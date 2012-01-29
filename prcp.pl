@@ -127,7 +127,14 @@ elsif(@ARGV > 2) {
 
   # Copy all of the files
   foreach my $input_file (@ARGV) {
-    progress_copy($input_file, $output_directory);
+    # Is this value defined?
+    if(defined($input_file)) {
+      # Yes, copy it
+      progress_copy($input_file, $output_directory);
+    }
+    else {
+      # No, this is probably the destination directory that we undef'd above.  Do nothing.
+    }
   }
 }
 else {
