@@ -152,7 +152,13 @@ sub progress_copy {
     opendir SOURCE_DIRECTORY, $source;
 
     while(readdir SOURCE_DIRECTORY) {
-      progress_copy($source . "/" . $_, $destination);
+      my $directory_entry = $_;
+
+      # Is this entry safe?
+      if(($directory_entry ne ".") && ($directory_entry ne "..")) {
+        # Yes, copy it
+        progress_copy($source . "/" . $directory_entry, $destination);
+      }
     }
 
     # Return so we don't run this code on a raw directory
