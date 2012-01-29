@@ -1,7 +1,11 @@
 #!/usr/bin/perl -w
 
 # prcp.pl by Tim Mattison (tim@mattison.org)
-# Version 0.1 - 2012-01-29
+# Version 0.11 - 2012-01-29
+
+# Release history:
+#   Version 0.1  - 2012-01-29 - Single file copy supported
+#   Version 0.11 - 2012-01-29 - Multiple file copy to a directory supported
 
 # This script was written to provide a copy command with some form of progress indicator.
 #   I wrote it while using what appeared to be a very slow flash drive so I could make
@@ -25,6 +29,13 @@
 #
 # If any of these modules aren't installed the functionality they provide is disabled
 #   but the script will still function.
+
+# Start with some constants...
+
+# Read and write 1 MB at a time
+my $BUFFER_MAX_SIZE = 1024 * 1024;
+
+# And here comes the real code...
 
 # Make sure we have the File::Sync module.  We need it so we don't get fooled by
 #   disk caching and end up with a "bursty" progress readout.
@@ -95,83 +106,129 @@ while(@ARGV && ($ARGV[0] =~ m/^-/)) {
 }
 
 # Get the input and output files
-my $input_file = $ARGV[0];
-my $output_file = $ARGV[1];
 
-# Prime the display name since they may not have the basename module
-my $display_name = $input_file;
+# Do we have more than two arguments?
+if(@ARGV == 2) {
+  # No, just two arguments.  Do a normal file copy.
+  progress_copy($ARGV[0], $ARGV[1]);
+}
+elsif(@ARGV > 2) {
+  # Yes, all of the items except the last are files.  The last item must be a directory.
+  my $output_directory = $ARGV[@ARGV - 1];
 
-# Check to see if we have the basename module
-eval {
-  require File::Basename;
-  File::Basename->import("basename");
+  # Does the output directory exist?
+  if(!-d $output_directory) {
+    # It either doesn't exist or isn't a directory
+    die "$output_directory does not exist or is not a directory";
+  }
 
-  # If we got here we have the module and can determine the file's base name to keep
-  #   the progress bar clean
-  $display_name = basename($input_file);
-};
+  # Remove the output directory from the argument list
+  undef $ARGV[@ARGV - 1];
 
-# Read and write 1 MB at a time
-my $BUFFER_MAX_SIZE = 1024 * 1024;
-
-# Do we have both an input file and an output file?
-if(!defined($input_file) || !defined($output_file)) {
-  # No, show the program usage information
+  # Copy all of the files
+  foreach my $input_file (@ARGV) {
+    progress_copy($input_file, $output_directory);
+  }
+}
+else {
+  # Not enough options, show the program usage information
   show_usage();
 }
 
-# Get the input file's size
-my $filesize = -s $input_file or die "Couldn't get the size of the input file";
+sub progress_copy {
+  my $input_file = $_[0];
+  my $destination = $_[1];
 
-# Check to see if we have the progress bar module
-my $progress_bar;
+  # Prime the output file path
+  my $output_file = $destination;
 
-eval {
-  require Term::ProgressBar;
-  Term::ProgressBar->import();
+  # Prime the display name since they may not have the basename module
+  my $display_name = $input_file;
 
-  # If we got here the progress bar module is installed.  Instantiate a progress
-  #   bar that measures from 0 to our input file's size so we can use it later.
-  $progress_bar = Term::ProgressBar->new({ name => $display_name,
-                                           count => $filesize,
-                                           ETA => 'linear' });
-};
+  my $basename_supported = 0;
 
-open INPUT_FILE, "<$input_file" or die "Couldn't open the input file for reading";
-open OUTPUT_FILE, ">$output_file" or die "Couldn't open the output file for writing";
+  # Check to see if we have the basename module
+  eval {
+    require File::Basename;
+    File::Basename->import("basename");
 
-binmode INPUT_FILE or die "Couldn't go to binary mode on the input file";
-binmode OUTPUT_FILE or die "Couldn't go to binary mode on the output file";
+    # If we got here we have the module and can determine the file's base name to keep
+    #   the progress bar clean
+    $display_name = basename($input_file);
 
-my $offset = 0;
+    # Mark that this module is supported
+    $basename_supported = 1;
+  };
 
-my $bytes_read = sysread INPUT_FILE, $buffer, $BUFFER_MAX_SIZE;
-check_failure($bytes_read);
+  # Is the destination a directory?
+  if(-d $destination) {
+    # Yes, is basename supported?
+    if($basename_supported != 1) {
+      # No, can't do directory copies without basename
+      die "Directories as destinations are not supported without the File::Basename module";
+    }
+    else {
+      # Yes, change the output file path
+      $output_file = $destination . "/" . $display_name;
 
-while($bytes_read != 0) {
-  my $bytes_written = syswrite OUTPUT_FILE, $buffer, length($buffer);
-  fsync(\*OUTPUT_FILE) or die "fsync: $!";
-
-  if($bytes_written != $bytes_read) {
-    die "Bytes written does not equal bytes read, aborting";
+      # Remove any double forward slashes just to be clean
+      $output_file =~ s/\/\//\//g;
+    }
   }
 
-  $offset += length($buffer);
+  # Get the input file's size
+  my $filesize = -s $input_file or die "Couldn't get the size of the input file";
 
-  # Do we have a progress bar?
-  if(defined($progress_bar)) {
-    # Yes, update it
-    $progress_bar->update($offset);
-  }
+  # Check to see if we have the progress bar module
+  my $progress_bar;
 
-  #print "Offset: $offset\n";
+  eval {
+    require Term::ProgressBar;
+    Term::ProgressBar->import();
 
-  $bytes_read = sysread INPUT_FILE, $buffer, $BUFFER_MAX_SIZE;
+    # If we got here the progress bar module is installed.  Instantiate a progress
+    #   bar that measures from 0 to our input file's size so we can use it later.
+    $progress_bar = Term::ProgressBar->new({ name => $display_name,
+                                             count => $filesize,
+                                             ETA => 'linear' });
+  };
+
+  open INPUT_FILE, "<$input_file" or die "Couldn't open the input file for reading";
+  open OUTPUT_FILE, ">$output_file" or die "Couldn't open the output file for writing";
+
+  binmode INPUT_FILE or die "Couldn't go to binary mode on the input file";
+  binmode OUTPUT_FILE or die "Couldn't go to binary mode on the output file";
+
+  my $offset = 0;
+
+  my $bytes_read = sysread INPUT_FILE, $buffer, $BUFFER_MAX_SIZE;
   check_failure($bytes_read);
-}
 
-close INPUT_FILE;
-close OUTPUT_FILE;
+  while($bytes_read != 0) {
+    my $bytes_written = syswrite OUTPUT_FILE, $buffer, length($buffer);
+    fsync(\*OUTPUT_FILE) or die "fsync: $!";
+
+    if($bytes_written != $bytes_read) {
+      die "Bytes written does not equal bytes read, aborting";
+    }
+
+    $offset += length($buffer);
+
+    # Do we have a progress bar?
+    if(defined($progress_bar)) {
+      # Yes, update it
+      $progress_bar->update($offset);
+    }
+
+    #print "Offset: $offset\n";
+
+    $bytes_read = sysread INPUT_FILE, $buffer, $BUFFER_MAX_SIZE;
+    check_failure($bytes_read);
+  }
+
+  close INPUT_FILE;
+  close OUTPUT_FILE;
+}
 
 sub check_failure {
   my $bytes_processed = $_[0];
