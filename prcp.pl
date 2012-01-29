@@ -143,8 +143,24 @@ else {
 }
 
 sub progress_copy {
-  my $input_file = $_[0];
+  my $source = $_[0];
   my $destination = $_[1];
+
+  # Is the source a directory?
+  if(-d $source) {
+    # Yes, process it recursively
+    opendir SOURCE_DIRECTORY, $source;
+
+    while(readdir SOURCE_DIRECTORY) {
+      progress_copy($source . "/" . $_, $destination);
+    }
+
+    # Return so we don't run this code on a raw directory
+    return;
+  }
+
+  # This is a file, not a directory so the input file is the source
+  my $input_file = $source;
 
   # Prime the output file path
   my $output_file = $destination;
