@@ -76,12 +76,12 @@ while(@ARGV && ($ARGV[0] =~ m/^-/)) {
   foreach my $character (@characters) {
     if($character eq "g") {
       # Guarantee that the file will fit on the destination drive
-      print "Space guarantee enabled\n";
+      print "Space guarantee enabled [NOT IMPLEMENTED YET]\n";
       $guarantee = 1;
     }
     elsif($character eq "v") {
       # Verify the file after copying
-      print "Verification enabled\n";
+      print "Verification enabled [NOT IMPLEMENTED YET]\n";
       $verify = 1;
     }
     else {
