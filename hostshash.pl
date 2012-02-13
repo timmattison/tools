@@ -112,7 +112,7 @@ sub hash {
     }
 
     for my $hostname (@hostnames) {
-      push(@{$ip_entries{$ip}}, $hostname);
+      push(@{$ip_entries{$ip}}, lc($hostname));
     }
   }
 
