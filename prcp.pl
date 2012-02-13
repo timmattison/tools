@@ -206,7 +206,7 @@ sub progress_copy {
   }
 
   # Get the input file's size
-  my $filesize = -s $input_file or die "Couldn't get the size of the input file";
+  my $filesize = -s $input_file or die "Couldn't get the size of the input file [$input_file]";
 
   # Check to see if we have the progress bar module
   my $progress_bar;
