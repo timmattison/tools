@@ -151,7 +151,26 @@ sub progress_copy {
 
   # Is the source a directory?
   if(-d $source) {
-    # Yes, process it recursively
+    # Yes, does the destination exist?
+    if(-e $destination) {
+      # Yes, is it a directory?
+      if(!-d $destination) {
+        # No, this can't be done
+        die "The source is a directory [$source] but the destination [$destination] is not.  Cannot continue.";
+      }
+      else {
+        # Yes, source and destination are both directories
+      }
+    }
+    else {
+      # No, the destination does not exist.  Create it.
+      mkdir $destination;
+
+      # Let the user know
+      print "Directory $destination created\n";
+    }
+
+    # Everything looks good.  Copy the source recursively.
     opendir SOURCE_DIRECTORY, $source;
 
     while(readdir SOURCE_DIRECTORY) {
