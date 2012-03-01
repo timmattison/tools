@@ -6,6 +6,9 @@
 # Release history:
 #   Version 0.1  - 2012-01-29 - Single file copy supported
 #   Version 0.11 - 2012-01-29 - Multiple file copy to a directory supported
+#   Version 0.2  - 2012-03-01 - Added a carriage return after each file is
+#                                 copied so the users sees all of their statuses
+#                                 not just the last one
 
 # This script was written to provide a copy command with some form of progress indicator.
 #   I wrote it while using what appeared to be a very slow flash drive so I could make
@@ -257,6 +260,10 @@ sub progress_copy {
 
   close INPUT_FILE;
   close OUTPUT_FILE;
+
+  # Move to the next line so that the user can see the status of all of their files,
+  #   not just the last one
+  print "\n";
 }
 
 sub check_failure {
