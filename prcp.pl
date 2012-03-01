@@ -173,15 +173,17 @@ sub progress_copy {
     }
 
     # Everything looks good.  Copy the source recursively.
-    opendir SOURCE_DIRECTORY, $source;
+    opendir my $SOURCE_DIRECTORY, $source;
 
-    while(readdir SOURCE_DIRECTORY) {
+    while(readdir $SOURCE_DIRECTORY) {
       my $directory_entry = $_;
+      my $new_source = $source . "/" . $directory_entry;
+      my $new_destination = $destination . "/" . $directory_entry;
 
       # Is this entry safe?
       if(($directory_entry ne ".") && ($directory_entry ne "..")) {
         # Yes, copy it
-        progress_copy($source . "/" . $directory_entry, $destination);
+        progress_copy($new_source, $new_destination);
       }
     }
 
