@@ -9,6 +9,8 @@
 #   Version 0.2  - 2012-03-01 - Added a carriage return after each file is
 #                                 copied so the users sees all of their statuses
 #                                 not just the last one
+my $version = "0.2";
+my $release_date = "2012-03-01";
 
 # This script was written to provide a copy command with some form of progress indicator.
 #   I wrote it while using what appeared to be a very slow flash drive so I could make
@@ -294,6 +296,7 @@ sub check_failure {
 }
 
 sub show_usage {
+  print "PRogress CoPy (prcp.pl) - v$version - $release_date\n";
   print "Usage: PROGRAM [-gv] INPUT_FILE OUTPUT_FILE\n";
   print "\n";
   print "  -g - Guarantee that the file will fit on the destination file system before copying\n";
