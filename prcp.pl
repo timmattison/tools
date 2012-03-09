@@ -390,6 +390,7 @@ sub show_usage {
   print "PRogress CoPy (prcp.pl) - v$version - $release_date\n";
   print "Usage: PROGRAM [-gv] INPUT_FILE OUTPUT_FILE\n";
   print "\n";
+  print "  -o - Show the overall progress instead of a per file progress indicator\n";
   print "  -g - Guarantee that the file will fit on the destination file system before copying\n";
   print "  -v - Verify that the destination matches the source after copying using a hash\n";
   print "\n";
