@@ -1,7 +1,5 @@
 #!/usr/bin/perl -w
 
-use Data::Dumper;
-
 # logload.pl by Tim Mattison (tim@mattison.org)
 # Version 0.1 - 2012-03-16
 
