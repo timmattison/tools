@@ -20,7 +20,7 @@ func (m MainModel) Update(untypedMessage tea.Msg) (tea.Model, tea.Cmd) {
 			m.Quitting = true
 		case key == tea.KeySpace:
 			m.Paused = !m.Paused
-			m.PausedChannel <- m.Paused
+			cmds = append(cmds, ChangeTransferPauseState(m.Paused, m.PausedChannel))
 		}
 	case CopyErrorMsg:
 		m.Err = typedMessage.err
@@ -70,4 +70,11 @@ func (m MainModel) Update(untypedMessage tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func ChangeTransferPauseState(paused bool, channel chan bool) tea.Cmd {
+	return func() tea.Msg {
+		channel <- paused
+		return nil
+	}
 }
