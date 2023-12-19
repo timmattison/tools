@@ -8,6 +8,9 @@ for fun.
 - dirhash - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
   identical. This hash will only be the same if the directories have the same file names and the same file contents.
   However, we ignore the directory names and locations of files in the directories. See below for an example.
+- prcp - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
+  want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
+  space bar to pause the copy and press it again to resume.
 
 ## dirhash
 
@@ -34,3 +37,7 @@ dir2/
 
 As long as the contents of `file1.txt`, `file2.txt`, `file3.txt`, and `file4.txt` are the same in both directories, the
 hashes will be the same. The subdirectory names and locations are ignored.
+
+## prcp
+
+Simply run `prcp <source> <destination>` and you'll see the progress of the copy in the console.
