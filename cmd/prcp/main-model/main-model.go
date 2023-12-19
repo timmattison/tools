@@ -123,6 +123,7 @@ func StartTransfer(sourceFile *os.File, destinationFile *os.File, pausedChannel 
 				select {
 				case paused = <-pausedChannel:
 				default:
+					time.Sleep(100 * time.Millisecond)
 				}
 			}
 
