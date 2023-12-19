@@ -11,6 +11,8 @@ for fun.
 - prcp - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
   want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
   space bar to pause the copy and press it again to resume.
+- update-aws-credentials - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
+  your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
 
 ## dirhash
 
@@ -41,3 +43,8 @@ hashes will be the same. The subdirectory names and locations are ignored.
 ## prcp
 
 Simply run `prcp <source> <destination>` and you'll see the progress of the copy in the console.
+
+## update-aws-credentials
+
+Just run `update-aws-credentials` and it will take the AWS credentials from your clipboard and write them to your AWS
+config file. If something goes wrong it'll let you know.
