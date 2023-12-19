@@ -52,7 +52,7 @@ func main() {
 
 	printer := message.NewPrinter(getUserLocale())
 
-	pausedChannel := make(chan bool, 10)
+	pausedChannel := make(chan bool)
 
 	myModel := main_model.MainModel{
 		SourceFilename:      sourceFile,
