@@ -5,14 +5,20 @@ for fun.
 
 ## The tools
 
-- dirhash - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
+- dirhash
+  - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
   identical. This hash will only be the same if the directories have the same file names and the same file contents.
   However, we ignore the directory names and locations of files in the directories. See below for an example.
-- prcp - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
+  - To install: `go install github.com/timmattison/tools/cmd/dirhash@latest`
+- prcp
+  - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
   want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
   space bar to pause the copy and press it again to resume.
-- update-aws-credentials - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
+  - To install: `go install github.com/timmattison/tools/cmd/prcp@latest`
+- update-aws-credentials
+  - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
   your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
+  - To install: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
 
 ## dirhash
 
