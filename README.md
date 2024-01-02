@@ -19,6 +19,12 @@ for fun.
   - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
   your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
   - To install: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
+- sizeof
+  - Shows you the size of files in the current directory (and subdirectories) in a human-readable format. Supports
+  searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
+  doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
+  to include that if you want it.
+  - To install: `go install github.com/timmattison/tools/cmd/sizeof@latest`
 
 ## dirhash
 
@@ -54,3 +60,8 @@ Simply run `prcp <source> <destination>` and you'll see the progress of the copy
 
 Just run `update-aws-credentials` and it will take the AWS credentials from your clipboard and write them to your AWS
 config file. If something goes wrong it'll let you know.
+
+## sizeof
+
+Just run `sizeof -suffix .mkv` and you'll see the size of all of the `.mkv` files in the current directory and all
+subdirectories. I use it to figure out how large my videos are in a certain directory before trying to move them around.
