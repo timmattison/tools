@@ -5,37 +5,9 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/timmattison/tools/cmd/prcp/main-model"
-	"golang.org/x/text/language"
-	"golang.org/x/text/message"
+	"github.com/timmattison/tools/internal"
 	"os"
 )
-
-func getUserLocale() language.Tag {
-	// Get the preferred locale from the environment variables
-	locale := os.Getenv("LC_ALL")
-
-	if locale == "" {
-		locale = os.Getenv("LC_MESSAGES")
-	}
-
-	if locale == "" {
-		locale = os.Getenv("LANG")
-	}
-
-	if locale == "" {
-		// Default fallback if no environment variable is set
-		locale = "en_US.UTF-8"
-	}
-
-	// Parse the locale code
-	tag, err := language.Parse(locale)
-	if err != nil {
-		// Fallback to default language if parsing failed
-		return language.English
-	}
-
-	return tag
-}
 
 func main() {
 	if len(os.Args) != 3 {
@@ -50,7 +22,7 @@ func main() {
 
 	progressBar := progress.New(progress.WithScaledGradient("#FF7CCB", "#FDFF8C"))
 
-	printer := message.NewPrinter(getUserLocale())
+	printer := internal.GetLocalePrinter()
 
 	pausedChannel := make(chan bool)
 
