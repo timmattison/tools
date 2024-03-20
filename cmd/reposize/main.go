@@ -19,5 +19,5 @@ func main() {
 		log.Fatal("Couldn't calculate the git repo's size", "error", err)
 	}
 
-	log.Info("Git repo size", "size", internal.PrettyPrintInt(totalSize))
+	log.Info("Git repo size", "size", internal.PrettyPrintInt(totalSize), "path", repoBase)
 }
