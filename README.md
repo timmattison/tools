@@ -6,34 +6,37 @@ for fun.
 ## The tools
 
 - dirhash
-  - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
-  identical. This hash will only be the same if the directories have the same file names and the same file contents.
-  However, we ignore the directory names and locations of files in the directories. See below for an example.
-  - To install: `go install github.com/timmattison/tools/cmd/dirhash@latest`
+    - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
+      identical. This hash will only be the same if the directories have the same file names and the same file contents.
+      However, we ignore the directory names and locations of files in the directories. See below for an example.
+    - To install: `go install github.com/timmattison/tools/cmd/dirhash@latest`
 - prcp
-  - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
-  want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
-  space bar to pause the copy and press it again to resume.
-  - To install: `go install github.com/timmattison/tools/cmd/prcp@latest`
+    - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
+      want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
+      space bar to pause the copy and press it again to resume.
+    - To install: `go install github.com/timmattison/tools/cmd/prcp@latest`
 - prgz
-  - Similar to `prcp` but instead of copying a file it gzip compresses it. It shows the progress in the console.
-  - To install: `go install github.com/timmattison/tools/cmd/prgz@latest`
+    - Similar to `prcp` but instead of copying a file it gzip compresses it. It shows the progress in the console.
+    - To install: `go install github.com/timmattison/tools/cmd/prgz@latest`
 - update-aws-credentials
-  - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
-  your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
-  - To install: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
+    - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
+      your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
+    - To install: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
 - sizeof
-  - Shows you the size of files in the current directory (and subdirectories) in a human-readable format. Supports
-  searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
-  doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
-  to include that if you want it.
-  - To install: `go install github.com/timmattison/tools/cmd/sizeof@latest`
+    - Shows you the size of files in the current directory (and subdirectories) in a human-readable format. Supports
+      searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
+      doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
+      to include that if you want it.
+    - To install: `go install github.com/timmattison/tools/cmd/sizeof@latest`
 - htmlboard
-  - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
-  - To install: `go install github.com/timmattison/tools/cmd/htmlboard@latest`
+    - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - To install: `go install github.com/timmattison/tools/cmd/htmlboard@latest`
 - jsonboard
-  - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
-  - To install: `go install github.com/timmattison/tools/cmd/jsonboard@latest`
+    - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
+    - To install: `go install github.com/timmattison/tools/cmd/jsonboard@latest`
+- reposize
+    - Shows you the size of the git repository you're currently in. Useful for investigating performance issues with
+      large git repos.
 
 ## dirhash
 
