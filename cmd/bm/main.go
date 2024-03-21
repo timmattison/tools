@@ -6,6 +6,9 @@ import (
 	"github.com/timmattison/tools/internal"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -64,14 +67,30 @@ func main() {
 		unique[v] = true
 	}
 
-	fileHandler := internal.FileHandler(func(fileInfo os.FileInfo) {
-		// Move a file to the destination
-		if err := os.Rename(fileInfo.Name(), filepath.Join(*destinationParam, fileInfo.Name())); err != nil {
-			log.Fatal("Error moving file", "file", fileInfo.Name(), "error", err)
-		}
+	filesToMoveChannel := make(chan os.FileInfo)
 
-		filesMoved++
+	fileHandler := internal.FileHandler(func(fileInfo os.FileInfo) {
+		filesToMoveChannel <- fileInfo
 	})
+
+	wg := &sync.WaitGroup{}
+
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			for fileInfo := range filesToMoveChannel {
+				// Move a file to the destination
+				if err := os.Rename(fileInfo.Name(), filepath.Join(*destinationParam, fileInfo.Name())); err != nil {
+					log.Fatal("Error moving file", "file", fileInfo.Name(), "error", err)
+				}
+
+				atomic.AddInt64(&filesMoved, 1)
+			}
+		}()
+	}
 
 	startTime := time.Now()
 
@@ -80,6 +99,9 @@ func main() {
 			log.Fatal("Error walking path", "path", path, "error", err)
 		}
 	}
+
+	close(filesToMoveChannel)
+	wg.Wait()
 
 	duration := time.Since(startTime)
 	filesMovedPerSecond := float64(filesMoved) / duration.Seconds()
