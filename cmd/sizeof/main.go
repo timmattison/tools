@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/charmbracelet/log"
 	"github.com/timmattison/tools/internal"
 	"os"
 	"path/filepath"
@@ -13,7 +14,7 @@ var nameChecker internal.NameChecker
 
 func visit(path string, dirEntry os.DirEntry, err error) error {
 	if err != nil {
-		fmt.Printf("error visiting path %s: %v\n", path, err)
+		log.Warn("Error visiting path", "path", path, "error", err)
 		return nil
 	}
 
@@ -22,10 +23,10 @@ func visit(path string, dirEntry os.DirEntry, err error) error {
 	}
 
 	if (nameChecker != nil) && nameChecker(dirEntry.Name()) {
-		info, err := dirEntry.Info()
+		var info os.FileInfo
 
-		if err != nil {
-			panic(err)
+		if info, err = dirEntry.Info(); err != nil {
+			log.Fatal("Couldn't get file info", "error", err)
 		}
 
 		sizeTotal += info.Size()
@@ -39,7 +40,16 @@ func main() {
 	var prefixParam = flag.String("prefix", "", "prefix to search for")
 	var substringParam = flag.String("substring", "", "substring to search for")
 
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage of %s:\n", os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\n")
+		fmt.Fprintf(os.Stderr, "Optionally, you can specify any number of paths to search after specifying the search option.\n")
+		fmt.Fprintf(os.Stderr, "  (e.g. `%s -suffix mp4 ../videos ./more-videos`)\n", os.Args[0])
+	}
+
 	flag.Parse()
+
 	paramsSpecified := 0
 
 	if *suffixParam != "" {
@@ -57,13 +67,8 @@ func main() {
 		paramsSpecified++
 	}
 
-	if paramsSpecified == 0 {
-		fmt.Println("You must specify at least one of -suffix, -prefix, or -substring")
-		os.Exit(1)
-	}
-
-	if paramsSpecified > 1 {
-		fmt.Println("You must specify only one of -suffix, -prefix, or -substring")
+	if paramsSpecified != 1 {
+		flag.Usage()
 		os.Exit(1)
 	}
 
@@ -80,10 +85,11 @@ func main() {
 			paths = append(paths, v)
 		}
 	} else {
-		path, err := os.Getwd()
+		var path string
+		var err error
 
-		if err != nil {
-			panic(err)
+		if path, err = os.Getwd(); err != nil {
+			log.Fatal("Couldn't get the current working directory", "error", err)
 		}
 
 		paths = append(paths, path)
@@ -97,9 +103,9 @@ func main() {
 
 	for path := range unique {
 		if err := filepath.WalkDir(path, visit); err != nil {
-			panic(err)
+			log.Fatal("Error walking path", "path", path, "error", err)
 		}
 	}
 
-	println(internal.PrettyPrintBytes(uint64(sizeTotal)))
+	fmt.Println(internal.PrettyPrintBytes(uint64(sizeTotal)))
 }
