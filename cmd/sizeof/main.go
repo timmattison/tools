@@ -85,14 +85,7 @@ func main() {
 			paths = append(paths, v)
 		}
 	} else {
-		var path string
-		var err error
-
-		if path, err = os.Getwd(); err != nil {
-			log.Fatal("Couldn't get the current working directory", "error", err)
-		}
-
-		paths = append(paths, path)
+		paths = append(paths, ".")
 	}
 
 	unique := map[string]bool{}
