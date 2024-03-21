@@ -9,8 +9,8 @@ import (
 )
 
 type NameChecker func(filename string) bool
-type FileHandler func(fileInfo os.FileInfo)
-type DirectoryHandler func(entry os.DirEntry)
+type FileHandler func(entryPath string, fileInfo os.FileInfo)
+type DirectoryHandler func(entryPath string, entry os.DirEntry)
 
 func HasSuffixNameChecker(suffix string) NameChecker {
 	return func(filename string) bool {
@@ -68,7 +68,7 @@ func VisitWithNameChecker(nameChecker NameChecker, fileHandler FileHandler, dire
 
 		if dirEntry.IsDir() {
 			if directoryHandler != nil {
-				directoryHandler(dirEntry)
+				directoryHandler(path, dirEntry)
 			}
 
 			return nil
@@ -82,10 +82,20 @@ func VisitWithNameChecker(nameChecker NameChecker, fileHandler FileHandler, dire
 			}
 
 			if fileHandler != nil {
-				fileHandler(info)
+				fileHandler(path, info)
 			}
 		}
 
 		return nil
 	}
+}
+
+func FileExists(path string) bool {
+	var err error
+
+	if _, err = os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+
+	return err == nil
 }

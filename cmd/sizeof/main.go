@@ -71,7 +71,7 @@ func main() {
 		unique[v] = true
 	}
 
-	fileHandler := internal.FileHandler(func(fileInfo os.FileInfo) {
+	fileHandler := internal.FileHandler(func(entryPath string, fileInfo os.FileInfo) {
 		sizeTotal += fileInfo.Size()
 	})
 

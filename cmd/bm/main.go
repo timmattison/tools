@@ -64,9 +64,9 @@ func main() {
 		unique[v] = true
 	}
 
-	fileHandler := internal.FileHandler(func(fileInfo os.FileInfo) {
+	fileHandler := internal.FileHandler(func(entryPath string, fileInfo os.FileInfo) {
 		// Move a file to the destination
-		if err := os.Rename(fileInfo.Name(), filepath.Join(*destinationParam, fileInfo.Name())); err != nil {
+		if err := os.Rename(entryPath, filepath.Join(*destinationParam, fileInfo.Name())); err != nil {
 			log.Fatal("Error moving file", "file", fileInfo.Name(), "error", err)
 		}
 
