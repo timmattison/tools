@@ -37,6 +37,10 @@ for fun.
 - reposize
     - Shows you the size of the git repository you're currently in. Useful for investigating performance issues with
       large git repos.
+    - To install: `go install github.com/timmattison/tools/cmd/reposize@latest`
+- bm
+    - Bulk Move. Named "bm" because moving lots of files is shitty.
+    - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
 
 ## dirhash
 
