@@ -12,29 +12,6 @@ import (
 var sizeTotal int64
 var nameChecker internal.NameChecker
 
-func visit(path string, dirEntry os.DirEntry, err error) error {
-	if err != nil {
-		log.Warn("Error visiting path", "path", path, "error", err)
-		return nil
-	}
-
-	if dirEntry.IsDir() {
-		return nil
-	}
-
-	if (nameChecker != nil) && nameChecker(dirEntry.Name()) {
-		var info os.FileInfo
-
-		if info, err = dirEntry.Info(); err != nil {
-			log.Fatal("Couldn't get file info", "error", err)
-		}
-
-		sizeTotal += info.Size()
-	}
-
-	return nil
-}
-
 func main() {
 	var suffixParam = flag.String("suffix", "", "suffix to search for")
 	var prefixParam = flag.String("prefix", "", "prefix to search for")
@@ -94,8 +71,12 @@ func main() {
 		unique[v] = true
 	}
 
+	fileHandler := internal.FileHandler(func(fileInfo os.FileInfo) {
+		sizeTotal += fileInfo.Size()
+	})
+
 	for path := range unique {
-		if err := filepath.WalkDir(path, visit); err != nil {
+		if err := filepath.WalkDir(path, internal.VisitWithNameChecker(nameChecker, fileHandler, nil)); err != nil {
 			log.Fatal("Error walking path", "path", path, "error", err)
 		}
 	}
