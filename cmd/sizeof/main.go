@@ -3,13 +3,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/timmattison/tools/internal"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 var sizeTotal int64
-var nameChecker NameChecker
+var nameChecker internal.NameChecker
 
 func visit(path string, dirEntry os.DirEntry, err error) error {
 	if err != nil {
@@ -34,40 +34,6 @@ func visit(path string, dirEntry os.DirEntry, err error) error {
 	return nil
 }
 
-type NameChecker func(filename string) bool
-
-func HasSuffixNameChecker(suffix string) NameChecker {
-	return func(filename string) bool {
-		return strings.HasSuffix(filename, suffix)
-	}
-}
-
-func HasPrefixNameChecker(prefix string) NameChecker {
-	return func(filename string) bool {
-		return strings.HasPrefix(filename, prefix)
-	}
-}
-
-func ContainsNameChecker(substring string) NameChecker {
-	return func(filename string) bool {
-		return strings.Contains(filename, substring)
-	}
-}
-
-func formatBytes(bytes uint64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%dB", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-
-	return fmt.Sprintf("%.1f%cB", float64(bytes)/float64(div), "kMGTPE"[exp])
-}
-
 func main() {
 	var suffixParam = flag.String("suffix", "", "suffix to search for")
 	var prefixParam = flag.String("prefix", "", "prefix to search for")
@@ -77,17 +43,17 @@ func main() {
 	paramsSpecified := 0
 
 	if *suffixParam != "" {
-		nameChecker = HasSuffixNameChecker(*suffixParam)
+		nameChecker = internal.HasSuffixNameChecker(*suffixParam)
 		paramsSpecified++
 	}
 
 	if *prefixParam != "" {
-		nameChecker = HasPrefixNameChecker(*prefixParam)
+		nameChecker = internal.HasPrefixNameChecker(*prefixParam)
 		paramsSpecified++
 	}
 
 	if *substringParam != "" {
-		nameChecker = ContainsNameChecker(*substringParam)
+		nameChecker = internal.ContainsNameChecker(*substringParam)
 		paramsSpecified++
 	}
 
@@ -135,5 +101,5 @@ func main() {
 		}
 	}
 
-	println(formatBytes(uint64(sizeTotal)))
+	println(internal.PrettyPrintBytes(uint64(sizeTotal)))
 }

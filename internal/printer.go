@@ -24,6 +24,36 @@ func PrettyPrintFloat(input float64, precision int) string {
 	return GetLocalePrinter().Sprintf(formatString, input)
 }
 
+// PrettyPrintBytes returns a localized string representation of the input byte count
+func PrettyPrintBytes(bytes uint64) string {
+	const unit = 1024
+
+	suffix := ""
+	div := int64(1)
+
+	if bytes >= unit {
+		var exp int
+
+		div, exp = int64(unit), 0
+
+		for n := bytes / unit; n >= unit; n /= unit {
+			div *= unit
+			exp++
+		}
+
+		const suffixes = "kMGTPE"
+
+		if exp >= len(suffixes) {
+			// More than exabytes, really?
+			suffix = "OMFGz"
+		} else {
+			suffix = string(suffixes[exp])
+		}
+	}
+
+	return fmt.Sprintf("%.1f %sB", float64(bytes)/float64(div), suffix)
+}
+
 func getUserLocale() language.Tag {
 	// Get the preferred locale from the environment variables
 	locale := os.Getenv("LC_ALL")
