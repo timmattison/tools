@@ -40,7 +40,7 @@ for fun.
     - To install: `go install github.com/timmattison/tools/cmd/reposize@latest`
 - bm
     - Bulk Move. Named "bm" because moving lots of files is shitty.
-  - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
+    - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
 - repotidy
     - Run `go mod tidy` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
       CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
