@@ -1,12 +1,12 @@
 module github.com/timmattison/tools
 
-go 1.22.0
+go 1.22.1
 
 require (
-	github.com/aws/aws-sdk-go v1.51.2
+	github.com/aws/aws-sdk-go v1.51.5
 	github.com/charmbracelet/bubbles v0.18.0
 	github.com/charmbracelet/bubbletea v0.25.0
-	github.com/charmbracelet/log v0.3.1
+	github.com/charmbracelet/log v0.4.0
 	github.com/edsrzf/mmap-go v1.1.0
 	github.com/muesli/reflow v0.3.0
 	github.com/yosssi/gohtml v0.0.0-20201013000340-ee4748c638f4
@@ -33,7 +33,7 @@ require (
 	golang.org/x/exp v0.0.0-20240318143956-a85f2c67cd81 // indirect
 	golang.org/x/exp/shiny v0.0.0-20240318143956-a85f2c67cd81 // indirect
 	golang.org/x/image v0.15.0 // indirect
-	golang.org/x/mobile v0.0.0-20240319015410-c58ccf4b0c87 // indirect
+	golang.org/x/mobile v0.0.0-20240320162201-c76e57eead38 // indirect
 	golang.org/x/sync v0.6.0 // indirect
 	golang.org/x/sys v0.18.0 // indirect
 	golang.org/x/term v0.18.0 // indirect
