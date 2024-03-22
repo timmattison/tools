@@ -42,9 +42,14 @@ for fun.
     - Bulk Move. Named "bm" because moving lots of files is shitty.
     - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
 - repotidy
-    - Run `go mod tidy` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
+    - Runs `go mod tidy` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
       CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
     - To install: `go install github.com/timmattison/tools/cmd/repotidy@latest`
+- cf
+    - Recursively counts files in the current directory. The same as doing `find . | wc -l` but shorter and faster. In
+      my testing with a directory with almost 300k files in it this program takes 5 seconds, `find . | wc -l` takes over
+      one minute, `dust` takes 10 seconds (but arguably it is doing something different).
+    - To install: `go install github.com/timmattison/tools/cmd/cf@latest`
 
 ## dirhash
 
