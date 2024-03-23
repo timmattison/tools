@@ -55,7 +55,11 @@ for fun.
       directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
       with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates)
     - To install: `go install github.com/timmattison/tools/cmd/localnext@latest`
-
+- repoup
+    - Runs `go get -u all` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
+      CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
+    - To install: `go install github.com/timmattison/tools/cmd/repoup@latest`
+    - 
 ## dirhash
 
 If you have two directories with the following contents:
