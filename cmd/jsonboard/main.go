@@ -33,6 +33,8 @@ func runLoop() {
 			continue
 		}
 
+		lastSeen = clipboardString
+
 		if !(strings.Contains(clipboardString, "{") ||
 			strings.Contains(clipboardString, "}") ||
 			strings.Contains(clipboardString, "[") ||
@@ -45,7 +47,6 @@ func runLoop() {
 
 		if err = json.Unmarshal([]byte(clipboardString), &object); err != nil {
 			// Don't try to parse this again
-			lastSeen = clipboardString
 			continue
 		}
 
@@ -53,7 +54,6 @@ func runLoop() {
 
 		if output, err = json.MarshalIndent(object, "", "   "); err != nil {
 			// Marshalling error, don't try to parse it again
-			lastSeen = clipboardString
 			continue
 		}
 

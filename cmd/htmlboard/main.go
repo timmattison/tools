@@ -17,7 +17,7 @@ func runLoop() {
 		log.Fatal(err)
 	}
 
-	var lastWritten string
+	var lastSeen string
 
 	log.Info("Waiting for HTML in clipboard, press CTRL-C in this terminal to stop the program")
 
@@ -30,9 +30,11 @@ func runLoop() {
 
 		clipboardString := string(clipboardData)
 
-		if lastWritten == clipboardString {
+		if lastSeen == clipboardString {
 			continue
 		}
+
+		lastSeen = clipboardString
 
 		if !strings.Contains(clipboardString, "<") ||
 			!strings.Contains(clipboardString, ">") {
@@ -47,7 +49,7 @@ func runLoop() {
 
 		log.Info("Reformatted HTML in clipboard")
 		clipboard.Write(clipboard.FmtText, []byte(reformattedString))
-		lastWritten = reformattedString
+		lastSeen = reformattedString
 	}
 }
 
