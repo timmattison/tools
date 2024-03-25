@@ -59,7 +59,10 @@ for fun.
     - Runs `go get -u all` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
       CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
     - To install: `go install github.com/timmattison/tools/cmd/repoup@latest`
-    - 
+- unescapeboard
+    - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
+    - To install: `go install github.com/timmattison/tools/cmd/unescapeboard@latest`
+
 ## dirhash
 
 If you have two directories with the following contents:
