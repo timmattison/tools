@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"github.com/charmbracelet/log"
 	"golang.design/x/clipboard"
-	_ "golang.design/x/clipboard"
 	"strings"
 	"time"
 )

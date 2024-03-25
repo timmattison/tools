@@ -4,7 +4,6 @@ import (
 	"github.com/charmbracelet/log"
 	"github.com/yosssi/gohtml"
 	"golang.design/x/clipboard"
-	_ "golang.design/x/clipboard"
 	"golang.org/x/net/html"
 	"strings"
 	"time"
