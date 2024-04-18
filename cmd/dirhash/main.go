@@ -63,7 +63,7 @@ func visit(path string, info os.DirEntry, err error) error {
 
 		name := filepath.Base(path)
 
-		fmt.Printf("%s %s\n", name, hashed)
+		fmt.Printf("%s  %s\n", hashed, name)
 		hashChannel <- hashed
 	}
 
