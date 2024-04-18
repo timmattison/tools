@@ -56,12 +56,17 @@ for fun.
       with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates)
     - To install: `go install github.com/timmattison/tools/cmd/localnext@latest`
 - repoup
-    - Runs `go get -u all` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
+    - Runs `go get -u all` on every directory in the current git repo that has a `go.mod`. I wrote this while working on
+      a
       CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
     - To install: `go install github.com/timmattison/tools/cmd/repoup@latest`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - To install: `go install github.com/timmattison/tools/cmd/unescapeboard@latest`
+- prhash
+    - Hashes a file with the requested hashing algorithm and shows the progress in the console. Good for hashing very
+      large files and my experiments show that it runs a little bit faster than the standard system tools.
+    - To install: `go install github.com/timmattison/tools/cmd/prhash@latest`
 
 ## dirhash
 
