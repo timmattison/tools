@@ -24,7 +24,6 @@ type MainModel struct {
 	DestinationFilename string
 	DestinationFile     *os.File
 	DestinationPosition int64
-	TotalBytes          int64
 	StartTime           time.Time
 	Paused              bool
 	Err                 error
