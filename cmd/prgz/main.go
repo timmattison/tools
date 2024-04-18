@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 	"io"
@@ -15,17 +16,6 @@ import (
 	"strings"
 	"time"
 )
-
-type byteCounterWriter struct {
-	w     io.Writer
-	count int64
-}
-
-func (bcw *byteCounterWriter) Write(p []byte) (int, error) {
-	n, err := bcw.w.Write(p)
-	bcw.count += int64(n)
-	return n, err
-}
 
 func sprintFloat(input float64) string {
 	return getPrinter().Sprintf("%.2f", input)
@@ -48,7 +38,7 @@ func getPrinter() *message.Printer {
 
 type Model struct {
 	progressBar            progress.Model
-	counterWriter          *byteCounterWriter
+	counterWriter          *internal.ByteCounterWriter
 	writtenBytes           int64
 	totalSize              int64
 	startTime              time.Time
@@ -82,7 +72,7 @@ func (m Model) Update(untypedMsg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch typedMessage := untypedMsg.(type) {
 	case time.Time:
-		m.writtenBytes = m.counterWriter.count
+		m.writtenBytes = m.counterWriter.Count()
 
 		if m.writtenBytes != 0 {
 			elapsed := time.Since(m.startTime).Seconds()
@@ -192,7 +182,7 @@ func main() {
 
 	defer gzipWriter.Close()
 
-	counterWriter := &byteCounterWriter{w: gzipWriter}
+	counterWriter := &internal.ByteCounterWriter{Writer: gzipWriter}
 
 	prog := progress.New(progress.WithScaledGradient("#FF7CCB", "#FDFF8C"))
 
@@ -228,7 +218,7 @@ type CompressionComplete struct {
 	BytesWrittenPerSecond string
 }
 
-func StartCompressing(totalSize int64, inputFile *os.File, outputFile *os.File, counterWriter *byteCounterWriter, gzipWriter *gzip.Writer) tea.Cmd {
+func StartCompressing(totalSize int64, inputFile *os.File, outputFile *os.File, counterWriter *internal.ByteCounterWriter, gzipWriter *gzip.Writer) tea.Cmd {
 	return func() tea.Msg {
 		startTime := time.Now()
 
