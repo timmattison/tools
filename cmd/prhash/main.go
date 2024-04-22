@@ -29,6 +29,10 @@ func main() {
 		fmt.Println("Missing required arguments.")
 		fmt.Println("Usage:")
 		fmt.Println("  prhash <hash type> <input file>")
+		fmt.Println()
+
+		printValidHashTypes()
+
 		os.Exit(1)
 	}
 
@@ -39,11 +43,10 @@ func main() {
 
 	if hasherIndex = slices.Index(validHashTypes, hashType); hasherIndex == -1 {
 		fmt.Println("Invalid hash type.")
-		fmt.Println("Valid hash types are:")
 
-		for _, validHashType := range validHashTypes {
-			fmt.Println("  " + validHashType)
-		}
+		printValidHashTypes()
+
+		os.Exit(1)
 	}
 
 	progressBar := progress.New(progress.WithScaledGradient("#FF7CCB", "#FDFF8C"))
@@ -66,5 +69,13 @@ func main() {
 	if _, err := main_model.Prhash.Run(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
+	}
+}
+
+func printValidHashTypes() {
+	fmt.Println("Valid hash types are:")
+
+	for _, validHashType := range validHashTypes {
+		fmt.Println("  " + validHashType)
 	}
 }
