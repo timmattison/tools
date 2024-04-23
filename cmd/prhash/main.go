@@ -25,10 +25,10 @@ var hashImplementations = []func() hash.Hash{
 }
 
 func main() {
-	if len(os.Args) != 3 {
+	if len(os.Args) < 3 {
 		fmt.Println("Missing required arguments.")
 		fmt.Println("Usage:")
-		fmt.Println("  prhash <hash type> <input file>")
+		fmt.Println("  prhash <hash type> <input file(s)> ...")
 		fmt.Println()
 
 		printValidHashTypes()
@@ -37,7 +37,6 @@ func main() {
 	}
 
 	hashType := os.Args[1]
-	inputFilename := os.Args[2]
 
 	var hasherIndex int
 
@@ -49,26 +48,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	progressBar := progress.New(progress.WithScaledGradient("#FF7CCB", "#FDFF8C"))
+	for inputFilenameIndex := 2; inputFilenameIndex < len(os.Args); inputFilenameIndex++ {
+		inputFilename := os.Args[inputFilenameIndex]
+		progressBar := progress.New(progress.WithScaledGradient("#FF7CCB", "#FDFF8C"))
 
-	printer := internal.GetLocalePrinter()
+		printer := internal.GetLocalePrinter()
 
-	pausedChannel := make(chan bool)
+		pausedChannel := make(chan bool)
 
-	myModel := main_model.MainModel{
-		InputFilename: inputFilename,
-		HashType:      hashType,
-		Hasher:        hashImplementations[hasherIndex](),
-		ProgressBar:   progressBar,
-		Printer:       printer,
-		PausedChannel: pausedChannel,
-	}
+		myModel := main_model.MainModel{
+			InputFilename: inputFilename,
+			HashType:      hashType,
+			Hasher:        hashImplementations[hasherIndex](),
+			ProgressBar:   progressBar,
+			Printer:       printer,
+			PausedChannel: pausedChannel,
+		}
 
-	main_model.Prhash = tea.NewProgram(myModel)
+		main_model.Prhash = tea.NewProgram(myModel)
 
-	if _, err := main_model.Prhash.Run(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		var result tea.Msg
+		var err error
+
+		if result, err = main_model.Prhash.Run(); err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+
+		if resultModel, ok := result.(main_model.MainModel); ok && resultModel.AbnormalExit {
+			os.Exit(1)
+		}
 	}
 }
 

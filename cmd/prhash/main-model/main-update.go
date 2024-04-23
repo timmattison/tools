@@ -17,16 +17,16 @@ func (m MainModel) Update(untypedMessage tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch key := typedMessage.Type; {
 		case key == tea.KeyCtrlC:
-			m.Quitting = true
+			m.AbnormalExit = true
 		case key == tea.KeySpace:
 			m.Paused = !m.Paused
 			cmds = append(cmds, ChangeHashPauseState(m.Paused, m.PausedChannel))
 		}
 	case HashErrorMsg:
 		m.Err = typedMessage.err
-		m.Quitting = true
+		m.AbnormalExit = true
 	case HashFinishedMsg:
-		m.Quitting = true
+		m.Done = true
 		m.HashValue = typedMessage.hashValue
 	case HashProgressMsg:
 		m.Position = typedMessage.totalProcessed
@@ -35,14 +35,14 @@ func (m MainModel) Update(untypedMessage tea.Msg) (tea.Model, tea.Cmd) {
 	case OpenInputFileMsg:
 		if typedMessage.err != nil {
 			m.Err = typedMessage.err
-			m.Quitting = true
+			m.AbnormalExit = true
 		} else {
 			m.InputFile = typedMessage.file
 			m.InputFileInfo = typedMessage.fileInfo
 		}
 	}
 
-	if m.Quitting {
+	if m.AbnormalExit || m.Done {
 		cmds = append(cmds, CloseFile(m.InputFile))
 		cmds = append(cmds, tea.Quit)
 		return m, tea.Batch(cmds...)

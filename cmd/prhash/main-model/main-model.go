@@ -19,7 +19,8 @@ type MainModel struct {
 	Printer       *message.Printer
 	PausedChannel chan bool
 	ProgressBar   progress.Model
-	Quitting      bool
+	Done          bool
+	AbnormalExit  bool
 	InputFilename string
 	InputFile     *os.File
 	InputFileInfo os.FileInfo
