@@ -10,18 +10,22 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/timmattison/tools/cmd/prhash/main-model"
 	"github.com/timmattison/tools/internal"
+	"github.com/zeebo/blake3"
 	"hash"
 	"os"
 	"slices"
 )
 
-var validHashTypes = []string{"md5", "sha1", "sha256", "sha512"}
+var validHashTypes = []string{"md5", "sha1", "sha256", "sha512", "blake3"}
 
 var hashImplementations = []func() hash.Hash{
 	md5.New,
 	sha1.New,
 	sha256.New,
 	sha512.New,
+	func() hash.Hash {
+		return blake3.New()
+	},
 }
 
 func main() {

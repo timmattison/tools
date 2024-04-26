@@ -10,6 +10,7 @@ require (
 	github.com/edsrzf/mmap-go v1.1.0
 	github.com/muesli/reflow v0.3.0
 	github.com/yosssi/gohtml v0.0.0-20201013000340-ee4748c638f4
+	github.com/zeebo/blake3 v0.2.3
 	golang.design/x/clipboard v0.7.0
 	golang.org/x/net v0.24.0
 	golang.org/x/text v0.14.0
@@ -22,6 +23,7 @@ require (
 	github.com/containerd/console v1.0.4 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
