@@ -3,7 +3,7 @@ module github.com/timmattison/tools
 go 1.22.2
 
 require (
-	github.com/aws/aws-sdk-go v1.51.23
+	github.com/aws/aws-sdk-go v1.51.29
 	github.com/charmbracelet/bubbles v0.18.0
 	github.com/charmbracelet/bubbletea v0.25.0
 	github.com/charmbracelet/log v0.4.0
@@ -23,7 +23,7 @@ require (
 	github.com/containerd/console v1.0.4 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
-	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
