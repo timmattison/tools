@@ -23,11 +23,17 @@ for fun.
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
     - To install: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
 - sizeof
-    - Shows you the size of files in the current directory (and subdirectories) in a human-readable format. Supports
+    - Shows you the size of files in the specified directories (and subdirectories) in a human-readable format. Supports
       searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
       doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
       to include that if you want it.
     - To install: `go install github.com/timmattison/tools/cmd/sizeof@latest`
+- numberof
+    - Shows you the number of files in the specified directories (and subdirectories) in a human-readable format. Supports
+      searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
+      doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
+      to include that if you want it.
+    - To install: `go install github.com/timmattison/tools/cmd/numberof@latest`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
     - To install: `go install github.com/timmattison/tools/cmd/htmlboard@latest`
