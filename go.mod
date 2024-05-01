@@ -3,7 +3,7 @@ module github.com/timmattison/tools
 go 1.22.2
 
 require (
-	github.com/aws/aws-sdk-go v1.51.29
+	github.com/aws/aws-sdk-go v1.51.32
 	github.com/charmbracelet/bubbles v0.18.0
 	github.com/charmbracelet/bubbletea v0.25.0
 	github.com/charmbracelet/log v0.4.0
