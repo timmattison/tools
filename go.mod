@@ -3,9 +3,9 @@ module github.com/timmattison/tools
 go 1.22.2
 
 require (
-	github.com/aws/aws-sdk-go v1.51.32
+	github.com/aws/aws-sdk-go v1.52.0
 	github.com/charmbracelet/bubbles v0.18.0
-	github.com/charmbracelet/bubbletea v0.25.0
+	github.com/charmbracelet/bubbletea v0.26.0
 	github.com/charmbracelet/log v0.4.0
 	github.com/edsrzf/mmap-go v1.1.0
 	github.com/muesli/reflow v0.3.0
@@ -20,7 +20,7 @@ require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/harmonica v0.2.0 // indirect
 	github.com/charmbracelet/lipgloss v0.10.0 // indirect
-	github.com/containerd/console v1.0.4 // indirect
+	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
