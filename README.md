@@ -73,6 +73,11 @@ for fun.
     - Hashes a file with the requested hashing algorithm and shows the progress in the console. Good for hashing very
       large files and my experiments show that it runs a little bit faster than the standard system tools.
     - To install: `go install github.com/timmattison/tools/cmd/prhash@latest`
+- subito
+    - Subscribes to a list of topics on AWS IoT Core and prints out the messages it receives. This is useful for
+      debugging and testing. I was going to call it `subiot` but `subito` actually means "immediately" in Italian and
+      I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
+    - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
 
 ## dirhash
 
