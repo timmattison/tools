@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"github.com/charmbracelet/log"
 	"os"
+	"path/filepath"
 )
 
 func unprivilegedPortNumberFromString(input string) uint16 {
@@ -32,7 +33,8 @@ func main() {
 		log.Fatal("Couldn't get the current working directory", "error", err)
 	}
 
-	hashUint16 := unprivilegedPortNumberFromString(cwd)
+	baseCwd := filepath.Base(cwd)
+	hashUint16 := unprivilegedPortNumberFromString(baseCwd)
 
-	log.Info("Port", "port", hashUint16, "directory", cwd)
+	log.Info("Port", "port", hashUint16, "directory", baseCwd)
 }
