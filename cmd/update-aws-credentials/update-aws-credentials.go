@@ -78,10 +78,13 @@ func main() {
 
 	awsAccessKeyId = strings.Split(awsAccessKeyId, "=")[1]
 	awsAccessKeyId = strings.ReplaceAll(awsAccessKeyId, "\"", "")
+	awsAccessKeyId = strings.TrimSpace(awsAccessKeyId)
 	awsSecretAccessKey = strings.Split(awsSecretAccessKey, "=")[1]
 	awsSecretAccessKey = strings.ReplaceAll(awsSecretAccessKey, "\"", "")
+	awsSecretAccessKey = strings.TrimSpace(awsSecretAccessKey)
 	awsSessionToken = strings.Split(awsSessionToken, "=")[1]
 	awsSessionToken = strings.ReplaceAll(awsSessionToken, "\"", "")
+	awsSessionToken = strings.TrimSpace(awsSessionToken)
 
 	mySession := session.Must(session.NewSession())
 
