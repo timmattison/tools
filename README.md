@@ -83,6 +83,10 @@ for fun.
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
       separate instances/VMs.
   - To install: `go install github.com/timmattison/tools/cmd/portplz@latest`
+- tubeboard
+    - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from it.
+      I use this for deep linking videos to my Roku TVs through their APIs.
+  - To install: `go install github.com/timmattison/tools/cmd/tubeboard@latest`
 
 ## dirhash
 
