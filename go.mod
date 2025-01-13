@@ -14,24 +14,24 @@ require (
 	github.com/yosssi/gohtml v0.0.0-20201013000340-ee4748c638f4
 	github.com/zeebo/blake3 v0.2.4
 	golang.design/x/clipboard v0.7.0
-	golang.org/x/net v0.33.0
+	golang.org/x/net v0.34.0
 	golang.org/x/text v0.21.0
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.32.7 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.28.7 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.17.48 // indirect
-	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.22 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.26 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.6.26 // indirect
+	github.com/aws/aws-sdk-go-v2 v1.32.8 // indirect
+	github.com/aws/aws-sdk-go-v2/config v1.28.10 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.17.51 // indirect
+	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.23 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.27 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.6.27 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.12.7 // indirect
-	github.com/aws/aws-sdk-go-v2/service/iot v1.62.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.24.8 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.28.7 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sts v1.33.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.12.8 // indirect
+	github.com/aws/aws-sdk-go-v2/service/iot v1.62.2 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.24.9 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.28.8 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sts v1.33.6 // indirect
 	github.com/aws/smithy-go v1.22.1 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/harmonica v0.2.0 // indirect
@@ -51,10 +51,10 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.15.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	golang.org/x/exp v0.0.0-20241217172543-b2144cdd0a67 // indirect
-	golang.org/x/exp/shiny v0.0.0-20241217172543-b2144cdd0a67 // indirect
+	golang.org/x/exp v0.0.0-20250106191152-7588d65b2ba8 // indirect
+	golang.org/x/exp/shiny v0.0.0-20250106191152-7588d65b2ba8 // indirect
 	golang.org/x/image v0.23.0 // indirect
-	golang.org/x/mobile v0.0.0-20241213221354-a87c1cf6cf46 // indirect
+	golang.org/x/mobile v0.0.0-20250106192035-c31d5b91ecc3 // indirect
 	golang.org/x/sync v0.10.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
+	golang.org/x/sys v0.29.0 // indirect
 )
