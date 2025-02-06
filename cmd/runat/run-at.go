@@ -52,16 +52,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case time.Time:
 		if msg.After(m.targetTime) || msg.Equal(m.targetTime) {
+			// First quit bubbletea to restore terminal
+			program.Kill()
+			program = nil // Prevent double-kill
+
+			// Create command
 			cmd := exec.Command(m.command[0], m.command[1:]...)
 			cmd.Stdin = os.Stdin
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 
+			// Run the command
 			if err := cmd.Run(); err != nil {
+				if exitError, ok := err.(*exec.ExitError); ok {
+					// Command failed with non-zero exit code
+					os.Exit(exitError.ExitCode())
+				}
+				// Command failed to run
 				fatalWithCleanup("Failed to run command", "error", err)
 			}
 
-			return m, tea.Quit
+			// Command succeeded (exit code 0)
+			os.Exit(0)
 		}
 
 		return m, tea.Tick(time.Second, func(t time.Time) tea.Msg {
