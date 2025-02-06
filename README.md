@@ -87,6 +87,11 @@ for fun.
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from it.
       I use this for deep linking videos to my Roku TVs through their APIs.
   - To install: `go install github.com/timmattison/tools/cmd/tubeboard@latest`
+- runat
+    - Runs a command at a specified time. Shows a countdown timer and supports various time formats including UTC and local time.
+      You can use full dates like "2024-01-01T12:00:00Z" or just times like "12:00" (which will run today or tomorrow at that time).
+      Press Ctrl-C to cancel.
+    - To install: `go install github.com/timmattison/tools/cmd/runat@latest`
 
 ## dirhash
 
@@ -127,3 +132,24 @@ config file. If something goes wrong it'll let you know.
 
 Just run `sizeof -suffix .mkv` and you'll see the size of all of the `.mkv` files in the current directory and all
 subdirectories. I use it to figure out how large my videos are in a certain directory before trying to move them around.
+
+## runat
+
+Run any command at a specified time. The program shows a countdown timer until execution and supports various time formats:
+
+```
+runat 2024-01-01T12:00:00Z echo hello world    # UTC time
+runat 2024-01-01T12:00:00 echo hello world     # Local time
+runat "2024-01-01 12:00" echo hello world      # Local time
+runat 12:00 echo hello world                   # Today/tomorrow at 12:00 local time
+```
+
+If you specify just a time (like "12:00"), it will run today at that time, or if that time has already passed, it will run tomorrow at that time.
+
+The program shows:
+- Current time
+- Target time
+- Time remaining (hours:minutes:seconds)
+- Command to be executed
+
+You can press Ctrl-C at any time to cancel the scheduled execution.
