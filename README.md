@@ -92,6 +92,10 @@ for fun.
       You can use full dates like "2024-01-01T12:00:00Z" or just times like "12:00" (which will run today or tomorrow at that time).
       Press Ctrl-C to cancel.
     - To install: `go install github.com/timmattison/tools/cmd/runat@latest`
+- gitrdun
+    - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on recently
+      across different projects.
+    - To install: `go install github.com/timmattison/tools/cmd/gitrdun@latest`
 
 ## dirhash
 
