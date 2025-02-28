@@ -115,7 +115,40 @@ type progressMsg struct {
 	currentPath string
 }
 
-func getGitDir(path string) (string, error) {
+type gitOpStats struct {
+	count    int64
+	duration time.Duration
+	sync.Mutex
+}
+
+type gitStats struct {
+	getGitDir gitOpStats
+	getLog    gitOpStats
+	getEmail  gitOpStats
+}
+
+func (s *gitOpStats) record(duration time.Duration) {
+	s.Lock()
+	defer s.Unlock()
+	s.count++
+	s.duration += duration
+}
+
+func (s *gitOpStats) average() time.Duration {
+	s.Lock()
+	defer s.Unlock()
+	if s.count == 0 {
+		return 0
+	}
+	return time.Duration(int64(s.duration) / s.count)
+}
+
+func getGitDir(path string, stats *gitOpStats) (string, error) {
+	start := time.Now()
+	defer func() {
+		stats.record(time.Since(start))
+	}()
+
 	// Quick check for .git directory first
 	gitPath := filepath.Join(path, ".git")
 	if info, err := os.Stat(gitPath); err == nil && info.IsDir() {
@@ -143,6 +176,7 @@ type searchResult struct {
 	foundCommits     bool
 	threshold        time.Time
 	absPaths         []string
+	stats            gitStats
 }
 
 func main() {
@@ -150,6 +184,7 @@ func main() {
 	var ignoreFailures = flag.Bool("ignore-failures", false, "suppress output about directories that couldn't be accessed")
 	var summaryOnly = flag.Bool("summary-only", false, "only show repository names and commit counts")
 	var findNested = flag.Bool("find-nested", false, "look for nested git repositories inside other git repositories")
+	var showStats = flag.Bool("stats", false, "show git operation statistics")
 	var help = flag.Bool("help", false, "show help message")
 	var h = flag.Bool("h", false, "show help message")
 
@@ -245,10 +280,13 @@ func main() {
 		}
 		result.absPaths = absPaths
 
+		// Get git email
+		start := time.Now()
 		email, err := exec.Command("git", "config", "user.email").Output()
 		if err != nil {
 			log.Fatal("Could not get git user.email", "error", err)
 		}
+		result.stats.getEmail.record(time.Since(start))
 		userEmail := strings.TrimSpace(string(email))
 
 		threshold := time.Now().Add(-*durationFlag)
@@ -277,9 +315,13 @@ func main() {
 		unique.Range(func(key, value interface{}) bool {
 			workingDir := value.(string)
 			since := fmt.Sprintf("--since=%s", threshold.Format(time.RFC3339))
+
+			start := time.Now()
 			cmd := exec.Command("git", "-C", workingDir, "log", "--author="+userEmail,
 				since, "--format=%h %ad %s", "--date=iso")
 			output, err := cmd.Output()
+			result.stats.getLog.record(time.Since(start))
+
 			if err != nil {
 				if !*ignoreFailures {
 					result.inaccessibleDirs = append(result.inaccessibleDirs,
@@ -362,6 +404,22 @@ func main() {
 				fmt.Printf("   • Starting from: %s\n", results.threshold.Format(time.RFC3339))
 				fmt.Printf("   • Search paths: %s\n", strings.Join(results.absPaths, ", "))
 			}
+
+			// Only show stats if the stats flag is set
+			if *showStats {
+				fmt.Printf("\n🔍 Git Operation Stats:\n")
+				fmt.Printf("   • getGitDir: %d calls, avg %v per call\n",
+					results.stats.getGitDir.count,
+					results.stats.getGitDir.average().Round(time.Microsecond))
+				fmt.Printf("   • git log: %d calls, avg %v per call\n",
+					results.stats.getLog.count,
+					results.stats.getLog.average().Round(time.Microsecond))
+				fmt.Printf("   • git config: %d calls, avg %v per call\n",
+					results.stats.getEmail.count,
+					results.stats.getEmail.average().Round(time.Microsecond))
+				fmt.Println()
+			}
+
 		case <-time.After(100 * time.Millisecond): // Add short timeout
 			return // Exit if we don't get results quickly after quitting
 		}
@@ -414,7 +472,8 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 			atomic.AddInt32(dirsChecked, 1)
 			sendProgress(p)
 
-			gitDir, err := getGitDir(p)
+			gitDir, err := getGitDir(p, &result.stats.getGitDir)
+
 			if err != nil {
 				if !*ignoreFailures && os.IsPermission(err) {
 					result.inaccessibleDirs = append(result.inaccessibleDirs,
