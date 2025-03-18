@@ -1,12 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/charmbracelet/bubbles/spinner"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/log"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type model struct {
@@ -186,6 +191,9 @@ func main() {
 	var findNested = flag.Bool("find-nested", false, "look for nested git repositories inside other git repositories")
 	var showStats = flag.Bool("stats", false, "show git operation statistics")
 	var searchAllBranches = flag.Bool("all", false, "search all branches, not just the current branch")
+	var useOllama = flag.Bool("ollama", false, "use Ollama to generate summaries of work done in each repository")
+	var ollamaModel = flag.String("ollama-model", "llama3.3", "Ollama model to use for summaries")
+	var ollamaURL = flag.String("ollama-url", "http://localhost:11434", "URL for Ollama API")
 	var help = flag.Bool("help", false, "show help message")
 	var h = flag.Bool("h", false, "show help message")
 
@@ -319,9 +327,11 @@ func main() {
 
 			start := time.Now()
 			gitArgs := []string{"-C", workingDir, "log", "--author=" + userEmail, since, "--format=%h %ad %s", "--date=iso"}
+
 			if *searchAllBranches {
 				gitArgs = append(gitArgs, "--all")
 			}
+
 			cmd := exec.Command("git", gitArgs...)
 			output, err := cmd.Output()
 			result.stats.getLog.record(time.Since(start))
@@ -335,10 +345,12 @@ func main() {
 			}
 
 			commits := strings.TrimSpace(string(output))
+
 			if commits != "" {
 				result.foundCommits = true
 				result.repositories[workingDir] = strings.Split(commits, "\n")
 			}
+
 			return true
 		})
 
@@ -372,9 +384,11 @@ func main() {
 			// Print results
 			if len(results.inaccessibleDirs) > 0 && !*ignoreFailures {
 				fmt.Printf("⚠️  The following directories could not be fully accessed:\n")
+
 				for _, dir := range results.inaccessibleDirs {
 					fmt.Printf("  %s\n", dir)
 				}
+
 				fmt.Println()
 			}
 
@@ -389,6 +403,7 @@ func main() {
 
 				// Calculate total commits
 				totalCommits := 0
+
 				for _, commits := range results.repositories {
 					totalCommits += len(commits)
 				}
@@ -399,7 +414,23 @@ func main() {
 				for workingDir, commits := range results.repositories {
 					fmt.Printf("📁 %s - %d commits\n", workingDir, len(commits))
 
-					if !*summaryOnly {
+					if *useOllama {
+						// First show the commits as we did before
+						if !*summaryOnly {
+							for _, commit := range commits {
+								fmt.Printf("      • %s\n", commit)
+							}
+						}
+
+						// Then show the Ollama summary
+						fmt.Printf("\n🤖 Generating summary with Ollama...\n")
+						summary, err := generateOllamaSummary(workingDir, commits, *ollamaURL, *ollamaModel)
+						if err != nil {
+							fmt.Printf("⚠️  Error generating summary: %v\n", err)
+						} else {
+							fmt.Printf("📝 Summary: \n%s\n\n", summary)
+						}
+					} else if !*summaryOnly {
 						for _, commit := range commits {
 							fmt.Printf("      • %s\n", commit)
 						}
@@ -502,4 +533,193 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 			return nil
 		}
 	})
+}
+
+func generateOllamaSummary(workingDir string, commits []string, ollamaURL, ollamaModel string) (string, error) {
+	// Gather repository context
+	repoContext := "Repository: " + workingDir + "\n\n"
+
+	// Try to read README.md if it exists
+	readmeContent := ""
+	readmePath := filepath.Join(workingDir, "README.md")
+	if readmeBytes, err := os.ReadFile(readmePath); err == nil {
+		readmeContent = "README.md content:\n" + string(readmeBytes) + "\n\n"
+	} else {
+		// If no README.md, try to get repository description
+		cmd := exec.Command("git", "-C", workingDir, "remote", "-v")
+		if remoteOutput, err := cmd.Output(); err == nil {
+			repoContext += "Git remotes:\n" + string(remoteOutput) + "\n"
+		}
+
+		// Get repository structure overview
+		cmd = exec.Command("find", workingDir, "-type", "f", "-name", "*.go", "-o", "-name", "*.js", "-o", "-name", "*.py", "-o", "-name", "*.java", "-o", "-name", "*.ts", "|", "head", "-10")
+		if filesOutput, err := cmd.Output(); err == nil && len(filesOutput) > 0 {
+			repoContext += "Key files (sample):\n" + string(filesOutput) + "\n"
+		}
+	}
+
+	// Get detailed commit information with full file contents
+	detailedCommits := ""
+	var totalSize int
+	maxSize := 20000 // Limit total size to avoid overwhelming the model
+
+	for _, commitLine := range commits {
+		parts := strings.SplitN(commitLine, " ", 2)
+		if len(parts) > 0 {
+			commitHash := parts[0]
+
+			// Get commit message and stats
+			cmd := exec.Command("git", "-C", workingDir, "show", "--stat", commitHash)
+			if output, err := cmd.Output(); err == nil {
+				commitInfo := string(output)
+				detailedCommits += "COMMIT: " + commitInfo + "\n"
+				totalSize += len(commitInfo)
+
+				// Get list of changed files in this commit
+				cmd = exec.Command("git", "-C", workingDir, "diff-tree", "--no-commit-id", "--name-only", "-r", commitHash)
+				if filesOutput, err := cmd.Output(); err == nil {
+					changedFiles := strings.Split(strings.TrimSpace(string(filesOutput)), "\n")
+
+					// For each changed file, get its content after the commit
+					for _, file := range changedFiles {
+						if totalSize >= maxSize {
+							detailedCommits += "... (truncated due to size limits)\n"
+							break
+						}
+
+						// Skip binary files, large files, and certain extensions
+						if shouldSkipFile(file) {
+							continue
+						}
+
+						// Get file content at this commit
+						cmd = exec.Command("git", "-C", workingDir, "show", commitHash+":"+file)
+						if fileContent, err := cmd.Output(); err == nil {
+							content := string(fileContent)
+
+							// Only include if not too large
+							if len(content) > 5000 {
+								fileInfo := fmt.Sprintf("FILE %s: (truncated, too large)\n", file)
+								detailedCommits += fileInfo
+								totalSize += len(fileInfo)
+							} else {
+								fileInfo := fmt.Sprintf("FILE %s:\n```\n%s\n```\n\n", file, content)
+								detailedCommits += fileInfo
+								totalSize += len(fileInfo)
+							}
+						}
+					}
+				}
+
+				detailedCommits += "---\n"
+			}
+
+			// Check if we've exceeded our size limit
+			if totalSize >= maxSize {
+				detailedCommits += "...\n(truncated for brevity, reached size limit)\n"
+				break
+			}
+		}
+	}
+
+	// Format the prompt for Ollama
+	prompt := fmt.Sprintf(`Please summarize the work done in this repository based on these recent commits.
+
+%s
+%s
+Recent commits:
+%s
+
+Detailed commit information with file contents:
+%s
+
+Please provide a concise summary of what was worked on in this repository. Focus on:
+1. What features or changes were implemented
+2. Any bug fixes or improvements
+3. The overall purpose of the changes
+4. Technical details that would be relevant to a developer
+
+Use the file contents to understand the code changes in depth.`,
+		repoContext,
+		readmeContent,
+		strings.Join(commits, "\n"),
+		detailedCommits,
+	)
+
+	// Prepare the request to Ollama
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"model":  ollamaModel,
+		"prompt": prompt,
+	})
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %w", err)
+	}
+
+	// Send the request to Ollama
+	resp, err := http.Post(ollamaURL+"/api/generate", "application/json", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return "", fmt.Errorf("error calling Ollama API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Process the streaming NDJSON response
+	scanner := bufio.NewScanner(resp.Body)
+	var fullResponse strings.Builder
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		var responseChunk struct {
+			Model     string `json:"model"`
+			CreatedAt string `json:"created_at"`
+			Response  string `json:"response"`
+			Done      bool   `json:"done"`
+		}
+
+		if err := json.Unmarshal([]byte(line), &responseChunk); err != nil {
+			return "", fmt.Errorf("error parsing response chunk: %w", err)
+		}
+
+		fullResponse.WriteString(responseChunk.Response)
+
+		if responseChunk.Done {
+			break
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("error reading response stream: %w", err)
+	}
+
+	return fullResponse.String(), nil
+}
+
+// Helper function to determine if a file should be skipped
+func shouldSkipFile(filename string) bool {
+	// Skip binary files and other non-text formats
+	ext := strings.ToLower(filepath.Ext(filename))
+	skipExts := map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
+		".pdf": true, ".zip": true, ".tar": true, ".gz": true,
+		".bin": true, ".exe": true, ".dll": true, ".so": true,
+		".mp3": true, ".mp4": true, ".avi": true, ".mov": true,
+	}
+
+	// Skip files that are likely to be binary or too large
+	if skipExts[ext] {
+		return true
+	}
+
+	// Skip files with paths containing certain directories
+	skipDirs := []string{
+		"node_modules/", "vendor/", "dist/", "build/",
+		".git/", ".idea/", ".vscode/",
+	}
+
+	for _, dir := range skipDirs {
+		if strings.Contains(filename, dir) {
+			return true
+		}
+	}
+
+	return false
 }
