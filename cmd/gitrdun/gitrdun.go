@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -436,14 +437,23 @@ func main() {
 				fmt.Printf("📊 Summary:\n")
 				fmt.Printf("   • Found %d commits across %d repositories\n\n", totalCommits, len(results.repositories))
 
-				for workingDir, commits := range results.repositories {
+				// Sort repository paths for consistent output
+				var sortedRepoPaths []string
+				for workingDir := range results.repositories {
+					sortedRepoPaths = append(sortedRepoPaths, workingDir)
+				}
+				sort.Strings(sortedRepoPaths)
+
+				// Display results in sorted order
+				for _, workingDir := range sortedRepoPaths {
+					commits := results.repositories[workingDir]
 					fmt.Printf("📁 %s - %d commits\n", workingDir, len(commits))
 
 					if *useOllama {
 						// First show the commits as we did before
 						if !*summaryOnly {
 							for _, commit := range commits {
-								fmt.Printf("      • %s\n", commit)
+								fmt.Printf("      • %s", commit)
 							}
 						}
 
