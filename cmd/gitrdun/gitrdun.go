@@ -194,6 +194,7 @@ func main() {
 	var useOllama = flag.Bool("ollama", false, "use Ollama to generate summaries of work done in each repository")
 	var ollamaModel = flag.String("ollama-model", "llama3.3", "Ollama model to use for summaries")
 	var ollamaURL = flag.String("ollama-url", "http://localhost:11434", "URL for Ollama API")
+	var rootDir = flag.String("root", "", "root directory to start scanning from (overrides positional arguments)")
 	var help = flag.Bool("help", false, "show help message")
 	var h = flag.Bool("h", false, "show help message")
 
@@ -208,7 +209,10 @@ func main() {
 	var paths []string
 	args := flag.Args()
 
-	if len(args) > 0 {
+	// Use rootDir if specified, otherwise use args or default to current directory
+	if *rootDir != "" {
+		paths = append(paths, *rootDir)
+	} else if len(args) > 0 {
 		paths = append(paths, args...)
 	} else {
 		paths = append(paths, ".")
