@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/charmbracelet/log"
+	"github.com/sho0pi/naturaltime"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -37,7 +38,8 @@ type model struct {
 	reposFound     int
 	currentPath    string
 	lastUpdateTime time.Time
-	startTime      time.Time     // New field to track duration
+	startTime      time.Time     // When the search started
+	thresholdTime  time.Time     // Fixed threshold time for commit search
 	cancel         chan struct{} // Add this field
 }
 
@@ -82,8 +84,8 @@ func (m model) View() string {
 	duration := time.Since(m.startTime).Round(time.Second)
 
 	// Stats header
-	startTimeStr := m.startTime.Format("2006-01-02 15:04:05")
-	output.WriteString(fmt.Sprintf("🔍 Searching for commits since %s\n", startTimeStr))
+	thresholdTimeStr := m.thresholdTime.Format("2006-01-02 15:04:05") + " [" + m.thresholdTime.Format("Monday") + "]"
+	output.WriteString(fmt.Sprintf("🔍 Searching for commits since %s\n", thresholdTimeStr))
 	output.WriteString(strings.Repeat("─", 50) + "\n")
 
 	// Define styles
@@ -187,7 +189,7 @@ type searchResult struct {
 }
 
 func main() {
-	var durationStr = flag.String("duration", "24h", "how far back to look for commits (e.g. 24h, 7d, 2w)")
+	var durationStr = flag.String("duration", "24h", "how far back to look for commits (e.g. 24h, 7d, 2w, 'monday', 'last month', 'february', etc.)")
 	var ignoreFailures = flag.Bool("ignore-failures", false, "suppress output about directories that couldn't be accessed")
 	var summaryOnly = flag.Bool("summary-only", false, "only show repository names and commit counts")
 	var findNested = flag.Bool("find-nested", false, "look for nested git repositories inside other git repositories")
@@ -205,6 +207,7 @@ func main() {
 
 	// Parse the duration string
 	duration, err := parseDuration(*durationStr)
+
 	if err != nil {
 		log.Fatal("Invalid duration format", "error", err)
 	}
@@ -247,8 +250,9 @@ func main() {
 		reposFound:     0,
 		currentPath:    "",
 		lastUpdateTime: time.Now(),
-		startTime:      time.Now(),          // Initialize start time
-		cancel:         make(chan struct{}), // Initialize the cancel channel
+		startTime:      time.Now(),
+		thresholdTime:  time.Now().Add(-duration), // Calculate once
+		cancel:         make(chan struct{}),
 	}
 
 	p := tea.NewProgram(initialModel)
@@ -954,5 +958,32 @@ func parseDuration(durationStr string) (time.Duration, error) {
 	}
 
 	// Fall back to standard duration parsing for hours, minutes, etc.
-	return time.ParseDuration(durationStr)
+	var duration time.Duration
+	var err error
+
+	if duration, err = time.ParseDuration(durationStr); err == nil {
+		return duration, nil
+	}
+
+	// Try parsing with naturaltime as a last ditch effort
+	var parser *naturaltime.Parser
+
+	if parser, err = naturaltime.New(); err != nil {
+		return 0, err
+	}
+
+	now := time.Now()
+
+	var date *time.Time
+
+	if date, err = parser.ParseDate(durationStr, now); err != nil {
+		return 0, err
+	}
+
+	if date == nil {
+		return 0, fmt.Errorf("could not parse date")
+	}
+
+	// Calculate the duration from now to the parsed date
+	return date.Sub(now).Abs(), nil
 }
