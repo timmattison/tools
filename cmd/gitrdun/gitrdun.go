@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -192,6 +193,7 @@ func main() {
 	var showStats = flag.Bool("stats", false, "show git operation statistics")
 	var searchAllBranches = flag.Bool("all", false, "search all branches, not just the current branch")
 	var useOllama = flag.Bool("ollama", false, "use Ollama to generate summaries of work done in each repository")
+	var metaOllama = flag.Bool("meta-ollama", false, "generate a meta-summary across all repositories (implies --ollama)")
 	var ollamaModel = flag.String("ollama-model", "llama3.3", "Ollama model to use for summaries")
 	var ollamaURL = flag.String("ollama-url", "http://localhost:11434", "URL for Ollama API")
 	var rootDir = flag.String("root", "", "root directory to start scanning from (overrides positional arguments)")
@@ -204,6 +206,11 @@ func main() {
 	if *help || *h {
 		flag.Usage()
 		return
+	}
+
+	// If meta-ollama is set, enable ollama as well
+	if *metaOllama {
+		*useOllama = true
 	}
 
 	var paths []string
@@ -411,6 +418,10 @@ func main() {
 				}
 				sort.Strings(sortedRepoPaths)
 
+				// For meta-ollama, collect all summaries
+				var allSummaries []string
+				var repoSummaries = make(map[string]string)
+
 				// Display results in sorted order
 				for _, workingDir := range sortedRepoPaths {
 					commits := results.repositories[workingDir]
@@ -432,12 +443,28 @@ func main() {
 							fmt.Printf("⚠️  Error generating summary: %v\n", err)
 						} else {
 							fmt.Printf("📝 Summary: \n%s\n\n", summary)
+							// Store summary for meta-summary if needed
+							if *metaOllama {
+								repoSummaries[workingDir] = summary
+								allSummaries = append(allSummaries, fmt.Sprintf("Repository: %s\n%s", workingDir, summary))
+							}
 						}
 					} else if !*summaryOnly {
 						for _, commit := range commits {
 							fmt.Printf("      • %s\n", commit)
 						}
 						fmt.Println()
+					}
+				}
+
+				// Generate meta-summary if requested
+				if *metaOllama && len(allSummaries) > 0 {
+					fmt.Printf("\n🔍 Generating meta-summary of all work...\n")
+					metaSummary, err := generateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, *durationFlag)
+					if err != nil {
+						fmt.Printf("⚠️  Error generating meta-summary: %v\n", err)
+					} else {
+						fmt.Printf("\n📊 Meta-Summary of All Work:\n%s\n", metaSummary)
 					}
 				}
 			} else {
@@ -842,4 +869,60 @@ func getFirstLine(s string) string {
 		return s[:idx]
 	}
 	return s
+}
+
+func generateMetaSummary(summaries []string, ollamaURL, ollamaModel string, duration time.Duration) (string, error) {
+	// Format the prompt for Ollama
+	prompt := fmt.Sprintf(`Please provide a comprehensive overview of all work done across multiple repositories over the past %v.
+
+Below are summaries from individual repositories:
+
+%s
+
+Please synthesize these summaries into a cohesive meta-summary that:
+1. Identifies major themes or areas of work
+2. Highlights the most significant accomplishments
+3. Notes any patterns across repositories
+4. Provides a high-level overview suitable for a weekly status report
+
+Focus on the big picture rather than repeating details from individual repositories.`,
+		duration,
+		strings.Join(summaries, "\n\n---\n\n"),
+	)
+
+	// Prepare the request to Ollama
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"model":  ollamaModel,
+		"prompt": prompt,
+		"stream": false, // Ensure we get the complete response at once
+	})
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %w", err)
+	}
+
+	// Send the request to Ollama
+	resp, err := http.Post(ollamaURL+"/api/generate", "application/json", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return "", fmt.Errorf("error calling Ollama API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response body: %w", err)
+	}
+
+	// Parse the JSON response
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("error parsing JSON response: %w", err)
+	}
+
+	// Extract the response text
+	if response, ok := result["response"].(string); ok {
+		return response, nil
+	}
+
+	return "", fmt.Errorf("unexpected response format from Ollama: %s", string(body))
 }
