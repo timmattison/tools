@@ -20,6 +20,9 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 type model struct {
@@ -161,28 +164,24 @@ func getGitDir(path string, stats *gitOpStats) (string, error) {
 		return gitPath, nil
 	}
 
-	// Fall back to git command if .git directory isn't found
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--git-dir")
-	output, err := cmd.Output()
+	// Try to open as git repository using go-git
+	_, err := git.PlainOpen(path)
 	if err != nil {
 		return "", err
 	}
 
-	gitDir := strings.TrimSpace(string(output))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(path, gitDir)
-	}
-
-	return filepath.Clean(gitDir), nil
+	// If we can open it, return the .git path (go-git handles gitdir indirection internally)
+	return gitPath, nil
 }
 
 type searchResult struct {
-	inaccessibleDirs []string
-	repositories     map[string][]string // workingDir -> commits
-	foundCommits     bool
-	threshold        time.Time
-	absPaths         []string
-	stats            gitStats
+	repositories       map[string][]string
+	inaccessibleDirs   []string
+	foundCommits       bool
+	absPaths           []string
+	threshold          time.Time
+	stats              gitStats
+	fullCommitMessages map[string]map[string]string // Map of repo path to commit hash to full message
 }
 
 func main() {
@@ -294,14 +293,37 @@ func main() {
 		}
 		result.absPaths = absPaths
 
-		// Get git email
+		// Get git email using go-git if possible, fallback to command
+		userEmail := ""
 		start := time.Now()
-		email, err := exec.Command("git", "config", "user.email").Output()
-		if err != nil {
-			log.Fatal("Could not get git user.email", "error", err)
+
+		// Try to get from global config first
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			// Try to find a git config in the home directory
+			configPath := filepath.Join(homeDir, ".gitconfig")
+			if configBytes, err := os.ReadFile(configPath); err == nil {
+				configContent := string(configBytes)
+				for _, line := range strings.Split(configContent, "\n") {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "email = ") {
+						userEmail = strings.TrimPrefix(line, "email = ")
+						break
+					}
+				}
+			}
 		}
+
+		// Fallback to git command if needed
+		if userEmail == "" {
+			email, err := exec.Command("git", "config", "user.email").Output()
+			if err != nil {
+				log.Fatal("Could not get git user.email", "error", err)
+			}
+			userEmail = strings.TrimSpace(string(email))
+		}
+
 		result.stats.getEmail.record(time.Since(start))
-		userEmail := strings.TrimSpace(string(email))
 
 		threshold := time.Now().Add(-*durationFlag)
 		result.threshold = threshold
@@ -315,7 +337,7 @@ func main() {
 			go func(path string) {
 				defer wg.Done()
 				err := scanPath(path, &result, &dirsChecked, &reposFound, unique,
-					ignoreFailures, findNested, initialModel.cancel, sendProgress)
+					ignoreFailures, findNested, initialModel.cancel, sendProgress, userEmail, threshold, searchAllBranches)
 				if err != nil && !*ignoreFailures {
 					result.inaccessibleDirs = append(result.inaccessibleDirs,
 						fmt.Sprintf("%s (walk error: %v)", path, err))
@@ -324,61 +346,6 @@ func main() {
 		}
 
 		wg.Wait()
-
-		// Get commits for each repository
-		unique.Range(func(key, value interface{}) bool {
-			workingDir := value.(string)
-
-			// Keep the since parameter for initial filtering but we'll do additional filtering
-			since := fmt.Sprintf("--since=%s", threshold.Format(time.RFC3339))
-
-			start := time.Now()
-			// Use a more detailed format to include timestamp for filtering
-			gitArgs := []string{"-C", workingDir, "log", "--author=" + userEmail, since, "--format=%h %ad %s", "--date=iso8601-strict", "--date-order"}
-
-			if *searchAllBranches {
-				gitArgs = append(gitArgs, "--all")
-			}
-
-			cmd := exec.Command("git", gitArgs...)
-			output, err := cmd.Output()
-			result.stats.getLog.record(time.Since(start))
-
-			if err != nil {
-				if !*ignoreFailures {
-					result.inaccessibleDirs = append(result.inaccessibleDirs,
-						fmt.Sprintf("%s (error getting git log: %v)", workingDir, err))
-				}
-				return true
-			}
-
-			commits := strings.TrimSpace(string(output))
-
-			if commits != "" {
-				// Split commits and filter by date
-				allCommits := strings.Split(commits, "\n")
-				filteredCommits := []string{}
-
-				for _, commit := range allCommits {
-					// Extract date from commit line (format: hash date message)
-					parts := strings.SplitN(commit, " ", 3)
-					if len(parts) >= 2 {
-						// Parse the ISO8601 date
-						commitDate, err := time.Parse("2006-01-02T15:04:05-07:00", parts[1])
-						if err == nil && !commitDate.Before(threshold) {
-							filteredCommits = append(filteredCommits, commit)
-						}
-					}
-				}
-
-				if len(filteredCommits) > 0 {
-					result.foundCommits = true
-					result.repositories[workingDir] = filteredCommits
-				}
-			}
-
-			return true
-		})
 
 		// Only send results if we haven't cancelled
 		select {
@@ -453,13 +420,14 @@ func main() {
 						// First show the commits as we did before
 						if !*summaryOnly {
 							for _, commit := range commits {
-								fmt.Printf("      • %s", commit)
+								fmt.Printf("      • %s\n", commit)
 							}
 						}
 
 						// Then show the Ollama summary
 						fmt.Printf("\n🤖 Generating summary with Ollama...\n")
-						summary, err := generateOllamaSummary(workingDir, commits, *ollamaURL, *ollamaModel)
+						summary, err := generateOllamaSummary(workingDir, commits,
+							results.fullCommitMessages[workingDir], *ollamaURL, *ollamaModel)
 						if err != nil {
 							fmt.Printf("⚠️  Error generating summary: %v\n", err)
 						} else {
@@ -511,7 +479,8 @@ var skipDirs = map[string]bool{
 
 func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 	reposFound *int32, unique *sync.Map, ignoreFailures *bool,
-	findNested *bool, cancel chan struct{}, sendProgress func(string)) error {
+	findNested *bool, cancel chan struct{}, sendProgress func(string),
+	userEmail string, threshold time.Time, searchAllBranches *bool) error {
 
 	// Add check for directory existence before walking
 	if _, err := os.Stat(searchPath); err != nil {
@@ -556,9 +525,117 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 				return nil
 			}
 
+			// Store the working directory path
 			unique.Store(gitDir, p)
 			atomic.AddInt32(reposFound, 1)
 			sendProgress(p)
+
+			// Get commits using go-git
+			start := time.Now()
+			repo, err := git.PlainOpen(p)
+			if err != nil {
+				if !*ignoreFailures {
+					result.inaccessibleDirs = append(result.inaccessibleDirs,
+						fmt.Sprintf("%s (error opening git repo: %v)", p, err))
+				}
+				return nil
+			}
+
+			// Get the HEAD reference
+			var commits []string
+
+			// Function to process commits from a reference
+			processRef := func(ref *plumbing.Reference) error {
+				// Get the commit history
+				commitIter, err := repo.Log(&git.LogOptions{
+					From:  ref.Hash(),
+					Since: &threshold,
+				})
+				if err != nil {
+					return err
+				}
+				defer commitIter.Close()
+
+				// Iterate through commits
+				return commitIter.ForEach(func(c *object.Commit) error {
+					// Check if commit is by the user
+					if strings.Contains(c.Author.Email, userEmail) {
+						// Store first line for display, but keep full message for Ollama
+						firstLine := getFirstLine(c.Message)
+						commitLine := fmt.Sprintf("%s %s %s",
+							c.Hash.String()[:7],
+							c.Author.When.Format("2006-01-02 15:04:05 -0700"),
+							firstLine)
+
+						// Store the commit with full message in a separate field for Ollama
+						fullCommitLine := fmt.Sprintf("%s %s %s",
+							c.Hash.String()[:7],
+							c.Author.When.Format("2006-01-02 15:04:05 -0700"),
+							c.Message)
+
+						// Add to commits list with display version
+						commits = append(commits, commitLine)
+
+						// Store the full commit message in a map for Ollama
+						if result.fullCommitMessages == nil {
+							result.fullCommitMessages = make(map[string]map[string]string)
+						}
+
+						if result.fullCommitMessages[p] == nil {
+							result.fullCommitMessages[p] = make(map[string]string)
+						}
+
+						result.fullCommitMessages[p][c.Hash.String()[:7]] = fullCommitLine
+					}
+					return nil
+				})
+			}
+
+			if *searchAllBranches {
+				// Get all branches
+				refs, err := repo.References()
+				if err != nil {
+					if !*ignoreFailures {
+						result.inaccessibleDirs = append(result.inaccessibleDirs,
+							fmt.Sprintf("%s (error getting references: %v)", p, err))
+					}
+					return nil
+				}
+
+				err = refs.ForEach(func(ref *plumbing.Reference) error {
+					if ref.Name().IsBranch() {
+						return processRef(ref)
+					}
+					return nil
+				})
+				if err != nil && !*ignoreFailures {
+					result.inaccessibleDirs = append(result.inaccessibleDirs,
+						fmt.Sprintf("%s (error processing branches: %v)", p, err))
+				}
+			} else {
+				// Just use HEAD
+				ref, err := repo.Head()
+				if err != nil {
+					if !*ignoreFailures {
+						result.inaccessibleDirs = append(result.inaccessibleDirs,
+							fmt.Sprintf("%s (error getting HEAD: %v)", p, err))
+					}
+					return nil
+				}
+
+				err = processRef(ref)
+				if err != nil && !*ignoreFailures {
+					result.inaccessibleDirs = append(result.inaccessibleDirs,
+						fmt.Sprintf("%s (error processing HEAD: %v)", p, err))
+				}
+			}
+
+			result.stats.getLog.record(time.Since(start))
+
+			if len(commits) > 0 {
+				result.foundCommits = true
+				result.repositories[p] = commits
+			}
 
 			// Skip subdirectories unless --find-nested is set
 			if !*findNested {
@@ -570,7 +647,7 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 	})
 }
 
-func generateOllamaSummary(workingDir string, commits []string, ollamaURL, ollamaModel string) (string, error) {
+func generateOllamaSummary(workingDir string, commits []string, fullCommitMessages map[string]string, ollamaURL, ollamaModel string) (string, error) {
 	// Gather repository context
 	repoContext := "Repository: " + workingDir + "\n\n"
 
@@ -757,4 +834,12 @@ func shouldSkipFile(filename string) bool {
 	}
 
 	return false
+}
+
+// Function to get first line of a multi-line string
+func getFirstLine(s string) string {
+	if idx := strings.Index(s, "\n"); idx != -1 {
+		return s[:idx]
+	}
+	return s
 }
