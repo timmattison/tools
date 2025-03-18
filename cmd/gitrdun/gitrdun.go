@@ -435,14 +435,15 @@ func main() {
 							}
 						}
 
-						// Then show the Ollama summary
-						fmt.Printf("\n🤖 Generating summary with Ollama...\n")
+						// Then show the Ollama summary with repository name and model
+						repoName := filepath.Base(workingDir)
+						fmt.Printf("\n🤖 Generating summary for %s with Ollama (%s)...\n", repoName, *ollamaModel)
 						summary, err := generateOllamaSummary(workingDir, commits,
 							results.fullCommitMessages[workingDir], *ollamaURL, *ollamaModel)
 						if err != nil {
 							fmt.Printf("⚠️  Error generating summary: %v\n", err)
 						} else {
-							fmt.Printf("📝 Summary: \n%s\n\n", summary)
+							fmt.Printf("📝 Summary for %s (%s): \n%s\n\n", repoName, *ollamaModel, summary)
 							// Store summary for meta-summary if needed
 							if *metaOllama {
 								repoSummaries[workingDir] = summary
@@ -459,12 +460,12 @@ func main() {
 
 				// Generate meta-summary if requested
 				if *metaOllama && len(allSummaries) > 0 {
-					fmt.Printf("\n🔍 Generating meta-summary of all work...\n")
+					fmt.Printf("\n🔍 Generating meta-summary of all work with Ollama (%s)...\n", *ollamaModel)
 					metaSummary, err := generateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, *durationFlag)
 					if err != nil {
 						fmt.Printf("⚠️  Error generating meta-summary: %v\n", err)
 					} else {
-						fmt.Printf("\n📊 Meta-Summary of All Work:\n%s\n", metaSummary)
+						fmt.Printf("\n📊 Meta-Summary of All Work (%s):\n%s\n", *ollamaModel, metaSummary)
 					}
 				}
 			} else {
