@@ -200,6 +200,7 @@ func main() {
 	var ollamaModel = flag.String("ollama-model", "llama3.3", "Ollama model to use for summaries")
 	var ollamaURL = flag.String("ollama-url", "http://localhost:11434", "URL for Ollama API")
 	var rootDir = flag.String("root", "", "root directory to start scanning from (overrides positional arguments)")
+	var outputFile = flag.String("output", "", "file to write results to (in addition to stdout)")
 	var help = flag.Bool("help", false, "show help message")
 	var h = flag.Bool("h", false, "show help message")
 
@@ -392,25 +393,35 @@ func main() {
 				return // Channel was closed, exit gracefully
 			}
 
+			// Create a buffer to store output for file writing
+			var outputBuffer strings.Builder
+
+			// Helper function to write to both stdout and buffer
+			writeOutput := func(format string, a ...interface{}) {
+				msg := fmt.Sprintf(format, a...)
+				fmt.Print(msg)
+				outputBuffer.WriteString(msg)
+			}
+
 			// Print results
 			if len(results.inaccessibleDirs) > 0 && !*ignoreFailures {
-				fmt.Printf("⚠️  The following directories could not be fully accessed:\n")
+				writeOutput("⚠️  The following directories could not be fully accessed:\n")
 
 				for _, dir := range results.inaccessibleDirs {
-					fmt.Printf("  %s\n", dir)
+					writeOutput("  %s\n", dir)
 				}
 
-				fmt.Println()
+				writeOutput("\n")
 			}
 
 			if results.foundCommits {
-				fmt.Printf("🔍 Found commits from the last %v\n", duration)
-				fmt.Printf("📅 Starting from: %s\n", results.threshold.Format(time.RFC3339))
-				fmt.Printf("📂 Search paths: %s\n", strings.Join(results.absPaths, ", "))
+				writeOutput("🔍 Found commits from the last %v\n", duration)
+				writeOutput("📅 Starting from: %s\n", results.threshold.Format(time.RFC3339))
+				writeOutput("📂 Search paths: %s\n", strings.Join(results.absPaths, ", "))
 				if *searchAllBranches {
-					fmt.Printf("🔀 Searching across all branches\n")
+					writeOutput("🔀 Searching across all branches\n")
 				}
-				fmt.Println()
+				writeOutput("\n")
 
 				// Calculate total commits
 				totalCommits := 0
@@ -419,8 +430,8 @@ func main() {
 					totalCommits += len(commits)
 				}
 
-				fmt.Printf("📊 Summary:\n")
-				fmt.Printf("   • Found %d commits across %d repositories\n\n", totalCommits, len(results.repositories))
+				writeOutput("📊 Summary:\n")
+				writeOutput("   • Found %d commits across %d repositories\n\n", totalCommits, len(results.repositories))
 
 				// Sort repository paths for consistent output
 				var sortedRepoPaths []string
@@ -436,25 +447,25 @@ func main() {
 				// Display results in sorted order
 				for _, workingDir := range sortedRepoPaths {
 					commits := results.repositories[workingDir]
-					fmt.Printf("📁 %s - %d commits\n", workingDir, len(commits))
+					writeOutput("📁 %s - %d commits\n", workingDir, len(commits))
 
 					if *useOllama {
 						// First show the commits as we did before
 						if !*summaryOnly {
 							for _, commit := range commits {
-								fmt.Printf("      • %s\n", commit)
+								writeOutput("      • %s\n", commit)
 							}
 						}
 
 						// Then show the Ollama summary with repository name and model
 						repoName := filepath.Base(workingDir)
-						fmt.Printf("\n🤖 Generating summary for %s with Ollama (%s)...\n", repoName, *ollamaModel)
+						writeOutput("\n🤖 Generating summary for %s with Ollama (%s)...\n", repoName, *ollamaModel)
 						summary, err := generateOllamaSummary(workingDir, commits,
 							results.fullCommitMessages[workingDir], *ollamaURL, *ollamaModel)
 						if err != nil {
-							fmt.Printf("⚠️  Error generating summary: %v\n", err)
+							writeOutput("⚠️  Error generating summary: %v\n", err)
 						} else {
-							fmt.Printf("📝 Summary for %s (%s): \n%s\n\n", repoName, *ollamaModel, summary)
+							writeOutput("📝 Summary for %s (%s): \n%s\n\n", repoName, *ollamaModel, summary)
 							// Store summary for meta-summary if needed
 							if *metaOllama {
 								repoSummaries[workingDir] = summary
@@ -463,42 +474,52 @@ func main() {
 						}
 					} else if !*summaryOnly {
 						for _, commit := range commits {
-							fmt.Printf("      • %s\n", commit)
+							writeOutput("      • %s\n", commit)
 						}
-						fmt.Println()
+						writeOutput("\n")
 					}
 				}
 
 				// Generate meta-summary if requested
 				if *metaOllama && len(allSummaries) > 0 {
-					fmt.Printf("\n🔍 Generating meta-summary of all work with Ollama (%s)...\n", *ollamaModel)
+					writeOutput("\n🔍 Generating meta-summary of all work with Ollama (%s)...\n", *ollamaModel)
 					metaSummary, err := generateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, duration)
 					if err != nil {
-						fmt.Printf("⚠️  Error generating meta-summary: %v\n", err)
+						writeOutput("⚠️  Error generating meta-summary: %v\n", err)
 					} else {
-						fmt.Printf("\n📊 Meta-Summary of All Work (%s):\n%s\n", *ollamaModel, metaSummary)
+						writeOutput("\n📊 Meta-Summary of All Work (%s):\n%s\n", *ollamaModel, metaSummary)
 					}
 				}
 			} else {
-				fmt.Printf("😴 No commits found\n")
-				fmt.Printf("   • Time period: last %v\n", duration)
-				fmt.Printf("   • Starting from: %s\n", results.threshold.Format(time.RFC3339))
-				fmt.Printf("   • Search paths: %s\n", strings.Join(results.absPaths, ", "))
+				writeOutput("😴 No commits found\n")
+				writeOutput("   • Time period: last %v\n", duration)
+				writeOutput("   • Starting from: %s\n", results.threshold.Format(time.RFC3339))
+				writeOutput("   • Search paths: %s\n", strings.Join(results.absPaths, ", "))
 			}
 
 			// Only show stats if the stats flag is set
 			if *showStats {
-				fmt.Printf("\n🔍 Git Operation Stats:\n")
-				fmt.Printf("   • getGitDir: %d calls, avg %v per call\n",
+				writeOutput("\n🔍 Git Operation Stats:\n")
+				writeOutput("   • getGitDir: %d calls, avg %v per call\n",
 					results.stats.getGitDir.count,
 					results.stats.getGitDir.average().Round(time.Microsecond))
-				fmt.Printf("   • git log: %d calls, avg %v per call\n",
+				writeOutput("   • git log: %d calls, avg %v per call\n",
 					results.stats.getLog.count,
 					results.stats.getLog.average().Round(time.Microsecond))
-				fmt.Printf("   • git config: %d calls, avg %v per call\n",
+				writeOutput("   • git config: %d calls, avg %v per call\n",
 					results.stats.getEmail.count,
 					results.stats.getEmail.average().Round(time.Microsecond))
-				fmt.Println()
+				writeOutput("\n")
+			}
+
+			// Write to file if output file is specified
+			if *outputFile != "" {
+				err := os.WriteFile(*outputFile, []byte(outputBuffer.String()), 0644)
+				if err != nil {
+					fmt.Printf("⚠️  Error writing to output file: %v\n", err)
+				} else {
+					fmt.Printf("📝 Results written to %s\n", *outputFile)
+				}
 			}
 
 		case <-time.After(100 * time.Millisecond): // Add short timeout
