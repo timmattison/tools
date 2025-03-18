@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -186,7 +187,7 @@ type searchResult struct {
 }
 
 func main() {
-	var durationFlag = flag.Duration("duration", 24*time.Hour, "how far back to look for commits (e.g. 24h, 168h for a week)")
+	var durationStr = flag.String("duration", "24h", "how far back to look for commits (e.g. 24h, 7d, 2w)")
 	var ignoreFailures = flag.Bool("ignore-failures", false, "suppress output about directories that couldn't be accessed")
 	var summaryOnly = flag.Bool("summary-only", false, "only show repository names and commit counts")
 	var findNested = flag.Bool("find-nested", false, "look for nested git repositories inside other git repositories")
@@ -201,6 +202,12 @@ func main() {
 	var h = flag.Bool("h", false, "show help message")
 
 	flag.Parse()
+
+	// Parse the duration string
+	duration, err := parseDuration(*durationStr)
+	if err != nil {
+		log.Fatal("Invalid duration format", "error", err)
+	}
 
 	// Check for help flags before starting bubbletea
 	if *help || *h {
@@ -332,7 +339,7 @@ func main() {
 
 		result.stats.getEmail.record(time.Since(start))
 
-		threshold := time.Now().Add(-*durationFlag)
+		threshold := time.Now().Add(-duration)
 		result.threshold = threshold
 
 		unique := &sync.Map{}
@@ -393,7 +400,7 @@ func main() {
 			}
 
 			if results.foundCommits {
-				fmt.Printf("🔍 Found commits from the last %v\n", *durationFlag)
+				fmt.Printf("🔍 Found commits from the last %v\n", duration)
 				fmt.Printf("📅 Starting from: %s\n", results.threshold.Format(time.RFC3339))
 				fmt.Printf("📂 Search paths: %s\n", strings.Join(results.absPaths, ", "))
 				if *searchAllBranches {
@@ -461,7 +468,7 @@ func main() {
 				// Generate meta-summary if requested
 				if *metaOllama && len(allSummaries) > 0 {
 					fmt.Printf("\n🔍 Generating meta-summary of all work with Ollama (%s)...\n", *ollamaModel)
-					metaSummary, err := generateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, *durationFlag)
+					metaSummary, err := generateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, duration)
 					if err != nil {
 						fmt.Printf("⚠️  Error generating meta-summary: %v\n", err)
 					} else {
@@ -470,7 +477,7 @@ func main() {
 				}
 			} else {
 				fmt.Printf("😴 No commits found\n")
-				fmt.Printf("   • Time period: last %v\n", *durationFlag)
+				fmt.Printf("   • Time period: last %v\n", duration)
 				fmt.Printf("   • Starting from: %s\n", results.threshold.Format(time.RFC3339))
 				fmt.Printf("   • Search paths: %s\n", strings.Join(results.absPaths, ", "))
 			}
@@ -926,4 +933,26 @@ Focus on the big picture rather than repeating details from individual repositor
 	}
 
 	return "", fmt.Errorf("unexpected response format from Ollama: %s", string(body))
+}
+
+// parseDuration extends the standard time.ParseDuration to support days (d) and weeks (w)
+func parseDuration(durationStr string) (time.Duration, error) {
+	// Check for day format (e.g., "6d")
+	if strings.HasSuffix(durationStr, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(durationStr, "d"))
+		if err == nil {
+			return time.Duration(days) * 24 * time.Hour, nil
+		}
+	}
+
+	// Check for week format (e.g., "2w")
+	if strings.HasSuffix(durationStr, "w") {
+		weeks, err := strconv.Atoi(strings.TrimSuffix(durationStr, "w"))
+		if err == nil {
+			return time.Duration(weeks) * 7 * 24 * time.Hour, nil
+		}
+	}
+
+	// Fall back to standard duration parsing for hours, minutes, etc.
+	return time.ParseDuration(durationStr)
 }
