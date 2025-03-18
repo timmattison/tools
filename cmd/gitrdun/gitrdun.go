@@ -185,6 +185,7 @@ func main() {
 	var summaryOnly = flag.Bool("summary-only", false, "only show repository names and commit counts")
 	var findNested = flag.Bool("find-nested", false, "look for nested git repositories inside other git repositories")
 	var showStats = flag.Bool("stats", false, "show git operation statistics")
+	var searchAllBranches = flag.Bool("all", false, "search all branches, not just the current branch")
 	var help = flag.Bool("help", false, "show help message")
 	var h = flag.Bool("h", false, "show help message")
 
@@ -317,8 +318,11 @@ func main() {
 			since := fmt.Sprintf("--since=%s", threshold.Format(time.RFC3339))
 
 			start := time.Now()
-			cmd := exec.Command("git", "-C", workingDir, "log", "--author="+userEmail,
-				since, "--format=%h %ad %s", "--date=iso")
+			gitArgs := []string{"-C", workingDir, "log", "--author=" + userEmail, since, "--format=%h %ad %s", "--date=iso"}
+			if *searchAllBranches {
+				gitArgs = append(gitArgs, "--all")
+			}
+			cmd := exec.Command("git", gitArgs...)
 			output, err := cmd.Output()
 			result.stats.getLog.record(time.Since(start))
 
@@ -377,7 +381,11 @@ func main() {
 			if results.foundCommits {
 				fmt.Printf("🔍 Found commits from the last %v\n", *durationFlag)
 				fmt.Printf("📅 Starting from: %s\n", results.threshold.Format(time.RFC3339))
-				fmt.Printf("📂 Search paths: %s\n\n", strings.Join(results.absPaths, ", "))
+				fmt.Printf("📂 Search paths: %s\n", strings.Join(results.absPaths, ", "))
+				if *searchAllBranches {
+					fmt.Printf("🔀 Searching across all branches\n")
+				}
+				fmt.Println()
 
 				// Calculate total commits
 				totalCommits := 0
