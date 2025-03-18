@@ -323,10 +323,13 @@ func main() {
 		// Get commits for each repository
 		unique.Range(func(key, value interface{}) bool {
 			workingDir := value.(string)
+
+			// Keep the since parameter for initial filtering but we'll do additional filtering
 			since := fmt.Sprintf("--since=%s", threshold.Format(time.RFC3339))
 
 			start := time.Now()
-			gitArgs := []string{"-C", workingDir, "log", "--author=" + userEmail, since, "--format=%h %ad %s", "--date=iso"}
+			// Use a more detailed format to include timestamp for filtering
+			gitArgs := []string{"-C", workingDir, "log", "--author=" + userEmail, since, "--format=%h %ad %s", "--date=iso8601-strict", "--date-order"}
 
 			if *searchAllBranches {
 				gitArgs = append(gitArgs, "--all")
@@ -347,8 +350,26 @@ func main() {
 			commits := strings.TrimSpace(string(output))
 
 			if commits != "" {
-				result.foundCommits = true
-				result.repositories[workingDir] = strings.Split(commits, "\n")
+				// Split commits and filter by date
+				allCommits := strings.Split(commits, "\n")
+				filteredCommits := []string{}
+
+				for _, commit := range allCommits {
+					// Extract date from commit line (format: hash date message)
+					parts := strings.SplitN(commit, " ", 3)
+					if len(parts) >= 2 {
+						// Parse the ISO8601 date
+						commitDate, err := time.Parse("2006-01-02T15:04:05-07:00", parts[1])
+						if err == nil && !commitDate.Before(threshold) {
+							filteredCommits = append(filteredCommits, commit)
+						}
+					}
+				}
+
+				if len(filteredCommits) > 0 {
+					result.foundCommits = true
+					result.repositories[workingDir] = filteredCommits
+				}
 			}
 
 			return true
