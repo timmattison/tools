@@ -86,13 +86,13 @@ func (m model) View() string {
 	}
 
 	// Write stats with consistent alignment
-	writeStatLine("📂", "Directories scanned", fmt.Sprintf("%d", m.dirsChecked))
-	writeStatLine("⭐", "Repositories found", fmt.Sprintf("%d", m.reposFound))
-	writeStatLine("⏱ ", "Time elapsed", duration.String())
+	writeStatLine("", "Directories scanned", fmt.Sprintf("%d", m.dirsChecked))
+	writeStatLine("", "Repositories found", fmt.Sprintf("%d", m.reposFound))
+	writeStatLine("", "Time elapsed", duration.String())
 
 	// Calculate and show scan rate
 	scanRate := float64(m.dirsChecked) / duration.Seconds()
-	writeStatLine("⚡", "Scan rate", fmt.Sprintf("%.1f dirs/sec", scanRate))
+	writeStatLine("", "Scan rate", fmt.Sprintf("%.1f dirs/sec", scanRate))
 
 	// Current path with truncation if too long
 	currentPath := m.currentPath
