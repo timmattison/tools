@@ -84,7 +84,7 @@ func (m model) View() string {
 	duration := time.Since(m.startTime).Round(time.Second)
 
 	// Stats header
-	thresholdTimeStr := m.thresholdTime.Format("2006-01-02 15:04:05") + " [" + m.thresholdTime.Format("Monday") + "]"
+	thresholdTimeStr := m.thresholdTime.Format("2006-01-02 03:04:05 PM") + " [" + m.thresholdTime.Format("Monday") + "]"
 	output.WriteString(fmt.Sprintf("🔍 Searching for commits since %s\n", thresholdTimeStr))
 	output.WriteString(strings.Repeat("─", 50) + "\n")
 
