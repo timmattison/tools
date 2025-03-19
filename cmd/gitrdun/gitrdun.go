@@ -218,6 +218,7 @@ func main() {
 	var outputFile = flag.String("output", "", "file to write results to (in addition to stdout)")
 	var help = flag.Bool("help", false, "show help message")
 	var h = flag.Bool("h", false, "show help message")
+	var filterByUser = flag.Bool("filter-user", true, "only show commits authored by the current git user")
 
 	flag.Parse()
 
@@ -387,7 +388,7 @@ func main() {
 			go func(path string) {
 				defer wg.Done()
 				err := scanPath(path, &result, &dirsChecked, &reposFound, unique,
-					ignoreFailures, findNested, initialModel.cancel, sendProgress, userEmail, threshold, searchAllBranches)
+					ignoreFailures, findNested, initialModel.cancel, sendProgress, userEmail, threshold, searchAllBranches, filterByUser)
 				if err != nil && !*ignoreFailures {
 					result.inaccessibleDirs = append(result.inaccessibleDirs,
 						fmt.Sprintf("%s (walk error: %v)", path, err))
@@ -576,7 +577,7 @@ var skipDirs = map[string]bool{
 func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 	reposFound *int32, unique *sync.Map, ignoreFailures *bool,
 	findNested *bool, cancel chan struct{}, sendProgress func(string),
-	userEmail string, threshold time.Time, searchAllBranches *bool) error {
+	userEmail string, threshold time.Time, searchAllBranches *bool, filterByUser *bool) error {
 
 	// Add check for directory existence before walking
 	if _, err := os.Stat(searchPath); err != nil {
@@ -637,13 +638,13 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 						sendProgress(realPath)
 
 						// Process git repo
-						processGitRepo(realPath, result, ignoreFailures, searchAllBranches, threshold, &result.stats)
+						processGitRepo(realPath, result, ignoreFailures, searchAllBranches, threshold, &result.stats, userEmail, filterByUser)
 					}
 
 					// Recursively scan this directory if needed
 					if *findNested {
 						err = scanPath(realPath, result, dirsChecked, reposFound, unique,
-							ignoreFailures, findNested, cancel, sendProgress, userEmail, threshold, searchAllBranches)
+							ignoreFailures, findNested, cancel, sendProgress, userEmail, threshold, searchAllBranches, filterByUser)
 						if err != nil && !*ignoreFailures {
 							result.inaccessibleDirs = append(result.inaccessibleDirs,
 								fmt.Sprintf("%s (walk error in symlinked dir: %v)", realPath, err))
@@ -680,7 +681,7 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 			sendProgress(p)
 
 			// Process git repo
-			processGitRepo(p, result, ignoreFailures, searchAllBranches, threshold, &result.stats)
+			processGitRepo(p, result, ignoreFailures, searchAllBranches, threshold, &result.stats, userEmail, filterByUser)
 
 			// Skip subdirectories unless --find-nested is set
 			if !*findNested {
@@ -694,7 +695,7 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 
 // Extract git repository processing logic to a separate function
 func processGitRepo(p string, result *searchResult, ignoreFailures *bool, searchAllBranches *bool,
-	threshold time.Time, stats *gitStats) {
+	threshold time.Time, stats *gitStats, userEmail string, filterByUser *bool) {
 
 	// Get commits using go-git
 	start := time.Now()
@@ -732,11 +733,14 @@ func processGitRepo(p string, result *searchResult, ignoreFailures *bool, search
 		}
 
 		return commitIter.ForEach(func(c *object.Commit) error {
-			// Store the full commit message
-			result.fullCommitMessages[p][c.Hash.String()] = c.Message
+			// Only include commits from the user if filtering is enabled
+			if !*filterByUser || c.Author.Email == userEmail {
+				// Store the full commit message
+				result.fullCommitMessages[p][c.Hash.String()] = c.Message
 
-			// Add the commit to our list
-			commits = append(commits, fmt.Sprintf("%s %s", c.Hash.String(), getFirstLine(c.Message)))
+				// Add the commit to our list
+				commits = append(commits, fmt.Sprintf("%s %s", c.Hash.String(), getFirstLine(c.Message)))
+			}
 			return nil
 		})
 	}
