@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,7 +16,7 @@ import (
 )
 
 // GenerateOllamaSummary generates a summary of git commits using Ollama
-func GenerateOllamaSummary(workingDir string, commits []string, fullCommitMessages map[string]string, ollamaURL, ollamaModel string) (string, error) {
+func GenerateOllamaSummary(workingDir string, commits []string, ollamaURL, ollamaModel string) (string, error) {
 	// Gather repository context
 	repoContext := "Repository: " + workingDir + "\n\n"
 
@@ -204,7 +205,7 @@ func callOllama(ollamaURL, ollamaModel, prompt string, stream bool) (string, err
 
 		if err := scanner.Err(); err != nil {
 			// Check if it's a token too long error
-			if err == bufio.ErrTooLong {
+			if errors.Is(err, bufio.ErrTooLong) {
 				// Try again with the chunking approach
 				return callOllamaWithChunks(ollamaURL, ollamaModel, prompt)
 			}
@@ -325,19 +326,4 @@ Based on all this information, please provide a comprehensive response to the or
 
 	// Get the final combined response
 	return callOllama(ollamaURL, ollamaModel, finalPrompt, false)
-}
-
-// Helper functions for min/max
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

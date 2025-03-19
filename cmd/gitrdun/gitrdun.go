@@ -491,8 +491,7 @@ func main() {
 						// Then show the Ollama summary with repository name and model
 						repoName := filepath.Base(workingDir)
 						writeOutput("\n🤖 Generating summary for %s with Ollama (%s)...\n", repoName, *ollamaModel)
-						summary, err := internal.GenerateOllamaSummary(workingDir, commits,
-							results.fullCommitMessages[workingDir], *ollamaURL, *ollamaModel)
+						summary, err := internal.GenerateOllamaSummary(workingDir, commits, *ollamaURL, *ollamaModel)
 						if err != nil {
 							writeOutput("⚠️  Error generating summary: %v\n", err)
 						} else {
