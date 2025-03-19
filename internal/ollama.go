@@ -147,6 +147,14 @@ Focus on the big picture rather than repeating details from individual repositor
 
 // callOllama makes a request to the Ollama API
 func callOllama(ollamaURL, ollamaModel, prompt string, stream bool) (string, error) {
+	// Check if the prompt is too large and might cause scanner issues
+	const maxScannerTokenSize = 64 * 1024 // Default scanner buffer size is 64KB
+
+	if len(prompt) > maxScannerTokenSize && stream {
+		// For streaming responses with large prompts, split into chunks
+		return callOllamaWithChunks(ollamaURL, ollamaModel, prompt)
+	}
+
 	// Prepare the request to Ollama
 	requestBody, err := json.Marshal(map[string]interface{}{
 		"model":  ollamaModel,
@@ -167,6 +175,11 @@ func callOllama(ollamaURL, ollamaModel, prompt string, stream bool) (string, err
 	if stream {
 		// Process the streaming NDJSON response
 		scanner := bufio.NewScanner(resp.Body)
+		// Increase the buffer size to handle larger tokens
+		const maxBufferSize = 1024 * 1024 // 1MB buffer
+		scannerBuffer := make([]byte, maxBufferSize)
+		scanner.Buffer(scannerBuffer, maxBufferSize)
+
 		var fullResponse strings.Builder
 
 		for scanner.Scan() {
@@ -190,6 +203,11 @@ func callOllama(ollamaURL, ollamaModel, prompt string, stream bool) (string, err
 		}
 
 		if err := scanner.Err(); err != nil {
+			// Check if it's a token too long error
+			if err == bufio.ErrTooLong {
+				// Try again with the chunking approach
+				return callOllamaWithChunks(ollamaURL, ollamaModel, prompt)
+			}
 			return "", fmt.Errorf("error reading response stream: %w", err)
 		}
 
@@ -214,4 +232,112 @@ func callOllama(ollamaURL, ollamaModel, prompt string, stream bool) (string, err
 
 		return "", fmt.Errorf("unexpected response format from Ollama: %s", string(body))
 	}
+}
+
+// callOllamaWithChunks handles large prompts by splitting them into multiple requests
+func callOllamaWithChunks(ollamaURL, ollamaModel, prompt string) (string, error) {
+	// Split the prompt into manageable chunks
+	const chunkSize = 32 * 1024 // 32KB chunks
+
+	// First, try to make a non-streaming request with the full prompt
+	// This is simpler and might work for many models
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"model":  ollamaModel,
+		"prompt": prompt,
+		"stream": false, // Use non-streaming for large prompts
+	})
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %w", err)
+	}
+
+	resp, err := http.Post(ollamaURL+"/api/generate", "application/json", bytes.NewBuffer(requestBody))
+	if err != nil {
+		return "", fmt.Errorf("error calling Ollama API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response body: %w", err)
+	}
+
+	// Parse the JSON response
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		// If we can't parse the response, it might be too large for the model
+		// Fall back to the chunking approach
+	} else {
+		// Extract the response text
+		if response, ok := result["response"].(string); ok {
+			return response, nil
+		}
+	}
+
+	// If the simple approach failed, try the more complex chunking approach
+	// Split the prompt into introduction, body chunks, and conclusion
+	promptLines := strings.Split(prompt, "\n")
+
+	// First 10 lines as introduction
+	introLines := min(10, len(promptLines))
+	introduction := strings.Join(promptLines[:introLines], "\n")
+
+	// Last 10 lines as conclusion
+	conclusionStart := max(introLines, len(promptLines)-10)
+	conclusion := strings.Join(promptLines[conclusionStart:], "\n")
+
+	// Middle part to be chunked
+	middleLines := promptLines[introLines:conclusionStart]
+
+	// Process in chunks
+	var summaries []string
+
+	for i := 0; i < len(middleLines); i += chunkSize {
+		end := min(i+chunkSize, len(middleLines))
+		chunk := strings.Join(middleLines[i:end], "\n")
+
+		chunkPrompt := fmt.Sprintf("This is part %d of a larger document. Please analyze this part:\n\n%s",
+			(i/chunkSize)+1, chunk)
+
+		// Process this chunk
+		chunkSummary, err := callOllama(ollamaURL, ollamaModel, chunkPrompt, false)
+		if err != nil {
+			return "", fmt.Errorf("error processing chunk %d: %w", (i/chunkSize)+1, err)
+		}
+
+		summaries = append(summaries, chunkSummary)
+	}
+
+	// Final prompt to combine all summaries
+	finalPrompt := fmt.Sprintf(`I've analyzed a document in parts. Here's the introduction:
+
+%s
+
+Here are summaries of each part:
+%s
+
+And here's the conclusion:
+%s
+
+Based on all this information, please provide a comprehensive response to the original request.`,
+		introduction,
+		strings.Join(summaries, "\n\n---\n\n"),
+		conclusion)
+
+	// Get the final combined response
+	return callOllama(ollamaURL, ollamaModel, finalPrompt, false)
+}
+
+// Helper functions for min/max
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
