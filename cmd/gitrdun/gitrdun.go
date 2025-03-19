@@ -39,8 +39,10 @@ type model struct {
 	currentPath    string
 	lastUpdateTime time.Time
 	startTime      time.Time     // When the search started
-	thresholdTime  time.Time     // Fixed threshold time for commit search
-	cancel         chan struct{} // Add this field
+	thresholdTime  time.Time     // Start time for commit search
+	endTime        time.Time     // End time for commit search (if specified)
+	hasEndTime     bool          // Whether an end time was specified
+	cancel         chan struct{} // Channel to signal cancellation
 }
 
 func (m model) Init() tea.Cmd {
@@ -76,8 +78,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.quitting {
+		return "Goodbye!\n"
+	}
+
 	if m.searchDone {
-		return "\033[2K\r"
+		return ""
 	}
 
 	var output strings.Builder
@@ -85,7 +91,15 @@ func (m model) View() string {
 
 	// Stats header
 	thresholdTimeStr := m.thresholdTime.Format("2006-01-02 03:04:05 PM") + " [" + m.thresholdTime.Format("Monday") + "]"
-	output.WriteString(fmt.Sprintf("🔍 Searching for commits since %s\n", thresholdTimeStr))
+
+	// Check if we have an end time in the model
+	if m.hasEndTime {
+		endTimeStr := m.endTime.Format("2006-01-02 03:04:05 PM") + " [" + m.endTime.Format("Monday") + "]"
+		output.WriteString(fmt.Sprintf("🔍 Searching for commits between %s and %s\n", thresholdTimeStr, endTimeStr))
+	} else {
+		output.WriteString(fmt.Sprintf("🔍 Searching for commits since %s\n", thresholdTimeStr))
+	}
+
 	output.WriteString(strings.Repeat("─", 50) + "\n")
 
 	// Define styles
@@ -189,7 +203,8 @@ type searchResult struct {
 }
 
 func main() {
-	var durationStr = flag.String("duration", "24h", "how far back to look for commits (e.g. 24h, 7d, 2w, 'monday', 'last month', 'february', etc.)")
+	var startStr = flag.String("start", "24h", "how far back to start looking for commits (e.g. 24h, 7d, 2w, 'monday', 'last month', 'february', etc.)")
+	var endStr = flag.String("end", "", "when to stop looking for commits (e.g. '2023-12-31', 'yesterday', 'last month', etc.)")
 	var ignoreFailures = flag.Bool("ignore-failures", false, "suppress output about directories that couldn't be accessed")
 	var summaryOnly = flag.Bool("summary-only", false, "only show repository names and commit counts")
 	var findNested = flag.Bool("find-nested", false, "look for nested git repositories inside other git repositories")
@@ -206,11 +221,25 @@ func main() {
 
 	flag.Parse()
 
-	// Parse the duration string
-	duration, err := parseDuration(*durationStr)
-
+	// Parse the start string
+	startDuration, err := parseDuration(*startStr)
 	if err != nil {
-		log.Fatal("Invalid duration format", "error", err)
+		log.Fatal("Invalid start format", "error", err)
+	}
+
+	// Calculate the start time (how far back to look)
+	startTime := time.Now().Add(-startDuration)
+
+	// Parse the end string if provided
+	var endTime time.Time
+	var hasEndTime bool
+	if *endStr != "" {
+		end, err := parseTimeString(*endStr)
+		if err != nil {
+			log.Fatal("Invalid end format", "error", err)
+		}
+		endTime = end
+		hasEndTime = true
 	}
 
 	// Check for help flags before starting bubbletea
@@ -252,7 +281,9 @@ func main() {
 		currentPath:    "",
 		lastUpdateTime: time.Now(),
 		startTime:      time.Now(),
-		thresholdTime:  time.Now().Add(-duration), // Calculate once
+		thresholdTime:  startTime, // Use the calculated start time
+		endTime:        endTime,
+		hasEndTime:     hasEndTime,
 		cancel:         make(chan struct{}),
 	}
 
@@ -344,7 +375,7 @@ func main() {
 
 		result.stats.getEmail.record(time.Since(start))
 
-		threshold := time.Now().Add(-duration)
+		threshold := time.Now().Add(-startDuration)
 		result.threshold = threshold
 
 		unique := &sync.Map{}
@@ -415,8 +446,11 @@ func main() {
 			}
 
 			if results.foundCommits {
-				writeOutput("🔍 Found commits from the last %v\n", duration)
-				writeOutput("📅 Starting from: %s\n", results.threshold.Format(time.RFC3339))
+				writeOutput("🔍 Found commits\n")
+				writeOutput("📅 Start date: %s\n", results.threshold.Format(time.RFC3339))
+				if *endStr != "" {
+					writeOutput("📅 End date: %s\n", endTime.Format(time.RFC3339))
+				}
 				writeOutput("📂 Search paths: %s\n", strings.Join(results.absPaths, ", "))
 				if *searchAllBranches {
 					writeOutput("🔀 Searching across all branches\n")
@@ -483,7 +517,7 @@ func main() {
 				// Generate meta-summary if requested
 				if *metaOllama && len(allSummaries) > 0 {
 					writeOutput("\n🔍 Generating meta-summary of all work with Ollama (%s)...\n", *ollamaModel)
-					metaSummary, err := generateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, duration)
+					metaSummary, err := generateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, startDuration)
 					if err != nil {
 						writeOutput("⚠️  Error generating meta-summary: %v\n", err)
 					} else {
@@ -492,8 +526,10 @@ func main() {
 				}
 			} else {
 				writeOutput("😴 No commits found\n")
-				writeOutput("   • Time period: last %v\n", duration)
-				writeOutput("   • Starting from: %s\n", results.threshold.Format(time.RFC3339))
+				writeOutput("   • Start date: %s\n", results.threshold.Format(time.RFC3339))
+				if *endStr != "" {
+					writeOutput("   • End date: %s\n", endTime.Format(time.RFC3339))
+				}
 				writeOutput("   • Search paths: %s\n", strings.Join(results.absPaths, ", "))
 			}
 
@@ -1007,4 +1043,35 @@ func parseDuration(durationStr string) (time.Duration, error) {
 
 	// Calculate the duration from now to the parsed date
 	return date.Sub(now).Abs(), nil
+}
+
+// parseTimeString parses a string into a time.Time
+func parseTimeString(timeStr string) (time.Time, error) {
+	// Try parsing with naturaltime
+	parser, err := naturaltime.New()
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	now := time.Now()
+	date, err := parser.ParseDate(timeStr, now)
+	if err == nil && date != nil {
+		return *date, nil
+	}
+
+	// Try standard date formats
+	formats := []string{
+		"2006-01-02",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z07:00",
+	}
+
+	for _, format := range formats {
+		if t, err := time.Parse(format, timeStr); err == nil {
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("could not parse date: %s", timeStr)
 }
