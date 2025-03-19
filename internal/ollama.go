@@ -6,93 +6,117 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-git/go-git/v5/plumbing"
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/go-git/go-git/v5"
 )
 
-// GenerateOllamaSummary generates a summary of git commits using Ollama
-func GenerateOllamaSummary(workingDir string, commits []string, ollamaURL, ollamaModel string) (string, error) {
-	// Gather repository context
-	repoContext := "Repository: " + workingDir + "\n\n"
+// GenerateOllamaSummary generates a summary of recent commits using Ollama
+func GenerateOllamaSummary(repoPath string, commits []string, ollamaURL, ollamaModel string) (string, error) {
+	// Get repository context
+	repoContext := fmt.Sprintf("Repository: %s", filepath.Base(repoPath))
 
-	// Try to read README.md if it exists
+	// Try to read README file for additional context
 	readmeContent := ""
-	readmePath := filepath.Join(workingDir, "README.md")
-	if readmeBytes, err := os.ReadFile(readmePath); err == nil {
-		readmeContent = "README.md content:\n" + string(readmeBytes) + "\n\n"
-	} else {
-		// If no README.md, try to get repository description
-		cmd := exec.Command("git", "-C", workingDir, "remote", "-v")
-		if remoteOutput, err := cmd.Output(); err == nil {
-			repoContext += "Git remotes:\n" + string(remoteOutput) + "\n"
-		}
+	readmePaths := []string{
+		filepath.Join(repoPath, "README.md"),
+		filepath.Join(repoPath, "README"),
+		filepath.Join(repoPath, "readme.md"),
+	}
 
-		// Get repository structure overview
-		cmd = exec.Command("find", workingDir, "-type", "f", "-name", "*.go", "-o", "-name", "*.js", "-o", "-name", "*.py", "-o", "-name", "*.java", "-o", "-name", "*.ts", "|", "head", "-10")
-		if filesOutput, err := cmd.Output(); err == nil && len(filesOutput) > 0 {
-			repoContext += "Key files (sample):\n" + string(filesOutput) + "\n"
+	for _, readmePath := range readmePaths {
+		if content, err := os.ReadFile(readmePath); err == nil {
+			readmeContent = fmt.Sprintf("README:\n```\n%s\n```\n\n", string(content))
+			break
 		}
 	}
 
-	// Get detailed commit information with full file contents
+	// Get detailed commit information using go-git
 	detailedCommits := ""
-	var totalSize int
-	maxSize := 20000 // Limit total size to avoid overwhelming the model
+	totalSize := 0
+	maxSize := 50000 // Limit the total size to avoid overwhelming the model
 
-	for _, commitLine := range commits {
-		parts := strings.SplitN(commitLine, " ", 2)
-		if len(parts) > 0 {
-			commitHash := parts[0]
+	// Open the repository
+	repo, err := git.PlainOpen(repoPath)
+	if err == nil {
+		// Process each commit
+		for _, commitLine := range commits {
+			// Extract commit hash from the line
+			parts := strings.SplitN(commitLine, " ", 2)
+			if len(parts) < 1 {
+				continue
+			}
 
-			// Get commit message and stats
-			cmd := exec.Command("git", "-C", workingDir, "show", "--stat", commitHash)
-			if output, err := cmd.Output(); err == nil {
-				commitInfo := string(output)
-				detailedCommits += "COMMIT: " + commitInfo + "\n"
-				totalSize += len(commitInfo)
+			hash := parts[0]
 
-				// Get list of changed files in this commit
-				cmd = exec.Command("git", "-C", workingDir, "diff-tree", "--no-commit-id", "--name-only", "-r", commitHash)
-				if filesOutput, err := cmd.Output(); err == nil {
-					changedFiles := strings.Split(strings.TrimSpace(string(filesOutput)), "\n")
+			// Get the commit object
+			commitObj, err := repo.CommitObject(plumbing.NewHash(hash))
+			if err != nil {
+				continue
+			}
 
-					// Only process a few files to avoid overwhelming the model
-					maxFiles := 5
-					if len(changedFiles) > maxFiles {
-						changedFiles = changedFiles[:maxFiles]
-					}
+			// Add commit info to detailed commits
+			detailedCommits += fmt.Sprintf("COMMIT: %s\nAUTHOR: %s <%s>\nDATE: %s\nMESSAGE:\n%s\n\n",
+				commitObj.Hash.String(),
+				commitObj.Author.Name,
+				commitObj.Author.Email,
+				commitObj.Author.When.Format(time.RFC3339),
+				commitObj.Message)
 
-					for _, file := range changedFiles {
-						if file == "" {
-							continue
-						}
+			// Get the changes in this commit
+			if commitObj.NumParents() > 0 {
+				// Get parent commit
+				parent, err := commitObj.Parent(0)
+				if err == nil {
+					// Get changes between parent and this commit
+					patch, err := parent.Patch(commitObj)
+					if err == nil {
+						detailedCommits += "CHANGES:\n"
 
-						// Get file content at this commit
-						cmd = exec.Command("git", "-C", workingDir, "show", commitHash+":"+file)
-						if fileContent, err := cmd.Output(); err == nil {
-							content := string(fileContent)
+						for _, filePatch := range patch.FilePatches() {
+							from, to := filePatch.Files()
+							var filePath string
 
-							// Only include if not too large
-							if len(content) > 5000 {
-								fileInfo := fmt.Sprintf("FILE %s: (truncated, too large)\n", file)
-								detailedCommits += fileInfo
-								totalSize += len(fileInfo)
+							// Determine file path
+							if to != nil {
+								filePath = to.Path()
+							} else if from != nil {
+								filePath = from.Path()
 							} else {
-								fileInfo := fmt.Sprintf("FILE %s:\n```\n%s\n```\n\n", file, content)
-								detailedCommits += fileInfo
-								totalSize += len(fileInfo)
+								continue
+							}
+
+							// Add file info
+							detailedCommits += fmt.Sprintf("- %s\n", filePath)
+
+							// Try to get current file content
+							file, err := os.ReadFile(filepath.Join(repoPath, filePath))
+							if err == nil {
+								content := string(file)
+
+								// Only include if not too large
+								if len(content) > 5000 {
+									fileInfo := fmt.Sprintf("FILE %s: (truncated, too large)\n", filePath)
+									detailedCommits += fileInfo
+									totalSize += len(fileInfo)
+								} else {
+									fileInfo := fmt.Sprintf("FILE %s:\n```\n%s\n```\n\n", filePath, content)
+									detailedCommits += fileInfo
+									totalSize += len(fileInfo)
+								}
 							}
 						}
 					}
 				}
-
-				detailedCommits += "---\n"
 			}
+
+			detailedCommits += "---\n"
 
 			// Check if we've exceeded our size limit
 			if totalSize >= maxSize {
