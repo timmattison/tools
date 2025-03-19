@@ -90,11 +90,11 @@ func (m model) View() string {
 	duration := time.Since(m.startTime).Round(time.Second)
 
 	// Stats header
-	thresholdTimeStr := m.thresholdTime.Format("2006-01-02 03:04:05 PM") + " [" + m.thresholdTime.Format("Monday") + "]"
+	thresholdTimeStr := m.thresholdTime.Format("Monday, January 2, 2006 at 3:04 PM")
 
 	// Check if we have an end time in the model
 	if m.hasEndTime {
-		endTimeStr := m.endTime.Format("2006-01-02 03:04:05 PM") + " [" + m.endTime.Format("Monday") + "]"
+		endTimeStr := m.endTime.Format("Monday, January 2, 2006 at 3:04 PM")
 		output.WriteString(fmt.Sprintf("🔍 Searching for commits between %s and %s\n", thresholdTimeStr, endTimeStr))
 	} else {
 		output.WriteString(fmt.Sprintf("🔍 Searching for commits since %s\n", thresholdTimeStr))
@@ -229,7 +229,7 @@ func main() {
 	}
 
 	// Calculate the start time (how far back to look)
-	startTime := time.Now().Add(-startDuration)
+	thresholdTime := time.Now().Add(-startDuration)
 
 	// Parse the end string if provided
 	var endTime time.Time
@@ -282,7 +282,7 @@ func main() {
 		currentPath:    "",
 		lastUpdateTime: time.Now(),
 		startTime:      time.Now(),
-		thresholdTime:  startTime, // Use the calculated start time
+		thresholdTime:  thresholdTime, // Use the calculated threshold time
 		endTime:        endTime,
 		hasEndTime:     hasEndTime,
 		cancel:         make(chan struct{}),
@@ -448,9 +448,9 @@ func main() {
 
 			if results.foundCommits {
 				writeOutput("🔍 Found commits\n")
-				writeOutput("📅 Start date: %s\n", results.threshold.Format(time.RFC3339))
+				writeOutput("📅 Start date: %s\n", results.threshold.Format("Monday, January 2, 2006 at 3:04 PM"))
 				if *endStr != "" {
-					writeOutput("📅 End date: %s\n", endTime.Format(time.RFC3339))
+					writeOutput("📅 End date: %s\n", endTime.Format("Monday, January 2, 2006 at 3:04 PM"))
 				}
 				writeOutput("📂 Search paths: %s\n", strings.Join(results.absPaths, ", "))
 				if *searchAllBranches {
@@ -527,9 +527,9 @@ func main() {
 				}
 			} else {
 				writeOutput("😴 No commits found\n")
-				writeOutput("   • Start date: %s\n", results.threshold.Format(time.RFC3339))
+				writeOutput("   • Start date: %s\n", results.threshold.Format("Monday, January 2, 2006 at 3:04 PM"))
 				if *endStr != "" {
-					writeOutput("   • End date: %s\n", endTime.Format(time.RFC3339))
+					writeOutput("   • End date: %s\n", endTime.Format("Monday, January 2, 2006 at 3:04 PM"))
 				}
 				writeOutput("   • Search paths: %s\n", strings.Join(results.absPaths, ", "))
 			}
