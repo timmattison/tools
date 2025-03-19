@@ -587,6 +587,7 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 		return nil // Return nil to continue with other paths
 	}
 
+	// Use filepath.WalkDir with a custom fs.WalkDirFunc that follows symlinks
 	return filepath.WalkDir(searchPath, func(p string, d os.DirEntry, err error) error {
 		select {
 		case <-cancel:
@@ -598,6 +599,58 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 						fmt.Sprintf("%s (access error: %v)", p, err))
 				}
 				return filepath.SkipDir
+			}
+
+			// Check if this is a symlink to a directory
+			if d.Type()&os.ModeSymlink != 0 {
+				// Resolve the symlink
+				realPath, err := filepath.EvalSymlinks(p)
+				if err != nil {
+					if !*ignoreFailures {
+						result.inaccessibleDirs = append(result.inaccessibleDirs,
+							fmt.Sprintf("%s (symlink resolution error: %v)", p, err))
+					}
+					return nil
+				}
+
+				// Check if it's a directory
+				info, err := os.Stat(realPath)
+				if err != nil {
+					if !*ignoreFailures {
+						result.inaccessibleDirs = append(result.inaccessibleDirs,
+							fmt.Sprintf("%s (stat error after symlink resolution: %v)", realPath, err))
+					}
+					return nil
+				}
+
+				// If it's a directory, process it
+				if info.IsDir() {
+					// Process this directory as if we found it normally
+					atomic.AddInt32(dirsChecked, 1)
+					sendProgress(realPath)
+
+					gitDir, err := getGitDir(realPath, &result.stats.getGitDir)
+					if err == nil {
+						// Store the working directory path
+						unique.Store(gitDir, realPath)
+						atomic.AddInt32(reposFound, 1)
+						sendProgress(realPath)
+
+						// Process git repo
+						processGitRepo(realPath, result, ignoreFailures, searchAllBranches, threshold, &result.stats)
+					}
+
+					// Recursively scan this directory if needed
+					if *findNested {
+						err = scanPath(realPath, result, dirsChecked, reposFound, unique,
+							ignoreFailures, findNested, cancel, sendProgress, userEmail, threshold, searchAllBranches)
+						if err != nil && !*ignoreFailures {
+							result.inaccessibleDirs = append(result.inaccessibleDirs,
+								fmt.Sprintf("%s (walk error in symlinked dir: %v)", realPath, err))
+						}
+					}
+				}
+				return nil
 			}
 
 			if !d.IsDir() {
@@ -626,112 +679,8 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 			atomic.AddInt32(reposFound, 1)
 			sendProgress(p)
 
-			// Get commits using go-git
-			start := time.Now()
-			repo, err := git.PlainOpen(p)
-			if err != nil {
-				if !*ignoreFailures {
-					result.inaccessibleDirs = append(result.inaccessibleDirs,
-						fmt.Sprintf("%s (error opening git repo: %v)", p, err))
-				}
-				return nil
-			}
-
-			// Get the HEAD reference
-			var commits []string
-
-			// Function to process commits from a reference
-			processRef := func(ref *plumbing.Reference) error {
-				// Get the commit history
-				commitIter, err := repo.Log(&git.LogOptions{
-					From:  ref.Hash(),
-					Since: &threshold,
-				})
-				if err != nil {
-					return err
-				}
-				defer commitIter.Close()
-
-				// Iterate through commits
-				return commitIter.ForEach(func(c *object.Commit) error {
-					// Check if commit is by the user
-					if strings.Contains(c.Author.Email, userEmail) {
-						// Store first line for display, but keep full message for Ollama
-						firstLine := getFirstLine(c.Message)
-						commitLine := fmt.Sprintf("%s %s %s",
-							c.Hash.String()[:7],
-							c.Author.When.Format("2006-01-02 15:04:05 -0700"),
-							firstLine)
-
-						// Store the commit with full message in a separate field for Ollama
-						fullCommitLine := fmt.Sprintf("%s %s %s",
-							c.Hash.String()[:7],
-							c.Author.When.Format("2006-01-02 15:04:05 -0700"),
-							c.Message)
-
-						// Add to commits list with display version
-						commits = append(commits, commitLine)
-
-						// Store the full commit message in a map for Ollama
-						if result.fullCommitMessages == nil {
-							result.fullCommitMessages = make(map[string]map[string]string)
-						}
-
-						if result.fullCommitMessages[p] == nil {
-							result.fullCommitMessages[p] = make(map[string]string)
-						}
-
-						result.fullCommitMessages[p][c.Hash.String()[:7]] = fullCommitLine
-					}
-					return nil
-				})
-			}
-
-			if *searchAllBranches {
-				// Get all branches
-				refs, err := repo.References()
-				if err != nil {
-					if !*ignoreFailures {
-						result.inaccessibleDirs = append(result.inaccessibleDirs,
-							fmt.Sprintf("%s (error getting references: %v)", p, err))
-					}
-					return nil
-				}
-
-				err = refs.ForEach(func(ref *plumbing.Reference) error {
-					if ref.Name().IsBranch() {
-						return processRef(ref)
-					}
-					return nil
-				})
-				if err != nil && !*ignoreFailures {
-					result.inaccessibleDirs = append(result.inaccessibleDirs,
-						fmt.Sprintf("%s (error processing branches: %v)", p, err))
-				}
-			} else {
-				// Just use HEAD
-				ref, err := repo.Head()
-				if err != nil {
-					if !*ignoreFailures {
-						result.inaccessibleDirs = append(result.inaccessibleDirs,
-							fmt.Sprintf("%s (error getting HEAD: %v)", p, err))
-					}
-					return nil
-				}
-
-				err = processRef(ref)
-				if err != nil && !*ignoreFailures {
-					result.inaccessibleDirs = append(result.inaccessibleDirs,
-						fmt.Sprintf("%s (error processing HEAD: %v)", p, err))
-				}
-			}
-
-			result.stats.getLog.record(time.Since(start))
-
-			if len(commits) > 0 {
-				result.foundCommits = true
-				result.repositories[p] = commits
-			}
+			// Process git repo
+			processGitRepo(p, result, ignoreFailures, searchAllBranches, threshold, &result.stats)
 
 			// Skip subdirectories unless --find-nested is set
 			if !*findNested {
@@ -741,6 +690,102 @@ func scanPath(searchPath string, result *searchResult, dirsChecked *int32,
 			return nil
 		}
 	})
+}
+
+// Extract git repository processing logic to a separate function
+func processGitRepo(p string, result *searchResult, ignoreFailures *bool, searchAllBranches *bool,
+	threshold time.Time, stats *gitStats) {
+
+	// Get commits using go-git
+	start := time.Now()
+	repo, err := git.PlainOpen(p)
+	if err != nil {
+		if !*ignoreFailures {
+			result.inaccessibleDirs = append(result.inaccessibleDirs,
+				fmt.Sprintf("%s (error opening git repo: %v)", p, err))
+		}
+		return
+	}
+
+	// Get the HEAD reference
+	var commits []string
+
+	// Function to process commits from a reference
+	processRef := func(ref *plumbing.Reference) error {
+		// Get the commit history
+		commitIter, err := repo.Log(&git.LogOptions{
+			From:  ref.Hash(),
+			Since: &threshold,
+		})
+		if err != nil {
+			return err
+		}
+		defer commitIter.Close()
+
+		// Initialize map for full commit messages if needed
+		if result.fullCommitMessages == nil {
+			result.fullCommitMessages = make(map[string]map[string]string)
+		}
+
+		if _, ok := result.fullCommitMessages[p]; !ok {
+			result.fullCommitMessages[p] = make(map[string]string)
+		}
+
+		return commitIter.ForEach(func(c *object.Commit) error {
+			// Store the full commit message
+			result.fullCommitMessages[p][c.Hash.String()] = c.Message
+
+			// Add the commit to our list
+			commits = append(commits, fmt.Sprintf("%s %s", c.Hash.String(), getFirstLine(c.Message)))
+			return nil
+		})
+	}
+
+	if *searchAllBranches {
+		// Get all branches
+		refs, err := repo.References()
+		if err != nil {
+			if !*ignoreFailures {
+				result.inaccessibleDirs = append(result.inaccessibleDirs,
+					fmt.Sprintf("%s (error getting references: %v)", p, err))
+			}
+			return
+		}
+
+		err = refs.ForEach(func(ref *plumbing.Reference) error {
+			if ref.Name().IsBranch() {
+				return processRef(ref)
+			}
+			return nil
+		})
+		if err != nil && !*ignoreFailures {
+			result.inaccessibleDirs = append(result.inaccessibleDirs,
+				fmt.Sprintf("%s (error processing branches: %v)", p, err))
+		}
+	} else {
+		// Just use HEAD
+		ref, err := repo.Head()
+		if err != nil {
+			if !*ignoreFailures {
+				result.inaccessibleDirs = append(result.inaccessibleDirs,
+					fmt.Sprintf("%s (error getting HEAD: %v)", p, err))
+			}
+			return
+		}
+
+		err = processRef(ref)
+		if err != nil && !*ignoreFailures {
+			result.inaccessibleDirs = append(result.inaccessibleDirs,
+				fmt.Sprintf("%s (error processing HEAD: %v)", p, err))
+		}
+	}
+
+	stats.getLog.record(time.Since(start))
+
+	if len(commits) > 0 {
+		result.foundCommits = true
+		result.repositories[p] = commits
+	}
 }
 
 func generateOllamaSummary(workingDir string, commits []string, fullCommitMessages map[string]string, ollamaURL, ollamaModel string) (string, error) {
