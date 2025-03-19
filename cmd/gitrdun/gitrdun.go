@@ -344,24 +344,44 @@ func main() {
 		userEmail := ""
 		start := time.Now()
 
-		// Try to get from global config first
+		// Try to get from repository config first if we're in a git repo
 		homeDir, err := os.UserHomeDir()
 		if err == nil {
-			// Try to find a git config in the home directory
+			// Try to open the global git config
 			configPath := filepath.Join(homeDir, ".gitconfig")
-			if configBytes, err := os.ReadFile(configPath); err == nil {
-				configContent := string(configBytes)
-				for _, line := range strings.Split(configContent, "\n") {
-					line = strings.TrimSpace(line)
-					if strings.HasPrefix(line, "email = ") {
-						userEmail = strings.TrimPrefix(line, "email = ")
-						break
+			if _, err := os.Stat(configPath); err == nil {
+				// Use go-git to read the config file
+				cfg, err := git.PlainOpenWithOptions(homeDir, &git.PlainOpenOptions{
+					DetectDotGit: true,
+				})
+				if err == nil {
+					config, err := cfg.Config()
+					if err == nil && config.User.Email != "" {
+						userEmail = config.User.Email
 					}
 				}
 			}
 		}
 
-		// Fallback to git command if needed
+		// Fallback to manual config file reading if go-git config loading fails
+		if userEmail == "" {
+			homeDir, err := os.UserHomeDir()
+			if err == nil {
+				configPath := filepath.Join(homeDir, ".gitconfig")
+				if configBytes, err := os.ReadFile(configPath); err == nil {
+					configContent := string(configBytes)
+					for _, line := range strings.Split(configContent, "\n") {
+						line = strings.TrimSpace(line)
+						if strings.HasPrefix(line, "email = ") {
+							userEmail = strings.TrimPrefix(line, "email = ")
+							break
+						}
+					}
+				}
+			}
+		}
+
+		// Last resort: fallback to git command if needed
 		if userEmail == "" {
 			email, err := exec.Command("git", "config", "user.email").Output()
 			if err != nil {
