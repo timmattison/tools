@@ -96,6 +96,9 @@ for fun.
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on recently
       across different projects.
     - To install: `go install github.com/timmattison/tools/cmd/gitrdun@latest`
+- nodenuke
+    - Nukes your node_modules and .next directories and npm and pnpm lock files
+    - To install: `go install github.com/timmattison/tools/cmd/nodenuke@latest`
 
 ## dirhash
 
