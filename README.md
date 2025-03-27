@@ -99,6 +99,9 @@ for fun.
 - nodenuke
     - Nukes your node_modules and .next directories and npm and pnpm lock files
     - To install: `go install github.com/timmattison/tools/cmd/nodenuke@latest`
+- nodeup
+    - Updates your package.json dependencies recursively
+    - To install: `go install github.com/timmattison/tools/cmd/nodeup@latest`
 
 ## dirhash
 
