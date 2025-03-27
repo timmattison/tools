@@ -19,8 +19,6 @@ func main() {
 	fmt.Println("Starting to scan from:", cwd)
 	fmt.Println("Will delete directories:", targetDirs)
 	fmt.Println("Will delete files:", targetFiles)
-	fmt.Println("Press Enter to continue or Ctrl+C to cancel...")
-	fmt.Scanln()
 
 	err = filepath.Walk(cwd, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
