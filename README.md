@@ -102,6 +102,11 @@ for fun.
 - nodeup
     - Updates your package.json dependencies recursively
     - To install: `go install github.com/timmattison/tools/cmd/nodeup@latest`
+- procinfo
+    - Shows detailed information about running processes matching a name. Displays process details, working directory, 
+      command line, open files, network connections, and optionally environment variables. Useful for debugging and 
+      investigating running applications.
+    - To install: `go install github.com/timmattison/tools/cmd/procinfo@latest`
 
 ## dirhash
 
