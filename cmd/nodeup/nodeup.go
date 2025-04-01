@@ -6,12 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/timmattison/tools/internal"
 )
 
 func main() {
 	useLatest := flag.Bool("latest", false, "Use --latest flag with npm or -L with pnpm")
 	forceNpm := flag.Bool("npm", false, "Force using npm for all directories")
 	forcePnpm := flag.Bool("pnpm", false, "Force using pnpm for all directories")
+	noRoot := flag.Bool("no-root", false, "Don't go to the git repository root before running")
 	flag.Parse()
 
 	// Check for conflicting flags
@@ -24,6 +27,25 @@ func main() {
 	if err != nil {
 		fmt.Printf("Error getting current directory: %v\n", err)
 		os.Exit(1)
+	}
+
+	// If we're in a git repo and --no-root wasn't specified, go to the repo root
+	if !*noRoot {
+		gitDir, err := internal.GetRepoBase()
+		if err == nil {
+			// Found a git repo, change to its root directory
+			repoRoot := filepath.Dir(gitDir)
+			fmt.Printf("Found git repository, changing to root: %s\n", repoRoot)
+			err = os.Chdir(repoRoot)
+			if err != nil {
+				fmt.Printf("Error changing to repository root: %v\n", err)
+				os.Exit(1)
+			}
+			cwd = repoRoot
+		} else if err != os.ErrNotExist {
+			// Only report errors other than "not found"
+			fmt.Printf("Error checking for git repository: %v\n", err)
+		}
 	}
 
 	// Check if there's a pnpm-lock.yaml in the root directory
