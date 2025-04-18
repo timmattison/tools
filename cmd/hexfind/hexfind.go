@@ -143,13 +143,20 @@ func displayHexDump(data []byte, fileOffset int64, contextBytes int, patternLen 
 		startOffset = 0
 	}
 
+	// Ensure startOffset is aligned to a 4-byte boundary (position % 4 == 0)
+	startOffset = startOffset - (startOffset % 4)
+
 	// Calculate the position of the pattern in the data
 	patternPos := int(fileOffset - startOffset)
 
 	// Display the hex dump
 	for i := 0; i < len(data); i += 16 {
+		// Calculate the current offset and ensure it's aligned to a 4-byte boundary
+		currentOffset := startOffset + int64(i)
+		currentOffset = currentOffset - (currentOffset % 4)
+
 		// Print offset
-		fmt.Printf("%08x: ", startOffset+int64(i))
+		fmt.Printf("%08x: ", currentOffset)
 
 		// Print hex values
 		for j := 0; j < 16; j++ {
