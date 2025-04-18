@@ -107,6 +107,10 @@ for fun.
       command line, open files, network connections, and optionally environment variables. Useful for debugging and 
       investigating running applications.
     - To install: `go install github.com/timmattison/tools/cmd/procinfo@latest`
+- hexfind
+    - Searches for a hex string in a binary file and displays a hex dump with surrounding bytes. Shows the offset in both 
+      hex and decimal formats. Useful for analyzing binary files and finding specific patterns or signatures.
+    - To install: `go install github.com/timmattison/tools/cmd/hexfind@latest`
 
 ## dirhash
 
