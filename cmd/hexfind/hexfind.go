@@ -4,9 +4,10 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strings"
+
+	"github.com/edsrzf/mmap-go"
 )
 
 func main() {
@@ -82,90 +83,53 @@ func findPattern(file *os.File, pattern []byte, contextBytes int, allMatches boo
 	patternLen := len(pattern)
 	bufSize := patternLen + contextBytes*2 // Context before + pattern + context after
 
-	// Get file size
-	fileInfo, err := file.Stat()
+	// Memory map the file
+	mmapped, err := mmap.Map(file, mmap.RDONLY, 0)
 	if err != nil {
-		return nil, fmt.Errorf("error getting file info: %v", err)
+		return nil, fmt.Errorf("error memory mapping file: %v", err)
 	}
-	fileSize := fileInfo.Size()
+	defer mmapped.Unmap() // Ensure we unmap when done
 
-	// Buffer for reading file in chunks
-	buffer := make([]byte, 8192)
-	// Position in file
-	var pos int64 = 0
+	fileSize := len(mmapped)
 
-	for {
-		n, err := file.Read(buffer)
-		if err != nil && err != io.EOF {
-			return nil, fmt.Errorf("error reading file: %v", err)
-		}
-		if n == 0 {
-			break
-		}
-
-		// Search for pattern in current buffer
-		for i := 0; i <= n-patternLen; i++ {
-			match := true
-			for j := 0; j < patternLen; j++ {
-				if buffer[i+j] != pattern[j] {
-					match = false
-					break
-				}
-			}
-
-			if match {
-				matchOffset := pos + int64(i)
-
-				// Create a buffer for the match and its context
-				matchData := make([]byte, bufSize)
-
-				// Seek to the position for context before match
-				contextStart := matchOffset - int64(contextBytes)
-				if contextStart < 0 {
-					contextStart = 0
-				}
-
-				_, err := file.Seek(contextStart, io.SeekStart)
-				if err != nil {
-					return nil, fmt.Errorf("error seeking in file: %v", err)
-				}
-
-				// Read the match and its context
-				bytesToRead := bufSize
-				if contextStart+int64(bytesToRead) > fileSize {
-					bytesToRead = int(fileSize - contextStart)
-				}
-
-				_, err = file.Read(matchData[:bytesToRead])
-				if err != nil && err != io.EOF {
-					return nil, fmt.Errorf("error reading match context: %v", err)
-				}
-
-				// Add match to results
-				matches = append(matches, Match{
-					offset: matchOffset,
-					data:   matchData[:bytesToRead],
-				})
-
-				if !allMatches {
-					return matches, nil
-				}
-
-				// Seek back to continue search
-				_, err = file.Seek(pos+int64(i+1), io.SeekStart)
-				if err != nil {
-					return nil, fmt.Errorf("error seeking back in file: %v", err)
-				}
+	// Search for pattern in the memory mapped file
+	for i := 0; i <= fileSize-patternLen; i++ {
+		match := true
+		for j := 0; j < patternLen; j++ {
+			if mmapped[i+j] != pattern[j] {
+				match = false
+				break
 			}
 		}
 
-		// Move position forward, but keep last (patternLen-1) bytes for potential matches across buffer boundaries
-		pos += int64(n - (patternLen - 1))
+		if match {
+			matchOffset := int64(i)
 
-		// Seek to new position
-		_, err = file.Seek(pos, io.SeekStart)
-		if err != nil {
-			return nil, fmt.Errorf("error seeking in file: %v", err)
+			// Calculate the start of the context
+			contextStart := matchOffset - int64(contextBytes)
+			if contextStart < 0 {
+				contextStart = 0
+			}
+
+			// Calculate how many bytes to read for context
+			bytesToRead := bufSize
+			if int(contextStart)+bytesToRead > fileSize {
+				bytesToRead = fileSize - int(contextStart)
+			}
+
+			// Create a copy of the data with context
+			matchData := make([]byte, bytesToRead)
+			copy(matchData, mmapped[contextStart:int(contextStart)+bytesToRead])
+
+			// Add match to results
+			matches = append(matches, Match{
+				offset: matchOffset,
+				data:   matchData,
+			})
+
+			if !allMatches {
+				return matches, nil
+			}
 		}
 	}
 
