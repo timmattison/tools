@@ -111,6 +111,11 @@ for fun.
     - Searches for a hex string in a binary file and displays a hex dump with surrounding bytes. Shows the offset in both 
       hex and decimal formats. Useful for analyzing binary files and finding specific patterns or signatures.
     - To install: `go install github.com/timmattison/tools/cmd/hexfind@latest`
+- wifiqr
+    - Generates QR codes for WiFi networks that, when scanned by a mobile device, allow the device to automatically 
+      connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo 
+      in the center of the QR code, and adjusting the logo size.
+    - To install: `go install github.com/timmattison/tools/cmd/wifiqr@latest`
 
 ## dirhash
 
@@ -172,3 +177,47 @@ The program shows:
 - Command to be executed
 
 You can press Ctrl-C at any time to cancel the scheduled execution.
+
+## wifiqr
+
+Generate QR codes for WiFi networks that can be scanned by mobile devices to automatically connect to the network.
+
+### Basic Usage
+
+```
+wifiqr -ssid MyWiFiNetwork -password MySecretPassword
+```
+
+This will generate a QR code image named `MyWiFiNetwork.png` in the current directory.
+
+### Options
+
+- `-ssid` (required): The WiFi network name (SSID)
+- `-password` (required): The WiFi network password
+- `-resolution` (optional): Resolution of the QR code image in pixels (default: 1024)
+- `-logo` (optional): Path to an image file to use as a logo in the center of the QR code
+- `-logo-size` (optional): Size of the logo as a percentage of the QR code (1-100, default: 10%)
+
+### Examples
+
+Generate a basic WiFi QR code:
+```
+wifiqr -ssid MyWiFiNetwork -password MySecretPassword
+```
+
+Generate a smaller QR code (512x512 pixels):
+```
+wifiqr -resolution 512 -ssid MyWiFiNetwork -password MySecretPassword
+```
+
+Generate a QR code with a logo in the center:
+```
+wifiqr -logo company_logo.png -ssid MyWiFiNetwork -password MySecretPassword
+```
+
+Generate a QR code with a larger logo (20% of QR code size):
+```
+wifiqr -logo company_logo.png -logo-size 20 -ssid MyWiFiNetwork -password MySecretPassword
+```
+
+When scanned with a smartphone camera, these QR codes will prompt the device to join the specified WiFi network automatically.
