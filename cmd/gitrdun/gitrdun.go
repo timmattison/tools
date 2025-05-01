@@ -208,13 +208,14 @@ func main() {
 	var searchAllBranches = flag.Bool("all", false, "search all branches, not just the current branch")
 	var useOllama = flag.Bool("ollama", false, "use Ollama to generate summaries of work done in each repository")
 	var metaOllama = flag.Bool("meta-ollama", false, "generate a meta-summary across all repositories (implies --ollama)")
-	var ollamaModel = flag.String("ollama-model", "llama3.3", "Ollama model to use for summaries")
+	var ollamaModel = flag.String("ollama-model", "qwen3:30b-a3b", "Ollama model to use for summaries")
 	var ollamaURL = flag.String("ollama-url", "http://localhost:11434", "URL for Ollama API")
 	var rootDir = flag.String("root", "", "root directory to start scanning from (overrides positional arguments)")
 	var outputFile = flag.String("output", "", "file to write results to (in addition to stdout)")
 	var help = flag.Bool("help", false, "show help message")
 	var h = flag.Bool("h", false, "show help message")
 	var filterByUser = flag.Bool("filter-user", true, "only show commits authored by the current git user")
+	var keepThinking = flag.Bool("keep-thinking", false, "keep text between <think> and </think> tags in LLM output")
 
 	flag.Parse()
 
@@ -511,7 +512,16 @@ func main() {
 						// Then show the Ollama summary with repository name and model
 						repoName := filepath.Base(workingDir)
 						writeOutput("\n🤖 Generating summary for %s with Ollama (%s)...\n", repoName, *ollamaModel)
-						summary, err := internal.GenerateOllamaSummary(workingDir, commits, *ollamaURL, *ollamaModel)
+
+						// Create a status callback function that updates the output
+						statusCallback := func(status string) {
+							// Use carriage return and ANSI escape code to clear the line and overwrite
+							writeOutput("\r\033[K   ⏳ %s", status)
+						}
+
+						summary, err := internal.GenerateOllamaSummary(workingDir, commits, *ollamaURL, *ollamaModel, *keepThinking, statusCallback)
+						// Add a newline after processing to ensure clean output
+						writeOutput("\n")
 						if err != nil {
 							writeOutput("⚠️  Error generating summary: %v\n", err)
 						} else {
@@ -533,7 +543,16 @@ func main() {
 				// Generate meta-summary if requested
 				if *metaOllama && len(allSummaries) > 0 {
 					writeOutput("\n🔍 Generating meta-summary of all work with Ollama (%s)...\n", *ollamaModel)
-					metaSummary, err := internal.GenerateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, startDuration)
+
+					// Create a status callback function for meta-summary
+					metaStatusCallback := func(status string) {
+						// Use carriage return and ANSI escape code to clear the line and overwrite
+						writeOutput("\r\033[K   ⏳ %s", status)
+					}
+
+					metaSummary, err := internal.GenerateMetaSummary(allSummaries, *ollamaURL, *ollamaModel, startDuration, *keepThinking, metaStatusCallback)
+					// Add a newline after processing to ensure clean output
+					writeOutput("\n")
 					if err != nil {
 						writeOutput("⚠️  Error generating meta-summary: %v\n", err)
 					} else {
