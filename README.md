@@ -116,6 +116,11 @@ for fun.
       connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo 
       in the center of the QR code, and adjusting the logo size.
     - To install: `go install github.com/timmattison/tools/cmd/wifiqr@latest`
+- symfix
+    - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove 
+      a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving 
+      directories or restructuring projects.
+    - To install: `go install github.com/timmattison/tools/cmd/symfix@latest`
 
 ## dirhash
 
@@ -221,3 +226,53 @@ wifiqr -logo company_logo.png -logo-size 20 -ssid MyWiFiNetwork -password MySecr
 ```
 
 When scanned with a smartphone camera, these QR codes will prompt the device to join the specified WiFi network automatically.
+
+## symfix
+
+Recursively scans directories for broken symlinks and optionally fixes them by modifying the symlink targets.
+
+### Basic Usage
+
+```
+symfix                                # Scan current directory for broken symlinks
+symfix -dir /path/to/scan             # Scan a specific directory
+symfix -prepend-to-fix ../            # Fix broken symlinks by prepending "../" to targets
+symfix -remove-to-fix /old/path/      # Fix broken symlinks by removing "/old/path/" prefix
+```
+
+### Options
+
+- `-dir`: Directory to scan for broken symlinks (default: current directory)
+- `-prepend-to-fix`: String to prepend to broken symlink targets to attempt fixing them
+- `-remove-to-fix`: String to remove from the beginning of broken symlink targets
+- `-verbose`: Enable verbose output for debugging
+- `-help`: Show help message with usage information
+
+### Examples
+
+Find all broken symlinks in the current directory:
+```
+symfix
+```
+
+Find all broken symlinks in a specific directory:
+```
+symfix -dir ~/projects/my-website
+```
+
+Fix broken symlinks by prepending a string to their targets:
+```
+symfix -prepend-to-fix ../
+```
+
+Fix broken symlinks by removing a prefix from their targets:
+```
+symfix -remove-to-fix /old/path/prefix/
+```
+
+Scan a specific directory and fix symlinks by prepending:
+```
+symfix -dir ~/projects/my-website -prepend-to-fix ..
+```
+
+When fixing symlinks, targets are resolved relative to the symlink's location. The tool will report all broken symlinks found and indicate which ones were fixed.
