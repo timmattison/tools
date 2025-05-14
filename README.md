@@ -121,6 +121,12 @@ for fun.
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving 
       directories or restructuring projects.
     - To install: `go install github.com/timmattison/tools/cmd/symfix@latest`
+- dirc
+    - A versatile directory path tool that can both:
+      - Copy the current working directory to the clipboard
+      - Read a directory path from the clipboard and output a command to change to that directory (`paste` mode)
+    - Works best with an alias like `dirp='eval $(dirc -paste)'` in your shell configuration.
+    - To install: `go install github.com/timmattison/tools/cmd/dirc@latest`
 
 ## dirhash
 
