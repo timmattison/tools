@@ -59,6 +59,7 @@ const SKIP_DIRS: [&str; 6] = [
 ];
 
 /// Represents a search result
+#[derive(Default)]
 struct SearchResult {
     repositories: HashMap<String, Vec<String>>,
     inaccessible_dirs: Vec<String>,
@@ -628,4 +629,94 @@ fn add_matching_commit(matching_commits: &mut Vec<String>, commit: &Commit, mess
         commit.id().to_string(),
         first_line
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_is_ignored() {
+        // Create a temp directory for testing
+        let temp_dir = std::env::temp_dir();
+        
+        // Test with ignored directories
+        for ignored in SKIP_DIRS.iter() {
+            let ignored_path = temp_dir.join(ignored);
+            let entry = WalkDir::new(&ignored_path).into_iter().next().unwrap_or_else(|| {
+                // If the directory doesn't exist, just pretend we got an entry
+                Ok(WalkDir::new(&ignored_path).into_iter().filter_entry(|_| false).next().unwrap().unwrap())
+            });
+            
+            if let Ok(entry) = entry {
+                assert!(is_ignored(&entry), "Directory '{}' should be ignored", ignored);
+            }
+        }
+        
+        // Test with non-ignored directory
+        let non_ignored = "test_directory";
+        let non_ignored_path = temp_dir.join(non_ignored);
+        let entry = WalkDir::new(&non_ignored_path).into_iter().next().unwrap_or_else(|| {
+            Ok(WalkDir::new(&non_ignored_path).into_iter().filter_entry(|_| false).next().unwrap().unwrap())
+        });
+        
+        if let Ok(entry) = entry {
+            assert!(!is_ignored(&entry), "Directory '{}' should not be ignored", non_ignored);
+        }
+    }
+    
+    #[test]
+    fn test_add_matching_commit() {
+        // Since we can't easily create a git commit for testing,
+        // we'll test the parsing logic using string manipulation
+        
+        // Mock commit data
+        let commit_id = "abcdef1234567890";
+        let message = "Initial commit\nThis is a longer description\nWith multiple lines";
+        
+        // Create a temporary vector to hold commit output
+        let mut commits = Vec::new();
+        
+        // Call function with mock commit (using a string)
+        // First, create a custom struct to mock the commit
+        struct MockCommit {
+            id: String,
+        }
+        
+        impl MockCommit {
+            fn id(&self) -> MockOid {
+                MockOid { id: self.id.clone() }
+            }
+        }
+        
+        struct MockOid {
+            id: String,
+        }
+        
+        impl MockOid {
+            fn to_string(&self) -> String {
+                self.id.clone()
+            }
+        }
+        
+        let mock_commit = MockCommit { 
+            id: commit_id.to_string(),
+        };
+        
+        // Test adding a matching commit
+        add_matching_commit(&mut commits, &mock_commit, message);
+        
+        // Verify the output
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0], format!("{} Initial commit", commit_id));
+        
+        // Test with a different message format
+        let single_line_message = "Fix bug in authentication";
+        commits.clear();
+        
+        add_matching_commit(&mut commits, &mock_commit, single_line_message);
+        
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0], format!("{} Fix bug in authentication", commit_id));
+    }
 }
