@@ -134,7 +134,8 @@ for fun.
 - glo
     - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your repository
       and could be candidates for Git LFS or removal.
-    - To install: `go install github.com/timmattison/tools/cmd/glo@latest`
+    - To install Go version: `go install github.com/timmattison/tools/cmd/glo@latest`
+    - To install Rust version: `cargo install --git https://github.com/timmattison/tools glo`
 
 ## dirhash
 
