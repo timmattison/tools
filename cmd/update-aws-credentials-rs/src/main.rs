@@ -1,12 +1,10 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use aws_config::meta::region::RegionProviderChain;
-use aws_credential_types::provider::ProvideCredentials;
 use aws_credential_types::Credentials;
 use aws_sdk_sts::Client as StsClient;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
-use std::path::PathBuf;
 
 const UPPER_AWS_ACCESS_KEY_ID: &str = "AWS_ACCESS_KEY_ID";
 const UPPER_AWS_SECRET_ACCESS_KEY: &str = "AWS_SECRET_ACCESS_KEY";
@@ -26,10 +24,12 @@ async fn verify_credentials(
     secret_access_key: &str,
     session_token: &str,
 ) -> Result<aws_sdk_sts::operation::get_caller_identity::GetCallerIdentityOutput> {
-    let creds = Credentials::from_keys(
-        access_key_id,
-        secret_access_key,
+    let creds = Credentials::new(
+        access_key_id.to_string(),
+        secret_access_key.to_string(),
         Some(session_token.to_string()),
+        None,
+        "update-aws-credentials-rs",
     );
 
     let region_provider = RegionProviderChain::default_provider();
