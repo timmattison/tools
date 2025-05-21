@@ -15,7 +15,7 @@ require (
 	github.com/sho0pi/naturaltime v0.0.2
 	github.com/timmattison/aws-iot-core-websockets-go v0.6.1
 	github.com/yeqown/go-qrcode/v2 v2.2.5
-	github.com/yeqown/go-qrcode/writer/standard v1.2.6
+	github.com/yeqown/go-qrcode/writer/standard v1.3.0
 	github.com/yosssi/gohtml v0.0.0-20201013000340-ee4748c638f4
 	github.com/zeebo/blake3 v0.2.4
 	golang.design/x/clipboard v0.7.0
@@ -44,6 +44,7 @@ require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.3.1 // indirect
 	github.com/charmbracelet/harmonica v0.2.0 // indirect
+	github.com/charmbracelet/x/ansi v0.8.0 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.13 // indirect
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/cloudflare/circl v1.6.1 // indirect

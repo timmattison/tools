@@ -127,6 +127,9 @@ for fun.
       - Read a directory path from the clipboard and output a command to change to that directory (`paste` mode)
     - Works best with an alias like `dirp='eval $(dirc -paste)'` in your shell configuration.
     - To install: `go install github.com/timmattison/tools/cmd/dirc@latest`
+- gitdiggin
+    - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made across multiple repositories.
+    - To install: `go install github.com/timmattison/tools/cmd/gitdiggin@latest`
 
 ## dirhash
 
