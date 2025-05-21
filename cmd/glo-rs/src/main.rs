@@ -1,10 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use git2::{Object, ObjectType, Oid, Repository};
+use git2::{ObjectType, Repository};
 use human_bytes::human_bytes;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::process::exit;
+use std::path::{PathBuf};
 use thiserror::Error;
 
 /// A tool to find large objects in Git repositories.
@@ -68,7 +67,7 @@ fn get_all_objects(repo: &Repository) -> Result<Vec<ObjectInfo>> {
     // Process each reference (branch, tag, etc.)
     for reference in repo.references()? {
         let reference = reference?;
-        
+
         // Skip non-direct references
         if reference.is_remote() || reference.is_tag() || reference.is_note() {
             continue;
@@ -90,16 +89,16 @@ fn get_all_objects(repo: &Repository) -> Result<Vec<ObjectInfo>> {
                         tree.walk(git2::TreeWalkMode::PreOrder, |path, entry| {
                             if entry.kind() == Some(ObjectType::Blob) {
                                 let oid = entry.id();
-                                
+
                                 // Skip if we've already seen this object
                                 if !seen_objects.insert(oid) {
                                     return git2::TreeWalkResult::Skip;
                                 }
-                                
+
                                 // Try to get the blob object
                                 if let Ok(blob) = repo.find_blob(oid) {
-                                    let full_path = if path.is_empty() { 
-                                        entry.name().unwrap_or("").to_string() 
+                                    let full_path = if path.is_empty() {
+                                        entry.name().unwrap_or("").to_string()
                                     } else {
                                         format!("{}{}", path, entry.name().unwrap_or(""))
                                     };
@@ -130,7 +129,7 @@ fn main() -> Result<()> {
     let repo_path = match &args.repo {
         Some(path) => path.clone(),
         None => find_git_repo()
-            .context("Could not find Git repository. Use --repo to specify a path")?
+            .context("Could not find Git repository. Use --repo to specify a path")?,
     };
 
     // Open the Git repository
@@ -143,8 +142,7 @@ fn main() -> Result<()> {
     }
 
     // Get all objects in the repository
-    let mut objects = get_all_objects(&repo)
-        .context("Could not get Git objects")?;
+    let mut objects = get_all_objects(&repo).context("Could not get Git objects")?;
 
     // Sort objects by size (smallest first)
     objects.sort_by_key(|obj| obj.size);
