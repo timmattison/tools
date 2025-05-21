@@ -1,0 +1,13 @@
+[package]
+name = "glo"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tim Mattison"]
+description = "A tool to find large objects in Git repositories"
+
+[dependencies]
+git2 = "0.18.3"
+clap = { version = "4.5.1", features = ["derive"] }
+anyhow = "1.0.79"
+human_bytes = "0.4.3"
+thiserror = "1.0.56"
