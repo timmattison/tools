@@ -70,7 +70,7 @@ fn get_all_objects(repo: &Repository) -> Result<Vec<ObjectInfo>> {
         let reference = reference?;
         
         // Skip non-direct references
-        if reference.is_remote() || reference.is_symbolic() {
+        if reference.is_remote() || reference.is_tag() || reference.is_note() {
             continue;
         }
 
@@ -93,7 +93,7 @@ fn get_all_objects(repo: &Repository) -> Result<Vec<ObjectInfo>> {
                                 
                                 // Skip if we've already seen this object
                                 if !seen_objects.insert(oid) {
-                                    return git2::TreeWalkResult::Continue;
+                                    return git2::TreeWalkResult::Skip;
                                 }
                                 
                                 // Try to get the blob object
@@ -106,12 +106,12 @@ fn get_all_objects(repo: &Repository) -> Result<Vec<ObjectInfo>> {
 
                                     objects.push(ObjectInfo {
                                         hash: oid.to_string(),
-                                        size: blob.size(),
+                                        size: blob.size() as u64,
                                         path: full_path,
                                     });
                                 }
                             }
-                            git2::TreeWalkResult::Continue
+                            git2::TreeWalkResult::Ok
                         })?;
                     }
                 }
@@ -127,8 +127,8 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     // Get the repository path
-    let repo_path = match args.repo {
-        Some(path) => path,
+    let repo_path = match &args.repo {
+        Some(path) => path.clone(),
         None => find_git_repo()
             .context("Could not find Git repository. Use --repo to specify a path")?
     };
