@@ -96,10 +96,6 @@ for fun.
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on recently
       across different projects.
     - To install: `go install github.com/timmattison/tools/cmd/gitrdun@latest`
-- glo
-    - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your repository
-      and could be candidates for Git LFS or removal.
-    - To install: `go install github.com/timmattison/tools/cmd/glo@latest`
 - nodenuke
     - Nukes your node_modules and .next directories and npm and pnpm lock files
     - To install: `go install github.com/timmattison/tools/cmd/nodenuke@latest`
@@ -134,6 +130,10 @@ for fun.
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made across multiple repositories.
     - To install: `go install github.com/timmattison/tools/cmd/gitdiggin@latest`
+- glo
+    - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your repository
+      and could be candidates for Git LFS or removal.
+    - To install: `go install github.com/timmattison/tools/cmd/glo@latest`
 
 ## dirhash
 
