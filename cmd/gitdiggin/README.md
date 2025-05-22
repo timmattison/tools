@@ -8,7 +8,7 @@ A tool to recursively search Git repositories for commits containing a specific 
 git-diggin [options] <search-term> [path...]
 ```
 
-If no path is specified, the current directory is used.
+If no path is specified, the current directory is used. If no repositories are found under the specified directory, the tool will attempt to find the root of the repository that the user is currently in.
 
 ## Options
 
