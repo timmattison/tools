@@ -219,7 +219,7 @@ fn main() -> Result<()> {
             thread::spawn(move || {
                 scan_path(
                     &path,
-                    search_result,
+                    search_result.clone(),
                     dirs_checked,
                     repos_found,
                     current_path,
@@ -471,8 +471,8 @@ fn process_git_repo(
     let mut matching_commits = Vec::new();
 
     // Process a single branch reference
-    let process_branch = |branch: Result<Branch, git2::Error>| -> Result<(), git2::Error> {
-        let branch = branch?;
+    let process_branch = |branch_result: Result<(Branch, BranchType), git2::Error>| -> Result<(), git2::Error> {
+        let (branch, _branch_type) = branch_result?;
         let commit = branch.get().peel_to_commit()?;
         
         // Create a revwalk to iterate through commits
@@ -532,11 +532,10 @@ fn process_git_repo(
                 &mut |_, _| true,
                 None,
                 Some(&mut |_, hunk| {
-                    if let Some(content) = hunk.content() {
-                        if content.to_lowercase().contains(&search_term.to_lowercase()) {
-                            found_in_diff = true;
-                            return false; // Stop iterating
-                        }
+                    let text = hunk.text();
+                    if text.to_lowercase().contains(&search_term.to_lowercase()) {
+                        found_in_diff = true;
+                        return false; // Stop iterating
                     }
                     true
                 }),
@@ -582,15 +581,14 @@ fn process_git_repo(
         // Just use HEAD
         match repo.head() {
             Ok(head_ref) => {
-                if let Ok(branch) = Branch::wrap(head_ref) {
-                    if let Err(err) = process_branch(Ok(branch)) {
-                        if !ignore_failures {
-                            let mut result = search_result.lock().unwrap();
-                            result.inaccessible_dirs.push(format!(
-                                "{} (error processing HEAD: {})",
-                                path, err
-                            ));
-                        }
+                let branch = Branch::wrap(head_ref);
+                if let Err(err) = process_branch(Ok((branch, BranchType::Local))) {
+                    if !ignore_failures {
+                        let mut result = search_result.lock().unwrap();
+                        result.inaccessible_dirs.push(format!(
+                            "{} (error processing HEAD: {})",
+                            path, err
+                        ));
                     }
                 }
             }
