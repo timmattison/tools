@@ -73,7 +73,8 @@ for fun.
 - prhash
     - Hashes a file with the requested hashing algorithm and shows the progress in the console. Good for hashing very
       large files and my experiments show that it runs a little bit faster than the standard system tools.
-    - To install: `go install github.com/timmattison/tools/cmd/prhash@latest`
+    - To install Go version: `go install github.com/timmattison/tools/cmd/prhash@latest`
+    - To install Rust version: `cargo install --git https://github.com/timmattison/tools prhash`
 - subito
     - Subscribes to a list of topics on AWS IoT Core and prints out the messages it receives. This is useful for
       debugging and testing. I was going to call it `subiot` but `subito` actually means "immediately" in Italian and
