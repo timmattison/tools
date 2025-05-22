@@ -130,7 +130,8 @@ for fun.
     - To install: `go install github.com/timmattison/tools/cmd/dirc@latest`
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made across multiple repositories.
-    - To install: `go install github.com/timmattison/tools/cmd/gitdiggin@latest`
+    - To install Go version: `go install github.com/timmattison/tools/cmd/gitdiggin@latest`
+    - To install Rust version: `cargo install --git https://github.com/timmattison/tools gitdiggin-rs`
 - glo
     - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your repository
       and could be candidates for Git LFS or removal.

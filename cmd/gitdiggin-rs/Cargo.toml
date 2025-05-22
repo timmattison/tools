@@ -1,0 +1,16 @@
+[package]
+name = "gitdiggin-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tim Mattison"]
+description = "Recursively searches Git repositories for commits containing a specific string"
+
+[dependencies]
+git2 = "0.18.1"
+clap = { version = "4.4.6", features = ["derive"] }
+walkdir = "2.4.0"
+indicatif = "0.17.7"
+crossbeam = "0.8.2"
+anyhow = "1.0.75"
+colored = "2.0.4"
+dirs = "5.0.1"
