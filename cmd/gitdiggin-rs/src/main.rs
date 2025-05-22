@@ -13,6 +13,48 @@ use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
 
+/// Find the base directory of the git repository starting from current directory
+fn get_repo_base() -> Result<String> {
+    // Get current working directory
+    let mut current_path = std::env::current_dir()?;
+    
+    // Safety measures to prevent infinite loops
+    let max_iterations = 50;
+    let mut iteration_count = 0;
+    let mut last_path = PathBuf::new();
+    
+    while iteration_count < max_iterations {
+        // Check if .git directory exists in current path
+        let git_dir = current_path.join(".git");
+        if git_dir.exists() && git_dir.is_dir() {
+            return Ok(git_dir.to_string_lossy().to_string());
+        }
+        
+        // Store the current path before going up
+        let temp_path = current_path.clone();
+        
+        // Go up one directory level
+        if !current_path.pop() {
+            // We've reached the root
+            break;
+        }
+        
+        // Check if we're in the same place as before (another way to detect root)
+        if current_path == last_path {
+            break;
+        }
+        
+        // Update last path
+        last_path = temp_path;
+        
+        // Increment iteration counter
+        iteration_count += 1;
+    }
+    
+    // If we got here, we didn't find a git directory
+    Err(anyhow::anyhow!("No git repository found"))
+}
+
 /// Command line arguments
 #[derive(Parser, Debug)]
 #[command(
@@ -244,6 +286,36 @@ fn main() -> Result<()> {
     // Wait for scanning to complete
     for handle in handles {
         handle.join().unwrap();
+    }
+
+    // If no repositories were found, try to find the repository root
+    if repos_found.load(Ordering::Relaxed) == 0 {
+        // Try to find the repository root
+        if let Ok(git_dir) = get_repo_base() {
+            // Found a repository root
+            let repo_path = Path::new(&git_dir).parent().unwrap().to_string_lossy().to_string();
+            repos_found.fetch_add(1, Ordering::Relaxed);
+            
+            // Update the current path
+            *current_path.lock().unwrap() = repo_path.clone();
+            
+            // Send progress update
+            let _ = tx.send(ProgressInfo {
+                dirs_checked: dirs_checked.load(Ordering::Relaxed),
+                repos_found: repos_found.load(Ordering::Relaxed),
+                current_path: repo_path.clone(),
+            });
+            
+            // Process the repository
+            process_git_repo(
+                &repo_path,
+                search_result.clone(),
+                args.ignore_failures,
+                &args.search_term,
+                args.contents,
+                args.all,
+            );
+        }
     }
 
     // Signal progress thread to exit
