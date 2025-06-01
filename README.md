@@ -112,6 +112,9 @@ for fun.
     - Searches for a hex string in a binary file and displays a hex dump with surrounding bytes. Shows the offset in both 
       hex and decimal formats. Useful for analyzing binary files and finding specific patterns or signatures.
     - To install: `go install github.com/timmattison/tools/cmd/hexfind@latest`
+- ic
+    - A fast terminal image display utility for iTerm2, designed as a high-performance alternative to `imgcat`. Supports multiple image formats, resizing with aspect ratio preservation, and reading from files or stdin.
+    - To install: `cargo install --git https://github.com/timmattison/tools ic`
 - wifiqr
     - Generates QR codes for WiFi networks that, when scanned by a mobile device, allow the device to automatically 
       connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo 
