@@ -30,7 +30,8 @@ for fun.
       to include that if you want it.
     - To install: `go install github.com/timmattison/tools/cmd/sizeof@latest`
 - numberof
-    - Shows you the number of files in the specified directories (and subdirectories) in a human-readable format. Supports
+    - Shows you the number of files in the specified directories (and subdirectories) in a human-readable format.
+      Supports
       searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
       doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
       to include that if you want it.
@@ -78,23 +79,27 @@ for fun.
     - Subscribes to a list of topics on AWS IoT Core and prints out the messages it receives. This is useful for
       debugging and testing. I was going to call it `subiot` but `subito` actually means "immediately" in Italian and
       I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
-  - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
+    - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
 - portplz
     - Generates an unprivileged port number based on the name of the current directory. Nice for picking a port number
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
       separate instances/VMs.
-  - To install: `go install github.com/timmattison/tools/cmd/portplz@latest`
+    - To install: `go install github.com/timmattison/tools/cmd/portplz@latest`
 - tubeboard
-    - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from it.
+    - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
+      it.
       I use this for deep linking videos to my Roku TVs through their APIs.
-  - To install: `go install github.com/timmattison/tools/cmd/tubeboard@latest`
+    - To install: `go install github.com/timmattison/tools/cmd/tubeboard@latest`
 - runat
-    - Runs a command at a specified time. Shows a countdown timer and supports various time formats including UTC and local time.
-      You can use full dates like "2024-01-01T12:00:00Z" or just times like "12:00" (which will run today or tomorrow at that time).
+    - Runs a command at a specified time. Shows a countdown timer and supports various time formats including UTC and
+      local time.
+      You can use full dates like "2024-01-01T12:00:00Z" or just times like "12:00" (which will run today or tomorrow at
+      that time).
       Press Ctrl-C to cancel.
     - To install: `go install github.com/timmattison/tools/cmd/runat@latest`
 - gitrdun
-    - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on recently
+    - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on
+      recently
       across different projects.
     - To install: `go install github.com/timmattison/tools/cmd/gitrdun@latest`
 - nodenuke
@@ -104,39 +109,44 @@ for fun.
     - Updates your package.json dependencies recursively
     - To install: `go install github.com/timmattison/tools/cmd/nodeup@latest`
 - procinfo
-    - Shows detailed information about running processes matching a name. Displays process details, working directory, 
-      command line, open files, network connections, and optionally environment variables. Useful for debugging and 
+    - Shows detailed information about running processes matching a name. Displays process details, working directory,
+      command line, open files, network connections, and optionally environment variables. Useful for debugging and
       investigating running applications.
     - To install: `go install github.com/timmattison/tools/cmd/procinfo@latest`
 - hexfind
-    - Searches for a hex string in a binary file and displays a hex dump with surrounding bytes. Shows the offset in both 
+    - Searches for a hex string in a binary file and displays a hex dump with surrounding bytes. Shows the offset in
+      both
       hex and decimal formats. Useful for analyzing binary files and finding specific patterns or signatures.
     - To install: `go install github.com/timmattison/tools/cmd/hexfind@latest`
 - ic
-    - A fast terminal image display utility for iTerm2, designed as a high-performance alternative to `imgcat`. Supports multiple image formats, resizing with aspect ratio preservation, and reading from files or stdin.
+    - A fast terminal image display utility for iTerm2, designed as a high-performance alternative to `imgcat`. Supports
+      multiple image formats, resizing with aspect ratio preservation, and reading from files or stdin.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
 - wifiqr
-    - Generates QR codes for WiFi networks that, when scanned by a mobile device, allow the device to automatically 
-      connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo 
+    - Generates QR codes for WiFi networks that, when scanned by a mobile device, allow the device to automatically
+      connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo
       in the center of the QR code, and adjusting the logo size.
     - To install: `go install github.com/timmattison/tools/cmd/wifiqr@latest`
 - symfix
-    - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove 
-      a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving 
+    - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
+      a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
       directories or restructuring projects.
     - To install: `go install github.com/timmattison/tools/cmd/symfix@latest`
 - dirc
     - A versatile directory path tool that can both:
-      - Copy the current working directory to the clipboard
-      - Read a directory path from the clipboard and output a command to change to that directory (`paste` mode)
+        - Copy the current working directory to the clipboard
+        - Read a directory path from the clipboard and output a command to change to that directory (`paste` mode)
     - Works best with an alias like `dirp='eval $(dirc -paste)'` in your shell configuration.
     - To install: `go install github.com/timmattison/tools/cmd/dirc@latest`
 - gitdiggin
-    - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made across multiple repositories.
+    - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
+      default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made
+      across multiple repositories.
     - To install Go version: `go install github.com/timmattison/tools/cmd/gitdiggin@latest`
     - To install Rust version: `cargo install --git https://github.com/timmattison/tools gitdiggin`
 - glo
-    - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your repository
+    - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your
+      repository
       and could be candidates for Git LFS or removal.
     - To install Go version: `go install github.com/timmattison/tools/cmd/glo@latest`
     - To install Rust version: `cargo install --git https://github.com/timmattison/tools glo`
@@ -173,7 +183,8 @@ Simply run `prcp <source> <destination>` and you'll see the progress of the copy
 
 ## update-aws-credentials
 
-Just run `update-aws-credentials` (Go version) or `update-aws-credentials` (Rust version) and it will take the AWS credentials from your clipboard and write them to your AWS config file. If something goes wrong it'll let you know.
+Just run `update-aws-credentials` (Go version) or `update-aws-credentials` (Rust version) and it will take the AWS
+credentials from your clipboard and write them to your AWS config file. If something goes wrong it'll let you know.
 
 ## sizeof
 
@@ -182,7 +193,8 @@ subdirectories. I use it to figure out how large my videos are in a certain dire
 
 ## runat
 
-Run any command at a specified time. The program shows a countdown timer until execution and supports various time formats:
+Run any command at a specified time. The program shows a countdown timer until execution and supports various time
+formats:
 
 ```
 runat 2024-01-01T12:00:00Z echo hello world    # UTC time
@@ -191,9 +203,11 @@ runat "2024-01-01 12:00" echo hello world      # Local time
 runat 12:00 echo hello world                   # Today/tomorrow at 12:00 local time
 ```
 
-If you specify just a time (like "12:00"), it will run today at that time, or if that time has already passed, it will run tomorrow at that time.
+If you specify just a time (like "12:00"), it will run today at that time, or if that time has already passed, it will
+run tomorrow at that time.
 
 The program shows:
+
 - Current time
 - Target time
 - Time remaining (hours:minutes:seconds)
@@ -224,26 +238,31 @@ This will generate a QR code image named `MyWiFiNetwork.png` in the current dire
 ### Examples
 
 Generate a basic WiFi QR code:
+
 ```
 wifiqr -ssid MyWiFiNetwork -password MySecretPassword
 ```
 
 Generate a smaller QR code (512x512 pixels):
+
 ```
 wifiqr -resolution 512 -ssid MyWiFiNetwork -password MySecretPassword
 ```
 
 Generate a QR code with a logo in the center:
+
 ```
 wifiqr -logo company_logo.png -ssid MyWiFiNetwork -password MySecretPassword
 ```
 
 Generate a QR code with a larger logo (20% of QR code size):
+
 ```
 wifiqr -logo company_logo.png -logo-size 20 -ssid MyWiFiNetwork -password MySecretPassword
 ```
 
-When scanned with a smartphone camera, these QR codes will prompt the device to join the specified WiFi network automatically.
+When scanned with a smartphone camera, these QR codes will prompt the device to join the specified WiFi network
+automatically.
 
 ## symfix
 
@@ -269,28 +288,34 @@ symfix -remove-to-fix /old/path/      # Fix broken symlinks by removing "/old/pa
 ### Examples
 
 Find all broken symlinks in the current directory:
+
 ```
 symfix
 ```
 
 Find all broken symlinks in a specific directory:
+
 ```
 symfix -dir ~/projects/my-website
 ```
 
 Fix broken symlinks by prepending a string to their targets:
+
 ```
 symfix -prepend-to-fix ../
 ```
 
 Fix broken symlinks by removing a prefix from their targets:
+
 ```
 symfix -remove-to-fix /old/path/prefix/
 ```
 
 Scan a specific directory and fix symlinks by prepending:
+
 ```
 symfix -dir ~/projects/my-website -prepend-to-fix ..
 ```
 
-When fixing symlinks, targets are resolved relative to the symlink's location. The tool will report all broken symlinks found and indicate which ones were fixed.
+When fixing symlinks, targets are resolved relative to the symlink's location. The tool will report all broken symlinks
+found and indicate which ones were fixed.
