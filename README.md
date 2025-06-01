@@ -22,7 +22,7 @@ for fun.
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
     - To install Go version: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
-    - To install Rust version: `cargo install --git https://github.com/timmattison/tools update-aws-credentials-rs`
+    - To install Rust version: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
 - sizeof
     - Shows you the size of files in the specified directories (and subdirectories) in a human-readable format. Supports
       searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
@@ -131,12 +131,12 @@ for fun.
 - gitdiggin
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made across multiple repositories.
     - To install Go version: `go install github.com/timmattison/tools/cmd/gitdiggin@latest`
-    - To install Rust version: `cargo install --git https://github.com/timmattison/tools gitdiggin-rs`
+    - To install Rust version: `cargo install --git https://github.com/timmattison/tools gitdiggin`
 - glo
     - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your repository
       and could be candidates for Git LFS or removal.
     - To install Go version: `go install github.com/timmattison/tools/cmd/glo@latest`
-    - To install Rust version: `cargo install --git https://github.com/timmattison/tools glo-rs`
+    - To install Rust version: `cargo install --git https://github.com/timmattison/tools glo`
 
 ## dirhash
 
@@ -170,7 +170,7 @@ Simply run `prcp <source> <destination>` and you'll see the progress of the copy
 
 ## update-aws-credentials
 
-Just run `update-aws-credentials` (Go version) or `update-aws-credentials-rs` (Rust version) and it will take the AWS credentials from your clipboard and write them to your AWS config file. If something goes wrong it'll let you know.
+Just run `update-aws-credentials` (Go version) or `update-aws-credentials` (Rust version) and it will take the AWS credentials from your clipboard and write them to your AWS config file. If something goes wrong it'll let you know.
 
 ## sizeof
 

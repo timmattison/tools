@@ -1,4 +1,4 @@
-# gitdiggin-rs
+# gitdiggin
 
 A tool to recursively search Git repositories for commits containing a specific string.
 This is the Rust version of the original Go-based `gitdiggin` tool.
@@ -6,7 +6,7 @@ This is the Rust version of the original Go-based `gitdiggin` tool.
 ## Usage
 
 ```
-gitdiggin-rs [options] <search-term> [path...]
+gitdiggin [options] <search-term> [path...]
 ```
 
 If no path is specified, the current directory is used.
@@ -23,17 +23,17 @@ If no path is specified, the current directory is used.
 
 Search for "registration" in commit messages of all repositories under the current directory:
 ```
-gitdiggin-rs registration
+gitdiggin registration
 ```
 
 Search for "api" in both commit messages and contents of all repositories under a specific directory:
 ```
-gitdiggin-rs --contents api /path/to/projects
+gitdiggin --contents api /path/to/projects
 ```
 
 Search for "fix" in all branches of repositories under the current directory:
 ```
-gitdiggin-rs --all fix
+gitdiggin --all fix
 ```
 
 ## Output
@@ -48,5 +48,5 @@ For each matching commit.
 ## Installation
 
 ```
-cargo install --git https://github.com/timmattison/tools gitdiggin-rs
+cargo install --git https://github.com/timmattison/tools gitdiggin
 ```

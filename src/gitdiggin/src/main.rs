@@ -58,15 +58,15 @@ fn get_repo_base() -> Result<String> {
 /// Command line arguments
 #[derive(Parser, Debug)]
 #[command(
-    name = "gitdiggin-rs",
+    name = "gitdiggin",
     author = "Tim Mattison",
     about = "Recursively searches Git repositories for commits containing a specific string",
     version,
     long_about = None,
     after_help = "Examples:
-  gitdiggin-rs registration               # Search for 'registration' in commit messages
-  gitdiggin-rs --contents api /path/to/dir # Search for 'api' in messages and contents
-  gitdiggin-rs --all fix                  # Search for 'fix' in all branches"
+  gitdiggin registration               # Search for 'registration' in commit messages
+  gitdiggin --contents api /path/to/dir # Search for 'api' in messages and contents
+  gitdiggin --all fix                  # Search for 'fix' in all branches"
 )]
 struct Args {
     /// Search term to look for in commit messages and optionally contents
