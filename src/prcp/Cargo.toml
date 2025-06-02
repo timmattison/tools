@@ -1,0 +1,19 @@
+[package]
+name = "prcp"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tim Mattison"]
+description = "Progress copy tool with TUI - port of the Go version to Rust using Ratatui"
+
+[[bin]]
+name = "prcp"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+tokio = { version = "1.32", features = ["full"] }
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+indicatif = "0.17"
+num-format = "0.4"
