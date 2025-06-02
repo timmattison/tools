@@ -26,6 +26,9 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Parser)]
 #[command(name = "prcp")]
 #[command(about = "Progress copy tool with TUI")]
