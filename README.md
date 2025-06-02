@@ -182,9 +182,16 @@ hashes will be the same. The subdirectory names and locations are ignored.
 
 Simply run `prcp <source> <destination>` and you'll see the progress of the copy in the console.
 
-Available in both Go and Rust versions with identical functionality:
-- Go version: `go install github.com/timmattison/tools/cmd/prcp@latest`
-- Rust version: `cargo install --git https://github.com/timmattison/tools prcp`
+**Available versions:**
+- **Go version** (original): Uses Bubble Tea for TUI
+- **Rust version** (new): Uses Ratatui for TUI, with automatic fallback to simple progress when no TTY is available
+
+**Features:**
+- Progress bar with percentage complete
+- Real-time throughput display (MB/s, GB/s, etc.)
+- Pause/resume with spacebar
+- Ctrl+C to cancel
+- Works in both interactive terminals and CI/headless environments
 
 ## update-aws-credentials
 
