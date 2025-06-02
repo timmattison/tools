@@ -15,7 +15,7 @@ for fun.
       want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
       space bar to pause the copy and press it again to resume.
     - To install Go version: `go install github.com/timmattison/tools/cmd/prcp@latest`
-    - To install Rust version: `cargo install --path src/prcp` (from repository root)
+    - To install Rust version: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It shows the progress in the console.
     - To install: `go install github.com/timmattison/tools/cmd/prgz@latest`
