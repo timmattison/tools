@@ -57,6 +57,11 @@ async fn main() -> Result<()> {
     }
     
     for input_file in args.input_files {
+        if !input_file.exists() {
+            eprintln!("Error: File not found: {}", input_file.display());
+            std::process::exit(1);
+        }
+        
         if let Err(e) = process_file(&args.hash_type, &input_file).await {
             eprintln!("Error processing {}: {}", input_file.display(), e);
             std::process::exit(1);
@@ -79,6 +84,9 @@ async fn process_file_simple(hash_type: &str, input_file: &PathBuf) -> Result<()
     use crate::hash::{hash_file, HashMessage};
     use tokio::sync::mpsc;
     
+    let file_metadata = std::fs::metadata(input_file)?;
+    let file_size = file_metadata.len();
+    
     let (progress_sender, mut progress_receiver) = mpsc::unbounded_channel();
     let (_pause_sender, pause_receiver) = mpsc::unbounded_channel();
     
@@ -89,12 +97,30 @@ async fn process_file_simple(hash_type: &str, input_file: &PathBuf) -> Result<()
         hash_file(&file_path, &hash_type_owned, progress_sender, pause_receiver).await
     });
     
+    // Show progress for large files
+    let show_progress = file_size > 10 * 1024 * 1024; // Show progress for files > 10MB
+    if show_progress {
+        eprintln!("Hashing {} ({} bytes) with {}...", 
+                 input_file.display(), 
+                 file_size, 
+                 hash_type.to_uppercase());
+    }
+    
     // Wait for completion
     let mut hash_result = None;
+    let mut last_progress = 0u64;
+    
     while let Some(message) = progress_receiver.recv().await {
         match message {
-            HashMessage::Progress(_) => {
-                // Just ignore progress in simple mode
+            HashMessage::Progress(progress) => {
+                if show_progress && progress.bytes_processed >= last_progress + (10 * 1024 * 1024) {
+                    let percent = (progress.bytes_processed as f64 / file_size as f64) * 100.0;
+                    eprintln!("Progress: {:.1}% ({} / {} bytes)", 
+                             percent, 
+                             progress.bytes_processed,
+                             file_size);
+                    last_progress = progress.bytes_processed;
+                }
             }
             HashMessage::Finished(hash_value) => {
                 hash_result = Some(hash_value);

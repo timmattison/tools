@@ -9,7 +9,7 @@ pub enum HasherType {
     Sha1(sha1::Sha1),
     Sha256(sha2::Sha256),
     Sha512(sha2::Sha512),
-    Blake3(Blake3Hasher),
+    Blake3(Box<Blake3Hasher>),
 }
 
 impl HasherType {
@@ -19,7 +19,7 @@ impl HasherType {
             "sha1" => Ok(HasherType::Sha1(sha1::Sha1::new())),
             "sha256" => Ok(HasherType::Sha256(sha2::Sha256::new())),
             "sha512" => Ok(HasherType::Sha512(sha2::Sha512::new())),
-            "blake3" => Ok(HasherType::Blake3(Blake3Hasher::new())),
+            "blake3" => Ok(HasherType::Blake3(Box::new(Blake3Hasher::new()))),
             _ => anyhow::bail!("Unsupported hash type: {}", hash_type),
         }
     }
