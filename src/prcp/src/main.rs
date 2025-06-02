@@ -34,7 +34,6 @@ struct CopyProgress {
     bytes_copied: u64,
     total_bytes: u64,
     throughput: u64, // bytes per second
-    elapsed: Duration,
     is_finished: bool,
     error: Option<String>,
 }
@@ -56,7 +55,6 @@ impl App {
                 bytes_copied: 0,
                 total_bytes,
                 throughput: 0,
-                elapsed: Duration::from_secs(0),
                 is_finished: false,
                 error: None,
             },
@@ -207,7 +205,6 @@ async fn copy_file(
                     bytes_copied,
                     total_bytes,
                     throughput,
-                    elapsed,
                     is_finished: false,
                     error: None,
                 };
@@ -221,7 +218,6 @@ async fn copy_file(
                     bytes_copied,
                     total_bytes,
                     throughput: 0,
-                    elapsed: start_time.elapsed(),
                     is_finished: false,
                     error: Some(format!("Read error: {}", e)),
                 };
@@ -242,7 +238,6 @@ async fn copy_file(
         } else {
             0
         },
-        elapsed: start_time.elapsed(),
         is_finished: true,
         error: None,
     };
