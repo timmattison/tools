@@ -151,6 +151,11 @@ for fun.
       and could be candidates for Git LFS or removal.
     - To install Go version: `go install github.com/timmattison/tools/cmd/glo@latest`
     - To install Rust version: `cargo install --git https://github.com/timmattison/tools glo`
+- clipboard-random
+    - Generates random data and copies it to the clipboard. Supports two modes: binary data (with hex, base64, or raw 
+      output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
+      text generation (mild, scary, insane, zalgo, doom), and a dry run mode to preview without copying.
+    - To install: `cargo install --git https://github.com/timmattison/tools clipboard-random`
 
 ## dirhash
 
