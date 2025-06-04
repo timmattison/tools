@@ -156,6 +156,11 @@ for fun.
       output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
       text generation (mild, scary, insane, zalgo, doom), and a dry run mode to preview without copying.
     - To install: `cargo install --git https://github.com/timmattison/tools clipboard-random`
+- freeport
+    - Finds a free TCP port on localhost (127.0.0.1) quickly and cross-platform. Supports random or sequential port 
+      selection, custom port ranges, and can include privileged ports. Useful for development servers, testing 
+      environments, and service configuration.
+    - To install: `cargo install --git https://github.com/timmattison/tools freeport`
 
 ## dirhash
 

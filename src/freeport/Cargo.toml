@@ -1,0 +1,10 @@
+[package]
+name = "freeport"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust tool that finds a free TCP port on localhost"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+anyhow = "1.0"
+rand = "0.9.1"
