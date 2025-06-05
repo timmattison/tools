@@ -176,8 +176,8 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
     }
     
     // Generate random data
-    let mut rng = rand::thread_rng();
-    let random_bytes: Vec<u8> = (0..bytes).map(|_| rng.gen()).collect();
+    let mut rng = rand::rng();
+    let random_bytes: Vec<u8> = (0..bytes).map(|_| rng.random()).collect();
     
     // Handle raw binary data differently
     if format == OutputFormat::Raw {
@@ -295,7 +295,7 @@ fn copy_binary_to_clipboard(data: &[u8]) -> Result<()> {
 }
 
 fn generate_zalgo_text(chars: usize, config: &TextConfig) -> Result<String> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut result = String::new();
     let mut chars_added = 0;
     
@@ -307,7 +307,7 @@ fn generate_zalgo_text(chars: usize, config: &TextConfig) -> Result<String> {
     
     while chars_added < chars {
         // Generate a word
-        let word_length = rng.gen_range(config.min_word_length..=config.max_word_length);
+        let word_length = rng.random_range(config.min_word_length..=config.max_word_length);
         let word_length = std::cmp::min(word_length, chars - chars_added);
         
         for _ in 0..word_length {
@@ -316,15 +316,15 @@ fn generate_zalgo_text(chars: usize, config: &TextConfig) -> Result<String> {
             }
             
             // Add a base character
-            let base_char = base_chars[rng.gen_range(0..base_chars.len())];
+            let base_char = base_chars[rng.random_range(0..base_chars.len())];
             result.push(base_char);
             chars_added += 1;
             
             // Potentially add diacritics
-            if rng.gen::<f64>() < config.probability {
-                let num_diacritics = rng.gen_range(config.min_diacritics..=config.max_diacritics);
+            if rng.random::<f64>() < config.probability {
+                let num_diacritics = rng.random_range(config.min_diacritics..=config.max_diacritics);
                 for _ in 0..num_diacritics {
-                    let mark = combining_marks[rng.gen_range(0..combining_marks.len())];
+                    let mark = combining_marks[rng.random_range(0..combining_marks.len())];
                     result.push(mark);
                 }
             }
