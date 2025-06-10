@@ -120,8 +120,8 @@ for fun.
       hex and decimal formats. Useful for analyzing binary files and finding specific patterns or signatures.
     - To install: `go install github.com/timmattison/tools/cmd/hexfind@latest`
 - ic
-    - A fast terminal image display utility for iTerm2, designed as a high-performance alternative to `imgcat`. Supports
-      multiple image formats, resizing with aspect ratio preservation, and reading from files or stdin.
+    - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
+      multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
 - wifiqr
     - Generates QR codes for WiFi networks that, when scanned by a mobile device, allow the device to automatically
