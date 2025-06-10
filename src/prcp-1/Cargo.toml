@@ -7,10 +7,9 @@ description = "Progress copy - file copy with progress bar using Ratatui"
 
 [dependencies]
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = "0.29.0"
 anyhow = "1.0"
 tokio = { version = "1.32", features = ["full"] }
-humantime = "2.1"
 
 [[bin]]
 name = "prcp"
