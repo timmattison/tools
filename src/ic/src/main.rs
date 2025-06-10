@@ -294,10 +294,12 @@ fn play_video_simple(
 
         let mut ffmpeg_child = std::process::Command::new("ffmpeg")
             .args(&[
-                "-ss",
-                &format!("{:.3}", current_time), // Seek to current position
                 "-i",
                 file_path.to_str().unwrap(),
+                "-ss",
+                &format!("{:.6}", current_time), // Seek to current position with higher precision
+                "-avoid_negative_ts",
+                "make_zero",
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
@@ -355,19 +357,25 @@ fn play_video_simple(
                                     break;
                                 }
                                 Ok(VideoControl::FrameForward) => {
-                                    // Move forward one frame (1/fps seconds)
+                                    // Move forward one frame (1/fps seconds) and stay paused
                                     current_time += 1.0 / fps;
                                     if current_time >= duration {
                                         current_time = duration - (1.0 / fps); // Stay on last frame
                                     }
                                     show_frame_after_seek = true;
+                                    // Keep video paused after seeking
+                                    pause_start_time = Some(Instant::now()); // Reset pause timer for consistent timing
+                                    let _ = ffmpeg_child.kill();
                                     break; // Restart ffmpeg at new position
                                 }
                                 Ok(VideoControl::FrameBackward) => {
-                                    // Move backward one frame (1/fps seconds)
+                                    // Move backward one frame (1/fps seconds) and stay paused
                                     current_time -= 1.0 / fps;
                                     current_time = current_time.max(0.0);
                                     show_frame_after_seek = true;
+                                    // Keep video paused after seeking
+                                    pause_start_time = Some(Instant::now()); // Reset pause timer for consistent timing
+                                    let _ = ffmpeg_child.kill();
                                     break; // Restart ffmpeg at new position
                                 }
                                 Ok(VideoControl::SeekForward(seconds)) => {
@@ -376,12 +384,18 @@ fn play_video_simple(
                                         current_time = duration - (1.0 / fps); // Stay on last frame
                                     }
                                     show_frame_after_seek = true;
+                                    // Keep video paused after seeking
+                                    pause_start_time = Some(Instant::now()); // Reset pause timer for consistent timing
+                                    let _ = ffmpeg_child.kill();
                                     break; // Restart ffmpeg at new position
                                 }
                                 Ok(VideoControl::SeekBackward(seconds)) => {
                                     current_time -= seconds;
                                     current_time = current_time.max(0.0);
                                     show_frame_after_seek = true;
+                                    // Keep video paused after seeking
+                                    pause_start_time = Some(Instant::now()); // Reset pause timer for consistent timing
+                                    let _ = ffmpeg_child.kill();
                                     break; // Restart ffmpeg at new position
                                 }
                                 _ => {}
@@ -391,7 +405,7 @@ fn play_video_simple(
                     }
                 }
                 Ok(VideoControl::FrameForward) => {
-                    // Pause and move forward one frame
+                    // Force pause and move forward one frame
                     is_paused = true;
                     show_frame_after_seek = true;
                     pause_start_time = Some(Instant::now());
@@ -403,7 +417,7 @@ fn play_video_simple(
                     break 'frame_loop; // Restart ffmpeg at new position
                 }
                 Ok(VideoControl::FrameBackward) => {
-                    // Pause and move backward one frame
+                    // Force pause and move backward one frame
                     is_paused = true;
                     show_frame_after_seek = true;
                     pause_start_time = Some(Instant::now());
@@ -413,7 +427,7 @@ fn play_video_simple(
                     break 'frame_loop; // Restart ffmpeg at new position
                 }
                 Ok(VideoControl::SeekForward(seconds)) => {
-                    // Pause and seek forward
+                    // Force pause and seek forward
                     is_paused = true;
                     show_frame_after_seek = true;
                     pause_start_time = Some(Instant::now());
@@ -425,7 +439,7 @@ fn play_video_simple(
                     break 'frame_loop; // Restart ffmpeg at new position
                 }
                 Ok(VideoControl::SeekBackward(seconds)) => {
-                    // Pause and seek backward
+                    // Force pause and seek backward
                     is_paused = true;
                     show_frame_after_seek = true;
                     pause_start_time = Some(Instant::now());
@@ -448,29 +462,31 @@ fn play_video_simple(
             let expected_video_time =
                 playback_start_video_time + elapsed_since_segment_start.as_secs_f64();
 
-            // Handle frame timing and dropping
-            if current_time > expected_video_time {
-                // We're ahead of schedule (video time > real time), wait
-                let time_ahead = current_time - expected_video_time;
-                thread::sleep(Duration::from_secs_f64(time_ahead));
-            } else if current_time < expected_video_time && !args.do_not_drop_frames {
-                // We're behind schedule - check if we should drop frames
-                let time_behind = expected_video_time - current_time;
-                let frames_behind = (time_behind * fps) as u32;
+            // Handle frame timing and dropping (skip timing logic when showing frame after seek)
+            if !show_frame_after_seek {
+                if current_time > expected_video_time {
+                    // We're ahead of schedule (video time > real time), wait
+                    let time_ahead = current_time - expected_video_time;
+                    thread::sleep(Duration::from_secs_f64(time_ahead));
+                } else if current_time < expected_video_time && !args.do_not_drop_frames {
+                    // We're behind schedule - check if we should drop frames
+                    let time_behind = expected_video_time - current_time;
+                    let frames_behind = (time_behind * fps) as u32;
 
-                if frames_behind > 1 {
-                    // Skip frames to catch up
-                    let frames_to_skip = frames_behind.min(5); // Don't skip too many at once
-                    current_time += frames_to_skip as f64 / fps;
+                    if frames_behind > 1 {
+                        // Skip frames to catch up
+                        let frames_to_skip = frames_behind.min(5); // Don't skip too many at once
+                        current_time += frames_to_skip as f64 / fps;
 
-                    // Try to skip the frame data in ffmpeg output
-                    let mut skip_buffer = vec![0u8; frame_size];
-                    for _ in 0..frames_to_skip {
-                        if reader.read_exact(&mut skip_buffer).is_err() {
-                            break;
+                        // Try to skip the frame data in ffmpeg output
+                        let mut skip_buffer = vec![0u8; frame_size];
+                        for _ in 0..frames_to_skip {
+                            if reader.read_exact(&mut skip_buffer).is_err() {
+                                break;
+                            }
                         }
+                        continue;
                     }
-                    continue;
                 }
             }
 
