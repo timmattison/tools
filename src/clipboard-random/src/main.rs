@@ -183,8 +183,8 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
     if format == OutputFormat::Raw {
         // Copy raw binary data to clipboard
         if dry_run {
-            println!("DRY RUN MODE: {} bytes of raw binary data generated but not copied to clipboard", bytes);
-            println!("Preview: {:?}", &random_bytes[..std::cmp::min(20, random_bytes.len())]);
+            println!("{:?}", random_bytes);
+            return Ok(());
         } else {
             copy_binary_to_clipboard(&random_bytes)?;
             println!("Generated {} bytes of raw binary data and copied to clipboard", bytes);
@@ -201,7 +201,8 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
     
     // Copy to clipboard (unless in dry run mode)
     if dry_run {
-        println!("DRY RUN MODE: Data generated but not copied to clipboard");
+        println!("{}", formatted_data);
+        return Ok(());
     } else {
         let mut clipboard = Clipboard::new()
             .context("Failed to access clipboard. Make sure you're running in a graphical environment.")?;
@@ -248,7 +249,8 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
     
     // Copy to clipboard (unless in dry run mode)
     if dry_run {
-        println!("DRY RUN MODE: Text generated but not copied to clipboard");
+        println!("{}", text);
+        return Ok(());
     } else {
         let mut clipboard = Clipboard::new()
             .context("Failed to access clipboard. Make sure you're running in a graphical environment.")?;
