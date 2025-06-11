@@ -4,4 +4,5 @@ import "github.com/timmattison/tools/internal"
 
 func main() {
 	internal.RunCommandInRepoDirectoriesWithFile("go.mod", []string{"go", "get", "-u", "all"})
+	internal.RunCommandInRepoDirectoriesWithFile("Cargo.toml", []string{"cargo", "upgrade"})
 }
