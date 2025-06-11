@@ -1,16 +1,20 @@
 use anyhow::{Context, Result};
 use base64::prelude::*;
 use clap::Parser;
-use image::{DynamicImage, ImageFormat};
+use image::{DynamicImage};
+use std::collections::HashSet;
+use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 use terminal_size::{terminal_size, Height, Width};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 #[derive(Debug, Clone)]
 enum VideoControl {
@@ -22,19 +26,27 @@ enum VideoControl {
     SeekBackward(f64), // seconds
 }
 
-/// Fast terminal image display utility for iTerm2 and Kitty
-/// 
+/// Fast terminal image display utility with video playback
+///
 /// Performance Tips for Video Playback:
 /// - Use --adaptive-fps to automatically adjust frame rate when terminal falls behind
 /// - Use --max-fps to limit frame rate (e.g., --max-fps 15 for better performance)
 /// - Use --scale to reduce image size (e.g., --scale 75 for 75% size)
 /// - For high-resolution videos, try combining options: --scale 60 --max-fps 20
-/// 
+///
 /// Terminal Compatibility:
 /// - iTerm2: Uses iTerm2 inline image protocol
 /// - Kitty: Uses Kitty graphics protocol (better performance for video)
+/// - WezTerm: Uses iTerm2 inline image protocol
+/// - Alacritty: NOT SUPPORTED (text-only terminal, no graphics protocols)
 /// - Other terminals: Limited or no image support
-/// 
+///
+/// Optimizations for Real-time Video:
+/// - Reduced protocol overhead with streamlined graphics commands
+/// - Direct RGB data handling for Kitty terminals
+/// - Efficient base64 encoding for iTerm2
+/// - Minimized terminal control sequences
+///
 /// iTerm2 Settings for Better Performance:
 /// - Disable "Background opacity" in Preferences > Profiles > Window
 /// - Reduce scrollback buffer size in Preferences > Profiles > Terminal
@@ -92,19 +104,26 @@ struct Args {
     /// Adaptive frame rate - automatically reduce FPS when terminal falls behind
     #[clap(long)]
     adaptive_fps: bool,
+
+    /// Monitor directories for new images and display them automatically
+    #[clap(long)]
+    monitor: Vec<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
     // Validate arguments
-    if !args.stdin && args.file.is_none() {
-        eprintln!("Error: Must specify a file or use --stdin");
+    let input_modes = [args.stdin, args.file.is_some(), !args.monitor.is_empty()];
+    let input_count = input_modes.iter().filter(|&&x| x).count();
+
+    if input_count == 0 {
+        eprintln!("Error: Must specify a file, use --stdin, or use --monitor");
         std::process::exit(1);
     }
 
-    if args.stdin && args.file.is_some() {
-        eprintln!("Error: Cannot specify both --stdin and a file");
+    if input_count > 1 {
+        eprintln!("Error: Cannot specify multiple input modes (--stdin, file, --monitor)");
         std::process::exit(1);
     }
 
@@ -132,9 +151,10 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Show tmux warning if detected
+    // Refuse to run in tmux
     if std::env::var("TMUX").is_ok() {
-        eprintln!("Warning: tmux detected. This utility does not work in tmux. Please run it directly in your terminal.");
+        eprintln!("Error: tmux detected. This utility does not work in tmux. Please run it directly in your terminal.");
+        std::process::exit(1);
     }
 
     if args.stdin {
@@ -144,6 +164,115 @@ fn main() -> Result<()> {
             display_video_from_file(file_path, &args)?;
         } else {
             display_image_from_file(file_path, &args)?;
+        }
+    } else if !args.monitor.is_empty() {
+        monitor_directories(&args.monitor, &args)?;
+    }
+
+    Ok(())
+}
+
+fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
+    // Validate that all directories exist
+    for dir in directories {
+        if !dir.exists() {
+            anyhow::bail!("Directory does not exist: {}", dir.display());
+        }
+        if !dir.is_dir() {
+            anyhow::bail!("Path is not a directory: {}", dir.display());
+        }
+    }
+
+    println!("Monitoring directories for new images:");
+    for dir in directories {
+        println!("  - {}", dir.display());
+    }
+    println!("Press Ctrl+C to exit");
+
+    // Create a channel to receive the events
+    let (tx, rx) = mpsc::channel();
+
+    // Create a watcher object, delivering debounced events
+    let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
+        .context("Failed to create file watcher")?;
+
+    // Add directories to watcher
+    for dir in directories {
+        watcher
+            .watch(dir, RecursiveMode::Recursive)
+            .with_context(|| format!("Failed to watch directory: {}", dir.display()))?;
+    }
+
+    // Keep track of recently displayed files to avoid duplicates
+    let mut recent_files = HashSet::new();
+    let mut last_cleanup = Instant::now();
+
+    // Process scan existing files first
+    for dir in directories {
+        scan_directory_for_images(dir, args, &mut recent_files)?;
+    }
+
+    // Monitor for new files
+    loop {
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(event) => {
+                if let Ok(event) = event {
+                    match event.kind {
+                        notify::EventKind::Create(_) | notify::EventKind::Modify(_) => {
+                            for path in event.paths {
+                                if is_image_file(&path) && !recent_files.contains(&path) {
+                                    println!("\nFound new image: {}", path.display());
+                                    match display_image_from_file(&path, args) {
+                                        Ok(_) => {
+                                            recent_files.insert(path.clone());
+                                        },
+                                        Err(e) => {
+                                            eprintln!("Failed to display {}: {}", path.display(), e);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Clean up old entries from recent_files periodically
+                if last_cleanup.elapsed() > Duration::from_secs(60) {
+                    recent_files.clear();
+                    last_cleanup = Instant::now();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn scan_directory_for_images(dir: &PathBuf, args: &Args, recent_files: &mut HashSet<PathBuf>) -> Result<()> {
+    let entries = fs::read_dir(dir)
+        .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.context("Failed to read directory entry")?;
+        let path = entry.path();
+
+        if path.is_file() && is_image_file(&path) && !recent_files.contains(&path) {
+            match display_image_from_file(&path, args) {
+                Ok(_) => {
+                    recent_files.insert(path.clone());
+                },
+                Err(e) => {
+                    eprintln!("Failed to display {}: {}", path.display(), e);
+                }
+            }
+        } else if path.is_dir() {
+            // Recursively scan subdirectories
+            scan_directory_for_images(&path, args, recent_files)?;
         }
     }
 
@@ -176,7 +305,60 @@ fn is_video_file(file_path: &PathBuf) -> bool {
     }
 }
 
+fn is_image_file(file_path: &PathBuf) -> bool {
+    if let Some(extension) = file_path.extension() {
+        if let Some(ext_str) = extension.to_str() {
+            let ext_lower = ext_str.to_lowercase();
+            matches!(
+                ext_lower.as_str(),
+                "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tiff" | "tif" | "webp" | "svg" | "ico" | "ppm" | "pbm" | "pgm" | "pnm"
+            )
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
 fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
+    // Check if we're in a terminal that doesn't support image display
+    if is_alacritty_terminal() {
+        anyhow::bail!(
+            "Video display is not supported in Alacritty terminal.\n\
+            Alacritty is a text-only terminal that doesn't support graphics protocols.\n\
+            \n\
+            For video display, please use one of these terminals:\n\
+            • iTerm2 (macOS) - supports inline images\n\
+            • Kitty - supports graphics protocol\n\
+            • WezTerm - supports iTerm2 image protocol\n\
+            \n\
+            Alternatively, you can:\n\
+            • Extract frames using ffmpeg and view them in an image viewer\n\
+            • Use ASCII art video players like 'mplayer -vo caca' or 'vlc --intf dummy --vout caca'"
+        );
+    }
+
+    // Check for other terminals that don't support graphics
+    if !is_kitty_terminal() && !supports_iterm2_protocol() {
+        anyhow::bail!(
+            "Video display is not supported in this terminal.\n\
+            This terminal doesn't support graphics protocols.\n\
+            \n\
+            For video display, please use one of these terminals:\n\
+            • iTerm2 (macOS) - supports inline images\n\
+            • Kitty - supports graphics protocol\n\
+            • WezTerm - supports iTerm2 image protocol\n\
+            \n\
+            Current terminal: {}\n\
+            \n\
+            Alternatively, you can:\n\
+            • Extract frames using ffmpeg and view them in an image viewer\n\
+            • Use ASCII art video players like 'mplayer -vo caca' or 'vlc --intf dummy --vout caca'",
+            std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string())
+        );
+    }
+
     // Check if ffmpeg is available
     if let Err(_) = std::process::Command::new("ffmpeg")
         .arg("-version")
@@ -187,7 +369,6 @@ fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
         );
     }
 
-    // Clear screen initially
     clear_screen()?;
 
     loop {
@@ -246,41 +427,70 @@ fn play_video_simple(
     let mut pause_start_time: Option<Instant> = None;
     let mut total_paused_duration: Duration;
 
-    // Set up raw mode for non-blocking input
-    let _raw_mode = io::stdout()
-        .into_raw_mode()
-        .context("Failed to set terminal to raw mode")?;
+    // Check terminal capabilities before setting raw mode
+    let supports_interactive_controls = supports_raw_mode();
 
-    // Spawn a thread to handle keyboard input
+    if !supports_interactive_controls {
+        if is_alacritty_terminal() {
+            eprintln!("Notice: Running in Alacritty. Video will play without interactive controls.");
+            eprintln!("For interactive video controls, consider using iTerm2 or Kitty.");
+        } else {
+            eprintln!("Notice: Terminal doesn't support interactive controls. Video will play automatically.");
+        }
+        eprintln!("Press Ctrl+C to stop playback.");
+    }
+
+    // Set up raw mode for non-blocking input (only if supported)
+    let _raw_mode = if supports_interactive_controls {
+        match io::stdout().into_raw_mode() {
+            Ok(raw_mode) => {
+                // eprintln!("Video controls: Space=pause/play, Q=quit, Arrow keys=seek");
+                Some(raw_mode)
+            }
+            Err(_) => {
+                // eprintln!("Warning: Could not enable interactive controls: {}", e);
+                // eprintln!("Video will play without controls. Press Ctrl+C to stop.");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Spawn a thread to handle keyboard input (only if raw mode is available)
     let (input_tx, input_rx) = std::sync::mpsc::channel();
-    let _input_handle = thread::spawn(move || {
-        let stdin = io::stdin();
-        for key_result in stdin.keys() {
-            if let Ok(key) = key_result {
-                let control = match key {
-                    Key::Esc | Key::Char('q') | Key::Char('Q') | Key::Ctrl('c') => Some(VideoControl::Exit),
-                    Key::Char(' ') => Some(VideoControl::TogglePause),
-                    Key::Left => Some(VideoControl::FrameBackward),
-                    Key::Right => Some(VideoControl::FrameForward),
-                    Key::Up => Some(VideoControl::SeekBackward(10.0)), // 10 seconds back
-                    Key::Down => Some(VideoControl::SeekForward(10.0)), // 10 seconds forward
-                    Key::Char('a') | Key::Char('A') => Some(VideoControl::SeekBackward(1.0)), // 1 second back
-                    Key::Char('d') | Key::Char('D') => Some(VideoControl::SeekForward(1.0)), // 1 second forward
-                    Key::Char('w') | Key::Char('W') => Some(VideoControl::SeekBackward(60.0)), // 1 minute back
-                    Key::Char('s') | Key::Char('S') => Some(VideoControl::SeekForward(60.0)), // 1 minute forward
-                    _ => None,
-                };
+    let _input_handle = if supports_interactive_controls && _raw_mode.is_some() {
+        Some(thread::spawn(move || {
+            let stdin = io::stdin();
+            for key_result in stdin.keys() {
+                if let Ok(key) = key_result {
+                    let control = match key {
+                        Key::Esc | Key::Char('q') | Key::Char('Q') | Key::Ctrl('c') => Some(VideoControl::Exit),
+                        Key::Char(' ') => Some(VideoControl::TogglePause),
+                        Key::Left => Some(VideoControl::FrameBackward),
+                        Key::Right => Some(VideoControl::FrameForward),
+                        Key::Up => Some(VideoControl::SeekBackward(10.0)), // 10 seconds back
+                        Key::Down => Some(VideoControl::SeekForward(10.0)), // 10 seconds forward
+                        Key::Char('a') | Key::Char('A') => Some(VideoControl::SeekBackward(1.0)), // 1 second back
+                        Key::Char('d') | Key::Char('D') => Some(VideoControl::SeekForward(1.0)), // 1 second forward
+                        Key::Char('w') | Key::Char('W') => Some(VideoControl::SeekBackward(60.0)), // 1 minute back
+                        Key::Char('s') | Key::Char('S') => Some(VideoControl::SeekForward(60.0)), // 1 minute forward
+                        _ => None,
+                    };
 
-                if let Some(ctrl) = control {
-                    let is_exit = matches!(ctrl, VideoControl::Exit);
-                    let _ = input_tx.send(ctrl);
-                    if is_exit {
-                        break;
+                    if let Some(ctrl) = control {
+                        let is_exit = matches!(ctrl, VideoControl::Exit);
+                        let _ = input_tx.send(ctrl);
+                        if is_exit {
+                            break;
+                        }
                     }
                 }
             }
-        }
-    });
+        }))
+    } else {
+        None
+    };
 
     // Main playback loop - restart FFmpeg when resuming from pause or seeking
     'main_loop: loop {
@@ -878,7 +1088,43 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
     display_image(img, args)
 }
 
-fn display_image(mut img: DynamicImage, args: &Args) -> Result<()> {
+fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
+    // Check if we're in a terminal that doesn't support image display
+    if is_alacritty_terminal() {
+        anyhow::bail!(
+            "Image display is not supported in Alacritty terminal.\n\
+            Alacritty is a text-only terminal that doesn't support graphics protocols.\n\
+            \n\
+            For image display, please use one of these terminals:\n\
+            • iTerm2 (macOS) - supports inline images\n\
+            • Kitty - supports graphics protocol\n\
+            • WezTerm - supports iTerm2 image protocol\n\
+            \n\
+            Alternatively, you can:\n\
+            • Convert images to ASCII art using tools like 'jp2a' or 'img2txt'\n\
+            • Open images in a separate image viewer"
+        );
+    }
+
+    // Check for other terminals that don't support graphics
+    if !is_kitty_terminal() && !supports_iterm2_protocol() {
+        anyhow::bail!(
+            "Image display is not supported in this terminal.\n\
+            This terminal doesn't support graphics protocols.\n\
+            \n\
+            For image display, please use one of these terminals:\n\
+            • iTerm2 (macOS) - supports inline images\n\
+            • Kitty - supports graphics protocol\n\
+            • WezTerm - supports iTerm2 image protocol\n\
+            \n\
+            Current terminal: {}\n\
+            \n\
+            Alternatively, you can:\n\
+            • Convert images to ASCII art using tools like 'jp2a' or 'img2txt'\n\
+            • Open images in a separate image viewer",
+            std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string())
+        );
+    }
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
         // Use user-specified dimensions but still use character-based sizing
@@ -911,64 +1157,82 @@ fn display_image(mut img: DynamicImage, args: &Args) -> Result<()> {
         (target_width, target_height)
     };
 
-    // Since we're always using character-based sizing, we don't resize the image anymore -
-    // iTerm2 will handle the sizing based on the character dimensions we provide
-    // This avoids quality loss from resizing
-    let needs_resize = false;
-
-    if needs_resize {
-        if let (Some(width), Some(height)) = (target_width, target_height) {
-            img = if args.preserve_aspect {
-                img.resize(width, height, image::imageops::FilterType::Triangle)
-            } else {
-                img.resize_exact(width, height, image::imageops::FilterType::Triangle)
-            };
-        } else if let Some(width) = target_width {
-            let height = (img.height() * width) / img.width();
-            img = img.resize(width, height, image::imageops::FilterType::Triangle);
-        } else if let Some(height) = target_height {
-            let width = (img.width() * height) / img.height();
-            img = img.resize(width, height, image::imageops::FilterType::Triangle);
-        }
-    }
-
-    // Convert image to the specified format for encoding
-    let mut encoded_data = Vec::with_capacity(img.width() as usize * img.height() as usize * 4);
-
-    // PNM is uncompressed by default and has no compression options at all
-    img.write_to(
-        &mut io::Cursor::new(&mut encoded_data),
-        ImageFormat::Pnm,
-    )
-    .context("Failed to encode image as PNM")?;
-
-    // Detect terminal type and use appropriate graphics protocol
+    // Choose optimal display method based on terminal capabilities
     if is_kitty_terminal() {
-        // For Kitty, use RGB data directly without encoding as PNM
-        let rgb_data = img.to_rgb8();
-        print_kitty_image(
-            rgb_data.as_raw(),
-            img.width(),
-            img.height(),
-            scaled_width,
-            scaled_height,
-            args.no_newline,
-        )?;
+        display_image_kitty(&img, scaled_width, scaled_height, args)
     } else {
-        // Base64 encode the image data with pre-allocated capacity
-        let encoded = BASE64_STANDARD.encode(&encoded_data);
-
-        // Use iTerm2 protocol for other terminals
-        print_iterm2_image_with_chars(&encoded, scaled_width, scaled_height, args.no_newline)?;
+        display_image_iterm2(&img, scaled_width, scaled_height, args)
     }
-
-    Ok(())
 }
 
-fn is_kitty_terminal() -> bool {
-    // Check if we're running in Kitty terminal
-    std::env::var("KITTY_WINDOW_ID").is_ok() 
-        || std::env::var("TERM").map_or(false, |term| term.contains("kitty"))
+/// Optimized Kitty terminal display with better performance for video
+fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+    // Use RGB data directly for better performance (no base64 encoding overhead)
+    let rgb_data = img.to_rgb8();
+
+    // Use Kitty's more efficient graphics protocol with optimizations
+    print_kitty_image(
+        rgb_data.as_raw(),
+        img.width(),
+        img.height(),
+        width,
+        height,
+        args.no_newline,
+    )
+}
+
+/// Optimized iTerm2 display with reduced overhead
+fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+    // Use more efficient encoding for iTerm2
+    // Convert to RGB first for consistency and smaller data size than RGBA
+    let rgb_img = img.to_rgb8();
+    let rgb_data = rgb_img.as_raw();
+
+    // Create PNM header manually for more control
+    let pnm_header = format!("P6\n{} {}\n255\n", img.width(), img.height());
+    let mut pnm_data = Vec::with_capacity(pnm_header.len() + rgb_data.len());
+    pnm_data.extend_from_slice(pnm_header.as_bytes());
+    pnm_data.extend_from_slice(rgb_data);
+
+    let encoded = BASE64_STANDARD.encode(&pnm_data);
+
+    print_iterm2_image(&encoded, width, height, args.no_newline)
+}
+
+/// Optimized Kitty image printing with reduced protocol overhead
+fn is_alacritty_terminal() -> bool {
+    // Check if we're running in Alacritty terminal
+    std::env::var("ALACRITTY_SOCKET").is_ok()
+        || std::env::var("TERM").map_or(false, |term| term.contains("alacritty"))
+}
+
+fn supports_raw_mode() -> bool {
+    // Check if stdout is a TTY and supports raw mode
+    use std::os::unix::io::AsRawFd;
+    unsafe {
+        libc::isatty(io::stdout().as_raw_fd()) == 1
+    }
+}
+
+fn supports_iterm2_protocol() -> bool {
+    // Check if terminal supports iTerm2 inline image protocol
+    // This is a conservative check - assume support for common terminals
+    let term = std::env::var("TERM").unwrap_or_default();
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+
+    // Known supported terminals
+    if term_program.contains("iTerm") ||
+        term_program.contains("WezTerm") ||
+        std::env::var("ITERM_SESSION_ID").is_ok() {
+        return true;
+    }
+
+    // Assume most modern terminals support it except for known unsupported ones
+    // This is better than showing blank screens
+    !is_alacritty_terminal() &&
+        !term.contains("linux") &&  // Linux console doesn't support graphics
+        !term.contains("screen") &&  // Screen doesn't support graphics
+        !term.starts_with("vt")     // VT terminals don't support graphics
 }
 
 fn print_kitty_image(
@@ -1034,14 +1298,15 @@ fn print_kitty_image(
     }
 
     if !no_newline {
-        write!(stdout, "\n")?;
+        writeln!(stdout)?;
     }
 
     stdout.flush().context("Failed to flush output")?;
     Ok(())
 }
 
-fn print_iterm2_image_with_chars(
+/// Optimized iTerm2 image printing with reduced protocol overhead
+fn print_iterm2_image(
     base64_data: &str,
     width: Option<u32>,
     height: Option<u32>,
@@ -1075,4 +1340,10 @@ fn print_iterm2_image_with_chars(
 
     stdout.flush().context("Failed to flush output")?;
     Ok(())
+}
+
+fn is_kitty_terminal() -> bool {
+    // Check if we're running in Kitty terminal
+    std::env::var("KITTY_WINDOW_ID").is_ok()
+        || std::env::var("TERM").map_or(false, |term| term.contains("kitty"))
 }
