@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"errors"
 	"fmt"
 	"github.com/charmbracelet/log"
 	"os"
@@ -64,14 +65,14 @@ func GetRepoBase() (string, error) {
 	return "", os.ErrNotExist
 }
 
-func RunCommandInRepoDirectoriesWithFile(file string, command []string) {
+func RunCommandInRepoDirectoriesWithFile(file string, command []string) error {
 	var repoBase string
 	var err error
 
 	commandString := strings.Join(command, " ")
 
 	if repoBase, err = GetRepoBase(); err != nil {
-		log.Fatal("Couldn't find the git repo", "error", err)
+		return errors.New(fmt.Sprintf("Couldn't find the git repo [%s]", err))
 	}
 
 	repo := path.Dir(repoBase) + "/"
@@ -84,15 +85,17 @@ func RunCommandInRepoDirectoriesWithFile(file string, command []string) {
 		}
 
 		if err = runCommandInDirectory(entryPath, command); err != nil {
-			log.Fatal(fmt.Sprintf("Error running %s", commandString), "directory", entryPath, "error", err)
+			log.Error(fmt.Sprintf("Error running %s", commandString), "directory", entryPath, "error", err)
 		}
 
 		log.Info(fmt.Sprintf("Ran %s", commandString), "directory", entryPath)
 	})
 
 	if err = filepath.WalkDir(repo, VisitWithNameChecker(nil, nil, directoryHandler)); err != nil {
-		log.Fatal("Error walking path", "path", repo, "error", err)
+		return errors.New(fmt.Sprintf("Error walking path [%s] [%s]", repo, err))
 	}
+
+	return nil
 }
 
 func runCommandInDirectory(dir string, command []string) error {
