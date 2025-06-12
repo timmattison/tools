@@ -4,3 +4,5 @@ cmd/prcp/prcp
 cmd/update-aws-credentials/update-aws-credentials
 cmd/sizeof/sizeof
 go.sum
+target
+Cargo.lock

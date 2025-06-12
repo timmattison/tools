@@ -1,0 +1,15 @@
+[package]
+name = "update-aws-credentials"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tim Mattison"]
+description = "Takes AWS credentials from clipboard and updates AWS credentials file"
+
+[dependencies]
+arboard = "3.5.0"
+aws-config = "1.6.3"
+aws-credential-types = "1.2.3"
+aws-sdk-sts = "1.73.0"
+tokio = { version = "1.45.1", features = ["full"] }
+anyhow = "1.0.98"
+dirs = "6.0.0"

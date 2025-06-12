@@ -29,7 +29,7 @@ async fn verify_credentials(
         secret_access_key.to_string(),
         Some(session_token.to_string()),
         None,
-        "update-aws-credentials-rs",
+        "update-aws-credentials",
     );
 
     let region_provider = RegionProviderChain::default_provider();

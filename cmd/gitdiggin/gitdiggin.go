@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal"
 	"os"
 	"path/filepath"
 	"sort"
@@ -273,6 +274,21 @@ func main() {
 		}
 
 		wg.Wait()
+
+		// If no repositories were found, try to find the repository root using internal.GetRepoBase
+		if atomic.LoadInt32(&reposFound) == 0 {
+			// Try to find the repository root
+			gitDir, err := internal.GetRepoBase()
+			if err == nil {
+				// Found a repository root
+				repoPath := filepath.Dir(gitDir) // Get the directory containing .git
+				atomic.AddInt32(&reposFound, 1)
+				sendProgress(repoPath)
+
+				// Process the repository
+				processGitRepo(repoPath, &result, ignoreFailures, searchTerm, *searchContents, *searchAllBranches)
+			}
+		}
 
 		// Only send results if we haven't cancelled
 		select {
