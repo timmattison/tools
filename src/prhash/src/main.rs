@@ -42,7 +42,7 @@ enum HashError {
 // Define a trait for hashing
 trait Hasher {
     fn update(&mut self, data: &[u8]);
-    fn finalize(&self) -> String;
+    fn finalize(&mut self) -> String;
     fn reset(&mut self);
 }
 
@@ -55,9 +55,9 @@ impl Hasher for Md5Hasher {
         self.0.update(data);
     }
 
-    fn finalize(&self) -> String {
+    fn finalize(&mut self) -> String {
         use md5::Digest;
-        let result = self.0.clone().finalize();
+        let result = std::mem::replace(&mut self.0, Md5::new()).finalize();
         format!("{:x}", result)
     }
 
@@ -74,9 +74,9 @@ impl Hasher for Sha1Hasher {
         self.0.update(data);
     }
 
-    fn finalize(&self) -> String {
+    fn finalize(&mut self) -> String {
         use sha1::Digest;
-        let result = self.0.clone().finalize();
+        let result = std::mem::replace(&mut self.0, Sha1::new()).finalize();
         format!("{:x}", result)
     }
 
@@ -93,9 +93,9 @@ impl Hasher for Sha256Hasher {
         self.0.update(data);
     }
 
-    fn finalize(&self) -> String {
+    fn finalize(&mut self) -> String {
         use sha2::Digest;
-        let result = self.0.clone().finalize();
+        let result = std::mem::replace(&mut self.0, Sha256::new()).finalize();
         format!("{:x}", result)
     }
 
@@ -112,9 +112,9 @@ impl Hasher for Sha512Hasher {
         self.0.update(data);
     }
 
-    fn finalize(&self) -> String {
+    fn finalize(&mut self) -> String {
         use sha2::Digest;
-        let result = self.0.clone().finalize();
+        let result = std::mem::replace(&mut self.0, Sha512::new()).finalize();
         format!("{:x}", result)
     }
 
@@ -130,8 +130,8 @@ impl Hasher for Blake3Hasher {
         self.0.update(data);
     }
 
-    fn finalize(&self) -> String {
-        self.0.clone().finalize().to_hex().to_string()
+    fn finalize(&mut self) -> String {
+        std::mem::replace(&mut self.0, blake3::Hasher::new()).finalize().to_hex().to_string()
     }
 
     fn reset(&mut self) {
@@ -211,7 +211,7 @@ fn hash_file(path: &Path, hash_type: &str) -> Result<()> {
             .progress_chars("#>-"),
     );
 
-    let mut buffer = [0; 16 * 1024 * 1024]; // 16MB buffer
+    let mut buffer = vec![0u8; 64 * 1024]; // 64KB buffer
     let mut total_read = 0;
     let start_time = Instant::now();
     let mut paused = false;
