@@ -12,7 +12,7 @@ use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use std::{
     fs::File,
-    io::{self, BufReader, Read, Seek, SeekFrom},
+    io::{self, BufReader, Read},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
@@ -192,15 +192,16 @@ fn format_throughput(throughput: u64) -> String {
 fn hash_file(path: &Path, hash_type: &str) -> Result<()> {
     Term::stdout();
     let mut hasher = create_hasher(hash_type)?;
-    
+
     // Open the file
-    let file = File::open(path).with_context(|| format!("Failed to open file {}", path.display()))?;
+    let file =
+        File::open(path).with_context(|| format!("Failed to open file {}", path.display()))?;
     let file_size = file.metadata()?.len();
     let file_name = path.display();
-    
+
     // Create a buffered reader
     let mut reader = BufReader::new(file);
-    
+
     // Create a progress bar
     let pb = ProgressBar::new(file_size);
     pb.set_style(
@@ -209,26 +210,28 @@ fn hash_file(path: &Path, hash_type: &str) -> Result<()> {
             .unwrap()
             .progress_chars("#>-"),
     );
-    
+
     let mut buffer = [0; 16 * 1024 * 1024]; // 16MB buffer
     let mut total_read = 0;
     let start_time = Instant::now();
     let mut paused = false;
-    
+
     // Enable raw mode for key detection
     enable_raw_mode()?;
-    
+
     // Clear screen and show initial message
     println!("Hashing {} with {}", file_name, hash_type);
     println!("Press SPACE to pause/resume, CTRL-C to abort");
 
-    'outer: loop {
+    loop {
         // Check for key presses
         while event::poll(Duration::from_millis(0))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => {
+                        KeyCode::Char('c')
+                            if key.modifiers.contains(event::KeyModifiers::CONTROL) =>
+                        {
                             pb.finish_and_clear();
                             disable_raw_mode()?;
                             println!("Hashing aborted");
@@ -249,19 +252,19 @@ fn hash_file(path: &Path, hash_type: &str) -> Result<()> {
                 }
             }
         }
-        
+
         if paused {
             thread::sleep(Duration::from_millis(100));
             continue;
         }
-        
+
         match reader.read(&mut buffer) {
             Ok(0) => break, // End of file
             Ok(bytes_read) => {
                 hasher.update(&buffer[0..bytes_read]);
                 total_read += bytes_read as u64;
                 pb.set_position(total_read);
-                
+
                 // Show throughput every 500ms
                 if total_read % (32 * 1024 * 1024) == 0 {
                     let throughput = calculate_throughput(start_time, Instant::now(), total_read);
@@ -280,16 +283,16 @@ fn hash_file(path: &Path, hash_type: &str) -> Result<()> {
             }
         }
     }
-    
+
     // Finalize and print the hash
     let hash = hasher.finalize();
-    
+
     pb.finish_and_clear();
     disable_raw_mode()?;
-    
+
     // Print the final result
     println!("{}  {}", hash, file_name);
-    
+
     Ok(())
 }
 
@@ -306,7 +309,7 @@ fn main() -> Result<()> {
     }
 
     let hash_type = &args.hash_type;
-    
+
     if !valid_hash_types().contains(&hash_type.to_string()) {
         println!("Invalid hash type.");
         print_valid_hash_types();
@@ -315,7 +318,7 @@ fn main() -> Result<()> {
 
     for input_file in &args.input_files {
         let path = PathBuf::from(input_file);
-        
+
         if let Err(e) = hash_file(&path, hash_type) {
             eprintln!("Error hashing file {}: {}", path.display(), e);
             std::process::exit(1);
