@@ -6,7 +6,7 @@ use crossterm::{
 };
 use dialoguer::console::Term;
 use indicatif::{ProgressBar, ProgressStyle};
-use md5::Md5;
+use md5::{Digest, Md5};
 use num_format::{Locale, ToFormattedString};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
@@ -190,7 +190,7 @@ fn format_throughput(throughput: u64) -> String {
 }
 
 fn hash_file(path: &Path, hash_type: &str) -> Result<()> {
-    let term = Term::stdout();
+    Term::stdout();
     let mut hasher = create_hasher(hash_type)?;
     
     // Open the file

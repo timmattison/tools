@@ -1,4 +1,4 @@
-# prhash-rs
+# prhash
 
 Rust implementation of a tool to hash files with progress display.
 
