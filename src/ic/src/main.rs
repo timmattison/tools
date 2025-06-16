@@ -120,8 +120,11 @@ fn main() -> Result<()> {
     } else if let Some(ref file_path) = args.file {
         if is_video_file(file_path) {
             display_video_from_file(file_path, &args)?;
-        } else {
+        } else if is_image_file(file_path) {
             display_image_from_file(file_path, &args)?;
+        } else {
+            // Treat as text file
+            display_text_file(file_path)?;
         }
     } else if !args.monitor.is_empty() {
         monitor_directories(&args.monitor, &args)?;
@@ -142,11 +145,11 @@ fn validate_arguments(args: &Args) -> Result<()> {
 fn validate_input_modes(args: &Args) -> Result<()> {
     let input_modes = [args.stdin, args.file.is_some(), !args.monitor.is_empty()];
     let input_count = input_modes.iter().filter(|&&x| x).count();
-
+    
     if input_count == 0 {
         anyhow::bail!("Must specify a file, use --stdin, or use --monitor");
     }
-
+    
     if input_count > 1 {
         anyhow::bail!("Cannot specify multiple input modes (--stdin, file, --monitor)");
     }
@@ -185,9 +188,8 @@ fn validate_frame_options(args: &Args) -> Result<()> {
 }
 
 fn validate_environment() -> Result<()> {
-    if std::env::var("TMUX").is_ok() {
-        anyhow::bail!("tmux detected. This utility does not work in tmux. Please run it directly in your terminal.");
-    }
+    // Environment validation that applies to all file types
+    // tmux check moved to validate_terminal_for_graphics() since it only affects image/video display
     Ok(())
 }
 
@@ -228,7 +230,7 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
 
     // Process scan existing files first
     for dir in directories {
-        scan_directory_for_images(dir, args, &mut recent_files)?;
+        scan_directory_for_files(dir, args, &mut recent_files)?;
     }
 
     // Monitor for new files
@@ -239,14 +241,26 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                     match event.kind {
                         notify::EventKind::Create(_) | notify::EventKind::Modify(_) => {
                             for path in event.paths {
-                                if is_image_file(&path) && !recent_files.contains(&path) {
-                                    println!("\nFound new image: {}", path.display());
-                                    match display_image_from_file(&path, args) {
-                                        Ok(_) => {
-                                            recent_files.insert(path.clone());
-                                        },
-                                        Err(e) => {
-                                            eprintln!("Failed to display {}: {}", path.display(), e);
+                                if !recent_files.contains(&path) {
+                                    if is_image_file(&path) {
+                                        println!("\nFound new image: {}", path.display());
+                                        match display_image_from_file(&path, args) {
+                                            Ok(_) => {
+                                                recent_files.insert(path.clone());
+                                            },
+                                            Err(e) => {
+                                                eprintln!("Failed to display image {}: {}", path.display(), e);
+                                            }
+                                        }
+                                    } else if is_text_file(&path) {
+                                        println!("\nFound new text file: {}", path.display());
+                                        match display_text_file(&path) {
+                                            Ok(_) => {
+                                                recent_files.insert(path.clone());
+                                            },
+                                            Err(e) => {
+                                                eprintln!("Failed to display text file {}: {}", path.display(), e);
+                                            }
                                         }
                                     }
                                 }
@@ -272,26 +286,38 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn scan_directory_for_images(dir: &PathBuf, args: &Args, recent_files: &mut HashSet<PathBuf>) -> Result<()> {
+fn scan_directory_for_files(dir: &PathBuf, args: &Args, recent_files: &mut HashSet<PathBuf>) -> Result<()> {
     let entries = fs::read_dir(dir)
         .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
 
     for entry in entries {
         let entry = entry.context("Failed to read directory entry")?;
         let path = entry.path();
-
-        if path.is_file() && is_image_file(&path) && !recent_files.contains(&path) {
-            match display_image_from_file(&path, args) {
-                Ok(_) => {
-                    recent_files.insert(path.clone());
-                },
-                Err(e) => {
-                    eprintln!("Failed to display {}: {}", path.display(), e);
+        
+        if path.is_file() && !recent_files.contains(&path) {
+            if is_image_file(&path) {
+                match display_image_from_file(&path, args) {
+                    Ok(_) => {
+                        recent_files.insert(path.clone());
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to display image {}: {}", path.display(), e);
+                    }
+                }
+            } else if is_text_file(&path) {
+                match display_text_file(&path) {
+                    Ok(_) => {
+                        recent_files.insert(path.clone());
+                    },
+                    Err(e) => {
+                        eprintln!("Failed to display text file {}: {}", path.display(), e);
+                    }
                 }
             }
+            // Note: Video files are not handled in directory monitoring for now
         } else if path.is_dir() {
             // Recursively scan subdirectories
-            scan_directory_for_images(&path, args, recent_files)?;
+            scan_directory_for_files(&path, args, recent_files)?;
         }
     }
 
@@ -340,6 +366,11 @@ fn is_image_file(file_path: &PathBuf) -> bool {
     }
 }
 
+fn is_text_file(file_path: &PathBuf) -> bool {
+    // If it's not an image or video file, treat it as text
+    !is_image_file(file_path) && !is_video_file(file_path)
+}
+
 fn ensure_ffmpeg_available() -> Result<()> {
     if std::process::Command::new("ffmpeg")
         .arg("-version")
@@ -363,9 +394,14 @@ fn ensure_ffprobe_available() -> Result<()> {
 }
 
 fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature: &str) -> Result<()> {
+    // Check for tmux first, since graphics don't work in tmux
+    if std::env::var("TMUX").is_ok() {
+        anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
+    }
+    
     if !terminal_caps.supports_graphics {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
-
+        
         let error_msg = match terminal_caps.terminal_type {
             TerminalType::Alacritty => format!(
                 "{} display is not supported in Alacritty terminal.\n\
@@ -398,7 +434,7 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
                 feature, feature.to_lowercase(), term
             )
         };
-
+        
         anyhow::bail!("{}", error_msg);
     }
     Ok(())
@@ -406,12 +442,12 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
 
 fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
-
+    
     validate_terminal_for_graphics(&terminal_caps, "Video")?;
     ensure_ffmpeg_available()?;
 
-    // Clear screen initially with optimized function
-    clear_screen_optimized()?;
+    // Clear screen initially with function
+    clear_screen()?;
 
     loop {
         // Get video info first to determine frame rate and duration
@@ -577,7 +613,7 @@ fn process_frame_display(
     };
 
     if *frames_since_clear >= cleanup_frequency {
-        clear_scrollback_optimized()?;
+        clear_scrollback()?;
         *frames_since_clear = 0;
     }
 
@@ -598,9 +634,9 @@ fn process_frame_display(
     };
 
     if should_clear_screen {
-        clear_screen_optimized()?;
+        clear_screen()?;
     } else {
-        move_cursor_home_optimized()?;
+        move_cursor_home()?;
     }
 
     display_image(img, args)?;
@@ -1085,15 +1121,15 @@ fn get_video_duration(file_path: &PathBuf) -> Result<f64> {
     Ok(duration_str.parse().unwrap_or(60.0))
 }
 
-fn clear_screen_optimized() -> Result<()> {
+fn clear_screen() -> Result<()> {
     // Use more efficient screen clearing for video playback
     print!("\x1b[2J\x1b[H"); // Clear screen and move cursor to top-left
     io::stdout().flush().context("Failed to flush output")?;
     Ok(())
 }
 
-fn clear_scrollback_optimized() -> Result<()> {
-    // Clear iTerm2 scrollback buffer to free memory - optimized for video playback
+fn clear_scrollback() -> Result<()> {
+    // Clear iTerm2 scrollback buffer to free memory - for video playback
     print!("\x1b]1337;ClearScrollback\x07");
     io::stdout()
         .flush()
@@ -1101,7 +1137,7 @@ fn clear_scrollback_optimized() -> Result<()> {
     Ok(())
 }
 
-fn move_cursor_home_optimized() -> Result<()> {
+fn move_cursor_home() -> Result<()> {
     // Optimized cursor positioning for video frames
     print!("\x1b[1;1H"); // Move cursor to top-left without clearing
     io::stdout().flush().context("Failed to flush output")?;
@@ -1184,6 +1220,18 @@ fn display_image_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     display_image(img, args)
 }
 
+fn display_text_file(file_path: &PathBuf) -> Result<()> {
+    let contents = fs::read_to_string(file_path)
+        .with_context(|| format!("Failed to read text file: {}", file_path.display()))?;
+    
+    print!("{}", contents);
+    io::stdout()
+        .flush()
+        .context("Failed to flush output")?;
+    
+    Ok(())
+}
+
 fn display_image_from_stdin(args: &Args) -> Result<()> {
     let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
@@ -1198,13 +1246,8 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 }
 
 fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
-    // Use optimized terminal graphics for better video performance
-    display_image_optimized(img, args)
-}
-
-fn display_image_optimized(img: DynamicImage, args: &Args) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
-
+    
     validate_terminal_for_graphics(&terminal_caps, "Image")?;
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
@@ -1227,7 +1270,7 @@ fn display_image_optimized(img: DynamicImage, args: &Args) -> Result<()> {
         (Some(safe_width), Some(safe_height))
     };
 
-    // Apply scaling for performance optimization
+    // Apply scaling
     let (scaled_width, scaled_height) = if args.scale < 100 {
         let scale_factor = args.scale as f32 / 100.0;
         (
@@ -1240,19 +1283,19 @@ fn display_image_optimized(img: DynamicImage, args: &Args) -> Result<()> {
 
     // Choose optimal display method based on terminal capabilities
     if is_kitty_terminal() {
-        display_image_kitty_optimized(&img, scaled_width, scaled_height, args)
+        display_image_kitty(&img, scaled_width, scaled_height, args)
     } else {
-        display_image_iterm2_optimized(&img, scaled_width, scaled_height, args)
+        display_image_iterm2(&img, scaled_width, scaled_height, args)
     }
 }
 
-/// Optimized Kitty terminal display with better performance for video
-fn display_image_kitty_optimized(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+/// Kitty terminal display with better performance for video
+fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
     // Use RGB data directly for better performance (no base64 encoding overhead)
     let rgb_data = img.to_rgb8();
 
     // Use Kitty's more efficient graphics protocol with optimizations
-    print_kitty_image_optimized(
+    print_kitty_image(
         rgb_data.as_raw(),
         img.width(),
         img.height(),
@@ -1263,7 +1306,7 @@ fn display_image_kitty_optimized(img: &DynamicImage, width: Option<u32>, height:
 }
 
 /// Optimized iTerm2 display with reduced overhead
-fn display_image_iterm2_optimized(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
     // Use more efficient encoding for iTerm2
     // Convert to RGB first for consistency and smaller data size than RGBA
     let rgb_img = img.to_rgb8();
@@ -1275,10 +1318,10 @@ fn display_image_iterm2_optimized(img: &DynamicImage, width: Option<u32>, height
     pnm_data.extend_from_slice(pnm_header.as_bytes());
     pnm_data.extend_from_slice(rgb_data);
 
-    // Use optimized base64 encoding
+    // Use base64 encoding
     let encoded = BASE64_STANDARD.encode(&pnm_data);
 
-    print_iterm2_image_optimized(&encoded, width, height, args.no_newline)
+    print_iterm2_image(&encoded, width, height, args.no_newline)
 }
 
 /// Optimized Kitty image printing with reduced protocol overhead
@@ -1337,7 +1380,7 @@ fn is_kitty_terminal() -> bool {
     matches!(detect_terminal_capabilities().terminal_type, TerminalType::Kitty)
 }
 
-fn print_kitty_image_optimized(
+fn print_kitty_image(
     rgb_data: &[u8],
     img_width: u32,
     img_height: u32,
@@ -1408,7 +1451,7 @@ fn print_kitty_image_optimized(
 }
 
 /// Optimized iTerm2 image printing with reduced protocol overhead
-fn print_iterm2_image_optimized(
+fn print_iterm2_image(
     base64_data: &str,
     width: Option<u32>,
     height: Option<u32>,
@@ -1443,3 +1486,4 @@ fn print_iterm2_image_optimized(
     stdout.flush().context("Failed to flush output")?;
     Ok(())
 }
+
