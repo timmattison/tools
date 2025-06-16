@@ -228,11 +228,6 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     let mut recent_files = HashSet::new();
     let mut last_cleanup = Instant::now();
 
-    // Process scan existing files first
-    for dir in directories {
-        scan_directory_for_files(dir, args, &mut recent_files)?;
-    }
-
     // Monitor for new files
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
@@ -286,43 +281,7 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn scan_directory_for_files(dir: &PathBuf, args: &Args, recent_files: &mut HashSet<PathBuf>) -> Result<()> {
-    let entries = fs::read_dir(dir)
-        .with_context(|| format!("Failed to read directory: {}", dir.display()))?;
 
-    for entry in entries {
-        let entry = entry.context("Failed to read directory entry")?;
-        let path = entry.path();
-        
-        if path.is_file() && !recent_files.contains(&path) {
-            if is_image_file(&path) {
-                match display_image_from_file(&path, args) {
-                    Ok(_) => {
-                        recent_files.insert(path.clone());
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to display image {}: {}", path.display(), e);
-                    }
-                }
-            } else if is_text_file(&path) {
-                match display_text_file(&path) {
-                    Ok(_) => {
-                        recent_files.insert(path.clone());
-                    },
-                    Err(e) => {
-                        eprintln!("Failed to display text file {}: {}", path.display(), e);
-                    }
-                }
-            }
-            // Note: Video files are not handled in directory monitoring for now
-        } else if path.is_dir() {
-            // Recursively scan subdirectories
-            scan_directory_for_files(&path, args, recent_files)?;
-        }
-    }
-
-    Ok(())
-}
 
 fn is_video_file(file_path: &PathBuf) -> bool {
     if let Some(extension) = file_path.extension() {
