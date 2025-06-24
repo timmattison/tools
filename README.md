@@ -91,6 +91,12 @@ for fun. Several tools have also been ported to Rust for improved performance an
       that time).
       Press Ctrl-C to cancel.
     - To install: `go install github.com/timmattison/tools/cmd/runat@latest`
+- safeboard
+    - Monitors clipboard for dangerous Unicode characters that could be used in copy-paste attacks. Detects invisible 
+      characters like zero-width spaces, directional overrides, and private use area characters that attackers use to 
+      hide malicious code or commands. Options include `--audible` for sound alerts and `--modify` to prepend a warning 
+      to dangerous content. Includes a test script to verify functionality.
+    - To install: `cargo install --git https://github.com/timmattison/tools safeboard`
 - gitrdun
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on
       recently
