@@ -1,0 +1,9 @@
+[package]
+name = "unescapeboard"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clipboardmon = { path = "../clipboardmon" }
+anyhow = "1.0"
+env_logger = "0.11"

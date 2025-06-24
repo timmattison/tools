@@ -37,10 +37,10 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - To install: `cargo install --git https://github.com/timmattison/tools cf`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
-    - To install: `go install github.com/timmattison/tools/cmd/htmlboard@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools htmlboard`
 - jsonboard
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
-    - To install: `go install github.com/timmattison/tools/cmd/jsonboard@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
 - reposize
     - Shows you the size of the git repository you're currently in. Useful for investigating performance issues with
       large git repos.
@@ -64,7 +64,7 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - To install: `go install github.com/timmattison/tools/cmd/repoup@latest`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
-    - To install: `go install github.com/timmattison/tools/cmd/unescapeboard@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
 - prhash
     - Hashes a file with the requested hashing algorithm and shows the progress in the console. Good for hashing very
       large files and my experiments show that it runs a little bit faster than the standard system tools.
@@ -83,7 +83,7 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
       it.
       I use this for deep linking videos to my Roku TVs through their APIs.
-    - To install: `go install github.com/timmattison/tools/cmd/tubeboard@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools tubeboard`
 - runat
     - Runs a command at a specified time. Shows a countdown timer and supports various time formats including UTC and
       local time.
