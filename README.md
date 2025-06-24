@@ -1,7 +1,7 @@
 # Fun tools written by Tim Mattison
 
 I started this repo forever ago (2014!) to hold some tools I needed at the time. Now I'm converting the tools to Golang
-for fun.
+for fun. Several tools have also been ported to Rust for improved performance and cross-platform compatibility.
 
 ## The tools
 
@@ -9,7 +9,7 @@ for fun.
     - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
       identical. This hash will only be the same if the directories have the same file names and the same file contents.
       However, we ignore the directory names and locations of files in the directories. See below for an example.
-    - To install: `go install github.com/timmattison/tools/cmd/dirhash@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
     - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
       want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
@@ -24,19 +24,18 @@ for fun.
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
     - To install Go version: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
     - To install Rust version: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
-- sizeof
-    - Shows you the size of files in the specified directories (and subdirectories) in a human-readable format. Supports
-      searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
-      doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
-      to include that if you want it.
-    - To install: `go install github.com/timmattison/tools/cmd/sizeof@latest`
-- numberof
-    - Shows you the number of files in the specified directories (and subdirectories) in a human-readable format.
-      Supports
-      searching for files with a specific suffix (e.g. `.mkv`), prefix (e.g. `IMG_`), or a substring (e.g. `G_00`). It
-      doesn't support any other form of wildcards. It doesn't assume suffixes have a period in front of them so you need
-      to include that if you want it.
-    - To install: `go install github.com/timmattison/tools/cmd/numberof@latest`
+- sf (size of files)
+    - Shows you the total size of files in the specified directories (and subdirectories) in a human-readable format. 
+      Supports optional filtering by suffix (e.g. `--suffix .mkv`), prefix (e.g. `--prefix IMG_`), or substring 
+      (e.g. `--substring G_00`). Without filters, it shows the total size of all files. Doesn't assume suffixes have 
+      a period in front of them so you need to include that if you want it.
+    - To install: `cargo install --git https://github.com/timmattison/tools sf`
+- cf (count files)
+    - Recursively counts files in the specified directories. Without filters, counts all files. Supports optional 
+      filtering by suffix (e.g. `--suffix .mkv`), prefix (e.g. `--prefix IMG_`), or substring (e.g. `--substring G_00`). 
+      The same as doing `find . | wc -l` but shorter and faster. In my testing with a directory with almost 300k files 
+      in it this program takes 5 seconds, `find . | wc -l` takes over one minute.
+    - To install: `cargo install --git https://github.com/timmattison/tools cf`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
     - To install: `go install github.com/timmattison/tools/cmd/htmlboard@latest`
@@ -54,11 +53,6 @@ for fun.
     - Runs `go mod tidy` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
       CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
     - To install: `go install github.com/timmattison/tools/cmd/repotidy@latest`
-- cf
-    - Recursively counts files in the current directory. The same as doing `find . | wc -l` but shorter and faster. In
-      my testing with a directory with almost 300k files in it this program takes 5 seconds, `find . | wc -l` takes over
-      one minute, `dust` takes 10 seconds (but arguably it is doing something different).
-    - To install: `go install github.com/timmattison/tools/cmd/cf@latest`
 - localnext
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
       directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
@@ -85,7 +79,7 @@ for fun.
     - Generates an unprivileged port number based on the name of the current directory. Nice for picking a port number
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
       separate instances/VMs.
-    - To install: `go install github.com/timmattison/tools/cmd/portplz@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools portplz`
 - tubeboard
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
       it.
@@ -118,7 +112,7 @@ for fun.
     - Searches for a hex string in a binary file and displays a hex dump with surrounding bytes. Shows the offset in
       both
       hex and decimal formats. Useful for analyzing binary files and finding specific patterns or signatures.
-    - To install: `go install github.com/timmattison/tools/cmd/hexfind@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools hexfind`
 - ic
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
@@ -127,7 +121,7 @@ for fun.
     - Generates QR codes for WiFi networks that, when scanned by a mobile device, allow the device to automatically
       connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo
       in the center of the QR code, and adjusting the logo size.
-    - To install: `go install github.com/timmattison/tools/cmd/wifiqr@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools wifiqr`
 - symfix
     - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
