@@ -160,6 +160,10 @@ for fun. Several tools have also been ported to Rust for improved performance an
       selection, custom port ranges, and can include privileged ports. Useful for development servers, testing 
       environments, and service configuration.
     - To install: `cargo install --git https://github.com/timmattison/tools freeport`
+- wl
+    - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
+      on your system. Supports verbose output to show detailed socket information.
+    - To install: `cargo install --git https://github.com/timmattison/tools wl`
 
 ## dirhash
 
