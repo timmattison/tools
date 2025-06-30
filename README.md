@@ -127,6 +127,11 @@ for fun. Several tools have also been ported to Rust for improved performance an
       connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo
       in the center of the QR code, and adjusting the logo size.
     - To install: `cargo install --git https://github.com/timmattison/tools wifiqr`
+- wu
+    - Cross-platform tool to identify which processes have a file, directory, or device open. "Who's using" a file or
+      path. Shows process name, PID, user, and access mode. Supports multiple paths and recursive directory scanning.
+      Works on macOS (using lsof), Linux (using /proc), and Windows (using system APIs). Supports JSON output and verbose mode.
+    - To install: `cargo install --git https://github.com/timmattison/tools wu`
 - symfix
     - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
@@ -288,6 +293,68 @@ wifiqr -logo company_logo.png -logo-size 20 -ssid MyWiFiNetwork -password MySecr
 
 When scanned with a smartphone camera, these QR codes will prompt the device to join the specified WiFi network
 automatically.
+
+## wu
+
+Cross-platform tool to identify which processes have a file, directory, or device open. Shows process information including PID, name, user, and access mode. When given a directory, it recursively checks all files within that directory tree. Supports checking multiple paths in a single command.
+
+### Basic Usage
+
+```
+wu /path/to/file
+wu /path/to/directory      # Recursively checks all files in directory
+wu /dev/disk0
+wu file1.txt file2.txt     # Check multiple files
+wu /dir1 /dir2 file.txt    # Mix of directories and files
+```
+
+### Options
+
+- `--json` or `-j`: Output results in JSON format for scripting
+- `--verbose` or `-v`: Show detailed information for each process
+
+### Examples
+
+Check which processes are using the current directory (recursively):
+
+```
+wu .
+```
+
+Check multiple paths at once:
+
+```
+wu /home/user/documents /var/log/myapp.log
+```
+
+Check a specific file with verbose output:
+
+```
+wu --verbose /Users/shared/document.txt
+```
+
+Get JSON output for scripting:
+
+```
+wu --json /tmp /var/tmp
+```
+
+### Platform Support
+
+- **macOS**: Uses the `lsof` command with `+D` flag for recursive directory searches
+- **Linux**: Directly reads from the `/proc` filesystem for optimal performance, recursively walking directories
+- **Windows**: Uses system APIs and the sysinfo crate to enumerate process handles, with directory recursion
+
+### Output Format
+
+Default output shows a table with:
+- **PID**: Process ID
+- **NAME**: Process name
+- **USER**: User running the process
+- **ACCESS**: Type of access (read, write, directory, etc.)
+- **FILE**: The specific file or directory being accessed
+
+Verbose output groups processes by PID and shows all files each process has open, including file descriptors and detailed access modes.
 
 ## symfix
 
