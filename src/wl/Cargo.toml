@@ -1,0 +1,10 @@
+[package]
+name = "wl"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust tool that shows which program is listening on a given port"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+listeners = "0.2"
