@@ -9,6 +9,9 @@ use std::path::Path;
 struct Cli {
     #[arg(help = "Directory path (defaults to current directory)")]
     path: Option<String>,
+    
+    #[arg(short, long, help = "Print verbose output with directory name")]
+    verbose: bool,
 }
 
 fn unprivileged_port_from_string(input: &str) -> u16 {
@@ -42,7 +45,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let port = unprivileged_port_from_string(&basename);
     
-    println!("Port {} for directory '{}'", port, basename);
+    if cli.verbose {
+        println!("Port {} for directory '{}'", port, basename);
+    } else {
+        println!("{}", port);
+    }
     
     Ok(())
 }
