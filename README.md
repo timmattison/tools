@@ -129,8 +129,8 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - To install: `cargo install --git https://github.com/timmattison/tools wifiqr`
 - wu
     - Cross-platform tool to identify which processes have a file, directory, or device open. "Who's using" a file or
-      path. Shows process name, PID, user, and access mode. Works on macOS (using lsof), Linux (using /proc), and Windows
-      (using system APIs). Supports JSON output and verbose mode.
+      path. Shows process name, PID, user, and access mode. Supports multiple paths and recursive directory scanning.
+      Works on macOS (using lsof), Linux (using /proc), and Windows (using system APIs). Supports JSON output and verbose mode.
     - To install: `cargo install --git https://github.com/timmattison/tools wu`
 - symfix
     - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
@@ -292,14 +292,16 @@ automatically.
 
 ## wu
 
-Cross-platform tool to identify which processes have a file, directory, or device open. Shows process information including PID, name, user, and access mode.
+Cross-platform tool to identify which processes have a file, directory, or device open. Shows process information including PID, name, user, and access mode. When given a directory, it recursively checks all files within that directory tree. Supports checking multiple paths in a single command.
 
 ### Basic Usage
 
 ```
 wu /path/to/file
-wu /path/to/directory
+wu /path/to/directory      # Recursively checks all files in directory
 wu /dev/disk0
+wu file1.txt file2.txt     # Check multiple files
+wu /dir1 /dir2 file.txt    # Mix of directories and files
 ```
 
 ### Options
@@ -309,10 +311,16 @@ wu /dev/disk0
 
 ### Examples
 
-Check which processes are using the current directory:
+Check which processes are using the current directory (recursively):
 
 ```
 wu .
+```
+
+Check multiple paths at once:
+
+```
+wu /home/user/documents /var/log/myapp.log
 ```
 
 Check a specific file with verbose output:
@@ -324,14 +332,14 @@ wu --verbose /Users/shared/document.txt
 Get JSON output for scripting:
 
 ```
-wu --json /tmp/myfile.txt
+wu --json /tmp /var/tmp
 ```
 
 ### Platform Support
 
-- **macOS**: Uses the `lsof` command to identify processes with open file handles
-- **Linux**: Directly reads from the `/proc` filesystem for optimal performance
-- **Windows**: Uses system APIs and the sysinfo crate to enumerate process handles
+- **macOS**: Uses the `lsof` command with `+D` flag for recursive directory searches
+- **Linux**: Directly reads from the `/proc` filesystem for optimal performance, recursively walking directories
+- **Windows**: Uses system APIs and the sysinfo crate to enumerate process handles, with directory recursion
 
 ### Output Format
 
@@ -340,8 +348,9 @@ Default output shows a table with:
 - **NAME**: Process name
 - **USER**: User running the process
 - **ACCESS**: Type of access (read, write, directory, etc.)
+- **FILE**: The specific file or directory being accessed
 
-Verbose output includes additional details like file descriptors and access modes.
+Verbose output groups processes by PID and shows all files each process has open, including file descriptors and detailed access modes.
 
 ## symfix
 
