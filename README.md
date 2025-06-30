@@ -127,6 +127,11 @@ for fun. Several tools have also been ported to Rust for improved performance an
       connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo
       in the center of the QR code, and adjusting the logo size.
     - To install: `cargo install --git https://github.com/timmattison/tools wifiqr`
+- wu
+    - Cross-platform tool to identify which processes have a file, directory, or device open. "Who's using" a file or
+      path. Shows process name, PID, user, and access mode. Works on macOS (using lsof), Linux (using /proc), and Windows
+      (using system APIs). Supports JSON output and verbose mode.
+    - To install: `cargo install --git https://github.com/timmattison/tools wu`
 - symfix
     - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
@@ -284,6 +289,59 @@ wifiqr -logo company_logo.png -logo-size 20 -ssid MyWiFiNetwork -password MySecr
 
 When scanned with a smartphone camera, these QR codes will prompt the device to join the specified WiFi network
 automatically.
+
+## wu
+
+Cross-platform tool to identify which processes have a file, directory, or device open. Shows process information including PID, name, user, and access mode.
+
+### Basic Usage
+
+```
+wu /path/to/file
+wu /path/to/directory
+wu /dev/disk0
+```
+
+### Options
+
+- `--json` or `-j`: Output results in JSON format for scripting
+- `--verbose` or `-v`: Show detailed information for each process
+
+### Examples
+
+Check which processes are using the current directory:
+
+```
+wu .
+```
+
+Check a specific file with verbose output:
+
+```
+wu --verbose /Users/shared/document.txt
+```
+
+Get JSON output for scripting:
+
+```
+wu --json /tmp/myfile.txt
+```
+
+### Platform Support
+
+- **macOS**: Uses the `lsof` command to identify processes with open file handles
+- **Linux**: Directly reads from the `/proc` filesystem for optimal performance
+- **Windows**: Uses system APIs and the sysinfo crate to enumerate process handles
+
+### Output Format
+
+Default output shows a table with:
+- **PID**: Process ID
+- **NAME**: Process name
+- **USER**: User running the process
+- **ACCESS**: Type of access (read, write, directory, etc.)
+
+Verbose output includes additional details like file descriptors and access modes.
 
 ## symfix
 
