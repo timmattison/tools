@@ -46,8 +46,8 @@ fn detect_package_manager(dir: &Path) -> Option<&'static str> {
     } else if dir.join("yarn.lock").exists() {
         Some("yarn")
     } else if dir.join("package.json").exists() {
-        // Default to npm if no lock file found
-        Some("npm")
+        // Default to pnpm if no lock file found
+        Some("pnpm")
     } else {
         None
     }
@@ -80,8 +80,8 @@ fn main() {
         if entry.file_type().is_dir() {
             let dir_path = entry.path();
             
-            // Skip node_modules directories
-            if entry.file_name() == "node_modules" {
+            // Skip any path that has node_modules as a component
+            if dir_path.components().any(|c| c.as_os_str() == "node_modules") {
                 continue;
             }
             
