@@ -22,8 +22,7 @@ for fun. Several tools have also been ported to Rust for improved performance an
 - update-aws-credentials
     - Takes AWS credentials from your clipboard in the format provided by AWS SSO and writes it to
       your AWS config file. This is useful if you're using AWS SSO and you want to use the AWS CLI locally.
-    - To install Go version: `go install github.com/timmattison/tools/cmd/update-aws-credentials@latest`
-    - To install Rust version: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
+    - To install: `cargo install --git https://github.com/timmattison/tools update-aws-credentials`
 - sf (size of files)
     - Shows you the total size of files in the specified directories (and subdirectories) in a human-readable format. 
       Supports optional filtering by suffix (e.g. `--suffix .mkv`), prefix (e.g. `--prefix IMG_`), or substring 
@@ -147,14 +146,12 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - Recursively searches Git repositories for commits containing a specific string. Can search in commit messages by
       default and optionally in commit contents (diffs). Useful for finding when and where specific changes were made
       across multiple repositories.
-    - To install Go version: `go install github.com/timmattison/tools/cmd/gitdiggin@latest`
-    - To install Rust version: `cargo install --git https://github.com/timmattison/tools gitdiggin`
+    - To install: `cargo install --git https://github.com/timmattison/tools gitdiggin`
 - glo
     - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your
       repository
       and could be candidates for Git LFS or removal.
-    - To install Go version: `go install github.com/timmattison/tools/cmd/glo@latest`
-    - To install Rust version: `cargo install --git https://github.com/timmattison/tools glo`
+    - To install: `cargo install --git https://github.com/timmattison/tools glo`
 - clipboard-random
     - Generates random data and copies it to the clipboard. Supports two modes: binary data (with hex, base64, or raw 
       output formats) and text with diacritics (Zalgo text). Features include customizable parameters, presets for 
