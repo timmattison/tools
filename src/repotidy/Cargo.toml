@@ -1,0 +1,11 @@
+[package]
+name = "repotidy"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "repotidy"
+path = "src/main.rs"
+
+[dependencies]
+walkdir = "2.4"

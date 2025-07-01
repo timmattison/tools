@@ -41,27 +41,14 @@ for fun. Several tools have also been ported to Rust for improved performance an
 - jsonboard
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
-- reposize
-    - Shows you the size of the git repository you're currently in. Useful for investigating performance issues with
-      large git repos.
-    - To install: `go install github.com/timmattison/tools/cmd/reposize@latest`
 - bm
     - Bulk Move. Named "bm" because moving lots of files is shitty.
     - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
-- repotidy
-    - Runs `go mod tidy` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
-      CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
-    - To install: `go install github.com/timmattison/tools/cmd/repotidy@latest`
 - localnext
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
       directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
       with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates)
     - To install: `go install github.com/timmattison/tools/cmd/localnext@latest`
-- repoup
-    - Runs `go get -u all` on every directory in the current git repo that has a `go.mod`. I wrote this while working on
-      a
-      CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
-    - To install: `go install github.com/timmattison/tools/cmd/repoup@latest`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
@@ -84,13 +71,6 @@ for fun. Several tools have also been ported to Rust for improved performance an
       it.
       I use this for deep linking videos to my Roku TVs through their APIs.
     - To install: `cargo install --git https://github.com/timmattison/tools tubeboard`
-- runat
-    - Runs a command at a specified time. Shows a countdown timer and supports various time formats including UTC and
-      local time.
-      You can use full dates like "2024-01-01T12:00:00Z" or just times like "12:00" (which will run today or tomorrow at
-      that time).
-      Press Ctrl-C to cancel.
-    - To install: `go install github.com/timmattison/tools/cmd/runat@latest`
 - safeboard
     - Monitors clipboard for dangerous Unicode characters that could be used in copy-paste attacks. Detects invisible 
       characters like zero-width spaces, directional overrides, and private use area characters that attackers use to 
@@ -102,12 +82,6 @@ for fun. Several tools have also been ported to Rust for improved performance an
       recently
       across different projects.
     - To install: `go install github.com/timmattison/tools/cmd/gitrdun@latest`
-- nodenuke
-    - Nukes your node_modules and .next directories and npm and pnpm lock files
-    - To install: `go install github.com/timmattison/tools/cmd/nodenuke@latest`
-- nodeup
-    - Updates your package.json dependencies recursively
-    - To install: `go install github.com/timmattison/tools/cmd/nodeup@latest`
 - procinfo
     - Shows detailed information about running processes matching a name. Displays process details, working directory,
       command line, open files, network connections, and optionally environment variables. Useful for debugging and
@@ -169,6 +143,38 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
+- repotidy
+    - Runs `go mod tidy` in all directories containing go.mod files within a git repository. Automatically finds
+      the repository root and cleans up Go module dependencies throughout the entire codebase.
+    - To install: `cargo install --git https://github.com/timmattison/tools repotidy`
+- reposize
+    - Calculates and displays the total size of a git repository in human-readable format. Shows the total
+      byte count with thousands separators based on your locale.
+    - To install: `cargo install --git https://github.com/timmattison/tools reposize`
+- repoup
+    - Updates dependencies across Go, Node.js, and Rust projects in a git repository. Automatically detects
+      project types and uses the appropriate package manager (npm/pnpm/yarn for Node.js). Continues
+      processing even if individual updates fail.
+    - To install: `cargo install --git https://github.com/timmattison/tools repoup`
+- nodenuke
+    - Removes node_modules directories and lock files (pnpm-lock.yaml, package-lock.json) throughout a
+      repository. Supports `--no-root` flag to start from current directory instead of git root.
+    - To install: `cargo install --git https://github.com/timmattison/tools nodenuke`
+- nodeup
+    - Updates npm/pnpm/yarn packages in all directories with package.json. Intelligently detects which
+      package manager to use based on lock files. Supports `--latest` flag for major version updates,
+      `--npm`/`--pnpm` to force a specific package manager, and `--no-root` to start from current directory.
+    - To install: `cargo install --git https://github.com/timmattison/tools nodeup`
+- runat
+    - TUI tool to run commands at a specified time with a real-time countdown display. Supports various
+      time formats including RFC3339, local time, and time-only (runs today or tomorrow). Shows
+      current time, target time, and remaining time with styled output. Press Ctrl-C to cancel.
+    - To install: `cargo install --git https://github.com/timmattison/tools runat`
+- rr
+    - Rust remover - runs `cargo clean` in all Rust projects to free disk space. Shows the size of each
+      target directory before cleaning. Supports `--dry-run` to preview what would be cleaned and
+      `--no-root` to start from current directory. Displays total space freed after completion.
+    - To install: `cargo install --git https://github.com/timmattison/tools rr`
 
 ## dirhash
 
@@ -220,30 +226,6 @@ credentials from your clipboard and write them to your AWS config file. If somet
 
 Just run `sizeof -suffix .mkv` and you'll see the size of all of the `.mkv` files in the current directory and all
 subdirectories. I use it to figure out how large my videos are in a certain directory before trying to move them around.
-
-## runat
-
-Run any command at a specified time. The program shows a countdown timer until execution and supports various time
-formats:
-
-```
-runat 2024-01-01T12:00:00Z echo hello world    # UTC time
-runat 2024-01-01T12:00:00 echo hello world     # Local time
-runat "2024-01-01 12:00" echo hello world      # Local time
-runat 12:00 echo hello world                   # Today/tomorrow at 12:00 local time
-```
-
-If you specify just a time (like "12:00"), it will run today at that time, or if that time has already passed, it will
-run tomorrow at that time.
-
-The program shows:
-
-- Current time
-- Target time
-- Time remaining (hours:minutes:seconds)
-- Command to be executed
-
-You can press Ctrl-C at any time to cancel the scheduled execution.
 
 ## wifiqr
 
