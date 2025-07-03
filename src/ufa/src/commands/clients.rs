@@ -181,7 +181,7 @@ async fn list_clients(
         params.push(("filter", f));
     }
 
-    let path = format!("/sites/{}/clients", site_id);
+    let path = format!("sites/{}/clients", site_id);
     let page: Page<Client> = client.get_with_params(&path, &params).await?;
 
     match output_format {
@@ -203,7 +203,7 @@ async fn get_client(
     client_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
-    let path = format!("/sites/{}/clients/{}", site_id, client_id);
+    let path = format!("sites/{}/clients/{}", site_id, client_id);
     let client_details: Client = client.get(&path).await?;
 
     print_single_item(&client_details, output_format)?;
@@ -219,7 +219,7 @@ async fn authorize_guest(
     rx_rate_limit_kbps: Option<u64>,
     tx_rate_limit_kbps: Option<u64>,
 ) -> Result<()> {
-    let path = format!("/sites/{}/clients/{}/actions", site_id, client_id);
+    let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
     let action = ClientAction::AuthorizeGuestAccess {
         time_limit_minutes,
         data_usage_limit_mbytes,
@@ -237,7 +237,7 @@ async fn unauthorize_guest(
     site_id: Uuid,
     client_id: Uuid,
 ) -> Result<()> {
-    let path = format!("/sites/{}/clients/{}/actions", site_id, client_id);
+    let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
     let action = ClientAction::UnauthorizeGuestAccess;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
