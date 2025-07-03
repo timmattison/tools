@@ -9,7 +9,8 @@ use imageproc::rect::Rect;
 use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
-// Use system monospace font for now - could be enhanced with embedded font later
+// For now, we'll create a simple built-in font fallback
+// This can be enhanced with an embedded font file later
 
 pub async fn export_video(
     input: PathBuf,
@@ -140,36 +141,67 @@ fn render_terminal_to_image(
     let mut image = ImageBuffer::new(width, height);
     let theme = terminal_state.get_theme();
     
+    // Fill background
     let bg_color = Rgb([theme.background.0, theme.background.1, theme.background.2]);
     for pixel in image.pixels_mut() {
         *pixel = bg_color;
     }
-    
-    // For now, we'll render a simple representation
-    // This is a basic implementation that can be enhanced later
-    let content = terminal_state.get_content();
-    let lines: Vec<&str> = content.lines().collect();
     
     let char_width = 12.0;
     let char_height = 20.0;
     let padding_x = 20.0;
     let padding_y = 20.0;
     
-    for (y, line) in lines.iter().enumerate() {
-        for (x, ch) in line.chars().enumerate() {
-            if !ch.is_whitespace() && ch != '\x00' {
-                let pixel_x = padding_x + (x as f32 * char_width);
-                let pixel_y = padding_y + (y as f32 * char_height);
-                
-                // Draw a colored rectangle for each character
-                let rect = Rect::at(pixel_x as i32, pixel_y as i32)
-                    .of_size(char_width as u32, char_height as u32);
+    let grid = terminal_state.get_grid();
+    
+    // Create a simple fallback font representation using rectangles
+    // This will be replaced with proper font rendering once we have a font
+    for (y, row) in grid.iter().enumerate() {
+        for (x, cell) in row.iter().enumerate() {
+            let pixel_x = padding_x + (x as f32 * char_width);
+            let pixel_y = padding_y + (y as f32 * char_height);
+            
+            // Draw background color for this cell
+            let bg_rect = Rect::at(pixel_x as i32, pixel_y as i32)
+                .of_size(char_width as u32, char_height as u32);
+            
+            draw_filled_rect_mut(
+                &mut image,
+                bg_rect,
+                Rgb([cell.bg_color.0, cell.bg_color.1, cell.bg_color.2]),
+            );
+            
+            // If character is not space, draw a simplified representation
+            if cell.ch != ' ' && cell.ch != '\x00' {
+                // For now, render characters as smaller rectangles with proper colors
+                // This gives us better visual distinction than solid blocks
+                let char_rect = if cell.bold {
+                    // Bold characters are slightly larger
+                    Rect::at((pixel_x + 2.0) as i32, (pixel_y + 3.0) as i32)
+                        .of_size((char_width - 4.0) as u32, (char_height - 6.0) as u32)
+                } else {
+                    // Normal characters
+                    Rect::at((pixel_x + 3.0) as i32, (pixel_y + 4.0) as i32)
+                        .of_size((char_width - 6.0) as u32, (char_height - 8.0) as u32)
+                };
                 
                 draw_filled_rect_mut(
                     &mut image,
-                    rect,
-                    Rgb([theme.foreground.0, theme.foreground.1, theme.foreground.2]),
+                    char_rect,
+                    Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
                 );
+                
+                // Add underline if needed
+                if cell.underline {
+                    let underline_rect = Rect::at(pixel_x as i32, (pixel_y + char_height - 2.0) as i32)
+                        .of_size(char_width as u32, 1);
+                    
+                    draw_filled_rect_mut(
+                        &mut image,
+                        underline_rect,
+                        Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
+                    );
+                }
             }
         }
     }
