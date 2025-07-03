@@ -106,6 +106,11 @@ for fun. Several tools have also been ported to Rust for improved performance an
       path. Shows process name, PID, user, and access mode. Supports multiple paths and recursive directory scanning.
       Works on macOS (using lsof), Linux (using /proc), and Windows (using system APIs). Supports JSON output and verbose mode.
     - To install: `cargo install --git https://github.com/timmattison/tools wu`
+- workit
+    - Finds all Cargo.toml files in subdirectories and adds them to a Rust workspace in the top-level Cargo.toml file.
+      Useful for converting multiple independent Rust projects into a single workspace for faster builds and shared
+      dependency management. Supports dry-run mode, path prefixes, and exclude patterns.
+    - To install: `cargo install --git https://github.com/timmattison/tools workit`
 - symfix
     - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
@@ -175,6 +180,12 @@ for fun. Several tools have also been ported to Rust for improved performance an
       target directory before cleaning. Supports `--dry-run` to preview what would be cleaned and
       `--no-root` to start from current directory. Displays total space freed after completion.
     - To install: `cargo install --git https://github.com/timmattison/tools rr`
+- rcc
+    - Rust Cross Compiler helper - simplifies Rust cross-compilation by automatically determining target 
+      architectures from uname output, managing Cross.toml configuration, and executing cross build commands. 
+      Eliminates the complexity of setting up cross-compilation environments by handling target detection, 
+      Docker image configuration, and build execution automatically.
+    - To install: `cargo install --git https://github.com/timmattison/tools rcc`
 
 ## dirhash
 
@@ -393,3 +404,90 @@ symfix -dir ~/projects/my-website -prepend-to-fix ..
 
 When fixing symlinks, targets are resolved relative to the symlink's location. The tool will report all broken symlinks
 found and indicate which ones were fixed.
+
+## rcc
+
+Rust Cross Compiler helper that eliminates the complexity of cross-compilation by automatically handling target detection, configuration management, and build execution. Perfect for developers who need to build Rust applications for different architectures without memorizing target triples or Docker image names.
+
+### How it makes cross-compilation easier
+
+**Before rcc:**
+1. Install cross manually
+2. Figure out the correct target triple (e.g., `aarch64-unknown-linux-gnu` vs `aarch64-unknown-linux-musl`)
+3. Create Cross.toml with the right Docker image
+4. Remember the exact cross build command syntax
+
+**With rcc:**
+1. Run `rcc --uname "$(ssh remote-host uname -a)"` 
+2. rcc automatically detects the target, creates Cross.toml, and runs the build
+
+### Basic Usage
+
+```
+rcc                                          # Use existing Cross.toml
+rcc --target aarch64-unknown-linux-gnu      # Specify target directly
+rcc --uname "Linux host 5.4.0 aarch64 GNU/Linux"  # Auto-detect from uname
+rcc --release                                # Build in release mode
+```
+
+### Target Detection from uname
+
+rcc can parse uname output to automatically determine the correct target triple:
+
+```bash
+# Get uname from remote host and let rcc figure out the target
+ssh pi@raspberrypi.local uname -a
+# "Linux raspberrypi 5.10.17-v8+ #1414 SMP PREEMPT Fri Apr 30 13:18:35 BST 2021 aarch64 GNU/Linux"
+
+rcc --uname "Linux raspberrypi 5.10.17-v8+ #1414 SMP PREEMPT Fri Apr 30 13:18:35 BST 2021 aarch64 GNU/Linux"
+# Automatically detects: aarch64-unknown-linux-gnu
+```
+
+**Supported architectures:**
+- `aarch64` → `aarch64-unknown-linux-{gnu|musl}`
+- `x86_64` → `x86_64-unknown-linux-{gnu|musl}`  
+- `armv7l` → `armv7-unknown-linux-{gnu|musl}eabihf`
+- `i686` → `i686-unknown-linux-{gnu|musl}`
+
+**Libc detection:**
+- Alpine Linux (contains "alpine") → `musl`
+- All others → `gnu`
+
+### Cross.toml Management
+
+rcc automatically creates Cross.toml if it doesn't exist:
+
+```toml
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
+```
+
+If Cross.toml exists:
+- **Single target**: Uses that target automatically
+- **Multiple targets**: Lists available targets and prompts for selection with `--target`
+
+### Examples
+
+Cross-compile for a Raspberry Pi:
+```bash
+rcc --uname "Linux raspberrypi 5.15.84-v8+ aarch64 GNU/Linux"
+```
+
+Cross-compile for Alpine Linux server:
+```bash
+rcc --uname "Linux alpine 5.15.74-0-lts x86_64 Alpine Linux"
+# Auto-detects: x86_64-unknown-linux-musl
+```
+
+Build release version for specific target:
+```bash
+rcc --target aarch64-unknown-linux-gnu --release
+```
+
+### Prerequisites
+
+rcc automatically checks for and guides installation of the `cross` tool:
+
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+```
