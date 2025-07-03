@@ -1,5 +1,5 @@
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 use walkdir::WalkDir;
 
@@ -67,7 +67,12 @@ fn main() {
     println!("Updating dependencies in repository: {}", repo_root);
     println!("This will update Rust, Node.js, and Go projects...\n");
     
-    // Single pass through all directories
+    // Collect all project directories by type
+    let mut rust_dirs: Vec<PathBuf> = Vec::new();
+    let mut node_dirs: Vec<(PathBuf, &str)> = Vec::new();
+    let mut go_dirs: Vec<PathBuf> = Vec::new();
+    
+    // Collection phase - walk through all directories and categorize
     for entry in WalkDir::new(repo_path) {
         let entry = match entry {
             Ok(entry) => entry,
@@ -85,34 +90,49 @@ fn main() {
                 continue;
             }
             
-            // Check for Rust projects
+            // Categorize directories by project type
             if dir_path.join("Cargo.toml").exists() {
-                println!("\n[Rust] Found Cargo.toml in {}", dir_path.display());
-                if let Err(e) = run_command_in_directory(dir_path, &["cargo", "update"]) {
-                    eprintln!("Warning: {}", e);
-                }
+                rust_dirs.push(dir_path.to_path_buf());
             }
             
-            // Check for Node.js projects
             if let Some(pm) = detect_package_manager(dir_path) {
-                println!("\n[Node] Found package.json in {} (using {})", dir_path.display(), pm);
-                let cmd = match pm {
-                    "pnpm" => vec!["pnpm", "update"],
-                    "yarn" => vec!["yarn", "upgrade"],
-                    _ => vec!["npm", "update"],
-                };
-                if let Err(e) = run_command_in_directory(dir_path, &cmd) {
-                    eprintln!("Warning: {}", e);
-                }
+                node_dirs.push((dir_path.to_path_buf(), pm));
             }
             
-            // Check for Go projects
             if dir_path.join("go.mod").exists() {
-                println!("\n[Go] Found go.mod in {}", dir_path.display());
-                if let Err(e) = run_command_in_directory(dir_path, &["go", "get", "-u", "all"]) {
-                    eprintln!("Warning: {}", e);
-                }
+                go_dirs.push(dir_path.to_path_buf());
             }
+        }
+    }
+    
+    // Processing phase - handle each language type globally
+    
+    // Process all Rust projects first
+    for dir_path in rust_dirs {
+        println!("\n[Rust] Found Cargo.toml in {}", dir_path.display());
+        if let Err(e) = run_command_in_directory(&dir_path, &["cargo", "update"]) {
+            eprintln!("Warning: {}", e);
+        }
+    }
+    
+    // Process all Node.js projects second
+    for (dir_path, pm) in node_dirs {
+        println!("\n[Node] Found package.json in {} (using {})", dir_path.display(), pm);
+        let cmd = match pm {
+            "pnpm" => vec!["pnpm", "update"],
+            "yarn" => vec!["yarn", "upgrade"],
+            _ => vec!["npm", "update"],
+        };
+        if let Err(e) = run_command_in_directory(&dir_path, &cmd) {
+            eprintln!("Warning: {}", e);
+        }
+    }
+    
+    // Process all Go projects last
+    for dir_path in go_dirs {
+        println!("\n[Go] Found go.mod in {}", dir_path.display());
+        if let Err(e) = run_command_in_directory(&dir_path, &["go", "get", "-u", "all"]) {
+            eprintln!("Warning: {}", e);
         }
     }
     
