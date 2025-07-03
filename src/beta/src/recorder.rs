@@ -2,11 +2,11 @@ use anyhow::{Context, Result};
 use crossterm::{terminal, tty::IsTty};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Write, Read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::thread;
 
 use crate::{Event, EventType, Recording, get_timestamp};
 
@@ -63,20 +63,22 @@ pub async fn record(
     let mut child = pair.slave.spawn_command(cmd)
         .context("Failed to spawn shell")?;
     
+    // Drop the slave to close it
+    drop(pair.slave);
+    
     let reader = pair.master.try_clone_reader()
         .context("Failed to clone PTY reader")?;
-    let writer = pair.master.take_writer()
+    let mut writer = pair.master.take_writer()
         .context("Failed to take PTY writer")?;
     
+    // Thread to read from PTY and write to stdout
     let events_clone = events.clone();
-    let reader_task = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(
-            tokio_util::compat::FuturesAsyncReadCompatExt::compat(reader)
-        );
+    let reader_thread = thread::spawn(move || {
+        let mut reader = reader;
         let mut buffer = vec![0; 4096];
         
         loop {
-            match reader.read(&mut buffer).await {
+            match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buffer[..n]).to_string();
@@ -96,41 +98,45 @@ pub async fn record(
         }
     });
     
-    let writer_task = tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
-        let mut writer = tokio_util::compat::FuturesAsyncWriteCompatExt::compat_write(writer);
+    // Thread to read from stdin and write to PTY
+    let events_clone = events.clone();
+    let writer_thread = thread::spawn(move || {
+        let mut stdin = std::io::stdin();
         let mut buffer = vec![0; 1024];
         
         loop {
-            match stdin.read(&mut buffer).await {
+            match stdin.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(n) => {
                     let data = buffer[..n].to_vec();
                     let input_str = String::from_utf8_lossy(&data).to_string();
                     let elapsed = start_time.elapsed().as_secs_f64();
                     
-                    events.lock().unwrap().push(Event {
+                    events_clone.lock().unwrap().push(Event {
                         time: elapsed,
                         event_type: EventType::Input,
                         data: input_str,
                     });
                     
-                    if writer.write_all(&data).await.is_err() {
+                    if writer.write_all(&data).is_err() {
                         break;
                     }
-                    writer.flush().await.ok();
+                    writer.flush().ok();
                 }
                 Err(_) => break,
             }
         }
     });
     
-    let _ = tokio::try_join!(reader_task, writer_task);
+    // Wait for threads to complete
+    let _ = reader_thread.join();
+    let _ = writer_thread.join();
     let _ = child.wait();
     
     let duration = start_time.elapsed().as_secs_f64();
     let events = Arc::try_unwrap(events)
-        .unwrap_or_else(|arc| (*arc.lock().unwrap()).clone());
+        .map(|mutex| mutex.into_inner().unwrap())
+        .unwrap_or_else(|arc| arc.lock().unwrap().clone());
     
     let recording = Recording {
         version: 2,

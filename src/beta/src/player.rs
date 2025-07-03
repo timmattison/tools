@@ -1,19 +1,18 @@
 use anyhow::{Context, Result};
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
-    event::{self, Event as TermEvent, KeyCode, KeyEvent},
+    event::{self, Event as TermEvent, KeyCode},
     execute,
-    style::Print,
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::fs::File;
 use std::io::{stdout, BufReader, Write};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::time::{interval, sleep, Instant};
+use tokio::time::{interval, Instant};
 use tokio_stream::StreamExt;
 
-use crate::{Event, EventType, Recording};
+use crate::{EventType, Recording};
 
 pub async fn play(file_path: PathBuf, speed: f64, paused: bool) -> Result<()> {
     let file = File::open(&file_path)

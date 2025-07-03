@@ -60,7 +60,7 @@ struct Event {
     data: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum EventType {
     #[serde(rename = "o")]
@@ -78,6 +78,9 @@ fn get_timestamp() -> f64 {
 
 mod recorder;
 mod player;
+
+#[cfg(test)]
+mod test;
 
 #[tokio::main]
 async fn main() -> Result<()> {
