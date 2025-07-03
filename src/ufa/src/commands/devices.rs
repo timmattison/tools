@@ -132,7 +132,7 @@ async fn list_devices(
         ("offset", &offset_str),
     ];
 
-    let path = format!("/sites/{}/devices", site_id);
+    let path = format!("sites/{}/devices", site_id);
     let page: Page<Device> = client.get_with_params(&path, &params).await?;
 
     match output_format {
@@ -154,7 +154,7 @@ async fn get_device(
     device_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
-    let path = format!("/sites/{}/devices/{}", site_id, device_id);
+    let path = format!("sites/{}/devices/{}", site_id, device_id);
     let device: DeviceDetails = client.get(&path).await?;
 
     print_single_item(&device, output_format)?;
@@ -167,7 +167,7 @@ async fn get_device_stats(
     device_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
-    let path = format!("/sites/{}/devices/{}/statistics/latest", site_id, device_id);
+    let path = format!("sites/{}/devices/{}/statistics/latest", site_id, device_id);
     let stats: DeviceStatistics = client.get(&path).await?;
 
     print_single_item(&stats, output_format)?;
@@ -179,7 +179,7 @@ async fn restart_device(
     site_id: Uuid,
     device_id: Uuid,
 ) -> Result<()> {
-    let path = format!("/sites/{}/devices/{}/actions", site_id, device_id);
+    let path = format!("sites/{}/devices/{}/actions", site_id, device_id);
     let action = DeviceAction::Restart;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
@@ -193,7 +193,7 @@ async fn power_cycle_port(
     device_id: Uuid,
     port_idx: u32,
 ) -> Result<()> {
-    let path = format!("/sites/{}/devices/{}/interfaces/ports/{}/actions", site_id, device_id, port_idx);
+    let path = format!("sites/{}/devices/{}/interfaces/ports/{}/actions", site_id, device_id, port_idx);
     let action = PortAction::PowerCycle;
 
     let _: serde_json::Value = client.post(&path, &action).await?;
