@@ -29,10 +29,17 @@ impl UnifiClient {
         let mut base_url = Url::parse(base_url)
             .context("Invalid UniFi controller URL")?;
         
-        // Append to the existing path instead of replacing it
-        let current_path = base_url.path().trim_end_matches('/');
-        base_url.set_path(&format!("{}/proxy/network/integration/v1", current_path));
+        // Set the path to exactly what we need
+        if base_url.path() == "/" || base_url.path().is_empty() {
+            base_url.set_path("/proxy/network/integration/v1");
+        } else {
+            // If there's already a path, append to it
+            let current_path = base_url.path().trim_end_matches('/');
+            base_url.set_path(&format!("{}/proxy/network/integration/v1", current_path));
+        }
 
+        eprintln!("DEBUG: Base URL constructed: {}", base_url);
+        
         Ok(Self {
             client,
             base_url,
@@ -45,6 +52,8 @@ impl UnifiClient {
     {
         let url = self.base_url.join(path)
             .context("Failed to construct request URL")?;
+
+        eprintln!("DEBUG: GET request to: {}", url);
 
         let response = self.client
             .get(url)
@@ -68,6 +77,8 @@ impl UnifiClient {
                 query_pairs.append_pair(key, &value.to_string());
             }
         }
+
+        eprintln!("DEBUG: GET request to: {}", url);
 
         let response = self.client
             .get(url)
