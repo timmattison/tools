@@ -190,7 +190,7 @@ async fn list_vouchers(
         params.push(("filter", f));
     }
 
-    let path = format!("/v1/sites/{}/hotspot/vouchers", site_id);
+    let path = format!("/sites/{}/hotspot/vouchers", site_id);
     let page: Page<Voucher> = client.get_with_params(&path, &params).await?;
 
     match output_format {
@@ -212,7 +212,7 @@ async fn get_voucher(
     voucher_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
-    let path = format!("/v1/sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
+    let path = format!("/sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let voucher: Voucher = client.get(&path).await?;
 
     print_single_item(&voucher, output_format)?;
@@ -231,7 +231,7 @@ async fn create_vouchers(
     tx_rate_limit_kbps: Option<u64>,
     output_format: OutputFormat,
 ) -> Result<()> {
-    let path = format!("/v1/sites/{}/hotspot/vouchers", site_id);
+    let path = format!("/sites/{}/hotspot/vouchers", site_id);
     let request = VoucherCreateRequest {
         count,
         name,
@@ -262,7 +262,7 @@ async fn delete_voucher(
     site_id: Uuid,
     voucher_id: Uuid,
 ) -> Result<()> {
-    let path = format!("/v1/sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
+    let path = format!("/sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let result: VoucherDeletionResults = client.delete(&path).await?;
 
     println!("Deleted {} voucher(s)", result.vouchers_deleted);
@@ -274,7 +274,7 @@ async fn delete_vouchers_filtered(
     site_id: Uuid,
     filter: String,
 ) -> Result<()> {
-    let path = format!("/v1/sites/{}/hotspot/vouchers", site_id);
+    let path = format!("/sites/{}/hotspot/vouchers", site_id);
     let params: Vec<(&str, &dyn std::fmt::Display)> = vec![("filter", &filter)];
     
     let result: VoucherDeletionResults = client.delete_with_params(&path, &params).await?;

@@ -12,8 +12,11 @@ pub struct UnifiClient {
 impl UnifiClient {
     pub async fn new(base_url: &str, api_key: &str, insecure: bool) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
-        headers.insert("X-API-KEY", header::HeaderValue::from_str(api_key)
-            .context("Invalid API key")?);
+        headers.insert(
+            header::HeaderName::from_static("x-api-key"),
+            header::HeaderValue::from_str(api_key)
+                .context("Invalid API key")?
+        );
         headers.insert(header::ACCEPT, header::HeaderValue::from_static("application/json"));
 
         let client_builder = Client::builder()
@@ -26,7 +29,7 @@ impl UnifiClient {
         let mut base_url = Url::parse(base_url)
             .context("Invalid UniFi controller URL")?;
         
-        base_url.set_path("/proxy/network/integration");
+        base_url.set_path("/proxy/network/integration/v1");
 
         Ok(Self {
             client,
@@ -45,7 +48,7 @@ impl UnifiClient {
             .get(url)
             .send()
             .await
-            .context("Failed to send GET request")?;
+            .map_err(|e| self.handle_request_error(e, "GET"))?;
 
         self.handle_response(response).await
     }
@@ -68,7 +71,7 @@ impl UnifiClient {
             .get(url)
             .send()
             .await
-            .context("Failed to send GET request")?;
+            .map_err(|e| self.handle_request_error(e, "GET"))?;
 
         self.handle_response(response).await
     }
@@ -86,7 +89,7 @@ impl UnifiClient {
             .json(body)
             .send()
             .await
-            .context("Failed to send POST request")?;
+            .map_err(|e| self.handle_request_error(e, "POST"))?;
 
         self.handle_response(response).await
     }
@@ -102,7 +105,7 @@ impl UnifiClient {
             .delete(url)
             .send()
             .await
-            .context("Failed to send DELETE request")?;
+            .map_err(|e| self.handle_request_error(e, "DELETE"))?;
 
         self.handle_response(response).await
     }
@@ -125,7 +128,7 @@ impl UnifiClient {
             .delete(url)
             .send()
             .await
-            .context("Failed to send DELETE request")?;
+            .map_err(|e| self.handle_request_error(e, "DELETE"))?;
 
         self.handle_response(response).await
     }
@@ -156,5 +159,21 @@ impl UnifiClient {
 
         serde_json::from_str(&text)
             .with_context(|| format!("Failed to parse response JSON: {}", text))
+    }
+
+    fn handle_request_error(&self, error: reqwest::Error, method: &str) -> anyhow::Error {
+        let error_str = error.to_string();
+        if error_str.contains("UnknownIssuer") || 
+           error_str.contains("certificate") ||
+           error_str.contains("CertificateRequired") ||
+           error_str.contains("self-signed") ||
+           error_str.contains("self signed") {
+            anyhow::anyhow!(
+                "TLS certificate error: {}\n\nTo connect to a UniFi controller with a self-signed certificate:\n  - Use the --insecure flag\n  - Or set UNIFI_INSECURE=true in your .env file\n\nNote: This disables certificate verification and should only be used for trusted networks.",
+                error
+            )
+        } else {
+            anyhow::anyhow!("Failed to send {} request: {}", method, error)
+        }
     }
 }
