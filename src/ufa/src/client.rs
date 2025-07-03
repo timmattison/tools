@@ -29,13 +29,13 @@ impl UnifiClient {
         let mut base_url = Url::parse(base_url)
             .context("Invalid UniFi controller URL")?;
         
-        // Set the path to exactly what we need
+        // Set the path to exactly what we need, ensuring it ends with a slash
         if base_url.path() == "/" || base_url.path().is_empty() {
-            base_url.set_path("/proxy/network/integration/v1");
+            base_url.set_path("/proxy/network/integration/v1/");
         } else {
             // If there's already a path, append to it
             let current_path = base_url.path().trim_end_matches('/');
-            base_url.set_path(&format!("{}/proxy/network/integration/v1", current_path));
+            base_url.set_path(&format!("{}/proxy/network/integration/v1/", current_path));
         }
 
         eprintln!("DEBUG: Base URL constructed: {}", base_url);
