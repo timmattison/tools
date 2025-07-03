@@ -148,16 +148,31 @@ ufa info
 - **Command line**: Avoid in production as API keys may be visible in process lists.
 
 #### TLS Certificate Verification
-By default, TLS certificates are verified. Use `--insecure` to skip verification for self-signed certificates:
+By default, TLS certificates are verified. If your UniFi controller uses a self-signed certificate, you'll see an error like "UnknownIssuer". To connect:
 
+**Option 1: Command line flag**
 ```bash
 ufa --insecure sites
 ```
+
+**Option 2: Environment variable**
+```bash
+export UNIFI_INSECURE=true
+ufa sites
+```
+
+**Option 3: .env file**
+```env
+UNIFI_INSECURE=true
+```
+
+The UNIFI_INSECURE variable accepts: `true`, `1`, `yes`, `on` (or `false`, `0`, `no`, `off`).
 
 **Important**: 
 - Never commit your `.env` file or expose API keys in command history
 - API keys have full access to your UniFi controller - keep them secure
 - Rotate API keys regularly for better security
+- Only disable certificate verification for trusted networks and controllers you own
 
 ### Filtering
 
