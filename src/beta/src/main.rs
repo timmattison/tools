@@ -79,7 +79,7 @@ enum ExportFormat {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Recording {
     version: u32,
     width: u16,

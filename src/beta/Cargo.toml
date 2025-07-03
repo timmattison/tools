@@ -24,3 +24,4 @@ image = "0.25"             # Image generation for video export
 imageproc = "0.24"         # Image processing for video export
 rusttype = "0.9"           # Font rendering for video export
 vte = "0.13"               # VT100/ANSI terminal emulator
+signal-hook = "0.3"        # Signal handling for graceful termination

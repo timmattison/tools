@@ -193,10 +193,21 @@ beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 ## Technical Details
 
 - Uses pseudo-terminals (PTY) to capture all terminal I/O
-- Preserves ANSI escape sequences and terminal control codes
+- **Raw mode terminal capture** for proper keyboard input handling
+- **Signal handling** for graceful recording termination (Ctrl-C)
+- **Thread synchronization** for reliable data capture and storage
+- Preserves ANSI escape sequences and terminal control codes with VTE parser
 - Records terminal dimensions for accurate playback
-- Thread-based I/O handling for efficient recording
+- Thread-based I/O handling with proper error recovery
 - Async playback engine for smooth performance
+- **Automatic recording save** on shell exit or interruption
+
+## Recording Controls
+
+- **Exit gracefully**: Press `Ctrl-C` to stop recording and save the session
+- **Shell exit**: Type `exit` in the shell to end the session normally
+- **Interactive programs**: All keyboard input (including `q` to quit programs like `btop`) works correctly
+- **Recovery**: Recording is automatically saved even if the shell exits unexpectedly
 
 ## Limitations
 
