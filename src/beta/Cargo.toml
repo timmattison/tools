@@ -16,3 +16,9 @@ tokio-stream = "0.1"
 chrono = "0.4"
 flate2 = "1.0"
 terminal_size = "0.3"
+
+# Export functionality dependencies
+minijinja = "2.0"          # Template engine for web export
+base64 = "0.22"            # Data embedding for web export
+image = "0.25"             # Image generation for video export
+imageproc = "0.24"         # Image processing for video export

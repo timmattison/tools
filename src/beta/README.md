@@ -4,6 +4,7 @@
 
 ## Features
 
+### Recording & Playback
 - Records all terminal input and output with microsecond precision timestamps
 - Plays back recordings with accurate timing
 - Supports playback speed control (slow down or speed up)
@@ -12,6 +13,13 @@
 - Optional gzip compression for recordings
 - JSON-based recording format for easy parsing and manipulation
 - Terminal size tracking and restoration
+
+### Export Options
+- **Web Export**: Generate self-contained HTML files with embedded JavaScript player
+- **Video Export**: Create MP4 or GIF videos from terminal recordings
+- Multiple theme support (Dracula, Monokai, Solarized Dark/Light)
+- Configurable video settings (FPS, resolution, optimization)
+- No external dependencies for web playback
 
 ## Installation
 
@@ -66,6 +74,23 @@ Start playback paused:
 beta play session.json --paused
 ```
 
+### Exporting Recordings
+
+Export to self-contained HTML:
+```bash
+beta export web session.json -o session.html
+```
+
+Export to video with custom theme:
+```bash
+beta export video session.json -o session.mp4 --theme dracula --fps 30
+```
+
+Export to optimized GIF:
+```bash
+beta export video session.json -o session.gif --fps 15 --optimize-web
+```
+
 ### Playback Controls
 
 During playback, you can use the following keyboard controls:
@@ -105,26 +130,64 @@ Event types:
 
 ## Examples
 
-### Record a build process
+### Recording Examples
+
+#### Record a build process
 ```bash
 beta record -o build.json -c "cargo build --release"
 ```
 
-### Record an interactive session
+#### Record an interactive session
 ```bash
 beta record -o demo.json
 # ... do your work ...
 # Press Ctrl-D or type 'exit' to finish
 ```
 
-### Play back at half speed
+#### Create a compressed recording
+```bash
+beta record --compress -o session.json.gz
+```
+
+### Playback Examples
+
+#### Play back at half speed
 ```bash
 beta play demo.json -s 0.5
 ```
 
-### Create a compressed recording
+#### Start playback paused
 ```bash
-beta record --compress -o session.json.gz
+beta play demo.json --paused
+```
+
+### Export Examples
+
+#### Export to Web (HTML)
+```bash
+# Basic web export
+beta export web demo.json -o demo.html
+
+# With Dracula theme
+beta export web demo.json -o demo.html --theme dracula
+
+# With compressed data embedding
+beta export web demo.json -o demo.html --compress
+```
+
+#### Export to Video
+```bash
+# Basic MP4 export
+beta export video demo.json -o demo.mp4
+
+# Create an optimized GIF
+beta export video demo.json -o demo.gif --fps 15 --optimize-web
+
+# High-quality video with custom settings
+beta export video demo.json -o demo.mp4 --fps 60 --resolution 1920x1080 --theme monokai
+
+# Web-optimized MP4
+beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 ```
 
 ## Technical Details

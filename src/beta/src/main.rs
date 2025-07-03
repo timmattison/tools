@@ -37,6 +37,46 @@ enum Commands {
         #[arg(long, help = "Start playback paused")]
         paused: bool,
     },
+    Export {
+        #[command(subcommand)]
+        format: ExportFormat,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportFormat {
+    Web {
+        #[arg(help = "Recording file to export")]
+        input: PathBuf,
+        
+        #[arg(short, long, help = "Output HTML file")]
+        output: Option<PathBuf>,
+        
+        #[arg(long, default_value = "auto", help = "Theme (auto, dracula, monokai, solarized-dark, solarized-light)")]
+        theme: String,
+        
+        #[arg(long, help = "Embed compressed data")]
+        compress: bool,
+    },
+    Video {
+        #[arg(help = "Recording file to export")]
+        input: PathBuf,
+        
+        #[arg(short, long, help = "Output video file (MP4/GIF)")]
+        output: Option<PathBuf>,
+        
+        #[arg(long, default_value = "30", help = "Frame rate (FPS)")]
+        fps: u32,
+        
+        #[arg(long, help = "Resolution (WIDTHxHEIGHT)")]
+        resolution: Option<String>,
+        
+        #[arg(long, default_value = "auto", help = "Theme for terminal rendering")]
+        theme: String,
+        
+        #[arg(long, help = "Optimize for web delivery")]
+        optimize_web: bool,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,6 +118,7 @@ fn get_timestamp() -> f64 {
 
 mod recorder;
 mod player;
+mod export;
 
 #[cfg(test)]
 mod test;
@@ -92,6 +133,9 @@ async fn main() -> Result<()> {
         }
         Commands::Play { file, speed, paused } => {
             player::play(file, speed, paused).await
+        }
+        Commands::Export { format } => {
+            export::handle_export(format).await
         }
     }
 }
