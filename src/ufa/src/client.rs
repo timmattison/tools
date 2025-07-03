@@ -29,7 +29,9 @@ impl UnifiClient {
         let mut base_url = Url::parse(base_url)
             .context("Invalid UniFi controller URL")?;
         
-        base_url.set_path("/proxy/network/integration/v1");
+        // Append to the existing path instead of replacing it
+        let current_path = base_url.path().trim_end_matches('/');
+        base_url.set_path(&format!("{}/proxy/network/integration/v1", current_path));
 
         Ok(Self {
             client,
