@@ -8,6 +8,14 @@ use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
 
+fn parse_bool_env(s: &str) -> Result<bool, String> {
+    match s.to_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        _ => Err(format!("Invalid boolean value: {}. Use true/false, 1/0, yes/no, or on/off", s))
+    }
+}
+
 /// UniFi API CLI tool for managing UniFi Network applications
 #[derive(Parser, Debug)]
 #[clap(author, version, about)]
@@ -21,7 +29,7 @@ struct Args {
     api_key: String,
 
     /// Skip TLS certificate verification
-    #[clap(long)]
+    #[clap(long, env = "UNIFI_INSECURE", value_parser = parse_bool_env)]
     insecure: bool,
 
     /// Output format

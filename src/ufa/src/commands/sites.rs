@@ -71,7 +71,7 @@ async fn list_sites(
         params.push(("filter", f));
     }
 
-    let page: Page<Site> = client.get_with_params("/v1/sites", &params).await?;
+    let page: Page<Site> = client.get_with_params("/sites", &params).await?;
 
     match output_format {
         OutputFormat::Json => {
