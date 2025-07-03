@@ -65,7 +65,7 @@ fn main() {
     let repo_path = Path::new(&repo_root);
     
     println!("Updating dependencies in repository: {}", repo_root);
-    println!("This will update Go, Node.js, and Rust projects...\n");
+    println!("This will update Rust, Node.js, and Go projects...\n");
     
     // Single pass through all directories
     for entry in WalkDir::new(repo_path) {
@@ -85,14 +85,6 @@ fn main() {
                 continue;
             }
             
-            // Check for Go projects
-            if dir_path.join("go.mod").exists() {
-                println!("\n[Go] Found go.mod in {}", dir_path.display());
-                if let Err(e) = run_command_in_directory(dir_path, &["go", "get", "-u", "all"]) {
-                    eprintln!("Warning: {}", e);
-                }
-            }
-            
             // Check for Rust projects
             if dir_path.join("Cargo.toml").exists() {
                 println!("\n[Rust] Found Cargo.toml in {}", dir_path.display());
@@ -110,6 +102,14 @@ fn main() {
                     _ => vec!["npm", "update"],
                 };
                 if let Err(e) = run_command_in_directory(dir_path, &cmd) {
+                    eprintln!("Warning: {}", e);
+                }
+            }
+            
+            // Check for Go projects
+            if dir_path.join("go.mod").exists() {
+                println!("\n[Go] Found go.mod in {}", dir_path.display());
+                if let Err(e) = run_command_in_directory(dir_path, &["go", "get", "-u", "all"]) {
                     eprintln!("Warning: {}", e);
                 }
             }
