@@ -1,8 +1,7 @@
 use anyhow::{Context, Result};
-use reqwest::{Client, header};
+use reqwest::{Client, header, Url};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use url::Url;
 
 pub struct UnifiClient {
     client: Client,
