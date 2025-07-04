@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::ValueEnum;
 use serde::Serialize;
-use tabled::{Table, Tabled};
+use tabled::{Table, Tabled, settings::Style};
 
 #[derive(ValueEnum, Debug, Clone)]
 pub enum OutputFormat {
@@ -28,7 +28,8 @@ pub fn print_table<T>(data: &[T]) -> Result<()>
 where
     T: Tabled,
 {
-    let table = Table::new(data);
+    let mut table = Table::new(data);
+    table.with(Style::modern());
     println!("{}", table);
     Ok(())
 }
