@@ -13,28 +13,50 @@ use crate::{Event, EventType, Recording, get_timestamp};
 
 fn parse_hotkey(hotkey_str: &str) -> (KeyCode, KeyModifiers) {
     match hotkey_str.to_lowercase().as_str() {
+        "ctrl-end" => (KeyCode::End, KeyModifiers::CONTROL),
         "ctrl-]" => (KeyCode::Char(']'), KeyModifiers::CONTROL),
         "f12" => (KeyCode::F(12), KeyModifiers::NONE),
         "ctrl-\\" | "ctrl-\\\\" => (KeyCode::Char('\\'), KeyModifiers::CONTROL),
         "ctrl-c" => (KeyCode::Char('c'), KeyModifiers::CONTROL),
         _ => {
-            eprintln!("Warning: Unknown hotkey '{}', defaulting to Ctrl-]", hotkey_str);
-            (KeyCode::Char(']'), KeyModifiers::CONTROL)
+            eprintln!("Warning: Unknown hotkey '{}', defaulting to Ctrl-End", hotkey_str);
+            (KeyCode::End, KeyModifiers::CONTROL)
         }
     }
 }
 
 fn is_stop_hotkey(key_event: &KeyEvent, stop_key: &(KeyCode, KeyModifiers)) -> bool {
-    // Check the configured hotkey
+    // Check the configured hotkey with modifiers
     if key_event.code == stop_key.0 && key_event.modifiers.contains(stop_key.1) {
         return true;
     }
     
-    // Also check for raw ASCII control codes that might be generated
-    // CTRL-] generates ASCII 29 (Group Separator)
-    if let (KeyCode::Char(']'), KeyModifiers::CONTROL) = stop_key {
+    // Handle raw control characters that terminals might send
+    // Check if we're looking for CTRL-] and got ASCII 29
+    if matches!(stop_key, (KeyCode::Char(']'), mods) if mods.contains(KeyModifiers::CONTROL)) {
         if let KeyCode::Char(c) = key_event.code {
-            if c as u8 == 29 {  // ASCII 29 is CTRL-]
+            // Check for ASCII 29 (Group Separator) which is CTRL-]
+            if c == '\x1d' || c as u8 == 29 {
+                return true;
+            }
+        }
+    }
+    
+    // Check if we're looking for CTRL-\ and got ASCII 28
+    if matches!(stop_key, (KeyCode::Char('\\'), mods) if mods.contains(KeyModifiers::CONTROL)) {
+        if let KeyCode::Char(c) = key_event.code {
+            // Check for ASCII 28 (File Separator) which is CTRL-\
+            if c == '\x1c' || c as u8 == 28 {
+                return true;
+            }
+        }
+    }
+    
+    // Check if we're looking for CTRL-C and got ASCII 3
+    if matches!(stop_key, (KeyCode::Char('c'), mods) if mods.contains(KeyModifiers::CONTROL)) {
+        if let KeyCode::Char(c) = key_event.code {
+            // Check for ASCII 3 (End of Text) which is CTRL-C
+            if c == '\x03' || c as u8 == 3 {
                 return true;
             }
         }
@@ -159,11 +181,12 @@ pub async fn record(
     
     let stop_key = parse_hotkey(&stop_hotkey);
     let hotkey_display = match stop_hotkey.as_str() {
+        "ctrl-end" => "Ctrl-End",
         "ctrl-]" => "Ctrl-]",
         "f12" => "F12",
         "ctrl-\\" | "ctrl-\\\\" => "Ctrl-\\",
         "ctrl-c" => "Ctrl-C",
-        _ => "Ctrl-]",
+        _ => "Ctrl-End",
     };
     
     println!("Recording session to: {}", output_path.display());
@@ -262,6 +285,15 @@ pub async fn record(
             
             match tokio::time::timeout(timeout_duration, event_stream.next()).await {
                 Ok(Some(Ok(CrosstermEvent::Key(key_event)))) => {
+                    // Debug logging if BETA_DEBUG env var is set
+                    if std::env::var("BETA_DEBUG").is_ok() {
+                        eprintln!("DEBUG: Key event - code: {:?}, modifiers: {:?}, char value: {}", 
+                            key_event.code, 
+                            key_event.modifiers,
+                            if let KeyCode::Char(c) = key_event.code { c as u8 } else { 0 }
+                        );
+                    }
+                    
                     // Check for stop hotkey
                     if is_stop_hotkey(&key_event, &stop_key_clone) {
                         eprintln!("\nStop hotkey detected ({}), saving recording...", hotkey_display_clone);

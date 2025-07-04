@@ -60,15 +60,26 @@ beta record --compress -o session.json.gz
 Record with custom stop hotkey:
 ```bash
 beta record --stop-hotkey f12
-beta record --stop-hotkey "ctrl-\\"
+beta record --stop-hotkey "ctrl-]"
 ```
 
 #### Available Stop Hotkeys
 
-- `ctrl-]` (default) - Ctrl + Right Square Bracket
+- `ctrl-end` (default) - Ctrl + End Key ⭐ **Recommended**
 - `f12` - Function Key 12
+- `ctrl-]` - Ctrl + Right Square Bracket
 - `ctrl-\\` - Ctrl + Backslash  
 - `ctrl-c` - Ctrl + C (traditional interrupt)
+
+#### Debugging Hotkeys
+
+If hotkeys aren't working as expected, enable debug mode to see what key events are being received:
+
+```bash
+BETA_DEBUG=1 beta record
+```
+
+This will print debug information about each key press, helping identify how your terminal reports key combinations.
 
 ### Playing Back a Recording
 
@@ -207,7 +218,7 @@ beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 
 - Uses pseudo-terminals (PTY) to capture all terminal I/O
 - **Raw mode terminal capture** for proper keyboard input handling
-- **Crossterm event handling** for graceful recording termination (Ctrl-])
+- **Crossterm event handling** for graceful recording termination (Ctrl-End)
 - **Thread synchronization** for reliable data capture and storage
 - Preserves ANSI escape sequences and terminal control codes with VTE parser
 - Records terminal dimensions for accurate playback
@@ -217,8 +228,8 @@ beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 
 ## Recording Controls
 
-- **Exit gracefully**: Press `Ctrl-]` to stop recording and save the session (default hotkey)
-- **Custom hotkeys**: Configure with `--stop-hotkey` option (supports: `ctrl-]`, `f12`, `ctrl-\\`, `ctrl-c`)
+- **Exit gracefully**: Press `Ctrl-End` to stop recording and save the session (default hotkey)
+- **Custom hotkeys**: Configure with `--stop-hotkey` option (supports: `ctrl-end`, `f12`, `ctrl-]`, `ctrl-\\`, `ctrl-c`)
 - **Shell exit**: Type `exit` in the shell to end the session normally
 - **Interactive programs**: All keyboard input (including `q` to quit programs like `btop`) works correctly
 - **Recovery**: Recording is automatically saved even if the shell exits unexpectedly

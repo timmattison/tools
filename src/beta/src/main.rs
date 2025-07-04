@@ -27,7 +27,7 @@ enum Commands {
         #[arg(long, help = "Compress the recording with gzip")]
         compress: bool,
         
-        #[arg(long, default_value = "ctrl-]", help = "Hotkey to stop recording (ctrl-], f12, ctrl-\\\\)")]
+        #[arg(long, default_value = "ctrl-end", help = "Hotkey to stop recording (ctrl-end, f12, ctrl-], ctrl-\\\\)")]
         stop_hotkey: String,
     },
     Play {
