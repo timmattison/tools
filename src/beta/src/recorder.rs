@@ -25,7 +25,22 @@ fn parse_hotkey(hotkey_str: &str) -> (KeyCode, KeyModifiers) {
 }
 
 fn is_stop_hotkey(key_event: &KeyEvent, stop_key: &(KeyCode, KeyModifiers)) -> bool {
-    key_event.code == stop_key.0 && key_event.modifiers.contains(stop_key.1)
+    // Check the configured hotkey
+    if key_event.code == stop_key.0 && key_event.modifiers.contains(stop_key.1) {
+        return true;
+    }
+    
+    // Also check for raw ASCII control codes that might be generated
+    // CTRL-] generates ASCII 29 (Group Separator)
+    if let (KeyCode::Char(']'), KeyModifiers::CONTROL) = stop_key {
+        if let KeyCode::Char(c) = key_event.code {
+            if c as u8 == 29 {  // ASCII 29 is CTRL-]
+                return true;
+            }
+        }
+    }
+    
+    false
 }
 
 struct RecordingSession {
@@ -267,7 +282,12 @@ pub async fn record(
                                 let ctrl_char = if c.is_ascii_alphabetic() {
                                     (c.to_ascii_uppercase() as u8 - b'A' + 1) as char
                                 } else {
-                                    c
+                                    // Handle special control characters
+                                    match c {
+                                        ']' => '\x1d' as char, // ASCII 29 (Group Separator)
+                                        '\\' => '\x1c' as char, // ASCII 28 (File Separator)
+                                        _ => c,
+                                    }
                                 };
                                 vec![ctrl_char as u8]
                             } else {
