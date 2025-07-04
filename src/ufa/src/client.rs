@@ -38,7 +38,6 @@ impl UnifiClient {
             base_url.set_path(&format!("{}/proxy/network/integration/v1/", current_path));
         }
 
-        eprintln!("DEBUG: Base URL constructed: {}", base_url);
         
         Ok(Self {
             client,
@@ -53,7 +52,6 @@ impl UnifiClient {
         let url = self.base_url.join(path)
             .context("Failed to construct request URL")?;
 
-        eprintln!("DEBUG: GET request to: {}", url);
 
         let response = self.client
             .get(url)
@@ -78,7 +76,6 @@ impl UnifiClient {
             }
         }
 
-        eprintln!("DEBUG: GET request to: {}", url);
 
         let response = self.client
             .get(url)

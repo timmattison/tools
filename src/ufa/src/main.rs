@@ -2,6 +2,7 @@ mod client;
 mod models;
 mod commands;
 mod output;
+mod site_helper;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
