@@ -44,9 +44,9 @@ fn run_cargo_clean(dir: &Path, dry_run: bool) -> Result<(), std::io::Error> {
         .output()?;
     
     if !output.status.success() {
-        eprintln!("Error running cargo clean in {}: {}", 
+        eprintln!("Warning: cargo clean failed in {} - {}", 
                  dir.display(), 
-                 String::from_utf8_lossy(&output.stderr));
+                 String::from_utf8_lossy(&output.stderr).trim());
         return Err(std::io::Error::new(std::io::ErrorKind::Other, "cargo clean failed"));
     }
     
@@ -120,6 +120,7 @@ fn main() {
     let mut total_cleaned = 0;
     let mut total_size_freed = 0u64;
     let mut projects_found = 0;
+    let mut total_failed = 0;
     
     for entry in WalkDir::new(&start_dir) {
         let entry = match entry {
@@ -146,8 +147,9 @@ fn main() {
                             total_cleaned += 1;
                             total_size_freed += target_size;
                         }
-                        Err(e) => {
-                            eprintln!("  Failed: {}", e);
+                        Err(_) => {
+                            total_failed += 1;
+                            eprintln!("  Skipping this project, continuing with others...");
                         }
                     }
                 }
@@ -158,6 +160,9 @@ fn main() {
     println!("\n=== Summary ===");
     println!("Rust projects found: {}", projects_found);
     println!("Projects cleaned: {}", total_cleaned);
+    if total_failed > 0 {
+        println!("Projects failed: {} (see warnings above)", total_failed);
+    }
     println!("Space freed: {}", format_size(total_size_freed));
     
     if cli.dry_run {
