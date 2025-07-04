@@ -1,15 +1,32 @@
 use anyhow::{Context, Result};
-use crossterm::{terminal, tty::IsTty};
+use crossterm::{terminal, tty::IsTty, event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers}};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::fs::File;
 use std::io::{BufWriter, Write, Read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use std::time::Instant;
+use std::time::{Instant, Duration};
 use std::thread;
-use signal_hook::{consts::SIGINT, iterator::Signals};
+use tokio_stream::StreamExt;
 
 use crate::{Event, EventType, Recording, get_timestamp};
+
+fn parse_hotkey(hotkey_str: &str) -> (KeyCode, KeyModifiers) {
+    match hotkey_str.to_lowercase().as_str() {
+        "ctrl-]" => (KeyCode::Char(']'), KeyModifiers::CONTROL),
+        "f12" => (KeyCode::F(12), KeyModifiers::NONE),
+        "ctrl-\\" | "ctrl-\\\\" => (KeyCode::Char('\\'), KeyModifiers::CONTROL),
+        "ctrl-c" => (KeyCode::Char('c'), KeyModifiers::CONTROL),
+        _ => {
+            eprintln!("Warning: Unknown hotkey '{}', defaulting to Ctrl-]", hotkey_str);
+            (KeyCode::Char(']'), KeyModifiers::CONTROL)
+        }
+    }
+}
+
+fn is_stop_hotkey(key_event: &KeyEvent, stop_key: &(KeyCode, KeyModifiers)) -> bool {
+    key_event.code == stop_key.0 && key_event.modifiers.contains(stop_key.1)
+}
 
 struct RecordingSession {
     events: Arc<Mutex<Vec<Event>>>,
@@ -103,6 +120,7 @@ pub async fn record(
     command: Option<String>,
     append: bool,
     compress: bool,
+    stop_hotkey: String,
 ) -> Result<()> {
     if !std::io::stdout().is_tty() {
         anyhow::bail!("beta record must be run in a terminal");
@@ -124,8 +142,17 @@ pub async fn record(
         std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
     });
     
+    let stop_key = parse_hotkey(&stop_hotkey);
+    let hotkey_display = match stop_hotkey.as_str() {
+        "ctrl-]" => "Ctrl-]",
+        "f12" => "F12",
+        "ctrl-\\" | "ctrl-\\\\" => "Ctrl-\\",
+        "ctrl-c" => "Ctrl-C",
+        _ => "Ctrl-]",
+    };
+    
     println!("Recording session to: {}", output_path.display());
-    println!("Press Ctrl-C to stop recording gracefully, or 'exit' to end the shell session");
+    println!("Press {} to stop recording gracefully, or 'exit' to end the shell session", hotkey_display);
     println!();
     
     // Create recording session
@@ -137,28 +164,8 @@ pub async fn record(
         shell.clone()
     ));
     
-    // Set up signal handling
-    let session_clone = session.clone();
-    let mut signals = Signals::new(&[SIGINT])
-        .context("Failed to register signal handler")?;
-    
-    thread::spawn(move || {
-        for sig in signals.forever() {
-            match sig {
-                SIGINT => {
-                    eprintln!("\nReceived interrupt signal, saving recording...");
-                    session_clone.stop();
-                    if let Err(e) = session_clone.save_recording() {
-                        eprintln!("Failed to save recording: {}", e);
-                    } else {
-                        eprintln!("Recording saved to: {}", session_clone.output_path.display());
-                    }
-                    std::process::exit(0);
-                }
-                _ => {}
-            }
-        }
-    });
+    // Enable crossterm events before entering raw mode
+    // This ensures we can capture keyboard events properly
     
     // Enable raw mode for proper keyboard capture
     terminal::enable_raw_mode()
@@ -227,17 +234,70 @@ pub async fn record(
         }
     });
     
-    // Thread to read from stdin and write to PTY (with raw mode support)
+    // Thread to handle keyboard events with hotkey detection
     let session_writer = session.clone();
-    let writer_handle = thread::spawn(move || {
-        let mut stdin = std::io::stdin();
-        let mut buffer = vec![0; 1024];
+    let stop_key_clone = stop_key.clone();
+    let hotkey_display_clone = hotkey_display.to_string();
+    let writer_handle = tokio::spawn(async move {
+        let mut event_stream = event::EventStream::new();
         
         while session_writer.should_continue() {
-            match stdin.read(&mut buffer) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    let data = buffer[..n].to_vec();
+            // Use a timeout to check should_continue periodically
+            let timeout_duration = Duration::from_millis(100);
+            
+            match tokio::time::timeout(timeout_duration, event_stream.next()).await {
+                Ok(Some(Ok(CrosstermEvent::Key(key_event)))) => {
+                    // Check for stop hotkey
+                    if is_stop_hotkey(&key_event, &stop_key_clone) {
+                        eprintln!("\nStop hotkey detected ({}), saving recording...", hotkey_display_clone);
+                        session_writer.stop();
+                        if let Err(e) = session_writer.save_recording() {
+                            eprintln!("Failed to save recording: {}", e);
+                        } else {
+                            eprintln!("Recording saved to: {}", session_writer.output_path.display());
+                        }
+                        break;
+                    }
+                    
+                    // Convert key event to bytes for PTY forwarding
+                    let data = match key_event.code {
+                        KeyCode::Char(c) => {
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) {
+                                // Handle control characters
+                                let ctrl_char = if c.is_ascii_alphabetic() {
+                                    (c.to_ascii_uppercase() as u8 - b'A' + 1) as char
+                                } else {
+                                    c
+                                };
+                                vec![ctrl_char as u8]
+                            } else {
+                                c.to_string().into_bytes()
+                            }
+                        }
+                        KeyCode::Enter => vec![b'\r'],
+                        KeyCode::Tab => vec![b'\t'],
+                        KeyCode::Backspace => vec![b'\x7f'],
+                        KeyCode::Esc => vec![b'\x1b'],
+                        KeyCode::Up => b"\x1b[A".to_vec(),
+                        KeyCode::Down => b"\x1b[B".to_vec(),
+                        KeyCode::Right => b"\x1b[C".to_vec(),
+                        KeyCode::Left => b"\x1b[D".to_vec(),
+                        KeyCode::Home => b"\x1b[H".to_vec(),
+                        KeyCode::End => b"\x1b[F".to_vec(),
+                        KeyCode::PageUp => b"\x1b[5~".to_vec(),
+                        KeyCode::PageDown => b"\x1b[6~".to_vec(),
+                        KeyCode::Delete => b"\x1b[3~".to_vec(),
+                        KeyCode::Insert => b"\x1b[2~".to_vec(),
+                        KeyCode::F(n) => {
+                            match n {
+                                1..=4 => format!("\x1bO{}", (b'P' + n - 1) as char).into_bytes(),
+                                5..=12 => format!("\x1b[{}{}", n + 10, if n <= 5 { "~" } else { "~" }).into_bytes(),
+                                _ => continue,
+                            }
+                        }
+                        _ => continue, // Skip other key types
+                    };
+                    
                     let input_str = String::from_utf8_lossy(&data).to_string();
                     
                     // Record the input
@@ -253,9 +313,19 @@ pub async fn record(
                         break;
                     }
                 }
-                Err(e) => {
-                    eprintln!("Error reading from stdin: {}", e);
+                Ok(Some(Ok(_))) => {
+                    // Ignore other events (mouse, resize, etc.)
+                }
+                Ok(Some(Err(e))) => {
+                    eprintln!("Error reading events: {}", e);
                     break;
+                }
+                Ok(None) => {
+                    // Event stream ended
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - continue loop to check should_continue
                 }
             }
         }
@@ -270,7 +340,7 @@ pub async fn record(
     
     // Wait for all threads to complete
     let _ = reader_handle.join();
-    let _ = writer_handle.join();
+    let _ = writer_handle.await;
     let _ = child_handle.join();
     
     // Save the recording

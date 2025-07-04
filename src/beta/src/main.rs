@@ -26,6 +26,9 @@ enum Commands {
         
         #[arg(long, help = "Compress the recording with gzip")]
         compress: bool,
+        
+        #[arg(long, default_value = "ctrl-]", help = "Hotkey to stop recording (ctrl-], f12, ctrl-\\\\)")]
+        stop_hotkey: String,
     },
     Play {
         #[arg(help = "Recording file to play")]
@@ -128,8 +131,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match cli.command {
-        Commands::Record { output, command, append, compress } => {
-            recorder::record(output, command, append, compress).await
+        Commands::Record { output, command, append, compress, stop_hotkey } => {
+            recorder::record(output, command, append, compress, stop_hotkey).await
         }
         Commands::Play { file, speed, paused } => {
             player::play(file, speed, paused).await

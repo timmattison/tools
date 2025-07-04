@@ -57,6 +57,19 @@ Record with compression:
 beta record --compress -o session.json.gz
 ```
 
+Record with custom stop hotkey:
+```bash
+beta record --stop-hotkey f12
+beta record --stop-hotkey "ctrl-\\"
+```
+
+#### Available Stop Hotkeys
+
+- `ctrl-]` (default) - Ctrl + Right Square Bracket
+- `f12` - Function Key 12
+- `ctrl-\\` - Ctrl + Backslash  
+- `ctrl-c` - Ctrl + C (traditional interrupt)
+
 ### Playing Back a Recording
 
 Basic playback:
@@ -194,7 +207,7 @@ beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 
 - Uses pseudo-terminals (PTY) to capture all terminal I/O
 - **Raw mode terminal capture** for proper keyboard input handling
-- **Signal handling** for graceful recording termination (Ctrl-C)
+- **Crossterm event handling** for graceful recording termination (Ctrl-])
 - **Thread synchronization** for reliable data capture and storage
 - Preserves ANSI escape sequences and terminal control codes with VTE parser
 - Records terminal dimensions for accurate playback
@@ -204,7 +217,8 @@ beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 
 ## Recording Controls
 
-- **Exit gracefully**: Press `Ctrl-C` to stop recording and save the session
+- **Exit gracefully**: Press `Ctrl-]` to stop recording and save the session (default hotkey)
+- **Custom hotkeys**: Configure with `--stop-hotkey` option (supports: `ctrl-]`, `f12`, `ctrl-\\`, `ctrl-c`)
 - **Shell exit**: Type `exit` in the shell to end the session normally
 - **Interactive programs**: All keyboard input (including `q` to quit programs like `btop`) works correctly
 - **Recovery**: Recording is automatically saved even if the shell exits unexpectedly
