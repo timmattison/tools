@@ -7,14 +7,15 @@ use crate::{
     client::UnifiClient,
     models::{Device, DeviceDetails, DeviceStatistics, DeviceAction, PortAction, Page},
     output::{OutputFormat, print_vec_table, print_single_item},
+    site_helper::get_site_id_or_prompt,
 };
 
 #[derive(Subcommand, Debug)]
 pub enum DevicesCommand {
     /// List devices on a site
     List {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Maximum number of devices to return
         #[clap(long, default_value = "25")]
@@ -27,8 +28,8 @@ pub enum DevicesCommand {
 
     /// Get device details
     Get {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Device ID
         device_id: Uuid,
@@ -36,8 +37,8 @@ pub enum DevicesCommand {
 
     /// Get device statistics
     Stats {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Device ID
         device_id: Uuid,
@@ -45,8 +46,8 @@ pub enum DevicesCommand {
 
     /// Restart a device
     Restart {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Device ID
         device_id: Uuid,
@@ -54,8 +55,8 @@ pub enum DevicesCommand {
 
     /// Power cycle a port
     PowerCyclePort {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Device ID
         device_id: Uuid,
@@ -120,7 +121,7 @@ pub async fn handle_devices_command(
 
 async fn list_devices(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     limit: u32,
     offset: u64,
     output_format: OutputFormat,
@@ -132,6 +133,7 @@ async fn list_devices(
         ("offset", &offset_str),
     ];
 
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices", site_id);
     let page: Page<Device> = client.get_with_params(&path, &params).await?;
 
@@ -150,10 +152,11 @@ async fn list_devices(
 
 async fn get_device(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     device_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices/{}", site_id, device_id);
     let device: DeviceDetails = client.get(&path).await?;
 
@@ -163,10 +166,11 @@ async fn get_device(
 
 async fn get_device_stats(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     device_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices/{}/statistics/latest", site_id, device_id);
     let stats: DeviceStatistics = client.get(&path).await?;
 
@@ -176,9 +180,10 @@ async fn get_device_stats(
 
 async fn restart_device(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     device_id: Uuid,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices/{}/actions", site_id, device_id);
     let action = DeviceAction::Restart;
 
@@ -189,10 +194,11 @@ async fn restart_device(
 
 async fn power_cycle_port(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     device_id: Uuid,
     port_idx: u32,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices/{}/interfaces/ports/{}/actions", site_id, device_id, port_idx);
     let action = PortAction::PowerCycle;
 

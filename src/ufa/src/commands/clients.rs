@@ -7,14 +7,15 @@ use crate::{
     client::UnifiClient,
     models::{Client, ClientAction, Page},
     output::{OutputFormat, print_vec_table, print_single_item},
+    site_helper::get_site_id_or_prompt,
 };
 
 #[derive(Subcommand, Debug)]
 pub enum ClientsCommand {
     /// List connected clients on a site
     List {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Maximum number of clients to return
         #[clap(long, default_value = "25")]
@@ -31,8 +32,8 @@ pub enum ClientsCommand {
 
     /// Get client details
     Get {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Client ID
         client_id: Uuid,
@@ -40,8 +41,8 @@ pub enum ClientsCommand {
 
     /// Authorize guest access for a client
     AuthorizeGuest {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Client ID
         client_id: Uuid,
@@ -65,8 +66,8 @@ pub enum ClientsCommand {
 
     /// Unauthorize guest access for a client
     UnauthorizeGuest {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Client ID
         client_id: Uuid,
@@ -164,7 +165,7 @@ pub async fn handle_clients_command(
 
 async fn list_clients(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     limit: u32,
     offset: u64,
     filter: Option<String>,
@@ -181,6 +182,7 @@ async fn list_clients(
         params.push(("filter", f));
     }
 
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients", site_id);
     let page: Page<Client> = client.get_with_params(&path, &params).await?;
 
@@ -199,10 +201,11 @@ async fn list_clients(
 
 async fn get_client(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     client_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients/{}", site_id, client_id);
     let client_details: Client = client.get(&path).await?;
 
@@ -212,13 +215,14 @@ async fn get_client(
 
 async fn authorize_guest(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     client_id: Uuid,
     time_limit_minutes: Option<u64>,
     data_usage_limit_mbytes: Option<u64>,
     rx_rate_limit_kbps: Option<u64>,
     tx_rate_limit_kbps: Option<u64>,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
     let action = ClientAction::AuthorizeGuestAccess {
         time_limit_minutes,
@@ -234,9 +238,10 @@ async fn authorize_guest(
 
 async fn unauthorize_guest(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     client_id: Uuid,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/clients/{}/actions", site_id, client_id);
     let action = ClientAction::UnauthorizeGuestAccess;
 
