@@ -22,7 +22,7 @@ pub enum SitesCommand {
 }
 
 #[derive(Tabled, serde::Serialize)]
-struct SiteRow {
+pub struct SiteRow {
     #[tabled(rename = "ID")]
     id: String,
     #[tabled(rename = "Name")]

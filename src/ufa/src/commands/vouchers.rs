@@ -7,14 +7,15 @@ use crate::{
     client::UnifiClient,
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
     output::{OutputFormat, print_vec_table, print_single_item},
+    site_helper::get_site_id_or_prompt,
 };
 
 #[derive(Subcommand, Debug)]
 pub enum VouchersCommand {
     /// List vouchers on a site
     List {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Maximum number of vouchers to return
         #[clap(long, default_value = "100")]
@@ -31,8 +32,8 @@ pub enum VouchersCommand {
 
     /// Get voucher details
     Get {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Voucher ID
         voucher_id: Uuid,
@@ -40,8 +41,8 @@ pub enum VouchersCommand {
 
     /// Create new vouchers
     Create {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Number of vouchers to create
         #[clap(long, default_value = "1")]
@@ -74,8 +75,8 @@ pub enum VouchersCommand {
 
     /// Delete a specific voucher
     Delete {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Voucher ID
         voucher_id: Uuid,
@@ -83,8 +84,8 @@ pub enum VouchersCommand {
 
     /// Delete vouchers by filter
     DeleteFiltered {
-        /// Site ID
-        site_id: Uuid,
+        /// Site ID (if not provided, will auto-detect)
+        site_id: Option<Uuid>,
 
         /// Filter expression
         #[clap(long)]
@@ -173,7 +174,7 @@ pub async fn handle_vouchers_command(
 
 async fn list_vouchers(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     limit: u32,
     offset: u64,
     filter: Option<String>,
@@ -190,6 +191,7 @@ async fn list_vouchers(
         params.push(("filter", f));
     }
 
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
     let page: Page<Voucher> = client.get_with_params(&path, &params).await?;
 
@@ -208,10 +210,11 @@ async fn list_vouchers(
 
 async fn get_voucher(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     voucher_id: Uuid,
     output_format: OutputFormat,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let voucher: Voucher = client.get(&path).await?;
 
@@ -221,7 +224,7 @@ async fn get_voucher(
 
 async fn create_vouchers(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     count: u32,
     name: String,
     time_limit_minutes: u64,
@@ -231,6 +234,7 @@ async fn create_vouchers(
     tx_rate_limit_kbps: Option<u64>,
     output_format: OutputFormat,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
     let request = VoucherCreateRequest {
         count,
@@ -259,9 +263,10 @@ async fn create_vouchers(
 
 async fn delete_voucher(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     voucher_id: Uuid,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let result: VoucherDeletionResults = client.delete(&path).await?;
 
@@ -271,9 +276,10 @@ async fn delete_voucher(
 
 async fn delete_vouchers_filtered(
     client: &UnifiClient,
-    site_id: Uuid,
+    site_id: Option<Uuid>,
     filter: String,
 ) -> Result<()> {
+    let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
     let params: Vec<(&str, &dyn std::fmt::Display)> = vec![("filter", &filter)];
     
