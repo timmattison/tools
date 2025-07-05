@@ -14,9 +14,6 @@ use crate::{
 pub enum ClientsCommand {
     /// List connected clients on a site
     List {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Maximum number of clients to return
         #[clap(long, default_value = "25")]
         limit: u32,
@@ -32,18 +29,12 @@ pub enum ClientsCommand {
 
     /// Get client details
     Get {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Client ID
         client_id: Uuid,
     },
 
     /// Authorize guest access for a client
     AuthorizeGuest {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Client ID
         client_id: Uuid,
 
@@ -66,9 +57,6 @@ pub enum ClientsCommand {
 
     /// Unauthorize guest access for a client
     UnauthorizeGuest {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Client ID
         client_id: Uuid,
     },
@@ -129,18 +117,18 @@ fn client_to_row(client: &Client) -> ClientRow {
 
 pub async fn handle_clients_command(
     command: ClientsCommand,
+    site_id: Option<Uuid>,
     client: &UnifiClient,
     output_format: OutputFormat,
 ) -> Result<()> {
     match command {
-        ClientsCommand::List { site_id, limit, offset, filter } => {
+        ClientsCommand::List { limit, offset, filter } => {
             list_clients(client, site_id, limit, offset, filter, output_format).await
         }
-        ClientsCommand::Get { site_id, client_id } => {
+        ClientsCommand::Get { client_id } => {
             get_client(client, site_id, client_id, output_format).await
         }
         ClientsCommand::AuthorizeGuest { 
-            site_id, 
             client_id, 
             time_limit_minutes,
             data_usage_limit_mbytes,
@@ -157,7 +145,7 @@ pub async fn handle_clients_command(
                 tx_rate_limit_kbps,
             ).await
         }
-        ClientsCommand::UnauthorizeGuest { site_id, client_id } => {
+        ClientsCommand::UnauthorizeGuest { client_id } => {
             unauthorize_guest(client, site_id, client_id).await
         }
     }

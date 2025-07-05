@@ -14,9 +14,6 @@ use crate::{
 pub enum VouchersCommand {
     /// List vouchers on a site
     List {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Maximum number of vouchers to return
         #[clap(long, default_value = "100")]
         limit: u32,
@@ -32,18 +29,12 @@ pub enum VouchersCommand {
 
     /// Get voucher details
     Get {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Voucher ID
         voucher_id: Uuid,
     },
 
     /// Create new vouchers
     Create {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Number of vouchers to create
         #[clap(long, default_value = "1")]
         count: u32,
@@ -75,18 +66,12 @@ pub enum VouchersCommand {
 
     /// Delete a specific voucher
     Delete {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Voucher ID
         voucher_id: Uuid,
     },
 
     /// Delete vouchers by filter
     DeleteFiltered {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Filter expression
         #[clap(long)]
         filter: String,
@@ -130,18 +115,18 @@ impl From<&Voucher> for VoucherRow {
 
 pub async fn handle_vouchers_command(
     command: VouchersCommand,
+    site_id: Option<Uuid>,
     client: &UnifiClient,
     output_format: OutputFormat,
 ) -> Result<()> {
     match command {
-        VouchersCommand::List { site_id, limit, offset, filter } => {
+        VouchersCommand::List { limit, offset, filter } => {
             list_vouchers(client, site_id, limit, offset, filter, output_format).await
         }
-        VouchersCommand::Get { site_id, voucher_id } => {
+        VouchersCommand::Get { voucher_id } => {
             get_voucher(client, site_id, voucher_id, output_format).await
         }
         VouchersCommand::Create { 
-            site_id, 
             count, 
             name, 
             time_limit_minutes,
@@ -163,10 +148,10 @@ pub async fn handle_vouchers_command(
                 output_format,
             ).await
         }
-        VouchersCommand::Delete { site_id, voucher_id } => {
+        VouchersCommand::Delete { voucher_id } => {
             delete_voucher(client, site_id, voucher_id).await
         }
-        VouchersCommand::DeleteFiltered { site_id, filter } => {
+        VouchersCommand::DeleteFiltered { filter } => {
             delete_vouchers_filtered(client, site_id, filter).await
         }
     }

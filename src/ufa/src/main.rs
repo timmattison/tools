@@ -3,11 +3,13 @@ mod models;
 mod commands;
 mod output;
 mod site_helper;
+mod device_helper;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
+use uuid::Uuid;
 
 fn parse_bool_env(s: &str) -> Result<bool, String> {
     match s.to_lowercase().as_str() {
@@ -60,18 +62,30 @@ enum Commands {
     
     /// Manage devices
     Devices {
+        /// Site ID (if not provided, will auto-detect)
+        #[clap(long)]
+        site_id: Option<Uuid>,
+        
         #[clap(subcommand)]
         command: devices::DevicesCommand,
     },
     
     /// Manage clients
     Clients {
+        /// Site ID (if not provided, will auto-detect)
+        #[clap(long)]
+        site_id: Option<Uuid>,
+        
         #[clap(subcommand)]
         command: clients::ClientsCommand,
     },
     
     /// Manage hotspot vouchers
     Vouchers {
+        /// Site ID (if not provided, will auto-detect)
+        #[clap(long)]
+        site_id: Option<Uuid>,
+        
         #[clap(subcommand)]
         command: vouchers::VouchersCommand,
     },
@@ -98,9 +112,9 @@ async fn main() -> Result<()> {
             let cmd = sites::SitesCommand::List { limit, offset, filter };
             sites::handle_sites_command(cmd, &client, args.output).await
         },
-        Commands::Devices { command } => devices::handle_devices_command(command, &client, args.output).await,
-        Commands::Clients { command } => clients::handle_clients_command(command, &client, args.output).await,
-        Commands::Vouchers { command } => vouchers::handle_vouchers_command(command, &client, args.output).await,
+        Commands::Devices { site_id, command } => devices::handle_devices_command(command, site_id, &client, args.output).await,
+        Commands::Clients { site_id, command } => clients::handle_clients_command(command, site_id, &client, args.output).await,
+        Commands::Vouchers { site_id, command } => vouchers::handle_vouchers_command(command, site_id, &client, args.output).await,
         Commands::Info => info::handle_info_command(&client, args.output).await,
     }
 }
