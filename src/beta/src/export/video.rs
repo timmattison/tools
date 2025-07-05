@@ -4,13 +4,40 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::Command;
-use imageproc::drawing::draw_filled_rect_mut;
+use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
+use ab_glyph::{FontRef, PxScale};
 use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
-// For now, we'll create a simple built-in font fallback
-// This can be enhanced with an embedded font file later
+fn get_font() -> Result<FontRef<'static>> {
+    // Try to load system monospace fonts
+    let font_paths = [
+        "/System/Library/Fonts/Monaco.ttf",  // macOS
+        "/System/Library/Fonts/Menlo.ttf",   // macOS
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", // Linux
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf", // Linux (alternative)
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", // Linux
+        "/System/Library/Fonts/Courier.ttf", // macOS fallback
+    ];
+    
+    for font_path in &font_paths {
+        if let Ok(font_data) = std::fs::read(font_path) {
+            // Need to leak the data to get a 'static lifetime
+            let static_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
+            if let Ok(font) = FontRef::try_from_slice(static_data) {
+                println!("Using font: {}", font_path);
+                return Ok(font);
+            }
+        }
+    }
+    
+    Err(anyhow::anyhow!(
+        "No suitable monospace font found. Please install a monospace font like:\n\
+         - macOS: Monaco or Menlo (should be pre-installed)\n\
+         - Linux: sudo apt install fonts-dejavu fonts-liberation"
+    ))
+}
 
 pub async fn export_video(
     input: PathBuf,
@@ -138,6 +165,7 @@ fn render_terminal_to_image(
     width: u32,
     height: u32,
 ) -> Result<RgbImage> {
+    let font = get_font()?;
     let mut image = ImageBuffer::new(width, height);
     let theme = terminal_state.get_theme();
     
@@ -147,15 +175,17 @@ fn render_terminal_to_image(
         *pixel = bg_color;
     }
     
-    let char_width = 12.0;
+    // Calculate font size and spacing
+    let font_size = 16.0;
+    let scale = PxScale::from(font_size);
+    let char_width = 9.6; // Typical monospace width
     let char_height = 20.0;
     let padding_x = 20.0;
     let padding_y = 20.0;
     
     let grid = terminal_state.get_grid();
     
-    // Create a simple fallback font representation using rectangles
-    // This will be replaced with proper font rendering once we have a font
+    // Render each character in the terminal grid
     for (y, row) in grid.iter().enumerate() {
         for (x, cell) in row.iter().enumerate() {
             let pixel_x = padding_x + (x as f32 * char_width);
@@ -171,24 +201,23 @@ fn render_terminal_to_image(
                 Rgb([cell.bg_color.0, cell.bg_color.1, cell.bg_color.2]),
             );
             
-            // If character is not space, draw a simplified representation
+            // Draw the character if it's not empty
             if cell.ch != ' ' && cell.ch != '\x00' {
-                // For now, render characters as smaller rectangles with proper colors
-                // This gives us better visual distinction than solid blocks
-                let char_rect = if cell.bold {
-                    // Bold characters are slightly larger
-                    Rect::at((pixel_x + 2.0) as i32, (pixel_y + 3.0) as i32)
-                        .of_size((char_width - 4.0) as u32, (char_height - 6.0) as u32)
-                } else {
-                    // Normal characters
-                    Rect::at((pixel_x + 3.0) as i32, (pixel_y + 4.0) as i32)
-                        .of_size((char_width - 6.0) as u32, (char_height - 8.0) as u32)
+                let text = cell.ch.to_string();
+                let font_scale = if cell.bold { 
+                    PxScale::from(font_size + 1.0) // Slightly larger for bold
+                } else { 
+                    scale 
                 };
                 
-                draw_filled_rect_mut(
+                draw_text_mut(
                     &mut image,
-                    char_rect,
                     Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
+                    pixel_x as i32,
+                    (pixel_y + 2.0) as i32, // Slight vertical adjustment
+                    font_scale,
+                    &font,
+                    &text,
                 );
                 
                 // Add underline if needed

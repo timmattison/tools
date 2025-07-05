@@ -17,6 +17,7 @@
 ### Export Options
 - **Web Export**: Generate self-contained HTML files with embedded JavaScript player
 - **Video Export**: Create MP4 or GIF videos from terminal recordings
+- **High-quality text rendering**: Actual fonts instead of placeholder rectangles
 - Multiple theme support (Dracula, Monokai, Solarized Dark/Light)
 - Configurable video settings (FPS, resolution, optimization)
 - No external dependencies for web playback
@@ -213,6 +214,10 @@ beta export video demo.json -o demo.mp4 --fps 60 --resolution 1920x1080 --theme 
 # Web-optimized MP4
 beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 ```
+
+**Font Requirements for Video Export:**
+- macOS: Uses Monaco or Menlo (pre-installed)
+- Linux: Install fonts with `sudo apt install fonts-dejavu fonts-liberation`
 
 ## Technical Details
 
