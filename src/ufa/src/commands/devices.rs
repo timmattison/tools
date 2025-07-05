@@ -8,15 +8,13 @@ use crate::{
     models::{Device, DeviceDetails, DeviceStatistics, DeviceAction, PortAction, Page},
     output::{OutputFormat, print_vec_table, print_single_item},
     site_helper::get_site_id_or_prompt,
+    device_helper::get_device_id_or_prompt,
 };
 
 #[derive(Subcommand, Debug)]
 pub enum DevicesCommand {
     /// List devices on a site
     List {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Maximum number of devices to return
         #[clap(long, default_value = "25")]
         limit: u32,
@@ -28,36 +26,24 @@ pub enum DevicesCommand {
 
     /// Get device details
     Get {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Device ID
         device_id: Uuid,
     },
 
     /// Get device statistics
     Stats {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
-        /// Device ID
-        device_id: Uuid,
+        /// Device ID (if not provided, will show device list)
+        device_id: Option<Uuid>,
     },
 
     /// Restart a device
     Restart {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Device ID
         device_id: Uuid,
     },
 
     /// Power cycle a port
     PowerCyclePort {
-        /// Site ID (if not provided, will auto-detect)
-        site_id: Option<Uuid>,
-
         /// Device ID
         device_id: Uuid,
 
@@ -67,7 +53,7 @@ pub enum DevicesCommand {
 }
 
 #[derive(Tabled, serde::Serialize)]
-struct DeviceRow {
+pub struct DeviceRow {
     #[tabled(rename = "ID")]
     id: String,
     #[tabled(rename = "Name")]
@@ -97,23 +83,24 @@ impl From<&Device> for DeviceRow {
 
 pub async fn handle_devices_command(
     command: DevicesCommand,
+    site_id: Option<Uuid>,
     client: &UnifiClient,
     output_format: OutputFormat,
 ) -> Result<()> {
     match command {
-        DevicesCommand::List { site_id, limit, offset } => {
+        DevicesCommand::List { limit, offset } => {
             list_devices(client, site_id, limit, offset, output_format).await
         }
-        DevicesCommand::Get { site_id, device_id } => {
+        DevicesCommand::Get { device_id } => {
             get_device(client, site_id, device_id, output_format).await
         }
-        DevicesCommand::Stats { site_id, device_id } => {
+        DevicesCommand::Stats { device_id } => {
             get_device_stats(client, site_id, device_id, output_format).await
         }
-        DevicesCommand::Restart { site_id, device_id } => {
+        DevicesCommand::Restart { device_id } => {
             restart_device(client, site_id, device_id).await
         }
-        DevicesCommand::PowerCyclePort { site_id, device_id, port_idx } => {
+        DevicesCommand::PowerCyclePort { device_id, port_idx } => {
             power_cycle_port(client, site_id, device_id, port_idx).await
         }
     }
@@ -167,10 +154,11 @@ async fn get_device(
 async fn get_device_stats(
     client: &UnifiClient,
     site_id: Option<Uuid>,
-    device_id: Uuid,
+    device_id: Option<Uuid>,
     output_format: OutputFormat,
 ) -> Result<()> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
+    let device_id = get_device_id_or_prompt(client, site_id, device_id).await?;
     let path = format!("sites/{}/devices/{}/statistics/latest", site_id, device_id);
     let stats: DeviceStatistics = client.get(&path).await?;
 
