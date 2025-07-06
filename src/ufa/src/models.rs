@@ -229,7 +229,7 @@ pub struct DeviceInterfaceStatistics {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RadioStatistics {
     #[serde(rename = "frequencyGHz")]
-    pub frequency_ghz: String,
+    pub frequency_ghz: f64,
     #[serde(rename = "txRetriesPct")]
     pub tx_retries_pct: Option<f64>,
 }
