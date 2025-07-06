@@ -62,7 +62,7 @@ for fun. Several tools have also been ported to Rust for improved performance an
       I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
     - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
 - portplz
-    - Generates an unprivileged port number based on the name of the current directory. Nice for picking a port number
+    - Generates an unprivileged port number based on the name of the current directory and git branch. Nice for picking a port number
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
       separate instances/VMs.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
