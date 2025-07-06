@@ -81,6 +81,91 @@ impl From<&Device> for DeviceRow {
     }
 }
 
+#[derive(Tabled, serde::Serialize)]
+pub struct DeviceStatsRow {
+    #[tabled(rename = "Uptime")]
+    uptime: String,
+    #[tabled(rename = "CPU %")]
+    cpu_pct: String,
+    #[tabled(rename = "Memory %")]
+    memory_pct: String,
+    #[tabled(rename = "Load Avg (1m)")]
+    load_avg_1m: String,
+    #[tabled(rename = "Load Avg (5m)")]
+    load_avg_5m: String,
+    #[tabled(rename = "Load Avg (15m)")]
+    load_avg_15m: String,
+    #[tabled(rename = "TX Rate")]
+    tx_rate: String,
+    #[tabled(rename = "RX Rate")]
+    rx_rate: String,
+}
+
+fn format_uptime(seconds: Option<u64>) -> String {
+    match seconds {
+        Some(secs) => {
+            let days = secs / 86400;
+            let hours = (secs % 86400) / 3600;
+            let minutes = (secs % 3600) / 60;
+            
+            if days > 0 {
+                format!("{}d {}h {}m", days, hours, minutes)
+            } else if hours > 0 {
+                format!("{}h {}m", hours, minutes)
+            } else {
+                format!("{}m", minutes)
+            }
+        }
+        None => "N/A".to_string(),
+    }
+}
+
+fn format_rate(bps: Option<u64>) -> String {
+    match bps {
+        Some(rate) => {
+            if rate >= 1_000_000_000 {
+                format!("{:.1} Gbps", rate as f64 / 1_000_000_000.0)
+            } else if rate >= 1_000_000 {
+                format!("{:.1} Mbps", rate as f64 / 1_000_000.0)
+            } else if rate >= 1_000 {
+                format!("{:.1} Kbps", rate as f64 / 1_000.0)
+            } else {
+                format!("{} bps", rate)
+            }
+        }
+        None => "N/A".to_string(),
+    }
+}
+
+fn format_percentage(pct: Option<f64>) -> String {
+    match pct {
+        Some(p) => format!("{:.1}%", p),
+        None => "N/A".to_string(),
+    }
+}
+
+fn format_load_avg(load: Option<f64>) -> String {
+    match load {
+        Some(l) => format!("{:.2}", l),
+        None => "N/A".to_string(),
+    }
+}
+
+impl From<&crate::models::DeviceStatistics> for DeviceStatsRow {
+    fn from(stats: &crate::models::DeviceStatistics) -> Self {
+        Self {
+            uptime: format_uptime(stats.uptime_sec),
+            cpu_pct: format_percentage(stats.cpu_utilization_pct),
+            memory_pct: format_percentage(stats.memory_utilization_pct),
+            load_avg_1m: format_load_avg(stats.load_average_1min),
+            load_avg_5m: format_load_avg(stats.load_average_5min),
+            load_avg_15m: format_load_avg(stats.load_average_15min),
+            tx_rate: format_rate(stats.uplink.as_ref().and_then(|u| u.tx_rate_bps)),
+            rx_rate: format_rate(stats.uplink.as_ref().and_then(|u| u.rx_rate_bps)),
+        }
+    }
+}
+
 pub async fn handle_devices_command(
     command: DevicesCommand,
     site_id: Option<Uuid>,
@@ -162,7 +247,16 @@ async fn get_device_stats(
     let path = format!("sites/{}/devices/{}/statistics/latest", site_id, device_id);
     let stats: DeviceStatistics = client.get(&path).await?;
 
-    print_single_item(&stats, output_format)?;
+    match output_format {
+        OutputFormat::Json => {
+            print_single_item(&stats, output_format)?;
+        }
+        OutputFormat::Table => {
+            let stats_row = DeviceStatsRow::from(&stats);
+            print_vec_table(&[stats_row], output_format)?;
+        }
+    }
+    
     Ok(())
 }
 
