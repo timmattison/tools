@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 use walkdir::WalkDir;
@@ -53,6 +54,20 @@ fn detect_package_manager(dir: &Path) -> Option<&'static str> {
     }
 }
 
+fn is_git_worktree(dir: &Path) -> bool {
+    let git_path = dir.join(".git");
+    
+    // If .git is a file (not a directory), it's likely a worktree
+    if git_path.is_file() {
+        if let Ok(content) = fs::read_to_string(&git_path) {
+            // Git worktrees have .git files that contain "gitdir: <path>"
+            return content.trim().starts_with("gitdir:");
+        }
+    }
+    
+    false
+}
+
 fn main() {
     let repo_root = match find_git_repo() {
         Some(root) => root,
@@ -87,6 +102,12 @@ fn main() {
             
             // Skip any path that has node_modules as a component
             if dir_path.components().any(|c| c.as_os_str() == "node_modules") {
+                continue;
+            }
+            
+            // Skip git worktree directories
+            if is_git_worktree(dir_path) {
+                println!("Skipping git worktree directory: {}", dir_path.display());
                 continue;
             }
             
