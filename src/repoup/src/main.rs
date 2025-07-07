@@ -2,7 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 fn find_git_repo() -> Option<String> {
     let mut current_dir = env::current_dir().ok()?;
@@ -68,6 +68,21 @@ fn is_git_worktree(dir: &Path) -> bool {
     false
 }
 
+fn should_skip_entry(entry: &DirEntry) -> bool {
+    // Skip any path that has node_modules as a component
+    if entry.file_name() == "node_modules" {
+        return true;
+    }
+    
+    // Skip git worktree directories
+    if entry.file_type().is_dir() && is_git_worktree(entry.path()) {
+        println!("Skipping git worktree directory: {}", entry.path().display());
+        return true;
+    }
+    
+    false
+}
+
 fn main() {
     let repo_root = match find_git_repo() {
         Some(root) => root,
@@ -88,7 +103,10 @@ fn main() {
     let mut go_dirs: Vec<PathBuf> = Vec::new();
     
     // Collection phase - walk through all directories and categorize
-    for entry in WalkDir::new(repo_path) {
+    for entry in WalkDir::new(repo_path)
+        .into_iter()
+        .filter_entry(|e| !should_skip_entry(e))
+    {
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -99,17 +117,6 @@ fn main() {
         
         if entry.file_type().is_dir() {
             let dir_path = entry.path();
-            
-            // Skip any path that has node_modules as a component
-            if dir_path.components().any(|c| c.as_os_str() == "node_modules") {
-                continue;
-            }
-            
-            // Skip git worktree directories
-            if is_git_worktree(dir_path) {
-                println!("Skipping git worktree directory: {}", dir_path.display());
-                continue;
-            }
             
             // Categorize directories by project type
             if dir_path.join("Cargo.toml").exists() {
