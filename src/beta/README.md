@@ -17,7 +17,7 @@
 ### Export Options
 - **Web Export**: Generate self-contained HTML files with embedded JavaScript player
 - **Video Export**: Create MP4 or GIF videos from terminal recordings
-- **High-quality text rendering**: Actual fonts instead of placeholder rectangles
+- **High-quality text rendering**: Uses JetBrains Mono Nerd Font with programming ligatures and icons
 - Multiple theme support (Dracula, Monokai, Solarized Dark/Light)
 - Configurable video settings (FPS, resolution, optimization)
 - No external dependencies for web playback
@@ -216,8 +216,16 @@ beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 ```
 
 **Font Requirements for Video Export:**
-- macOS: Uses Monaco or Menlo (pre-installed)
-- Linux: Install fonts with `sudo apt install fonts-dejavu fonts-liberation`
+
+**Recommended (Best Quality):**
+- **JetBrains Mono Nerd Font** - Modern coding font with programming ligatures and icons
+  - Download: https://github.com/ryanoasis/nerd-fonts/releases
+  - macOS: `brew tap homebrew/cask-fonts && brew install font-jetbrains-mono-nerd-font`
+  - Linux: Download and extract to `~/.local/share/fonts/`
+
+**Fallback Options:**
+- macOS: Monaco or Menlo (pre-installed)
+- Linux: `sudo apt install fonts-dejavu fonts-liberation`
 
 ## Technical Details
 

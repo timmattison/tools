@@ -11,8 +11,31 @@ use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
 fn get_font() -> Result<FontRef<'static>> {
-    // Try to load system monospace fonts
+    // Try to load fonts in order of preference, starting with JetBrains Mono Nerd Font
     let font_paths = [
+        // JetBrains Mono Nerd Font (preferred) - macOS user fonts
+        "~/Library/Fonts/JetBrainsMono Nerd Font Mono.ttf",
+        "~/Library/Fonts/JetBrainsMonoNL Nerd Font Mono.ttf", // No Ligatures
+        "~/Library/Fonts/JetBrains Mono Nerd Font Regular.ttf",
+        
+        // JetBrains Mono Nerd Font - macOS system fonts
+        "/Library/Fonts/JetBrainsMono Nerd Font Mono.ttf",
+        "/Library/Fonts/JetBrainsMonoNL Nerd Font Mono.ttf",
+        
+        // JetBrains Mono Nerd Font - Linux user fonts
+        "~/.local/share/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+        "~/.local/share/fonts/JetBrainsMonoNLNerdFont-Regular.ttf",
+        
+        // JetBrains Mono Nerd Font - Linux system fonts
+        "/usr/share/fonts/truetype/nerd-fonts/JetBrainsMonoNerdFont-Regular.ttf",
+        "/usr/local/share/fonts/JetBrainsMonoNerdFont-Regular.ttf",
+        
+        // Regular JetBrains Mono (fallback)
+        "~/Library/Fonts/JetBrains Mono Regular.ttf",
+        "/Library/Fonts/JetBrains Mono Regular.ttf",
+        "~/.local/share/fonts/JetBrains Mono Regular.ttf",
+        
+        // System default monospace fonts
         "/System/Library/Fonts/Monaco.ttf",  // macOS
         "/System/Library/Fonts/Menlo.ttf",   // macOS
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", // Linux
@@ -22,18 +45,35 @@ fn get_font() -> Result<FontRef<'static>> {
     ];
     
     for font_path in &font_paths {
-        if let Ok(font_data) = std::fs::read(font_path) {
+        // Expand home directory if path starts with ~
+        let expanded_path = if font_path.starts_with("~/") {
+            if let Some(home_dir) = std::env::var_os("HOME") {
+                let home_str = home_dir.to_string_lossy();
+                font_path.replacen("~", &home_str, 1)
+            } else {
+                continue; // Skip paths with ~ if HOME not set
+            }
+        } else {
+            font_path.to_string()
+        };
+        
+        if let Ok(font_data) = std::fs::read(&expanded_path) {
             // Need to leak the data to get a 'static lifetime
             let static_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
             if let Ok(font) = FontRef::try_from_slice(static_data) {
-                println!("Using font: {}", font_path);
+                println!("Using font: {}", expanded_path);
                 return Ok(font);
             }
         }
     }
     
     Err(anyhow::anyhow!(
-        "No suitable monospace font found. Please install a monospace font like:\n\
+        "No suitable monospace font found. For best results, install JetBrains Mono Nerd Font:\n\
+         - Download from: https://github.com/ryanoasis/nerd-fonts/releases\n\
+         - Or use Homebrew: brew tap homebrew/cask-fonts && brew install font-jetbrains-mono-nerd-font\n\
+         - Linux: Download and install to ~/.local/share/fonts/\n\
+         \n\
+         Fallback options:\n\
          - macOS: Monaco or Menlo (should be pre-installed)\n\
          - Linux: sudo apt install fonts-dejavu fonts-liberation"
     ))
