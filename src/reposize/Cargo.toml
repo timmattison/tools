@@ -8,5 +8,5 @@ name = "reposize"
 path = "src/main.rs"
 
 [dependencies]
-walkdir = "2.4"
+walkdir = "2.5"
 num-format = "0.4"
