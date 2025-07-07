@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 use walkdir::{DirEntry, WalkDir};
+use clap::Parser;
 
 fn find_git_repo() -> Option<String> {
     let mut current_dir = env::current_dir().ok()?;
@@ -83,7 +84,25 @@ fn should_skip_entry(entry: &DirEntry) -> bool {
     false
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Use latest versions for Rust crates (requires cargo-edit)
+    #[arg(long, short = 'l')]
+    latest: bool,
+}
+
+fn check_cargo_edit_installed() -> bool {
+    Command::new("cargo")
+        .args(&["upgrade", "--help"])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
 fn main() {
+    let args = Args::parse();
+    
     let repo_root = match find_git_repo() {
         Some(root) => root,
         None => {
@@ -136,10 +155,39 @@ fn main() {
     // Processing phase - handle each language type globally
     
     // Process all Rust projects first
+    if args.latest && !rust_dirs.is_empty() {
+        // Check if cargo-edit is installed
+        if check_cargo_edit_installed() {
+            println!("\n✓ cargo-edit is installed, will use cargo upgrade for latest versions");
+        } else {
+            eprintln!("\n⚠️  Warning: --latest flag was specified but cargo-edit is not installed.");
+            eprintln!("   To install it, run: cargo install cargo-edit");
+            eprintln!("   Falling back to standard cargo update (respects version constraints)\n");
+        }
+    }
+    
     for dir_path in rust_dirs {
         println!("\n[Rust] Found Cargo.toml in {}", dir_path.display());
-        if let Err(e) = run_command_in_directory(&dir_path, &["cargo", "update"]) {
-            eprintln!("Warning: {}", e);
+        
+        if args.latest && check_cargo_edit_installed() {
+            // First run cargo upgrade to update Cargo.toml to latest versions
+            if let Err(e) = run_command_in_directory(&dir_path, &["cargo", "upgrade"]) {
+                eprintln!("Warning: Failed to run cargo upgrade: {}", e);
+                eprintln!("         Falling back to cargo update");
+                if let Err(e) = run_command_in_directory(&dir_path, &["cargo", "update"]) {
+                    eprintln!("Warning: {}", e);
+                }
+            } else {
+                // Then run cargo update to update Cargo.lock
+                if let Err(e) = run_command_in_directory(&dir_path, &["cargo", "update"]) {
+                    eprintln!("Warning: {}", e);
+                }
+            }
+        } else {
+            // Standard cargo update (respects version constraints)
+            if let Err(e) = run_command_in_directory(&dir_path, &["cargo", "update"]) {
+                eprintln!("Warning: {}", e);
+            }
         }
     }
     
