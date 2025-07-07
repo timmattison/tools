@@ -34,6 +34,10 @@ pub enum DevicesCommand {
     Stats {
         /// Device ID (if not provided, will show device list)
         device_id: Option<Uuid>,
+        
+        /// Show statistics for all devices
+        #[clap(long)]
+        all: bool,
     },
 
     /// Restart a device
@@ -166,6 +170,53 @@ impl From<&crate::models::DeviceStatistics> for DeviceStatsRow {
     }
 }
 
+#[derive(Tabled, serde::Serialize)]
+pub struct DeviceStatsRowWithName {
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Model")]
+    model: String,
+    #[tabled(rename = "Uptime")]
+    uptime: String,
+    #[tabled(rename = "CPU %")]
+    cpu_pct: String,
+    #[tabled(rename = "Memory %")]
+    memory_pct: String,
+    #[tabled(rename = "Load Avg (1m)")]
+    load_avg_1m: String,
+    #[tabled(rename = "TX Rate")]
+    tx_rate: String,
+    #[tabled(rename = "RX Rate")]
+    rx_rate: String,
+}
+
+impl DeviceStatsRowWithName {
+    fn from_device_and_stats(device: &Device, stats: Option<&crate::models::DeviceStatistics>) -> Self {
+        match stats {
+            Some(s) => Self {
+                name: device.name.clone(),
+                model: device.model.clone(),
+                uptime: format_uptime(s.uptime_sec),
+                cpu_pct: format_percentage(s.cpu_utilization_pct),
+                memory_pct: format_percentage(s.memory_utilization_pct),
+                load_avg_1m: format_load_avg(s.load_average_1min),
+                tx_rate: format_rate(s.uplink.as_ref().and_then(|u| u.tx_rate_bps)),
+                rx_rate: format_rate(s.uplink.as_ref().and_then(|u| u.rx_rate_bps)),
+            },
+            None => Self {
+                name: device.name.clone(),
+                model: device.model.clone(),
+                uptime: "N/A".to_string(),
+                cpu_pct: "N/A".to_string(),
+                memory_pct: "N/A".to_string(),
+                load_avg_1m: "N/A".to_string(),
+                tx_rate: "N/A".to_string(),
+                rx_rate: "N/A".to_string(),
+            },
+        }
+    }
+}
+
 pub async fn handle_devices_command(
     command: DevicesCommand,
     site_id: Option<Uuid>,
@@ -179,8 +230,8 @@ pub async fn handle_devices_command(
         DevicesCommand::Get { device_id } => {
             get_device(client, site_id, device_id, output_format).await
         }
-        DevicesCommand::Stats { device_id } => {
-            get_device_stats(client, site_id, device_id, output_format).await
+        DevicesCommand::Stats { device_id, all } => {
+            get_device_stats(client, site_id, device_id, all, output_format).await
         }
         DevicesCommand::Restart { device_id } => {
             restart_device(client, site_id, device_id).await
@@ -240,10 +291,35 @@ async fn get_device_stats(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     device_id: Option<Uuid>,
+    all: bool,
     output_format: OutputFormat,
 ) -> Result<()> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
-    let device_id = get_device_id_or_prompt(client, site_id, device_id).await?;
+
+    // Validate that --all and device_id are mutually exclusive
+    if all && device_id.is_some() {
+        anyhow::bail!("Cannot specify both --all and a device ID. Use either --all to show all devices or specify a single device ID.");
+    }
+
+    if all {
+        // Get stats for all devices
+        get_all_device_stats(client, site_id, output_format).await
+    } else if let Some(device_id) = device_id {
+        // Get stats for specific device
+        get_single_device_stats(client, site_id, device_id, output_format).await
+    } else {
+        // Show device selection prompt
+        let device_id = get_device_id_or_prompt(client, site_id, device_id).await?;
+        get_single_device_stats(client, site_id, device_id, output_format).await
+    }
+}
+
+async fn get_single_device_stats(
+    client: &UnifiClient,
+    site_id: Uuid,
+    device_id: Uuid,
+    output_format: OutputFormat,
+) -> Result<()> {
     let path = format!("sites/{}/devices/{}/statistics/latest", site_id, device_id);
     let stats: DeviceStatistics = client.get(&path).await?;
 
@@ -256,6 +332,38 @@ async fn get_device_stats(
             print_vec_table(&[stats_row], output_format)?;
         }
     }
+    
+    Ok(())
+}
+
+async fn get_all_device_stats(
+    client: &UnifiClient,
+    site_id: Uuid,
+    output_format: OutputFormat,
+) -> Result<()> {
+    // Fetch all devices
+    let params: Vec<(&str, &dyn std::fmt::Display)> = vec![];
+    let devices_path = format!("sites/{}/devices", site_id);
+    let devices_page: Page<Device> = client.get_with_params(&devices_path, &params).await?;
+
+    if devices_page.data.is_empty() {
+        println!("No devices found on this site.");
+        return Ok(());
+    }
+
+    // Create rows with device information and stats
+    let mut stats_rows = Vec::new();
+    
+    // Fetch statistics for each device (sequentially for now to avoid ownership issues)
+    for device in &devices_page.data {
+        let stats_path = format!("sites/{}/devices/{}/statistics/latest", site_id, device.id);
+        let stats = client.get::<DeviceStatistics>(&stats_path).await.ok();
+        let row = DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref());
+        stats_rows.push(row);
+    }
+
+    // Always show table format for --all (JSON would be too verbose)
+    print_vec_table(&stats_rows, OutputFormat::Table)?;
     
     Ok(())
 }
