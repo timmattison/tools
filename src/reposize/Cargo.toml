@@ -1,0 +1,12 @@
+[package]
+name = "reposize"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "reposize"
+path = "src/main.rs"
+
+[dependencies]
+walkdir = "2.4"
+num-format = "0.4"

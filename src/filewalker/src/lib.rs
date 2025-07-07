@@ -44,7 +44,13 @@ impl FileWalker {
         
         for path in unique_paths {
             for entry in WalkDir::new(path) {
-                let entry = entry?;
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(err) => {
+                        eprintln!("Warning: {}", err);
+                        continue;
+                    }
+                };
                 
                 // Skip directories
                 if entry.file_type().is_dir() {
@@ -79,7 +85,13 @@ impl FileWalker {
             let mut entries = Vec::new();
             
             for entry in WalkDir::new(path) {
-                let entry = entry?;
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(err) => {
+                        eprintln!("Warning: {}", err);
+                        continue;
+                    }
+                };
                 
                 // Skip directories
                 if entry.file_type().is_dir() {

@@ -40,27 +40,14 @@ for fun. Several tools have also been ported to Rust for improved performance an
 - jsonboard
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
-- reposize
-    - Shows you the size of the git repository you're currently in. Useful for investigating performance issues with
-      large git repos.
-    - To install: `go install github.com/timmattison/tools/cmd/reposize@latest`
 - bm
     - Bulk Move. Named "bm" because moving lots of files is shitty.
     - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
-- repotidy
-    - Runs `go mod tidy` on every directory in the current git repo that has a `go.mod`. I wrote this while working on a
-      CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
-    - To install: `go install github.com/timmattison/tools/cmd/repotidy@latest`
 - localnext
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
       directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
       with [the templates I was testing at the time](https://github.com/timmattison/material-ui-react-templates)
     - To install: `go install github.com/timmattison/tools/cmd/localnext@latest`
-- repoup
-    - Runs `go get -u all` on every directory in the current git repo that has a `go.mod`. I wrote this while working on
-      a
-      CDK project with multiple Golang functions since I kept having to track down which one needed to be updated.
-    - To install: `go install github.com/timmattison/tools/cmd/repoup@latest`
 - unescapeboard
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
@@ -74,7 +61,7 @@ for fun. Several tools have also been ported to Rust for improved performance an
       I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
     - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
 - portplz
-    - Generates an unprivileged port number based on the name of the current directory. Nice for picking a port number
+    - Generates an unprivileged port number based on the name of the current directory and git branch. Nice for picking a port number
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
       separate instances/VMs.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
@@ -83,13 +70,6 @@ for fun. Several tools have also been ported to Rust for improved performance an
       it.
       I use this for deep linking videos to my Roku TVs through their APIs.
     - To install: `cargo install --git https://github.com/timmattison/tools tubeboard`
-- runat
-    - Runs a command at a specified time. Shows a countdown timer and supports various time formats including UTC and
-      local time.
-      You can use full dates like "2024-01-01T12:00:00Z" or just times like "12:00" (which will run today or tomorrow at
-      that time).
-      Press Ctrl-C to cancel.
-    - To install: `go install github.com/timmattison/tools/cmd/runat@latest`
 - safeboard
     - Monitors clipboard for dangerous Unicode characters that could be used in copy-paste attacks. Detects invisible 
       characters like zero-width spaces, directional overrides, and private use area characters that attackers use to 
@@ -101,12 +81,6 @@ for fun. Several tools have also been ported to Rust for improved performance an
       recently
       across different projects.
     - To install: `go install github.com/timmattison/tools/cmd/gitrdun@latest`
-- nodenuke
-    - Nukes your node_modules and .next directories and npm and pnpm lock files
-    - To install: `go install github.com/timmattison/tools/cmd/nodenuke@latest`
-- nodeup
-    - Updates your package.json dependencies recursively
-    - To install: `go install github.com/timmattison/tools/cmd/nodeup@latest`
 - procinfo
     - Shows detailed information about running processes matching a name. Displays process details, working directory,
       command line, open files, network connections, and optionally environment variables. Useful for debugging and
@@ -131,6 +105,11 @@ for fun. Several tools have also been ported to Rust for improved performance an
       path. Shows process name, PID, user, and access mode. Supports multiple paths and recursive directory scanning.
       Works on macOS (using lsof), Linux (using /proc), and Windows (using system APIs). Supports JSON output and verbose mode.
     - To install: `cargo install --git https://github.com/timmattison/tools wu`
+- workit
+    - Finds all Cargo.toml files in subdirectories and adds them to a Rust workspace in the top-level Cargo.toml file.
+      Useful for converting multiple independent Rust projects into a single workspace for faster builds and shared
+      dependency management. Supports dry-run mode, path prefixes, and exclude patterns.
+    - To install: `cargo install --git https://github.com/timmattison/tools workit`
 - symfix
     - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
@@ -166,6 +145,44 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
+- repotidy
+    - Runs `go mod tidy` in all directories containing go.mod files within a git repository. Automatically finds
+      the repository root and cleans up Go module dependencies throughout the entire codebase.
+    - To install: `cargo install --git https://github.com/timmattison/tools repotidy`
+- reposize
+    - Calculates and displays the total size of a git repository in human-readable format. Shows the total
+      byte count with thousands separators based on your locale.
+    - To install: `cargo install --git https://github.com/timmattison/tools reposize`
+- repoup
+    - Updates dependencies across Go, Node.js, and Rust projects in a git repository. Automatically detects
+      project types and uses the appropriate package manager (npm/pnpm/yarn for Node.js). Continues
+      processing even if individual updates fail.
+    - To install: `cargo install --git https://github.com/timmattison/tools repoup`
+- nodenuke
+    - Removes node_modules directories and lock files (pnpm-lock.yaml, package-lock.json) throughout a
+      repository. Supports `--no-root` flag to start from current directory instead of git root.
+    - To install: `cargo install --git https://github.com/timmattison/tools nodenuke`
+- nodeup
+    - Updates npm/pnpm/yarn packages in all directories with package.json. Intelligently detects which
+      package manager to use based on lock files. Supports `--latest` flag for major version updates,
+      `--npm`/`--pnpm` to force a specific package manager, and `--no-root` to start from current directory.
+    - To install: `cargo install --git https://github.com/timmattison/tools nodeup`
+- runat
+    - TUI tool to run commands at a specified time with a real-time countdown display. Supports various
+      time formats including RFC3339, local time, and time-only (runs today or tomorrow). Shows
+      current time, target time, and remaining time with styled output. Press Ctrl-C to cancel.
+    - To install: `cargo install --git https://github.com/timmattison/tools runat`
+- rr
+    - Rust remover - runs `cargo clean` in all Rust projects to free disk space. Shows the size of each
+      target directory before cleaning. Supports `--dry-run` to preview what would be cleaned and
+      `--no-root` to start from current directory. Displays total space freed after completion.
+    - To install: `cargo install --git https://github.com/timmattison/tools rr`
+- rcc
+    - Rust Cross Compiler helper - simplifies Rust cross-compilation by automatically determining target 
+      architectures from uname output, managing Cross.toml configuration, and executing cross build commands. 
+      Eliminates the complexity of setting up cross-compilation environments by handling target detection, 
+      Docker image configuration, and build execution automatically.
+    - To install: `cargo install --git https://github.com/timmattison/tools rcc`
 
 ## dirhash
 
@@ -217,30 +234,6 @@ credentials from your clipboard and write them to your AWS config file. If somet
 
 Just run `sizeof -suffix .mkv` and you'll see the size of all of the `.mkv` files in the current directory and all
 subdirectories. I use it to figure out how large my videos are in a certain directory before trying to move them around.
-
-## runat
-
-Run any command at a specified time. The program shows a countdown timer until execution and supports various time
-formats:
-
-```
-runat 2024-01-01T12:00:00Z echo hello world    # UTC time
-runat 2024-01-01T12:00:00 echo hello world     # Local time
-runat "2024-01-01 12:00" echo hello world      # Local time
-runat 12:00 echo hello world                   # Today/tomorrow at 12:00 local time
-```
-
-If you specify just a time (like "12:00"), it will run today at that time, or if that time has already passed, it will
-run tomorrow at that time.
-
-The program shows:
-
-- Current time
-- Target time
-- Time remaining (hours:minutes:seconds)
-- Command to be executed
-
-You can press Ctrl-C at any time to cancel the scheduled execution.
 
 ## wifiqr
 
@@ -408,3 +401,90 @@ symfix -dir ~/projects/my-website -prepend-to-fix ..
 
 When fixing symlinks, targets are resolved relative to the symlink's location. The tool will report all broken symlinks
 found and indicate which ones were fixed.
+
+## rcc
+
+Rust Cross Compiler helper that eliminates the complexity of cross-compilation by automatically handling target detection, configuration management, and build execution. Perfect for developers who need to build Rust applications for different architectures without memorizing target triples or Docker image names.
+
+### How it makes cross-compilation easier
+
+**Before rcc:**
+1. Install cross manually
+2. Figure out the correct target triple (e.g., `aarch64-unknown-linux-gnu` vs `aarch64-unknown-linux-musl`)
+3. Create Cross.toml with the right Docker image
+4. Remember the exact cross build command syntax
+
+**With rcc:**
+1. Run `rcc --uname "$(ssh remote-host uname -a)"` 
+2. rcc automatically detects the target, creates Cross.toml, and runs the build
+
+### Basic Usage
+
+```
+rcc                                          # Use existing Cross.toml
+rcc --target aarch64-unknown-linux-gnu      # Specify target directly
+rcc --uname "Linux host 5.4.0 aarch64 GNU/Linux"  # Auto-detect from uname
+rcc --release                                # Build in release mode
+```
+
+### Target Detection from uname
+
+rcc can parse uname output to automatically determine the correct target triple:
+
+```bash
+# Get uname from remote host and let rcc figure out the target
+ssh pi@raspberrypi.local uname -a
+# "Linux raspberrypi 5.10.17-v8+ #1414 SMP PREEMPT Fri Apr 30 13:18:35 BST 2021 aarch64 GNU/Linux"
+
+rcc --uname "Linux raspberrypi 5.10.17-v8+ #1414 SMP PREEMPT Fri Apr 30 13:18:35 BST 2021 aarch64 GNU/Linux"
+# Automatically detects: aarch64-unknown-linux-gnu
+```
+
+**Supported architectures:**
+- `aarch64` → `aarch64-unknown-linux-{gnu|musl}`
+- `x86_64` → `x86_64-unknown-linux-{gnu|musl}`  
+- `armv7l` → `armv7-unknown-linux-{gnu|musl}eabihf`
+- `i686` → `i686-unknown-linux-{gnu|musl}`
+
+**Libc detection:**
+- Alpine Linux (contains "alpine") → `musl`
+- All others → `gnu`
+
+### Cross.toml Management
+
+rcc automatically creates Cross.toml if it doesn't exist:
+
+```toml
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:edge"
+```
+
+If Cross.toml exists:
+- **Single target**: Uses that target automatically
+- **Multiple targets**: Lists available targets and prompts for selection with `--target`
+
+### Examples
+
+Cross-compile for a Raspberry Pi:
+```bash
+rcc --uname "Linux raspberrypi 5.15.84-v8+ aarch64 GNU/Linux"
+```
+
+Cross-compile for Alpine Linux server:
+```bash
+rcc --uname "Linux alpine 5.15.74-0-lts x86_64 Alpine Linux"
+# Auto-detects: x86_64-unknown-linux-musl
+```
+
+Build release version for specific target:
+```bash
+rcc --target aarch64-unknown-linux-gnu --release
+```
+
+### Prerequisites
+
+rcc automatically checks for and guides installation of the `cross` tool:
+
+```bash
+cargo install cross --git https://github.com/cross-rs/cross
+```

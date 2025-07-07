@@ -1,0 +1,12 @@
+[package]
+name = "nodenuke"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nodenuke"
+path = "src/main.rs"
+
+[dependencies]
+walkdir = "2.4"
+clap = { version = "4.4", features = ["derive"] }

@@ -1,0 +1,14 @@
+[package]
+name = "runat"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "runat"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.26"
+crossterm = "0.27"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.4", features = ["derive"] }
