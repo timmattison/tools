@@ -299,10 +299,8 @@ fn calculate_font_metrics(font: &FontRef, font_size: f32) -> (u32, u32, f32) {
     let char_width = h_advance.ceil() as u32;
     let char_height = (ascent - descent).ceil() as u32;
     
-    // Calculate baseline offset for proper text positioning
-    let baseline_offset = descent.abs();
-    
-    (char_width, char_height, baseline_offset)
+    // Return ascent for proper baseline positioning
+    (char_width, char_height, ascent)
 }
 
 fn render_terminal_to_image(
@@ -326,7 +324,7 @@ fn render_terminal_to_image(
     
     // Get the primary font for metrics calculation
     let primary_font = &font_manager.fonts[0];
-    let (char_width, char_height, baseline_offset) = calculate_font_metrics(primary_font, font_size);
+    let (char_width, char_height, ascent) = calculate_font_metrics(primary_font, font_size);
     
     let padding_x = 20;
     let padding_y = 20;
@@ -364,7 +362,7 @@ fn render_terminal_to_image(
                 
                 // Position text properly within the character cell
                 let text_x = pixel_x as i32;
-                let text_y = pixel_y as i32 + (char_height as f32 - baseline_offset) as i32;
+                let text_y = pixel_y as i32 + ascent as i32;
                 
                 draw_text_mut(
                     &mut image,
