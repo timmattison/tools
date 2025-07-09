@@ -228,7 +228,7 @@ pub async fn record(
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(std::env::current_dir()?);
     
-    let mut child = pair.slave.spawn_command(cmd)
+    let child = pair.slave.spawn_command(cmd)
         .context("Failed to spawn shell")?;
     
     // Drop the slave to close it
@@ -296,6 +296,9 @@ pub async fn record(
                     
                     // Check for stop hotkey
                     if is_stop_hotkey(&key_event, &stop_key_clone) {
+                        // Disable raw mode before printing to fix terminal output
+                        let _ = terminal::disable_raw_mode();
+                        
                         eprintln!("\nStop hotkey detected ({}), saving recording...", hotkey_display_clone);
                         session_writer.stop();
                         if let Err(e) = session_writer.save_recording() {
@@ -303,6 +306,9 @@ pub async fn record(
                         } else {
                             eprintln!("Recording saved to: {}", session_writer.output_path.display());
                         }
+                        
+                        // Flush output to ensure messages are displayed
+                        let _ = std::io::stderr().flush();
                         break;
                     }
                     
@@ -383,16 +389,29 @@ pub async fn record(
         }
     });
     
+    // Wrap child in Arc<Mutex> so we can kill it when needed
+    let child = Arc::new(Mutex::new(child));
+    
     // Wait for child process or stop signal
     let session_monitor = session.clone();
+    let child_clone = child.clone();
     let child_handle = thread::spawn(move || {
-        let _ = child.wait();
+        if let Ok(mut child) = child_clone.lock() {
+            let _ = child.wait();
+        }
         session_monitor.stop();
     });
     
     // Wait for all threads to complete
     let _ = reader_handle.join();
     let _ = writer_handle.await;
+    
+    // Kill the child process if it's still running
+    if let Ok(mut child) = child.lock() {
+        let _ = child.kill();
+    }
+    
+    // Wait for child thread with timeout
     let _ = child_handle.join();
     
     // Save the recording
@@ -405,6 +424,9 @@ pub async fn record(
     let events_count = session.events.lock()
         .map(|events| events.len())
         .unwrap_or(0);
+    
+    // Ensure terminal is restored (RawModeGuard will also do this on drop)
+    let _ = terminal::disable_raw_mode();
     
     println!("\nRecording saved to: {}", output_path.display());
     println!("Duration: {:.1}s", duration);
@@ -421,5 +443,8 @@ impl Drop for RawModeGuard {
         if let Err(e) = terminal::disable_raw_mode() {
             eprintln!("Failed to disable raw mode: {}", e);
         }
+        // Flush output to ensure terminal is properly restored
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
     }
 }
