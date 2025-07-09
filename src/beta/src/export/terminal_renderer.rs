@@ -25,7 +25,30 @@ pub struct TerminalTheme {
 
 impl TerminalTheme {
     pub fn auto() -> Self {
-        Self::solarized_dark()
+        Self::black()
+    }
+    
+    pub fn black() -> Self {
+        Self {
+            background: (0, 0, 0),
+            foreground: (255, 255, 255),
+            black: (0, 0, 0),
+            red: (255, 85, 85),
+            green: (85, 255, 85),
+            yellow: (255, 255, 85),
+            blue: (85, 85, 255),
+            magenta: (255, 85, 255),
+            cyan: (85, 255, 255),
+            white: (255, 255, 255),
+            bright_black: (85, 85, 85),
+            bright_red: (255, 85, 85),
+            bright_green: (85, 255, 85),
+            bright_yellow: (255, 255, 85),
+            bright_blue: (85, 85, 255),
+            bright_magenta: (255, 85, 255),
+            bright_cyan: (85, 255, 255),
+            bright_white: (255, 255, 255),
+        }
     }
     
     pub fn dracula() -> Self {
@@ -122,6 +145,7 @@ impl TerminalTheme {
     
     pub fn from_name(name: &str) -> Self {
         match name.to_lowercase().as_str() {
+            "black" => Self::black(),
             "dracula" => Self::dracula(),
             "monokai" => Self::monokai(),
             "solarized-dark" => Self::solarized_dark(),
