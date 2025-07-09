@@ -234,10 +234,20 @@ pub async fn record(
     // Drop the slave to close it
     drop(pair.slave);
     
-    let reader = pair.master.try_clone_reader()
-        .context("Failed to clone PTY reader")?;
-    let mut writer = pair.master.take_writer()
-        .context("Failed to take PTY writer")?;
+    // Store master in Arc<Mutex> so we can close it later
+    let master = Arc::new(Mutex::new(Some(pair.master)));
+    
+    let reader = {
+        let master_lock = master.lock().unwrap();
+        master_lock.as_ref().unwrap().try_clone_reader()
+            .context("Failed to clone PTY reader")?
+    };
+    
+    let mut writer = {
+        let mut master_lock = master.lock().unwrap();
+        master_lock.as_mut().unwrap().take_writer()
+            .context("Failed to take PTY writer")?
+    };
     
     // Thread to read from PTY and write to stdout
     let session_reader = session.clone();
@@ -276,6 +286,7 @@ pub async fn record(
     let session_writer = session.clone();
     let stop_key_clone = stop_key.clone();
     let hotkey_display_clone = hotkey_display.to_string();
+    let master_clone = master.clone();
     let writer_handle = tokio::spawn(async move {
         let mut event_stream = event::EventStream::new();
         
@@ -299,12 +310,12 @@ pub async fn record(
                         // Disable raw mode before printing to fix terminal output
                         let _ = terminal::disable_raw_mode();
                         
-                        eprintln!("\nStop hotkey detected ({}), saving recording...", hotkey_display_clone);
+                        eprintln!("\nStop hotkey detected ({}), stopping recording...", hotkey_display_clone);
                         session_writer.stop();
-                        if let Err(e) = session_writer.save_recording() {
-                            eprintln!("Failed to save recording: {}", e);
-                        } else {
-                            eprintln!("Recording saved to: {}", session_writer.output_path.display());
+                        
+                        // Close the PTY master to signal EOF to reader thread
+                        if let Ok(mut master_lock) = master_clone.lock() {
+                            *master_lock = None; // Drop the master
                         }
                         
                         // Flush output to ensure messages are displayed
@@ -402,16 +413,21 @@ pub async fn record(
         session_monitor.stop();
     });
     
-    // Wait for all threads to complete
-    let _ = reader_handle.join();
+    // Wait for keyboard handler to complete
     let _ = writer_handle.await;
+    
+    // Close PTY master to ensure reader thread exits
+    if let Ok(mut master_lock) = master.lock() {
+        *master_lock = None; // Drop the master
+    }
     
     // Kill the child process if it's still running
     if let Ok(mut child) = child.lock() {
         let _ = child.kill();
     }
     
-    // Wait for child thread with timeout
+    // Wait for threads to complete
+    let _ = reader_handle.join();
     let _ = child_handle.join();
     
     // Save the recording
