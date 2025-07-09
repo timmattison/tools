@@ -280,27 +280,17 @@ fn generate_frames(
     Ok(frames)
 }
 
-fn calculate_font_metrics(font: &FontRef, font_size: f32) -> (u32, u32, f32) {
+fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     let scale = PxScale::from(font_size);
-    
-    // Measure a typical monospace character to get cell dimensions
-    let test_char = 'M'; // Use 'M' as it's typically the widest in monospace fonts
-    let glyph_id = font.glyph_id(test_char);
     
     // Get font metrics using ab_glyph unscaled API and apply scaling
     let units_per_em = font.units_per_em().unwrap_or(1000.0);
     let scale_factor = scale.y / units_per_em;
     
-    let h_advance = font.h_advance_unscaled(glyph_id) * scale_factor;
     let ascent = font.ascent_unscaled() * scale_factor;
-    let descent = font.descent_unscaled() * scale_factor;
     
-    // Calculate character cell dimensions
-    let char_width = h_advance.ceil() as u32;
-    let char_height = (ascent - descent).ceil() as u32;
-    
-    // Return ascent for proper baseline positioning
-    (char_width, char_height, ascent)
+    // Return ascent for proper baseline positioning within fixed cells
+    ascent
 }
 
 fn render_terminal_to_image(
@@ -318,13 +308,15 @@ fn render_terminal_to_image(
         *pixel = bg_color;
     }
     
-    // Calculate font size and proper metrics
+    // Use fixed character cell dimensions to match terminal expectations
+    let char_width = 12u32;
+    let char_height = 20u32;
     let font_size = 16.0;
     let scale = PxScale::from(font_size);
     
-    // Get the primary font for metrics calculation
+    // Get the primary font for baseline calculation
     let primary_font = &font_manager.fonts[0];
-    let (char_width, char_height, ascent) = calculate_font_metrics(primary_font, font_size);
+    let baseline_offset = calculate_font_baseline(primary_font, font_size);
     
     let padding_x = 20;
     let padding_y = 20;
@@ -362,7 +354,7 @@ fn render_terminal_to_image(
                 
                 // Position text properly within the character cell
                 let text_x = pixel_x as i32;
-                let text_y = pixel_y as i32 + ascent as i32;
+                let text_y = pixel_y as i32 + baseline_offset as i32;
                 
                 draw_text_mut(
                     &mut image,
