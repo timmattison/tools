@@ -96,6 +96,18 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
+- idear
+    - IDEA Reaper. Cleans up orphaned .idea directories that remain when you delete a project directory before closing 
+      JetBrains IDEs (IntelliJ IDEA, PyCharm, WebStorm, PhpStorm, RubyMine, CLion, DataGrip, GoLand, Rider, Android Studio). 
+      These IDEs create .idea directories to store project metadata, but they can become orphaned and waste disk space if 
+      you remove the project folder while the IDE is still open. This tool finds directories containing only a .idea 
+      subdirectory and can safely remove them.
+    - Usage examples:
+      - `idear` - List directories containing only .idea
+      - `idear --delete --dry-run` - Show what would be deleted
+      - `idear --delete` - Delete directories after confirmation
+      - `idear --delete --force` - Delete without confirmation
+    - To install: `cargo install --git https://github.com/timmattison/tools idear`
 - wifiqr
     - Generates QR codes for WiFi networks that, when scanned by a mobile device, allow the device to automatically
       connect to the WiFi network without manually entering credentials. Supports custom resolution, adding a logo
