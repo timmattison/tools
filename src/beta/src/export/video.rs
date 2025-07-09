@@ -179,6 +179,9 @@ fn generate_frames(
     let frame_duration = 1.0 / fps as f64;
     let total_frames = (recording.duration * fps as f64).ceil() as usize;
     
+    // Load font once for all frames
+    let font = get_font()?;
+    
     let mut terminal_state = TerminalState::new(
         recording.width as usize,
         recording.height as usize,
@@ -199,7 +202,7 @@ fn generate_frames(
             event_index += 1;
         }
         
-        let frame = render_terminal_to_image(&terminal_state, width, height)?;
+        let frame = render_terminal_to_image(&terminal_state, width, height, &font)?;
         frames.push(frame);
         
         if frame_num % 30 == 0 {
@@ -214,8 +217,8 @@ fn render_terminal_to_image(
     terminal_state: &TerminalState,
     width: u32,
     height: u32,
+    font: &FontRef,
 ) -> Result<RgbImage> {
-    let font = get_font()?;
     let mut image = ImageBuffer::new(width, height);
     let theme = terminal_state.get_theme();
     
