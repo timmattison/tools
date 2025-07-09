@@ -11,9 +11,18 @@ use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
 fn get_font() -> Result<FontRef<'static>> {
-    // Try to load fonts in order of preference, starting with JetBrains Mono Nerd Font
+    // Try to load fonts in order of preference, starting with user's preferred font
     let font_paths = [
-        // JetBrains Mono Nerd Font (preferred) - macOS user fonts
+        // User's preferred font - JetBrains Mono Nerd Font Medium
+        "~/Library/Fonts/JetBrainsMonoNerdFontMono-Medium.ttf",
+        "~/Library/Fonts/JetBrains Mono Nerd Font Mono Medium.ttf", // Space variant
+        "/Library/Fonts/JetBrainsMonoNerdFontMono-Medium.ttf",
+        "/Library/Fonts/JetBrains Mono Nerd Font Mono Medium.ttf",
+        
+        // User's fallback - Monaco
+        "/System/Library/Fonts/Monaco.ttf",
+        
+        // Other JetBrains Mono Nerd Font variants - macOS user fonts
         "~/Library/Fonts/JetBrainsMono Nerd Font Mono.ttf",
         "~/Library/Fonts/JetBrainsMonoNL Nerd Font Mono.ttf", // No Ligatures
         "~/Library/Fonts/JetBrains Mono Nerd Font Regular.ttf",
@@ -23,10 +32,12 @@ fn get_font() -> Result<FontRef<'static>> {
         "/Library/Fonts/JetBrainsMonoNL Nerd Font Mono.ttf",
         
         // JetBrains Mono Nerd Font - Linux user fonts
+        "~/.local/share/fonts/JetBrainsMonoNerdFont-Medium.ttf",
         "~/.local/share/fonts/JetBrainsMonoNerdFont-Regular.ttf",
         "~/.local/share/fonts/JetBrainsMonoNLNerdFont-Regular.ttf",
         
         // JetBrains Mono Nerd Font - Linux system fonts
+        "/usr/share/fonts/truetype/nerd-fonts/JetBrainsMonoNerdFont-Medium.ttf",
         "/usr/share/fonts/truetype/nerd-fonts/JetBrainsMonoNerdFont-Regular.ttf",
         "/usr/local/share/fonts/JetBrainsMonoNerdFont-Regular.ttf",
         
@@ -36,7 +47,6 @@ fn get_font() -> Result<FontRef<'static>> {
         "~/.local/share/fonts/JetBrains Mono Regular.ttf",
         
         // System default monospace fonts
-        "/System/Library/Fonts/Monaco.ttf",  // macOS
         "/System/Library/Fonts/Menlo.ttf",   // macOS
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", // Linux
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf", // Linux (alternative)
@@ -68,13 +78,13 @@ fn get_font() -> Result<FontRef<'static>> {
     }
     
     Err(anyhow::anyhow!(
-        "No suitable monospace font found. For best results, install JetBrains Mono Nerd Font:\n\
-         - Download from: https://github.com/ryanoasis/nerd-fonts/releases\n\
+        "No suitable monospace font found. For best results, install JetBrains Mono Nerd Font Medium:\n\
+         - Download JetBrainsMonoNerdFontMono-Medium.ttf from: https://github.com/ryanoasis/nerd-fonts/releases\n\
          - Or use Homebrew: brew tap homebrew/cask-fonts && brew install font-jetbrains-mono-nerd-font\n\
-         - Linux: Download and install to ~/.local/share/fonts/\n\
+         - Install to ~/Library/Fonts/ (macOS) or ~/.local/share/fonts/ (Linux)\n\
          \n\
          Fallback options:\n\
-         - macOS: Monaco or Menlo (should be pre-installed)\n\
+         - macOS: Monaco (should be pre-installed)\n\
          - Linux: sudo apt install fonts-dejavu fonts-liberation"
     ))
 }
