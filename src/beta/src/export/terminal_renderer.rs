@@ -175,6 +175,53 @@ impl TerminalTheme {
             _ => self.foreground,
         }
     }
+    
+    pub fn get_256_color(index: u8) -> (u8, u8, u8) {
+        match index {
+            // Standard 16 colors (0-15)
+            0..=15 => {
+                // Use standard ANSI colors
+                match index {
+                    0 => (0, 0, 0),         // black
+                    1 => (128, 0, 0),       // red
+                    2 => (0, 128, 0),       // green
+                    3 => (128, 128, 0),     // yellow
+                    4 => (0, 0, 128),       // blue
+                    5 => (128, 0, 128),     // magenta
+                    6 => (0, 128, 128),     // cyan
+                    7 => (192, 192, 192),   // white
+                    8 => (128, 128, 128),   // bright black
+                    9 => (255, 0, 0),       // bright red
+                    10 => (0, 255, 0),      // bright green
+                    11 => (255, 255, 0),    // bright yellow
+                    12 => (0, 0, 255),      // bright blue
+                    13 => (255, 0, 255),    // bright magenta
+                    14 => (0, 255, 255),    // bright cyan
+                    15 => (255, 255, 255),  // bright white
+                    _ => (255, 255, 255),
+                }
+            }
+            // 6x6x6 RGB cube (16-231)
+            16..=231 => {
+                let index = index - 16;
+                let r = index / 36;
+                let g = (index % 36) / 6;
+                let b = index % 6;
+                
+                // Convert 0-5 range to 0-255 range
+                let r = if r == 0 { 0 } else { 55 + r * 40 };
+                let g = if g == 0 { 0 } else { 55 + g * 40 };
+                let b = if b == 0 { 0 } else { 55 + b * 40 };
+                
+                (r, g, b)
+            }
+            // Grayscale (232-255)
+            232..=255 => {
+                let gray = 8 + (index - 232) * 10;
+                (gray, gray, gray)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +390,107 @@ impl TerminalState {
         self.cursor_x = 0;
         self.cursor_y = 0;
     }
+    
+    fn process_sgr_params(&mut self, params: &vte::Params) {
+        let param_vec: Vec<u16> = params.iter().flatten().copied().collect();
+        let mut i = 0;
+        
+        while i < param_vec.len() {
+            let param = param_vec[i];
+            
+            match param {
+                0 => {
+                    // Reset
+                    self.current_fg = self.theme.foreground;
+                    self.current_bg = self.theme.background;
+                    self.bold = false;
+                    self.italic = false;
+                    self.underline = false;
+                }
+                1 => self.bold = true,
+                3 => self.italic = true,
+                4 => self.underline = true,
+                22 => self.bold = false,
+                23 => self.italic = false,
+                24 => self.underline = false,
+                30..=37 => {
+                    // Foreground colors
+                    let color_index = (param - 30) as u8;
+                    self.current_fg = self.theme.get_color(color_index);
+                }
+                38 => {
+                    // Extended foreground color
+                    if i + 1 < param_vec.len() {
+                        match param_vec[i + 1] {
+                            5 => {
+                                // 256-color mode: ESC[38;5;n
+                                if i + 2 < param_vec.len() {
+                                    let color_index = param_vec[i + 2] as u8;
+                                    self.current_fg = TerminalTheme::get_256_color(color_index);
+                                    i += 2; // Skip the 5 and color index
+                                }
+                            }
+                            2 => {
+                                // 24-bit RGB mode: ESC[38;2;r;g;b
+                                if i + 4 < param_vec.len() {
+                                    let r = param_vec[i + 2] as u8;
+                                    let g = param_vec[i + 3] as u8;
+                                    let b = param_vec[i + 4] as u8;
+                                    self.current_fg = (r, g, b);
+                                    i += 4; // Skip the 2, r, g, b
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                40..=47 => {
+                    // Background colors
+                    let color_index = (param - 40) as u8;
+                    self.current_bg = self.theme.get_color(color_index);
+                }
+                48 => {
+                    // Extended background color
+                    if i + 1 < param_vec.len() {
+                        match param_vec[i + 1] {
+                            5 => {
+                                // 256-color mode: ESC[48;5;n
+                                if i + 2 < param_vec.len() {
+                                    let color_index = param_vec[i + 2] as u8;
+                                    self.current_bg = TerminalTheme::get_256_color(color_index);
+                                    i += 2; // Skip the 5 and color index
+                                }
+                            }
+                            2 => {
+                                // 24-bit RGB mode: ESC[48;2;r;g;b
+                                if i + 4 < param_vec.len() {
+                                    let r = param_vec[i + 2] as u8;
+                                    let g = param_vec[i + 3] as u8;
+                                    let b = param_vec[i + 4] as u8;
+                                    self.current_bg = (r, g, b);
+                                    i += 4; // Skip the 2, r, g, b
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                90..=97 => {
+                    // Bright foreground colors
+                    let color_index = (param - 90 + 8) as u8;
+                    self.current_fg = self.theme.get_color(color_index);
+                }
+                100..=107 => {
+                    // Bright background colors
+                    let color_index = (param - 100 + 8) as u8;
+                    self.current_bg = self.theme.get_color(color_index);
+                }
+                _ => {}
+            }
+            
+            i += 1;
+        }
+    }
 }
 
 impl Perform for TerminalState {
@@ -477,45 +625,7 @@ impl Perform for TerminalState {
             }
             'm' => {
                 // Set graphics rendition (colors, bold, etc.)
-                for param in params.iter().flatten() {
-                    match *param {
-                        0 => {
-                            // Reset
-                            self.current_fg = self.theme.foreground;
-                            self.current_bg = self.theme.background;
-                            self.bold = false;
-                            self.italic = false;
-                            self.underline = false;
-                        }
-                        1 => self.bold = true,
-                        3 => self.italic = true,
-                        4 => self.underline = true,
-                        22 => self.bold = false,
-                        23 => self.italic = false,
-                        24 => self.underline = false,
-                        30..=37 => {
-                            // Foreground colors
-                            let color_index = (param - 30) as u8;
-                            self.current_fg = self.theme.get_color(color_index);
-                        }
-                        40..=47 => {
-                            // Background colors
-                            let color_index = (param - 40) as u8;
-                            self.current_bg = self.theme.get_color(color_index);
-                        }
-                        90..=97 => {
-                            // Bright foreground colors
-                            let color_index = (param - 90 + 8) as u8;
-                            self.current_fg = self.theme.get_color(color_index);
-                        }
-                        100..=107 => {
-                            // Bright background colors
-                            let color_index = (param - 100 + 8) as u8;
-                            self.current_bg = self.theme.get_color(color_index);
-                        }
-                        _ => {}
-                    }
-                }
+                self.process_sgr_params(params);
             }
             _ => {}
         }
