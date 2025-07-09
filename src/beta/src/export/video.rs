@@ -6,13 +6,61 @@ use std::path::PathBuf;
 use std::process::Command;
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
-use ab_glyph::{FontRef, PxScale};
+use ab_glyph::{FontRef, PxScale, Font};
+use std::collections::HashMap;
 use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
-fn get_font() -> Result<FontRef<'static>> {
-    // Try to load fonts in order of preference, starting with user's preferred font
-    let font_paths = [
+struct FontManager {
+    fonts: Vec<FontRef<'static>>,
+    glyph_cache: HashMap<char, usize>, // Character -> font index
+}
+
+impl FontManager {
+    fn new() -> Result<Self> {
+        let mut fonts = Vec::new();
+        let font_paths = get_font_paths();
+        
+        for font_path in &font_paths {
+            if let Ok(font) = load_font_from_path(font_path) {
+                fonts.push(font);
+                if fonts.len() >= 5 { // Limit to reasonable number of fonts
+                    break;
+                }
+            }
+        }
+        
+        if fonts.is_empty() {
+            return Err(anyhow::anyhow!("No fonts could be loaded"));
+        }
+        
+        Ok(FontManager {
+            fonts,
+            glyph_cache: HashMap::new(),
+        })
+    }
+    
+    fn get_best_font_for_char(&mut self, ch: char) -> &FontRef<'static> {
+        // Check cache first
+        if let Some(&font_index) = self.glyph_cache.get(&ch) {
+            return &self.fonts[font_index];
+        }
+        
+        // Find font that contains this character
+        for (i, font) in self.fonts.iter().enumerate() {
+            if font.glyph_id(ch).0 != 0 { // 0 means missing glyph
+                self.glyph_cache.insert(ch, i);
+                return &self.fonts[i];
+            }
+        }
+        
+        // Fallback to first font if no font contains the character
+        &self.fonts[0]
+    }
+}
+
+fn get_font_paths() -> Vec<&'static str> {
+    vec![
         // User's preferred font - JetBrains Mono Nerd Font Medium
         "~/Library/Fonts/JetBrainsMonoNerdFontMono-Medium.ttf",
         "~/Library/Fonts/JetBrains Mono Nerd Font Mono Medium.ttf", // Space variant
@@ -21,6 +69,16 @@ fn get_font() -> Result<FontRef<'static>> {
         
         // User's fallback - Monaco
         "/System/Library/Fonts/Monaco.ttf",
+        
+        // Unicode-rich fonts for better coverage
+        "/System/Library/Fonts/Apple Braille Outline 6 Dot.ttf", // macOS Braille
+        "/System/Library/Fonts/Apple Braille Outline 8 Dot.ttf", // macOS Braille
+        "/System/Library/Fonts/Apple Braille Pinpoint 6 Dot.ttf", // macOS Braille
+        "/System/Library/Fonts/Apple Braille Pinpoint 8 Dot.ttf", // macOS Braille
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", // Linux - good Unicode
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf", // Linux (alternative)
+        "/usr/share/fonts/truetype/unifont/unifont.ttf", // Linux - comprehensive Unicode
+        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", // Linux
         
         // Other JetBrains Mono Nerd Font variants - macOS user fonts
         "~/Library/Fonts/JetBrainsMono Nerd Font Mono.ttf",
@@ -48,32 +106,38 @@ fn get_font() -> Result<FontRef<'static>> {
         
         // System default monospace fonts
         "/System/Library/Fonts/Menlo.ttf",   // macOS
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", // Linux
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf", // Linux (alternative)
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf", // Linux
         "/System/Library/Fonts/Courier.ttf", // macOS fallback
-    ];
+    ]
+}
+
+fn load_font_from_path(font_path: &str) -> Result<FontRef<'static>> {
+    // Expand home directory if path starts with ~
+    let expanded_path = if font_path.starts_with("~/") {
+        if let Some(home_dir) = std::env::var_os("HOME") {
+            let home_str = home_dir.to_string_lossy();
+            font_path.replacen("~", &home_str, 1)
+        } else {
+            return Err(anyhow::anyhow!("HOME not set"));
+        }
+    } else {
+        font_path.to_string()
+    };
+    
+    let font_data = std::fs::read(&expanded_path)?;
+    // Need to leak the data to get a 'static lifetime
+    let static_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
+    FontRef::try_from_slice(static_data)
+        .map_err(|_| anyhow::anyhow!("Failed to parse font"))
+}
+
+fn get_font() -> Result<FontRef<'static>> {
+    // Try to load fonts in order of preference, starting with user's preferred font
+    let font_paths = get_font_paths();
     
     for font_path in &font_paths {
-        // Expand home directory if path starts with ~
-        let expanded_path = if font_path.starts_with("~/") {
-            if let Some(home_dir) = std::env::var_os("HOME") {
-                let home_str = home_dir.to_string_lossy();
-                font_path.replacen("~", &home_str, 1)
-            } else {
-                continue; // Skip paths with ~ if HOME not set
-            }
-        } else {
-            font_path.to_string()
-        };
-        
-        if let Ok(font_data) = std::fs::read(&expanded_path) {
-            // Need to leak the data to get a 'static lifetime
-            let static_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
-            if let Ok(font) = FontRef::try_from_slice(static_data) {
-                println!("Using font: {}", expanded_path);
-                return Ok(font);
-            }
+        if let Ok(font) = load_font_from_path(font_path) {
+            println!("Using font: {}", font_path);
+            return Ok(font);
         }
     }
     
@@ -179,8 +243,11 @@ fn generate_frames(
     let frame_duration = 1.0 / fps as f64;
     let total_frames = (recording.duration * fps as f64).ceil() as usize;
     
-    // Load font once for all frames
-    let font = get_font()?;
+    // Load font manager once for all frames
+    let mut font_manager = FontManager::new()?;
+    
+    // Print fonts being used
+    println!("Loaded {} fonts for better Unicode coverage", font_manager.fonts.len());
     
     let mut terminal_state = TerminalState::new(
         recording.width as usize,
@@ -202,7 +269,7 @@ fn generate_frames(
             event_index += 1;
         }
         
-        let frame = render_terminal_to_image(&terminal_state, width, height, &font)?;
+        let frame = render_terminal_to_image(&terminal_state, width, height, &mut font_manager)?;
         frames.push(frame);
         
         if frame_num % 30 == 0 {
@@ -217,7 +284,7 @@ fn render_terminal_to_image(
     terminal_state: &TerminalState,
     width: u32,
     height: u32,
-    font: &FontRef,
+    font_manager: &mut FontManager,
 ) -> Result<RgbImage> {
     let mut image = ImageBuffer::new(width, height);
     let theme = terminal_state.get_theme();
@@ -263,13 +330,16 @@ fn render_terminal_to_image(
                     scale 
                 };
                 
+                // Get the best font for this character
+                let font = font_manager.get_best_font_for_char(cell.ch);
+                
                 draw_text_mut(
                     &mut image,
                     Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
                     pixel_x as i32,
                     (pixel_y + 2.0) as i32, // Slight vertical adjustment
                     font_scale,
-                    &font,
+                    font,
                     &text,
                 );
                 
