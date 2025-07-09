@@ -280,6 +280,31 @@ fn generate_frames(
     Ok(frames)
 }
 
+fn calculate_font_metrics(font: &FontRef, font_size: f32) -> (u32, u32, f32) {
+    let scale = PxScale::from(font_size);
+    
+    // Measure a typical monospace character to get cell dimensions
+    let test_char = 'M'; // Use 'M' as it's typically the widest in monospace fonts
+    let glyph_id = font.glyph_id(test_char);
+    
+    // Get font metrics using ab_glyph unscaled API and apply scaling
+    let units_per_em = font.units_per_em().unwrap_or(1000.0);
+    let scale_factor = scale.y / units_per_em;
+    
+    let h_advance = font.h_advance_unscaled(glyph_id) * scale_factor;
+    let ascent = font.ascent_unscaled() * scale_factor;
+    let descent = font.descent_unscaled() * scale_factor;
+    
+    // Calculate character cell dimensions
+    let char_width = h_advance.ceil() as u32;
+    let char_height = (ascent - descent).ceil() as u32;
+    
+    // Calculate baseline offset for proper text positioning
+    let baseline_offset = descent.abs();
+    
+    (char_width, char_height, baseline_offset)
+}
+
 fn render_terminal_to_image(
     terminal_state: &TerminalState,
     width: u32,
@@ -295,25 +320,29 @@ fn render_terminal_to_image(
         *pixel = bg_color;
     }
     
-    // Calculate font size and spacing
+    // Calculate font size and proper metrics
     let font_size = 16.0;
     let scale = PxScale::from(font_size);
-    let char_width = 9.6; // Typical monospace width
-    let char_height = 20.0;
-    let padding_x = 20.0;
-    let padding_y = 20.0;
+    
+    // Get the primary font for metrics calculation
+    let primary_font = &font_manager.fonts[0];
+    let (char_width, char_height, baseline_offset) = calculate_font_metrics(primary_font, font_size);
+    
+    let padding_x = 20;
+    let padding_y = 20;
     
     let grid = terminal_state.get_grid();
     
     // Render each character in the terminal grid
     for (y, row) in grid.iter().enumerate() {
         for (x, cell) in row.iter().enumerate() {
-            let pixel_x = padding_x + (x as f32 * char_width);
-            let pixel_y = padding_y + (y as f32 * char_height);
+            // Use integer positioning to avoid gaps
+            let pixel_x = padding_x + (x as u32 * char_width);
+            let pixel_y = padding_y + (y as u32 * char_height);
             
-            // Draw background color for this cell
+            // Draw background color for this cell - ensure it fills the entire cell
             let bg_rect = Rect::at(pixel_x as i32, pixel_y as i32)
-                .of_size(char_width as u32, char_height as u32);
+                .of_size(char_width, char_height);
             
             draw_filled_rect_mut(
                 &mut image,
@@ -333,11 +362,15 @@ fn render_terminal_to_image(
                 // Get the best font for this character
                 let font = font_manager.get_best_font_for_char(cell.ch);
                 
+                // Position text properly within the character cell
+                let text_x = pixel_x as i32;
+                let text_y = pixel_y as i32 + (char_height as f32 - baseline_offset) as i32;
+                
                 draw_text_mut(
                     &mut image,
                     Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
-                    pixel_x as i32,
-                    (pixel_y + 2.0) as i32, // Slight vertical adjustment
+                    text_x,
+                    text_y,
                     font_scale,
                     font,
                     &text,
@@ -345,8 +378,8 @@ fn render_terminal_to_image(
                 
                 // Add underline if needed
                 if cell.underline {
-                    let underline_rect = Rect::at(pixel_x as i32, (pixel_y + char_height - 2.0) as i32)
-                        .of_size(char_width as u32, 1);
+                    let underline_rect = Rect::at(pixel_x as i32, (pixel_y + char_height - 2) as i32)
+                        .of_size(char_width, 1);
                     
                     draw_filled_rect_mut(
                         &mut image,
