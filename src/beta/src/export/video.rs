@@ -222,10 +222,10 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        const SCALE: u32 = 2;  // 2x resolution for crisp text
-        let char_width = 6 * SCALE;  // 12px at 2x - tighter spacing
-        let char_height = 13 * SCALE;  // 26px at 2x - tighter spacing
-        let padding = 40 * SCALE;  // 80px at 2x
+        const SCALE: u32 = 4;  // 4x resolution for fine control
+        let char_width = 6 * SCALE - 1;  // 23px - 0.25px tighter
+        let char_height = 13 * SCALE + 1;  // 53px - 0.25px looser
+        let padding = 40 * SCALE;  // 160px at 4x
         
         let width = (recording.width as u32 * char_width) + (padding * 2);
         let height = (recording.height as u32 * char_height) + (padding * 2);
@@ -292,8 +292,8 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     let ascent = font.ascent_unscaled() * scale_factor;
     
     // Round to nearest integer for pixel-perfect rendering
-    // Cap baseline to leave room for descenders (scaled for 2x)
-    ascent.min(24.0).round()
+    // Cap baseline to leave room for descenders (scaled for 4x)
+    ascent.min(48.0).round()
 }
 
 fn render_terminal_to_image(
@@ -312,18 +312,18 @@ fn render_terminal_to_image(
     }
     
     // Use fixed character cell dimensions to match terminal expectations
-    const SCALE: u32 = 2;  // 2x resolution for crisp text
-    let char_width = 6u32 * SCALE;  // 12px at 2x - tighter spacing
-    let char_height = 13u32 * SCALE;  // 26px at 2x - tighter spacing
-    let font_size = 12.0 * SCALE as f32;  // 24pt at 2x
+    const SCALE: u32 = 4;  // 4x resolution for fine control
+    let char_width = 6u32 * SCALE - 1;  // 23px - 0.25px tighter
+    let char_height = 13u32 * SCALE + 1;  // 53px - 0.25px looser
+    let font_size = 12.0 * SCALE as f32;  // 48pt at 4x
     let scale = PxScale::from(font_size);
     
     // Get the primary font for baseline calculation
     let primary_font = &font_manager.fonts[0];
     let baseline_offset = calculate_font_baseline(primary_font, font_size);
     
-    let padding_x = 20 * SCALE;
-    let padding_y = 20 * SCALE;
+    let padding_x = 20 * SCALE;  // 80px at 4x
+    let padding_y = 20 * SCALE;  // 80px at 4x
     
     let grid = terminal_state.get_grid();
     
