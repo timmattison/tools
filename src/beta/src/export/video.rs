@@ -223,8 +223,8 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         Ok((width, height))
     } else {
         const SCALE: u32 = 2;  // 2x resolution for crisp text
-        let char_width = 7 * SCALE;  // 14px at 2x
-        let char_height = 14 * SCALE;  // 28px at 2x
+        let char_width = 6 * SCALE;  // 12px at 2x - tighter spacing
+        let char_height = 13 * SCALE;  // 26px at 2x - tighter spacing
         let padding = 40 * SCALE;  // 80px at 2x
         
         let width = (recording.width as u32 * char_width) + (padding * 2);
@@ -293,7 +293,7 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     
     // Round to nearest integer for pixel-perfect rendering
     // Cap baseline to leave room for descenders (scaled for 2x)
-    ascent.min(26.0).round()
+    ascent.min(24.0).round()
 }
 
 fn render_terminal_to_image(
@@ -313,8 +313,8 @@ fn render_terminal_to_image(
     
     // Use fixed character cell dimensions to match terminal expectations
     const SCALE: u32 = 2;  // 2x resolution for crisp text
-    let char_width = 7u32 * SCALE;  // 14px at 2x
-    let char_height = 14u32 * SCALE;  // 28px at 2x
+    let char_width = 6u32 * SCALE;  // 12px at 2x - tighter spacing
+    let char_height = 13u32 * SCALE;  // 26px at 2x - tighter spacing
     let font_size = 12.0 * SCALE as f32;  // 24pt at 2x
     let scale = PxScale::from(font_size);
     
