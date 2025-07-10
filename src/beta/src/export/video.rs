@@ -431,18 +431,27 @@ fn encode_video(
             .arg("fps=15,scale=-1:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=256:stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle");
     } else {
         cmd.arg("-c:v")
-            .arg("libx264")
+            .arg("libx265")
             .arg("-pix_fmt")
-            .arg("yuv420p");
+            .arg("yuv444p");
         
         if optimize_web {
+            // Use lossy H.265 with good quality for web
             cmd.arg("-crf")
-                .arg("23")
+                .arg("18")  // Lower CRF for better quality with H.265
                 .arg("-preset")
                 .arg("medium")
                 .arg("-movflags")
                 .arg("faststart");
+        } else {
+            // Use lossless H.265 by default
+            cmd.arg("-x265-params")
+                .arg("lossless=1");
         }
+        
+        // Add hvc1 tag for better Apple device compatibility
+        cmd.arg("-tag:v")
+            .arg("hvc1");
     }
     
     cmd.arg(output_path);
