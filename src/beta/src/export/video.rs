@@ -221,8 +221,8 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        let char_width = 6;  // Very tight terminal-like spacing
-        let char_height = 10;  // Proportionally reduced from 20px
+        let char_width = 8;  // Proportionally scaled with font size
+        let char_height = 13;  // Proportionally scaled with font size
         let padding = 40;
         
         let width = (recording.width as u32 * char_width) + (padding * 2);
@@ -291,7 +291,7 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     
     // Ensure baseline fits within our fixed 20px cells
     // If ascent is too large, cap it to leave room for descenders
-    ascent.min(10.0)  // Cap at cell height for 10px cells
+    ascent.min(13.0)  // Cap at cell height for 13px cells
 }
 
 fn render_terminal_to_image(
@@ -310,9 +310,9 @@ fn render_terminal_to_image(
     }
     
     // Use fixed character cell dimensions to match terminal expectations
-    let char_width = 6u32;  // Very tight terminal-like spacing
-    let char_height = 10u32;  // Proportionally reduced from 20px
-    let font_size = 14.0;  // Keep original size for readability
+    let char_width = 8u32;  // Proportionally scaled with font size
+    let char_height = 13u32;  // Proportionally scaled with font size
+    let font_size = 18.0;  // Larger default font size
     let scale = PxScale::from(font_size);
     
     // Get the primary font for baseline calculation
