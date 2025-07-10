@@ -221,7 +221,7 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        let char_width = 8;  // Try even tighter spacing
+        let char_width = 6;  // Very tight terminal-like spacing
         let char_height = 20;
         let padding = 40;
         
@@ -310,7 +310,7 @@ fn render_terminal_to_image(
     }
     
     // Use fixed character cell dimensions to match terminal expectations
-    let char_width = 8u32;  // Try even tighter spacing for terminal-like appearance
+    let char_width = 6u32;  // Very tight terminal-like spacing
     let char_height = 20u32;
     let font_size = 14.0;  // Reduced from 16 to fit better in 20px cells
     let scale = PxScale::from(font_size);
