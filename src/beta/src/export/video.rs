@@ -289,8 +289,9 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     
     let ascent = font.ascent_unscaled() * scale_factor;
     
-    // Return ascent for proper baseline positioning within fixed cells
-    ascent
+    // Ensure baseline fits within our fixed 20px cells
+    // If ascent is too large, cap it to leave room for descenders
+    ascent.min(16.0)  // Leave ~4px for descenders in 20px cell
 }
 
 fn render_terminal_to_image(
@@ -311,12 +312,12 @@ fn render_terminal_to_image(
     // Use fixed character cell dimensions to match terminal expectations
     let char_width = 12u32;
     let char_height = 20u32;
-    let font_size = 16.0;
+    let font_size = 14.0;  // Reduced from 16 to fit better in 20px cells
     let scale = PxScale::from(font_size);
     
-    // Calculate baseline offset as a percentage of cell height for proper positioning
-    // Place baseline at 75% of cell height so text fits within the cell
-    let baseline_offset = (char_height as f32 * 0.75) as u32;
+    // Get the primary font for baseline calculation
+    let primary_font = &font_manager.fonts[0];
+    let baseline_offset = calculate_font_baseline(primary_font, font_size);
     
     let padding_x = 20;
     let padding_y = 20;
@@ -353,7 +354,8 @@ fn render_terminal_to_image(
                 let font = font_manager.get_best_font_for_char(cell.ch);
                 
                 // Position text properly within the character cell
-                let text_x = pixel_x as i32;
+                // Center horizontally by adding small offset
+                let text_x = pixel_x as i32 + 1;  // Small offset for better centering
                 let text_y = pixel_y as i32 + baseline_offset as i32;
                 
                 draw_text_mut(
