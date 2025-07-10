@@ -221,7 +221,7 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        let char_width = 12;
+        let char_width = 8;  // Try even tighter spacing
         let char_height = 20;
         let padding = 40;
         
@@ -310,7 +310,7 @@ fn render_terminal_to_image(
     }
     
     // Use fixed character cell dimensions to match terminal expectations
-    let char_width = 12u32;
+    let char_width = 8u32;  // Try even tighter spacing for terminal-like appearance
     let char_height = 20u32;
     let font_size = 14.0;  // Reduced from 16 to fit better in 20px cells
     let scale = PxScale::from(font_size);
@@ -363,8 +363,8 @@ fn render_terminal_to_image(
                 let font = font_manager.get_best_font_for_char(cell.ch);
                 
                 // Position text properly within the character cell
-                // Center horizontally by adding small offset
-                let text_x = pixel_x as i32 + 1;  // Small offset for better centering
+                // Center horizontally in the narrower 10px cell
+                let text_x = pixel_x as i32;  // No offset needed for 10px cells
                 let text_y = pixel_y as i32 + baseline_offset as i32;
                 
                 draw_text_mut(
