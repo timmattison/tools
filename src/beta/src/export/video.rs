@@ -221,8 +221,8 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        let char_width = 9;  // Common monospace font width (e.g., 9x18)
-        let char_height = 18;  // Common monospace font height
+        let char_width = 7;  // Tight spacing for terminal look
+        let char_height = 14;  // Compact height to avoid gaps
         let padding = 40;
         
         let width = (recording.width as u32 * char_width) + (padding * 2);
@@ -310,9 +310,9 @@ fn render_terminal_to_image(
     }
     
     // Use fixed character cell dimensions to match terminal expectations
-    let char_width = 9u32;  // Common monospace font width
-    let char_height = 18u32;  // Common monospace font height
-    let font_size = 14.0;  // Standard terminal font size
+    let char_width = 7u32;  // Tight spacing for terminal look
+    let char_height = 14u32;  // Compact height to avoid gaps
+    let font_size = 12.0;  // Smaller font for pixel-perfect rendering
     let scale = PxScale::from(font_size);
     
     // Get the primary font for baseline calculation
@@ -424,7 +424,9 @@ fn encode_video(
         .arg("-i")
         .arg(temp_dir.join("frame_%06d.png"))
         .arg("-r")
-        .arg(fps.to_string());
+        .arg(fps.to_string())
+        .arg("-sws_flags")
+        .arg("neighbor");  // Use nearest-neighbor scaling for crisp pixels
     
     if is_gif {
         cmd.arg("-vf")
@@ -433,7 +435,7 @@ fn encode_video(
         cmd.arg("-c:v")
             .arg("libx265")
             .arg("-pix_fmt")
-            .arg("yuv444p");
+            .arg("gbrp");  // Use RGB format to avoid YUV softening
         
         if optimize_web {
             // Use lossy H.265 with good quality for web
