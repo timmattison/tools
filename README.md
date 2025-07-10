@@ -117,11 +117,6 @@ for fun. Several tools have also been ported to Rust for improved performance an
       path. Shows process name, PID, user, and access mode. Supports multiple paths and recursive directory scanning.
       Works on macOS (using lsof), Linux (using /proc), and Windows (using system APIs). Supports JSON output and verbose mode.
     - To install: `cargo install --git https://github.com/timmattison/tools wu`
-- workit
-    - Finds all Cargo.toml files in subdirectories and adds them to a Rust workspace in the top-level Cargo.toml file.
-      Useful for converting multiple independent Rust projects into a single workspace for faster builds and shared
-      dependency management. Supports dry-run mode, path prefixes, and exclude patterns.
-    - To install: `cargo install --git https://github.com/timmattison/tools workit`
 - symfix
     - Recursively scans directories for broken symlinks and optionally fixes them. Can prepend a string to or remove
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
