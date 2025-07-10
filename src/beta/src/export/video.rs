@@ -221,9 +221,10 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        let char_width = 7;  // Tight spacing for terminal look
-        let char_height = 14;  // Compact height to avoid gaps
-        let padding = 40;
+        const SCALE: u32 = 2;  // 2x resolution for crisp text
+        let char_width = 7 * SCALE;  // 14px at 2x
+        let char_height = 14 * SCALE;  // 28px at 2x
+        let padding = 40 * SCALE;  // 80px at 2x
         
         let width = (recording.width as u32 * char_width) + (padding * 2);
         let height = (recording.height as u32 * char_height) + (padding * 2);
@@ -290,8 +291,8 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     let ascent = font.ascent_unscaled() * scale_factor;
     
     // Round to nearest integer for pixel-perfect rendering
-    // Cap baseline to leave room for descenders
-    ascent.min(13.0).round()
+    // Cap baseline to leave room for descenders (scaled for 2x)
+    ascent.min(26.0).round()
 }
 
 fn render_terminal_to_image(
@@ -310,17 +311,18 @@ fn render_terminal_to_image(
     }
     
     // Use fixed character cell dimensions to match terminal expectations
-    let char_width = 7u32;  // Tight spacing for terminal look
-    let char_height = 14u32;  // Compact height to avoid gaps
-    let font_size = 12.0;  // Smaller font for pixel-perfect rendering
+    const SCALE: u32 = 2;  // 2x resolution for crisp text
+    let char_width = 7u32 * SCALE;  // 14px at 2x
+    let char_height = 14u32 * SCALE;  // 28px at 2x
+    let font_size = 12.0 * SCALE as f32;  // 24pt at 2x
     let scale = PxScale::from(font_size);
     
     // Get the primary font for baseline calculation
     let primary_font = &font_manager.fonts[0];
     let baseline_offset = calculate_font_baseline(primary_font, font_size);
     
-    let padding_x = 20;
-    let padding_y = 20;
+    let padding_x = 20 * SCALE;
+    let padding_y = 20 * SCALE;
     
     let grid = terminal_state.get_grid();
     
@@ -379,8 +381,8 @@ fn render_terminal_to_image(
                 
                 // Add underline if needed
                 if cell.underline {
-                    let underline_rect = Rect::at(pixel_x as i32, (pixel_y + char_height - 2) as i32)
-                        .of_size(char_width, 1);
+                    let underline_rect = Rect::at(pixel_x as i32, (pixel_y + char_height - (2 * SCALE)) as i32)
+                        .of_size(char_width, SCALE);  // Scale underline thickness
                     
                     draw_filled_rect_mut(
                         &mut image,
