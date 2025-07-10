@@ -221,8 +221,8 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        let char_width = 8;  // Proportionally scaled with font size
-        let char_height = 16;  // Increased to prevent descender clipping
+        let char_width = 9;  // Common monospace font width (e.g., 9x18)
+        let char_height = 18;  // Common monospace font height
         let padding = 40;
         
         let width = (recording.width as u32 * char_width) + (padding * 2);
@@ -289,9 +289,9 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     
     let ascent = font.ascent_unscaled() * scale_factor;
     
-    // Ensure baseline fits within our fixed 20px cells
-    // If ascent is too large, cap it to leave room for descenders
-    ascent.min(14.0)  // Cap baseline to leave room for descenders
+    // Round to nearest integer for pixel-perfect rendering
+    // Cap baseline to leave room for descenders
+    ascent.min(13.0).round()
 }
 
 fn render_terminal_to_image(
@@ -310,9 +310,9 @@ fn render_terminal_to_image(
     }
     
     // Use fixed character cell dimensions to match terminal expectations
-    let char_width = 8u32;  // Proportionally scaled with font size
-    let char_height = 16u32;  // Increased to prevent descender clipping
-    let font_size = 18.0;  // Larger default font size
+    let char_width = 9u32;  // Common monospace font width
+    let char_height = 18u32;  // Common monospace font height
+    let font_size = 14.0;  // Standard terminal font size
     let scale = PxScale::from(font_size);
     
     // Get the primary font for baseline calculation
@@ -354,7 +354,7 @@ fn render_terminal_to_image(
             if cell.ch != ' ' && cell.ch != '\x00' {
                 let text = cell.ch.to_string();
                 let font_scale = if cell.bold { 
-                    PxScale::from(font_size + 1.0) // Slightly larger for bold
+                    PxScale::from(font_size) // Same size for crisp rendering
                 } else { 
                     scale 
                 };
@@ -363,9 +363,9 @@ fn render_terminal_to_image(
                 let font = font_manager.get_best_font_for_char(cell.ch);
                 
                 // Position text properly within the character cell
-                // Center horizontally in the narrower 10px cell
-                let text_x = pixel_x as i32;  // No offset needed for 10px cells
-                let text_y = pixel_y as i32 + baseline_offset as i32;
+                // Ensure integer positioning for crisp rendering
+                let text_x = pixel_x as i32;
+                let text_y = (pixel_y as f32 + baseline_offset).round() as i32;
                 
                 draw_text_mut(
                     &mut image,
