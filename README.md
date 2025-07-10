@@ -80,7 +80,7 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - Shows your recent git commits across multiple repositories. Useful for finding what you've been working on
       recently
       across different projects.
-    - To install: `go install github.com/timmattison/tools/cmd/gitrdun@latest`
+    - To install: `cargo install --git https://github.com/timmattison/tools gitrdun`
 - procinfo
     - Shows detailed information about running processes matching a name. Displays process details, working directory,
       command line, open files, network connections, and optionally environment variables. Useful for debugging and
