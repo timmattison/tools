@@ -314,9 +314,9 @@ fn render_terminal_to_image(
     let font_size = 16.0;
     let scale = PxScale::from(font_size);
     
-    // Get the primary font for baseline calculation
-    let primary_font = &font_manager.fonts[0];
-    let baseline_offset = calculate_font_baseline(primary_font, font_size);
+    // Calculate baseline offset as a percentage of cell height for proper positioning
+    // Place baseline at 75% of cell height so text fits within the cell
+    let baseline_offset = (char_height as f32 * 0.75) as u32;
     
     let padding_x = 20;
     let padding_y = 20;
