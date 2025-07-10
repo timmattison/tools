@@ -260,6 +260,14 @@ pub struct TerminalState {
     pub italic: bool,
     pub underline: bool,
     parser: Parser,
+    // Saved cursor position for ESC 7/8
+    saved_cursor_x: usize,
+    saved_cursor_y: usize,
+    // Scrolling region
+    scroll_top: usize,
+    scroll_bottom: usize,
+    // Character set state
+    use_acs: bool,
 }
 
 impl TerminalState {
@@ -291,6 +299,11 @@ impl TerminalState {
             underline: false,
             theme,
             parser: Parser::new(),
+            saved_cursor_x: 0,
+            saved_cursor_y: 0,
+            scroll_top: 0,
+            scroll_bottom: height - 1,
+            use_acs: false,
         }
     }
     
@@ -323,9 +336,29 @@ impl TerminalState {
     }
     
     fn put_char(&mut self, ch: char) {
+        // Convert ACS characters to Unicode box drawing if needed
+        let display_char = if self.use_acs {
+            match ch {
+                'j' => '┘', // Lower right corner
+                'k' => '┐', // Upper right corner
+                'l' => '┌', // Upper left corner
+                'm' => '└', // Lower left corner
+                'n' => '┼', // Cross
+                'q' => '─', // Horizontal line
+                't' => '├', // Left T
+                'u' => '┤', // Right T
+                'v' => '┴', // Bottom T
+                'w' => '┬', // Top T
+                'x' => '│', // Vertical line
+                _ => ch,
+            }
+        } else {
+            ch
+        };
+        
         if self.cursor_y < self.height && self.cursor_x < self.width {
             self.grid[self.cursor_y][self.cursor_x] = Cell {
-                ch,
+                ch: display_char,
                 fg_color: self.current_fg,
                 bg_color: self.current_bg,
                 bold: self.bold,
@@ -334,27 +367,24 @@ impl TerminalState {
             };
             self.cursor_x += 1;
             
-            if self.cursor_x >= self.width {
-                self.cursor_x = 0;
-                self.cursor_y += 1;
-                if self.cursor_y >= self.height {
-                    self.scroll_up();
-                    self.cursor_y = self.height - 1;
-                }
+            // Don't auto-wrap at line end - just stop at the edge
+            if self.cursor_x > self.width {
+                self.cursor_x = self.width;
             }
         }
     }
     
     fn scroll_up(&mut self) {
-        for y in 1..self.height {
+        // Only scroll within the scrolling region
+        for y in (self.scroll_top + 1)..=self.scroll_bottom {
             for x in 0..self.width {
                 self.grid[y - 1][x] = self.grid[y][x].clone();
             }
         }
         
-        // Clear the last line
+        // Clear the bottom line of the scrolling region
         for x in 0..self.width {
-            self.grid[self.height - 1][x] = Cell {
+            self.grid[self.scroll_bottom][x] = Cell {
                 ch: ' ',
                 fg_color: self.theme.foreground,
                 bg_color: self.theme.background,
@@ -502,9 +532,10 @@ impl Perform for TerminalState {
         match byte {
             b'\n' => {
                 self.cursor_y += 1;
-                if self.cursor_y >= self.height {
+                // Check if we need to scroll within the scrolling region
+                if self.cursor_y > self.scroll_bottom {
                     self.scroll_up();
-                    self.cursor_y = self.height - 1;
+                    self.cursor_y = self.scroll_bottom;
                 }
             }
             b'\r' => {
@@ -578,7 +609,12 @@ impl Perform for TerminalState {
                     0 => {
                         // Clear from cursor to end of screen
                         for x in self.cursor_x..self.width {
-                            self.grid[self.cursor_y][x] = Cell::default();
+                            self.grid[self.cursor_y][x] = Cell {
+                                ch: ' ',
+                                fg_color: self.theme.foreground,
+                                bg_color: self.theme.background,
+                                ..Default::default()
+                            };
                         }
                         for y in (self.cursor_y + 1)..self.height {
                             self.clear_line(y);
@@ -590,7 +626,12 @@ impl Perform for TerminalState {
                             self.clear_line(y);
                         }
                         for x in 0..=self.cursor_x {
-                            self.grid[self.cursor_y][x] = Cell::default();
+                            self.grid[self.cursor_y][x] = Cell {
+                                ch: ' ',
+                                fg_color: self.theme.foreground,
+                                bg_color: self.theme.background,
+                                ..Default::default()
+                            };
                         }
                     }
                     2 => {
@@ -607,13 +648,23 @@ impl Perform for TerminalState {
                     0 => {
                         // Clear from cursor to end of line
                         for x in self.cursor_x..self.width {
-                            self.grid[self.cursor_y][x] = Cell::default();
+                            self.grid[self.cursor_y][x] = Cell {
+                                ch: ' ',
+                                fg_color: self.theme.foreground,
+                                bg_color: self.theme.background,
+                                ..Default::default()
+                            };
                         }
                     }
                     1 => {
                         // Clear from start of line to cursor
                         for x in 0..=self.cursor_x {
-                            self.grid[self.cursor_y][x] = Cell::default();
+                            self.grid[self.cursor_y][x] = Cell {
+                                ch: ' ',
+                                fg_color: self.theme.foreground,
+                                bg_color: self.theme.background,
+                                ..Default::default()
+                            };
                         }
                     }
                     2 => {
@@ -627,11 +678,48 @@ impl Perform for TerminalState {
                 // Set graphics rendition (colors, bold, etc.)
                 self.process_sgr_params(params);
             }
+            'r' => {
+                // Set scrolling region (DECSTBM)
+                let top = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let bottom = params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(self.height as u16) as usize;
+                
+                // Validate and set scrolling region
+                if top > 0 && bottom <= self.height && top < bottom {
+                    self.scroll_top = top - 1;  // Convert to 0-based
+                    self.scroll_bottom = bottom - 1;
+                    
+                    // DECSTBM also moves cursor to home position
+                    self.cursor_x = 0;
+                    self.cursor_y = 0;
+                }
+            }
             _ => {}
         }
     }
     
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
-        // Handle escape sequences if needed
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        match byte {
+            b'7' => {
+                // Save cursor position (DECSC)
+                self.saved_cursor_x = self.cursor_x;
+                self.saved_cursor_y = self.cursor_y;
+            }
+            b'8' => {
+                // Restore cursor position (DECRC)
+                self.cursor_x = self.saved_cursor_x;
+                self.cursor_y = self.saved_cursor_y;
+            }
+            b'(' | b')' => {
+                // Character set designation
+                if intermediates.len() == 1 {
+                    match intermediates[0] {
+                        b'0' => self.use_acs = true,  // Enter ACS mode
+                        b'B' => self.use_acs = false, // Exit ACS mode (ASCII)
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 }
