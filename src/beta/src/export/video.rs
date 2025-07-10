@@ -437,7 +437,7 @@ fn encode_video(
         cmd.arg("-c:v")
             .arg("libx265")
             .arg("-pix_fmt")
-            .arg("gbrp");  // Use RGB format to avoid YUV softening
+            .arg("yuv444p");  // Full color resolution without chroma subsampling
         
         if optimize_web {
             // Use lossy H.265 with good quality for web
