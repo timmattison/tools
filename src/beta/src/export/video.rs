@@ -3,7 +3,8 @@ use image::{ImageBuffer, Rgb, RgbImage};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::io::Write;
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
 use ab_glyph::{FontRef, PxScale, Font};
@@ -404,15 +405,13 @@ fn encode_video(
     fps: u32,
     optimize_web: bool,
 ) -> Result<()> {
-    let temp_dir = std::env::temp_dir().join("beta_video_export");
-    std::fs::create_dir_all(&temp_dir)
-        .context("Failed to create temp directory")?;
-    
-    for (i, frame) in frames.iter().enumerate() {
-        let frame_path = temp_dir.join(format!("frame_{:06}.png", i));
-        frame.save(&frame_path)
-            .context("Failed to save frame")?;
+    if frames.is_empty() {
+        anyhow::bail!("No frames to encode");
     }
+    
+    // Get dimensions from first frame
+    let width = frames[0].width();
+    let height = frames[0].height();
     
     let is_gif = output_path.extension()
         .and_then(|ext| ext.to_str())
@@ -420,15 +419,19 @@ fn encode_video(
         .unwrap_or(false);
     
     let mut cmd = Command::new("ffmpeg");
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    
+    // Input format specification for raw RGB data
     cmd.arg("-y")
-        .arg("-framerate")
-        .arg(fps.to_string())
-        .arg("-i")
-        .arg(temp_dir.join("frame_%06d.png"))
-        .arg("-r")
-        .arg(fps.to_string())
-        .arg("-sws_flags")
-        .arg("neighbor");  // Use nearest-neighbor scaling for crisp pixels
+        .arg("-f").arg("rawvideo")
+        .arg("-pix_fmt").arg("rgb24")
+        .arg("-s").arg(format!("{}x{}", width, height))
+        .arg("-framerate").arg(fps.to_string())
+        .arg("-i").arg("pipe:0")
+        .arg("-r").arg(fps.to_string())
+        .arg("-sws_flags").arg("neighbor");  // Use nearest-neighbor scaling for crisp pixels
     
     if is_gif {
         cmd.arg("-vf")
@@ -460,15 +463,38 @@ fn encode_video(
     
     cmd.arg(output_path);
     
-    let output = cmd.output()
-        .context("Failed to run FFmpeg")?;
+    // Spawn FFmpeg process
+    let mut child = cmd.spawn()
+        .context("Failed to spawn FFmpeg")?;
+    
+    // Get stdin handle
+    let mut stdin = child.stdin.take()
+        .context("Failed to get FFmpeg stdin")?;
+    
+    // Write raw RGB data for each frame
+    for (i, frame) in frames.iter().enumerate() {
+        // Get raw RGB bytes from the image
+        let rgb_data = frame.as_raw();
+        
+        stdin.write_all(rgb_data)
+            .context("Failed to write frame data to FFmpeg")?;
+        
+        if i % 30 == 0 && i > 0 {
+            println!("Encoded frame {} / {}", i, frames.len());
+        }
+    }
+    
+    // Close stdin to signal end of input
+    drop(stdin);
+    
+    // Wait for FFmpeg to complete
+    let output = child.wait_with_output()
+        .context("Failed to wait for FFmpeg")?;
     
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("FFmpeg failed: {}", stderr);
     }
-    
-    std::fs::remove_dir_all(&temp_dir).ok();
     
     Ok(())
 }
