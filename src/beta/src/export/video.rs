@@ -324,7 +324,7 @@ fn render_terminal_to_image(
     
     let grid = terminal_state.get_grid();
     
-    // Render each character in the terminal grid
+    // Pass 1: Render all cell backgrounds first
     for (y, row) in grid.iter().enumerate() {
         for (x, cell) in row.iter().enumerate() {
             // Use integer positioning to avoid gaps
@@ -340,6 +340,15 @@ fn render_terminal_to_image(
                 bg_rect,
                 Rgb([cell.bg_color.0, cell.bg_color.1, cell.bg_color.2]),
             );
+        }
+    }
+    
+    // Pass 2: Render all text on top of backgrounds
+    for (y, row) in grid.iter().enumerate() {
+        for (x, cell) in row.iter().enumerate() {
+            // Use integer positioning to avoid gaps
+            let pixel_x = padding_x + (x as u32 * char_width);
+            let pixel_y = padding_y + (y as u32 * char_height);
             
             // Draw the character if it's not empty
             if cell.ch != ' ' && cell.ch != '\x00' {
