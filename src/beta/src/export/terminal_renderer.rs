@@ -367,6 +367,7 @@ impl TerminalState {
             ch
         };
         
+        
         if self.cursor_y < self.height && self.cursor_x < self.width {
             self.grid[self.cursor_y][self.cursor_x] = Cell {
                 ch: display_char,
@@ -379,8 +380,8 @@ impl TerminalState {
             self.cursor_x += 1;
             
             // Don't auto-wrap at line end - just stop at the edge
-            if self.cursor_x > self.width {
-                self.cursor_x = self.width;
+            if self.cursor_x >= self.width {
+                self.cursor_x = self.width - 1;
             }
         }
     }

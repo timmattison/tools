@@ -428,7 +428,7 @@ fn render_terminal_to_image(
         
         // Calculate cursor pixel position
         let cursor_pixel_x = padding_x + (cursor_x as u32 * char_width);
-        let cursor_pixel_y = padding_y + (cursor_y as u32 * char_height);
+        let cursor_pixel_y = padding_y + ((cursor_y + 1) as u32 * char_height);
         
         // Draw cursor as inverted block
         let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
