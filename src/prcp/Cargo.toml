@@ -1,0 +1,11 @@
+[package]
+name = "prcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18.0"
+crossterm = "0.29.0"
+anyhow = "1.0"
+tokio = { version = "1", features = ["full"] }
