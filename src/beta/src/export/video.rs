@@ -422,6 +422,50 @@ fn render_terminal_to_image(
         }
     }
     
+    // Pass 3: Render cursor if visible
+    if terminal_state.is_cursor_visible() {
+        let (cursor_x, cursor_y) = terminal_state.get_cursor_position();
+        
+        // Calculate cursor pixel position
+        let cursor_pixel_x = padding_x + (cursor_x as u32 * char_width);
+        let cursor_pixel_y = padding_y + (cursor_y as u32 * char_height);
+        
+        // Draw cursor as inverted block
+        let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
+            .of_size(char_width, char_height);
+        
+        // Get the cell at cursor position to determine colors
+        let grid = terminal_state.get_grid();
+        if cursor_y < grid.len() && cursor_x < grid[cursor_y].len() {
+            let cell = &grid[cursor_y][cursor_x];
+            
+            // Draw inverted cursor block (swap fg/bg colors)
+            draw_filled_rect_mut(
+                &mut image,
+                cursor_rect,
+                Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
+            );
+            
+            // If there's a character at cursor position, redraw it with inverted colors
+            if cell.ch != ' ' && cell.ch != '\x00' {
+                let text = cell.ch.to_string();
+                let font = font_manager.get_best_font_for_char(cell.ch);
+                let text_x = cursor_pixel_x as i32;
+                let text_y = (cursor_pixel_y as f32 + baseline_offset).round() as i32;
+                
+                draw_text_mut(
+                    &mut image,
+                    Rgb([cell.bg_color.0, cell.bg_color.1, cell.bg_color.2]),
+                    text_x,
+                    text_y,
+                    scale,
+                    font,
+                    &text,
+                );
+            }
+        }
+    }
+    
     Ok(image)
 }
 

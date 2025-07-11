@@ -268,6 +268,8 @@ pub struct TerminalState {
     scroll_bottom: usize,
     // Character set state
     use_acs: bool,
+    // Cursor visibility
+    cursor_visible: bool,
 }
 
 impl TerminalState {
@@ -304,6 +306,7 @@ impl TerminalState {
             scroll_top: 0,
             scroll_bottom: height - 1,
             use_acs: false,
+            cursor_visible: true,  // Cursor is visible by default
         }
     }
     
@@ -333,6 +336,14 @@ impl TerminalState {
     
     pub fn get_height(&self) -> usize {
         self.height
+    }
+    
+    pub fn get_cursor_position(&self) -> (usize, usize) {
+        (self.cursor_x, self.cursor_y)
+    }
+    
+    pub fn is_cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
     
     fn put_char(&mut self, ch: char) {
@@ -573,7 +584,33 @@ impl Perform for TerminalState {
         // Handle OSC sequences if needed
     }
     
-    fn csi_dispatch(&mut self, params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // Check for private mode sequences (CSI ? ...)
+        if intermediates.contains(&b'?') {
+            match action {
+                'h' => {
+                    // DECSET - Set Mode
+                    for param in params.iter().flatten() {
+                        match *param {
+                            25 => self.cursor_visible = true,  // Show cursor
+                            _ => {}
+                        }
+                    }
+                }
+                'l' => {
+                    // DECRST - Reset Mode  
+                    for param in params.iter().flatten() {
+                        match *param {
+                            25 => self.cursor_visible = false, // Hide cursor
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        
         match action {
             'H' | 'f' => {
                 // Cursor position
