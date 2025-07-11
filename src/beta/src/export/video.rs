@@ -364,7 +364,6 @@ fn render_terminal_to_image(
     // Get the primary font for baseline calculation
     let primary_font = &font_manager.fonts[0];
     let baseline_offset = calculate_font_baseline(primary_font, font_size);
-    let (text_ascent, text_descent) = calculate_text_height(primary_font, font_size);
     
     let padding_x = 20 * SCALE;  // 80px at 4x
     let padding_y = 20 * SCALE;  // 80px at 4x
@@ -443,14 +442,14 @@ fn render_terminal_to_image(
     if terminal_state.is_cursor_visible() {
         let (cursor_x, cursor_y) = terminal_state.get_cursor_position();
         
-        // Calculate cursor pixel position - align with text baseline and height
+        // Calculate cursor pixel position - align with text rendering
         let cursor_pixel_x = padding_x + (cursor_x as u32 * char_width);
         let cell_top_y = padding_y + (cursor_y as u32 * char_height);
         
-        // Position cursor to align with actual text rendering area
-        // The cursor should start from the text baseline minus ascent and extend to baseline plus descent
-        let cursor_pixel_y = cell_top_y + (baseline_offset - text_ascent) as u32;
-        let cursor_height = (text_ascent + text_descent) as u32;
+        // Position cursor to align with text baseline - start from baseline and extend down
+        // This matches how terminals typically render cursors
+        let cursor_pixel_y = cell_top_y + (baseline_offset * 0.8) as u32;
+        let cursor_height = (baseline_offset * 0.4) as u32;
         
         // Draw cursor as inverted block aligned with text
         let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
