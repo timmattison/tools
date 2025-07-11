@@ -11,11 +11,11 @@ for fun. Several tools have also been ported to Rust for improved performance an
       However, we ignore the directory names and locations of files in the directories. See below for an example.
     - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
-    - Copies a file and shows the progress in the console. Useful for when you're copying large files and you don't
-      want to keep opening a new terminal window to run `du -sh` to see how much has been copied. You can also press the
-      space bar to pause the copy and press it again to resume.
-    - To install Go version: `go install github.com/timmattison/tools/cmd/prcp@latest`
-    - To install Rust version: `cargo install --git https://github.com/timmattison/tools prcp`
+    - Copies a file and shows the progress in the console with a beautiful progress bar using Unicode block characters.
+      Useful for when you're copying large files and you don't want to keep opening a new terminal window to run `du -sh`
+      to see how much has been copied. You can press the space bar to pause the copy and press it again to resume.
+      Press Ctrl+C to cancel and cleanly exit.
+    - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It shows the progress in the console.
     - To install: `go install github.com/timmattison/tools/cmd/prgz@latest`
@@ -52,9 +52,11 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - Waits for text with `\\"` in it to be put on the clipboard and then unescapes one level of it.
     - To install: `cargo install --git https://github.com/timmattison/tools unescapeboard`
 - prhash
-    - Hashes a file with the requested hashing algorithm and shows the progress in the console. Good for hashing very
-      large files and my experiments show that it runs a little bit faster than the standard system tools.
-    - To install: `go install github.com/timmattison/tools/cmd/prhash@latest`
+    - Hashes files with the requested hashing algorithm (MD5, SHA1, SHA256, SHA512, Blake3) and shows the progress
+      in the console with a beautiful progress bar using Unicode block characters. Outputs results in shasum-compatible
+      format. Good for hashing very large files. You must specify the algorithm with `-a/--algorithm`. Press space
+      to pause/resume, Ctrl+C to cancel.
+    - To install: `cargo install --git https://github.com/timmattison/tools prhash`
 - subito
     - Subscribes to a list of topics on AWS IoT Core and prints out the messages it receives. This is useful for
       debugging and testing. I was going to call it `subiot` but `subito` actually means "immediately" in Italian and
@@ -221,21 +223,32 @@ hashes will be the same. The subdirectory names and locations are ignored.
 
 Simply run `prcp <source> <destination>` and you'll see the progress of the copy in the console.
 
-**Available versions:**
-- **Go version** (original): Uses Bubble Tea for TUI
-- **Rust version** (new): Uses Ratatui for TUI, with automatic fallback to simple progress when no TTY is available
+**Features:**
+- Beautiful progress bar with Unicode block characters (█▉▊▋▌▍▎▏)
+- Real-time throughput display with human-readable byte formatting
+- Elapsed time, ETA, and completion percentage
+- Pause/resume with spacebar
+- Ctrl+C to cancel cleanly with proper terminal cleanup
+- 16MB buffer size for efficient copying
+- Preserves file permissions
+
+## prhash
+
+Hash files with progress display: `prhash -a sha256 file1.txt file2.txt`
 
 **Features:**
-- Progress bar with percentage complete
-- Real-time throughput display (MB/s, GB/s, etc.)
+- Supports MD5, SHA1, SHA256, SHA512, and Blake3 algorithms
+- Beautiful progress bar with Unicode block characters
+- Outputs in shasum-compatible format
+- Required algorithm selection (no default)
 - Pause/resume with spacebar
-- Ctrl+C to cancel
-- Works in both interactive terminals and CI/headless environments
+- Ctrl+C to cancel cleanly with proper terminal cleanup
+- Processes multiple files sequentially
+- 16MB buffer size for efficient hashing
 
 ## update-aws-credentials
 
-Just run `update-aws-credentials` (Go version) or `update-aws-credentials` (Rust version) and it will take the AWS
-credentials from your clipboard and write them to your AWS config file. If something goes wrong it'll let you know.
+Just run `update-aws-credentials` and it will take the AWS credentials from your clipboard and write them to your AWS config file. If something goes wrong it'll let you know.
 
 ## sizeof
 
