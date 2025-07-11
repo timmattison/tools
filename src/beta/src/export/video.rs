@@ -323,6 +323,22 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     ascent.min(48.0).round()
 }
 
+fn calculate_text_height(font: &FontRef, font_size: f32) -> (f32, f32) {
+    let scale = PxScale::from(font_size);
+    
+    // Get font metrics using ab_glyph unscaled API and apply scaling
+    let units_per_em = font.units_per_em().unwrap_or(1000.0);
+    let scale_factor = scale.y / units_per_em;
+    
+    let ascent = font.ascent_unscaled() * scale_factor;
+    let descent = font.descent_unscaled() * scale_factor; // descent is typically negative
+    
+    let text_ascent = ascent.min(48.0);
+    let text_descent = (-descent).min(12.0); // Make descent positive and cap it
+    
+    (text_ascent, text_descent)
+}
+
 fn render_terminal_to_image(
     terminal_state: &TerminalState,
     width: u32,
@@ -348,6 +364,7 @@ fn render_terminal_to_image(
     // Get the primary font for baseline calculation
     let primary_font = &font_manager.fonts[0];
     let baseline_offset = calculate_font_baseline(primary_font, font_size);
+    let (text_ascent, text_descent) = calculate_text_height(primary_font, font_size);
     
     let padding_x = 20 * SCALE;  // 80px at 4x
     let padding_y = 20 * SCALE;  // 80px at 4x
@@ -426,13 +443,18 @@ fn render_terminal_to_image(
     if terminal_state.is_cursor_visible() {
         let (cursor_x, cursor_y) = terminal_state.get_cursor_position();
         
-        // Calculate cursor pixel position
+        // Calculate cursor pixel position - align with text baseline and height
         let cursor_pixel_x = padding_x + (cursor_x as u32 * char_width);
-        let cursor_pixel_y = padding_y + ((cursor_y + 1) as u32 * char_height);
+        let cell_top_y = padding_y + (cursor_y as u32 * char_height);
         
-        // Draw cursor as inverted block
+        // Position cursor to align with actual text rendering area
+        // The cursor should start from the text baseline minus ascent and extend to baseline plus descent
+        let cursor_pixel_y = cell_top_y + (baseline_offset - text_ascent) as u32;
+        let cursor_height = (text_ascent + text_descent) as u32;
+        
+        // Draw cursor as inverted block aligned with text
         let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
-            .of_size(char_width, char_height);
+            .of_size(char_width, cursor_height);
         
         // Get the cell at cursor position to determine colors
         let grid = terminal_state.get_grid();
@@ -451,7 +473,7 @@ fn render_terminal_to_image(
                 let text = cell.ch.to_string();
                 let font = font_manager.get_best_font_for_char(cell.ch);
                 let text_x = cursor_pixel_x as i32;
-                let text_y = (cursor_pixel_y as f32 + baseline_offset).round() as i32;
+                let text_y = (cell_top_y as f32 + baseline_offset).round() as i32;
                 
                 draw_text_mut(
                     &mut image,
