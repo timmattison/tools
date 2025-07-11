@@ -189,21 +189,24 @@ pub async fn export_video(
     let (width, height) = parse_resolution(&resolution, &recording)?;
     let terminal_theme = TerminalTheme::from_name(&theme);
     
-    println!("Generating video frames...");
+    println!("Generating and encoding video...");
     println!("Resolution: {}x{}", width, height);
     println!("FPS: {}", fps);
     println!("Theme: {}", theme);
     
-    let frames = generate_frames(&recording, width, height, fps, terminal_theme)?;
-    
-    println!("Generated {} frames", frames.len());
-    println!("Encoding video with FFmpeg...");
-    
-    encode_video(&frames, &output_path, fps, optimize_web)?;
+    let total_frames = generate_and_encode_video(
+        &recording, 
+        &output_path, 
+        width, 
+        height, 
+        fps, 
+        terminal_theme,
+        optimize_web
+    )?;
     
     println!("Video export saved to: {}", output_path.display());
     println!("Duration: {:.1}s", recording.duration);
-    println!("Frames: {}", frames.len());
+    println!("Frames: {}", total_frames);
     
     Ok(())
 }
@@ -234,21 +237,25 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
     }
 }
 
-fn generate_frames(
+fn generate_and_encode_video(
     recording: &Recording,
+    output_path: &PathBuf,
     width: u32,
     height: u32,
     fps: u32,
     theme: TerminalTheme,
-) -> Result<Vec<RgbImage>> {
-    let mut frames = Vec::new();
+    optimize_web: bool,
+) -> Result<usize> {
     let frame_duration = 1.0 / fps as f64;
     let total_frames = (recording.duration * fps as f64).ceil() as usize;
     
+    // Start FFmpeg process first
+    let mut ffmpeg_process = spawn_ffmpeg(output_path, width, height, fps, optimize_web)?;
+    let mut stdin = ffmpeg_process.stdin.take()
+        .context("Failed to get FFmpeg stdin")?;
+    
     // Load font manager once for all frames
     let mut font_manager = FontManager::new()?;
-    
-    // Print fonts being used
     println!("Loaded {} fonts for better Unicode coverage", font_manager.fonts.len());
     
     let mut terminal_state = TerminalState::new(
@@ -259,9 +266,11 @@ fn generate_frames(
     
     let mut event_index = 0;
     
+    // Generate and stream frames one at a time
     for frame_num in 0..total_frames {
         let current_time = frame_num as f64 * frame_duration;
         
+        // Process events up to current time
         while event_index < recording.events.len() && recording.events[event_index].time <= current_time {
             let event = &recording.events[event_index];
             if matches!(event.event_type, EventType::Output) {
@@ -271,15 +280,33 @@ fn generate_frames(
             event_index += 1;
         }
         
+        // Render frame
         let frame = render_terminal_to_image(&terminal_state, width, height, &mut font_manager)?;
-        frames.push(frame);
+        
+        // Write frame data directly to FFmpeg
+        stdin.write_all(frame.as_raw())
+            .context("Failed to write frame data to FFmpeg")?;
         
         if frame_num % 30 == 0 {
-            println!("Generated frame {} / {}", frame_num + 1, total_frames);
+            println!("Processed frame {} / {}", frame_num + 1, total_frames);
         }
+        
+        // Frame is dropped here, freeing memory immediately
     }
     
-    Ok(frames)
+    // Close stdin to signal end of input
+    drop(stdin);
+    
+    // Wait for FFmpeg to complete
+    let output = ffmpeg_process.wait_with_output()
+        .context("Failed to wait for FFmpeg")?;
+    
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("FFmpeg failed: {}", stderr);
+    }
+    
+    Ok(total_frames)
 }
 
 fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
@@ -399,20 +426,13 @@ fn render_terminal_to_image(
 }
 
 
-fn encode_video(
-    frames: &[RgbImage],
+fn spawn_ffmpeg(
     output_path: &PathBuf,
+    width: u32,
+    height: u32,
     fps: u32,
     optimize_web: bool,
-) -> Result<()> {
-    if frames.is_empty() {
-        anyhow::bail!("No frames to encode");
-    }
-    
-    // Get dimensions from first frame
-    let width = frames[0].width();
-    let height = frames[0].height();
-    
+) -> Result<std::process::Child> {
     let is_gif = output_path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_lowercase() == "gif")
@@ -463,38 +483,6 @@ fn encode_video(
     
     cmd.arg(output_path);
     
-    // Spawn FFmpeg process
-    let mut child = cmd.spawn()
-        .context("Failed to spawn FFmpeg")?;
-    
-    // Get stdin handle
-    let mut stdin = child.stdin.take()
-        .context("Failed to get FFmpeg stdin")?;
-    
-    // Write raw RGB data for each frame
-    for (i, frame) in frames.iter().enumerate() {
-        // Get raw RGB bytes from the image
-        let rgb_data = frame.as_raw();
-        
-        stdin.write_all(rgb_data)
-            .context("Failed to write frame data to FFmpeg")?;
-        
-        if i % 30 == 0 && i > 0 {
-            println!("Encoded frame {} / {}", i, frames.len());
-        }
-    }
-    
-    // Close stdin to signal end of input
-    drop(stdin);
-    
-    // Wait for FFmpeg to complete
-    let output = child.wait_with_output()
-        .context("Failed to wait for FFmpeg")?;
-    
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("FFmpeg failed: {}", stderr);
-    }
-    
-    Ok(())
+    // Spawn and return the FFmpeg process
+    cmd.spawn().context("Failed to spawn FFmpeg")
 }
