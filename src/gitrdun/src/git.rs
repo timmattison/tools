@@ -61,6 +61,16 @@ pub fn get_git_user_email(stats: &GitStats) -> Result<String> {
     Ok(email)
 }
 
+/// Get the root directory of the git repository containing the given path
+pub fn get_repository_root(path: &Path) -> Option<PathBuf> {
+    match Repository::discover(path) {
+        Ok(repo) => {
+            repo.workdir().map(|p| p.to_path_buf())
+        }
+        Err(_) => None,
+    }
+}
+
 /// Convert git2::Time to DateTime<Local>
 fn git_time_to_datetime(time: &Time) -> DateTime<Local> {
     Local.timestamp_opt(time.seconds(), 0).unwrap()

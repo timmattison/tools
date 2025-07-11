@@ -46,7 +46,13 @@ async fn main() -> Result<()> {
     } else if !args.paths.is_empty() {
         args.paths.clone()
     } else {
-        vec![PathBuf::from(".")]
+        // Default case: check if we're in a git repository
+        let current_dir = PathBuf::from(".");
+        if let Some(repo_root) = git::get_repository_root(&current_dir) {
+            vec![repo_root]
+        } else {
+            vec![current_dir]
+        }
     };
 
     // Get git user email
@@ -147,23 +153,22 @@ async fn main() -> Result<()> {
     // Signal that scanning is complete
     progress.set_scan_complete();
     
-    // Process and display results in a separate thread while UI is still running
+    // Process and display results in a separate task while UI is still running
     let display_handle = {
         let result = Arc::clone(&search_result);
         let args = args.clone();
         let progress_clone = Arc::clone(&progress);
         let cancellation_token = progress.cancellation_token();
         
-        thread::spawn(move || {
-            // Create a new tokio runtime for the async display_results
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result_guard = result.lock().unwrap();
-            
-            rt.block_on(async {
+        // We'll use spawn_blocking to avoid the nested runtime issue
+        tokio::task::spawn_blocking(move || {
+            // Block on the async operation
+            tokio::runtime::Handle::current().block_on(async move {
+                let result_guard = result.lock().unwrap();
                 if let Err(e) = display_results(&*result_guard, &args, use_ollama, Some(progress_clone), cancellation_token).await {
                     eprintln!("Error displaying results: {}", e);
                 }
-            });
+            })
         })
     };
     
@@ -171,8 +176,8 @@ async fn main() -> Result<()> {
     let user_cancelled = progress.is_cancelled();
     
     if !user_cancelled {
-        // Wait for display thread to complete only if not cancelled
-        let _ = display_handle.join();
+        // Wait for display task to complete only if not cancelled
+        let _ = display_handle.await;
         
         // Signal that Ollama processing is complete (if it was running)
         if use_ollama {
@@ -186,11 +191,8 @@ async fn main() -> Result<()> {
     // After TUI exits, print the results to stdout (if not cancelled)
     if !user_cancelled {
         let result = search_result.lock().unwrap();
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(async {
-            // Use a new cancellation token that won't be cancelled for final output
-            display_results(&*result, &args, use_ollama, None, CancellationToken::new()).await
-        })?;
+        // Use a new cancellation token that won't be cancelled for final output
+        display_results(&*result, &args, use_ollama, None, CancellationToken::new()).await?;
     }
 
     Ok(())
