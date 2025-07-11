@@ -4,12 +4,14 @@ mod commands;
 mod output;
 mod site_helper;
 mod device_helper;
+mod config;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
 use uuid::Uuid;
+use config::Config;
 
 fn parse_bool_env(s: &str) -> Result<bool, String> {
     match s.to_lowercase().as_str() {
@@ -25,15 +27,15 @@ fn parse_bool_env(s: &str) -> Result<bool, String> {
 struct Args {
     /// UniFi controller URL (e.g., https://192.168.1.1)
     #[clap(long, env = "UNIFI_URL")]
-    url: String,
+    url: Option<String>,
 
     /// API key for authentication (generate in Settings -> Control Plane -> Integrations)
     #[clap(long, env = "UNIFI_API_KEY")]
-    api_key: String,
+    api_key: Option<String>,
 
     /// Skip TLS certificate verification
     #[clap(long, env = "UNIFI_INSECURE", value_parser = parse_bool_env)]
-    insecure: bool,
+    insecure: Option<bool>,
 
     /// Output format
     #[clap(long, value_enum, default_value = "table")]
@@ -92,6 +94,20 @@ enum Commands {
     
     /// Get application information
     Info,
+    
+    /// Configure ufa settings
+    Config {
+        #[clap(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommand {
+    /// Interactive configuration setup
+    Setup,
+    /// Show current configuration file path
+    Path,
 }
 
 #[tokio::main]
@@ -101,10 +117,44 @@ async fn main() -> Result<()> {
     
     let args = Args::parse();
 
+    // Handle config commands first (they don't need API connection)
+    if let Commands::Config { command } = &args.command {
+        match command {
+            ConfigCommand::Setup => {
+                Config::setup()?;
+                return Ok(());
+            }
+            ConfigCommand::Path => {
+                let path = Config::config_file_path()?;
+                println!("Configuration file path: {}", path.display());
+                return Ok(());
+            }
+        }
+    }
+
+    // Load configuration from file
+    let file_config = Config::load()?;
+    
+    // Determine final configuration values (CLI args > env vars > config file)
+    let url = args.url
+        .or_else(|| std::env::var("UNIFI_URL").ok())
+        .or_else(|| file_config.as_ref().and_then(|c| c.url.clone()))
+        .context("UniFi URL not provided. Set it via --url, UNIFI_URL environment variable, or run 'ufa config setup' to create a configuration file.")?;
+    
+    let api_key = args.api_key
+        .or_else(|| std::env::var("UNIFI_API_KEY").ok())
+        .or_else(|| file_config.as_ref().and_then(|c| c.api_key.clone()))
+        .context("API key not provided. Set it via --api-key, UNIFI_API_KEY environment variable, or run 'ufa config setup' to create a configuration file.")?;
+    
+    let insecure = args.insecure
+        .or_else(|| std::env::var("UNIFI_INSECURE").ok().and_then(|v| parse_bool_env(&v).ok()))
+        .or_else(|| file_config.as_ref().and_then(|c| c.insecure))
+        .unwrap_or(false);
+
     let client = UnifiClient::new(
-        &args.url,
-        &args.api_key,
-        args.insecure,
+        &url,
+        &api_key,
+        insecure,
     ).await?;
 
     match args.command {
@@ -116,5 +166,6 @@ async fn main() -> Result<()> {
         Commands::Clients { site_id, command } => clients::handle_clients_command(command, site_id, &client, args.output).await,
         Commands::Vouchers { site_id, command } => vouchers::handle_vouchers_command(command, site_id, &client, args.output).await,
         Commands::Info => info::handle_info_command(&client, args.output).await,
+        Commands::Config { .. } => unreachable!("Config commands handled above"),
     }
 }
