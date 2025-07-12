@@ -11,7 +11,7 @@ pub async fn handle_export(format: ExportFormat) -> Result<()> {
             web::export_web(input, output, theme, compress).await
         }
         ExportFormat::Video { input, output, fps, resolution, theme, optimize_web } => {
-            video::export_video(input, output, fps, resolution, theme, optimize_web)
+            video::export_video(input, output, fps, resolution, theme, optimize_web).await
         }
     }
 }
