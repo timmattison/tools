@@ -273,6 +273,18 @@ pub struct TerminalState {
     // Track if we're in a DCS/OSC sequence
     in_dcs_sequence: bool,
     in_osc_sequence: bool,
+    // Dynamic color palette for OSC sequences
+    dynamic_palette: Vec<(u8, u8, u8)>,
+    // Selection colors
+    selection_fg: Option<(u8, u8, u8)>,
+    selection_bg: Option<(u8, u8, u8)>,
+    // Override colors from OSC 10/11
+    override_fg: Option<(u8, u8, u8)>,
+    override_bg: Option<(u8, u8, u8)>,
+    // Terminal modes
+    alternate_screen: bool,
+    bracketed_paste: bool,
+    mouse_reporting: u16, // 0=none, 1000=basic, 1002=button, 1006=sgr
 }
 
 impl TerminalState {
@@ -289,6 +301,12 @@ impl TerminalState {
                 });
             }
             grid.push(row);
+        }
+        
+        // Initialize the standard 256-color palette
+        let mut dynamic_palette = Vec::with_capacity(256);
+        for i in 0..=255 {
+            dynamic_palette.push(TerminalTheme::get_256_color(i));
         }
         
         Self {
@@ -312,6 +330,14 @@ impl TerminalState {
             cursor_visible: true,  // Cursor is visible by default
             in_dcs_sequence: false,
             in_osc_sequence: false,
+            dynamic_palette,
+            selection_fg: Some((0, 0, 0)),    // Default selection: black on yellow
+            selection_bg: Some((255, 255, 0)),
+            override_fg: None,
+            override_bg: None,
+            alternate_screen: false,
+            bracketed_paste: false,
+            mouse_reporting: 0,
         }
     }
     
@@ -473,7 +499,11 @@ impl TerminalState {
                                 // 256-color mode: ESC[38;5;n
                                 if i + 2 < param_vec.len() {
                                     let color_index = param_vec[i + 2] as u8;
-                                    self.current_fg = TerminalTheme::get_256_color(color_index);
+                                    if (color_index as usize) < self.dynamic_palette.len() {
+                                        self.current_fg = self.dynamic_palette[color_index as usize];
+                                    } else {
+                                        self.current_fg = TerminalTheme::get_256_color(color_index);
+                                    }
                                     i += 2; // Skip the 5 and color index
                                 }
                             }
@@ -504,7 +534,11 @@ impl TerminalState {
                                 // 256-color mode: ESC[48;5;n
                                 if i + 2 < param_vec.len() {
                                     let color_index = param_vec[i + 2] as u8;
-                                    self.current_bg = TerminalTheme::get_256_color(color_index);
+                                    if (color_index as usize) < self.dynamic_palette.len() {
+                                        self.current_bg = self.dynamic_palette[color_index as usize];
+                                    } else {
+                                        self.current_bg = TerminalTheme::get_256_color(color_index);
+                                    }
                                     i += 2; // Skip the 5 and color index
                                 }
                             }
@@ -537,6 +571,57 @@ impl TerminalState {
             
             i += 1;
         }
+    }
+    
+    fn parse_color_spec(&self, color_spec: &str) -> Option<(u8, u8, u8)> {
+        let spec = color_spec.trim();
+        
+        if spec.starts_with('#') && spec.len() == 7 {
+            // Hex format: #RRGGBB
+            if let (Ok(r), Ok(g), Ok(b)) = (
+                u8::from_str_radix(&spec[1..3], 16),
+                u8::from_str_radix(&spec[3..5], 16),
+                u8::from_str_radix(&spec[5..7], 16),
+            ) {
+                return Some((r, g, b));
+            }
+        } else if spec.starts_with("rgb:") {
+            // X11 RGB format: rgb:RRRR/GGGG/BBBB or rgb:RR/GG/BB
+            let rgb_part = &spec[4..];
+            let parts: Vec<&str> = rgb_part.split('/').collect();
+            if parts.len() == 3 {
+                let parse_component = |s: &str| -> Option<u8> {
+                    match s.len() {
+                        2 => u8::from_str_radix(s, 16).ok(),
+                        4 => u8::from_str_radix(&s[0..2], 16).ok(), // Take first two hex digits
+                        _ => None,
+                    }
+                };
+                
+                if let (Some(r), Some(g), Some(b)) = (
+                    parse_component(parts[0]),
+                    parse_component(parts[1]),
+                    parse_component(parts[2]),
+                ) {
+                    return Some((r, g, b));
+                }
+            }
+        } else {
+            // Named colors - basic support
+            match spec.to_lowercase().as_str() {
+                "black" => return Some((0, 0, 0)),
+                "red" => return Some((255, 0, 0)),
+                "green" => return Some((0, 255, 0)),
+                "yellow" => return Some((255, 255, 0)),
+                "blue" => return Some((0, 0, 255)),
+                "magenta" => return Some((255, 0, 255)),
+                "cyan" => return Some((0, 255, 255)),
+                "white" => return Some((255, 255, 255)),
+                _ => {}
+            }
+        }
+        
+        None
     }
 }
 
@@ -592,24 +677,105 @@ impl Perform for TerminalState {
     
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // Handle OSC sequences - these are operating system commands
-        // Common ones from tmux include:
-        // OSC 10 - Set foreground color
-        // OSC 11 - Set background color
-        // OSC 52 - Clipboard operations
+        if params.is_empty() {
+            return;
+        }
         
-        if let Some(first_param) = params.get(0) {
-            let param_str = std::str::from_utf8(first_param).unwrap_or("");
-            match param_str {
-                "10" | "11" => {
-                    // Color setting sequences - we ignore these for now
-                    // as we use our own theme colors
+        let first_param = std::str::from_utf8(params[0]).unwrap_or("");
+        
+        match first_param {
+            "4" => {
+                // OSC 4 ; color_index ; color_spec ST
+                // Set/modify color palette entry
+                if params.len() >= 3 {
+                    if let Ok(index) = std::str::from_utf8(params[1]).unwrap_or("").parse::<u8>() {
+                        let color_spec = std::str::from_utf8(params[2]).unwrap_or("");
+                        if let Some(color) = self.parse_color_spec(color_spec) {
+                            if (index as usize) < self.dynamic_palette.len() {
+                                self.dynamic_palette[index as usize] = color;
+                            }
+                        }
+                    }
                 }
-                "52" => {
-                    // Clipboard operations - ignore for security
+            }
+            "10" => {
+                // OSC 10 ; color_spec ST - Set text foreground color
+                if params.len() >= 2 {
+                    let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
+                    if let Some(color) = self.parse_color_spec(color_spec) {
+                        self.override_fg = Some(color);
+                    }
                 }
-                _ => {
-                    // Ignore other OSC sequences
+            }
+            "11" => {
+                // OSC 11 ; color_spec ST - Set text background color  
+                if params.len() >= 2 {
+                    let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
+                    if let Some(color) = self.parse_color_spec(color_spec) {
+                        self.override_bg = Some(color);
+                    }
                 }
+            }
+            "17" => {
+                // OSC 17 ; color_spec ST - Set selection background color
+                if params.len() >= 2 {
+                    let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
+                    if let Some(color) = self.parse_color_spec(color_spec) {
+                        self.selection_bg = Some(color);
+                    }
+                }
+            }
+            "19" => {
+                // OSC 19 ; color_spec ST - Set selection foreground color
+                if params.len() >= 2 {
+                    let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
+                    if let Some(color) = self.parse_color_spec(color_spec) {
+                        self.selection_fg = Some(color);
+                    }
+                }
+            }
+            "52" => {
+                // OSC 52 - Clipboard operations - ignore for security
+            }
+            "104" => {
+                // OSC 104 ; index_list ST - Reset color palette entries
+                if params.len() >= 2 {
+                    let indices = std::str::from_utf8(params[1]).unwrap_or("");
+                    if indices.is_empty() {
+                        // Reset all colors
+                        for i in 0..=255 {
+                            self.dynamic_palette[i] = TerminalTheme::get_256_color(i as u8);
+                        }
+                    } else {
+                        // Reset specific indices
+                        for index_str in indices.split(';') {
+                            if let Ok(index) = index_str.parse::<u8>() {
+                                if (index as usize) < self.dynamic_palette.len() {
+                                    self.dynamic_palette[index as usize] = TerminalTheme::get_256_color(index);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "110" => {
+                // OSC 110 ST - Reset text foreground color
+                self.override_fg = None;
+            }
+            "111" => {
+                // OSC 111 ST - Reset text background color
+                self.override_bg = None;
+            }
+            "117" => {
+                // OSC 117 ST - Reset selection background color
+                self.selection_bg = Some((255, 255, 0)); // Reset to default yellow
+            }
+            "119" => {
+                // OSC 119 ST - Reset selection foreground color
+                self.selection_fg = Some((0, 0, 0)); // Reset to default black
+            }
+            _ => {
+                // Ignore other OSC sequences
             }
         }
     }
@@ -623,6 +789,18 @@ impl Perform for TerminalState {
                     for param in params.iter().flatten() {
                         match *param {
                             25 => self.cursor_visible = true,  // Show cursor
+                            47 => self.alternate_screen = true, // Use alternate screen buffer
+                            1047 => self.alternate_screen = true, // Use alternate screen buffer
+                            1049 => {
+                                // Save cursor and use alternate screen buffer
+                                self.saved_cursor_x = self.cursor_x;
+                                self.saved_cursor_y = self.cursor_y;
+                                self.alternate_screen = true;
+                            }
+                            1000 => self.mouse_reporting = 1000, // Send mouse X & Y on button press
+                            1002 => self.mouse_reporting = 1002, // Use cell motion mouse tracking
+                            1006 => self.mouse_reporting = 1006, // SGR mouse mode
+                            2004 => self.bracketed_paste = true, // Bracketed paste mode
                             _ => {}
                         }
                     }
@@ -632,6 +810,16 @@ impl Perform for TerminalState {
                     for param in params.iter().flatten() {
                         match *param {
                             25 => self.cursor_visible = false, // Hide cursor
+                            47 => self.alternate_screen = false, // Use normal screen buffer
+                            1047 => self.alternate_screen = false, // Use normal screen buffer
+                            1049 => {
+                                // Use normal screen buffer and restore cursor
+                                self.alternate_screen = false;
+                                self.cursor_x = self.saved_cursor_x;
+                                self.cursor_y = self.saved_cursor_y;
+                            }
+                            1000 | 1002 | 1006 => self.mouse_reporting = 0, // Disable mouse reporting
+                            2004 => self.bracketed_paste = false, // Disable bracketed paste mode
                             _ => {}
                         }
                     }
@@ -765,6 +953,117 @@ impl Perform for TerminalState {
                 // tmux sends this to query terminal capabilities
                 // We're not responding, just consuming it
             }
+            's' => {
+                // Save cursor position (ANSI.SYS style) - similar to ESC 7
+                self.saved_cursor_x = self.cursor_x;
+                self.saved_cursor_y = self.cursor_y;
+            }
+            'u' => {
+                // Restore cursor position (ANSI.SYS style) - similar to ESC 8
+                self.cursor_x = self.saved_cursor_x;
+                self.cursor_y = self.saved_cursor_y;
+            }
+            'S' => {
+                // Scroll up
+                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                for _ in 0..count {
+                    self.scroll_up();
+                }
+            }
+            'T' => {
+                // Scroll down
+                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                for _ in 0..count {
+                    // Scroll down by moving content up and clearing the top line
+                    for y in 0..(self.height - 1) {
+                        for x in 0..self.width {
+                            self.grid[y][x] = self.grid[y + 1][x].clone();
+                        }
+                    }
+                    self.clear_line(self.height - 1);
+                }
+            }
+            'L' => {
+                // Insert lines
+                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                for _ in 0..count {
+                    // Move lines down from current cursor position
+                    for y in (self.cursor_y + 1..self.height).rev() {
+                        for x in 0..self.width {
+                            if y > 0 {
+                                self.grid[y][x] = self.grid[y - 1][x].clone();
+                            }
+                        }
+                    }
+                    self.clear_line(self.cursor_y);
+                }
+            }
+            'M' => {
+                // Delete lines
+                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                for _ in 0..count {
+                    // Move lines up from current cursor position
+                    for y in self.cursor_y..(self.height - 1) {
+                        for x in 0..self.width {
+                            self.grid[y][x] = self.grid[y + 1][x].clone();
+                        }
+                    }
+                    self.clear_line(self.height - 1);
+                }
+            }
+            'P' => {
+                // Delete characters
+                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let start_x = self.cursor_x;
+                for x in start_x..(self.width - count) {
+                    if x + count < self.width {
+                        self.grid[self.cursor_y][x] = self.grid[self.cursor_y][x + count].clone();
+                    }
+                }
+                // Clear the rightmost characters
+                for x in (self.width - count)..self.width {
+                    self.grid[self.cursor_y][x] = Cell {
+                        ch: ' ',
+                        fg_color: self.theme.foreground,
+                        bg_color: self.theme.background,
+                        ..Default::default()
+                    };
+                }
+            }
+            '@' => {
+                // Insert characters
+                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let start_x = self.cursor_x;
+                // Shift existing characters to the right
+                for x in (start_x..(self.width - count)).rev() {
+                    if x + count < self.width {
+                        self.grid[self.cursor_y][x + count] = self.grid[self.cursor_y][x].clone();
+                    }
+                }
+                // Clear the inserted space
+                for x in start_x..(start_x + count).min(self.width) {
+                    self.grid[self.cursor_y][x] = Cell {
+                        ch: ' ',
+                        fg_color: self.theme.foreground,
+                        bg_color: self.theme.background,
+                        ..Default::default()
+                    };
+                }
+            }
+            'X' => {
+                // Erase characters
+                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                for i in 0..count {
+                    if self.cursor_x + i < self.width {
+                        self.grid[self.cursor_y][self.cursor_x + i] = Cell {
+                            ch: ' ',
+                            fg_color: self.theme.foreground,
+                            bg_color: self.theme.background,
+                            ..Default::default()
+                        };
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -781,17 +1080,82 @@ impl Perform for TerminalState {
                 self.cursor_x = self.saved_cursor_x;
                 self.cursor_y = self.saved_cursor_y;
             }
-            b'(' | b')' => {
-                // Character set designation
-                if intermediates.len() == 1 {
-                    match intermediates[0] {
-                        b'0' => self.use_acs = true,  // Enter ACS mode
-                        b'B' => self.use_acs = false, // Exit ACS mode (ASCII)
-                        _ => {}
-                    }
+            b'D' => {
+                // Index (IND) - move cursor down, scroll if at bottom
+                self.cursor_y += 1;
+                if self.cursor_y > self.scroll_bottom {
+                    self.scroll_up();
+                    self.cursor_y = self.scroll_bottom;
                 }
             }
-            _ => {}
+            b'E' => {
+                // Next Line (NEL) - move to first column of next line
+                self.cursor_x = 0;
+                self.cursor_y += 1;
+                if self.cursor_y > self.scroll_bottom {
+                    self.scroll_up();
+                    self.cursor_y = self.scroll_bottom;
+                }
+            }
+            b'M' => {
+                // Reverse Index (RI) - move cursor up, scroll if at top
+                if self.cursor_y == self.scroll_top {
+                    // Scroll down by moving lines down and clearing the top
+                    for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
+                        for x in 0..self.width {
+                            self.grid[y][x] = self.grid[y - 1][x].clone();
+                        }
+                    }
+                    self.clear_line(self.scroll_top);
+                } else if self.cursor_y > 0 {
+                    self.cursor_y -= 1;
+                }
+            }
+            b'H' => {
+                // Tab Set (HTS) - set tab stop at current column
+                // We don't implement tab stops, just consume
+            }
+            b'=' => {
+                // Application Keypad Mode (DECKPAM)
+                // Just consume, we don't differentiate keypad modes
+            }
+            b'>' => {
+                // Normal Keypad Mode (DECKPNM)
+                // Just consume, we don't differentiate keypad modes
+            }
+            b'c' => {
+                // Reset terminal (RIS) - full reset
+                self.clear_screen();
+                self.current_fg = self.theme.foreground;
+                self.current_bg = self.theme.background;
+                self.bold = false;
+                self.italic = false;
+                self.underline = false;
+                self.cursor_visible = true;
+                self.use_acs = false;
+                self.alternate_screen = false;
+                self.bracketed_paste = false;
+                self.mouse_reporting = 0;
+            }
+            _ => {
+                // Ignore unhandled escape sequences
+            }
+        }
+        
+        // Handle character set designation sequences
+        if !intermediates.is_empty() {
+            match intermediates[0] {
+                b'(' | b')' | b'*' | b'+' => {
+                    // Character set designation
+                    match byte {
+                        b'0' => self.use_acs = true,  // DEC Special Character and Line Drawing Set
+                        b'B' => self.use_acs = false, // ASCII character set
+                        b'A' => self.use_acs = false, // UK character set
+                        _ => {} // Other character sets - just use ASCII
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
