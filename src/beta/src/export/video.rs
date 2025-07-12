@@ -5,6 +5,7 @@ use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::io::Write;
+use std::sync::Arc;
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
 use ab_glyph::{FontRef, PxScale, Font};
@@ -12,20 +13,30 @@ use std::collections::HashMap;
 use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
+// Constants for video rendering
+const RENDER_SCALE: u32 = 4;  // 4x resolution for fine control
+const CURSOR_START_OFFSET: f32 = 1.0;  // Cursor starts at 100% of baseline offset
+const CURSOR_HEIGHT_FACTOR: f32 = 1.0;  // Cursor height is 100% of baseline offset
+
 struct FontManager {
+    _font_data: Vec<Arc<Vec<u8>>>, // Store font data with proper ownership (kept alive)
     fonts: Vec<FontRef<'static>>,
     glyph_cache: HashMap<char, usize>, // Character -> font index
 }
 
 impl FontManager {
     fn new() -> Result<Self> {
+        let mut font_data = Vec::new();
         let mut fonts = Vec::new();
         let font_paths = get_font_paths();
         
+        const MAX_FONTS: usize = 5; // Limit to reasonable number of fonts
+        
         for font_path in &font_paths {
-            if let Ok(font) = load_font_from_path(font_path) {
+            if let Ok((data, font)) = load_font_from_path(font_path) {
+                font_data.push(data);
                 fonts.push(font);
-                if fonts.len() >= 5 { // Limit to reasonable number of fonts
+                if fonts.len() >= MAX_FONTS {
                     break;
                 }
             }
@@ -36,6 +47,7 @@ impl FontManager {
         }
         
         Ok(FontManager {
+            _font_data: font_data,
             fonts,
             glyph_cache: HashMap::new(),
         })
@@ -111,7 +123,7 @@ fn get_font_paths() -> Vec<&'static str> {
     ]
 }
 
-fn load_font_from_path(font_path: &str) -> Result<FontRef<'static>> {
+fn load_font_from_path(font_path: &str) -> Result<(Arc<Vec<u8>>, FontRef<'static>)> {
     // Expand home directory if path starts with ~
     let expanded_path = if font_path.starts_with("~/") {
         if let Some(home_dir) = std::env::var_os("HOME") {
@@ -124,37 +136,21 @@ fn load_font_from_path(font_path: &str) -> Result<FontRef<'static>> {
         font_path.to_string()
     };
     
-    let font_data = std::fs::read(&expanded_path)?;
-    // Need to leak the data to get a 'static lifetime
-    let static_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
-    FontRef::try_from_slice(static_data)
-        .map_err(|_| anyhow::anyhow!("Failed to parse font"))
+    let font_data = Arc::new(std::fs::read(&expanded_path)?);
+    // SAFETY: We're ensuring the data lives as long as the FontRef by storing it in FontManager
+    let font_ref = unsafe {
+        let data_ptr = font_data.as_ptr();
+        let data_len = font_data.len();
+        let slice = std::slice::from_raw_parts(data_ptr, data_len);
+        FontRef::try_from_slice(slice)
+            .map_err(|_| anyhow::anyhow!("Failed to parse font"))?
+    };
+    
+    Ok((font_data, font_ref))
 }
 
-fn get_font() -> Result<FontRef<'static>> {
-    // Try to load fonts in order of preference, starting with user's preferred font
-    let font_paths = get_font_paths();
-    
-    for font_path in &font_paths {
-        if let Ok(font) = load_font_from_path(font_path) {
-            println!("Using font: {}", font_path);
-            return Ok(font);
-        }
-    }
-    
-    Err(anyhow::anyhow!(
-        "No suitable monospace font found. For best results, install JetBrains Mono Nerd Font Medium:\n\
-         - Download JetBrainsMonoNerdFontMono-Medium.ttf from: https://github.com/ryanoasis/nerd-fonts/releases\n\
-         - Or use Homebrew: brew tap homebrew/cask-fonts && brew install font-jetbrains-mono-nerd-font\n\
-         - Install to ~/Library/Fonts/ (macOS) or ~/.local/share/fonts/ (Linux)\n\
-         \n\
-         Fallback options:\n\
-         - macOS: Monaco (should be pre-installed)\n\
-         - Linux: sudo apt install fonts-dejavu fonts-liberation"
-    ))
-}
 
-pub async fn export_video(
+pub fn export_video(
     input: PathBuf,
     output: Option<PathBuf>,
     fps: u32,
@@ -225,10 +221,9 @@ fn parse_resolution(resolution: &Option<String>, recording: &Recording) -> Resul
         
         Ok((width, height))
     } else {
-        const SCALE: u32 = 4;  // 4x resolution for fine control
-        let char_width = 6 * SCALE - 1;  // 23px - 0.25px tighter
-        let char_height = 13 * SCALE + 1;  // 53px - 0.25px looser
-        let padding = 40 * SCALE;  // 160px at 4x
+        let char_width = 6 * RENDER_SCALE - 1;  // 23px - 0.25px tighter
+        let char_height = 13 * RENDER_SCALE + 1;  // 53px - 0.25px looser
+        let padding = 40 * RENDER_SCALE;  // 160px at 4x
         
         let width = (recording.width as u32 * char_width) + (padding * 2);
         let height = (recording.height as u32 * char_height) + (padding * 2);
@@ -323,21 +318,6 @@ fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
     ascent.min(48.0).round()
 }
 
-fn calculate_text_height(font: &FontRef, font_size: f32) -> (f32, f32) {
-    let scale = PxScale::from(font_size);
-    
-    // Get font metrics using ab_glyph unscaled API and apply scaling
-    let units_per_em = font.units_per_em().unwrap_or(1000.0);
-    let scale_factor = scale.y / units_per_em;
-    
-    let ascent = font.ascent_unscaled() * scale_factor;
-    let descent = font.descent_unscaled() * scale_factor; // descent is typically negative
-    
-    let text_ascent = ascent.min(48.0);
-    let text_descent = (-descent).min(12.0); // Make descent positive and cap it
-    
-    (text_ascent, text_descent)
-}
 
 fn render_terminal_to_image(
     terminal_state: &TerminalState,
@@ -345,28 +325,24 @@ fn render_terminal_to_image(
     height: u32,
     font_manager: &mut FontManager,
 ) -> Result<RgbImage> {
-    let mut image = ImageBuffer::new(width, height);
     let theme = terminal_state.get_theme();
-    
-    // Fill background
     let bg_color = Rgb([theme.background.0, theme.background.1, theme.background.2]);
-    for pixel in image.pixels_mut() {
-        *pixel = bg_color;
-    }
+    
+    // Create image with background color
+    let mut image = ImageBuffer::from_pixel(width, height, bg_color);
     
     // Use fixed character cell dimensions to match terminal expectations
-    const SCALE: u32 = 4;  // 4x resolution for fine control
-    let char_width = 6u32 * SCALE - 1;  // 23px - 0.25px tighter
-    let char_height = 13u32 * SCALE + 1;  // 53px - 0.25px looser
-    let font_size = 12.0 * SCALE as f32;  // 48pt at 4x
+    let char_width = 6u32 * RENDER_SCALE - 1;  // 23px - 0.25px tighter
+    let char_height = 13u32 * RENDER_SCALE + 1;  // 53px - 0.25px looser
+    let font_size = 12.0 * RENDER_SCALE as f32;  // 48pt at 4x
     let scale = PxScale::from(font_size);
     
     // Get the primary font for baseline calculation
     let primary_font = &font_manager.fonts[0];
     let baseline_offset = calculate_font_baseline(primary_font, font_size);
     
-    let padding_x = 20 * SCALE;  // 80px at 4x
-    let padding_y = 20 * SCALE;  // 80px at 4x
+    let padding_x = 20 * RENDER_SCALE;  // 80px at 4x
+    let padding_y = 20 * RENDER_SCALE;  // 80px at 4x
     
     let grid = terminal_state.get_grid();
     
@@ -399,11 +375,6 @@ fn render_terminal_to_image(
             // Draw the character if it's not empty
             if cell.ch != ' ' && cell.ch != '\x00' {
                 let text = cell.ch.to_string();
-                let font_scale = if cell.bold { 
-                    PxScale::from(font_size) // Same size for crisp rendering
-                } else { 
-                    scale 
-                };
                 
                 // Get the best font for this character
                 let font = font_manager.get_best_font_for_char(cell.ch);
@@ -418,15 +389,15 @@ fn render_terminal_to_image(
                     Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
                     text_x,
                     text_y,
-                    font_scale,
+                    scale,
                     font,
                     &text,
                 );
                 
                 // Add underline if needed
                 if cell.underline {
-                    let underline_rect = Rect::at(pixel_x as i32, (pixel_y + char_height - (2 * SCALE)) as i32)
-                        .of_size(char_width, SCALE);  // Scale underline thickness
+                    let underline_rect = Rect::at(pixel_x as i32, (pixel_y + char_height - (2 * RENDER_SCALE)) as i32)
+                        .of_size(char_width, RENDER_SCALE);  // Scale underline thickness
                     
                     draw_filled_rect_mut(
                         &mut image,
@@ -448,8 +419,8 @@ fn render_terminal_to_image(
         
         // Position cursor to align with text baseline - start from baseline and extend down
         // This matches how terminals typically render cursors
-        let cursor_pixel_y = cell_top_y + baseline_offset as u32;
-        let cursor_height = baseline_offset as u32;
+        let cursor_pixel_y = cell_top_y + (baseline_offset * CURSOR_START_OFFSET) as u32;
+        let cursor_height = (baseline_offset * CURSOR_HEIGHT_FACTOR) as u32;
         
         // Draw cursor as inverted block aligned with text
         let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
