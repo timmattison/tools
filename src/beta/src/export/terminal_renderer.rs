@@ -449,6 +449,14 @@ impl TerminalState {
         // Handle tmux status bar foreground text color
         let corrected_fg = if corrected_bg == (0, 128, 0) {
             // Status bar should have black text on green background
+            // But if the original foreground was already black or very dark, keep it
+            if fg == (0, 0, 0) || fg == (255, 255, 255) {
+                (0, 0, 0)  // Ensure black text
+            } else {
+                (0, 0, 0)  // Force black text for visibility
+            }
+        } else if bg == (0, 255, 0) || bg == (85, 255, 85) {
+            // Even if we didn't correct the background, ensure text is visible on bright green
             (0, 0, 0)
         } else {
             fg
@@ -463,6 +471,15 @@ impl TerminalState {
         };
         
         (final_fg, final_bg)
+    }
+    
+    pub fn is_status_bar_row(&self, row_index: usize) -> bool {
+        // Check if this row index is the tmux status bar
+        if let Some(layout) = self.detect_tmux_layout() {
+            row_index == layout.status_bar_row
+        } else {
+            false
+        }
     }
     
     pub fn detect_tmux_layout(&self) -> Option<TmuxLayout> {

@@ -370,17 +370,11 @@ fn render_terminal_to_image(
     
     let grid = terminal_state.get_grid();
     
-    // Detect tmux layout to handle positioning correctly
+    // Detect tmux layout for color correction and cursor validation
     let tmux_layout = terminal_state.detect_tmux_layout();
-    let effective_height = if let Some(ref layout) = tmux_layout {
-        // Render only up to the status bar to prevent overlap
-        layout.content_height
-    } else {
-        grid.len()
-    };
     
-    // Pass 1: Render all cell backgrounds first
-    for (y, row) in grid.iter().enumerate().take(effective_height) {
+    // Pass 1: Render all cell backgrounds first (including status bar)
+    for (y, row) in grid.iter().enumerate() {
         for (x, cell) in row.iter().enumerate() {
             // Use integer positioning to avoid gaps
             let pixel_x = padding_x + (x as u32 * char_width);
@@ -401,8 +395,8 @@ fn render_terminal_to_image(
         }
     }
     
-    // Pass 2: Render all text on top of backgrounds
-    for (y, row) in grid.iter().enumerate().take(effective_height) {
+    // Pass 2: Render all text on top of backgrounds (including status bar)
+    for (y, row) in grid.iter().enumerate() {
         for (x, cell) in row.iter().enumerate() {
             // Use integer positioning to avoid gaps
             let pixel_x = padding_x + (x as u32 * char_width);
