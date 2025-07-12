@@ -227,6 +227,7 @@ pub async fn record(
     
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(std::env::current_dir()?);
+    cmd.env("TERM", "xterm-256color");
     
     let child = pair.slave.spawn_command(cmd)
         .context("Failed to spawn shell")?;
