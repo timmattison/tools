@@ -68,7 +68,7 @@ enum ExportFormat {
         #[arg(short, long, help = "Output video file (MP4/GIF)")]
         output: Option<PathBuf>,
         
-        #[arg(long, default_value = "30", help = "Frame rate (FPS)")]
+        #[arg(long, default_value = "60", help = "Frame rate (FPS)")]
         fps: u32,
         
         #[arg(long, help = "Resolution (WIDTHxHEIGHT)")]
