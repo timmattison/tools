@@ -270,6 +270,9 @@ pub struct TerminalState {
     use_acs: bool,
     // Cursor visibility
     cursor_visible: bool,
+    // Track if we're in a DCS/OSC sequence
+    in_dcs_sequence: bool,
+    in_osc_sequence: bool,
 }
 
 impl TerminalState {
@@ -307,6 +310,8 @@ impl TerminalState {
             scroll_bottom: height - 1,
             use_acs: false,
             cursor_visible: true,  // Cursor is visible by default
+            in_dcs_sequence: false,
+            in_osc_sequence: false,
         }
     }
     
@@ -570,19 +575,43 @@ impl Perform for TerminalState {
     }
     
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
-        // Handle hooks if needed
+        // Start of DCS sequence
+        self.in_dcs_sequence = true;
     }
     
     fn put(&mut self, _byte: u8) {
-        // Handle put if needed
+        // This is called for bytes within DCS/OSC sequences
+        // We consume them without displaying to prevent junk text
+        // The actual sequence handling happens in hook/unhook/osc_dispatch
     }
     
     fn unhook(&mut self) {
-        // Handle unhook if needed
+        // End of DCS sequence
+        self.in_dcs_sequence = false;
     }
     
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
-        // Handle OSC sequences if needed
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // Handle OSC sequences - these are operating system commands
+        // Common ones from tmux include:
+        // OSC 10 - Set foreground color
+        // OSC 11 - Set background color
+        // OSC 52 - Clipboard operations
+        
+        if let Some(first_param) = params.get(0) {
+            let param_str = std::str::from_utf8(first_param).unwrap_or("");
+            match param_str {
+                "10" | "11" => {
+                    // Color setting sequences - we ignore these for now
+                    // as we use our own theme colors
+                }
+                "52" => {
+                    // Clipboard operations - ignore for security
+                }
+                _ => {
+                    // Ignore other OSC sequences
+                }
+            }
+        }
     }
     
     fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
@@ -730,6 +759,11 @@ impl Perform for TerminalState {
                     self.cursor_x = 0;
                     self.cursor_y = 0;
                 }
+            }
+            'c' => {
+                // Device Attributes (DA) request - ignore for now
+                // tmux sends this to query terminal capabilities
+                // We're not responding, just consuming it
             }
             _ => {}
         }
