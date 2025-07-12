@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use crossterm::{terminal, tty::IsTty, event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers}};
+use crossterm::{terminal, tty::IsTty, event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent}, execute};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::fs::File;
 use std::io::{BufWriter, Write, Read};
@@ -205,7 +205,12 @@ pub async fn record(
     // Enable crossterm events before entering raw mode
     // This ensures we can capture keyboard events properly
     
-    // Enable raw mode for proper keyboard capture
+    // Enable mouse capture and raw mode for proper event capture
+    execute!(
+        std::io::stdout(),
+        crossterm::event::EnableMouseCapture
+    ).context("Failed to enable mouse capture")?;
+    
     terminal::enable_raw_mode()
         .context("Failed to enable raw mode")?;
     
@@ -383,8 +388,35 @@ pub async fn record(
                         break;
                     }
                 }
+                Ok(Some(Ok(CrosstermEvent::Mouse(mouse_event)))) => {
+                    // Forward mouse events to PTY as escape sequences
+                    if let Some(escape_seq) = mouse_event_to_escape_sequence(&mouse_event) {
+                        if let Err(e) = writer.write_all(escape_seq.as_bytes()) {
+                            eprintln!("Failed to write mouse event to PTY: {}", e);
+                            break;
+                        }
+                        if let Err(e) = writer.flush() {
+                            eprintln!("Failed to flush PTY after mouse event: {}", e);
+                            break;
+                        }
+                    }
+                }
+                Ok(Some(Ok(CrosstermEvent::Resize(width, height)))) => {
+                    // Update PTY size - need to get master from the mutex
+                    if let Ok(master_lock) = master_clone.lock() {
+                        if let Some(master) = master_lock.as_ref() {
+                            let new_size = PtySize {
+                                rows: height,
+                                cols: width,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            };
+                            let _ = master.resize(new_size);
+                        }
+                    }
+                }
                 Ok(Some(Ok(_))) => {
-                    // Ignore other events (mouse, resize, etc.)
+                    // Ignore other events
                 }
                 Ok(Some(Err(e))) => {
                     eprintln!("Error reading events: {}", e);
@@ -457,11 +489,72 @@ struct RawModeGuard;
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
+        // Disable mouse capture
+        let _ = execute!(
+            std::io::stdout(),
+            crossterm::event::DisableMouseCapture
+        );
+        
         if let Err(e) = terminal::disable_raw_mode() {
             eprintln!("Failed to disable raw mode: {}", e);
         }
         // Flush output to ensure terminal is properly restored
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
+    }
+}
+
+// Convert mouse events to appropriate escape sequences for PTY
+fn mouse_event_to_escape_sequence(mouse_event: &MouseEvent) -> Option<String> {
+    use crossterm::event::{MouseEventKind, MouseButton};
+    
+    match mouse_event.kind {
+        MouseEventKind::Down(button) => {
+            let button_code = match button {
+                MouseButton::Left => 0,
+                MouseButton::Right => 2,
+                MouseButton::Middle => 1,
+            };
+            // SGR mouse encoding: ESC[<button;x;yM
+            Some(format!("\x1b[<{};{};{}M", button_code, mouse_event.column + 1, mouse_event.row + 1))
+        }
+        MouseEventKind::Up(button) => {
+            let button_code = match button {
+                MouseButton::Left => 0,
+                MouseButton::Right => 2,
+                MouseButton::Middle => 1,
+            };
+            // SGR mouse encoding: ESC[<button;x;ym
+            Some(format!("\x1b[<{};{};{}m", button_code, mouse_event.column + 1, mouse_event.row + 1))
+        }
+        MouseEventKind::Drag(button) => {
+            let button_code = match button {
+                MouseButton::Left => 32,
+                MouseButton::Right => 34,
+                MouseButton::Middle => 33,
+            };
+            // SGR mouse encoding with drag flag
+            Some(format!("\x1b[<{};{};{}M", button_code, mouse_event.column + 1, mouse_event.row + 1))
+        }
+        MouseEventKind::Moved => {
+            // Mouse movement (hover)
+            Some(format!("\x1b[<35;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
+        }
+        MouseEventKind::ScrollDown => {
+            // Scroll down
+            Some(format!("\x1b[<65;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
+        }
+        MouseEventKind::ScrollUp => {
+            // Scroll up  
+            Some(format!("\x1b[<64;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
+        }
+        MouseEventKind::ScrollLeft => {
+            // Scroll left
+            Some(format!("\x1b[<66;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
+        }
+        MouseEventKind::ScrollRight => {
+            // Scroll right
+            Some(format!("\x1b[<67;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
+        }
     }
 }
