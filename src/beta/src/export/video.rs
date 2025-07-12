@@ -370,8 +370,17 @@ fn render_terminal_to_image(
     
     let grid = terminal_state.get_grid();
     
+    // Detect tmux layout to handle positioning correctly
+    let tmux_layout = terminal_state.detect_tmux_layout();
+    let effective_height = if let Some(ref layout) = tmux_layout {
+        // Render only up to the status bar to prevent overlap
+        layout.content_height
+    } else {
+        grid.len()
+    };
+    
     // Pass 1: Render all cell backgrounds first
-    for (y, row) in grid.iter().enumerate() {
+    for (y, row) in grid.iter().enumerate().take(effective_height) {
         for (x, cell) in row.iter().enumerate() {
             // Use integer positioning to avoid gaps
             let pixel_x = padding_x + (x as u32 * char_width);
@@ -381,16 +390,19 @@ fn render_terminal_to_image(
             let bg_rect = Rect::at(pixel_x as i32, pixel_y as i32)
                 .of_size(char_width, char_height);
             
+            // Get resolved colors from terminal state (handles dynamic palette, overrides, etc.)
+            let (_, bg_color) = terminal_state.resolve_cell_colors(cell);
+            
             draw_filled_rect_mut(
                 &mut image,
                 bg_rect,
-                Rgb([cell.bg_color.0, cell.bg_color.1, cell.bg_color.2]),
+                Rgb([bg_color.0, bg_color.1, bg_color.2]),
             );
         }
     }
     
     // Pass 2: Render all text on top of backgrounds
-    for (y, row) in grid.iter().enumerate() {
+    for (y, row) in grid.iter().enumerate().take(effective_height) {
         for (x, cell) in row.iter().enumerate() {
             // Use integer positioning to avoid gaps
             let pixel_x = padding_x + (x as u32 * char_width);
@@ -398,6 +410,9 @@ fn render_terminal_to_image(
             
             // Draw the character if it's not empty
             if cell.ch != ' ' && cell.ch != '\x00' {
+                // Get resolved colors from terminal state (handles dynamic palette, overrides, etc.)
+                let (fg_color, _) = terminal_state.resolve_cell_colors(cell);
+                
                 let text = cell.ch.to_string();
                 let font_scale = if cell.bold { 
                     PxScale::from(font_size) // Same size for crisp rendering
@@ -415,7 +430,7 @@ fn render_terminal_to_image(
                 
                 draw_text_mut(
                     &mut image,
-                    Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
+                    Rgb([fg_color.0, fg_color.1, fg_color.2]),
                     text_x,
                     text_y,
                     font_scale,
@@ -431,7 +446,7 @@ fn render_terminal_to_image(
                     draw_filled_rect_mut(
                         &mut image,
                         underline_rect,
-                        Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
+                        Rgb([fg_color.0, fg_color.1, fg_color.2]),
                     );
                 }
             }
@@ -442,47 +457,58 @@ fn render_terminal_to_image(
     if terminal_state.is_cursor_visible() {
         let (cursor_x, cursor_y) = terminal_state.get_cursor_position();
         
-        // Calculate cursor pixel position - align with text rendering
-        let cursor_pixel_x = padding_x + (cursor_x as u32 * char_width);
-        let cell_top_y = padding_y + (cursor_y as u32 * char_height);
-        
-        // Position cursor to align with text baseline - start from baseline and extend down
-        // This matches how terminals typically render cursors
-        let cursor_pixel_y = cell_top_y + baseline_offset as u32;
-        let cursor_height = baseline_offset as u32;
-        
-        // Draw cursor as inverted block aligned with text
-        let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
-            .of_size(char_width, cursor_height);
-        
-        // Get the cell at cursor position to determine colors
-        let grid = terminal_state.get_grid();
-        if cursor_y < grid.len() && cursor_x < grid[cursor_y].len() {
-            let cell = &grid[cursor_y][cursor_x];
-            
-            // Draw inverted cursor block (swap fg/bg colors)
-            draw_filled_rect_mut(
-                &mut image,
-                cursor_rect,
-                Rgb([cell.fg_color.0, cell.fg_color.1, cell.fg_color.2]),
+        // Check if cursor is in valid position for tmux layout
+        if terminal_state.is_valid_cursor_position(tmux_layout.as_ref()) {
+            // Adjust cursor coordinates for tmux layout
+            let (adj_cursor_x, adj_cursor_y) = terminal_state.adjust_coordinates_for_tmux(
+                cursor_x, cursor_y, tmux_layout.as_ref()
             );
             
-            // If there's a character at cursor position, redraw it with inverted colors
-            if cell.ch != ' ' && cell.ch != '\x00' {
-                let text = cell.ch.to_string();
-                let font = font_manager.get_best_font_for_char(cell.ch);
-                let text_x = cursor_pixel_x as i32;
-                let text_y = (cell_top_y as f32 + baseline_offset).round() as i32;
+            // Calculate cursor pixel position - align with text rendering
+            let cursor_pixel_x = padding_x + (adj_cursor_x as u32 * char_width);
+            let cell_top_y = padding_y + (adj_cursor_y as u32 * char_height);
+        
+            // Position cursor to align with text baseline - start from baseline and extend down
+            // This matches how terminals typically render cursors
+            let cursor_pixel_y = cell_top_y + baseline_offset as u32;
+            let cursor_height = baseline_offset as u32;
+            
+            // Draw cursor as inverted block aligned with text
+            let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
+                .of_size(char_width, cursor_height);
+            
+            // Get the cell at cursor position to determine colors
+            let grid = terminal_state.get_grid();
+            if adj_cursor_y < grid.len() && adj_cursor_x < grid[adj_cursor_y].len() {
+                let cell = &grid[adj_cursor_y][adj_cursor_x];
                 
-                draw_text_mut(
+                // Get resolved colors from terminal state
+                let (fg_color, bg_color) = terminal_state.resolve_cell_colors(cell);
+                
+                // Draw inverted cursor block (swap fg/bg colors)
+                draw_filled_rect_mut(
                     &mut image,
-                    Rgb([cell.bg_color.0, cell.bg_color.1, cell.bg_color.2]),
-                    text_x,
-                    text_y,
-                    scale,
-                    font,
-                    &text,
+                    cursor_rect,
+                    Rgb([fg_color.0, fg_color.1, fg_color.2]),
                 );
+                
+                // If there's a character at cursor position, redraw it with inverted colors
+                if cell.ch != ' ' && cell.ch != '\x00' {
+                    let text = cell.ch.to_string();
+                    let font = font_manager.get_best_font_for_char(cell.ch);
+                    let text_x = cursor_pixel_x as i32;
+                    let text_y = (cell_top_y as f32 + baseline_offset).round() as i32;
+                    
+                    draw_text_mut(
+                        &mut image,
+                        Rgb([bg_color.0, bg_color.1, bg_color.2]),
+                        text_x,
+                        text_y,
+                        scale,
+                        font,
+                        &text,
+                    );
+                }
             }
         }
     }

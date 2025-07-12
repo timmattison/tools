@@ -47,7 +47,7 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum ExportFormat {
+pub enum ExportFormat {
     Web {
         #[arg(help = "Recording file to export")]
         input: PathBuf,
@@ -83,36 +83,36 @@ enum ExportFormat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Recording {
-    version: u32,
-    width: u16,
-    height: u16,
-    timestamp: f64,
-    duration: f64,
-    command: String,
-    title: String,
-    env: std::collections::HashMap<String, String>,
-    events: Vec<Event>,
+pub struct Recording {
+    pub version: u32,
+    pub width: u16,
+    pub height: u16,
+    pub timestamp: f64,
+    pub duration: f64,
+    pub command: String,
+    pub title: String,
+    pub env: std::collections::HashMap<String, String>,
+    pub events: Vec<Event>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct Event {
-    time: f64,
+pub struct Event {
+    pub time: f64,
     #[serde(rename = "type")]
-    event_type: EventType,
-    data: String,
+    pub event_type: EventType,
+    pub data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum EventType {
+pub enum EventType {
     #[serde(rename = "o")]
     Output,
     #[serde(rename = "i")]
     Input,
 }
 
-fn get_timestamp() -> f64 {
+pub fn get_timestamp() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

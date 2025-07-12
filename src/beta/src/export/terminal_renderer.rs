@@ -343,11 +343,12 @@ impl TerminalState {
     
     pub fn process_output(&mut self, data: &str) -> Result<()> {
         let bytes: Vec<u8> = data.bytes().collect();
+        // The VTE parser expects a slice of bytes
         for byte in bytes {
             // We need to handle the borrow checker by using a temporary approach
             // The VTE parser calls back into our Perform implementation
             let mut temp_parser = std::mem::replace(&mut self.parser, Parser::new());
-            temp_parser.advance(self, byte);
+            temp_parser.advance(self, &[byte]);
             self.parser = temp_parser;
         }
         Ok(())
@@ -377,6 +378,168 @@ impl TerminalState {
         self.cursor_visible
     }
     
+    pub fn get_effective_foreground(&self) -> (u8, u8, u8) {
+        self.override_fg.unwrap_or(self.theme.foreground)
+    }
+    
+    pub fn get_effective_background(&self) -> (u8, u8, u8) {
+        self.override_bg.unwrap_or(self.theme.background)
+    }
+    
+    pub fn get_selection_colors(&self) -> ((u8, u8, u8), (u8, u8, u8)) {
+        (
+            self.selection_fg.unwrap_or((0, 0, 0)),
+            self.selection_bg.unwrap_or((255, 255, 0))
+        )
+    }
+    
+    pub fn resolve_cell_colors(&self, cell: &Cell) -> ((u8, u8, u8), (u8, u8, u8)) {
+        let mut fg = cell.fg_color;
+        let mut bg = cell.bg_color;
+        
+        // Handle palette color mapping for 256-color mode
+        // Check if the color matches any standard palette entry and use dynamic version
+        for i in 0..=255u8 {
+            let standard_color = TerminalTheme::get_256_color(i);
+            let dynamic_color = if (i as usize) < self.dynamic_palette.len() {
+                self.dynamic_palette[i as usize]
+            } else {
+                standard_color
+            };
+            
+            // Only replace if the dynamic color is different (has been modified)
+            if fg == standard_color && dynamic_color != standard_color {
+                fg = dynamic_color;
+            }
+            if bg == standard_color && dynamic_color != standard_color {
+                bg = dynamic_color;
+            }
+        }
+        
+        // Apply global foreground/background color overrides from OSC 10/11
+        if let Some(override_fg) = self.override_fg {
+            // Replace theme foreground or any color that matches the theme foreground
+            if fg == self.theme.foreground {
+                fg = override_fg;
+            }
+        }
+        if let Some(override_bg) = self.override_bg {
+            // Replace theme background or any color that matches the theme background
+            if bg == self.theme.background {
+                bg = override_bg;
+            }
+        }
+        
+        // Handle common tmux color issues
+        // tmux often uses specific color combinations that need adjustment
+        self.apply_tmux_color_corrections(fg, bg)
+    }
+    
+    fn apply_tmux_color_corrections(&self, fg: (u8, u8, u8), bg: (u8, u8, u8)) -> ((u8, u8, u8), (u8, u8, u8)) {
+        // Fix common tmux color rendering issues
+        
+        // Handle tmux status bar colors - bright green should be normal green
+        let corrected_bg = match bg {
+            (0, 255, 0) => (0, 128, 0),    // Bright green -> normal green
+            (85, 255, 85) => (0, 128, 0),  // Another bright green variant
+            (80, 250, 123) => (0, 128, 0), // Dracula bright green -> normal green
+            _ => bg
+        };
+        
+        // Handle tmux status bar foreground text color
+        let corrected_fg = if corrected_bg == (0, 128, 0) {
+            // Status bar should have black text on green background
+            (0, 0, 0)
+        } else {
+            fg
+        };
+        
+        // Handle selection colors - ensure proper contrast for yellow selection background
+        let (final_fg, final_bg) = if corrected_bg == (255, 255, 0) || corrected_bg == (255, 255, 85) {
+            // Yellow background should have black foreground for selection
+            ((0, 0, 0), corrected_bg)
+        } else {
+            (corrected_fg, corrected_bg)
+        };
+        
+        (final_fg, final_bg)
+    }
+    
+    pub fn detect_tmux_layout(&self) -> Option<TmuxLayout> {
+        let grid = &self.grid;
+        if grid.is_empty() {
+            return None;
+        }
+        
+        // Check for tmux status bar - usually at the bottom
+        let last_row = grid.len() - 1;
+        if last_row > 0 {
+            let status_row = &grid[last_row];
+            
+            // Check if this row has characteristics of a tmux status bar
+            let has_status_colors = status_row.iter().any(|cell| {
+                // Look for green backgrounds (tmux default status color)
+                cell.bg_color == (0, 255, 0) || 
+                cell.bg_color == (85, 255, 85) ||
+                cell.bg_color == (0, 128, 0) ||
+                cell.bg_color == (80, 250, 123) ||  // dracula green
+                // Or inverted colors typical of status bars
+                (cell.bg_color != (0, 0, 0) && cell.fg_color != (255, 255, 255)) ||
+                // Common tmux status color combinations
+                (cell.bg_color == (255, 255, 255) && cell.fg_color == (0, 0, 0)) ||
+                // Look for characters that commonly appear in tmux status bars
+                matches!(cell.ch, '[' | ']' | '-' | '|' | ':')
+            });
+            
+            // Check if the row is mostly filled (status bars are usually full width)
+            let filled_cells = status_row.iter().filter(|cell| cell.ch != ' ').count();
+            let fill_ratio = filled_cells as f32 / status_row.len() as f32;
+            
+            if has_status_colors || fill_ratio > 0.3 {
+                return Some(TmuxLayout {
+                    status_bar_row: last_row,
+                    content_height: last_row,
+                });
+            }
+        }
+        
+        None
+    }
+    
+    pub fn is_valid_cursor_position(&self, tmux_layout: Option<&TmuxLayout>) -> bool {
+        // Check if cursor is within valid content area considering tmux layout
+        let max_row = if let Some(layout) = tmux_layout {
+            layout.content_height
+        } else {
+            self.height
+        };
+        
+        self.cursor_y < max_row && self.cursor_x < self.width
+    }
+    
+    pub fn adjust_coordinates_for_tmux(&self, x: usize, y: usize, tmux_layout: Option<&TmuxLayout>) -> (usize, usize) {
+        // Adjust coordinates to account for tmux layout
+        if let Some(layout) = tmux_layout {
+            // Ensure we don't render outside the content area
+            let adjusted_y = if y >= layout.content_height {
+                layout.content_height - 1
+            } else {
+                y
+            };
+            (x, adjusted_y)
+        } else {
+            (x, y)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TmuxLayout {
+    pub status_bar_row: usize,
+    pub content_height: usize,
+}
+
+impl TerminalState {
     fn put_char(&mut self, ch: char) {
         // Convert ACS characters to Unicode box drawing if needed
         let display_char = if self.use_acs {
