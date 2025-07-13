@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::fs::File;
-use std::io::{BufWriter, Write, Read};
+use std::io::{self, BufWriter, Write, Read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::Instant;
@@ -85,9 +85,9 @@ pub async fn record(
     command: Option<String>,
     append: bool,
     compress: bool,
-    stop_hotkey: String,
+    _stop_hotkey: String,  // Kept for compatibility but ignored
 ) -> Result<()> {
-    if !std::io::stdout().is_tty() {
+    if !io::stdout().is_tty() {
         anyhow::bail!("shellcast record must be run in a terminal");
     }
     
@@ -137,7 +137,7 @@ pub async fn record(
     cmd.cwd(std::env::current_dir()?);
     cmd.env("TERM", std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()));
     
-    let child = pair.slave.spawn_command(cmd)
+    let mut child = pair.slave.spawn_command(cmd)
         .context("Failed to spawn shell")?;
     
     // Drop the slave to close it
@@ -146,18 +146,19 @@ pub async fn record(
     // Get readers and writers for the PTY master
     let reader = pair.master.try_clone_reader()
         .context("Failed to clone PTY reader")?;
-    let mut writer = pair.master.take_writer()
+    let writer = pair.master.take_writer()
         .context("Failed to take PTY writer")?;
     
     // Set up signal handling for graceful shutdown
     let session_for_signal = session.clone();
-    thread::spawn(move || {
-        let mut signals = Signals::new(&[SIGINT]).expect("Failed to register signal handler");
-        for sig in signals.forever() {
-            if sig == SIGINT {
-                eprintln!("\nReceived interrupt signal, stopping recording...");
-                session_for_signal.stop();
-                break;
+    let _signal_handle = thread::spawn(move || {
+        if let Ok(mut signals) = Signals::new(&[SIGINT]) {
+            for sig in signals.forever() {
+                if sig == SIGINT {
+                    eprintln!("\nReceived interrupt signal, stopping recording...");
+                    session_for_signal.stop();
+                    break;
+                }
             }
         }
     });
@@ -175,11 +176,11 @@ pub async fn record(
                     let data = String::from_utf8_lossy(&buffer[..n]).to_string();
                     
                     // Write to stdout
-                    if let Err(e) = std::io::stdout().write_all(&buffer[..n]) {
+                    if let Err(e) = io::stdout().write_all(&buffer[..n]) {
                         eprintln!("Failed to write to stdout: {}", e);
                         break;
                     }
-                    if let Err(e) = std::io::stdout().flush() {
+                    if let Err(e) = io::stdout().flush() {
                         eprintln!("Failed to flush stdout: {}", e);
                         break;
                     }
@@ -187,7 +188,7 @@ pub async fn record(
                     // Record the output
                     session_reader.add_event(EventType::Output, data);
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 }
@@ -205,10 +206,11 @@ pub async fn record(
     // Thread to read from stdin and write to PTY
     let session_writer = session.clone();
     let writer_handle = thread::spawn(move || {
+        let mut writer = writer;  // Make writer mutable in this scope
         let mut buffer = vec![0; 4096];
         
         while session_writer.should_continue() {
-            match std::io::stdin().read(&mut buffer) {
+            match io::stdin().read(&mut buffer) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
                     let data = &buffer[..n];
@@ -227,7 +229,7 @@ pub async fn record(
                         break;
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(std::time::Duration::from_millis(10));
                     continue;
                 }
