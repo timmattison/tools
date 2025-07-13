@@ -11,6 +11,15 @@ use crossterm::{terminal, tty::IsTty};
 
 use crate::{Event, EventType, Recording, get_timestamp};
 
+// Guard to ensure raw mode is disabled on drop
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
 struct RecordingSession {
     output_path: PathBuf,
     compress: bool,
@@ -111,6 +120,13 @@ pub async fn record(
     println!("Press Ctrl-C to stop recording, or 'exit' to end the shell session");
     println!();
     
+    // Enable raw mode for immediate character input
+    terminal::enable_raw_mode()
+        .context("Failed to enable raw mode")?;
+    
+    // Ensure raw mode is disabled on exit
+    let _raw_mode_guard = RawModeGuard;
+    
     // Create recording session
     let session = Arc::new(RecordingSession::new(
         output_path.clone(),
@@ -155,6 +171,8 @@ pub async fn record(
         if let Ok(mut signals) = Signals::new(&[SIGINT]) {
             for sig in signals.forever() {
                 if sig == SIGINT {
+                    // Disable raw mode before printing to fix terminal output
+                    let _ = terminal::disable_raw_mode();
                     eprintln!("\nReceived interrupt signal, stopping recording...");
                     session_for_signal.stop();
                     break;
