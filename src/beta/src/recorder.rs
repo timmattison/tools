@@ -1,108 +1,47 @@
 use anyhow::{Context, Result};
-use crossterm::{terminal, tty::IsTty, event::{self, Event as CrosstermEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent}, execute};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::fs::File;
 use std::io::{BufWriter, Write, Read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use std::time::{Instant, Duration};
+use std::time::Instant;
 use std::thread;
-use tokio_stream::StreamExt;
+use signal_hook::{consts::SIGINT, iterator::Signals};
+use crossterm::{terminal, tty::IsTty};
 
 use crate::{Event, EventType, Recording, get_timestamp};
 
-fn parse_hotkey(hotkey_str: &str) -> (KeyCode, KeyModifiers) {
-    match hotkey_str.to_lowercase().as_str() {
-        "ctrl-end" => (KeyCode::End, KeyModifiers::CONTROL),
-        "ctrl-]" => (KeyCode::Char(']'), KeyModifiers::CONTROL),
-        "f12" => (KeyCode::F(12), KeyModifiers::NONE),
-        "ctrl-\\" | "ctrl-\\\\" => (KeyCode::Char('\\'), KeyModifiers::CONTROL),
-        "ctrl-c" => (KeyCode::Char('c'), KeyModifiers::CONTROL),
-        _ => {
-            eprintln!("Warning: Unknown hotkey '{}', defaulting to Ctrl-End", hotkey_str);
-            (KeyCode::End, KeyModifiers::CONTROL)
-        }
-    }
-}
-
-fn is_stop_hotkey(key_event: &KeyEvent, stop_key: &(KeyCode, KeyModifiers)) -> bool {
-    // Check the configured hotkey with modifiers
-    if key_event.code == stop_key.0 && key_event.modifiers.contains(stop_key.1) {
-        return true;
-    }
-    
-    // Handle raw control characters that terminals might send
-    // Check if we're looking for CTRL-] and got ASCII 29
-    if matches!(stop_key, (KeyCode::Char(']'), mods) if mods.contains(KeyModifiers::CONTROL)) {
-        if let KeyCode::Char(c) = key_event.code {
-            // Check for ASCII 29 (Group Separator) which is CTRL-]
-            if c == '\x1d' || c as u8 == 29 {
-                return true;
-            }
-        }
-    }
-    
-    // Check if we're looking for CTRL-\ and got ASCII 28
-    if matches!(stop_key, (KeyCode::Char('\\'), mods) if mods.contains(KeyModifiers::CONTROL)) {
-        if let KeyCode::Char(c) = key_event.code {
-            // Check for ASCII 28 (File Separator) which is CTRL-\
-            if c == '\x1c' || c as u8 == 28 {
-                return true;
-            }
-        }
-    }
-    
-    // Check if we're looking for CTRL-C and got ASCII 3
-    if matches!(stop_key, (KeyCode::Char('c'), mods) if mods.contains(KeyModifiers::CONTROL)) {
-        if let KeyCode::Char(c) = key_event.code {
-            // Check for ASCII 3 (End of Text) which is CTRL-C
-            if c == '\x03' || c as u8 == 3 {
-                return true;
-            }
-        }
-    }
-    
-    false
-}
-
 struct RecordingSession {
-    events: Arc<Mutex<Vec<Event>>>,
-    start_time: Instant,
-    start_timestamp: f64,
     output_path: PathBuf,
     compress: bool,
-    recording: Recording,
+    recording: Arc<Mutex<Recording>>,
+    start_time: Instant,
     should_stop: Arc<AtomicBool>,
 }
 
 impl RecordingSession {
-    fn new(output_path: PathBuf, compress: bool, width: u16, height: u16, shell: String) -> Self {
-        let start_time = Instant::now();
-        let start_timestamp = get_timestamp();
-        
+    fn new(output_path: PathBuf, compress: bool, width: u16, height: u16, command: String) -> Self {
         let recording = Recording {
             version: 2,
             width,
             height,
-            timestamp: start_timestamp,
+            timestamp: get_timestamp(),
             duration: 0.0,
-            command: shell,
+            command,
             title: format!("Terminal recording at {}", chrono::Local::now()),
             env: std::collections::HashMap::new(),
             events: Vec::new(),
         };
-
+        
         Self {
-            events: Arc::new(Mutex::new(Vec::new())),
-            start_time,
-            start_timestamp,
             output_path,
             compress,
-            recording,
+            recording: Arc::new(Mutex::new(recording)),
+            start_time: Instant::now(),
             should_stop: Arc::new(AtomicBool::new(false)),
         }
     }
-
+    
     fn add_event(&self, event_type: EventType, data: String) {
         let elapsed = self.start_time.elapsed().as_secs_f64();
         let event = Event {
@@ -111,42 +50,31 @@ impl RecordingSession {
             data,
         };
         
-        if let Ok(mut events) = self.events.lock() {
-            events.push(event);
-        }
+        let mut recording = self.recording.lock().unwrap();
+        recording.events.push(event);
+        recording.duration = elapsed;
     }
-
-    fn save_recording(&self) -> Result<()> {
-        let duration = self.start_time.elapsed().as_secs_f64();
-        let events = self.events.lock()
-            .map_err(|_| anyhow::anyhow!("Failed to lock events"))?
-            .clone();
-
-        let mut recording = self.recording.clone();
-        recording.duration = duration;
-        recording.events = events;
-
-        let file = File::create(&self.output_path)
-            .context("Failed to create output file")?;
-
+    
+    fn save(&self) -> Result<()> {
+        let recording = self.recording.lock().unwrap();
+        
         if self.compress {
+            let file = File::create(&self.output_path)?;
             let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-            let writer = BufWriter::new(encoder);
-            serde_json::to_writer_pretty(writer, &recording)
-                .context("Failed to write compressed recording")?;
+            serde_json::to_writer(encoder, &*recording)?;
         } else {
+            let file = File::create(&self.output_path)?;
             let writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(writer, &recording)
-                .context("Failed to write recording")?;
+            serde_json::to_writer_pretty(writer, &*recording)?;
         }
-
+        
         Ok(())
     }
-
+    
     fn stop(&self) {
         self.should_stop.store(true, Ordering::Relaxed);
     }
-
+    
     fn should_continue(&self) -> bool {
         !self.should_stop.load(Ordering::Relaxed)
     }
@@ -179,18 +107,8 @@ pub async fn record(
         std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
     });
     
-    let stop_key = parse_hotkey(&stop_hotkey);
-    let hotkey_display = match stop_hotkey.as_str() {
-        "ctrl-end" => "Ctrl-End",
-        "ctrl-]" => "Ctrl-]",
-        "f12" => "F12",
-        "ctrl-\\" | "ctrl-\\\\" => "Ctrl-\\",
-        "ctrl-c" => "Ctrl-C",
-        _ => "Ctrl-End",
-    };
-    
     println!("Recording session to: {}", output_path.display());
-    println!("Press {} to stop recording gracefully, or 'exit' to end the shell session", hotkey_display);
+    println!("Press Ctrl-C to stop recording, or 'exit' to end the shell session");
     println!();
     
     // Create recording session
@@ -201,21 +119,6 @@ pub async fn record(
         term_height,
         shell.clone()
     ));
-    
-    // Enable crossterm events before entering raw mode
-    // This ensures we can capture keyboard events properly
-    
-    // Enable mouse capture and raw mode for proper event capture
-    execute!(
-        std::io::stdout(),
-        crossterm::event::EnableMouseCapture
-    ).context("Failed to enable mouse capture")?;
-    
-    terminal::enable_raw_mode()
-        .context("Failed to enable raw mode")?;
-    
-    // Ensure raw mode is disabled on exit
-    let _raw_mode_guard = RawModeGuard;
     
     // Set up PTY
     let pty_system = native_pty_system();
@@ -232,7 +135,7 @@ pub async fn record(
     
     let mut cmd = CommandBuilder::new(&shell);
     cmd.cwd(std::env::current_dir()?);
-    cmd.env("TERM", "xterm-256color");
+    cmd.env("TERM", std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string()));
     
     let child = pair.slave.spawn_command(cmd)
         .context("Failed to spawn shell")?;
@@ -240,20 +143,24 @@ pub async fn record(
     // Drop the slave to close it
     drop(pair.slave);
     
-    // Store master in Arc<Mutex> so we can close it later
-    let master = Arc::new(Mutex::new(Some(pair.master)));
+    // Get readers and writers for the PTY master
+    let reader = pair.master.try_clone_reader()
+        .context("Failed to clone PTY reader")?;
+    let mut writer = pair.master.take_writer()
+        .context("Failed to take PTY writer")?;
     
-    let reader = {
-        let master_lock = master.lock().unwrap();
-        master_lock.as_ref().unwrap().try_clone_reader()
-            .context("Failed to clone PTY reader")?
-    };
-    
-    let mut writer = {
-        let mut master_lock = master.lock().unwrap();
-        master_lock.as_mut().unwrap().take_writer()
-            .context("Failed to take PTY writer")?
-    };
+    // Set up signal handling for graceful shutdown
+    let session_for_signal = session.clone();
+    thread::spawn(move || {
+        let mut signals = Signals::new(&[SIGINT]).expect("Failed to register signal handler");
+        for sig in signals.forever() {
+            if sig == SIGINT {
+                eprintln!("\nReceived interrupt signal, stopping recording...");
+                session_for_signal.stop();
+                break;
+            }
+        }
+    });
     
     // Thread to read from PTY and write to stdout
     let session_reader = session.clone();
@@ -267,7 +174,7 @@ pub async fn record(
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buffer[..n]).to_string();
                     
-                    // Write to stdout (in raw mode, we need to handle this carefully)
+                    // Write to stdout
                     if let Err(e) = std::io::stdout().write_all(&buffer[..n]) {
                         eprintln!("Failed to write to stdout: {}", e);
                         break;
@@ -280,7 +187,14 @@ pub async fn record(
                     // Record the output
                     session_reader.add_event(EventType::Output, data);
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
                 Err(e) => {
+                    if !session_reader.should_continue() {
+                        break; // Expected when stopping
+                    }
                     eprintln!("Error reading from PTY: {}", e);
                     break;
                 }
@@ -288,98 +202,23 @@ pub async fn record(
         }
     });
     
-    // Thread to handle keyboard events with hotkey detection
+    // Thread to read from stdin and write to PTY
     let session_writer = session.clone();
-    let stop_key_clone = stop_key.clone();
-    let hotkey_display_clone = hotkey_display.to_string();
-    let master_clone = master.clone();
-    let writer_handle = tokio::spawn(async move {
-        let mut event_stream = event::EventStream::new();
+    let writer_handle = thread::spawn(move || {
+        let mut buffer = vec![0; 4096];
         
         while session_writer.should_continue() {
-            // Use a timeout to check should_continue periodically
-            let timeout_duration = Duration::from_millis(100);
-            
-            match tokio::time::timeout(timeout_duration, event_stream.next()).await {
-                Ok(Some(Ok(CrosstermEvent::Key(key_event)))) => {
-                    // Debug logging if SHELLCAST_DEBUG env var is set
-                    if std::env::var("SHELLCAST_DEBUG").is_ok() {
-                        eprintln!("DEBUG: Key event - code: {:?}, modifiers: {:?}, char value: {}", 
-                            key_event.code, 
-                            key_event.modifiers,
-                            if let KeyCode::Char(c) = key_event.code { c as u8 } else { 0 }
-                        );
-                    }
-                    
-                    // Check for stop hotkey
-                    if is_stop_hotkey(&key_event, &stop_key_clone) {
-                        // Disable raw mode before printing to fix terminal output
-                        let _ = terminal::disable_raw_mode();
-                        
-                        eprintln!("\nStop hotkey detected ({}), stopping recording...", hotkey_display_clone);
-                        session_writer.stop();
-                        
-                        // Close the PTY master to signal EOF to reader thread
-                        if let Ok(mut master_lock) = master_clone.lock() {
-                            *master_lock = None; // Drop the master
-                        }
-                        
-                        // Flush output to ensure messages are displayed
-                        let _ = std::io::stderr().flush();
-                        break;
-                    }
-                    
-                    // Convert key event to bytes for PTY forwarding
-                    let data = match key_event.code {
-                        KeyCode::Char(c) => {
-                            if key_event.modifiers.contains(KeyModifiers::CONTROL) {
-                                // Handle control characters
-                                let ctrl_char = if c.is_ascii_alphabetic() {
-                                    (c.to_ascii_uppercase() as u8 - b'A' + 1) as char
-                                } else {
-                                    // Handle special control characters
-                                    match c {
-                                        ']' => '\x1d' as char, // ASCII 29 (Group Separator)
-                                        '\\' => '\x1c' as char, // ASCII 28 (File Separator)
-                                        _ => c,
-                                    }
-                                };
-                                vec![ctrl_char as u8]
-                            } else {
-                                c.to_string().into_bytes()
-                            }
-                        }
-                        KeyCode::Enter => vec![b'\r'],
-                        KeyCode::Tab => vec![b'\t'],
-                        KeyCode::Backspace => vec![b'\x7f'],
-                        KeyCode::Esc => vec![b'\x1b'],
-                        KeyCode::Up => b"\x1b[A".to_vec(),
-                        KeyCode::Down => b"\x1b[B".to_vec(),
-                        KeyCode::Right => b"\x1b[C".to_vec(),
-                        KeyCode::Left => b"\x1b[D".to_vec(),
-                        KeyCode::Home => b"\x1b[H".to_vec(),
-                        KeyCode::End => b"\x1b[F".to_vec(),
-                        KeyCode::PageUp => b"\x1b[5~".to_vec(),
-                        KeyCode::PageDown => b"\x1b[6~".to_vec(),
-                        KeyCode::Delete => b"\x1b[3~".to_vec(),
-                        KeyCode::Insert => b"\x1b[2~".to_vec(),
-                        KeyCode::F(n) => {
-                            match n {
-                                1..=4 => format!("\x1bO{}", (b'P' + n - 1) as char).into_bytes(),
-                                5..=12 => format!("\x1b[{}{}", n + 10, if n <= 5 { "~" } else { "~" }).into_bytes(),
-                                _ => continue,
-                            }
-                        }
-                        _ => continue, // Skip other key types
-                    };
-                    
-                    let input_str = String::from_utf8_lossy(&data).to_string();
+            match std::io::stdin().read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    let data = &buffer[..n];
                     
                     // Record the input
+                    let input_str = String::from_utf8_lossy(data).to_string();
                     session_writer.add_event(EventType::Input, input_str);
                     
                     // Forward to PTY
-                    if let Err(e) = writer.write_all(&data) {
+                    if let Err(e) = writer.write_all(data) {
                         eprintln!("Failed to write to PTY: {}", e);
                         break;
                     }
@@ -388,173 +227,38 @@ pub async fn record(
                         break;
                     }
                 }
-                Ok(Some(Ok(CrosstermEvent::Mouse(mouse_event)))) => {
-                    // Forward mouse events to PTY as escape sequences
-                    if let Some(escape_seq) = mouse_event_to_escape_sequence(&mouse_event) {
-                        if let Err(e) = writer.write_all(escape_seq.as_bytes()) {
-                            eprintln!("Failed to write mouse event to PTY: {}", e);
-                            break;
-                        }
-                        if let Err(e) = writer.flush() {
-                            eprintln!("Failed to flush PTY after mouse event: {}", e);
-                            break;
-                        }
-                    }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
                 }
-                Ok(Some(Ok(CrosstermEvent::Resize(width, height)))) => {
-                    // Update PTY size - need to get master from the mutex
-                    if let Ok(master_lock) = master_clone.lock() {
-                        if let Some(master) = master_lock.as_ref() {
-                            let new_size = PtySize {
-                                rows: height,
-                                cols: width,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            };
-                            let _ = master.resize(new_size);
-                        }
-                    }
-                }
-                Ok(Some(Ok(_))) => {
-                    // Ignore other events
-                }
-                Ok(Some(Err(e))) => {
-                    eprintln!("Error reading events: {}", e);
+                Err(e) => {
+                    eprintln!("Error reading from stdin: {}", e);
                     break;
-                }
-                Ok(None) => {
-                    // Event stream ended
-                    break;
-                }
-                Err(_) => {
-                    // Timeout - continue loop to check should_continue
                 }
             }
         }
+        
+        // Signal that input has ended
+        session_writer.stop();
     });
     
-    // Wrap child in Arc<Mutex> so we can kill it when needed
-    let child = Arc::new(Mutex::new(child));
+    // Wait for child process to exit
+    let exit_status = child.wait()
+        .context("Failed to wait for child process")?;
     
-    // Wait for child process or stop signal
-    let session_monitor = session.clone();
-    let child_clone = child.clone();
-    let child_handle = thread::spawn(move || {
-        if let Ok(mut child) = child_clone.lock() {
-            let _ = child.wait();
-        }
-        session_monitor.stop();
-    });
+    // Stop recording
+    session.stop();
     
-    // Wait for keyboard handler to complete
-    let _ = writer_handle.await;
-    
-    // Close PTY master to ensure reader thread exits
-    if let Ok(mut master_lock) = master.lock() {
-        *master_lock = None; // Drop the master
-    }
-    
-    // Kill the child process if it's still running
-    if let Ok(mut child) = child.lock() {
-        let _ = child.kill();
-    }
-    
-    // Wait for threads to complete
+    // Wait for threads to finish
     let _ = reader_handle.join();
-    let _ = child_handle.join();
+    let _ = writer_handle.join();
     
     // Save the recording
-    if let Err(e) = session.save_recording() {
-        eprintln!("Failed to save recording: {}", e);
-        return Err(e);
-    }
-    
-    let duration = session.start_time.elapsed().as_secs_f64();
-    let events_count = session.events.lock()
-        .map(|events| events.len())
-        .unwrap_or(0);
-    
-    // Ensure terminal is restored (RawModeGuard will also do this on drop)
-    let _ = terminal::disable_raw_mode();
+    session.save()
+        .context("Failed to save recording")?;
     
     println!("\nRecording saved to: {}", output_path.display());
-    println!("Duration: {:.1}s", duration);
-    println!("Events: {}", events_count);
+    println!("Exit status: {}", exit_status);
     
     Ok(())
-}
-
-// RAII guard to ensure raw mode is disabled
-struct RawModeGuard;
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        // Disable mouse capture
-        let _ = execute!(
-            std::io::stdout(),
-            crossterm::event::DisableMouseCapture
-        );
-        
-        if let Err(e) = terminal::disable_raw_mode() {
-            eprintln!("Failed to disable raw mode: {}", e);
-        }
-        // Flush output to ensure terminal is properly restored
-        let _ = std::io::stdout().flush();
-        let _ = std::io::stderr().flush();
-    }
-}
-
-// Convert mouse events to appropriate escape sequences for PTY
-fn mouse_event_to_escape_sequence(mouse_event: &MouseEvent) -> Option<String> {
-    use crossterm::event::{MouseEventKind, MouseButton};
-    
-    match mouse_event.kind {
-        MouseEventKind::Down(button) => {
-            let button_code = match button {
-                MouseButton::Left => 0,
-                MouseButton::Right => 2,
-                MouseButton::Middle => 1,
-            };
-            // SGR mouse encoding: ESC[<button;x;yM
-            Some(format!("\x1b[<{};{};{}M", button_code, mouse_event.column + 1, mouse_event.row + 1))
-        }
-        MouseEventKind::Up(button) => {
-            let button_code = match button {
-                MouseButton::Left => 0,
-                MouseButton::Right => 2,
-                MouseButton::Middle => 1,
-            };
-            // SGR mouse encoding: ESC[<button;x;ym
-            Some(format!("\x1b[<{};{};{}m", button_code, mouse_event.column + 1, mouse_event.row + 1))
-        }
-        MouseEventKind::Drag(button) => {
-            let button_code = match button {
-                MouseButton::Left => 32,
-                MouseButton::Right => 34,
-                MouseButton::Middle => 33,
-            };
-            // SGR mouse encoding with drag flag
-            Some(format!("\x1b[<{};{};{}M", button_code, mouse_event.column + 1, mouse_event.row + 1))
-        }
-        MouseEventKind::Moved => {
-            // Mouse movement (hover)
-            Some(format!("\x1b[<35;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
-        }
-        MouseEventKind::ScrollDown => {
-            // Scroll down
-            Some(format!("\x1b[<65;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
-        }
-        MouseEventKind::ScrollUp => {
-            // Scroll up  
-            Some(format!("\x1b[<64;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
-        }
-        MouseEventKind::ScrollLeft => {
-            // Scroll left
-            Some(format!("\x1b[<66;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
-        }
-        MouseEventKind::ScrollRight => {
-            // Scroll right
-            Some(format!("\x1b[<67;{};{}M", mouse_event.column + 1, mouse_event.row + 1))
-        }
-    }
 }

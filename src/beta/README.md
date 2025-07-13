@@ -60,27 +60,16 @@ shellcast record --compress -o session.json.gz
 
 Record with custom stop hotkey:
 ```bash
-shellcast record --stop-hotkey f12
-shellcast record --stop-hotkey "ctrl-]"
+# Note: Custom hotkeys are no longer supported to preserve terminal functionality
+# Use Ctrl-C to stop recording
 ```
 
-#### Available Stop Hotkeys
+#### Stopping Recording
 
-- `ctrl-end` (default) - Ctrl + End Key ⭐ **Recommended**
-- `f12` - Function Key 12
-- `ctrl-]` - Ctrl + Right Square Bracket
-- `ctrl-\\` - Ctrl + Backslash  
-- `ctrl-c` - Ctrl + C (traditional interrupt)
+To stop recording, use:
+- `Ctrl-C` - Standard interrupt signal
+- Type `exit` in the shell to end the session normally
 
-#### Debugging Hotkeys
-
-If hotkeys aren't working as expected, enable debug mode to see what key events are being received:
-
-```bash
-SHELLCAST_DEBUG=1 shellcast record
-```
-
-This will print debug information about each key press, helping identify how your terminal reports key combinations.
 
 ### Playing Back a Recording
 
@@ -230,21 +219,20 @@ shellcast export video demo.json -o demo.mp4 --optimize-web --theme solarized-da
 ## Technical Details
 
 - Uses pseudo-terminals (PTY) to capture all terminal I/O
-- **Raw mode terminal capture** for proper keyboard input handling
-- **Crossterm event handling** for graceful recording termination (Ctrl-End)
-- **Thread synchronization** for reliable data capture and storage
-- Preserves ANSI escape sequences and terminal control codes with VTE parser
+- **Transparent byte-level recording** - no interpretation of escape sequences
+- **Signal handling** for graceful recording termination (Ctrl-C)
+- **Thread-based I/O** for reliable data capture and storage
+- Preserves all ANSI escape sequences and terminal control codes exactly
 - Records terminal dimensions for accurate playback
-- Thread-based I/O handling with proper error recovery
+- Direct stdin/stdout to PTY forwarding for zero interference
 - Async playback engine for smooth performance
 - **Automatic recording save** on shell exit or interruption
 
 ## Recording Controls
 
-- **Exit gracefully**: Press `Ctrl-End` to stop recording and save the session (default hotkey)
-- **Custom hotkeys**: Configure with `--stop-hotkey` option (supports: `ctrl-end`, `f12`, `ctrl-]`, `ctrl-\\`, `ctrl-c`)
+- **Stop recording**: Press `Ctrl-C` to stop recording and save the session
 - **Shell exit**: Type `exit` in the shell to end the session normally
-- **Interactive programs**: All keyboard input (including `q` to quit programs like `btop`) works correctly
+- **Interactive programs**: All keyboard input and escape sequences pass through transparently
 - **Recovery**: Recording is automatically saved even if the shell exits unexpectedly
 
 ## Limitations
