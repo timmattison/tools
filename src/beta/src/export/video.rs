@@ -299,7 +299,7 @@ fn generate_and_encode_video(
         terminal_state.protect_status_bar_area();
         
         // Debug status bar content (only for first frame)
-        if frame_num == 0 && std::env::var("BETA_DEBUG").is_ok() {
+        if frame_num == 0 && std::env::var("SHELLCAST_DEBUG").is_ok() {
             terminal_state.debug_status_bar();
         }
         

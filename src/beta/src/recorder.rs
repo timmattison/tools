@@ -160,12 +160,12 @@ pub async fn record(
     stop_hotkey: String,
 ) -> Result<()> {
     if !std::io::stdout().is_tty() {
-        anyhow::bail!("beta record must be run in a terminal");
+        anyhow::bail!("shellcast record must be run in a terminal");
     }
     
     let output_path = output.unwrap_or_else(|| {
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        PathBuf::from(format!("beta_{}.json", timestamp))
+        PathBuf::from(format!("shellcast_{}.json", timestamp))
     });
     
     if output_path.exists() && !append {
@@ -302,8 +302,8 @@ pub async fn record(
             
             match tokio::time::timeout(timeout_duration, event_stream.next()).await {
                 Ok(Some(Ok(CrosstermEvent::Key(key_event)))) => {
-                    // Debug logging if BETA_DEBUG env var is set
-                    if std::env::var("BETA_DEBUG").is_ok() {
+                    // Debug logging if SHELLCAST_DEBUG env var is set
+                    if std::env::var("SHELLCAST_DEBUG").is_ok() {
                         eprintln!("DEBUG: Key event - code: {:?}, modifiers: {:?}, char value: {}", 
                             key_event.code, 
                             key_event.modifiers,

@@ -1,6 +1,6 @@
-# beta - Terminal Session Recorder and Player
+# shellcast - Terminal Session Recorder and Player
 
-`beta` is a terminal session recorder and player that captures all terminal output with high-resolution timestamps, allowing you to record and replay terminal sessions exactly as they happened.
+`shellcast` is a terminal session recorder and player that captures all terminal output with high-resolution timestamps, allowing you to record and replay terminal sessions exactly as they happened.
 
 ## Features
 
@@ -31,7 +31,7 @@ cargo install --path .
 Or from the tools repository:
 
 ```bash
-cargo install --git https://github.com/timmattison/tools beta
+cargo install --git https://github.com/timmattison/tools shellcast
 ```
 
 ## Usage
@@ -40,28 +40,28 @@ cargo install --git https://github.com/timmattison/tools beta
 
 Basic recording:
 ```bash
-beta record
+shellcast record
 ```
 
 Record with custom output file:
 ```bash
-beta record -o session.json
+shellcast record -o session.json
 ```
 
 Record a specific command:
 ```bash
-beta record -c "npm test"
+shellcast record -c "npm test"
 ```
 
 Record with compression:
 ```bash
-beta record --compress -o session.json.gz
+shellcast record --compress -o session.json.gz
 ```
 
 Record with custom stop hotkey:
 ```bash
-beta record --stop-hotkey f12
-beta record --stop-hotkey "ctrl-]"
+shellcast record --stop-hotkey f12
+shellcast record --stop-hotkey "ctrl-]"
 ```
 
 #### Available Stop Hotkeys
@@ -77,7 +77,7 @@ beta record --stop-hotkey "ctrl-]"
 If hotkeys aren't working as expected, enable debug mode to see what key events are being received:
 
 ```bash
-BETA_DEBUG=1 beta record
+SHELLCAST_DEBUG=1 shellcast record
 ```
 
 This will print debug information about each key press, helping identify how your terminal reports key combinations.
@@ -86,34 +86,34 @@ This will print debug information about each key press, helping identify how you
 
 Basic playback:
 ```bash
-beta play session.json
+shellcast play session.json
 ```
 
 Play at double speed:
 ```bash
-beta play session.json -s 2.0
+shellcast play session.json -s 2.0
 ```
 
 Start playback paused:
 ```bash
-beta play session.json --paused
+shellcast play session.json --paused
 ```
 
 ### Exporting Recordings
 
 Export to self-contained HTML:
 ```bash
-beta export web session.json -o session.html
+shellcast export web session.json -o session.html
 ```
 
 Export to video with custom theme:
 ```bash
-beta export video session.json -o session.mp4 --theme dracula --fps 30
+shellcast export video session.json -o session.mp4 --theme dracula --fps 30
 ```
 
 Export to optimized GIF:
 ```bash
-beta export video session.json -o session.gif --fps 15 --optimize-web
+shellcast export video session.json -o session.gif --fps 15 --optimize-web
 ```
 
 ### Playback Controls
@@ -159,31 +159,31 @@ Event types:
 
 #### Record a build process
 ```bash
-beta record -o build.json -c "cargo build --release"
+shellcast record -o build.json -c "cargo build --release"
 ```
 
 #### Record an interactive session
 ```bash
-beta record -o demo.json
+shellcast record -o demo.json
 # ... do your work ...
 # Press Ctrl-D or type 'exit' to finish
 ```
 
 #### Create a compressed recording
 ```bash
-beta record --compress -o session.json.gz
+shellcast record --compress -o session.json.gz
 ```
 
 ### Playback Examples
 
 #### Play back at half speed
 ```bash
-beta play demo.json -s 0.5
+shellcast play demo.json -s 0.5
 ```
 
 #### Start playback paused
 ```bash
-beta play demo.json --paused
+shellcast play demo.json --paused
 ```
 
 ### Export Examples
@@ -191,28 +191,28 @@ beta play demo.json --paused
 #### Export to Web (HTML)
 ```bash
 # Basic web export
-beta export web demo.json -o demo.html
+shellcast export web demo.json -o demo.html
 
 # With Dracula theme
-beta export web demo.json -o demo.html --theme dracula
+shellcast export web demo.json -o demo.html --theme dracula
 
 # With compressed data embedding
-beta export web demo.json -o demo.html --compress
+shellcast export web demo.json -o demo.html --compress
 ```
 
 #### Export to Video
 ```bash
 # Basic MP4 export
-beta export video demo.json -o demo.mp4
+shellcast export video demo.json -o demo.mp4
 
 # Create an optimized GIF
-beta export video demo.json -o demo.gif --fps 15 --optimize-web
+shellcast export video demo.json -o demo.gif --fps 15 --optimize-web
 
 # High-quality video with custom settings
-beta export video demo.json -o demo.mp4 --fps 60 --resolution 1920x1080 --theme monokai
+shellcast export video demo.json -o demo.mp4 --fps 60 --resolution 1920x1080 --theme monokai
 
 # Web-optimized MP4
-beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
+shellcast export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 ```
 
 **Font Requirements for Video Export:**
