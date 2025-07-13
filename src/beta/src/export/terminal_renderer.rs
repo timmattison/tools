@@ -448,16 +448,18 @@ impl TerminalState {
         
         // Handle tmux status bar foreground text color
         let corrected_fg = if corrected_bg == (0, 128, 0) {
-            // Status bar should have black text on green background
-            // But if the original foreground was already black or very dark, keep it
-            if fg == (0, 0, 0) || fg == (255, 255, 255) {
-                (0, 0, 0)  // Ensure black text
-            } else {
-                (0, 0, 0)  // Force black text for visibility
-            }
-        } else if bg == (0, 255, 0) || bg == (85, 255, 85) {
-            // Even if we didn't correct the background, ensure text is visible on bright green
+            // Status bar should have black text on green background for maximum visibility
             (0, 0, 0)
+        } else if bg == (0, 255, 0) || bg == (85, 255, 85) || bg == (80, 250, 123) {
+            // Even if we didn't correct the background, ensure text is visible on any green
+            (0, 0, 0)
+        } else if corrected_bg != (0, 0, 0) && fg == corrected_bg {
+            // If foreground matches background, force contrasting color
+            if is_light_color_terminal(corrected_bg) {
+                (0, 0, 0)      // Black text on light background
+            } else {
+                (255, 255, 255) // White text on dark background
+            }
         } else {
             fg
         };
@@ -548,12 +550,80 @@ impl TerminalState {
             (x, y)
         }
     }
+    
+    pub fn get_effective_terminal_height(&self) -> usize {
+        // Return the height that applications should use, accounting for tmux status bar
+        if let Some(layout) = self.detect_tmux_layout() {
+            layout.content_height
+        } else {
+            self.height
+        }
+    }
+    
+    pub fn protect_status_bar_area(&mut self) {
+        // Ensure status bar area is protected from application content
+        if let Some(layout) = self.detect_tmux_layout() {
+            let status_row = layout.status_bar_row;
+            
+            // Clear any non-status content that might have been written to the status bar
+            if status_row < self.grid.len() {
+                let row = &mut self.grid[status_row];
+                
+                // Check if this looks like application content rather than status bar
+                let non_status_chars = row.iter().filter(|cell| {
+                    // Look for patterns that suggest this is application content
+                    matches!(cell.ch, 'A'..='Z' | 'a'..='z' | '0'..='9') &&
+                    cell.bg_color == (0, 0, 0) && // Default background
+                    cell.fg_color == (255, 255, 255) // Default foreground
+                }).count();
+                
+                // If more than 20% of the status bar looks like application content, clear it
+                if non_status_chars > row.len() / 5 {
+                    for cell in row {
+                        if cell.bg_color == (0, 0, 0) && cell.fg_color == (255, 255, 255) {
+                            // Only clear cells that look like application content
+                            cell.ch = ' ';
+                            cell.bg_color = (0, 128, 0); // Set to status bar green
+                            cell.fg_color = (0, 0, 0);   // Black text
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn debug_status_bar(&self) {
+        // Debug function to analyze status bar content
+        if let Some(layout) = self.detect_tmux_layout() {
+            let status_row = layout.status_bar_row;
+            if status_row < self.grid.len() {
+                eprintln!("Status bar analysis (row {}):", status_row);
+                let row = &self.grid[status_row];
+                
+                for (i, cell) in row.iter().enumerate().take(20) { // Show first 20 chars
+                    if cell.ch != ' ' || cell.bg_color != (0, 0, 0) {
+                        eprintln!("  [{}] char='{}' fg=({},{},{}) bg=({},{},{})", 
+                            i, cell.ch, 
+                            cell.fg_color.0, cell.fg_color.1, cell.fg_color.2,
+                            cell.bg_color.0, cell.bg_color.1, cell.bg_color.2);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct TmuxLayout {
     pub status_bar_row: usize,
     pub content_height: usize,
+}
+
+// Helper function for color analysis in terminal renderer
+fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
+    // Use luminance formula to determine if color is light
+    let luminance = (0.299 * color.0 as f32 + 0.587 * color.1 as f32 + 0.114 * color.2 as f32);
+    luminance > 127.0
 }
 
 impl TerminalState {

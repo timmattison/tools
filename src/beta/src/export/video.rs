@@ -12,6 +12,21 @@ use std::collections::HashMap;
 use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
+// Helper functions for color analysis
+fn color_similarity(color1: (u8, u8, u8), color2: (u8, u8, u8)) -> u32 {
+    // Calculate Euclidean distance between colors
+    let dr = (color1.0 as i32 - color2.0 as i32).abs() as u32;
+    let dg = (color1.1 as i32 - color2.1 as i32).abs() as u32;
+    let db = (color1.2 as i32 - color2.2 as i32).abs() as u32;
+    dr + dg + db
+}
+
+fn is_light_color(color: (u8, u8, u8)) -> bool {
+    // Use luminance formula to determine if color is light
+    let luminance = (0.299 * color.0 as f32 + 0.587 * color.1 as f32 + 0.114 * color.2 as f32);
+    luminance > 127.0
+}
+
 struct FontManager {
     fonts: Vec<FontRef<'static>>,
     glyph_cache: HashMap<char, usize>, // Character -> font index
@@ -280,6 +295,14 @@ fn generate_and_encode_video(
             event_index += 1;
         }
         
+        // Protect status bar from overlap before rendering
+        terminal_state.protect_status_bar_area();
+        
+        // Debug status bar content (only for first frame)
+        if frame_num == 0 && std::env::var("BETA_DEBUG").is_ok() {
+            terminal_state.debug_status_bar();
+        }
+        
         // Render frame
         let frame = render_terminal_to_image(&terminal_state, width, height, &mut font_manager)?;
         
@@ -405,7 +428,19 @@ fn render_terminal_to_image(
             // Draw the character if it's not empty
             if cell.ch != ' ' && cell.ch != '\x00' {
                 // Get resolved colors from terminal state (handles dynamic palette, overrides, etc.)
-                let (fg_color, _) = terminal_state.resolve_cell_colors(cell);
+                let (mut fg_color, bg_color) = terminal_state.resolve_cell_colors(cell);
+                
+                // Special handling for status bar rows to ensure text visibility
+                if terminal_state.is_status_bar_row(y) {
+                    // Force visible text color if fg and bg are too similar
+                    if fg_color == bg_color || color_similarity(fg_color, bg_color) < 100 {
+                        fg_color = if is_light_color(bg_color) {
+                            (0, 0, 0)      // Black text on light background
+                        } else {
+                            (255, 255, 255) // White text on dark background
+                        };
+                    }
+                }
                 
                 let text = cell.ch.to_string();
                 let font_scale = if cell.bold { 
