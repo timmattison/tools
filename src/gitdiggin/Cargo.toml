@@ -7,7 +7,7 @@ description = "Recursively searches Git repositories for commits containing a sp
 
 [dependencies]
 git2 = "0.20.2"
-clap = { version = "4.5.41", features = ["derive"] }
+clap = { version = "4.5.42", features = ["derive"] }
 walkdir = "2.5.0"
 indicatif = "0.18.0"
 crossbeam = "0.8.4"
