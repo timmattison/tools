@@ -192,6 +192,11 @@ for fun. Several tools have also been ported to Rust for improved performance an
       Eliminates the complexity of setting up cross-compilation environments by handling target detection, 
       Docker image configuration, and build execution automatically.
     - To install: `cargo install --git https://github.com/timmattison/tools rcc`
+- r2-bucket-cleaner
+    - Lists and optionally clears all objects from a Cloudflare R2 bucket using the wrangler CLI. Features 
+      parallel deletion with 10 concurrent operations, automatic pagination handling with the `--all` flag, 
+      and progress tracking. Includes safety confirmation prompts and retry logic for reliability.
+    - To install: `cargo install --git https://github.com/timmattison/tools r2-bucket-cleaner`
 
 ## dirhash
 
