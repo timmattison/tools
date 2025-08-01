@@ -283,7 +283,7 @@ async fn main() -> Result<()> {
             
             // Create the fixup commit using git command
             let output = Command::new("git")
-                .args(&["commit", "--allow-empty", &format!("--fixup=reword:{}:{}", commit_hash, new_message)])
+                .args(&["commit", "--allow-empty", &format!("--fixup=reword:{}", commit_hash), "-m", &new_message])
                 .output()
                 .context("Failed to create fixup commit")?;
             
