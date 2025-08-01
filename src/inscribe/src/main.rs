@@ -262,9 +262,10 @@ async fn main() -> Result<()> {
         }
     } else if let Some(commit_hash) = args.fixup {
         // Handle fixup mode
-        println!("\nWARNING: Using --fixup will create a fixup commit that will:");
-        println!("- Change the commit message of commit {}", commit_hash);
-        println!("- Require running 'git rebase -i --autosquash' to apply the change");
+        println!("\nRewording commit {}...", &commit_hash[..8]);
+        println!("This will:");
+        println!("- Generate a new commit message using Claude");
+        println!("- Update the commit message directly");
         println!("- Change all commit hashes after the target commit\n");
         
         // Get the diff of the commit to reword
@@ -279,24 +280,80 @@ async fn main() -> Result<()> {
         if !args.dry_run {
             use std::process::Command;
             
-            println!("\nCreating fixup commit...");
+            use std::fs;
             
-            // Create the fixup commit using git command
+            // Save the new message to a temporary file
+            let message_file = format!(".git/INSCRIBE_MSG_{}", &commit_hash[..8]);
+            fs::write(&message_file, &new_message)
+                .context("Failed to save commit message")?;
+            
+            println!("\nApplying new commit message...");
+            
+            // Create a sequence editor script that changes pick to reword
+            let todo_script = format!(".git/INSCRIBE_TODO_{}", &commit_hash[..8]);
+            let todo_content = format!(
+                "#!/bin/bash\n\
+                # Change pick to reword for the target commit\n\
+                sed -i.bak 's/^pick {}/reword {}/' \"$1\"\n",
+                &commit_hash[..7], &commit_hash[..7]
+            );
+            
+            fs::write(&todo_script, &todo_content)
+                .context("Failed to create todo script")?;
+            
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&todo_script)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&todo_script, perms)?;
+            }
+            
+            // Create a commit message editor that will use our new message
+            let msg_editor = format!(".git/INSCRIBE_EDITOR_{}", &commit_hash[..8]);
+            let msg_content = format!(
+                "#!/bin/bash\n\
+                # Replace the commit message with our new one\n\
+                cp {} \"$1\"\n",
+                message_file
+            );
+            
+            fs::write(&msg_editor, &msg_content)
+                .context("Failed to create message editor")?;
+            
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&msg_editor)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&msg_editor, perms)?;
+            }
+            
+            // Run rebase with our custom editors
             let output = Command::new("git")
-                .args(&["commit", "--allow-empty", &format!("--fixup=reword:{}", commit_hash), "-m", &new_message])
+                .env("GIT_SEQUENCE_EDITOR", &todo_script)
+                .env("GIT_EDITOR", &msg_editor)
+                .args(&["rebase", "-i", &format!("{}^", commit_hash)])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
                 .output()
-                .context("Failed to create fixup commit")?;
+                .context("Failed to run rebase")?;
+            
+            // Clean up temporary files
+            let _ = fs::remove_file(&todo_script);
+            let _ = fs::remove_file(&msg_editor);
+            let _ = fs::remove_file(&message_file);
+            let _ = fs::remove_file(&format!("{}.bak", todo_script));
             
             if !output.status.success() {
                 let error = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("Failed to create fixup commit: {}", error);
+                anyhow::bail!("Failed to reword commit: {}", error);
             }
             
-            println!("Fixup commit created successfully!");
-            println!("\nTo apply this change, run:");
-            println!("  git rebase -i --autosquash {}", commit_hash);
-            println!("\nOr to automatically apply it:");
-            println!("  git rebase -i --autosquash {}~1", commit_hash);
+            println!("\nCommit message successfully updated!");
+            println!("\nWARNING: All commit hashes after {} have changed.", &commit_hash[..8]);
+            println!("If you've already pushed, you'll need to force push.");
         }
     } else {
         // Normal commit mode
