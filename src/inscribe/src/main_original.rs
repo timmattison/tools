@@ -4,6 +4,7 @@ use git2::{DiffOptions, Oid, Repository};
 use std::env;
 use std::path::PathBuf;
 
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Automatically generate git commit messages using Claude")]
 struct Args {
@@ -23,6 +24,8 @@ struct Args {
     reword: bool,
 }
 
+
+
 fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
     let start = if let Some(path) = start_path {
         PathBuf::from(path)
@@ -30,18 +33,22 @@ fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
         env::current_dir().context("Failed to get current directory")?
     };
     
+    // Try to open repository using git2's discovery mechanism
+    // This will search up the directory tree for a .git directory
     Repository::discover(&start)
         .with_context(|| format!("No git repository found starting from {:?}", start))
 }
 
+
 fn check_claude_cli() -> Result<()> {
     use std::process::Command;
     
+    // Try different possible Claude locations
     let home = env::var("HOME").unwrap_or_default();
     let claude_paths = vec![
-        "claude".to_string(),
-        format!("{}/.claude/local/claude", home),
-        "/usr/local/bin/claude".to_string(),
+        "claude".to_string(),  // In PATH
+        format!("{}/.claude/local/claude", home),  // Common install location
+        "/usr/local/bin/claude".to_string(),  // Another common location
     ];
     
     let mut claude_check = None;
@@ -62,8 +69,11 @@ fn check_claude_cli() -> Result<()> {
     match claude_check {
         Some(Ok(output)) => {
             if output.status.success() {
+                // Claude CLI is available, now check if it's authenticated by trying a minimal command
+                // We'll check authentication when we actually try to use it
                 return Ok(());
             } else {
+                // Claude CLI had an error even with --version
                 let error_msg = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!(
                     "Claude Code encountered an error: {}\n\n\
@@ -76,6 +86,7 @@ fn check_claude_cli() -> Result<()> {
             anyhow::bail!("Failed to run Claude CLI at {}: {}", used_path, e)
         },
         None => {
+            // Claude CLI is not found in any of the expected locations
             anyhow::bail!(
                 "Claude Code is not installed or not in expected locations.\n\n\
                 Checked locations:\n\
@@ -145,10 +156,9 @@ fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
     Ok(diff_text)
 }
 
+
 async fn generate_commit_message(diff: &str) -> Result<String> {
-    use std::process::{Command, Stdio};
-    use std::io::Write;
-    use tokio::time::{timeout, Duration};
+    use std::process::Command;
     
     let prompt = format!(
         "Based on the following git diff, generate a clear and concise commit message. \
@@ -159,64 +169,29 @@ async fn generate_commit_message(diff: &str) -> Result<String> {
         diff
     );
     
-    // If diff is very large, truncate it to avoid issues
-    let truncated_prompt = if prompt.len() > 10000 {
-        let truncated_diff = &diff[..8000];
-        format!(
-            "Based on the following git diff, generate a clear and concise commit message. \
-            Follow conventional commit format (type: description). \
-            The message should explain what was changed and why, not just describe the diff. \
-            Keep it under 72 characters for the subject line. \
-            Return ONLY the commit message, no explanation or additional text.\n\n{}\n\n[... diff truncated for length ...]",
-            truncated_diff
-        )
-    } else {
-        prompt
-    };
-    
+    // Try different possible Claude locations
     let home = env::var("HOME").unwrap_or_default();
     let claude_paths = vec![
-        "claude".to_string(),
-        format!("{}/.claude/local/claude", home),
-        "/usr/local/bin/claude".to_string(),
+        "claude".to_string(),  // In PATH
+        format!("{}/.claude/local/claude", home),  // Common install location
+        "/usr/local/bin/claude".to_string(),  // Another common location
     ];
     
-    let mut claude_path = None;
+    let mut output = None;
+    
     for path in &claude_paths {
-        if std::fs::metadata(path).is_ok() {
-            claude_path = Some(path);
+        let result = Command::new(path)
+            .args(&["--print", &prompt])
+            .output();
+            
+        if let Ok(o) = result {
+            output = Some(o);
             break;
         }
     }
     
-    let claude_path = claude_path
-        .ok_or_else(|| anyhow::anyhow!("Claude CLI not found. Make sure Claude Code is installed."))?;
-    
-    // Use stdin for the prompt to handle large diffs better
-    let mut child = Command::new(claude_path)
-        .arg("--print")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn Claude CLI")?;
-    
-    // Write prompt to stdin
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(truncated_prompt.as_bytes())
-            .context("Failed to write prompt to Claude CLI stdin")?;
-    }
-    
-    // Wait for output with timeout
-    let output = tokio::task::spawn_blocking(move || {
-        child.wait_with_output()
-    });
-    
-    let output = timeout(Duration::from_secs(30), output)
-        .await
-        .context("Claude CLI timed out after 30 seconds")?
-        .context("Failed to join Claude CLI task")?
-        .context("Failed to wait for Claude CLI output")?;
+    let output = output
+        .ok_or_else(|| anyhow::anyhow!("Failed to execute Claude CLI. Make sure Claude Code is installed and you're logged in with 'claude login'"))?;
     
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
@@ -234,92 +209,9 @@ async fn generate_commit_message(diff: &str) -> Result<String> {
         .trim()
         .to_string();
     
-    if message.is_empty() {
-        anyhow::bail!("Claude CLI returned empty message");
-    }
-    
     Ok(message)
 }
 
-fn amend_commit_with_git2(repo: &Repository, new_message: &str) -> Result<()> {
-    // Get HEAD commit
-    let head = repo.head()?.peel_to_commit()?;
-    
-    // Get the author and committer signatures
-    let author = head.author();
-    let committer = repo.signature()?;
-    
-    // Amend the commit with the new message
-    let amended_commit = head.amend(
-        Some("HEAD"),           // update_ref
-        Some(&author),          // author (None keeps original)
-        Some(&committer),       // committer (None keeps original)
-        None,                   // message_encoding (None for UTF-8)
-        Some(new_message),      // new message
-        None                    // tree (None keeps original tree)
-    )?;
-    
-    println!("Commit successfully reworded! New commit: {}", amended_commit);
-    
-    Ok(())
-}
-
-fn reword_commit_with_rebase(repo: &Repository, commit_hash: &str, new_message: &str) -> Result<()> {
-    use git2::RebaseOptions;
-    
-    let target_oid = Oid::from_str(commit_hash)?;
-    let target_commit = repo.find_commit(target_oid)?;
-    
-    // Find the parent of the target commit
-    if target_commit.parent_count() == 0 {
-        anyhow::bail!("Cannot reword root commit with rebase");
-    }
-    
-    let parent_commit = target_commit.parent(0)?;
-    let parent_annotated = repo.find_annotated_commit(parent_commit.id())?;
-    
-    // Get the current branch reference
-    let head = repo.head()?;
-    let branch_annotated = repo.reference_to_annotated_commit(&head)?;
-    
-    // Create rebase options
-    let mut rebase_options = RebaseOptions::new();
-    rebase_options.quiet(true);
-    
-    // Start the rebase from the parent of the commit we want to reword
-    let mut rebase = repo.rebase(
-        Some(&branch_annotated),  // branch (current branch)
-        Some(&parent_annotated),  // upstream (rebase onto parent of target)
-        None,                     // onto (use upstream)
-        Some(&mut rebase_options)
-    )?;
-    
-    let signature = repo.signature()?;
-    
-    // Process each commit in the rebase
-    while let Some(operation) = rebase.next() {
-        let operation = operation?;
-        let operation_id = operation.id();
-        
-        // Check if this is the commit we want to reword
-        if operation_id == target_oid {
-            // Use the new message for this commit
-            rebase.commit(None, &signature, Some(new_message))?;
-        } else {
-            // Keep the original message for other commits
-            rebase.commit(None, &signature, None)?;
-        }
-    }
-    
-    // Finish the rebase
-    rebase.finish(Some(&signature))?;
-    
-    println!("Commit message successfully updated!");
-    println!("\nWARNING: All commit hashes after {} have changed.", &commit_hash[..8]);
-    println!("If you've already pushed, you'll need to force push.");
-    
-    Ok(())
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -349,11 +241,22 @@ async fn main() -> Result<()> {
         println!("{}", new_message);
         
         if !args.dry_run {
+            use std::process::Command;
+            
             println!("\nAmending commit...");
             
-            // Use git2 to amend the commit
-            amend_commit_with_git2(&repo, &new_message)?;
+            // Use git commit --amend to update the message
+            let output = Command::new("git")
+                .args(&["commit", "--amend", "-m", &new_message])
+                .output()
+                .context("Failed to amend commit")?;
             
+            if !output.status.success() {
+                let error = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to amend commit: {}", error);
+            }
+            
+            println!("Commit successfully reworded!");
             println!("\nWARNING: The commit hash has changed. If you've already pushed this commit,");
             println!("you'll need to force push with: git push --force-with-lease");
         }
@@ -375,10 +278,82 @@ async fn main() -> Result<()> {
         println!("{}", new_message);
         
         if !args.dry_run {
+            use std::process::Command;
+            
+            use std::fs;
+            
+            // Save the new message to a temporary file
+            let message_file = format!(".git/INSCRIBE_MSG_{}", &commit_hash[..8]);
+            fs::write(&message_file, &new_message)
+                .context("Failed to save commit message")?;
+            
             println!("\nApplying new commit message...");
             
-            // Use git2 rebase to reword the commit
-            reword_commit_with_rebase(&repo, &commit_hash, &new_message)?;
+            // Create a sequence editor script that changes pick to reword
+            let todo_script = format!(".git/INSCRIBE_TODO_{}", &commit_hash[..8]);
+            let todo_content = format!(
+                "#!/bin/bash\n\
+                # Change pick to reword for the target commit\n\
+                sed -i.bak 's/^pick {}/reword {}/' \"$1\"\n",
+                &commit_hash[..7], &commit_hash[..7]
+            );
+            
+            fs::write(&todo_script, &todo_content)
+                .context("Failed to create todo script")?;
+            
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&todo_script)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&todo_script, perms)?;
+            }
+            
+            // Create a commit message editor that will use our new message
+            let msg_editor = format!(".git/INSCRIBE_EDITOR_{}", &commit_hash[..8]);
+            let msg_content = format!(
+                "#!/bin/bash\n\
+                # Replace the commit message with our new one\n\
+                cp {} \"$1\"\n",
+                message_file
+            );
+            
+            fs::write(&msg_editor, &msg_content)
+                .context("Failed to create message editor")?;
+            
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&msg_editor)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&msg_editor, perms)?;
+            }
+            
+            // Run rebase with our custom editors
+            let output = Command::new("git")
+                .env("GIT_SEQUENCE_EDITOR", &todo_script)
+                .env("GIT_EDITOR", &msg_editor)
+                .args(&["rebase", "-i", &format!("{}^", commit_hash)])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .context("Failed to run rebase")?;
+            
+            // Clean up temporary files
+            let _ = fs::remove_file(&todo_script);
+            let _ = fs::remove_file(&msg_editor);
+            let _ = fs::remove_file(&message_file);
+            let _ = fs::remove_file(&format!("{}.bak", todo_script));
+            
+            if !output.status.success() {
+                let error = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to reword commit: {}", error);
+            }
+            
+            println!("\nCommit message successfully updated!");
+            println!("\nWARNING: All commit hashes after {} have changed.", &commit_hash[..8]);
+            println!("If you've already pushed, you'll need to force push.");
         }
     } else {
         // Normal commit mode
