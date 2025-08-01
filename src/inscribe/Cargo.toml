@@ -7,4 +7,4 @@ edition = "2021"
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
-git2 = "0.18"
+git2 = "0.20.2"
