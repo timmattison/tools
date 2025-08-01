@@ -97,6 +97,13 @@ for fun. Several tools have also been ported to Rust for improved performance an
     - A fast terminal image and video display utility, designed as a high-performance alternative to `imgcat`. Supports
       multiple image and video formats, resizing with aspect ratio preservation, and reading from files or stdin. Video support requires ffmpeg.
     - To install: `cargo install --git https://github.com/timmattison/tools ic`
+- inscribe
+    - Automatically generates clear and consistent git commit messages using Claude AI. Analyzes staged changes and creates
+      conventional commit messages. Supports credential storage in system credential managers (Keychain on macOS, Credential
+      Manager on Windows, Secret Service on Linux). **Note: Currently only tested on macOS.**
+    - Usage: `inscribe` (requires staged changes), `inscribe -a` (stages all changes), `inscribe -d` (dry run),
+      `inscribe --store-key` (save API key)
+    - To install: `cargo install --git https://github.com/timmattison/tools inscribe`
 - idear
     - IDEA Reaper. Cleans up orphaned .idea directories that remain when you delete a project directory before closing 
       JetBrains IDEs (IntelliJ IDEA, PyCharm, WebStorm, PhpStorm, RubyMine, CLion, DataGrip, GoLand, Rider, Android Studio). 
