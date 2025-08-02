@@ -315,7 +315,7 @@ fn reword_commit_with_rebase(repo: &Repository, commit_hash: &str, new_message: 
     rebase.finish(Some(&signature))?;
     
     println!("Commit message successfully updated!");
-    println!("\nWARNING: All commit hashes after {} have changed.", &commit_hash[..8]);
+    println!("\nWARNING: All commit hashes after {} have changed.", &commit_hash[..commit_hash.len().min(8)]);
     println!("If you've already pushed, you'll need to force push.");
     
     Ok(())
@@ -336,7 +336,7 @@ async fn main() -> Result<()> {
         let head_oid = head.id();
         let head_hash = head_oid.to_string();
         
-        println!("\nRewording the most recent commit: {}", &head_hash[..8]);
+        println!("\nRewording the most recent commit: {}", &head_hash[..head_hash.len().min(8)]);
         println!("Original message: {}", head.message().unwrap_or(""));
         
         // Get the diff of the HEAD commit
@@ -359,7 +359,7 @@ async fn main() -> Result<()> {
         }
     } else if let Some(commit_hash) = args.fixup {
         // Handle fixup mode
-        println!("\nRewording commit {}...", &commit_hash[..8]);
+        println!("\nRewording commit {}...", &commit_hash[..commit_hash.len().min(8)]);
         println!("This will:");
         println!("- Generate a new commit message using Claude");
         println!("- Update the commit message directly");
