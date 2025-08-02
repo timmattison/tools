@@ -21,6 +21,9 @@ struct Args {
     
     #[arg(short, long, help = "Reword the most recent commit")]
     reword: bool,
+    
+    #[arg(long, help = "Generate a longer, more detailed commit message with context")]
+    long: bool,
 }
 
 fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
@@ -145,31 +148,61 @@ fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
     Ok(diff_text)
 }
 
-async fn generate_commit_message(diff: &str) -> Result<String> {
+async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String> {
     use std::process::{Command, Stdio};
     use std::io::Write;
     use tokio::time::{timeout, Duration};
     
-    let prompt = format!(
-        "Based on the following git diff, generate a clear and concise commit message. \
-        Follow conventional commit format (type: description). \
-        The message should explain what was changed and why, not just describe the diff. \
-        Keep it under 72 characters for the subject line. \
-        Return ONLY the commit message, no explanation or additional text.\n\n{}",
-        diff
-    );
-    
-    // If diff is very large, truncate it to avoid issues
-    let truncated_prompt = if prompt.len() > 10000 {
-        let truncated_diff = &diff[..8000];
+    let prompt = if long_format {
+        format!(
+            "Based on the following git diff, generate a detailed commit message with: \
+            1. A clear subject line under 72 characters following conventional commit format (type: description) \
+            2. A blank line \
+            3. A detailed body explaining: \
+               - What was changed and why \
+               - Any important context or implications \
+               - Any breaking changes or considerations \
+            The body should wrap at 72 characters per line. \
+            Return ONLY the commit message (subject and body), no explanation or additional text.\n\n{}",
+            diff
+        )
+    } else {
         format!(
             "Based on the following git diff, generate a clear and concise commit message. \
             Follow conventional commit format (type: description). \
             The message should explain what was changed and why, not just describe the diff. \
             Keep it under 72 characters for the subject line. \
-            Return ONLY the commit message, no explanation or additional text.\n\n{}\n\n[... diff truncated for length ...]",
-            truncated_diff
+            Return ONLY the commit message, no explanation or additional text.\n\n{}",
+            diff
         )
+    };
+    
+    // If diff is very large, truncate it to avoid issues
+    let truncated_prompt = if prompt.len() > 10000 {
+        let truncated_diff = &diff[..8000];
+        if long_format {
+            format!(
+                "Based on the following git diff, generate a detailed commit message with: \
+                1. A clear subject line under 72 characters following conventional commit format (type: description) \
+                2. A blank line \
+                3. A detailed body explaining: \
+                   - What was changed and why \
+                   - Any important context or implications \
+                   - Any breaking changes or considerations \
+                The body should wrap at 72 characters per line. \
+                Return ONLY the commit message (subject and body), no explanation or additional text.\n\n{}\n\n[... diff truncated for length ...]",
+                truncated_diff
+            )
+        } else {
+            format!(
+                "Based on the following git diff, generate a clear and concise commit message. \
+                Follow conventional commit format (type: description). \
+                The message should explain what was changed and why, not just describe the diff. \
+                Keep it under 72 characters for the subject line. \
+                Return ONLY the commit message, no explanation or additional text.\n\n{}\n\n[... diff truncated for length ...]",
+                truncated_diff
+            )
+        }
     } else {
         prompt
     };
@@ -343,7 +376,7 @@ async fn main() -> Result<()> {
         let commit_diff = get_commit_diff(&repo, &head_hash)?;
         
         println!("\nGenerating new commit message...");
-        let new_message = generate_commit_message(&commit_diff).await?;
+        let new_message = generate_commit_message(&commit_diff, args.long).await?;
         
         println!("\nGenerated commit message:");
         println!("{}", new_message);
@@ -369,7 +402,7 @@ async fn main() -> Result<()> {
         let commit_diff = get_commit_diff(&repo, &commit_hash)?;
         
         println!("Generating new commit message for commit {}...", commit_hash);
-        let new_message = generate_commit_message(&commit_diff).await?;
+        let new_message = generate_commit_message(&commit_diff, args.long).await?;
         
         println!("\nGenerated commit message:");
         println!("{}", new_message);
@@ -394,7 +427,7 @@ async fn main() -> Result<()> {
         }
         
         println!("Generating commit message...");
-        let commit_message = generate_commit_message(&staged_diff).await?;
+        let commit_message = generate_commit_message(&staged_diff, args.long).await?;
         
         println!("\nGenerated commit message:");
         println!("{}", commit_message);
