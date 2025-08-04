@@ -1,7 +1,7 @@
 # Fun tools written by Tim Mattison
 
-I started this repo forever ago (2014!) to hold some tools I needed at the time. Now I'm converting the tools to Golang
-for fun. Several tools have also been ported to Rust for improved performance and cross-platform compatibility.
+I started this repo forever ago (2014!) to hold some tools I needed at the time. Now I'm converting the tools to ~~Golang~~ Rust
+for fun.
 
 ## The tools
 
