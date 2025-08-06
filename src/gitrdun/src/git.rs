@@ -76,6 +76,18 @@ fn git_time_to_datetime(time: &Time) -> DateTime<Local> {
     Local.timestamp_opt(time.seconds(), 0).unwrap()
 }
 
+/// Get the current branch name of a repository
+pub fn get_current_branch(repo_path: &Path) -> String {
+    if let Ok(repo) = Repository::open(repo_path) {
+        if let Ok(head) = repo.head() {
+            if let Some(branch_name) = head.shorthand() {
+                return branch_name.to_string();
+            }
+        }
+    }
+    "HEAD".to_string() // Default fallback
+}
+
 /// Get the first line of a commit message
 fn get_first_line(message: &str) -> &str {
     message.lines().next().unwrap_or("")
