@@ -62,7 +62,7 @@ gitrdun --find-nested
 
 ```bash
 # Generate meta-summary across all repositories
-gitrdun --meta-ollama --ollama-model qwen3:30b-a3b
+gitrdun --meta-ollama --ollama-model gpt-oss
 
 # Save results to file
 gitrdun --output results.txt
@@ -85,7 +85,7 @@ gitrdun path1 path2 path3
 - `--find-nested`: Include nested Git repositories
 - `--ollama`: Generate AI summaries using Ollama
 - `--meta-ollama`: Generate cross-repository meta-summary
-- `--ollama-model <MODEL>`: Ollama model to use (default: "qwen3:30b-a3b")
+- `--ollama-model <MODEL>`: Ollama model to use (default: "gpt-oss")
 - `--ollama-url <URL>`: Ollama API URL (default: "http://localhost:11434")
 - `--output <FILE>`: Write results to file
 - `--summary-only`: Show only repository names and commit counts
