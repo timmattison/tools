@@ -468,7 +468,7 @@ impl Default for Args {
             all: false,
             ollama: false,
             meta_ollama: false,
-            ollama_model: "qwen3:30b-a3b".to_string(),
+            ollama_model: "gpt-oss".to_string(),
             ollama_url: "http://localhost:11434".to_string(),
             root: None,
             output: None,

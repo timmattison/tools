@@ -70,7 +70,7 @@ mod cli_tests {
         assert!(!args.all);
         assert!(!args.ollama);
         assert!(!args.meta_ollama);
-        assert_eq!(args.ollama_model, "qwen3:30b-a3b");
+        assert_eq!(args.ollama_model, "gpt-oss");
         assert_eq!(args.ollama_url, "http://localhost:11434");
         assert!(args.filter_user);
         assert!(!args.keep_thinking);

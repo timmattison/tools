@@ -54,7 +54,7 @@ pub struct Args {
     pub meta_ollama: bool,
 
     /// Ollama model to use for summaries
-    #[arg(long = "ollama-model", default_value = "qwen3:30b-a3b")]
+    #[arg(long = "ollama-model", default_value = "gpt-oss")]
     pub ollama_model: String,
 
     /// URL for Ollama API
