@@ -299,10 +299,22 @@ impl ProgressDisplay {
                     "✅ Scanning complete - preparing results...".to_string()
                 } else {
                     let current_path = self.current_path.lock().clone();
-                    let truncated_path = if current_path.len() > 60 {
-                        format!("...{}", &current_path[current_path.len().saturating_sub(57)..])
+                    // Extract repo name from path if it contains .git
+                    let display_path = if current_path.contains(".git") {
+                        // Get the parent directory of .git (the actual repo)
+                        if let Some(repo_end) = current_path.rfind(".git") {
+                            current_path[..repo_end].trim_end_matches('/').to_string()
+                        } else {
+                            current_path.clone()
+                        }
                     } else {
-                        current_path
+                        current_path.clone()
+                    };
+                    
+                    let truncated_path = if display_path.len() > 60 {
+                        format!("...{}", &display_path[display_path.len().saturating_sub(57)..])
+                    } else {
+                        display_path
                     };
                     format!("🔎 Current: {}", truncated_path)
                 };
@@ -399,15 +411,27 @@ impl ProgressDisplay {
         } else {
             let current_path = self.current_path.lock().clone();
             
+            // Extract repo name from path if it contains .git
+            let display_path = if current_path.contains(".git") {
+                // Get the parent directory of .git (the actual repo)
+                if let Some(repo_end) = current_path.rfind(".git") {
+                    current_path[..repo_end].trim_end_matches('/').to_string()
+                } else {
+                    current_path.clone()
+                }
+            } else {
+                current_path.clone()
+            };
+            
             print!(
                 "\r🔍 Scanned: {} dirs, Found: {} repos, Rate: {:.1} dirs/sec, Current: {}",
                 dirs_checked,
                 repos_found,
                 scan_rate,
-                if current_path.len() > 40 {
-                    format!("...{}", &current_path[current_path.len().saturating_sub(37)..])
+                if display_path.len() > 40 {
+                    format!("...{}", &display_path[display_path.len().saturating_sub(37)..])
                 } else {
-                    current_path
+                    display_path
                 }
             );
         }

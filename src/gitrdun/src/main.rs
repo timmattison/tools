@@ -291,12 +291,14 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
 
                 // Generate Ollama summary
                 let repo_name = repo_path.file_name().unwrap_or_default().to_string_lossy();
+                let branch_name = git::get_current_branch(repo_path);
+                let full_repo_info = format!("{} ({})", repo_path.display(), branch_name);
                 write_output(&format!("\n🤖 Generating summary for {} with Ollama ({})...\n", repo_name, args.ollama_model));
 
                 // Update progress display with current repo
                 if let Some(progress_ref) = &progress {
-                    progress_ref.update_ollama_repo(repo_name.to_string());
-                    progress_ref.update_ollama_status(format!("Generating summary for {}", repo_name));
+                    progress_ref.update_ollama_repo(full_repo_info.clone());
+                    progress_ref.update_ollama_status(format!("Generating summary for {}", full_repo_info));
                 }
 
                 let status_callback: Box<dyn Fn(&str) + Send + Sync> = if let Some(progress_ref) = &progress {
