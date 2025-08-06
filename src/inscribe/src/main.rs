@@ -331,6 +331,42 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
         anyhow::bail!("Claude CLI returned empty message");
     }
 
+    // Check if the message is "Execution error" or other error patterns which indicate Claude CLI failed
+    if message == "Execution error" 
+        || message.starts_with("Error:") 
+        || message.starts_with("error:") 
+        || message.contains("failed")
+        || message.contains("Failed") {
+        // Log the stderr output for debugging
+        let stderr_output = String::from_utf8_lossy(&output.stderr);
+        eprintln!("Error: Claude CLI execution failed");
+        eprintln!("Claude CLI output: {}", message);
+        if !stderr_output.is_empty() {
+            eprintln!("Claude CLI stderr: {}", stderr_output);
+        }
+        anyhow::bail!(
+            "Claude CLI returned an error message: '{}'\n\n\
+            This typically means:\n\
+            - The Claude CLI encountered an internal error\n\
+            - There may be an issue with your Claude.ai subscription or API limits\n\
+            - The prompt may have been too large or malformed\n\n\
+            Please try again or check your Claude Code installation with: claude --version",
+            message
+        );
+    }
+    
+    // Additional safety check: ensure the message looks like a valid commit message
+    // (not just an error or diagnostic output)
+    if message.len() < 3 || !message.chars().any(|c| c.is_alphabetic()) {
+        eprintln!("Warning: Generated message appears to be invalid: '{}'", message);
+        anyhow::bail!(
+            "Claude CLI returned an invalid commit message: '{}'\n\
+            The message is too short or doesn't contain any letters.\n\
+            Please try again.",
+            message
+        );
+    }
+
     spinner.finish_with_message("✓ Commit message generated");
     Ok(message)
 }
