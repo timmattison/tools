@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use git2::{DiffOptions, Oid, Repository};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
 use std::path::PathBuf;
 
@@ -51,6 +52,16 @@ fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
 
 fn check_claude_cli() -> Result<()> {
     use std::process::Command;
+    
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    spinner.set_message("Checking Claude CLI installation...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let home = env::var("HOME").unwrap_or_default();
     let claude_paths = vec![
@@ -75,8 +86,10 @@ fn check_claude_cli() -> Result<()> {
     match claude_check {
         Some(Ok(output)) => {
             if output.status.success() {
+                spinner.finish_with_message("✓ Claude CLI found");
                 return Ok(());
             } else {
+                spinner.finish_and_clear();
                 let error_msg = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!(
                     "Claude Code encountered an error: {}\n\n\
@@ -86,9 +99,11 @@ fn check_claude_cli() -> Result<()> {
             }
         }
         Some(Err(e)) => {
+            spinner.finish_and_clear();
             anyhow::bail!("Failed to run Claude CLI at {}: {}", used_path, e)
         }
         None => {
+            spinner.finish_and_clear();
             anyhow::bail!(
                 "Claude Code is not installed or not in expected locations.\n\n\
                 Checked locations:\n\
@@ -105,6 +120,16 @@ fn check_claude_cli() -> Result<()> {
 }
 
 fn get_diff(repo: &Repository, staged: bool) -> Result<String> {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    spinner.set_message("Analyzing git diff...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+    
     let mut diff_options = DiffOptions::new();
 
     let diff = if staged {
@@ -126,10 +151,21 @@ fn get_diff(repo: &Repository, staged: bool) -> Result<String> {
         true
     })?;
 
+    spinner.finish_with_message("✓ Diff analyzed");
     Ok(diff_text)
 }
 
 fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    spinner.set_message(format!("Analyzing commit {}...", &commit_hash[..commit_hash.len().min(8)]));
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+    
     let oid = Oid::from_str(commit_hash).context("Invalid commit hash")?;
 
     let commit = repo.find_commit(oid).context("Commit not found")?;
@@ -157,6 +193,7 @@ fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
         true
     })?;
 
+    spinner.finish_with_message("✓ Commit diff analyzed");
     Ok(diff_text)
 }
 
@@ -164,6 +201,16 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
     use std::io::Write;
     use std::process::{Command, Stdio};
     use tokio::time::{timeout, Duration};
+    
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .unwrap()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    spinner.set_message("Generating commit message with Claude...");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let prompt = if long_format {
         format!(
@@ -264,6 +311,7 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
         .context("Failed to wait for Claude CLI output")?;
 
     if !output.status.success() {
+        spinner.finish_and_clear();
         let error = String::from_utf8_lossy(&output.stderr);
         if error.contains("not authenticated") || error.contains("login") {
             anyhow::bail!(
@@ -272,15 +320,18 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
                 Then authenticate with your Claude.ai account."
             );
         }
+        spinner.finish_and_clear();
         anyhow::bail!("Claude CLI error: {}", error);
     }
 
     let message = String::from_utf8(output.stdout)?.trim().to_string();
 
     if message.is_empty() {
+        spinner.finish_and_clear();
         anyhow::bail!("Claude CLI returned empty message");
     }
 
+    spinner.finish_with_message("✓ Commit message generated");
     Ok(message)
 }
 
@@ -398,17 +449,25 @@ async fn main() -> Result<()> {
         // Get the diff of the HEAD commit
         let commit_diff = get_commit_diff(&repo, &head_hash)?;
 
-        println!("\nGenerating new commit message...");
         let new_message = generate_commit_message(&commit_diff, !args.short).await?;
 
         println!("\nGenerated commit message:");
         println!("{}", new_message);
 
         if !args.dry_run {
-            println!("\nAmending commit...");
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            );
+            spinner.set_message("Amending commit...");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
             // Use git2 to amend the commit
             amend_commit_with_git2(&repo, &new_message)?;
+            spinner.finish_with_message("✓ Commit amended successfully");
 
             println!(
                 "\nWARNING: The commit hash has changed. If you've already pushed this commit,"
@@ -429,27 +488,43 @@ async fn main() -> Result<()> {
         // Get the diff of the commit to reword
         let commit_diff = get_commit_diff(&repo, &commit_hash)?;
 
-        println!(
-            "Generating new commit message for commit {}...",
-            commit_hash
-        );
         let new_message = generate_commit_message(&commit_diff, !args.short).await?;
 
         println!("\nGenerated commit message:");
         println!("{}", new_message);
 
         if !args.dry_run {
-            println!("\nApplying new commit message...");
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            );
+            spinner.set_message("Applying new commit message...");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
             // Use git2 rebase to reword the commit
             reword_commit_with_rebase(&repo, &commit_hash, &new_message)?;
+            spinner.finish_with_message("✓ Commit message updated");
         }
     } else {
         // Normal commit mode
         if args.all {
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            );
+            spinner.set_message("Staging all changes...");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+            
             let mut index = repo.index()?;
             index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
             index.write()?;
+            spinner.finish_with_message("✓ All changes staged");
         }
 
         let staged_diff = get_diff(&repo, true)?;
@@ -457,14 +532,21 @@ async fn main() -> Result<()> {
             anyhow::bail!("No staged changes found. Use -a to stage all changes.");
         }
 
-        println!("Generating commit message...");
         let commit_message = generate_commit_message(&staged_diff, !args.short).await?;
 
         println!("\nGenerated commit message:");
         println!("{}", commit_message);
 
         if !args.dry_run {
-            println!("\nCreating commit...");
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_style(
+                ProgressStyle::default_spinner()
+                    .template("{spinner:.cyan} {msg}")
+                    .unwrap()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+            );
+            spinner.set_message("Creating commit...");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
 
             let signature = repo.signature()?;
             let tree_oid = repo.index()?.write_tree()?;
@@ -480,7 +562,7 @@ async fn main() -> Result<()> {
                 &[&parent_commit],
             )?;
 
-            println!("Commit created successfully!");
+            spinner.finish_with_message("✓ Commit created successfully!");
         }
     }
 
