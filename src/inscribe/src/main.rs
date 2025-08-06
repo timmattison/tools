@@ -407,9 +407,41 @@ fn reword_commit_with_rebase(
     let target_oid = Oid::from_str(commit_hash)?;
     let target_commit = repo.find_commit(target_oid)?;
 
-    // Find the parent of the target commit
+    // Handle root commit specially - use amend instead of rebase
     if target_commit.parent_count() == 0 {
-        anyhow::bail!("Cannot reword root commit with rebase");
+        // For root commits, we need to check if this is HEAD
+        let head = repo.head()?.peel_to_commit()?;
+        if head.id() == target_oid {
+            // If it's HEAD, we can use the regular amend function
+            amend_commit_with_git2(repo, new_message)?;
+        } else {
+            // If it's not HEAD but still a root commit, we need to handle it differently
+            // Create a new root commit with the same tree but different message
+            let author = target_commit.author();
+            let committer = repo.signature()?;
+            let tree = target_commit.tree()?;
+            
+            // Create the new root commit
+            let _new_oid = repo.commit(
+                None,             // don't update any refs yet
+                &author,          // use original author
+                &committer,       // use current committer
+                new_message,      // new message
+                &tree,            // same tree
+                &[],              // no parents (root commit)
+            )?;
+            
+            // Now we need to update the branch to point to the new commit
+            // This is complex because we need to rebase all subsequent commits
+            anyhow::bail!(
+                "Rewording a root commit that is not HEAD requires rebasing the entire history. \
+                Please checkout the root commit first with 'git checkout {}' then use --reword",
+                &commit_hash[..commit_hash.len().min(8)]
+            );
+        }
+        
+        println!("Root commit successfully reworded!");
+        return Ok(());
     }
 
     let parent_commit = target_commit.parent(0)?;
