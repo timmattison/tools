@@ -14,6 +14,9 @@ const MODEL_CONTEXT_SIZES: &[(&str, usize)] = &[
     ("llama2:13b", 4096),
     ("mistral:7b", 8192),
     ("qwen3:30b-a3b", 32768),
+    ("gpt-oss", 131072),
+    ("gpt-oss:20b", 131072),
+    ("gpt-oss:120b", 131072),
 ];
 
 /// Default context size if model not found
