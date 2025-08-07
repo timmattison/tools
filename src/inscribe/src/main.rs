@@ -324,7 +324,23 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
         anyhow::bail!("Claude CLI error: {}", error);
     }
 
-    let message = String::from_utf8(output.stdout)?.trim().to_string();
+    let mut message = String::from_utf8(output.stdout)?.trim().to_string();
+    
+    // Strip markdown code block formatting if present
+    // Claude sometimes wraps responses in ```
+    if message.starts_with("```") {
+        // Remove opening backticks (and optional language identifier)
+        if let Some(idx) = message.find('\n') {
+            message = message[idx + 1..].to_string();
+        } else {
+            message = message[3..].to_string();
+        }
+    }
+    
+    // Remove closing backticks if present
+    if message.ends_with("```") {
+        message = message[..message.len() - 3].trim().to_string();
+    }
 
     if message.is_empty() {
         spinner.finish_and_clear();
