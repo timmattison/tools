@@ -301,12 +301,12 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
             .context("Failed to write prompt to Claude CLI stdin")?;
     }
 
-    // Wait for output with timeout
+    // Wait for output with timeout (increased for large commits)
     let output = tokio::task::spawn_blocking(move || child.wait_with_output());
 
-    let output = timeout(Duration::from_secs(30), output)
+    let output = timeout(Duration::from_secs(120), output)
         .await
-        .context("Claude CLI timed out after 30 seconds")?
+        .context("Claude CLI timed out after 120 seconds. This may happen with large commits or complex diffs. Try using the --short flag for a more concise message.")?
         .context("Failed to join Claude CLI task")?
         .context("Failed to wait for Claude CLI output")?;
 
