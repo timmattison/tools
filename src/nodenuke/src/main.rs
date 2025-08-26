@@ -1,9 +1,8 @@
 use std::env;
 use std::fs;
-use std::path::Path;
 use std::process::exit;
-use walkdir::WalkDir;
 use clap::Parser;
+use repowalker::{find_git_repo, RepoWalker};
 
 #[derive(Parser)]
 #[command(name = "nodenuke")]
@@ -11,23 +10,6 @@ use clap::Parser;
 struct Cli {
     #[arg(long, help = "Don't go to the git repository root before running")]
     no_root: bool,
-}
-
-fn find_git_repo() -> Option<String> {
-    let mut current_dir = env::current_dir().ok()?;
-    
-    loop {
-        let git_dir = current_dir.join(".git");
-        if git_dir.exists() {
-            return Some(current_dir.to_string_lossy().to_string());
-        }
-        
-        if !current_dir.pop() {
-            break;
-        }
-    }
-    
-    None
 }
 
 fn main() {
@@ -44,8 +26,8 @@ fn main() {
     } else {
         match find_git_repo() {
             Some(repo_root) => {
-                println!("Found git repository, changing to root: {}", repo_root);
-                Path::new(&repo_root).to_path_buf()
+                println!("Found git repository, changing to root: {}", repo_root.display());
+                repo_root
             }
             None => {
                 env::current_dir().unwrap_or_else(|e| {
@@ -60,19 +42,16 @@ fn main() {
     println!("Will delete directories: {:?}", target_dirs);
     println!("Will delete files: {:?}", target_files);
     
-    for entry in WalkDir::new(&start_dir) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                eprintln!("Error accessing {}: {}", e.path().unwrap_or(Path::new("unknown")).display(), e);
-                continue;
-            }
-        };
-        
+    let walker = RepoWalker::new(start_dir.clone())
+        .respect_gitignore(true)
+        .skip_node_modules(false) // We want to find and delete them
+        .skip_worktrees(true);
+    
+    for entry in walker.walk_with_ignore() {
         let entry_name = entry.file_name().to_string_lossy();
         
         // Check for target directories
-        if entry.file_type().is_dir() {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
             if target_dirs.contains(&entry_name.as_ref()) {
                 println!("Removing directory: {}", entry.path().display());
                 if let Err(e) = fs::remove_dir_all(entry.path()) {
@@ -82,7 +61,7 @@ fn main() {
         }
         
         // Check for target files
-        if entry.file_type().is_file() {
+        if entry.file_type().is_some_and(|ft| ft.is_file()) {
             if target_files.contains(&entry_name.as_ref()) {
                 println!("Removing file: {}", entry.path().display());
                 if let Err(e) = fs::remove_file(entry.path()) {

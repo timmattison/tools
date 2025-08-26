@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, exit};
 use walkdir::WalkDir;
 use clap::Parser;
+use repowalker::{find_git_repo, RepoWalker};
 
 #[derive(Parser)]
 #[command(name = "rr")]
@@ -15,22 +16,6 @@ struct Cli {
     dry_run: bool,
 }
 
-fn find_git_repo() -> Option<String> {
-    let mut current_dir = env::current_dir().ok()?;
-    
-    loop {
-        let git_dir = current_dir.join(".git");
-        if git_dir.exists() {
-            return Some(current_dir.to_string_lossy().to_string());
-        }
-        
-        if !current_dir.pop() {
-            break;
-        }
-    }
-    
-    None
-}
 
 fn run_cargo_clean(dir: &Path, dry_run: bool) -> Result<(), std::io::Error> {
     if dry_run {
@@ -99,8 +84,8 @@ fn main() {
     } else {
         match find_git_repo() {
             Some(repo_root) => {
-                println!("Found git repository, starting from root: {}", repo_root);
-                Path::new(&repo_root).to_path_buf()
+                println!("Found git repository, starting from root: {}", repo_root.display());
+                repo_root
             }
             None => {
                 env::current_dir().unwrap_or_else(|e| {
@@ -122,16 +107,13 @@ fn main() {
     let mut projects_found = 0;
     let mut total_failed = 0;
     
-    for entry in WalkDir::new(&start_dir) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                eprintln!("Warning: Error accessing path: {}", e);
-                continue;
-            }
-        };
-        
-        if entry.file_type().is_dir() {
+    let walker = RepoWalker::new(start_dir.clone())
+        .respect_gitignore(true)
+        .skip_node_modules(true)
+        .skip_worktrees(true);
+    
+    for entry in walker.walk_with_ignore() {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
             let cargo_toml_path = entry.path().join("Cargo.toml");
             if cargo_toml_path.exists() {
                 projects_found += 1;

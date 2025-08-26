@@ -8,5 +8,6 @@ name = "rr"
 path = "src/main.rs"
 
 [dependencies]
+repowalker = { path = "../repowalker" }
 walkdir = "2.5"
 clap = { version = "4.5", features = ["derive"] }

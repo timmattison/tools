@@ -5,6 +5,7 @@ use human_bytes::human_bytes;
 use std::collections::HashSet;
 use std::path::{PathBuf};
 use thiserror::Error;
+use repowalker::find_git_repo as find_git_repo_repowalker;
 
 /// A tool to find large objects in Git repositories.
 #[derive(Parser)]
@@ -35,28 +36,10 @@ enum GloError {
 
 /// Find the Git repository from the current directory by searching up the directory tree.
 fn find_git_repo() -> Result<PathBuf> {
-    let mut current_dir = std::env::current_dir()?;
-    let max_iterations = 50;
-    let mut iteration_count = 0;
-
-    loop {
-        let git_dir = current_dir.join(".git");
-        if git_dir.exists() && git_dir.is_dir() {
-            return Ok(current_dir);
-        }
-
-        // Go up one level
-        if !current_dir.pop() {
-            break;
-        }
-
-        iteration_count += 1;
-        if iteration_count >= max_iterations {
-            break;
-        }
+    match find_git_repo_repowalker() {
+        Some(repo_path) => Ok(repo_path),
+        None => Err(GloError::RepositoryNotFound.into()),
     }
-
-    Err(GloError::RepositoryNotFound.into())
 }
 
 /// Get all blob objects from a Git repository
