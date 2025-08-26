@@ -1,26 +1,7 @@
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
-use walkdir::{DirEntry, WalkDir};
 use clap::Parser;
-
-fn find_git_repo() -> Option<String> {
-    let mut current_dir = env::current_dir().ok()?;
-    
-    loop {
-        let git_dir = current_dir.join(".git");
-        if git_dir.exists() {
-            return Some(current_dir.to_string_lossy().to_string());
-        }
-        
-        if !current_dir.pop() {
-            break;
-        }
-    }
-    
-    None
-}
+use repowalker::{find_git_repo, RepoWalker};
 
 fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io::Error> {
     let output = Command::new(command[0])
@@ -38,38 +19,6 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
     
     println!("Ran {} in {}", command.join(" "), dir.display());
     Ok(())
-}
-
-fn is_git_worktree(dir: &Path) -> bool {
-    let git_path = dir.join(".git");
-    
-    // If .git is a file (not a directory), it's likely a worktree
-    if git_path.is_file() {
-        if let Ok(content) = fs::read_to_string(&git_path) {
-            // Git worktrees have .git files that contain "gitdir: <path>"
-            return content.trim().starts_with("gitdir:");
-        }
-    }
-    
-    false
-}
-
-fn should_skip_entry(entry: &DirEntry, repo_root: &Path) -> bool {
-    // Skip any path that has node_modules as a component
-    if entry.file_name() == "node_modules" {
-        return true;
-    }
-    
-    // Skip git worktree directories, but only if they're not the repo root we're running from
-    if entry.file_type().is_dir() && is_git_worktree(entry.path()) {
-        // Allow the root directory we're running from, even if it's a worktree
-        if entry.path() != repo_root {
-            println!("Skipping git worktree directory: {}", entry.path().display());
-            return true;
-        }
-    }
-    
-    false
 }
 
 #[derive(Parser, Debug)]
@@ -91,28 +40,18 @@ fn main() {
         }
     };
     
-    let repo_path = Path::new(&repo_root);
-    
-    println!("Updating Go dependencies in repository: {}", repo_root);
+    println!("Updating Go dependencies in repository: {}", repo_root.display());
     println!();
     
     // Collect all Go project directories
     let mut go_dirs: Vec<PathBuf> = Vec::new();
     
     // Walk through all directories and find Go projects
-    for entry in WalkDir::new(repo_path)
-        .into_iter()
-        .filter_entry(|e| !should_skip_entry(e, repo_path))
-    {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                eprintln!("Warning: Error accessing path: {}", e);
-                continue;
-            }
-        };
-        
-        if entry.file_type().is_dir() {
+    let walker = RepoWalker::new(repo_root.clone())
+        .respect_gitignore(true);
+    
+    for entry in walker.walk_with_ignore() {
+        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
             let dir_path = entry.path();
             
             if dir_path.join("go.mod").exists() {
