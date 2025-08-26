@@ -1,24 +1,6 @@
-use std::env;
 use std::path::Path;
 use std::process::{Command, exit};
-use walkdir::WalkDir;
-
-fn find_git_repo() -> Option<String> {
-    let mut current_dir = env::current_dir().ok()?;
-    
-    loop {
-        let git_dir = current_dir.join(".git");
-        if git_dir.exists() {
-            return Some(current_dir.to_string_lossy().to_string());
-        }
-        
-        if !current_dir.pop() {
-            break;
-        }
-    }
-    
-    None
-}
+use repowalker::{find_git_repo, RepoWalker};
 
 fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io::Error> {
     let output = Command::new(command[0])
@@ -47,18 +29,13 @@ fn main() {
         }
     };
     
-    let repo_path = Path::new(&repo_root);
+    let walker = RepoWalker::new(repo_root.clone())
+        .respect_gitignore(true)
+        .skip_node_modules(true)
+        .skip_worktrees(true);
     
-    for entry in WalkDir::new(repo_path) {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(e) => {
-                eprintln!("Warning: Error accessing path: {}", e);
-                continue;
-            }
-        };
-        
-        if entry.file_type().is_dir() {
+    for entry in walker.walk_with_ignore() {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
             let go_mod_path = entry.path().join("go.mod");
             if go_mod_path.exists() {
                 if let Err(e) = run_command_in_directory(entry.path(), &["go", "mod", "tidy"]) {

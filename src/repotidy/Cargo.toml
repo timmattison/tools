@@ -8,4 +8,4 @@ name = "repotidy"
 path = "src/main.rs"
 
 [dependencies]
-walkdir = "2.5"
+repowalker = { path = "../repowalker" }

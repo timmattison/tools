@@ -12,47 +12,14 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
+use repowalker::find_git_repo as find_git_repo_repowalker;
 
 /// Find the base directory of the git repository starting from current directory
 fn get_repo_base() -> Result<String> {
-    // Get current working directory
-    let mut current_path = std::env::current_dir()?;
-    
-    // Safety measures to prevent infinite loops
-    let max_iterations = 50;
-    let mut iteration_count = 0;
-    let mut last_path = PathBuf::new();
-    
-    while iteration_count < max_iterations {
-        // Check if .git directory exists in current path
-        let git_dir = current_path.join(".git");
-        if git_dir.exists() && git_dir.is_dir() {
-            return Ok(git_dir.to_string_lossy().to_string());
-        }
-        
-        // Store the current path before going up
-        let temp_path = current_path.clone();
-        
-        // Go up one directory level
-        if !current_path.pop() {
-            // We've reached the root
-            break;
-        }
-        
-        // Check if we're in the same place as before (another way to detect root)
-        if current_path == last_path {
-            break;
-        }
-        
-        // Update last path
-        last_path = temp_path;
-        
-        // Increment iteration counter
-        iteration_count += 1;
+    match find_git_repo_repowalker() {
+        Some(repo_path) => Ok(repo_path.join(".git").to_string_lossy().to_string()),
+        None => Err(anyhow::anyhow!("No git repository found")),
     }
-    
-    // If we got here, we didn't find a git directory
-    Err(anyhow::anyhow!("No git repository found"))
 }
 
 /// Command line arguments

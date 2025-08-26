@@ -11,3 +11,4 @@ clap = { version = "4.5.42", features = ["derive"] }
 anyhow = "1.0.98"
 human_bytes = "0.4.3"
 thiserror = "2.0.12"
+repowalker = { path = "../repowalker" }
