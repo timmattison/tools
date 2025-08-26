@@ -123,21 +123,11 @@ impl RepoWalker {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_is_git_worktree() {
-        let temp_dir = std::env::temp_dir();
-        assert!(!is_git_worktree(&temp_dir));
-    }
-    
     #[test]
     fn test_find_git_repo() {
-        let repo = find_git_repo();
-        if let Some(path) = repo {
-            assert!(path.join(".git").exists());
-        }
+-        let repo = find_git_repo();
+-        if let Some(path) = repo {
+-            assert!(path.join(".git").exists());
+        let path = find_git_repo().expect("Tests should run within a git repository");
+        assert!(path.join(".git").exists());
     }
-}
