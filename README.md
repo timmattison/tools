@@ -3,6 +3,17 @@
 I started this repo forever ago (2014!) to hold some tools I needed at the time. Now I'm converting the tools to ~~Golang~~ Rust
 for fun.
 
+## Shared Libraries
+
+### repowalker
+A shared Rust library for walking repository directories with intelligent filtering and gitignore support. Used by `goup`, `polish`, and `nodeup` to provide consistent repository traversal with support for:
+- Git repository and worktree detection
+- Respecting `.gitignore` files and other ignore patterns
+- Skipping `node_modules` directories
+- Configurable filtering options
+
+See [src/repowalker/README.md](src/repowalker/README.md) for detailed documentation.
+
 ## The tools
 
 - dirhash
