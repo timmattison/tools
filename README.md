@@ -170,11 +170,16 @@ for fun.
     - Calculates and displays the total size of a git repository in human-readable format. Shows the total
       byte count with thousands separators based on your locale.
     - To install: `cargo install --git https://github.com/timmattison/tools reposize`
-- repoup
-    - Updates dependencies across Go, Node.js, and Rust projects in a git repository. Automatically detects
-      project types and uses the appropriate package manager (npm/pnpm/yarn for Node.js). Continues
-      processing even if individual updates fail.
-    - To install: `cargo install --git https://github.com/timmattison/tools repoup`
+- goup
+    - Updates Go dependencies in a git repository. Automatically finds all go.mod files and updates
+      dependencies. Supports `--update` flag to use `go get -u all` for latest versions, otherwise
+      uses `go mod tidy` for cleanup.
+    - To install: `cargo install --git https://github.com/timmattison/tools goup`
+- polish
+    - Polishes Rust dependencies in a git repository. Automatically finds all Cargo.toml files and
+      updates dependencies. Supports `--latest` flag to use cargo-edit's `cargo upgrade` for latest
+      versions (requires cargo-edit installed), otherwise uses standard `cargo update`.
+    - To install: `cargo install --git https://github.com/timmattison/tools polish`
 - nodenuke
     - Removes node_modules directories and lock files (pnpm-lock.yaml, package-lock.json) throughout a
       repository. Supports `--no-root` flag to start from current directory instead of git root.

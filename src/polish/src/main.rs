@@ -40,21 +40,6 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
     Ok(())
 }
 
-fn detect_package_manager(dir: &Path) -> Option<&'static str> {
-    if dir.join("pnpm-lock.yaml").exists() {
-        Some("pnpm")
-    } else if dir.join("package-lock.json").exists() {
-        Some("npm")
-    } else if dir.join("yarn.lock").exists() {
-        Some("yarn")
-    } else if dir.join("package.json").exists() {
-        // Default to pnpm if no lock file found
-        Some("pnpm")
-    } else {
-        None
-    }
-}
-
 fn is_git_worktree(dir: &Path) -> bool {
     let git_path = dir.join(".git");
     
@@ -87,20 +72,20 @@ fn should_skip_entry(entry: &DirEntry, repo_root: &Path) -> bool {
     false
 }
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Use latest versions for Rust crates (requires cargo-edit)
-    #[arg(long, short = 'l')]
-    latest: bool,
-}
-
 fn check_cargo_edit_installed() -> bool {
     Command::new("cargo")
         .args(&["upgrade", "--help"])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
+}
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Polish Rust dependencies - update crates in a repository", long_about = None)]
+struct Args {
+    /// Use latest versions for Rust crates (requires cargo-edit)
+    #[arg(long, short = 'l')]
+    latest: bool,
 }
 
 fn main() {
@@ -116,15 +101,13 @@ fn main() {
     
     let repo_path = Path::new(&repo_root);
     
-    println!("Updating dependencies in repository: {}", repo_root);
-    println!("This will update Rust, Node.js, and Go projects...\n");
+    println!("Polishing Rust dependencies in repository: {}", repo_root);
+    println!();
     
-    // Collect all project directories by type
+    // Collect all Rust project directories
     let mut rust_dirs: Vec<PathBuf> = Vec::new();
-    let mut node_dirs: Vec<(PathBuf, &str)> = Vec::new();
-    let mut go_dirs: Vec<PathBuf> = Vec::new();
     
-    // Collection phase - walk through all directories and categorize
+    // Walk through all directories and find Rust projects
     for entry in WalkDir::new(repo_path)
         .into_iter()
         .filter_entry(|e| !should_skip_entry(e, repo_path))
@@ -140,37 +123,31 @@ fn main() {
         if entry.file_type().is_dir() {
             let dir_path = entry.path();
             
-            // Categorize directories by project type
             if dir_path.join("Cargo.toml").exists() {
                 rust_dirs.push(dir_path.to_path_buf());
-            }
-            
-            if let Some(pm) = detect_package_manager(dir_path) {
-                node_dirs.push((dir_path.to_path_buf(), pm));
-            }
-            
-            if dir_path.join("go.mod").exists() {
-                go_dirs.push(dir_path.to_path_buf());
             }
         }
     }
     
-    // Processing phase - handle each language type globally
+    // Process all Rust projects
+    if rust_dirs.is_empty() {
+        println!("No Rust projects found in repository");
+        return;
+    }
     
-    // Process all Rust projects first
-    if args.latest && !rust_dirs.is_empty() {
-        // Check if cargo-edit is installed
+    // Check if cargo-edit is installed when --latest flag is used
+    if args.latest {
         if check_cargo_edit_installed() {
-            println!("\n✓ cargo-edit is installed, will use cargo upgrade for latest versions");
+            println!("✓ cargo-edit is installed, will use cargo upgrade for latest versions");
         } else {
-            eprintln!("\n⚠️  Warning: --latest flag was specified but cargo-edit is not installed.");
+            eprintln!("⚠️  Warning: --latest flag was specified but cargo-edit is not installed.");
             eprintln!("   To install it, run: cargo install cargo-edit");
             eprintln!("   Falling back to standard cargo update (respects version constraints)\n");
         }
     }
     
     for dir_path in rust_dirs {
-        println!("\n[Rust] Found Cargo.toml in {}", dir_path.display());
+        println!("[Rust] Found Cargo.toml in {}", dir_path.display());
         
         if args.latest && check_cargo_edit_installed() {
             // First run cargo upgrade to update Cargo.toml to latest versions
@@ -194,26 +171,5 @@ fn main() {
         }
     }
     
-    // Process all Node.js projects second
-    for (dir_path, pm) in node_dirs {
-        println!("\n[Node] Found package.json in {} (using {})", dir_path.display(), pm);
-        let cmd = match pm {
-            "pnpm" => vec!["pnpm", "update"],
-            "yarn" => vec!["yarn", "upgrade"],
-            _ => vec!["npm", "update"],
-        };
-        if let Err(e) = run_command_in_directory(&dir_path, &cmd) {
-            eprintln!("Warning: {}", e);
-        }
-    }
-    
-    // Process all Go projects last
-    for dir_path in go_dirs {
-        println!("\n[Go] Found go.mod in {}", dir_path.display());
-        if let Err(e) = run_command_in_directory(&dir_path, &["go", "get", "-u", "all"]) {
-            eprintln!("Warning: {}", e);
-        }
-    }
-    
-    println!("\n✓ Dependency update complete!");
+    println!("\n✓ Rust dependency polishing complete!");
 }
