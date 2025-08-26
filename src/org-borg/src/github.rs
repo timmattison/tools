@@ -68,7 +68,7 @@ impl GitHubClient {
         );
         headers.insert(
             header::USER_AGENT,
-            HeaderValue::from_static("github-org-clone"),
+            HeaderValue::from_static("org-borg"),
         );
         headers.insert(
             header::ACCEPT,

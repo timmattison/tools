@@ -10,8 +10,8 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "github-org-clone",
-    about = "Clone and manage GitHub repositories by organization",
+    name = "org-borg",
+    about = "Assimilate GitHub organization repositories - resistance is futile",
     version
 )]
 struct Cli {

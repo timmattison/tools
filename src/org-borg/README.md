@@ -1,4 +1,6 @@
-# GitHub Organization Clone Tool
+# Org-Borg
+
+Assimilate GitHub organization repositories. Resistance is futile.
 
 A Rust CLI tool for managing GitHub repositories across organizations with support for bulk cloning, archiving, and organization management.
 
@@ -19,7 +21,7 @@ A Rust CLI tool for managing GitHub repositories across organizations with suppo
 cargo build --release
 ```
 
-The binary will be available at `target/release/github-org-clone`
+The binary will be available at `target/release/org-borg`
 
 ## Setup
 
@@ -40,7 +42,7 @@ The tool supports multiple authentication methods, tried in this order:
 
 3. **Command Line Flag** - Pass token directly:
    ```bash
-   github-org-clone --token "your_token_here" <command>
+   org-borg --token "your_token_here" <command>
    ```
 
 ### Creating a Personal Access Token
@@ -55,17 +57,17 @@ If you prefer using a personal access token instead of `gh` CLI:
 
 ### Show Current User Information
 ```bash
-github-org-clone whoami
+org-borg whoami
 ```
 
 ### List All Organizations
 ```bash
-github-org-clone list-orgs
+org-borg list-orgs
 ```
 
 ### Clone All Repos from a Specific Organization
 ```bash
-github-org-clone clone-org <ORG_NAME> [OPTIONS]
+org-borg clone-org <ORG_NAME> [OPTIONS]
 
 Options:
   -o, --output <PATH>   Output directory (default: ./repos)
@@ -75,12 +77,12 @@ Options:
 
 Example:
 ```bash
-github-org-clone clone-org my-org -o ~/github-repos --ssh
+org-borg clone-org my-org -o ~/github-repos --ssh
 ```
 
 ### Clone All Repos from All Organizations
 ```bash
-github-org-clone clone-all [OPTIONS]
+org-borg clone-all [OPTIONS]
 
 Options:
   -o, --output <PATH>   Output directory (default: ./repos)
@@ -90,7 +92,7 @@ Options:
 
 Example:
 ```bash
-github-org-clone clone-all -o ~/all-repos --archive
+org-borg clone-all -o ~/all-repos --archive
 ```
 
 ## Directory Structure
