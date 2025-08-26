@@ -210,6 +210,12 @@ for fun.
       parallel deletion with 10 concurrent operations, automatic pagination handling with the `--all` flag, 
       and progress tracking. Includes safety confirmation prompts and retry logic for reliability.
     - To install: `cargo install --git https://github.com/timmattison/tools r2-bucket-cleaner`
+- org-borg
+    - Assimilate GitHub organization repositories - resistance is futile. Clone and manage repositories from 
+      GitHub organizations with bulk operations. Features automatic authentication via GitHub CLI (`gh`), 
+      concurrent cloning, smart updates for existing repos, and optional archiving. Supports cloning from 
+      specific organizations or all accessible organizations at once.
+    - To install: `cargo install --git https://github.com/timmattison/tools org-borg`
 
 ## dirhash
 
