@@ -6,6 +6,6 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
-walkdir = "2"
 anyhow = "1.0"
 rayon = "1.10"
+ignore = "0.4"

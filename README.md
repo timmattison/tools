@@ -8,7 +8,8 @@ for fun.
 - dirhash
     - Gets a SHA256 hash of a directory tree. This is useful for comparing two directories to see if they are
       identical. This hash will only be the same if the directories have the same file names and the same file contents.
-      However, we ignore the directory names and locations of files in the directories. See below for an example.
+      However, we ignore the directory names and locations of files in the directories. Respects .gitignore and other
+      ignore files by default. See below for an example.
     - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
     - Copies a file and shows the progress in the console with a beautiful progress bar using Unicode block characters.
@@ -207,6 +208,29 @@ for fun.
 
 ## dirhash
 
+Calculate a SHA256 hash of a directory tree that's deterministic based on file contents. Respects .gitignore and other ignore files by default.
+
+### Usage
+
+```
+dirhash [OPTIONS] <DIRECTORY>
+```
+
+### Options
+
+- `--no-ignore`: Don't respect ignore files (.gitignore, .ignore, etc.)
+- `--no-ignore-vcs`: Don't respect .gitignore files specifically
+- `--hidden`: Include hidden files and directories
+
+### Features
+
+- **Respects ignore files**: Automatically excludes files listed in .gitignore, .ignore, and other standard ignore files
+- **Clean output**: Outputs only the final hash to stdout for easy scripting
+- **Informative messages**: Shows count of ignored files on stderr with instructions on how to include them
+- **Fast**: Uses parallel processing for hashing multiple files
+
+### How it works
+
 If you have two directories with the following contents:
 
 ```
@@ -230,6 +254,30 @@ dir2/
 
 As long as the contents of `file1.txt`, `file2.txt`, `file3.txt`, and `file4.txt` are the same in both directories, the
 hashes will be the same. The subdirectory names and locations are ignored.
+
+### Examples
+
+Basic usage (respects .gitignore):
+```bash
+dirhash /path/to/directory
+```
+
+Include all files (ignore .gitignore):
+```bash
+dirhash --no-ignore-vcs /path/to/directory
+```
+
+Include hidden files and directories:
+```bash
+dirhash --hidden /path/to/directory
+```
+
+Compare two directories:
+```bash
+if [ "$(dirhash dir1)" = "$(dirhash dir2)" ]; then
+  echo "Directories have identical contents"
+fi
+```
 
 ## prcp
 
