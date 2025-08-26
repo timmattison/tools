@@ -1,7 +1,8 @@
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::process::{Command, exit};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -36,6 +37,53 @@ fn find_git_repo() -> Option<String> {
     }
     
     None
+}
+
+fn detect_package_manager(dir: &Path) -> Option<&'static str> {
+    if dir.join("pnpm-lock.yaml").exists() {
+        Some("pnpm")
+    } else if dir.join("package-lock.json").exists() {
+        Some("npm")
+    } else if dir.join("yarn.lock").exists() {
+        Some("yarn")
+    } else if dir.join("package.json").exists() {
+        // Default to pnpm if no lock file found
+        Some("pnpm")
+    } else {
+        None
+    }
+}
+
+fn is_git_worktree(dir: &Path) -> bool {
+    let git_path = dir.join(".git");
+    
+    // If .git is a file (not a directory), it's likely a worktree
+    if git_path.is_file() {
+        if let Ok(content) = fs::read_to_string(&git_path) {
+            // Git worktrees have .git files that contain "gitdir: <path>"
+            return content.trim().starts_with("gitdir:");
+        }
+    }
+    
+    false
+}
+
+fn should_skip_entry(entry: &DirEntry, start_dir: &Path) -> bool {
+    // Skip any path that has node_modules as a component
+    if entry.file_name() == "node_modules" {
+        return true;
+    }
+    
+    // Skip git worktree directories, but only if they're not the directory we're running from
+    if entry.file_type().is_dir() && is_git_worktree(entry.path()) {
+        // Allow the directory we're running from, even if it's a worktree
+        if entry.path() != start_dir {
+            println!("Skipping git worktree directory: {}", entry.path().display());
+            return true;
+        }
+    }
+    
+    false
 }
 
 fn format_command(args: &[&str]) -> String {
@@ -89,64 +137,56 @@ fn main() {
         println!("Using --latest flag to update to latest versions");
     }
     
-    for entry in WalkDir::new(&start_dir) {
+    for entry in WalkDir::new(&start_dir)
+        .into_iter()
+        .filter_entry(|e| !should_skip_entry(e, &start_dir))
+    {
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                eprintln!("Error accessing {}: {}", e.path().unwrap_or(Path::new("unknown")).display(), e);
+                eprintln!("Warning: Error accessing path: {}", e);
                 continue;
             }
         };
         
-        // Skip node_modules directories
-        if entry.file_type().is_dir() && entry.file_name() == "node_modules" {
-            continue;
-        }
-        
-        // Check for package.json
-        if entry.file_type().is_file() && entry.file_name() == "package.json" {
-            let dir_path = entry.path().parent().unwrap();
+        // Check for directories with package.json
+        if entry.file_type().is_dir() {
+            let dir_path = entry.path();
             
-            let cmd_args = if cli.npm {
-                // Force npm
-                if cli.latest {
-                    vec!["npm", "update", "--latest"]
-                } else {
-                    vec!["npm", "update"]
-                }
+            // Determine package manager to use
+            let detected_pm = detect_package_manager(dir_path);
+            if detected_pm.is_none() {
+                continue; // No package.json in this directory
+            }
+            
+            let pm = if cli.npm {
+                "npm"
             } else if cli.pnpm {
-                // Force pnpm
-                if cli.latest {
-                    vec!["pnpm", "up", "-L"]
-                } else {
-                    vec!["pnpm", "up"]
-                }
+                "pnpm"
             } else if root_has_pnpm_lock {
                 // Root has pnpm-lock.yaml, prefer pnpm
-                if cli.latest {
-                    vec!["pnpm", "up", "-L"]
-                } else {
-                    vec!["pnpm", "up"]
-                }
+                "pnpm"
             } else {
-                // Check for lock files to determine which package manager to use
-                let pnpm_lock_path = dir_path.join("pnpm-lock.yaml");
-                let npm_lock_path = dir_path.join("package-lock.json");
-                
-                if pnpm_lock_path.exists() {
+                // Use the detected package manager
+                detected_pm.unwrap()
+            };
+            
+            let cmd_args = match pm {
+                "pnpm" => {
                     if cli.latest {
                         vec!["pnpm", "up", "-L"]
                     } else {
                         vec!["pnpm", "up"]
                     }
-                } else if npm_lock_path.exists() {
+                }
+                "yarn" => {
                     if cli.latest {
-                        vec!["npm", "update", "--latest"]
+                        vec!["yarn", "upgrade", "--latest"]
                     } else {
-                        vec!["npm", "update"]
+                        vec!["yarn", "upgrade"]
                     }
-                } else {
-                    // Default to npm if no lock file is found
+                }
+                _ => { // npm or default
                     if cli.latest {
                         vec!["npm", "update", "--latest"]
                     } else {
