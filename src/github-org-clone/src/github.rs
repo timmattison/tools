@@ -5,12 +5,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct GitHubClient {
     client: reqwest::Client,
+    #[allow(dead_code)]
     token: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct User {
     pub login: String,
+    #[allow(dead_code)]
     pub id: i64,
     pub name: Option<String>,
     pub email: Option<String>,
@@ -23,6 +25,7 @@ pub struct User {
 #[derive(Debug, Deserialize)]
 pub struct Organization {
     pub login: String,
+    #[allow(dead_code)]
     pub id: i64,
     pub description: Option<String>,
     pub public_repos: Option<i32>,
@@ -30,17 +33,24 @@ pub struct Organization {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Repository {
+    #[allow(dead_code)]
     pub id: i64,
     pub name: String,
     pub full_name: String,
+    #[allow(dead_code)]
     pub html_url: String,
     pub ssh_url: String,
     pub clone_url: String,
+    #[allow(dead_code)]
     pub description: Option<String>,
+    #[allow(dead_code)]
     pub fork: bool,
     pub archived: bool,
+    #[allow(dead_code)]
     pub disabled: bool,
+    #[allow(dead_code)]
     pub private: bool,
+    #[allow(dead_code)]
     pub default_branch: Option<String>,
 }
 
