@@ -69,16 +69,19 @@ fn is_git_worktree(dir: &Path) -> bool {
     false
 }
 
-fn should_skip_entry(entry: &DirEntry) -> bool {
+fn should_skip_entry(entry: &DirEntry, repo_root: &Path) -> bool {
     // Skip any path that has node_modules as a component
     if entry.file_name() == "node_modules" {
         return true;
     }
     
-    // Skip git worktree directories
+    // Skip git worktree directories, but only if they're not the repo root we're running from
     if entry.file_type().is_dir() && is_git_worktree(entry.path()) {
-        println!("Skipping git worktree directory: {}", entry.path().display());
-        return true;
+        // Allow the root directory we're running from, even if it's a worktree
+        if entry.path() != repo_root {
+            println!("Skipping git worktree directory: {}", entry.path().display());
+            return true;
+        }
     }
     
     false
@@ -124,7 +127,7 @@ fn main() {
     // Collection phase - walk through all directories and categorize
     for entry in WalkDir::new(repo_path)
         .into_iter()
-        .filter_entry(|e| !should_skip_entry(e))
+        .filter_entry(|e| !should_skip_entry(e, repo_path))
     {
         let entry = match entry {
             Ok(entry) => entry,
