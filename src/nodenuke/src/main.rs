@@ -42,12 +42,15 @@ fn main() {
     println!("Will delete directories: {:?}", target_dirs);
     println!("Will delete files: {:?}", target_files);
     
-    let walker = RepoWalker::new(start_dir.clone())
-        .respect_gitignore(true)
-        .skip_node_modules(false) // We want to find and delete them
-        .skip_worktrees(true);
+    // First pass: Find and remove target directories without respecting gitignore
+    // This ensures we always find and delete node_modules/.next even if they're gitignored
+    let dir_walker = RepoWalker::new(start_dir.clone())
+        .respect_gitignore(false)  // Don't respect gitignore for target directories
+        .skip_node_modules(false)  // We want to find and delete them
+        .skip_worktrees(true)
+        .include_hidden(true);     // Include hidden directories like .next
     
-    for entry in walker.walk_with_ignore() {
+    for entry in dir_walker.walk_with_ignore() {
         let entry_name = entry.file_name().to_string_lossy();
         
         // Check for target directories
@@ -59,6 +62,18 @@ fn main() {
                 }
             }
         }
+    }
+    
+    // Second pass: Find and remove target files, respecting gitignore for other files
+    // but still checking everywhere for lock files
+    let file_walker = RepoWalker::new(start_dir.clone())
+        .respect_gitignore(false)  // Don't respect gitignore to find lock files everywhere
+        .skip_node_modules(true)   // Skip node_modules since we just deleted them
+        .skip_worktrees(true)
+        .include_hidden(true);     // Include hidden directories
+    
+    for entry in file_walker.walk_with_ignore() {
+        let entry_name = entry.file_name().to_string_lossy();
         
         // Check for target files
         if entry.file_type().is_some_and(|ft| ft.is_file()) {
