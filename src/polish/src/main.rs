@@ -56,7 +56,8 @@ fn main() {
     
     // Walk through all directories and find Rust projects
     let walker = RepoWalker::new(repo_root.clone())
-        .respect_gitignore(true);
+        .respect_gitignore(false)  // Don't respect gitignore - find ALL Rust projects
+        .include_hidden(true);     // Include hidden directories
     
     for entry in walker.walk_with_ignore() {
         if entry.file_type().map_or(false, |ft| ft.is_dir()) {

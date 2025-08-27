@@ -88,7 +88,8 @@ fn main() {
     }
     
     let walker = RepoWalker::new(start_dir.clone())
-        .respect_gitignore(true);
+        .respect_gitignore(false)  // Don't respect gitignore - find ALL Node.js projects
+        .include_hidden(true);     // Include hidden directories
     
     for entry in walker.walk_with_ignore() {
         // Check for directories with package.json
