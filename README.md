@@ -227,6 +227,12 @@ See [src/repowalker/README.md](src/repowalker/README.md) for detailed documentat
       concurrent cloning, smart updates for existing repos, and optional archiving. Supports cloning from 
       specific organizations or all accessible organizations at once.
     - To install: `cargo install --git https://github.com/timmattison/tools org-borg`
+- aws2env
+    - Converts AWS credentials from `~/.aws/credentials` and `~/.aws/config` files into environment variable 
+      export commands. Supports multiple profiles, lists available profiles, and generates exports for 
+      AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, and AWS_REGION. Use with `eval $(aws2env)` 
+      to apply exports to current shell.
+    - To install: `cargo install --git https://github.com/timmattison/tools aws2env`
 
 ## dirhash
 
