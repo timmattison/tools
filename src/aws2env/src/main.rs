@@ -185,22 +185,47 @@ fn list_profiles() -> Result<Vec<String>> {
     Ok(profiles)
 }
 
+/// Escape a string for safe use in shell commands using single quotes
+/// This handles all special characters by wrapping in single quotes and
+/// escaping any embedded single quotes
+fn shell_escape(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    
+    // Check if the string needs escaping
+    // Safe characters that don't need escaping when not quoted
+    let needs_escaping = s.chars().any(|c| {
+        !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.' && c != '/'
+    });
+    
+    if !needs_escaping {
+        return s.to_string();
+    }
+    
+    // Use single quotes and escape any embedded single quotes
+    // The strategy is: close the quote, add escaped single quote, reopen the quote
+    // For example: 'can'\''t' becomes can't when evaluated by the shell
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
 fn print_export_commands(credentials: &AwsCredentials) {
     if let Some(access_key) = &credentials.access_key_id {
-        println!("export AWS_ACCESS_KEY_ID=\"{}\"", access_key);
+        println!("export AWS_ACCESS_KEY_ID={}", shell_escape(access_key));
     }
     
     if let Some(secret_key) = &credentials.secret_access_key {
-        println!("export AWS_SECRET_ACCESS_KEY=\"{}\"", secret_key);
+        println!("export AWS_SECRET_ACCESS_KEY={}", shell_escape(secret_key));
     }
     
     if let Some(session_token) = &credentials.session_token {
-        println!("export AWS_SESSION_TOKEN=\"{}\"", session_token);
+        println!("export AWS_SESSION_TOKEN={}", shell_escape(session_token));
     }
     
     if let Some(region) = &credentials.region {
-        println!("export AWS_DEFAULT_REGION=\"{}\"", region);
-        println!("export AWS_REGION=\"{}\"", region);
+        println!("export AWS_DEFAULT_REGION={}", shell_escape(region));
+        println!("export AWS_REGION={}", shell_escape(region));
     }
 }
 
