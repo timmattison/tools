@@ -10,6 +10,8 @@ use repowalker::{find_git_repo, RepoWalker};
 struct Cli {
     #[arg(long, help = "Don't go to the git repository root before running")]
     no_root: bool,
+    #[arg(long, help = "Include hidden directories in the search")]
+    hidden: bool,
 }
 
 fn main() {
@@ -48,7 +50,7 @@ fn main() {
         .respect_gitignore(false)  // Don't respect gitignore for target directories
         .skip_node_modules(false)  // We want to find and delete them
         .skip_worktrees(true)
-        .include_hidden(true);     // Include hidden directories like .next
+        .include_hidden(cli.hidden);  // Only traverse hidden dirs if --hidden flag is set
     
     for entry in dir_walker.walk_with_ignore() {
         let entry_name = entry.file_name().to_string_lossy();
@@ -64,13 +66,28 @@ fn main() {
         }
     }
     
+    // Also check for hidden target directories at the top level even without --hidden
+    if !cli.hidden {
+        for target_dir in &target_dirs {
+            if target_dir.starts_with('.') {
+                let target_path = start_dir.join(target_dir);
+                if target_path.is_dir() {
+                    println!("Removing directory: {}", target_path.display());
+                    if let Err(e) = fs::remove_dir_all(&target_path) {
+                        eprintln!("Error removing {}: {}", target_path.display(), e);
+                    }
+                }
+            }
+        }
+    }
+    
     // Second pass: Find and remove target files, respecting gitignore for other files
     // but still checking everywhere for lock files
-    let file_walker = RepoWalker::new(start_dir.clone())
+    let file_walker = RepoWalker::new(start_dir)
         .respect_gitignore(false)  // Don't respect gitignore to find lock files everywhere
         .skip_node_modules(true)   // Skip node_modules since we just deleted them
         .skip_worktrees(true)
-        .include_hidden(true);     // Include hidden directories
+        .include_hidden(cli.hidden);  // Only traverse hidden dirs if --hidden flag is set
     
     for entry in file_walker.walk_with_ignore() {
         let entry_name = entry.file_name().to_string_lossy();
