@@ -193,8 +193,14 @@ See [src/repowalker/README.md](src/repowalker/README.md) for detailed documentat
     - To install: `cargo install --git https://github.com/timmattison/tools polish`
 - nodenuke
     - Removes node_modules directories and lock files (pnpm-lock.yaml, package-lock.json) throughout a
-      repository. Supports `--no-root` flag to start from current directory instead of git root.
+      repository. Supports `--no-root` flag to start from current directory instead of git root, and
+      `--hidden` flag to include hidden directories in the search.
     - To install: `cargo install --git https://github.com/timmattison/tools nodenuke`
+- cdknuke
+    - Removes cdk.out directories from AWS CDK projects throughout a repository. Uses the same intelligent
+      directory scanning as nodenuke. Supports `--no-root` flag to start from current directory instead of
+      git root, and `--hidden` flag to include hidden directories in the search.
+    - To install: `cargo install --git https://github.com/timmattison/tools cdknuke`
 - nodeup
     - Updates npm/pnpm/yarn packages in all directories with package.json. Intelligently detects which
       package manager to use based on lock files. Supports `--latest` flag for major version updates,
