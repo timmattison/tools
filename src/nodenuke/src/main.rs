@@ -74,12 +74,12 @@ fn main() {
     
     
     // Second pass: Find and remove target files
-    // We need to include hidden directories to find lock files in .next and .open-next
+    // Only search in hidden directories if --hidden flag is set
     let file_walker = RepoWalker::new(start_dir)
         .respect_gitignore(false)  // Don't respect gitignore to find lock files everywhere
         .skip_node_modules(true)   // Skip node_modules since we just deleted them
         .skip_worktrees(true)
-        .include_hidden(true);  // Always include hidden dirs to find files in .next and .open-next
+        .include_hidden(cli.hidden);  // Only traverse hidden dirs if --hidden flag is set
     
     for entry in file_walker.walk_with_ignore() {
         let entry_name = entry.file_name().to_string_lossy();
