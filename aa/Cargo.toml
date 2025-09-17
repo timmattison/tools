@@ -1,0 +1,11 @@
+[package]
+name = "aa"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aws-config = "1.5"
+aws-sdk-sts = "1.55"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1.0"
+anyhow = "1.0"
