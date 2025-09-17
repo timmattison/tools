@@ -46,14 +46,20 @@ fn main() {
     
     // First pass: Find and remove target directories without respecting gitignore
     // This ensures we always find and delete node_modules/.next even if they're gitignored
+    // We need to include hidden directories to find .next and .open-next
     let dir_walker = RepoWalker::new(start_dir.clone())
         .respect_gitignore(false)  // Don't respect gitignore for target directories
         .skip_node_modules(false)  // We want to find and delete them
         .skip_worktrees(true)
-        .include_hidden(cli.hidden);  // Only traverse hidden dirs if --hidden flag is set
+        .include_hidden(true);  // Always include hidden dirs to find .next and .open-next
     
     for entry in dir_walker.walk_with_ignore() {
         let entry_name = entry.file_name().to_string_lossy();
+        
+        // Skip hidden directories that are not our targets when --hidden is not set
+        if !cli.hidden && entry_name.starts_with('.') && !target_dirs.contains(&entry_name.as_ref()) {
+            continue;
+        }
         
         // Check for target directories
         if entry.file_type().is_some_and(|ft| ft.is_dir()) {
@@ -66,23 +72,9 @@ fn main() {
         }
     }
     
-    // Also check for hidden target directories at the top level even without --hidden
-    if !cli.hidden {
-        for target_dir in &target_dirs {
-            if target_dir.starts_with('.') {
-                let target_path = start_dir.join(target_dir);
-                if target_path.is_dir() {
-                    println!("Removing directory: {}", target_path.display());
-                    if let Err(e) = fs::remove_dir_all(&target_path) {
-                        eprintln!("Error removing {}: {}", target_path.display(), e);
-                    }
-                }
-            }
-        }
-    }
     
-    // Second pass: Find and remove target files, respecting gitignore for other files
-    // but still checking everywhere for lock files
+    // Second pass: Find and remove target files
+    // Only search in hidden directories if --hidden flag is set
     let file_walker = RepoWalker::new(start_dir)
         .respect_gitignore(false)  // Don't respect gitignore to find lock files everywhere
         .skip_node_modules(true)   // Skip node_modules since we just deleted them
