@@ -14,6 +14,20 @@ A shared Rust library for walking repository directories with intelligent filter
 
 See [src/repowalker/README.md](src/repowalker/README.md) for detailed documentation.
 
+### filewalker
+A shared Rust library for walking directories and files with filtering capabilities. Used by `sf` and `cf` to provide consistent file traversal with support for:
+- Walking multiple directories with deduplication
+- Filtering files by suffix, prefix, or substring
+- Formatted output for counts and byte sizes
+- Error handling for inaccessible files
+
+### clipboardmon
+A shared Rust library for monitoring and transforming clipboard content. Provides a framework for building clipboard monitoring tools with:
+- Automatic clipboard polling and change detection
+- Transformer trait for implementing content transformations
+- Only processes relevant content based on custom rules
+- Used as the foundation for clipboard transformation tools like `htmlboard`, `jsonboard`, and `unescapeboard`
+
 ## The tools
 
 - dirhash
@@ -344,9 +358,9 @@ Hash files with progress display: `prhash -a sha256 file1.txt file2.txt`
 
 Just run `update-aws-credentials` and it will take the AWS credentials from your clipboard and write them to your AWS config file. If something goes wrong it'll let you know.
 
-## sizeof
+## sf (size of files)
 
-Just run `sizeof -suffix .mkv` and you'll see the size of all of the `.mkv` files in the current directory and all
+Just run `sf --suffix .mkv` and you'll see the size of all of the `.mkv` files in the current directory and all
 subdirectories. I use it to figure out how large my videos are in a certain directory before trying to move them around.
 
 ## wifiqr
