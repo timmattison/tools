@@ -8,7 +8,6 @@ use serde_json::json;
 #[command(about = "Display AWS account information", long_about = None)]
 struct Args {
     /// AWS profile to use
-    #[arg(short, long)]
     profile: Option<String>,
 }
 
