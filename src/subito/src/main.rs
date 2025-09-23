@@ -8,7 +8,6 @@ use hmac::{Hmac, Mac};
 use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS, Transport};
 use sha2::Sha256;
 use tracing::{error, info};
-use url::Url;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -117,6 +116,7 @@ async fn create_mqtt_client(
         .ok_or_else(|| anyhow::anyhow!("No region configured"))?
         .as_ref();
 
+    // Generate the presigned URL for AWS IoT WebSocket authentication
     let presigned_url = create_presigned_url(
         iot_endpoint,
         region,
@@ -127,17 +127,18 @@ async fn create_mqtt_client(
 
     let client_id = format!("subito-{}", Utc::now().timestamp_millis());
 
-    // Parse the presigned URL to construct the WebSocket URL
-    let url = Url::parse(&presigned_url)?;
+    info!("Connecting to AWS IoT Core via WebSocket with presigned URL");
     
-    // For AWS IoT WebSocket connection, we need to use the presigned URL path and query
-    // The MqttOptions should point to the WebSocket endpoint with the presigned URL parameters
-    let ws_path = format!("{}?{}", url.path(), url.query().unwrap_or(""));
-    let full_ws_url = format!("wss://{}{}", iot_endpoint, ws_path);
+    // rumqttc expects the WebSocket URL to be passed as the broker address when using Transport::Ws
+    // The presigned URL already contains wss://, path, and query parameters with authentication
+    // We pass the full URL minus the "wss://" prefix as rumqttc adds the scheme based on Transport
+    let broker_url = presigned_url.trim_start_matches("wss://");
     
-    // Create MQTT options with the full WebSocket URL including presigned parameters
-    let mut mqttoptions = MqttOptions::new(client_id, full_ws_url, 443);
+    // Create MQTT options with the WebSocket URL (without wss:// prefix)
+    let mut mqttoptions = MqttOptions::new(client_id, broker_url, 443);
     mqttoptions.set_keep_alive(std::time::Duration::from_secs(30));
+    
+    // Set transport to WebSocket - rumqttc will prepend wss:// to the broker URL
     mqttoptions.set_transport(Transport::Ws);
 
     let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
