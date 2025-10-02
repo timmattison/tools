@@ -187,6 +187,12 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information.
     - To install: `cargo install --git https://github.com/timmattison/tools wl`
+- wolly
+    - Wake-on-LAN tool to remotely wake computers by sending magic packets. Features automatic subnet broadcast
+      detection, sends multiple packets for reliability (default: 3), supports both WoL ports (7 and 9), and
+      includes comprehensive troubleshooting hints. Supports multiple MAC address formats (colon-separated,
+      dash-separated, or no separators). Perfect for reliably waking computers on your local network.
+    - To install: `cargo install --git https://github.com/timmattison/tools wolly`
 - repotidy
     - Runs `go mod tidy` in all directories containing go.mod files within a git repository. Automatically finds
       the repository root and cleans up Go module dependencies throughout the entire codebase.
@@ -622,3 +628,201 @@ rcc automatically checks for and guides installation of the `cross` tool:
 ```bash
 cargo install cross --git https://github.com/cross-rs/cross
 ```
+
+## wolly
+
+Wake-on-LAN (WoL) tool to remotely wake computers by sending magic packets over the network. Supports various MAC address formats and custom network configurations.
+
+### Basic Usage
+
+```bash
+wolly AA:BB:CC:DD:EE:FF
+```
+
+This sends 3 magic packets (for reliability) to wake the computer with the specified MAC address. wolly automatically detects your subnet broadcast address and uses it instead of the global broadcast for better results on local networks. Includes helpful troubleshooting hints if the device doesn't wake.
+
+### Options
+
+- `<MAC_ADDRESS>` (required unless using `--list-interfaces`): MAC address of the target computer. Supports multiple formats:
+  - Colon-separated: `AA:BB:CC:DD:EE:FF`
+  - Dash-separated: `AA-BB-CC-DD-EE-FF`
+  - No separators: `AABBCCDDEEFF`
+  - Case-insensitive: `aa:bb:cc:dd:ee:ff` or `Aa:Bb:Cc:Dd:Ee:Ff`
+- `-p, --port <PORT>`: UDP port to send the magic packet to (default: 9)
+- `-b, --broadcast <BROADCAST>`: Broadcast address to send the packet to. Default is `255.255.255.255`, but wolly automatically detects and uses your subnet broadcast address for better reliability
+- `-i, --interface <INTERFACE>`: Network interface to use for sending the packet (e.g., en0, eth0). If not specified, uses the first available non-loopback interface
+- `-c, --count <COUNT>`: Number of packets to send (default: 3). Sending multiple packets improves reliability
+- `-d, --delay <DELAY>`: Delay between packets in milliseconds (default: 100ms)
+- `--try-both-ports`: Try sending on both port 7 and port 9 for maximum compatibility (some devices use port 7)
+- `--list-interfaces`: List all available network interfaces with their IP addresses and broadcast addresses, then exit
+- `-v, --verbose`: Show detailed output including packet details and sending progress
+
+### How it works
+
+Wake-on-LAN works by sending a "magic packet" containing:
+- 6 bytes of `0xFF` (255 in decimal)
+- 16 repetitions of the target computer's MAC address (6 bytes each)
+- Total packet size: 102 bytes
+
+The packet is sent as a UDP broadcast, which allows it to reach computers even when their IP address is unknown.
+
+### Examples
+
+List available network interfaces with broadcast addresses:
+```bash
+wolly --list-interfaces
+# Output: en8 - 192.168.0.118 (broadcast: 192.168.0.255)
+```
+
+Basic usage (sends 3 packets to auto-detected subnet broadcast):
+```bash
+wolly AA:BB:CC:DD:EE:FF
+```
+
+Wake a computer using a specific network interface:
+```bash
+wolly --interface en0 AA:BB:CC:DD:EE:FF
+```
+
+Try both standard WoL ports for maximum compatibility:
+```bash
+wolly --try-both-ports AA:BB:CC:DD:EE:FF
+```
+
+Send a single packet with custom port:
+```bash
+wolly --count 1 --port 7 AA:BB:CC:DD:EE:FF
+```
+
+Send 5 packets with 200ms delay between each:
+```bash
+wolly --count 5 --delay 200 AA:BB:CC:DD:EE:FF
+```
+
+Use global broadcast instead of subnet broadcast:
+```bash
+wolly --broadcast 255.255.255.255 AA:BB:CC:DD:EE:FF
+```
+
+Show verbose output with detailed packet information:
+```bash
+wolly --verbose AA:BB:CC:DD:EE:FF
+```
+
+Combine multiple options for maximum reliability:
+```bash
+wolly -v --try-both-ports --count 5 -i eth0 AA:BB:CC:DD:EE:FF
+```
+
+### Prerequisites
+
+The target computer must:
+- Have Wake-on-LAN enabled in BIOS/UEFI settings
+- Have Wake-on-LAN enabled in the network adapter settings
+- Be connected to power (even if turned off)
+- Be connected to the network via Ethernet (most WiFi adapters don't support WoL)
+
+### Finding your computer's MAC address
+
+**macOS:**
+```bash
+ifconfig en0 | grep ether
+```
+
+**Linux:**
+```bash
+ip link show eth0
+```
+
+**Windows:**
+```bash
+ipconfig /all
+```
+
+### Troubleshooting
+
+If your device doesn't wake up, try these steps in order:
+
+#### 1. Verify Device Configuration
+- **BIOS/UEFI Settings**: Ensure Wake-on-LAN is enabled
+  - Look for options like "Wake on LAN", "Power on by PCI-E", or "PME Event Wake Up"
+  - On some systems, this is under Power Management settings
+- **Network Adapter Settings**:
+  - Windows: Device Manager → Network Adapter → Properties → Advanced → Wake on Magic Packet (Enabled)
+  - Linux: Check with `ethtool eth0` and look for "Wake-on" (should show 'g' for magic packet)
+  - macOS: System Preferences → Energy Saver → Wake for network access
+
+#### 2. Try Different Broadcast Addresses
+wolly automatically uses your subnet broadcast (e.g., 192.168.0.255), but some networks require the global broadcast:
+
+```bash
+# Try global broadcast
+wolly --broadcast 255.255.255.255 B0:4F:13:10:4A:FC
+
+# Or try your specific subnet broadcast
+wolly --broadcast 192.168.1.255 B0:4F:13:10:4A:FC
+```
+
+#### 3. Try Both Ports
+Some devices listen on port 7 instead of the standard port 9:
+
+```bash
+wolly --try-both-ports B0:4F:13:10:4A:FC
+```
+
+#### 4. Send More Packets
+Increase reliability by sending more packets:
+
+```bash
+wolly --count 10 B0:4F:13:10:4A:FC
+```
+
+#### 5. Check Network Configuration
+- **Same Subnet**: Ensure both devices are on the same subnet/VLAN
+- **Switch/Router Settings**: Some switches block broadcast packets or have port security
+- **Firewall**: Check if firewall rules are blocking UDP broadcasts
+- **Network Segmentation**: VLANs or network segmentation may block broadcasts
+
+#### 6. Verify the MAC Address
+Double-check you're using the correct MAC address:
+
+```bash
+# On the target computer (when it's on)
+# macOS:
+ifconfig | grep ether
+
+# Linux:
+ip link show
+
+# Windows:
+ipconfig /all
+```
+
+#### 7. Test Different Power States
+- Try waking from **sleep/suspend** instead of full shutdown first
+- Some motherboards only support WoL from certain power states (S3/S4/S5)
+- Check if your device has an LED indicator for WoL (some network cards light up when receiving magic packets)
+
+#### 8. Use Verbose Mode
+See exactly what's being sent:
+
+```bash
+wolly -v --try-both-ports B0:4F:13:10:4A:FC
+```
+
+#### Common Issues
+
+**Issue**: Device wakes from sleep but not from shutdown
+- **Solution**: Check BIOS power management settings. Some systems need "Deep Sleep" or "ErP Ready" disabled
+
+**Issue**: WoL works sometimes but not always
+- **Solution**: Use `--count 5` to send multiple packets. Network congestion can drop packets
+
+**Issue**: WoL doesn't work across subnets
+- **Solution**: You need directed broadcasts or WoL forwarding configured on your router. For cross-subnet WoL, specify the broadcast address of the target subnet
+
+**Issue**: WiFi device won't wake
+- **Solution**: Most WiFi adapters don't support WoL. Connect via Ethernet
+
+**Issue**: Device won't wake after long shutdown period
+- **Solution**: Some systems lose WoL capability if unplugged. Ensure continuous power supply
