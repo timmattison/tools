@@ -98,28 +98,33 @@ impl RepoWalker {
     
     pub fn walk_with_ignore(&self) -> impl Iterator<Item = ignore::DirEntry> + '_ {
         let mut builder = WalkBuilder::new(&self.root);
-        
+
         builder
             .git_ignore(self.respect_gitignore)
             .git_global(self.respect_gitignore)
             .git_exclude(self.respect_gitignore)
             .hidden(!self.include_hidden);
-        
+
         if self.skip_node_modules {
             builder.filter_entry(move |entry| {
                 entry.file_name() != "node_modules"
             });
         }
-        
-        builder.build().filter_map(|e| e.ok()).filter(move |entry| {
-            if self.skip_worktrees && entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                if is_git_worktree(entry.path()) && entry.path() != self.root {
-                    println!("Skipping git worktree directory: {}", entry.path().display());
-                    return false;
+
+        if self.skip_worktrees {
+            let root = self.root.clone();
+            builder.filter_entry(move |entry| {
+                if entry.file_type().is_some_and(|ft| ft.is_dir()) {
+                    if is_git_worktree(entry.path()) && entry.path() != root {
+                        println!("Skipping git worktree directory: {}", entry.path().display());
+                        return false;
+                    }
                 }
-            }
-            true
-        })
+                true
+            });
+        }
+
+        builder.build().filter_map(|e| e.ok())
     }
 }
 
