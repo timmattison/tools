@@ -30,7 +30,6 @@ enum TokenizerModel {
     Gpt35Turbo,
     Gpt4,
     Gpt4o,
-    Claude,
 }
 
 impl TokenizerModel {
@@ -46,8 +45,10 @@ impl TokenizerModel {
             "gpt-3.5-turbo" | "gpt-3.5" | "gpt35" => Ok(TokenizerModel::Gpt35Turbo),
             "gpt-4" | "gpt4" => Ok(TokenizerModel::Gpt4),
             "gpt-4o" | "gpt4o" => Ok(TokenizerModel::Gpt4o),
-            "claude" | "claude-3-5-sonnet" | "claude-3" => Ok(TokenizerModel::Claude),
-            _ => Err(anyhow!("Unsupported model: {}. Supported models: gpt-3.5-turbo, gpt-4, gpt-4o, claude", name)),
+            _ => Err(anyhow!(
+                "Unsupported model: {}. Supported models: gpt-3.5-turbo, gpt-4, gpt-4o",
+                name
+            )),
         }
     }
 
@@ -60,7 +61,6 @@ impl TokenizerModel {
             TokenizerModel::Gpt35Turbo => Ok(tiktoken_rs::cl100k_base()?),
             TokenizerModel::Gpt4 => Ok(tiktoken_rs::cl100k_base()?),
             TokenizerModel::Gpt4o => Ok(tiktoken_rs::o200k_base()?),
-            TokenizerModel::Claude => Ok(tiktoken_rs::cl100k_base()?), // Claude uses a similar tokenizer
         }
     }
 }
