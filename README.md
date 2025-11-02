@@ -56,10 +56,16 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       a period in front of them so you need to include that if you want it.
     - To install: `cargo install --git https://github.com/timmattison/tools sf`
 - cf (count files)
-    - Recursively counts files in the specified directories. Without filters, counts all files. Supports optional 
-      filtering by suffix (e.g. `--suffix .mkv`), prefix (e.g. `--prefix IMG_`), or substring (e.g. `--substring G_00`). 
+    - Recursively counts files in the specified directories. Without filters, counts all files. Supports optional
+      filtering by suffix (e.g. `--suffix .mkv`), prefix (e.g. `--prefix IMG_`), or substring (e.g. `--substring G_00`).
       The same as doing `find . | wc -l` but shorter and faster.
     - To install: `cargo install --git https://github.com/timmattison/tools cf`
+- tc (token count)
+    - Counts estimated tokens in files, similar to how `wc` counts words/lines/characters. Useful for estimating
+      LLM API costs and checking if content fits within context windows. Supports multiple OpenAI tokenizer models
+      (GPT-3.5-turbo, GPT-4, GPT-4o) and can read from stdin or multiple files. Shows counts with
+      thousands separators for easy reading.
+    - To install: `cargo install --git https://github.com/timmattison/tools tc`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
     - To install: `cargo install --git https://github.com/timmattison/tools htmlboard`
@@ -374,6 +380,106 @@ Just run `update-aws-credentials` and it will take the AWS credentials from your
 
 Just run `sf --suffix .mkv` and you'll see the size of all of the `.mkv` files in the current directory and all
 subdirectories. I use it to figure out how large my videos are in a certain directory before trying to move them around.
+
+## tc (token count)
+
+Count estimated tokens in files, similar to how `wc` counts words/lines/characters. Useful for estimating LLM API costs and checking if content fits within context windows.
+
+### Basic Usage
+
+```bash
+tc file.txt                    # Count tokens in a single file
+tc *.md                        # Count tokens in all markdown files
+tc file1.txt file2.txt         # Count tokens across multiple files
+echo "Hello world" | tc        # Count tokens from stdin
+```
+
+### Options
+
+- `--model <MODEL>`: Tokenizer model to use (default: gpt-4)
+  - Supported models: `gpt-3.5-turbo`, `gpt-4`, `gpt-4o`
+- `--per-file`: Show token count for each file individually (useful with multiple files)
+- `-h, --help`: Print help information
+- `-V, --version`: Print version information
+
+### Features
+
+- **Multiple tokenizer models**: Support for GPT-3.5-turbo, GPT-4, and GPT-4o tokenizers
+- **Stdin support**: Read from pipes or use `-` to read from stdin
+- **Human-readable output**: Numbers formatted with thousands separators (e.g., `8,748 tokens`)
+- **Per-file breakdown**: Optional detailed output showing token count for each file
+- **Fast and efficient**: Built in Rust for performance
+
+### Output Formats
+
+**Single file:**
+```bash
+$ tc README.md
+8,748 tokens  README.md
+```
+
+**Multiple files (total only):**
+```bash
+$ tc file1.txt file2.txt
+12,345 tokens  total
+```
+
+**Multiple files with per-file breakdown:**
+```bash
+$ tc --per-file file1.txt file2.txt file3.txt
+1,234 tokens  file1.txt
+2,345 tokens  file2.txt
+3,456 tokens  file3.txt
+-------
+7,035 tokens  total
+```
+
+**From stdin:**
+```bash
+$ echo "Hello world!" | tc
+3 tokens
+
+$ cat large-document.txt | tc --model gpt-3.5-turbo
+45,678 tokens
+```
+
+### Examples
+
+Count tokens in a single file with default model (GPT-4):
+```bash
+tc README.md
+```
+
+Count tokens using GPT-4o tokenizer:
+```bash
+tc --model gpt-4o documentation.md
+```
+
+Count tokens across multiple files and show breakdown:
+```bash
+tc --per-file src/*.rs
+```
+
+Estimate tokens before sending to an API:
+```bash
+cat prompt.txt context.txt | tc --model gpt-4o
+```
+
+Check if content fits in a context window:
+```bash
+tokens=$(tc --model gpt-4 large-file.txt | awk '{print $1}' | tr -d ',')
+if [ $tokens -lt 8000 ]; then
+  echo "Fits in 8K context window"
+fi
+```
+
+### Use Cases
+
+- **API Cost Estimation**: Calculate approximate costs before sending content to LLM APIs
+- **Context Window Validation**: Verify content fits within model context limits
+- **Content Planning**: Plan document chunking for RAG systems
+- **Token Budgeting**: Track token usage across multiple files in a project
+- **Development**: Quick token counts during prompt engineering
 
 ## wifiqr
 
