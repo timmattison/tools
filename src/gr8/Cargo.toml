@@ -1,10 +1,10 @@
 [package]
-name = "ghrate"
+name = "gr8"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "ghrate"
+name = "gr8"
 path = "src/main.rs"
 
 [dependencies]
