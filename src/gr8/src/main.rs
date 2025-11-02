@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{Local, TimeZone};
 use colored::Colorize;
 use serde::Deserialize;
 use std::process::Command;
@@ -65,12 +65,12 @@ fn fetch_rate_limit_data() -> Result<String> {
 
 /// Converts a Unix epoch timestamp to a formatted local time string
 /// Returns format: YYYY-MM-DD HH:MM:SS (local time, without timezone offset)
+/// Returns "Invalid" if the timestamp cannot be parsed
 fn format_reset_time(epoch: i64) -> String {
-    let datetime: DateTime<Local> = Local.timestamp_opt(epoch, 0)
-        .single()
-        .unwrap_or_else(|| Local::now());
-
-    datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+    match Local.timestamp_opt(epoch, 0).single() {
+        Some(datetime) => datetime.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => "Invalid".to_string(),
+    }
 }
 
 /// Determines the appropriate color for a rate limit based on remaining percentage
@@ -107,7 +107,7 @@ fn print_rate_limit_row(name: &str, rate_limit: &RateLimit) {
     let remaining_colored = colorize_remaining(rate_limit);
 
     println!(
-        "{:<25} {:<8} {:<8} {} {}",
+        "{:<30} {:<8} {:<8} {} {}",
         name,
         rate_limit.limit,
         rate_limit.used,
@@ -128,10 +128,10 @@ fn main() -> Result<()> {
 
     // Print table header
     println!(
-        "{:<25} {:<8} {:<8} {:<10} {}",
+        "{:<30} {:<8} {:<8} {:<10} {}",
         "Resource", "Limit", "Used", "Remaining", "Reset Time"
     );
-    println!("{}", "─".repeat(74));
+    println!("{}", "─".repeat(79));
 
     // Print all resource rate limits
     print_rate_limit_row("core", &response.resources.core);
@@ -140,8 +140,7 @@ fn main() -> Result<()> {
     print_rate_limit_row("code_search", &response.resources.code_search);
     print_rate_limit_row("code_scanning_upload", &response.resources.code_scanning_upload);
     print_rate_limit_row("code_scanning_autofix", &response.resources.code_scanning_autofix);
-    // Abbreviated to fit within 25-character column width
-    print_rate_limit_row("actions_runner_reg", &response.resources.actions_runner_registration);
+    print_rate_limit_row("actions_runner_registration", &response.resources.actions_runner_registration);
     print_rate_limit_row("integration_manifest", &response.resources.integration_manifest);
     print_rate_limit_row("source_import", &response.resources.source_import);
     print_rate_limit_row("dependency_snapshots", &response.resources.dependency_snapshots);
