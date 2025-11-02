@@ -62,8 +62,8 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     - To install: `cargo install --git https://github.com/timmattison/tools cf`
 - tc (token count)
     - Counts estimated tokens in files, similar to how `wc` counts words/lines/characters. Useful for estimating
-      LLM API costs and checking if content fits within context windows. Supports multiple tokenizer models
-      (GPT-3.5, GPT-4, GPT-4o, Claude) and can read from stdin or multiple files. Shows counts with
+      LLM API costs and checking if content fits within context windows. Supports multiple OpenAI tokenizer models
+      (GPT-3.5-turbo, GPT-4, GPT-4o) and can read from stdin or multiple files. Shows counts with
       thousands separators for easy reading.
     - To install: `cargo install --git https://github.com/timmattison/tools tc`
 - htmlboard
@@ -397,14 +397,14 @@ echo "Hello world" | tc        # Count tokens from stdin
 ### Options
 
 - `--model <MODEL>`: Tokenizer model to use (default: gpt-4)
-  - Supported models: `gpt-3.5-turbo`, `gpt-4`, `gpt-4o`, `claude`
+  - Supported models: `gpt-3.5-turbo`, `gpt-4`, `gpt-4o`
 - `--per-file`: Show token count for each file individually (useful with multiple files)
 - `-h, --help`: Print help information
 - `-V, --version`: Print version information
 
 ### Features
 
-- **Multiple tokenizer models**: Support for GPT-3.5, GPT-4, GPT-4o, and Claude tokenizers
+- **Multiple tokenizer models**: Support for GPT-3.5-turbo, GPT-4, and GPT-4o tokenizers
 - **Stdin support**: Read from pipes or use `-` to read from stdin
 - **Human-readable output**: Numbers formatted with thousands separators (e.g., `8,748 tokens`)
 - **Per-file breakdown**: Optional detailed output showing token count for each file
@@ -450,9 +450,9 @@ Count tokens in a single file with default model (GPT-4):
 tc README.md
 ```
 
-Count tokens using Claude tokenizer:
+Count tokens using GPT-4o tokenizer:
 ```bash
-tc --model claude documentation.md
+tc --model gpt-4o documentation.md
 ```
 
 Count tokens across multiple files and show breakdown:
