@@ -40,6 +40,8 @@ struct Resources {
 #[derive(Debug, Deserialize)]
 struct RateLimitResponse {
     resources: Resources,
+    /// Rate limit for the core API (duplicates resources.core, kept for API structure completeness)
+    #[allow(dead_code)]
     rate: RateLimit,
 }
 
@@ -61,7 +63,8 @@ fn fetch_rate_limit_data() -> Result<String> {
     Ok(stdout)
 }
 
-/// Converts a Unix epoch timestamp to a formatted local time string in ISO 8601 format
+/// Converts a Unix epoch timestamp to a formatted local time string
+/// Returns format: YYYY-MM-DD HH:MM:SS (local time, without timezone offset)
 fn format_reset_time(epoch: i64) -> String {
     let datetime: DateTime<Local> = Local.timestamp_opt(epoch, 0)
         .single()
@@ -83,7 +86,13 @@ fn colorize_remaining(rate_limit: &RateLimit) -> String {
     if rate_limit.remaining == 0 {
         remaining_str.red().to_string()
     } else {
-        let percentage = rate_limit.remaining as f64 / rate_limit.limit as f64;
+        // Defensive check: avoid division by zero (though GitHub API should never return limit=0)
+        let percentage = if rate_limit.limit > 0 {
+            rate_limit.remaining as f64 / rate_limit.limit as f64
+        } else {
+            0.0
+        };
+
         if percentage < 0.2 {
             remaining_str.yellow().to_string()
         } else {
@@ -122,7 +131,7 @@ fn main() -> Result<()> {
         "{:<25} {:<8} {:<8} {:<10} {}",
         "Resource", "Limit", "Used", "Remaining", "Reset Time"
     );
-    println!("{}", "─".repeat(82));
+    println!("{}", "─".repeat(74));
 
     // Print all resource rate limits
     print_rate_limit_row("core", &response.resources.core);
@@ -131,6 +140,7 @@ fn main() -> Result<()> {
     print_rate_limit_row("code_search", &response.resources.code_search);
     print_rate_limit_row("code_scanning_upload", &response.resources.code_scanning_upload);
     print_rate_limit_row("code_scanning_autofix", &response.resources.code_scanning_autofix);
+    // Abbreviated to fit within 25-character column width
     print_rate_limit_row("actions_runner_reg", &response.resources.actions_runner_registration);
     print_rate_limit_row("integration_manifest", &response.resources.integration_manifest);
     print_rate_limit_row("source_import", &response.resources.source_import);
