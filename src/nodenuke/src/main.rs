@@ -12,6 +12,8 @@ struct Cli {
     no_root: bool,
     #[arg(long, help = "Include hidden directories in the search")]
     hidden: bool,
+    #[arg(long, help = "Include git worktrees in the search")]
+    worktrees: bool,
 }
 
 fn main() {
@@ -50,7 +52,7 @@ fn main() {
     let dir_walker = RepoWalker::new(start_dir.clone())
         .respect_gitignore(false)  // Don't respect gitignore for target directories
         .skip_node_modules(false)  // We want to find and delete them
-        .skip_worktrees(true)
+        .skip_worktrees(!cli.worktrees)
         .include_hidden(true);  // Always include hidden dirs to find .next and .open-next
     
     for entry in dir_walker.walk_with_ignore() {
@@ -78,7 +80,7 @@ fn main() {
     let file_walker = RepoWalker::new(start_dir)
         .respect_gitignore(false)  // Don't respect gitignore to find lock files everywhere
         .skip_node_modules(true)   // Skip node_modules since we just deleted them
-        .skip_worktrees(true)
+        .skip_worktrees(!cli.worktrees)
         .include_hidden(cli.hidden);  // Only traverse hidden dirs if --hidden flag is set
     
     for entry in file_walker.walk_with_ignore() {
