@@ -17,7 +17,7 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
     
-    let target_dirs = vec!["node_modules", ".next", ".open-next"];
+    let target_dirs = vec!["node_modules", ".next", ".open-next", ".turbo"];
     let target_files = vec!["pnpm-lock.yaml", "package-lock.json"];
     
     let start_dir = if cli.no_root {
