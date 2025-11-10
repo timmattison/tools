@@ -225,8 +225,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     - To install: `cargo install --git https://github.com/timmattison/tools polish`
 - nodenuke
     - Removes node_modules directories and lock files (pnpm-lock.yaml, package-lock.json) throughout a
-      repository. Supports `--no-root` flag to start from current directory instead of git root, and
-      `--hidden` flag to include hidden directories in the search.
+      repository. Supports `--no-root` flag to start from current directory instead of git root,
+      `--hidden` flag to include hidden directories in the search, and `--worktrees` flag to include
+      git worktrees in the search.
     - To install: `cargo install --git https://github.com/timmattison/tools nodenuke`
 - cdknuke
     - Removes cdk.out directories from AWS CDK projects throughout a repository. Uses the same intelligent
