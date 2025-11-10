@@ -11,9 +11,12 @@ use repowalker::{find_git_repo, RepoWalker};
 struct Cli {
     #[arg(long, help = "Don't go to the git repository root before running")]
     no_root: bool,
-    
+
     #[arg(long, help = "Dry run - show what would be cleaned without actually cleaning")]
     dry_run: bool,
+
+    #[arg(long, help = "Include git worktrees in the search")]
+    worktrees: bool,
 }
 
 
@@ -110,7 +113,7 @@ fn main() {
     let walker = RepoWalker::new(start_dir.clone())
         .respect_gitignore(false)  // Don't respect gitignore - find ALL Rust projects
         .skip_node_modules(true)
-        .skip_worktrees(true)
+        .skip_worktrees(!cli.worktrees)
         .include_hidden(true);     // Include hidden directories
     
     for entry in walker.walk_with_ignore() {
