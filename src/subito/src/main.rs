@@ -5,11 +5,45 @@ use aws_sdk_iot::Client as IotClient;
 use chrono::Utc;
 use clap::Parser;
 use hmac::{Hmac, Mac};
-use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS, Transport};
+use percent_encoding::{percent_encode, AsciiSet, CONTROLS};
+use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS, TlsConfiguration, Transport};
+use rustls::{ClientConfig, RootCertStore};
 use sha2::Sha256;
 use tracing::{error, info};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// AWS SigV4 URI encoding set: encode everything except A-Z, a-z, 0-9, -, _, ., ~
+const SIGV4_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'!')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'(')
+    .add(b')')
+    .add(b'*')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 /// Subscribe to AWS IoT Core topics via WebSocket
 #[derive(Parser, Debug)]
@@ -33,11 +67,6 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let args = Args::parse();
-
-    if args.topics.is_empty() {
-        error!("You must provide at least one AWS IoT topic to subscribe to");
-        std::process::exit(1);
-    }
 
     let config = if let Some(region) = args.region {
         aws_config::defaults(BehaviorVersion::latest())
@@ -73,11 +102,11 @@ async fn main() -> Result<()> {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
                 let topic = publish.topic;
                 let payload = String::from_utf8_lossy(&publish.payload);
-                info!("\nTopic: {}\nMessage: {}", topic, payload);
+                info!(topic = %topic, payload = %payload, "Received message");
             }
             Ok(_) => {}
             Err(e) => {
-                error!("MQTT error: {}", e);
+                error!(error = %e, "MQTT error");
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
         }
@@ -127,19 +156,29 @@ async fn create_mqtt_client(
 
     let client_id = format!("subito-{}", Utc::now().timestamp_millis());
 
-    info!("Connecting to AWS IoT Core via WebSocket with presigned URL");
-    
-    // rumqttc expects the WebSocket URL to be passed as the broker address when using Transport::Ws
-    // The presigned URL already contains wss://, path, and query parameters with authentication
-    // We pass the full URL minus the "wss://" prefix as rumqttc adds the scheme based on Transport
-    let broker_url = presigned_url.trim_start_matches("wss://");
-    
-    // Create MQTT options with the WebSocket URL (without wss:// prefix)
-    let mut mqttoptions = MqttOptions::new(client_id, broker_url, 443);
+    info!("Connecting to AWS IoT Core via secure WebSocket with presigned URL");
+
+    // Create MQTT options with the full presigned URL (wss://...) as the host
+    // rumqttc accepts the full WebSocket URL as the host parameter
+    let mut mqttoptions = MqttOptions::new(client_id, presigned_url, 443);
     mqttoptions.set_keep_alive(std::time::Duration::from_secs(30));
-    
-    // Set transport to WebSocket - rumqttc will prepend wss:// to the broker URL
-    mqttoptions.set_transport(Transport::Ws);
+
+    // Configure TLS for secure WebSocket connection using system root certificates
+    let mut root_cert_store = RootCertStore::empty();
+    for cert in rustls_native_certs::load_native_certs()
+        .context("Failed to load native certificates")?
+    {
+        root_cert_store.add(cert).ok();
+    }
+
+    let client_config = ClientConfig::builder()
+        .with_root_certificates(root_cert_store)
+        .with_no_client_auth();
+
+    let tls_config = TlsConfiguration::Rustls(std::sync::Arc::new(client_config));
+
+    // Set transport to secure WebSocket (Wss) with TLS configuration
+    mqttoptions.set_transport(Transport::Wss(tls_config));
 
     let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
     Ok((client, eventloop))
@@ -152,6 +191,8 @@ fn create_presigned_url(
     secret_key: &str,
     session_token: Option<&str>,
 ) -> Result<String> {
+    use std::cmp::Ordering;
+
     let now = Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
     let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -160,31 +201,48 @@ fn create_presigned_url(
     let canonical_uri = "/mqtt";
     let canonical_headers = format!("host:{}\n", host);
     let signed_headers = "host";
-    
     let algorithm = "AWS4-HMAC-SHA256";
     let credential_scope = format!("{}/{}/iotdevicegateway/aws4_request", date_stamp, region);
 
-    let mut canonical_querystring = format!(
-        "X-Amz-Algorithm={}&X-Amz-Credential={}/{}&X-Amz-Date={}&X-Amz-SignedHeaders={}",
-        algorithm,
-        access_key,
-        credential_scope,
-        amz_date,
-        signed_headers
-    );
-
+    // Build and sort canonical query parameters per SigV4 (encode values!)
+    let mut params: Vec<(String, String)> = vec![
+        ("X-Amz-Algorithm".into(), algorithm.into()),
+        (
+            "X-Amz-Credential".into(),
+            percent_encode(format!("{}/{}", access_key, credential_scope).as_bytes(), SIGV4_ENCODE_SET)
+                .to_string(),
+        ),
+        ("X-Amz-Date".into(), amz_date.clone()),
+        // Common practice for IoT Core is long-lived presigns (e.g., 86400s). Adjust if needed.
+        ("X-Amz-Expires".into(), "86400".into()),
+        ("X-Amz-SignedHeaders".into(), signed_headers.into()),
+    ];
     if let Some(token) = session_token {
-        canonical_querystring.push_str(&format!("&X-Amz-Security-Token={}", urlencoding::encode(token)));
+        params.push((
+            "X-Amz-Security-Token".into(),
+            percent_encode(token.as_bytes(), SIGV4_ENCODE_SET).to_string(),
+        ));
     }
+    params.sort_by(|a, b| match a.0.cmp(&b.0) {
+        Ordering::Equal => a.1.cmp(&b.1),
+        other => other,
+    });
+    let canonical_querystring = params
+        .into_iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join("&");
 
+    // GET has empty payload; use SHA256("") hash in canonical request
+    let empty_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     let canonical_request = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         method,
         canonical_uri,
-        canonical_querystring,
+        &canonical_querystring,
         canonical_headers,
         signed_headers,
-        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        empty_sha256
     );
 
     let string_to_sign = format!(
@@ -194,16 +252,13 @@ fn create_presigned_url(
         credential_scope,
         hex::encode(sha256_hash(canonical_request.as_bytes()))
     );
-
     let signing_key = get_signature_key(secret_key, &date_stamp, region, "iotdevicegateway");
     let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
-    let presigned_url = format!(
+    Ok(format!(
         "wss://{}{}?{}&X-Amz-Signature={}",
         host, canonical_uri, canonical_querystring, signature
-    );
-
-    Ok(presigned_url)
+    ))
 }
 
 fn sha256_hash(data: &[u8]) -> Vec<u8> {
@@ -225,15 +280,4 @@ fn get_signature_key(key: &str, date_stamp: &str, region: &str, service: &str) -
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, service.as_bytes());
     hmac_sha256(&k_service, b"aws4_request")
-}
-
-mod urlencoding {
-    pub fn encode(s: &str) -> String {
-        s.chars()
-            .map(|c| match c {
-                'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-                _ => format!("%{:02X}", c as u8),
-            })
-            .collect()
-    }
 }

@@ -37,4 +37,37 @@ The binary will be available at `target/release/subito`.
 ## Requirements
 
 - AWS credentials configured (via environment variables, AWS CLI, or IAM role)
-- Appropriate IAM permissions for IoT operations
+- Required IAM permissions for IoT operations:
+  - `iot:Connect` - Connect to AWS IoT Core
+  - `iot:Subscribe` - Subscribe to topics
+  - `iot:Receive` - Receive messages from subscribed topics
+  - `iot:DescribeEndpoint` - Auto-discover the IoT endpoint (required if `--endpoint` is not specified)
+
+### Example IAM Policy
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iot:Connect",
+        "iot:Subscribe",
+        "iot:Receive"
+      ],
+      "Resource": [
+        "arn:aws:iot:REGION:ACCOUNT_ID:client/${iot:Connection.Thing.ThingName}",
+        "arn:aws:iot:REGION:ACCOUNT_ID:topicfilter/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:DescribeEndpoint",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+Replace `REGION` and `ACCOUNT_ID` with your AWS region and account ID. Adjust the topic filter resources to match your specific topic patterns.
