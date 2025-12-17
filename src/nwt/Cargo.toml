@@ -1,0 +1,13 @@
+[package]
+name = "nwt"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nwt"
+path = "src/main.rs"
+
+[dependencies]
+repowalker = { path = "../repowalker" }
+clap = { version = "4.5", features = ["derive"] }
+names = { version = "0.14", default-features = false }
