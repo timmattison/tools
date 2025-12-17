@@ -137,6 +137,76 @@ fn get_branch_name<'a>(cli: &'a Cli, dir_name: &'a str) -> &'a str {
     cli.branch.as_deref().unwrap_or(dir_name)
 }
 
+/// Result of attempting to create a worktree.
+enum WorktreeResult {
+    /// Worktree created successfully
+    Success,
+    /// Directory path collision (TOCTOU race or pre-existing) - should retry with new name
+    PathCollision,
+    /// Branch already exists - user should use --checkout
+    BranchExists(String),
+    /// Ref is already checked out in another worktree
+    RefInUse(String),
+    /// Other git error
+    GitError(String),
+    /// Failed to execute git command
+    CommandError(std::io::Error),
+}
+
+/// Attempts to create a git worktree at the given path.
+///
+/// Returns a `WorktreeResult` indicating success or the type of failure.
+fn try_create_worktree(
+    repo_root: &std::path::Path,
+    worktree_path: &str,
+    branch_name: &str,
+    checkout_ref: Option<&str>,
+) -> WorktreeResult {
+    let output = if let Some(ref_name) = checkout_ref {
+        Command::new("git")
+            .args(["worktree", "add", worktree_path, ref_name])
+            .current_dir(repo_root)
+            .output()
+    } else {
+        Command::new("git")
+            .args(["worktree", "add", worktree_path, "-b", branch_name])
+            .current_dir(repo_root)
+            .output()
+    };
+
+    match output {
+        Ok(result) => {
+            if result.status.success() {
+                WorktreeResult::Success
+            } else {
+                let stderr = String::from_utf8_lossy(&result.stderr);
+
+                // Check for path/directory collision (TOCTOU race condition)
+                // Git says "'{path}' already exists" when the directory exists
+                if stderr.contains("already exists") && !stderr.contains("branch") {
+                    return WorktreeResult::PathCollision;
+                }
+
+                // Check for branch already exists
+                if stderr.contains("already exists") && stderr.contains("branch") {
+                    return WorktreeResult::BranchExists(branch_name.to_string());
+                }
+
+                // Check for ref already checked out
+                if stderr.contains("is already used by worktree")
+                    || stderr.contains("is already checked out")
+                {
+                    let ref_name = checkout_ref.unwrap_or(branch_name);
+                    return WorktreeResult::RefInUse(ref_name.to_string());
+                }
+
+                WorktreeResult::GitError(stderr.to_string())
+            }
+        }
+        Err(e) => WorktreeResult::CommandError(e),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -198,27 +268,27 @@ fn main() {
         exit(exit_codes::DIR_CREATE_FAILED);
     }
 
-    // Generate random Docker-style name for the directory with collision detection.
+    // Generate random Docker-style name and create worktree with retry on collision.
+    // This handles TOCTOU race conditions by retrying with a new name if another
+    // process creates a directory between our existence check and git's creation.
     let mut generator = Generator::default();
-    let (dir_name, worktree_path) = {
-        let mut attempts = 0;
-        loop {
-            let name = match generate_docker_name(&mut generator) {
-                Some(n) => n,
-                None => {
-                    error!(
-                        cli.quiet,
-                        "Error: Name generator failed to produce a name"
-                    );
-                    exit(exit_codes::NAME_COLLISION);
-                }
-            };
-            let path = worktrees_dir.join(&name);
+    let mut attempts = 0;
 
-            if !path.exists() {
-                break (name, path);
+    loop {
+        let dir_name = match generate_docker_name(&mut generator) {
+            Some(n) => n,
+            None => {
+                error!(
+                    cli.quiet,
+                    "Error: Name generator failed to produce a name"
+                );
+                exit(exit_codes::NAME_COLLISION);
             }
+        };
+        let worktree_path = worktrees_dir.join(&dir_name);
 
+        // Quick check to avoid unnecessary git calls (optimization only, not relied upon)
+        if worktree_path.exists() {
             attempts += 1;
             if attempts >= MAX_ATTEMPTS {
                 error!(
@@ -229,75 +299,78 @@ fn main() {
                 error!(cli.quiet, "Please try again or clean up unused worktrees.");
                 exit(exit_codes::NAME_COLLISION);
             }
+            continue;
         }
-    };
 
-    // Convert path to string, checking for valid UTF-8
-    let worktree_path_str = match worktree_path.to_str() {
-        Some(s) => s.to_string(),
-        None => {
-            error!(
-                cli.quiet,
-                "Error: Worktree path contains invalid UTF-8 characters: {}",
-                worktree_path.display()
-            );
-            error!(
-                cli.quiet,
-                "Please ensure the repository path contains only valid UTF-8 characters."
-            );
-            exit(exit_codes::INVALID_PATH_ENCODING);
-        }
-    };
+        // Convert path to string, checking for valid UTF-8
+        let worktree_path_str = match worktree_path.to_str() {
+            Some(s) => s,
+            None => {
+                error!(
+                    cli.quiet,
+                    "Error: Worktree path contains invalid UTF-8 characters: {}",
+                    worktree_path.display()
+                );
+                error!(
+                    cli.quiet,
+                    "Please ensure the repository path contains only valid UTF-8 characters."
+                );
+                exit(exit_codes::INVALID_PATH_ENCODING);
+            }
+        };
 
-    // Determine the branch name once (used for both command and error messages)
-    let branch_name = get_branch_name(&cli, &dir_name);
+        // Determine branch name for this attempt
+        let branch_name = get_branch_name(&cli, &dir_name);
 
-    // Build and execute git worktree command
-    let output = if let Some(ref checkout_ref) = cli.checkout {
-        // Checkout existing ref: git worktree add <path> <ref>
-        Command::new("git")
-            .args(["worktree", "add", &worktree_path_str, checkout_ref])
-            .current_dir(&repo_root)
-            .output()
-    } else {
-        // Create new branch
-        Command::new("git")
-            .args(["worktree", "add", &worktree_path_str, "-b", branch_name])
-            .current_dir(&repo_root)
-            .output()
-    };
-
-    match output {
-        Ok(result) => {
-            if result.status.success() {
+        // Attempt to create the worktree
+        match try_create_worktree(
+            &repo_root,
+            worktree_path_str,
+            branch_name,
+            cli.checkout.as_deref(),
+        ) {
+            WorktreeResult::Success => {
                 println!("{}", worktree_path.display());
-            } else {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-
-                // Check for common errors and provide helpful messages
-                if stderr.contains("already exists") {
-                    if stderr.contains("is already used by worktree") {
-                        error!(
-                            cli.quiet,
-                            "Error: The ref '{}' is already checked out in another worktree.",
-                            cli.checkout.as_deref().unwrap_or(branch_name)
-                        );
-                    } else {
-                        error!(cli.quiet, "Error: Branch '{}' already exists.", branch_name);
-                        error!(
-                            cli.quiet,
-                            "Use --checkout to check out an existing branch instead."
-                        );
-                    }
-                } else {
-                    error!(cli.quiet, "Failed to create worktree: {}", stderr);
+                break;
+            }
+            WorktreeResult::PathCollision => {
+                // TOCTOU race or unexpected collision - retry with a new name
+                attempts += 1;
+                if attempts >= MAX_ATTEMPTS {
+                    error!(
+                        cli.quiet,
+                        "Error: Could not find an available directory name after {} attempts",
+                        MAX_ATTEMPTS
+                    );
+                    error!(cli.quiet, "Please try again or clean up unused worktrees.");
+                    exit(exit_codes::NAME_COLLISION);
                 }
+                continue;
+            }
+            WorktreeResult::BranchExists(branch) => {
+                error!(cli.quiet, "Error: Branch '{}' already exists.", branch);
+                error!(
+                    cli.quiet,
+                    "Use --checkout to check out an existing branch instead."
+                );
                 exit(exit_codes::WORKTREE_FAILED);
             }
-        }
-        Err(e) => {
-            error!(cli.quiet, "Error running git command: {}", e);
-            exit(exit_codes::GIT_COMMAND_ERROR);
+            WorktreeResult::RefInUse(ref_name) => {
+                error!(
+                    cli.quiet,
+                    "Error: The ref '{}' is already checked out in another worktree.",
+                    ref_name
+                );
+                exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::GitError(stderr) => {
+                error!(cli.quiet, "Failed to create worktree: {}", stderr);
+                exit(exit_codes::WORKTREE_FAILED);
+            }
+            WorktreeResult::CommandError(e) => {
+                error!(cli.quiet, "Error running git command: {}", e);
+                exit(exit_codes::GIT_COMMAND_ERROR);
+            }
         }
     }
 }
