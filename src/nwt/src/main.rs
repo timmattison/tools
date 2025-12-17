@@ -25,6 +25,11 @@ mod exit_codes {
     pub const INVALID_PATH_ENCODING: i32 = 8;
 }
 
+/// Maximum attempts to find an available directory name before giving up.
+/// The `names` crate has ~100 adjectives and ~200 nouns, giving ~20,000 combinations.
+/// With 10 attempts, the probability of failure when <2000 worktrees exist is negligible.
+const MAX_ATTEMPTS: u32 = 10;
+
 /// Create a new git worktree with a Docker-style random name.
 ///
 /// This tool simplifies creating git worktrees by automatically generating
@@ -87,10 +92,11 @@ macro_rules! error {
 }
 
 /// Generates a Docker-style random name in the format "adjective-noun".
-fn generate_docker_name(generator: &mut Generator) -> String {
-    generator
-        .next()
-        .expect("Name generator should always produce a name")
+///
+/// Returns `None` if the generator fails to produce a name (should not happen
+/// with the default generator configuration, but handled gracefully).
+fn generate_docker_name(generator: &mut Generator) -> Option<String> {
+    generator.next()
 }
 
 /// Sanitizes a repository name to only allow safe characters.
@@ -144,11 +150,20 @@ fn main() {
         }
     };
 
-    // Get repo name from path with sanitization
+    // Get repo name from path with sanitization (fail-fast on non-UTF8)
     let repo_name = match repo_root.file_name() {
         Some(name) => {
-            let name_str = name.to_string_lossy();
-            match sanitize_repo_name(&name_str) {
+            let name_str = match name.to_str() {
+                Some(s) => s,
+                None => {
+                    error!(
+                        cli.quiet,
+                        "Error: Repository name contains invalid UTF-8 characters"
+                    );
+                    exit(exit_codes::INVALID_PATH_ENCODING);
+                }
+            };
+            match sanitize_repo_name(name_str) {
                 Some(sanitized) => sanitized,
                 None => {
                     error!(cli.quiet, "Error: Invalid repository name");
@@ -184,15 +199,20 @@ fn main() {
     }
 
     // Generate random Docker-style name for the directory with collision detection.
-    // The `names` crate has ~100 adjectives and ~200 nouns, giving ~20,000 combinations.
-    // With 10 attempts, the probability of failure when <2000 worktrees exist is negligible.
-    const MAX_ATTEMPTS: u32 = 10;
-
     let mut generator = Generator::default();
     let (dir_name, worktree_path) = {
         let mut attempts = 0;
         loop {
-            let name = generate_docker_name(&mut generator);
+            let name = match generate_docker_name(&mut generator) {
+                Some(n) => n,
+                None => {
+                    error!(
+                        cli.quiet,
+                        "Error: Name generator failed to produce a name"
+                    );
+                    exit(exit_codes::NAME_COLLISION);
+                }
+            };
             let path = worktrees_dir.join(&name);
 
             if !path.exists() {
@@ -289,7 +309,7 @@ mod tests {
     #[test]
     fn test_generate_docker_name_format() {
         let mut generator = Generator::default();
-        let name = generate_docker_name(&mut generator);
+        let name = generate_docker_name(&mut generator).expect("Generator should produce a name");
         assert!(name.contains('-'), "Name should contain a hyphen");
 
         let parts: Vec<&str> = name.split('-').collect();
@@ -309,14 +329,22 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_docker_name_returns_some() {
+        let mut generator = Generator::default();
+        let result = generate_docker_name(&mut generator);
+        assert!(result.is_some(), "Generator should return Some");
+    }
+
+    #[test]
     fn test_generate_docker_name_randomness() {
         let mut generator = Generator::default();
-        let name1 = generate_docker_name(&mut generator);
+        let name1 = generate_docker_name(&mut generator).expect("Generator should produce a name");
         let mut found_different = false;
 
         // Generate several names to check randomness (very unlikely all same)
         for _ in 0..10 {
-            let name2 = generate_docker_name(&mut generator);
+            let name2 =
+                generate_docker_name(&mut generator).expect("Generator should produce a name");
             if name1 != name2 {
                 found_different = true;
                 break;
@@ -332,7 +360,9 @@ mod tests {
         let mut names = Vec::new();
 
         for _ in 0..5 {
-            names.push(generate_docker_name(&mut generator));
+            names.push(
+                generate_docker_name(&mut generator).expect("Generator should produce a name"),
+            );
         }
 
         // Check that we got at least some different names
