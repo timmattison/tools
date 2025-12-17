@@ -45,21 +45,26 @@ The binary will be available at `target/release/subito`.
 
 ### Example IAM Policy
 
+For WebSocket connections with IAM credentials (which is what subito uses), you need the following policy:
+
 ```json
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": [
-        "iot:Connect",
-        "iot:Subscribe",
-        "iot:Receive"
-      ],
-      "Resource": [
-        "arn:aws:iot:REGION:ACCOUNT_ID:client/${iot:Connection.Thing.ThingName}",
-        "arn:aws:iot:REGION:ACCOUNT_ID:topicfilter/*"
-      ]
+      "Action": "iot:Connect",
+      "Resource": "arn:aws:iot:REGION:ACCOUNT_ID:client/subito-*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Subscribe",
+      "Resource": "arn:aws:iot:REGION:ACCOUNT_ID:topicfilter/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "iot:Receive",
+      "Resource": "arn:aws:iot:REGION:ACCOUNT_ID:topic/*"
     },
     {
       "Effect": "Allow",
@@ -70,4 +75,10 @@ The binary will be available at `target/release/subito`.
 }
 ```
 
-Replace `REGION` and `ACCOUNT_ID` with your AWS region and account ID. Adjust the topic filter resources to match your specific topic patterns.
+**Important Notes:**
+- Replace `REGION` with your AWS region (e.g., `us-east-1`)
+- Replace `ACCOUNT_ID` with your AWS account ID
+- The client resource uses `subito-*` to match the client ID pattern (subito-{timestamp})
+- The Subscribe action uses `topicfilter/*` - adjust this to match your specific topic patterns
+- The Receive action uses `topic/*` - adjust this to match the topics you want to receive messages from
+- For stricter security, replace the wildcards with specific topic patterns

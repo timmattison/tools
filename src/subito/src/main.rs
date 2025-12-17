@@ -157,6 +157,7 @@ async fn create_mqtt_client(
     let client_id = format!("subito-{}", Utc::now().timestamp_millis());
 
     info!("Connecting to AWS IoT Core via secure WebSocket with presigned URL");
+    info!(client_id = %client_id, "Using client ID");
 
     // Create MQTT options with the full presigned URL (wss://...) as the host
     // rumqttc accepts the full WebSocket URL as the host parameter
