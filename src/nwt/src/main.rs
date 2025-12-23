@@ -8,6 +8,131 @@ use names::Generator;
 use repowalker::find_git_repo;
 use serde::Deserialize;
 
+/// Configuration file schema for nwt.
+///
+/// All fields are optional - only set what you need to override defaults.
+/// The config file is loaded from `~/.nwt.toml`.
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct NwtConfig {
+    /// Default branch name (conflicts with checkout if both set).
+    branch: Option<String>,
+
+    /// Default checkout ref (conflicts with branch if both set).
+    checkout: Option<String>,
+
+    /// Enable quiet mode by default.
+    #[serde(default)]
+    quiet: bool,
+
+    /// Default command to run after worktree creation.
+    run: Option<String>,
+
+    /// Open worktree in tmux by default.
+    #[serde(default)]
+    tmux: bool,
+}
+
+/// Errors that can occur when loading or validating the config file.
+#[derive(Debug)]
+enum ConfigError {
+    /// Failed to read the config file.
+    Io(std::io::Error),
+    /// Failed to parse the TOML content.
+    Parse(toml::de::Error),
+    /// Config validation failed (e.g., conflicting options).
+    Validation(String),
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigError::Io(e) => write!(f, "Failed to read config file: {}", e),
+            ConfigError::Parse(e) => write!(f, "Failed to parse config file: {}", e),
+            ConfigError::Validation(msg) => write!(f, "Config validation error: {}", msg),
+        }
+    }
+}
+
+impl From<std::io::Error> for ConfigError {
+    fn from(e: std::io::Error) -> Self {
+        ConfigError::Io(e)
+    }
+}
+
+impl From<toml::de::Error> for ConfigError {
+    fn from(e: toml::de::Error) -> Self {
+        ConfigError::Parse(e)
+    }
+}
+
+/// Final merged configuration from CLI arguments and config file.
+///
+/// CLI arguments take precedence over config file values.
+struct MergedConfig {
+    branch: Option<String>,
+    checkout: Option<String>,
+    quiet: bool,
+    run: Option<String>,
+    tmux: bool,
+}
+
+/// Returns the path to the config file.
+///
+/// The config file is located at `~/.nwt.toml`.
+fn get_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".nwt.toml"))
+}
+
+/// Loads the config file from `~/.nwt.toml`.
+///
+/// Returns `Ok(None)` if the config file doesn't exist (not an error).
+/// Returns `Err` for invalid TOML, IO errors (other than not found), or validation failures.
+fn load_config() -> Result<Option<NwtConfig>, ConfigError> {
+    let config_path = match get_config_path() {
+        Some(path) => path,
+        None => return Ok(None), // No home directory, no config
+    };
+
+    if !config_path.exists() {
+        return Ok(None); // No config file is OK
+    }
+
+    let contents = fs::read_to_string(&config_path)?;
+    let config: NwtConfig = toml::from_str(&contents)?;
+
+    validate_config(&config)?;
+
+    Ok(Some(config))
+}
+
+/// Validates the config file for conflicting options.
+fn validate_config(config: &NwtConfig) -> Result<(), ConfigError> {
+    if config.branch.is_some() && config.checkout.is_some() {
+        return Err(ConfigError::Validation(
+            "branch and checkout cannot both be set in config file".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Merges CLI arguments with config file values.
+///
+/// CLI arguments always take precedence over config file values.
+fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
+    let config = config.unwrap_or_default();
+
+    MergedConfig {
+        // CLI options override config file values
+        branch: cli.branch.clone().or(config.branch),
+        checkout: cli.checkout.clone().or(config.checkout),
+        // For boolean flags, CLI sets to true if specified, otherwise use config
+        quiet: cli.quiet || config.quiet,
+        run: cli.run.clone().or(config.run),
+        tmux: cli.tmux || config.tmux,
+    }
+}
+
 /// Result of running a shell command.
 #[derive(Debug)]
 enum ShellCommandResult {
@@ -167,6 +292,8 @@ mod exit_codes {
     pub const TMUX_FAILED: i32 = 10;
     /// Window name contains invalid characters (control chars)
     pub const INVALID_WINDOW_NAME: i32 = 11;
+    /// Config file error (invalid TOML, validation failed, etc.)
+    pub const CONFIG_ERROR: i32 = 12;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -196,6 +323,15 @@ const MAX_ATTEMPTS: u32 = 10;
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
 and branch unless overridden.
 
+CONFIGURATION:
+    Default values can be set in ~/.nwt.toml. CLI arguments override config values.
+
+    Example config file:
+        branch = \"feature/default\"
+        quiet = false
+        tmux = true
+        run = \"pnpm install\"
+
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b feature/login             # Custom branch name, random directory
@@ -217,7 +353,8 @@ EXIT CODES:
     8  Path contains non-UTF8 characters
     9  Command specified with --run failed
     10 Tmux command failed
-    11 Invalid window name (contains control characters)")]
+    11 Invalid window name (contains control characters)
+    12 Config file error (invalid TOML, validation failed)")]
 struct Cli {
     /// Specify branch name instead of generating a random one.
     #[arg(short, long, conflicts_with = "checkout")]
@@ -315,9 +452,9 @@ fn sanitize_repo_name(name: &str) -> Option<String> {
     Some(sanitized)
 }
 
-/// Determines the branch name to use based on CLI options and generated directory name.
-fn get_branch_name<'a>(cli: &'a Cli, dir_name: &'a str) -> &'a str {
-    cli.branch.as_deref().unwrap_or(dir_name)
+/// Determines the branch name to use based on merged config and generated directory name.
+fn get_branch_name<'a>(config: &'a MergedConfig, dir_name: &'a str) -> &'a str {
+    config.branch.as_deref().unwrap_or(dir_name)
 }
 
 /// Result of attempting to create a worktree.
@@ -393,12 +530,29 @@ fn try_create_worktree(
 fn main() {
     let cli = Cli::parse();
 
+    // Load config file (missing file is OK, invalid file is error)
+    let file_config = match load_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // Config errors are fatal - always print them even in quiet mode
+            // since the user needs to know their config file is broken
+            eprintln!("Error: {}", e);
+            if let Some(path) = get_config_path() {
+                eprintln!("Config file location: {}", path.display());
+            }
+            exit(exit_codes::CONFIG_ERROR);
+        }
+    };
+
+    // Merge CLI args with config file - CLI takes precedence
+    let config = merge_config(&cli, file_config);
+
     // Find git repo root
     let repo_root = match find_git_repo() {
         Some(root) => root,
         None => {
-            error!(cli.quiet, "Error: Not in a git repository");
-            error!(cli.quiet, "Please run this command from within a git repository.");
+            error!(config.quiet, "Error: Not in a git repository");
+            error!(config.quiet, "Please run this command from within a git repository.");
             exit(exit_codes::NOT_IN_REPO);
         }
     };
@@ -410,7 +564,7 @@ fn main() {
                 Some(s) => s,
                 None => {
                     error!(
-                        cli.quiet,
+                        config.quiet,
                         "Error: Repository name contains invalid UTF-8 characters"
                     );
                     exit(exit_codes::INVALID_PATH_ENCODING);
@@ -419,13 +573,13 @@ fn main() {
             match sanitize_repo_name(name_str) {
                 Some(sanitized) => sanitized,
                 None => {
-                    error!(cli.quiet, "Error: Invalid repository name");
+                    error!(config.quiet, "Error: Invalid repository name");
                     exit(exit_codes::INVALID_REPO_NAME);
                 }
             }
         }
         None => {
-            error!(cli.quiet, "Error: Could not determine repository name");
+            error!(config.quiet, "Error: Could not determine repository name");
             exit(exit_codes::INVALID_REPO_NAME);
         }
     };
@@ -434,7 +588,7 @@ fn main() {
     let parent = match repo_root.parent() {
         Some(p) => p,
         None => {
-            error!(cli.quiet, "Error: Repository has no parent directory");
+            error!(config.quiet, "Error: Repository has no parent directory");
             exit(exit_codes::NO_PARENT_DIR);
         }
     };
@@ -443,7 +597,7 @@ fn main() {
     // Create worktrees directory if needed
     if let Err(e) = fs::create_dir_all(&worktrees_dir) {
         error!(
-            cli.quiet,
+            config.quiet,
             "Error: Could not create worktrees directory '{}': {}",
             worktrees_dir.display(),
             e
@@ -462,7 +616,7 @@ fn main() {
             Some(n) => n,
             None => {
                 error!(
-                    cli.quiet,
+                    config.quiet,
                     "Error: Name generator failed to produce a name"
                 );
                 exit(exit_codes::NAME_COLLISION);
@@ -475,11 +629,11 @@ fn main() {
             attempts += 1;
             if attempts >= MAX_ATTEMPTS {
                 error!(
-                    cli.quiet,
+                    config.quiet,
                     "Error: Could not find an available directory name after {} attempts",
                     MAX_ATTEMPTS
                 );
-                error!(cli.quiet, "Please try again or clean up unused worktrees.");
+                error!(config.quiet, "Please try again or clean up unused worktrees.");
                 exit(exit_codes::NAME_COLLISION);
             }
             continue;
@@ -490,12 +644,12 @@ fn main() {
             Some(s) => s,
             None => {
                 error!(
-                    cli.quiet,
+                    config.quiet,
                     "Error: Worktree path contains invalid UTF-8 characters: {}",
                     worktree_path.display()
                 );
                 error!(
-                    cli.quiet,
+                    config.quiet,
                     "Please ensure the repository path contains only valid UTF-8 characters."
                 );
                 exit(exit_codes::INVALID_PATH_ENCODING);
@@ -503,24 +657,24 @@ fn main() {
         };
 
         // Determine branch name for this attempt
-        let branch_name = get_branch_name(&cli, &dir_name);
+        let branch_name = get_branch_name(&config, &dir_name);
 
         // Attempt to create the worktree
         match try_create_worktree(
             &repo_root,
             worktree_path_str,
             branch_name,
-            cli.checkout.as_deref(),
+            config.checkout.as_deref(),
         ) {
             WorktreeResult::Success => {
                 // Handle tmux and/or run options
-                if cli.tmux {
+                if config.tmux {
                     // Validate dir_name doesn't contain control characters that could
                     // cause unexpected behavior in tmux window names. We validate before
                     // printing the worktree path so we don't output success then error.
                     if contains_control_chars(&dir_name) {
                         error!(
-                            cli.quiet,
+                            config.quiet,
                             "Error: Generated directory name contains control characters"
                         );
                         exit(exit_codes::INVALID_WINDOW_NAME);
@@ -530,7 +684,7 @@ fn main() {
                 println!("{}", worktree_path.display());
 
                 // Execute tmux and/or run commands
-                if cli.tmux {
+                if config.tmux {
                     #[cfg(unix)]
                     {
                         // Create a new tmux window.
@@ -548,7 +702,7 @@ fn main() {
 
                         // If --run is specified, wrap the command in an interactive shell
                         // so that aliases and shell functions are available.
-                        if let Some(ref cmd) = cli.run {
+                        if let Some(ref cmd) = config.run {
                             // Get the user's shell, defaulting to /bin/sh if SHELL is not set.
                             // We escape the shell path to prevent injection attacks from
                             // malicious SHELL environment variables.
@@ -594,7 +748,7 @@ fn main() {
                                     // successfully; this exit code indicates tmux itself failed,
                                     // not the user's --run command (which runs inside tmux).
                                     error!(
-                                        cli.quiet,
+                                        config.quiet,
                                         "tmux exited with code {}",
                                         get_exit_code(status)
                                     );
@@ -602,7 +756,7 @@ fn main() {
                                 }
                             }
                             Err(e) => {
-                                error!(cli.quiet, "Error running tmux: {}", e);
+                                error!(config.quiet, "Error running tmux: {}", e);
                                 exit(exit_codes::TMUX_FAILED);
                             }
                         }
@@ -612,23 +766,23 @@ fn main() {
                     #[cfg(windows)]
                     {
                         error!(
-                            cli.quiet,
+                            config.quiet,
                             "Error: --tmux is not supported on Windows. tmux is a Unix-only terminal multiplexer."
                         );
                         exit(exit_codes::TMUX_FAILED);
                     }
-                } else if let Some(ref cmd) = cli.run {
+                } else if let Some(ref cmd) = config.run {
                     // Run command directly (no tmux)
                     match run_shell_command(cmd, &worktree_path) {
                         ShellCommandResult::Success => {}
                         ShellCommandResult::Failed(code) => {
                             // Print error message so users know the exit code is from
                             // the command, not nwt itself (since codes 1-8 overlap).
-                            error!(cli.quiet, "Command exited with code {}", code);
+                            error!(config.quiet, "Command exited with code {}", code);
                             exit(code);
                         }
                         ShellCommandResult::ExecutionError(e) => {
-                            error!(cli.quiet, "Error running command: {}", e);
+                            error!(config.quiet, "Error running command: {}", e);
                             exit(exit_codes::RUN_COMMAND_FAILED);
                         }
                     }
@@ -641,37 +795,37 @@ fn main() {
                 attempts += 1;
                 if attempts >= MAX_ATTEMPTS {
                     error!(
-                        cli.quiet,
+                        config.quiet,
                         "Error: Could not find an available directory name after {} attempts",
                         MAX_ATTEMPTS
                     );
-                    error!(cli.quiet, "Please try again or clean up unused worktrees.");
+                    error!(config.quiet, "Please try again or clean up unused worktrees.");
                     exit(exit_codes::NAME_COLLISION);
                 }
                 continue;
             }
             WorktreeResult::BranchExists(branch) => {
-                error!(cli.quiet, "Error: Branch '{}' already exists.", branch);
+                error!(config.quiet, "Error: Branch '{}' already exists.", branch);
                 error!(
-                    cli.quiet,
+                    config.quiet,
                     "Use --checkout to check out an existing branch instead."
                 );
                 exit(exit_codes::WORKTREE_FAILED);
             }
             WorktreeResult::RefInUse(ref_name) => {
                 error!(
-                    cli.quiet,
+                    config.quiet,
                     "Error: The ref '{}' is already checked out in another worktree.",
                     ref_name
                 );
                 exit(exit_codes::WORKTREE_FAILED);
             }
             WorktreeResult::GitError(stderr) => {
-                error!(cli.quiet, "Failed to create worktree: {}", stderr);
+                error!(config.quiet, "Failed to create worktree: {}", stderr);
                 exit(exit_codes::WORKTREE_FAILED);
             }
             WorktreeResult::CommandError(e) => {
-                error!(cli.quiet, "Error running git command: {}", e);
+                error!(config.quiet, "Error running git command: {}", e);
                 exit(exit_codes::GIT_COMMAND_ERROR);
             }
         }
@@ -820,26 +974,26 @@ mod tests {
 
     #[test]
     fn test_get_branch_name_with_explicit_branch() {
-        let cli = Cli {
+        let config = MergedConfig {
             branch: Some("feature/test".to_string()),
             checkout: None,
             quiet: false,
             run: None,
             tmux: false,
         };
-        assert_eq!(get_branch_name(&cli, "random-name"), "feature/test");
+        assert_eq!(get_branch_name(&config, "random-name"), "feature/test");
     }
 
     #[test]
     fn test_get_branch_name_with_generated_name() {
-        let cli = Cli {
+        let config = MergedConfig {
             branch: None,
             checkout: None,
             quiet: false,
             run: None,
             tmux: false,
         };
-        assert_eq!(get_branch_name(&cli, "random-name"), "random-name");
+        assert_eq!(get_branch_name(&config, "random-name"), "random-name");
     }
 
     #[test]
@@ -1136,6 +1290,196 @@ mod tests {
                 .expect("Failed to run command");
             let code = get_exit_code(status);
             assert_eq!(code, 123, "Should capture custom exit code");
+        }
+    }
+
+    // Config file tests
+    mod config_tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_valid_config() {
+            let toml = r#"
+                branch = "feature/test"
+                quiet = true
+                tmux = false
+            "#;
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert_eq!(config.branch, Some("feature/test".to_string()));
+            assert!(config.quiet);
+            assert!(!config.tmux);
+            assert!(config.run.is_none());
+            assert!(config.checkout.is_none());
+        }
+
+        #[test]
+        fn test_parse_config_all_fields() {
+            let toml = r#"
+                branch = "my-branch"
+                quiet = true
+                tmux = true
+                run = "npm install"
+            "#;
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert_eq!(config.branch, Some("my-branch".to_string()));
+            assert!(config.quiet);
+            assert!(config.tmux);
+            assert_eq!(config.run, Some("npm install".to_string()));
+        }
+
+        #[test]
+        fn test_parse_empty_config() {
+            let toml = "";
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse empty config");
+            assert!(config.branch.is_none());
+            assert!(config.checkout.is_none());
+            assert!(!config.quiet);
+            assert!(config.run.is_none());
+            assert!(!config.tmux);
+        }
+
+        #[test]
+        fn test_parse_config_unknown_field_fails() {
+            // Unknown fields should be rejected (catches typos like "banch")
+            let toml = r#"banch = "typo""#;
+            let result: Result<NwtConfig, _> = toml::from_str(toml);
+            assert!(result.is_err(), "Should reject unknown field 'banch'");
+        }
+
+        #[test]
+        fn test_validate_config_branch_checkout_conflict() {
+            let config = NwtConfig {
+                branch: Some("feat".to_string()),
+                checkout: Some("main".to_string()),
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let result = validate_config(&config);
+            assert!(result.is_err(), "Should reject branch+checkout conflict");
+        }
+
+        #[test]
+        fn test_validate_config_branch_only() {
+            let config = NwtConfig {
+                branch: Some("feat".to_string()),
+                checkout: None,
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let result = validate_config(&config);
+            assert!(result.is_ok(), "Should accept config with only branch");
+        }
+
+        #[test]
+        fn test_validate_config_checkout_only() {
+            let config = NwtConfig {
+                branch: None,
+                checkout: Some("main".to_string()),
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let result = validate_config(&config);
+            assert!(result.is_ok(), "Should accept config with only checkout");
+        }
+
+        #[test]
+        fn test_merge_cli_overrides_config() {
+            let cli = Cli {
+                branch: Some("cli-branch".to_string()),
+                checkout: None,
+                quiet: true,
+                run: None,
+                tmux: false,
+            };
+            let config = NwtConfig {
+                branch: Some("config-branch".to_string()),
+                checkout: None,
+                quiet: false,
+                run: Some("npm install".to_string()),
+                tmux: true,
+            };
+            let merged = merge_config(&cli, Some(config));
+
+            // CLI values should override config
+            assert_eq!(merged.branch, Some("cli-branch".to_string()));
+            assert!(merged.quiet); // CLI quiet=true overrides config quiet=false
+            assert!(merged.tmux); // CLI tmux=false doesn't override because we use ||
+            assert_eq!(merged.run, Some("npm install".to_string())); // Config provides default
+        }
+
+        #[test]
+        fn test_merge_config_provides_defaults() {
+            let cli = Cli {
+                branch: None,
+                checkout: None,
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let config = NwtConfig {
+                branch: Some("config-branch".to_string()),
+                checkout: None,
+                quiet: true,
+                run: Some("make build".to_string()),
+                tmux: true,
+            };
+            let merged = merge_config(&cli, Some(config));
+
+            // Config values should be used when CLI doesn't specify
+            assert_eq!(merged.branch, Some("config-branch".to_string()));
+            assert!(merged.quiet);
+            assert!(merged.tmux);
+            assert_eq!(merged.run, Some("make build".to_string()));
+        }
+
+        #[test]
+        fn test_merge_no_config() {
+            let cli = Cli {
+                branch: Some("my-branch".to_string()),
+                checkout: None,
+                quiet: true,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, None);
+
+            // Should use CLI values with defaults for missing
+            assert_eq!(merged.branch, Some("my-branch".to_string()));
+            assert!(merged.quiet);
+            assert!(!merged.tmux);
+            assert!(merged.run.is_none());
+        }
+
+        #[test]
+        fn test_exit_code_config_error_is_unique() {
+            // Ensure CONFIG_ERROR doesn't conflict with other exit codes
+            let codes = [
+                exit_codes::NOT_IN_REPO,
+                exit_codes::INVALID_REPO_NAME,
+                exit_codes::NO_PARENT_DIR,
+                exit_codes::DIR_CREATE_FAILED,
+                exit_codes::NAME_COLLISION,
+                exit_codes::GIT_COMMAND_ERROR,
+                exit_codes::WORKTREE_FAILED,
+                exit_codes::INVALID_PATH_ENCODING,
+                exit_codes::RUN_COMMAND_FAILED,
+                exit_codes::TMUX_FAILED,
+                exit_codes::INVALID_WINDOW_NAME,
+                exit_codes::CONFIG_ERROR,
+            ];
+
+            let mut sorted = codes.to_vec();
+            sorted.sort();
+            sorted.dedup();
+
+            assert_eq!(
+                sorted.len(),
+                codes.len(),
+                "All exit codes including CONFIG_ERROR should be unique"
+            );
         }
     }
 }
