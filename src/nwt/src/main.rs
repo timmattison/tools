@@ -69,6 +69,7 @@ impl From<toml::de::Error> for ConfigError {
 /// Final merged configuration from CLI arguments and config file.
 ///
 /// CLI arguments take precedence over config file values.
+#[derive(Debug)]
 struct MergedConfig {
     branch: Option<String>,
     checkout: Option<String>,
@@ -316,8 +317,7 @@ mod exit_codes {
     pub const RUN_COMMAND_FAILED: i32 = 9;
     /// Tmux command failed to execute
     pub const TMUX_FAILED: i32 = 10;
-    /// Window name contains invalid characters (control chars)
-    pub const INVALID_WINDOW_NAME: i32 = 11;
+    // Note: Exit code 11 is reserved (previously INVALID_WINDOW_NAME, now a debug assertion)
     /// Config file error (invalid TOML, validation failed, etc.)
     pub const CONFIG_ERROR: i32 = 12;
     /// Tmux option specified but not running inside tmux
@@ -381,7 +381,6 @@ EXIT CODES:
     8  Path contains non-UTF8 characters
     9  Command specified with --run failed
     10 Tmux command failed
-    11 Invalid window name (contains control characters)
     12 Config file error (invalid TOML, validation failed)
     13 Not running inside tmux (--tmux specified)")]
 struct Cli {
@@ -719,16 +718,14 @@ fn main() {
             WorktreeResult::Success => {
                 // Handle tmux and/or run options
                 if config.tmux {
-                    // Validate dir_name doesn't contain control characters that could
-                    // cause unexpected behavior in tmux window names. We validate before
-                    // printing the worktree path so we don't output success then error.
-                    if contains_control_chars(&dir_name) {
-                        error!(
-                            config.quiet,
-                            "Error: Generated directory name contains control characters"
-                        );
-                        exit(exit_codes::INVALID_WINDOW_NAME);
-                    }
+                    // The names crate generates only lowercase ASCII letters and hyphens,
+                    // so control characters cannot appear. This is a debug assertion to
+                    // catch any future regression, not a runtime check.
+                    debug_assert!(
+                        !contains_control_chars(&dir_name),
+                        "Generated directory name contains control characters: {:?}",
+                        dir_name
+                    );
                 }
 
                 println!("{}", worktree_path.display());
@@ -1124,7 +1121,6 @@ mod tests {
             exit_codes::INVALID_PATH_ENCODING,
             exit_codes::RUN_COMMAND_FAILED,
             exit_codes::TMUX_FAILED,
-            exit_codes::INVALID_WINDOW_NAME,
             exit_codes::CONFIG_ERROR,
             exit_codes::TMUX_NOT_RUNNING,
         ];
@@ -1529,7 +1525,6 @@ mod tests {
                 exit_codes::INVALID_PATH_ENCODING,
                 exit_codes::RUN_COMMAND_FAILED,
                 exit_codes::TMUX_FAILED,
-                exit_codes::INVALID_WINDOW_NAME,
                 exit_codes::CONFIG_ERROR,
                 exit_codes::TMUX_NOT_RUNNING,
             ];
