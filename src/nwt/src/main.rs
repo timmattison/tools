@@ -99,6 +99,14 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Checks if a string contains any ASCII control characters.
+///
+/// Control characters (0x00-0x1F and 0x7F) can cause unexpected behavior
+/// in terminal applications like tmux when used in window names.
+fn contains_control_chars(s: &str) -> bool {
+    s.bytes().any(|b| b < 0x20 || b == 0x7F)
+}
+
 /// Exit codes for different failure modes
 mod exit_codes {
     /// Not running inside a git repository
@@ -121,6 +129,8 @@ mod exit_codes {
     pub const RUN_COMMAND_FAILED: i32 = 9;
     /// Tmux command failed to execute
     pub const TMUX_FAILED: i32 = 10;
+    /// Window name contains invalid characters (control chars)
+    pub const INVALID_WINDOW_NAME: i32 = 11;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -170,7 +180,8 @@ EXIT CODES:
     7  Git worktree creation failed
     8  Path contains non-UTF8 characters
     9  Command specified with --run failed
-    10 Tmux command failed")]
+    10 Tmux command failed
+    11 Invalid window name (contains control characters)")]
 struct Cli {
     /// Specify branch name instead of generating a random one.
     #[arg(short, long, conflicts_with = "checkout")]
@@ -208,7 +219,9 @@ struct Cli {
     /// The window is named after the worktree directory (e.g., "adjective-noun").
     ///
     /// When combined with --run, the command runs in an interactive shell
-    /// (`$SHELL -ic`), so aliases and shell functions are available.
+    /// (`$SHELL -ic`), so aliases and shell functions are available. This assumes
+    /// your shell supports `-i` (interactive) and `-c` (command) flags, which is
+    /// true for bash, zsh, fish, and most POSIX-compatible shells.
     ///
     /// Note: tmux is typically only available on Unix systems (Linux, macOS).
     /// This option will fail on Windows unless tmux is installed via WSL or similar.
@@ -467,83 +480,94 @@ fn main() {
                 println!("{}", worktree_path.display());
 
                 // Handle tmux and/or run options
-                #[cfg(unix)]
                 if cli.tmux {
-                    // Create a new tmux window
-                    let mut tmux_args = vec![
-                        "new-window".to_string(),
-                        "-c".to_string(),
-                        worktree_path_str.to_string(),
-                        "-n".to_string(),
-                        dir_name.clone(),
-                    ];
-
-                    // If --run is specified, wrap the command in an interactive shell
-                    // so that aliases and shell functions are available.
-                    if let Some(ref cmd) = cli.run {
-                        // Get the user's shell, defaulting to sh if not set.
-                        // We escape the shell path to prevent injection attacks from
-                        // malicious SHELL environment variables.
-                        let shell =
-                            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-                        // Use -ic to start an interactive shell that loads rc files
-                        // This ensures aliases and shell functions are available.
-                        // Both the shell path and command are escaped for safety.
-                        tmux_args.push(format!(
-                            "{} -ic {}",
-                            shell_escape(&shell),
-                            shell_escape(cmd)
-                        ));
+                    // Validate dir_name doesn't contain control characters that could
+                    // cause unexpected behavior in tmux window names.
+                    if contains_control_chars(&dir_name) {
+                        error!(
+                            cli.quiet,
+                            "Error: Generated directory name contains control characters"
+                        );
+                        exit(exit_codes::INVALID_WINDOW_NAME);
                     }
 
-                    match Command::new("tmux")
-                        .args(&tmux_args)
-                        .stdout(Stdio::inherit())
-                        .stderr(Stdio::inherit())
-                        .status()
+                    #[cfg(unix)]
                     {
-                        Ok(status) => {
-                            if !status.success() {
-                                // Use TMUX_FAILED for consistency. The worktree was created
-                                // successfully; this exit code indicates tmux itself failed,
-                                // not the user's --run command (which runs inside tmux).
-                                error!(
-                                    cli.quiet,
-                                    "tmux exited with code {}",
-                                    get_exit_code(status)
-                                );
+                        // Create a new tmux window
+                        let mut tmux_args = vec![
+                            "new-window".to_string(),
+                            "-c".to_string(),
+                            worktree_path_str.to_string(),
+                            "-n".to_string(),
+                            dir_name.clone(),
+                        ];
+
+                        // If --run is specified, wrap the command in an interactive shell
+                        // so that aliases and shell functions are available.
+                        if let Some(ref cmd) = cli.run {
+                            // Get the user's shell, defaulting to sh if not set.
+                            // We escape the shell path to prevent injection attacks from
+                            // malicious SHELL environment variables.
+                            let shell =
+                                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                            // Use -ic to start an interactive shell that loads rc files.
+                            // This ensures aliases and shell functions are available.
+                            // Note: This assumes $SHELL supports -i (interactive) and -c (command)
+                            // flags, which is true for bash, zsh, fish, and most POSIX shells.
+                            // Exotic shells that don't support these flags will fail.
+                            // Both the shell path and command are escaped for safety.
+                            tmux_args.push(format!(
+                                "{} -ic {}",
+                                shell_escape(&shell),
+                                shell_escape(cmd)
+                            ));
+                        }
+
+                        match Command::new("tmux")
+                            .args(&tmux_args)
+                            .stdout(Stdio::inherit())
+                            .stderr(Stdio::inherit())
+                            .status()
+                        {
+                            Ok(status) => {
+                                if !status.success() {
+                                    // Use TMUX_FAILED for consistency. The worktree was created
+                                    // successfully; this exit code indicates tmux itself failed,
+                                    // not the user's --run command (which runs inside tmux).
+                                    error!(
+                                        cli.quiet,
+                                        "tmux exited with code {}",
+                                        get_exit_code(status)
+                                    );
+                                    exit(exit_codes::TMUX_FAILED);
+                                }
+                            }
+                            Err(e) => {
+                                error!(cli.quiet, "Error running tmux: {}", e);
                                 exit(exit_codes::TMUX_FAILED);
                             }
                         }
-                        Err(e) => {
-                            error!(cli.quiet, "Error running tmux: {}", e);
-                            exit(exit_codes::TMUX_FAILED);
-                        }
                     }
-                }
 
-                // On Windows, --tmux is not supported (tmux is Unix-only)
-                #[cfg(windows)]
-                if cli.tmux {
-                    error!(
-                        cli.quiet,
-                        "Error: --tmux is not supported on Windows. tmux is a Unix-only terminal multiplexer."
-                    );
-                    exit(exit_codes::TMUX_FAILED);
-                }
-
-                if !cli.tmux {
-                    if let Some(ref cmd) = cli.run {
-                        // Run command directly (no tmux)
-                        match run_shell_command(cmd, &worktree_path) {
-                            ShellCommandResult::Success => {}
-                            ShellCommandResult::Failed(code) => {
-                                exit(code);
-                            }
-                            ShellCommandResult::ExecutionError(e) => {
-                                error!(cli.quiet, "Error running command: {}", e);
-                                exit(exit_codes::RUN_COMMAND_FAILED);
-                            }
+                    // On Windows, --tmux is not supported (tmux is Unix-only)
+                    #[cfg(windows)]
+                    {
+                        error!(
+                            cli.quiet,
+                            "Error: --tmux is not supported on Windows. tmux is a Unix-only terminal multiplexer."
+                        );
+                        exit(exit_codes::TMUX_FAILED);
+                    }
+                } else if let Some(ref cmd) = cli.run {
+                    // Run command directly (no tmux)
+                    match run_shell_command(cmd, &worktree_path) {
+                        ShellCommandResult::Success => {}
+                        ShellCommandResult::Failed(code) => {
+                            exit(code);
+                        }
+                        ShellCommandResult::ExecutionError(e) => {
+                            error!(cli.quiet, "Error running command: {}", e);
+                            exit(exit_codes::RUN_COMMAND_FAILED);
                         }
                     }
                 }
@@ -831,6 +855,7 @@ mod tests {
             exit_codes::INVALID_PATH_ENCODING,
             exit_codes::RUN_COMMAND_FAILED,
             exit_codes::TMUX_FAILED,
+            exit_codes::INVALID_WINDOW_NAME,
         ];
 
         let mut sorted = codes.to_vec();
@@ -842,6 +867,55 @@ mod tests {
             codes.len(),
             "All exit codes should be unique"
         );
+    }
+
+    #[test]
+    fn test_contains_control_chars_normal_strings() {
+        // Normal strings should not contain control characters
+        assert!(!contains_control_chars("hello"));
+        assert!(!contains_control_chars("hello-world"));
+        assert!(!contains_control_chars("adjective-noun"));
+        assert!(!contains_control_chars("my_worktree_123"));
+    }
+
+    #[test]
+    fn test_contains_control_chars_with_newline() {
+        // Newlines are control characters
+        assert!(contains_control_chars("hello\nworld"));
+        assert!(contains_control_chars("\n"));
+    }
+
+    #[test]
+    fn test_contains_control_chars_with_tab() {
+        // Tabs are control characters
+        assert!(contains_control_chars("hello\tworld"));
+        assert!(contains_control_chars("\t"));
+    }
+
+    #[test]
+    fn test_contains_control_chars_with_null() {
+        // Null byte is a control character
+        assert!(contains_control_chars("hello\0world"));
+        assert!(contains_control_chars("\0"));
+    }
+
+    #[test]
+    fn test_contains_control_chars_with_escape() {
+        // ESC (0x1B) is a control character
+        assert!(contains_control_chars("hello\x1bworld"));
+        assert!(contains_control_chars("\x1b[31m")); // ANSI escape sequence
+    }
+
+    #[test]
+    fn test_contains_control_chars_with_delete() {
+        // DEL (0x7F) is a control character
+        assert!(contains_control_chars("hello\x7fworld"));
+    }
+
+    #[test]
+    fn test_contains_control_chars_empty_string() {
+        // Empty string should not contain control characters
+        assert!(!contains_control_chars(""));
     }
 
     #[test]
