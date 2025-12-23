@@ -93,7 +93,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     - Subscribes to a list of topics on AWS IoT Core and prints out the messages it receives. This is useful for
       debugging and testing. I was going to call it `subiot` but `subito` actually means "immediately" in Italian and
       I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
-    - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
+    - Available in both Go and Rust versions:
+      - Go: `go install github.com/timmattison/tools/cmd/subito@latest`
+      - Rust: `cargo install --git https://github.com/timmattison/tools subito`
 - portplz
     - Generates an unprivileged port number based on the name of the current directory and git branch. Nice for picking a port number
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
