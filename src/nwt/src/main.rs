@@ -90,9 +90,10 @@ fn get_exit_code(status: ExitStatus) -> i32 {
 ///
 /// # Platform Note
 ///
-/// This function uses Unix single-quote escaping conventions. It is only used
-/// by the `--tmux` code path, which is itself Unix-only (tmux is not available
-/// on Windows). Do not use this function for Windows `cmd.exe` escaping.
+/// This function uses Unix single-quote escaping conventions and is only
+/// compiled on Unix platforms. It is used by the `--tmux` code path, which
+/// is itself Unix-only (tmux is not typically available on Windows).
+#[cfg(unix)]
 fn shell_escape(s: &str) -> String {
     // Wrap in single quotes and escape any embedded single quotes
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -191,8 +192,13 @@ struct Cli {
     /// When combined with --tmux, the command runs in an interactive shell
     /// (`$SHELL -ic`), so aliases and shell functions ARE available.
     ///
-    /// Security: Should only contain trusted input as commands are executed directly.
+    /// Exit codes: When --run is used without --tmux, the command's exit code is
+    /// passed through directly. This means exit codes 1-8 may shadow nwt's own
+    /// error codes. Use --quiet if you need to distinguish command failures from
+    /// nwt errors (nwt won't print errors in quiet mode, but the command might).
     /// If the command is killed by a signal, exits with 128 + signal number (bash convention).
+    ///
+    /// Security: Should only contain trusted input as commands are executed directly.
     #[arg(long)]
     run: Option<String>,
 
@@ -461,6 +467,7 @@ fn main() {
                 println!("{}", worktree_path.display());
 
                 // Handle tmux and/or run options
+                #[cfg(unix)]
                 if cli.tmux {
                     // Create a new tmux window
                     let mut tmux_args = vec![
@@ -474,12 +481,19 @@ fn main() {
                     // If --run is specified, wrap the command in an interactive shell
                     // so that aliases and shell functions are available.
                     if let Some(ref cmd) = cli.run {
-                        // Get the user's shell, defaulting to sh if not set
+                        // Get the user's shell, defaulting to sh if not set.
+                        // We escape the shell path to prevent injection attacks from
+                        // malicious SHELL environment variables.
                         let shell =
                             std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                         // Use -ic to start an interactive shell that loads rc files
-                        // This ensures aliases and shell functions are available
-                        tmux_args.push(format!("{} -ic {}", shell, shell_escape(cmd)));
+                        // This ensures aliases and shell functions are available.
+                        // Both the shell path and command are escaped for safety.
+                        tmux_args.push(format!(
+                            "{} -ic {}",
+                            shell_escape(&shell),
+                            shell_escape(cmd)
+                        ));
                     }
 
                     match Command::new("tmux")
@@ -506,16 +520,30 @@ fn main() {
                             exit(exit_codes::TMUX_FAILED);
                         }
                     }
-                } else if let Some(ref cmd) = cli.run {
-                    // Run command directly (no tmux)
-                    match run_shell_command(cmd, &worktree_path) {
-                        ShellCommandResult::Success => {}
-                        ShellCommandResult::Failed(code) => {
-                            exit(code);
-                        }
-                        ShellCommandResult::ExecutionError(e) => {
-                            error!(cli.quiet, "Error running command: {}", e);
-                            exit(exit_codes::RUN_COMMAND_FAILED);
+                }
+
+                // On Windows, --tmux is not supported (tmux is Unix-only)
+                #[cfg(windows)]
+                if cli.tmux {
+                    error!(
+                        cli.quiet,
+                        "Error: --tmux is not supported on Windows. tmux is a Unix-only terminal multiplexer."
+                    );
+                    exit(exit_codes::TMUX_FAILED);
+                }
+
+                if !cli.tmux {
+                    if let Some(ref cmd) = cli.run {
+                        // Run command directly (no tmux)
+                        match run_shell_command(cmd, &worktree_path) {
+                            ShellCommandResult::Success => {}
+                            ShellCommandResult::Failed(code) => {
+                                exit(code);
+                            }
+                            ShellCommandResult::ExecutionError(e) => {
+                                error!(cli.quiet, "Error running command: {}", e);
+                                exit(exit_codes::RUN_COMMAND_FAILED);
+                            }
                         }
                     }
                 }
@@ -750,12 +778,15 @@ mod tests {
         );
     }
 
+    // shell_escape tests are Unix-only since the function is Unix-only
+    #[cfg(unix)]
     #[test]
     fn test_shell_escape_simple() {
         assert_eq!(shell_escape("hello"), "'hello'");
         assert_eq!(shell_escape("npm install"), "'npm install'");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_shell_escape_with_single_quotes() {
         // Single quotes are escaped using the '\'' technique
@@ -763,12 +794,28 @@ mod tests {
         assert_eq!(shell_escape("echo 'hello'"), "'echo '\\''hello'\\'''");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_shell_escape_with_special_chars() {
         // These should be safely wrapped in single quotes
         assert_eq!(shell_escape("$HOME"), "'$HOME'");
         assert_eq!(shell_escape("foo && bar"), "'foo && bar'");
         assert_eq!(shell_escape("a;b"), "'a;b'");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_shell_escape_empty_string() {
+        // Empty string should still be safely quoted
+        assert_eq!(shell_escape(""), "''");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_shell_escape_shell_path() {
+        // Verify that typical shell paths are properly escaped
+        assert_eq!(shell_escape("/bin/bash"), "'/bin/bash'");
+        assert_eq!(shell_escape("/usr/local/bin/zsh"), "'/usr/local/bin/zsh'");
     }
 
     #[test]
