@@ -23,6 +23,11 @@ enum ShellCommandResult {
 ///
 /// Returns the appropriate exit code, using the bash convention of 128 + signal
 /// when a process is killed by a signal on Unix.
+///
+/// # Platform Support
+///
+/// This function only supports Unix and Windows platforms. Compilation will fail
+/// on other platforms (e.g., wasm32).
 fn run_shell_command(cmd: &str, working_dir: &Path) -> ShellCommandResult {
     #[cfg(unix)]
     let result = Command::new("sh")
@@ -39,6 +44,9 @@ fn run_shell_command(cmd: &str, working_dir: &Path) -> ShellCommandResult {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status();
+
+    #[cfg(not(any(unix, windows)))]
+    compile_error!("run_shell_command is only supported on Unix and Windows platforms");
 
     match result {
         Ok(status) => {
@@ -75,6 +83,15 @@ fn get_exit_code(status: ExitStatus) -> i32 {
     1
 }
 
+/// Escapes a string for safe use as a shell argument.
+///
+/// Wraps the string in single quotes and escapes any embedded single quotes
+/// using the `'\''` technique (end quote, escaped quote, start quote).
+fn shell_escape(s: &str) -> String {
+    // Wrap in single quotes and escape any embedded single quotes
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Exit codes for different failure modes
 mod exit_codes {
     /// Not running inside a git repository
@@ -95,6 +112,8 @@ mod exit_codes {
     pub const INVALID_PATH_ENCODING: i32 = 8;
     /// Command specified with --run failed to execute
     pub const RUN_COMMAND_FAILED: i32 = 9;
+    /// Tmux command failed to execute
+    pub const TMUX_FAILED: i32 = 10;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -143,7 +162,8 @@ EXIT CODES:
     6  Git command failed to execute
     7  Git worktree creation failed
     8  Path contains non-UTF8 characters
-    9  Command specified with --run failed")]
+    9  Command specified with --run failed
+    10 Tmux command failed")]
 struct Cli {
     /// Specify branch name instead of generating a random one.
     #[arg(short, long, conflicts_with = "checkout")]
@@ -158,13 +178,25 @@ struct Cli {
     quiet: bool,
 
     /// Run a command in the worktree directory after creation.
-    /// Uses `sh -c` on Unix or `cmd /C` on Windows. Should only contain trusted input.
+    ///
+    /// When used alone, executes via `sh -c` on Unix or `cmd /C` on Windows.
+    /// Shell aliases are NOT available in this mode.
+    ///
+    /// When combined with --tmux, the command runs in an interactive shell
+    /// (`$SHELL -ic`), so aliases and shell functions ARE available.
+    ///
+    /// Security: Should only contain trusted input as commands are executed directly.
     /// If the command is killed by a signal, exits with 128 + signal number (bash convention).
     #[arg(long)]
     run: Option<String>,
 
     /// Create a new tmux window for the worktree.
-    /// If --run is also specified, the command runs inside the tmux window.
+    ///
+    /// Opens a new tmux window with the working directory set to the worktree.
+    /// The window is named after the worktree directory (e.g., "adjective-noun").
+    ///
+    /// When combined with --run, the command runs in an interactive shell
+    /// (`$SHELL -ic`), so aliases and shell functions are available.
     #[arg(long)]
     tmux: bool,
 }
@@ -430,9 +462,15 @@ fn main() {
                         dir_name.clone(),
                     ];
 
-                    // If --run is specified, add the command to run in the tmux window
+                    // If --run is specified, wrap the command in an interactive shell
+                    // so that aliases and shell functions are available.
                     if let Some(ref cmd) = cli.run {
-                        tmux_args.push(cmd.clone());
+                        // Get the user's shell, defaulting to sh if not set
+                        let shell =
+                            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+                        // Use -ic to start an interactive shell that loads rc files
+                        // This ensures aliases and shell functions are available
+                        tmux_args.push(format!("{} -ic {}", shell, shell_escape(cmd)));
                     }
 
                     match Command::new("tmux")
@@ -448,7 +486,7 @@ fn main() {
                         }
                         Err(e) => {
                             error!(cli.quiet, "Error running tmux: {}", e);
-                            exit(exit_codes::RUN_COMMAND_FAILED);
+                            exit(exit_codes::TMUX_FAILED);
                         }
                     }
                 } else if let Some(ref cmd) = cli.run {
@@ -696,6 +734,27 @@ mod tests {
     }
 
     #[test]
+    fn test_shell_escape_simple() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+        assert_eq!(shell_escape("npm install"), "'npm install'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_single_quotes() {
+        // Single quotes are escaped using the '\'' technique
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+        assert_eq!(shell_escape("echo 'hello'"), "'echo '\\''hello'\\'''");
+    }
+
+    #[test]
+    fn test_shell_escape_with_special_chars() {
+        // These should be safely wrapped in single quotes
+        assert_eq!(shell_escape("$HOME"), "'$HOME'");
+        assert_eq!(shell_escape("foo && bar"), "'foo && bar'");
+        assert_eq!(shell_escape("a;b"), "'a;b'");
+    }
+
+    #[test]
     fn test_exit_codes_are_unique() {
         let codes = [
             exit_codes::NOT_IN_REPO,
@@ -707,6 +766,7 @@ mod tests {
             exit_codes::WORKTREE_FAILED,
             exit_codes::INVALID_PATH_ENCODING,
             exit_codes::RUN_COMMAND_FAILED,
+            exit_codes::TMUX_FAILED,
         ];
 
         let mut sorted = codes.to_vec();
@@ -784,89 +844,88 @@ mod tests {
         assert!(result.is_ok(), "Should accept --tmux with --run");
     }
 
-    #[test]
-    fn test_run_shell_command_success() {
+    // Unix-specific tests for shell command execution.
+    // These tests use Unix commands like `true`, `false`, `pwd`, and `sh`.
+    #[cfg(unix)]
+    mod unix_shell_tests {
+        use super::*;
         use std::env;
-        let temp_dir = env::temp_dir();
-
-        // Test a simple command that should succeed
-        let result = run_shell_command("true", &temp_dir);
-        assert!(
-            matches!(result, ShellCommandResult::Success),
-            "true command should succeed"
-        );
-    }
-
-    #[test]
-    fn test_run_shell_command_failure() {
-        use std::env;
-        let temp_dir = env::temp_dir();
-
-        // Test a command that should fail with exit code 1
-        let result = run_shell_command("false", &temp_dir);
-        assert!(
-            matches!(result, ShellCommandResult::Failed(1)),
-            "false command should fail with exit code 1"
-        );
-    }
-
-    #[test]
-    fn test_run_shell_command_custom_exit_code() {
-        use std::env;
-        let temp_dir = env::temp_dir();
-
-        // Test a command with a specific exit code
-        let result = run_shell_command("exit 42", &temp_dir);
-        assert!(
-            matches!(result, ShellCommandResult::Failed(42)),
-            "Should capture custom exit code 42"
-        );
-    }
-
-    #[test]
-    fn test_run_shell_command_working_directory() {
-        use std::env;
-        let temp_dir = env::temp_dir();
-
-        // Test that the command runs in the correct directory
-        // This command should succeed if we're in a valid directory
-        let result = run_shell_command("pwd", &temp_dir);
-        assert!(
-            matches!(result, ShellCommandResult::Success),
-            "pwd should succeed in temp directory"
-        );
-    }
-
-    #[test]
-    fn test_get_exit_code_with_success() {
         use std::process::Command;
 
-        // Run a command that succeeds
-        let status = Command::new("true").status().expect("Failed to run true");
-        let code = get_exit_code(status);
-        assert_eq!(code, 0, "Successful command should have exit code 0");
-    }
+        #[test]
+        fn test_run_shell_command_success() {
+            let temp_dir = env::temp_dir();
 
-    #[test]
-    fn test_get_exit_code_with_failure() {
-        use std::process::Command;
+            // Test a simple command that should succeed
+            let result = run_shell_command("true", &temp_dir);
+            assert!(
+                matches!(result, ShellCommandResult::Success),
+                "true command should succeed"
+            );
+        }
 
-        // Run a command that fails
-        let status = Command::new("false").status().expect("Failed to run false");
-        let code = get_exit_code(status);
-        assert_eq!(code, 1, "false command should have exit code 1");
-    }
+        #[test]
+        fn test_run_shell_command_failure() {
+            let temp_dir = env::temp_dir();
 
-    #[test]
-    fn test_get_exit_code_custom_code() {
-        use std::process::Command;
+            // Test a command that should fail with exit code 1
+            let result = run_shell_command("false", &temp_dir);
+            assert!(
+                matches!(result, ShellCommandResult::Failed(1)),
+                "false command should fail with exit code 1"
+            );
+        }
 
-        // Run a command with custom exit code
-        let status = Command::new("sh")
-            .args(["-c", "exit 123"])
-            .status()
-            .expect("Failed to run command");
-        let code = get_exit_code(status);
-        assert_eq!(code, 123, "Should capture custom exit code");
+        #[test]
+        fn test_run_shell_command_custom_exit_code() {
+            let temp_dir = env::temp_dir();
+
+            // Test a command with a specific exit code
+            let result = run_shell_command("exit 42", &temp_dir);
+            assert!(
+                matches!(result, ShellCommandResult::Failed(42)),
+                "Should capture custom exit code 42"
+            );
+        }
+
+        #[test]
+        fn test_run_shell_command_working_directory() {
+            let temp_dir = env::temp_dir();
+
+            // Test that the command runs in the correct directory
+            // This command should succeed if we're in a valid directory
+            let result = run_shell_command("pwd", &temp_dir);
+            assert!(
+                matches!(result, ShellCommandResult::Success),
+                "pwd should succeed in temp directory"
+            );
+        }
+
+        #[test]
+        fn test_get_exit_code_with_success() {
+            // Run a command that succeeds
+            let status = Command::new("true").status().expect("Failed to run true");
+            let code = get_exit_code(status);
+            assert_eq!(code, 0, "Successful command should have exit code 0");
+        }
+
+        #[test]
+        fn test_get_exit_code_with_failure() {
+            // Run a command that fails
+            let status = Command::new("false").status().expect("Failed to run false");
+            let code = get_exit_code(status);
+            assert_eq!(code, 1, "false command should have exit code 1");
+        }
+
+        #[test]
+        fn test_get_exit_code_custom_code() {
+            // Run a command with custom exit code
+            let status = Command::new("sh")
+                .args(["-c", "exit 123"])
+                .status()
+                .expect("Failed to run command");
+            let code = get_exit_code(status);
+            assert_eq!(code, 123, "Should capture custom exit code");
+        }
     }
 }
