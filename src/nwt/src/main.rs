@@ -1,12 +1,15 @@
+use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{exit, Command, ExitStatus, Stdio};
 
 use clap::Parser;
 use names::Generator;
 use repowalker::find_git_repo;
+use serde::Deserialize;
 
 /// Result of running a shell command.
+#[derive(Debug)]
 enum ShellCommandResult {
     /// Command completed successfully
     Success,
@@ -103,11 +106,44 @@ fn shell_escape(s: &str) -> String {
 ///
 /// Control characters (0x00-0x1F and 0x7F) can cause unexpected behavior
 /// in terminal applications like tmux when used in window names.
+///
+/// # Why ASCII-only, not full Unicode control characters (U+0080-U+009F)?
+///
+/// We only check ASCII control characters because:
+/// 1. The `names` crate generates only lowercase ASCII letters and hyphens,
+///    so Unicode control characters cannot appear in generated names.
+/// 2. Even if a future version allowed Unicode, the C1 control characters
+///    (U+0080-U+009F) are extremely rare in practice and tmux handles them
+///    by displaying replacement characters rather than causing terminal issues.
+/// 3. Using `char::is_control()` would add overhead for a theoretical edge case
+///    that cannot occur with the current name generator.
 fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7F)
 }
 
-/// Exit codes for different failure modes
+/// Exit codes for different failure modes.
+///
+/// # Exit Code Design Decision: Why --run passes through the command's exit code
+///
+/// When `--run` is used without `--tmux`, we pass through the command's exit code
+/// directly. This means exit codes 1-8 from the user's command will shadow nwt's
+/// own error codes. This is intentional:
+///
+/// 1. **Composability**: Users often chain commands like `nwt --run "make test" && deploy`.
+///    Passing through the exit code allows the shell to correctly detect test failures.
+///
+/// 2. **Precedent**: Tools like `xargs`, `find -exec`, and `docker run` all pass through
+///    the child process exit code rather than masking it.
+///
+/// 3. **Workaround**: Users who need to distinguish nwt errors from command errors can
+///    use `--quiet` mode (nwt won't print errors, but the command might) or check stderr.
+///
+/// 4. **Alternative rejected**: Using exit codes 128+ (like git does for signals) would
+///    conflict with the bash convention where 128+N means "killed by signal N". Starting
+///    at a higher base (e.g., 200+) would be non-standard and confusing.
+///
+/// The `RUN_COMMAND_FAILED` (9) exit code is only used when the command fails to *execute*
+/// (e.g., shell not found), not when the command runs but returns a non-zero exit code.
 mod exit_codes {
     /// Not running inside a git repository
     pub const NOT_IN_REPO: i32 = 1;
@@ -125,7 +161,7 @@ mod exit_codes {
     pub const WORKTREE_FAILED: i32 = 7;
     /// Path contains non-UTF8 characters
     pub const INVALID_PATH_ENCODING: i32 = 8;
-    /// Command specified with --run failed to execute
+    /// Command specified with --run failed to execute (not the command's own exit code)
     pub const RUN_COMMAND_FAILED: i32 = 9;
     /// Tmux command failed to execute
     pub const TMUX_FAILED: i32 = 10;
@@ -477,12 +513,11 @@ fn main() {
             cli.checkout.as_deref(),
         ) {
             WorktreeResult::Success => {
-                println!("{}", worktree_path.display());
-
                 // Handle tmux and/or run options
                 if cli.tmux {
                     // Validate dir_name doesn't contain control characters that could
-                    // cause unexpected behavior in tmux window names.
+                    // cause unexpected behavior in tmux window names. We validate before
+                    // printing the worktree path so we don't output success then error.
                     if contains_control_chars(&dir_name) {
                         error!(
                             cli.quiet,
@@ -490,31 +525,55 @@ fn main() {
                         );
                         exit(exit_codes::INVALID_WINDOW_NAME);
                     }
+                }
 
+                println!("{}", worktree_path.display());
+
+                // Execute tmux and/or run commands
+                if cli.tmux {
                     #[cfg(unix)]
                     {
-                        // Create a new tmux window
-                        let mut tmux_args = vec![
-                            "new-window".to_string(),
-                            "-c".to_string(),
-                            worktree_path_str.to_string(),
-                            "-n".to_string(),
+                        // Create a new tmux window.
+                        // Note: dir_name is passed directly to tmux as an argument (not through
+                        // a shell), so it doesn't need shell escaping. Control characters are
+                        // already validated above. The names crate generates simple adjective-noun
+                        // combinations with only lowercase letters and hyphens.
+                        let mut tmux_args: Vec<String> = vec![
+                            "new-window".into(),
+                            "-c".into(),
+                            worktree_path_str.into(),
+                            "-n".into(),
                             dir_name.clone(),
                         ];
 
                         // If --run is specified, wrap the command in an interactive shell
                         // so that aliases and shell functions are available.
                         if let Some(ref cmd) = cli.run {
-                            // Get the user's shell, defaulting to sh if not set.
+                            // Get the user's shell, defaulting to /bin/sh if SHELL is not set.
                             // We escape the shell path to prevent injection attacks from
                             // malicious SHELL environment variables.
+                            //
+                            // # Why /bin/sh fallback is acceptable
+                            //
+                            // When SHELL is unset, we fall back to /bin/sh. While /bin/sh with
+                            // -ic won't load user aliases (since POSIX sh has no ~/.shrc), this
+                            // is acceptable because:
+                            // 1. SHELL is almost always set on Unix systems - it's required by
+                            //    POSIX and set by login(1), sshd, and terminal emulators.
+                            // 2. If SHELL is unset, the user likely doesn't have shell aliases
+                            //    configured anyway, so there's nothing to load.
+                            // 3. The command itself will still execute correctly; only aliases
+                            //    and shell functions won't be available.
+                            // 4. This matches the behavior of tools like `tmux` itself, which
+                            //    also falls back to /bin/sh when SHELL is unset.
                             let shell =
                                 std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
                             // Use -ic to start an interactive shell that loads rc files.
                             // This ensures aliases and shell functions are available.
                             // Note: This assumes $SHELL supports -i (interactive) and -c (command)
                             // flags, which is true for bash, zsh, fish, and most POSIX shells.
-                            // Exotic shells that don't support these flags will fail.
+                            // Exotic shells that don't support these flags will fail with a clear
+                            // error message from the shell itself.
                             // Both the shell path and command are escaped for safety.
                             tmux_args.push(format!(
                                 "{} -ic {}",
@@ -563,6 +622,9 @@ fn main() {
                     match run_shell_command(cmd, &worktree_path) {
                         ShellCommandResult::Success => {}
                         ShellCommandResult::Failed(code) => {
+                            // Print error message so users know the exit code is from
+                            // the command, not nwt itself (since codes 1-8 overlap).
+                            error!(cli.quiet, "Command exited with code {}", code);
                             exit(code);
                         }
                         ShellCommandResult::ExecutionError(e) => {
