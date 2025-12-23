@@ -1,5 +1,5 @@
 use std::fs;
-use std::process::{exit, Command};
+use std::process::{exit, Command, Stdio};
 
 use clap::Parser;
 use names::Generator;
@@ -23,6 +23,8 @@ mod exit_codes {
     pub const WORKTREE_FAILED: i32 = 7;
     /// Path contains non-UTF8 characters
     pub const INVALID_PATH_ENCODING: i32 = 8;
+    /// Command specified with --run failed to execute
+    pub const RUN_COMMAND_FAILED: i32 = 9;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -57,6 +59,7 @@ EXAMPLES:
     nwt -b feature/login             # Custom branch name, random directory
     nwt -c main                      # Checkout existing 'main' branch
     nwt -c v1.0.0                    # Checkout a tag
+    nwt --run \"npm install\"          # Run a command after creation
 
 EXIT CODES:
     0  Success
@@ -67,7 +70,8 @@ EXIT CODES:
     5  Could not find available directory name
     6  Git command failed to execute
     7  Git worktree creation failed
-    8  Path contains non-UTF8 characters")]
+    8  Path contains non-UTF8 characters
+    9  Command specified with --run failed")]
 struct Cli {
     /// Specify branch name instead of generating a random one.
     #[arg(short, long, conflicts_with = "checkout")]
@@ -80,6 +84,11 @@ struct Cli {
     /// Suppress error messages (only output worktree path on success).
     #[arg(short, long)]
     quiet: bool,
+
+    /// Run a command in the worktree directory after creation.
+    /// The command is executed through a shell (sh -c) and should only contain trusted input.
+    #[arg(long)]
+    run: Option<String>,
 }
 
 /// Prints an error message to stderr unless quiet mode is enabled.
@@ -331,6 +340,28 @@ fn main() {
         ) {
             WorktreeResult::Success => {
                 println!("{}", worktree_path.display());
+
+                // Run command if specified
+                if let Some(ref cmd) = cli.run {
+                    match Command::new("sh")
+                        .args(["-c", cmd])
+                        .current_dir(&worktree_path)
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status()
+                    {
+                        Ok(status) => {
+                            if !status.success() {
+                                exit(status.code().unwrap_or(exit_codes::RUN_COMMAND_FAILED));
+                            }
+                        }
+                        Err(e) => {
+                            error!(cli.quiet, "Error running command: {}", e);
+                            exit(exit_codes::RUN_COMMAND_FAILED);
+                        }
+                    }
+                }
+
                 break;
             }
             WorktreeResult::PathCollision => {
@@ -521,6 +552,7 @@ mod tests {
             branch: Some("feature/test".to_string()),
             checkout: None,
             quiet: false,
+            run: None,
         };
         assert_eq!(get_branch_name(&cli, "random-name"), "feature/test");
     }
@@ -531,6 +563,7 @@ mod tests {
             branch: None,
             checkout: None,
             quiet: false,
+            run: None,
         };
         assert_eq!(get_branch_name(&cli, "random-name"), "random-name");
     }
@@ -568,6 +601,7 @@ mod tests {
             exit_codes::GIT_COMMAND_ERROR,
             exit_codes::WORKTREE_FAILED,
             exit_codes::INVALID_PATH_ENCODING,
+            exit_codes::RUN_COMMAND_FAILED,
         ];
 
         let mut sorted = codes.to_vec();
