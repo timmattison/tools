@@ -83,10 +83,16 @@ fn get_exit_code(status: ExitStatus) -> i32 {
     1
 }
 
-/// Escapes a string for safe use as a shell argument.
+/// Escapes a string for safe use as a Unix shell argument.
 ///
 /// Wraps the string in single quotes and escapes any embedded single quotes
 /// using the `'\''` technique (end quote, escaped quote, start quote).
+///
+/// # Platform Note
+///
+/// This function uses Unix single-quote escaping conventions. It is only used
+/// by the `--tmux` code path, which is itself Unix-only (tmux is not available
+/// on Windows). Do not use this function for Windows `cmd.exe` escaping.
 fn shell_escape(s: &str) -> String {
     // Wrap in single quotes and escape any embedded single quotes
     format!("'{}'", s.replace('\'', "'\\''"))
@@ -197,6 +203,9 @@ struct Cli {
     ///
     /// When combined with --run, the command runs in an interactive shell
     /// (`$SHELL -ic`), so aliases and shell functions are available.
+    ///
+    /// Note: tmux is typically only available on Unix systems (Linux, macOS).
+    /// This option will fail on Windows unless tmux is installed via WSL or similar.
     #[arg(long)]
     tmux: bool,
 }
@@ -481,7 +490,15 @@ fn main() {
                     {
                         Ok(status) => {
                             if !status.success() {
-                                exit(get_exit_code(status));
+                                // Use TMUX_FAILED for consistency. The worktree was created
+                                // successfully; this exit code indicates tmux itself failed,
+                                // not the user's --run command (which runs inside tmux).
+                                error!(
+                                    cli.quiet,
+                                    "tmux exited with code {}",
+                                    get_exit_code(status)
+                                );
+                                exit(exit_codes::TMUX_FAILED);
                             }
                         }
                         Err(e) => {
@@ -842,6 +859,16 @@ mod tests {
         // --tmux can be combined with --run
         let result = cmd.try_get_matches_from(["nwt", "--tmux", "--run", "npm install"]);
         assert!(result.is_ok(), "Should accept --tmux with --run");
+    }
+
+    #[test]
+    fn test_cli_tmux_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --tmux can be combined with --branch
+        let result = cmd.try_get_matches_from(["nwt", "--tmux", "--branch", "feature/test"]);
+        assert!(result.is_ok(), "Should accept --tmux with --branch");
     }
 
     // Unix-specific tests for shell command execution.
