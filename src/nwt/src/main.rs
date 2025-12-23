@@ -119,6 +119,23 @@ fn validate_config(config: &NwtConfig) -> Result<(), ConfigError> {
 /// Merges CLI arguments with config file values.
 ///
 /// CLI arguments always take precedence over config file values.
+///
+/// # Boolean Flag Merging Design Decision
+///
+/// Boolean flags (`quiet`, `tmux`) use OR logic: `cli.flag || config.flag`. This means:
+/// - If CLI specifies `--quiet` or `--tmux`, the flag is enabled (CLI wins).
+/// - If CLI doesn't specify the flag, the config file value is used.
+/// - **Limitation**: Users cannot disable a config file's `true` value from CLI.
+///
+/// This is an intentional design choice, not a bug:
+/// 1. **Standard CLI convention**: Most tools (git, docker, etc.) use this pattern.
+///    Adding `--no-quiet`/`--no-tmux` flags adds CLI complexity for a rare use case.
+/// 2. **Simple mental model**: "CLI flags enable features" is easier to understand
+///    than "CLI flags toggle features based on config state".
+/// 3. **Workaround exists**: Users who need to temporarily disable a config default
+///    can use an empty/different config file, or simply edit their config.
+/// 4. **Alternative rejected**: Using `Option<bool>` with `--flag`/`--no-flag` pairs
+///    would require clap's `ArgGroup` or custom parsing, adding complexity for edge cases.
 fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
     let config = config.unwrap_or_default();
 
@@ -126,7 +143,8 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // CLI options override config file values
         branch: cli.branch.clone().or(config.branch),
         checkout: cli.checkout.clone().or(config.checkout),
-        // For boolean flags, CLI sets to true if specified, otherwise use config
+        // Boolean flags use OR: CLI can enable but not disable config defaults.
+        // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
         run: cli.run.clone().or(config.run),
         tmux: cli.tmux || config.tmux,
@@ -246,6 +264,14 @@ fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7F)
 }
 
+/// Checks if the current process is running inside a tmux session.
+///
+/// This is determined by the presence of the `TMUX` environment variable,
+/// which tmux sets automatically when a shell is spawned inside it.
+fn is_running_in_tmux() -> bool {
+    std::env::var("TMUX").is_ok()
+}
+
 /// Exit codes for different failure modes.
 ///
 /// # Exit Code Design Decision: Why --run passes through the command's exit code
@@ -294,6 +320,8 @@ mod exit_codes {
     pub const INVALID_WINDOW_NAME: i32 = 11;
     /// Config file error (invalid TOML, validation failed, etc.)
     pub const CONFIG_ERROR: i32 = 12;
+    /// Tmux option specified but not running inside tmux
+    pub const TMUX_NOT_RUNNING: i32 = 13;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -354,7 +382,8 @@ EXIT CODES:
     9  Command specified with --run failed
     10 Tmux command failed
     11 Invalid window name (contains control characters)
-    12 Config file error (invalid TOML, validation failed)")]
+    12 Config file error (invalid TOML, validation failed)
+    13 Not running inside tmux (--tmux specified)")]
 struct Cli {
     /// Specify branch name instead of generating a random one.
     #[arg(short, long, conflicts_with = "checkout")]
@@ -534,8 +563,16 @@ fn main() {
     let file_config = match load_config() {
         Ok(cfg) => cfg,
         Err(e) => {
-            // Config errors are fatal - always print them even in quiet mode
-            // since the user needs to know their config file is broken
+            // # Why config errors bypass quiet mode
+            //
+            // Config errors are printed even before we know if quiet mode is enabled
+            // (since quiet mode itself might be set in the broken config file). This is
+            // intentional: if the user's config file is malformed, they need to know
+            // immediately so they can fix it. Silent failure here would be confusing
+            // since nwt would appear to ignore their config settings entirely.
+            //
+            // This differs from runtime errors (git failures, etc.) which respect quiet
+            // mode because those don't prevent the tool from understanding user intent.
             eprintln!("Error: {}", e);
             if let Some(path) = get_config_path() {
                 eprintln!("Config file location: {}", path.display());
@@ -546,6 +583,19 @@ fn main() {
 
     // Merge CLI args with config file - CLI takes precedence
     let config = merge_config(&cli, file_config);
+
+    // Early check: if tmux option is specified but we're not running in tmux, refuse to proceed
+    if config.tmux && !is_running_in_tmux() {
+        error!(
+            config.quiet,
+            "Error: --tmux option specified but not running inside tmux"
+        );
+        error!(
+            config.quiet,
+            "Please run this command from within a tmux session, or remove the --tmux option."
+        );
+        exit(exit_codes::TMUX_NOT_RUNNING);
+    }
 
     // Find git repo root
     let repo_root = match find_git_repo() {
@@ -692,12 +742,15 @@ fn main() {
                         // a shell), so it doesn't need shell escaping. Control characters are
                         // already validated above. The names crate generates simple adjective-noun
                         // combinations with only lowercase letters and hyphens.
+                        //
+                        // We move dir_name here (no .clone()) since it's not used after this point
+                        // in the success path - we either run tmux and break, or exit on error.
                         let mut tmux_args: Vec<String> = vec![
                             "new-window".into(),
                             "-c".into(),
                             worktree_path_str.into(),
                             "-n".into(),
-                            dir_name.clone(),
+                            dir_name,
                         ];
 
                         // If --run is specified, wrap the command in an interactive shell
@@ -1072,6 +1125,8 @@ mod tests {
             exit_codes::RUN_COMMAND_FAILED,
             exit_codes::TMUX_FAILED,
             exit_codes::INVALID_WINDOW_NAME,
+            exit_codes::CONFIG_ERROR,
+            exit_codes::TMUX_NOT_RUNNING,
         ];
 
         let mut sorted = codes.to_vec();
@@ -1403,10 +1458,17 @@ mod tests {
             };
             let merged = merge_config(&cli, Some(config));
 
-            // CLI values should override config
+            // CLI values should override config for Option<String> fields
             assert_eq!(merged.branch, Some("cli-branch".to_string()));
-            assert!(merged.quiet); // CLI quiet=true overrides config quiet=false
-            assert!(merged.tmux); // CLI tmux=false doesn't override because we use ||
+            assert!(merged.quiet); // CLI --quiet flag was set, so quiet=true
+
+            // Boolean flags use OR logic: cli.tmux || config.tmux
+            // Since CLI didn't specify --tmux (so cli.tmux=false, the default),
+            // the config value (tmux=true) is used via the OR. This is the expected
+            // behavior documented in merge_config(). See that function's doc comment
+            // for the full rationale on why we don't support --no-tmux to override.
+            assert!(merged.tmux);
+
             assert_eq!(merged.run, Some("npm install".to_string())); // Config provides default
         }
 
@@ -1455,7 +1517,7 @@ mod tests {
 
         #[test]
         fn test_exit_code_config_error_is_unique() {
-            // Ensure CONFIG_ERROR doesn't conflict with other exit codes
+            // Ensure CONFIG_ERROR and TMUX_NOT_RUNNING don't conflict with other exit codes
             let codes = [
                 exit_codes::NOT_IN_REPO,
                 exit_codes::INVALID_REPO_NAME,
@@ -1469,6 +1531,7 @@ mod tests {
                 exit_codes::TMUX_FAILED,
                 exit_codes::INVALID_WINDOW_NAME,
                 exit_codes::CONFIG_ERROR,
+                exit_codes::TMUX_NOT_RUNNING,
             ];
 
             let mut sorted = codes.to_vec();
@@ -1478,7 +1541,7 @@ mod tests {
             assert_eq!(
                 sorted.len(),
                 codes.len(),
-                "All exit codes including CONFIG_ERROR should be unique"
+                "All exit codes including CONFIG_ERROR and TMUX_NOT_RUNNING should be unique"
             );
         }
     }
