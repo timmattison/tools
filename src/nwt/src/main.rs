@@ -60,6 +60,8 @@ EXAMPLES:
     nwt -c main                      # Checkout existing 'main' branch
     nwt -c v1.0.0                    # Checkout a tag
     nwt --run \"npm install\"          # Run a command after creation
+    nwt --tmux                       # Open worktree in a new tmux window
+    nwt --tmux --run \"npm install\"   # Run command in a new tmux window
 
 EXIT CODES:
     0  Success
@@ -89,6 +91,11 @@ struct Cli {
     /// The command is executed through a shell (sh -c) and should only contain trusted input.
     #[arg(long)]
     run: Option<String>,
+
+    /// Create a new tmux window for the worktree.
+    /// If --run is also specified, the command runs inside the tmux window.
+    #[arg(long)]
+    tmux: bool,
 }
 
 /// Prints an error message to stderr unless quiet mode is enabled.
@@ -341,8 +348,40 @@ fn main() {
             WorktreeResult::Success => {
                 println!("{}", worktree_path.display());
 
-                // Run command if specified
-                if let Some(ref cmd) = cli.run {
+                // Handle tmux and/or run options
+                if cli.tmux {
+                    // Create a new tmux window
+                    let mut tmux_args = vec![
+                        "new-window".to_string(),
+                        "-c".to_string(),
+                        worktree_path_str.to_string(),
+                        "-n".to_string(),
+                        dir_name.clone(),
+                    ];
+
+                    // If --run is specified, add the command to run in the tmux window
+                    if let Some(ref cmd) = cli.run {
+                        tmux_args.push(cmd.clone());
+                    }
+
+                    match Command::new("tmux")
+                        .args(&tmux_args)
+                        .stdout(Stdio::inherit())
+                        .stderr(Stdio::inherit())
+                        .status()
+                    {
+                        Ok(status) => {
+                            if !status.success() {
+                                exit(status.code().unwrap_or(exit_codes::RUN_COMMAND_FAILED));
+                            }
+                        }
+                        Err(e) => {
+                            error!(cli.quiet, "Error running tmux: {}", e);
+                            exit(exit_codes::RUN_COMMAND_FAILED);
+                        }
+                    }
+                } else if let Some(ref cmd) = cli.run {
+                    // Run command directly (no tmux)
                     match Command::new("sh")
                         .args(["-c", cmd])
                         .current_dir(&worktree_path)
@@ -553,6 +592,7 @@ mod tests {
             checkout: None,
             quiet: false,
             run: None,
+            tmux: false,
         };
         assert_eq!(get_branch_name(&cli, "random-name"), "feature/test");
     }
@@ -564,6 +604,7 @@ mod tests {
             checkout: None,
             quiet: false,
             run: None,
+            tmux: false,
         };
         assert_eq!(get_branch_name(&cli, "random-name"), "random-name");
     }
