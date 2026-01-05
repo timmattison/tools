@@ -1045,6 +1045,8 @@ cwt --shell-setup
 
 This automatically adds the `wt` function and aliases to your shell config. Run `source ~/.zshrc` (or `~/.bashrc`) to activate, or open a new terminal.
 
+> **Note:** `--shell-setup` currently supports bash and zsh only. Fish users should use the manual setup below.
+
 #### Manual Setup
 
 If you prefer to add it manually, since a program can't change the parent shell's directory, cwt outputs the target path to stdout. Add these shell functions to enable directory changing:
@@ -1065,9 +1067,9 @@ function wt() {
     fi
 }
 
-# Quick navigation aliases
-alias wtf='cd $(cwt -f)'  # Next worktree
-alias wtp='cd $(cwt -p)'  # Previous worktree
+# Quick navigation aliases (reuse wt function for proper error handling)
+alias wtf='wt -f'  # Next worktree
+alias wtp='wt -p'  # Previous worktree
 ```
 
 #### Fish (~/.config/fish/config.fish)
@@ -1084,8 +1086,9 @@ function wt
     end
 end
 
-alias wtf 'cd (cwt -f)'
-alias wtp 'cd (cwt -p)'
+# Quick navigation aliases (reuse wt function for proper error handling)
+alias wtf 'wt -f'
+alias wtp 'wt -p'
 ```
 
 ### Examples

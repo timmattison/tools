@@ -62,8 +62,8 @@ macro_rules! error {
 ///     fi
 /// }
 ///
-/// alias wtf='cd $(cwt -f)'  # Next worktree
-/// alias wtp='cd $(cwt -p)'  # Previous worktree
+/// alias wtf='wt -f'  # Next worktree
+/// alias wtp='wt -p'  # Previous worktree
 /// ```
 ///
 /// # Exit Codes
@@ -295,9 +295,9 @@ function wt() {
     fi
 }
 
-# Quick navigation aliases
-alias wtf='cd $(cwt -f)'  # Next worktree
-alias wtp='cd $(cwt -p)'  # Previous worktree
+# Quick navigation aliases (reuse wt function for proper error handling)
+alias wtf='wt -f'  # Next worktree
+alias wtp='wt -p'  # Previous worktree
 "#;
 
 /// Marker to detect if shell integration is already installed.
@@ -333,7 +333,7 @@ fn setup_shell_integration() -> Result<(), String> {
         _ => {
             return Err(format!(
                 "Unsupported shell: {}. Please manually add the shell integration to your config.\n\
-                 Run 'cwt --help' to see the shell integration code.",
+                 See the README for shell integration examples: https://github.com/timmattison/tools#cwt-change-worktree",
                 shell_name
             ));
         }
