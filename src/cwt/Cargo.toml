@@ -1,0 +1,14 @@
+[package]
+name = "cwt"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cwt"
+path = "src/main.rs"
+
+[dependencies]
+repowalker = { path = "../repowalker" }
+clap = { version = "4.5", features = ["derive"] }
+colored = "2.1"
+dirs = "5.0"
