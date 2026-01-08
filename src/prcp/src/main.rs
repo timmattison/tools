@@ -22,6 +22,29 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task;
 
+/// Create a buffer without zeroing memory.
+///
+/// This is an optimization to avoid the cost of zeroing large buffers
+/// when they will be immediately overwritten by file reads.
+///
+/// # Safety
+/// The returned Vec has uninitialized contents. Callers MUST:
+/// - Only read bytes that have been written to (e.g., by `File::read`)
+/// - Never access uninitialized portions of the buffer
+#[inline]
+fn create_uninit_buffer(size: usize) -> Vec<u8> {
+    let mut buffer = Vec::with_capacity(size);
+    // SAFETY: We're setting length to capacity. The memory is uninitialized,
+    // but callers will only access bytes that File::read has written to.
+    // File::read returns the number of bytes actually read, so we never
+    // access uninitialized memory as long as we respect that count.
+    #[allow(clippy::uninit_vec)]
+    unsafe {
+        buffer.set_len(size);
+    }
+    buffer
+}
+
 /// RAII guard for terminal raw mode state management.
 /// Ensures raw mode is properly restored even if an error occurs.
 struct RawModeGuard {
@@ -481,7 +504,7 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+            if event::poll(Duration::from_millis(250)).unwrap_or(false) {
                 match event::read() {
                     Ok(Event::Key(key_event)) => {
                         match key_event.code {
@@ -1001,15 +1024,18 @@ fn calculate_file_hash(
     hint_sequential_io(&file);
 
     let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0; buffer_size];
+    let mut buffer = create_uninit_buffer(buffer_size);
     let mut bytes_hashed = 0u64;
 
     // Track last terminal width for resize detection
     let mut last_width = term_width_rx.map(|rx| *rx.borrow());
 
     // Throttle UI updates to 5 per second max (every 200ms)
+    // Check time every 8 iterations to reduce Instant::now() overhead
     const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+    const TIME_CHECK_INTERVAL: u32 = 8;
     let mut last_update = Instant::now();
+    let mut iteration_count: u32 = 0;
 
     loop {
         // Check for cancellation before each read (keep responsive)
@@ -1026,27 +1052,30 @@ fn calculate_file_hash(
 
         hasher.update(&buffer[..bytes_read]);
         bytes_hashed += bytes_read as u64;
+        iteration_count = iteration_count.wrapping_add(1);
 
-        // Throttle UI updates to reduce overhead
-        let now = Instant::now();
-        if now.duration_since(last_update) >= UPDATE_INTERVAL {
-            last_update = now;
+        // Throttle UI updates - only check time every N iterations to reduce overhead
+        if iteration_count % TIME_CHECK_INTERVAL == 0 {
+            let now = Instant::now();
+            if now.duration_since(last_update) >= UPDATE_INTERVAL {
+                last_update = now;
 
-            // Check for terminal resize and update progress bar style
-            if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
-                (term_width_rx, pb, filename, last_width.as_mut())
-            {
-                let current_width = *rx.borrow();
-                if current_width != *prev_width {
-                    *prev_width = current_width;
-                    if let Ok(style) = create_verify_style(fname, current_width) {
-                        progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                // Check for terminal resize and update progress bar style
+                if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
+                    (term_width_rx, pb, filename, last_width.as_mut())
+                {
+                    let current_width = *rx.borrow();
+                    if current_width != *prev_width {
+                        *prev_width = current_width;
+                        if let Ok(style) = create_verify_style(fname, current_width) {
+                            progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                        }
                     }
                 }
-            }
 
-            if let Some(progress) = pb {
-                progress.set_position(bytes_hashed);
+                if let Some(progress) = pb {
+                    progress.set_position(bytes_hashed);
+                }
             }
         }
     }
@@ -1440,7 +1469,7 @@ async fn copy_with_progress(
     // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
     let mut guard = PartialFileGuard::new(destination, dst_file);
 
-    let mut buffer = vec![0; buffer_size];
+    let mut buffer = create_uninit_buffer(buffer_size);
     let mut total_bytes = 0u64;
     let mut hasher = blake3::Hasher::new();
 
@@ -1448,8 +1477,11 @@ async fn copy_with_progress(
     let mut last_width = *term_width_rx.borrow();
 
     // Throttle UI updates to 5 per second max (every 200ms)
+    // Check time every 8 iterations to reduce Instant::now() overhead
     const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+    const TIME_CHECK_INTERVAL: u32 = 8;
     let mut last_update = Instant::now();
+    let mut iteration_count: u32 = 0;
 
     loop {
         // Check for shutdown - prompt user for confirmation (keep responsive)
@@ -1521,22 +1553,25 @@ async fn copy_with_progress(
             .context("Failed to write to destination file")?;
 
         total_bytes += bytes_read as u64;
+        iteration_count = iteration_count.wrapping_add(1);
 
-        // Throttle UI updates to reduce overhead
-        let now = Instant::now();
-        if now.duration_since(last_update) >= UPDATE_INTERVAL {
-            last_update = now;
+        // Throttle UI updates - only check time every N iterations to reduce overhead
+        if iteration_count % TIME_CHECK_INTERVAL == 0 {
+            let now = Instant::now();
+            if now.duration_since(last_update) >= UPDATE_INTERVAL {
+                last_update = now;
 
-            // Check for terminal resize and update progress bar style
-            let current_width = *term_width_rx.borrow();
-            if current_width != last_width {
-                last_width = current_width;
-                if let Ok(style) = create_copy_style(filename, current_width) {
-                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                // Check for terminal resize and update progress bar style
+                let current_width = *term_width_rx.borrow();
+                if current_width != last_width {
+                    last_width = current_width;
+                    if let Ok(style) = create_copy_style(filename, current_width) {
+                        pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                    }
                 }
-            }
 
-            pb.set_position(total_bytes);
+                pb.set_position(total_bytes);
+            }
         }
     }
 
