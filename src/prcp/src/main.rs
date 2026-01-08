@@ -1076,6 +1076,7 @@ fn verify_destination(
 ///
 /// Returns true if user confirms cancellation, false to continue.
 /// Temporarily disables raw mode and pauses key listener for user input.
+/// Pressing Ctrl+C at this prompt is treated as confirmation to cancel.
 fn prompt_cancel_copy(destination: &Path, input_active: &Arc<AtomicBool>) -> bool {
     // Pause key listener and disable raw mode for user input
     input_active.store(true, Ordering::SeqCst);
@@ -1088,8 +1089,11 @@ fn prompt_cancel_copy(destination: &Path, input_active: &Arc<AtomicBool>) -> boo
     let _ = io::stderr().flush();
 
     let mut input = String::new();
-    let confirmed = io::stdin().read_line(&mut input).is_ok()
-        && input.trim().eq_ignore_ascii_case("y");
+    let read_result = io::stdin().read_line(&mut input);
+
+    // Treat Ctrl+C (read error/interrupt) or explicit "y" as confirmation to cancel
+    // Only an explicit non-"y" response continues the copy
+    let confirmed = read_result.is_err() || input.trim().eq_ignore_ascii_case("y");
 
     // Re-enable raw mode and resume key listener
     let _ = crossterm::terminal::enable_raw_mode();
