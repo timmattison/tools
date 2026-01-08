@@ -13,6 +13,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 #[cfg(target_os = "macos")]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -609,6 +611,32 @@ fn disable_page_cache(_file: &File) -> Result<()> {
     Ok(())
 }
 
+/// Check if source and destination are on the same physical device.
+/// Used to decide between parallel (different devices) and sequential (same device) I/O.
+/// On spinning HDDs, parallel read/write to the same device causes head thrashing.
+#[cfg(unix)]
+fn same_device(source: &Path, destination: &Path) -> bool {
+    let src_meta = match fs::metadata(source) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    // For destination, check the parent directory since the file may not exist yet
+    let dst_dir = destination.parent().unwrap_or(destination);
+    let dst_meta = match fs::metadata(dst_dir) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    src_meta.dev() == dst_meta.dev()
+}
+
+#[cfg(not(unix))]
+fn same_device(_source: &Path, _destination: &Path) -> bool {
+    // On non-Unix platforms, assume same device (safer, uses sequential I/O)
+    true
+}
+
 /// Calculate Blake3 hash of a file by reading it completely.
 /// Uses F_NOCACHE on macOS for better throughput on large files.
 fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
@@ -667,7 +695,7 @@ fn verify_and_remove_source(
     Ok(())
 }
 
-/// Message sent from reader thread to writer thread
+/// Message sent from reader thread to writer thread (used in parallel copy mode)
 enum CopyMessage {
     /// Data chunk to write (buffer contents, length)
     Data(Vec<u8>),
@@ -677,12 +705,117 @@ enum CopyMessage {
     Error(String),
 }
 
-/// Performs the copy operation using dedicated reader/writer threads for true parallelism.
-/// This architecture allows:
-/// - Reader thread: continuously reads into buffers, sends to channel
-/// - Writer thread: receives from channel, hashes, writes to disk
-/// - Main async task: handles pause/resume/shutdown coordination
+/// Dispatches to the appropriate copy strategy based on whether source and destination
+/// are on the same physical device.
+/// - Same device (e.g., spinning HDD): uses sequential I/O to avoid head thrashing
+/// - Different devices (e.g., SSD to SSD, or cross-device): uses parallel I/O for throughput
 async fn copy_with_progress(
+    source: &Path,
+    destination: &Path,
+    pb: &ProgressBar,
+    paused: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    rx: &mut mpsc::UnboundedReceiver<()>,
+) -> Result<CopyResult> {
+    if same_device(source, destination) {
+        copy_sequential(source, destination, pb, paused, shutdown, rx).await
+    } else {
+        copy_parallel(source, destination, pb, paused, shutdown, rx).await
+    }
+}
+
+/// Sequential copy for same-device scenarios (optimal for spinning HDDs).
+/// Performs read→hash→write in sequence to avoid disk head thrashing.
+async fn copy_sequential(
+    source: &Path,
+    destination: &Path,
+    pb: &ProgressBar,
+    paused: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    rx: &mut mpsc::UnboundedReceiver<()>,
+) -> Result<CopyResult> {
+    let mut src_file = File::open(source).context("Failed to open source file")?;
+    let mut dst_file = File::create(destination).context("Failed to create destination file")?;
+    let _ = disable_page_cache(&src_file);
+    let _ = disable_page_cache(&dst_file);
+
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    let mut total_bytes = 0u64;
+    let mut hasher = blake3::Hasher::new();
+
+    loop {
+        // Check for shutdown
+        if shutdown.load(Ordering::SeqCst) {
+            return Err(anyhow::anyhow!("Copy cancelled by user"));
+        }
+
+        // Check for pause toggle
+        if rx.try_recv().is_ok() {
+            let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
+            if !was_paused {
+                pb.set_message("PAUSED - Press space to resume");
+            } else {
+                pb.set_message("");
+            }
+        }
+
+        // Wait while paused
+        while paused.load(Ordering::SeqCst) {
+            if shutdown.load(Ordering::SeqCst) {
+                return Err(anyhow::anyhow!("Copy cancelled by user"));
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            if rx.try_recv().is_ok() {
+                paused.store(false, Ordering::SeqCst);
+                pb.set_message("");
+            }
+        }
+
+        // Read from source
+        let bytes_read = match src_file.read(&mut buffer) {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(e) => return Err(e.into()),
+        };
+
+        // Hash and write (sequential - no head thrashing on same device)
+        hasher.update(&buffer[..bytes_read]);
+        dst_file
+            .write_all(&buffer[..bytes_read])
+            .context("Failed to write to destination file")?;
+
+        total_bytes += bytes_read as u64;
+        pb.set_position(total_bytes);
+    }
+
+    // Finalize
+    dst_file
+        .flush()
+        .context("Failed to flush destination file")?;
+    dst_file
+        .sync_all()
+        .context("Failed to sync destination file to disk")?;
+
+    // Copy file permissions
+    let metadata = fs::metadata(source)?;
+    fs::set_permissions(destination, metadata.permissions())?;
+
+    drop(dst_file);
+
+    Ok(CopyResult {
+        bytes_copied: total_bytes,
+        source_hash: hasher.finalize(),
+    })
+}
+
+/// Parallel copy for cross-device scenarios (optimal for SSDs/NVMe).
+/// Uses dedicated reader/writer threads for true parallelism.
+/// - Reader thread: continuously reads into buffers, sends to channel
+/// - Writer task: receives from channel, hashes, writes to disk
+/// - Main async task: handles pause/resume/shutdown coordination
+async fn copy_parallel(
     source: &Path,
     destination: &Path,
     pb: &ProgressBar,
