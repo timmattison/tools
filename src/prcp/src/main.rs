@@ -969,7 +969,7 @@ fn verify_destination(
     pb.set_style(
         ProgressStyle::default_bar()
             .template(&format!(
-                "{{spinner:.yellow}} {} [{{bar:40.yellow/dim}}] {{bytes}}/{{total_bytes}} (verifying)",
+                "{{spinner:.yellow}} {} [{{bar:40.yellow/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}}) verifying",
                 safe_filename
             ))
             .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
