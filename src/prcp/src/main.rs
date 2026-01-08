@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -15,98 +15,127 @@ use tokio::task;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Progress copy - copy files with progress bar", long_about = None)]
 struct Args {
-    /// Source file to copy
-    source: PathBuf,
+    /// Source files or glob patterns to copy
+    #[arg(required = true, num_args = 1..)]
+    sources: Vec<PathBuf>,
 
     /// Destination file or directory path
     destination: PathBuf,
 
-    /// Remove source file after successful copy (verified by SHA256 hash)
+    /// Remove source files after successful copy (verified by SHA256 hash)
     #[arg(long, short = 'r')]
     rm: bool,
+
+    /// Continue copying remaining files if one fails
+    #[arg(long)]
+    continue_on_error: bool,
 }
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
 
+/// Resolve source patterns into a list of files
+///
+/// Handles both literal file paths and glob patterns (*, ?, []).
+/// Returns an error if a glob pattern matches no files or a literal path doesn't exist.
+fn resolve_sources(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+
+    for pattern in patterns {
+        let pattern_str = pattern.to_string_lossy();
+
+        // Check if pattern contains glob characters
+        if pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('[') {
+            let matches: Vec<_> = glob::glob(&pattern_str)
+                .with_context(|| format!("Invalid glob pattern '{}'", pattern_str))?
+                .filter_map(|r| r.ok())
+                .filter(|p| p.is_file())
+                .collect();
+
+            if matches.is_empty() {
+                anyhow::bail!("No files match pattern '{}'", pattern_str);
+            }
+            files.extend(matches);
+        } else {
+            // Literal path - validate it exists and is a file
+            if !pattern.exists() {
+                anyhow::bail!("Source '{}' does not exist", pattern.display());
+            }
+            if !pattern.is_file() {
+                anyhow::bail!("Source '{}' is not a file", pattern.display());
+            }
+            files.push(pattern.clone());
+        }
+    }
+
+    if files.is_empty() {
+        anyhow::bail!("No source files specified");
+    }
+
+    Ok(files)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Set up shutdown flag
-    let shutdown = Arc::new(AtomicBool::new(false));
-    
     let args = Args::parse();
-    
-    // Validate source file exists
-    if !args.source.exists() {
-        anyhow::bail!("Source file '{}' does not exist", args.source.display());
-    }
-    
-    if !args.source.is_file() {
-        anyhow::bail!("Source '{}' is not a file", args.source.display());
+
+    // Resolve all source files (handles glob patterns)
+    let sources = resolve_sources(&args.sources)?;
+    let total_files = sources.len();
+
+    // Validate destination for multi-file operations
+    if total_files > 1 {
+        // For multiple files, destination must be a directory
+        // Check if exists and is NOT a directory (error case)
+        if args.destination.exists() && !args.destination.is_dir() {
+            anyhow::bail!(
+                "Destination '{}' is not a directory (required for multiple source files)",
+                args.destination.display()
+            );
+        }
+        // Create destination directory if needed (idempotent if already exists as dir)
+        fs::create_dir_all(&args.destination)
+            .context("Failed to create destination directory")?;
     }
 
-    // Resolve destination - if it's a directory, append the source filename
-    let destination = if args.destination.is_dir() {
-        let filename = args
-            .source
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Source has no filename"))?;
-        args.destination.join(filename)
-    } else {
-        args.destination
-    };
-
-    // Get file metadata
-    let metadata = fs::metadata(&args.source)
-        .context("Failed to read source file metadata")?;
-    let total_size = metadata.len();
-    
-    // Check if destination exists
-    if destination.exists() {
-        eprintln!("Destination '{}' already exists", destination.display());
-        eprint!("Overwrite? (y/N): ");
+    // Warn about potentially dangerous combination
+    if args.rm && args.continue_on_error && total_files > 1 {
+        eprintln!("Warning: Using --rm with --continue-on-error may result in partial moves.");
+        eprintln!("Some source files may be deleted while others remain if errors occur.");
+        eprint!("Continue? (y/N): ");
         io::stderr().flush()?;
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
-            println!("Copy cancelled");
+            println!("Operation cancelled");
             return Ok(());
         }
     }
 
-    // Create parent directories if needed
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .context("Failed to create destination directory")?;
-    }
-    
-    // Set up progress bar
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")?
-            .progress_chars("█▉▊▋▌▍▎▏  ")
-    );
-    
+    // Set up shutdown flag
+    let shutdown = Arc::new(AtomicBool::new(false));
+
     // Set up pause/resume handling
     let paused = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown_key_listener = shutdown.clone();
-    
+
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
             if shutdown_key_listener.load(Ordering::SeqCst) {
                 break;
             }
-            
+
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
                 if let Ok(Event::Key(key_event)) = event::read() {
                     match key_event.code {
                         KeyCode::Char(' ') => {
                             let _ = tx.send(());
                         }
-                        KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('c')
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             shutdown_key_listener.store(true, Ordering::SeqCst);
                             break;
                         }
@@ -116,77 +145,282 @@ async fn main() -> Result<()> {
             }
         }
     });
-    
+
     // Enable raw mode for keyboard input
     let raw_mode_enabled = crossterm::terminal::enable_raw_mode().is_ok();
-    
-    // Perform the copy
-    let result = copy_with_progress(
-        &args.source,
-        &destination,
-        &pb,
-        paused,
-        shutdown.clone(),
-        &mut rx,
-    )
-    .await;
-    
+
+    // Set up multi-progress display
+    let multi = MultiProgress::new();
+
+    // Overall progress bar (only shown for multiple files)
+    let overall_pb = if total_files > 1 {
+        let pb = multi.add(ProgressBar::new(total_files as u64));
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{prefix:.bold} [{bar:40.green/dim}] {pos}/{len}")?
+                .progress_chars("█▉▊▋▌▍▎▏  "),
+        );
+        pb.set_prefix("Files");
+        Some(pb)
+    } else {
+        None
+    };
+
+    // Track failures for --continue-on-error mode
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
+    let mut successful_copies = 0u64;
+    let mut total_bytes_copied = 0u64;
+
+    // Copy each file
+    for source in &sources {
+        // Check for shutdown
+        if shutdown.load(Ordering::SeqCst) {
+            eprintln!("\nCopy cancelled by user");
+            break;
+        }
+
+        // Resolve destination path
+        let destination = if args.destination.is_dir() {
+            let filename = source
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Source '{}' has no filename", source.display()))?;
+            args.destination.join(filename)
+        } else {
+            args.destination.clone()
+        };
+
+        // Get file metadata
+        let metadata = match fs::metadata(source) {
+            Ok(m) => m,
+            Err(e) => {
+                let error_msg = format!("Failed to read metadata: {}", e);
+                if args.continue_on_error {
+                    failures.push((source.clone(), error_msg));
+                    if let Some(ref pb) = overall_pb {
+                        pb.inc(1);
+                    }
+                    continue;
+                } else {
+                    anyhow::bail!("Failed to read metadata for '{}': {}", source.display(), e);
+                }
+            }
+        };
+        let file_size = metadata.len();
+
+        // Check if destination exists
+        if destination.exists() {
+            eprintln!(
+                "\nDestination '{}' already exists. Overwrite? (y/N): ",
+                destination.display()
+            );
+            io::stderr().flush()?;
+
+            // Temporarily disable raw mode for input
+            if raw_mode_enabled {
+                let _ = crossterm::terminal::disable_raw_mode();
+            }
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+
+            // Re-enable raw mode
+            if raw_mode_enabled {
+                let _ = crossterm::terminal::enable_raw_mode();
+            }
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                let error_msg = "Skipped (destination exists)".to_string();
+                if args.continue_on_error || total_files > 1 {
+                    failures.push((source.clone(), error_msg));
+                    if let Some(ref pb) = overall_pb {
+                        pb.inc(1);
+                    }
+                    continue;
+                } else {
+                    println!("Copy cancelled");
+                    break;
+                }
+            }
+        }
+
+        // Create parent directories if needed
+        if let Some(parent) = destination.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                let error_msg = format!("Failed to create directory: {}", e);
+                if args.continue_on_error {
+                    failures.push((source.clone(), error_msg));
+                    if let Some(ref pb) = overall_pb {
+                        pb.inc(1);
+                    }
+                    continue;
+                } else {
+                    anyhow::bail!(
+                        "Failed to create destination directory for '{}': {}",
+                        destination.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        // Create per-file progress bar
+        let file_pb = multi.add(ProgressBar::new(file_size));
+        let filename = source
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| source.display().to_string());
+
+        file_pb.set_style(
+            ProgressStyle::default_bar()
+                .template(&format!(
+                    "{{spinner:.green}} {} [{{bar:40.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})",
+                    filename
+                ))?
+                .progress_chars("█▉▊▋▌▍▎▏  "),
+        );
+
+        // Perform the copy
+        let result = copy_with_progress(
+            source,
+            &destination,
+            &file_pb,
+            paused.clone(),
+            shutdown.clone(),
+            &mut rx,
+        )
+        .await;
+
+        file_pb.finish_and_clear();
+        multi.remove(&file_pb);
+
+        match result {
+            Ok(copy_result) => {
+                successful_copies += 1;
+                total_bytes_copied += copy_result.bytes_copied;
+
+                // Handle --rm flag
+                if args.rm {
+                    let dest_hash = match calculate_file_hash(&destination) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            let error_msg =
+                                format!("Failed to verify destination: {}. Source NOT removed.", e);
+                            eprintln!("\n{}", error_msg);
+                            if args.continue_on_error {
+                                failures.push((source.clone(), error_msg));
+                                if let Some(ref pb) = overall_pb {
+                                    pb.inc(1);
+                                }
+                                continue;
+                            } else {
+                                anyhow::bail!("{}", error_msg);
+                            }
+                        }
+                    };
+
+                    if copy_result.source_hash == dest_hash {
+                        if let Err(e) = fs::remove_file(source) {
+                            let error_msg = format!("Failed to remove source: {}", e);
+                            if args.continue_on_error {
+                                failures.push((source.clone(), error_msg));
+                            } else {
+                                anyhow::bail!(
+                                    "Failed to remove source file '{}': {}",
+                                    source.display(),
+                                    e
+                                );
+                            }
+                        }
+                    } else {
+                        let error_msg = format!(
+                            "Hash mismatch! Source NOT removed.\n  Source: {}\n  Dest:   {}",
+                            hex_encode(&copy_result.source_hash),
+                            hex_encode(&dest_hash)
+                        );
+                        if args.continue_on_error {
+                            eprintln!("\n{}", error_msg);
+                            failures.push((source.clone(), error_msg));
+                        } else {
+                            anyhow::bail!("{}", error_msg);
+                        }
+                    }
+                }
+
+                if total_files == 1 {
+                    println!(
+                        "\nSuccessfully copied {} to '{}'",
+                        HumanBytes(copy_result.bytes_copied),
+                        destination.display()
+                    );
+                    if args.rm {
+                        println!("Source file removed after verification.");
+                    }
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                if args.continue_on_error {
+                    failures.push((source.clone(), error_msg));
+                } else {
+                    // Clean up and bail
+                    shutdown.store(true, Ordering::SeqCst);
+                    if raw_mode_enabled {
+                        let _ = crossterm::terminal::disable_raw_mode();
+                    }
+                    if let Some(ref pb) = overall_pb {
+                        pb.finish_and_clear();
+                    }
+                    let _ = key_task.await;
+                    anyhow::bail!("Failed to copy '{}': {}", source.display(), e);
+                }
+            }
+        }
+
+        // Update overall progress
+        if let Some(ref pb) = overall_pb {
+            pb.inc(1);
+        }
+    }
+
     // Signal shutdown to stop the key listener
     shutdown.store(true, Ordering::SeqCst);
-    
+
     // Disable raw mode
     if raw_mode_enabled {
         let _ = crossterm::terminal::disable_raw_mode();
     }
-    
-    // Finish progress bar
-    pb.finish();
-    
+
+    // Finish overall progress bar
+    if let Some(pb) = overall_pb {
+        pb.finish_and_clear();
+    }
+
     // Wait for key task to finish
     let _ = key_task.await;
-    
-    match result {
-        Ok(copy_result) => {
-            println!(
-                "\nSuccessfully copied {}",
-                HumanBytes(copy_result.bytes_copied)
-            );
 
-            // If --rm flag is set, verify destination and delete source
-            if args.rm {
-                println!("Verifying destination file...");
-
-                // Calculate destination hash by reopening and reading the file
-                let dest_hash = calculate_file_hash(&destination)?;
-
-                if copy_result.source_hash == dest_hash {
-                    // Hashes match - safe to delete source
-                    fs::remove_file(&args.source).context("Failed to remove source file")?;
-                    println!(
-                        "Verification successful. Source file '{}' removed.",
-                        args.source.display()
-                    );
-                } else {
-                    // Hashes don't match - report error
-                    let source_hex = hex_encode(&copy_result.source_hash);
-                    let dest_hex = hex_encode(&dest_hash);
-                    anyhow::bail!(
-                        "Hash mismatch! Source file NOT removed for safety.\n  \
-                        Source SHA256: {}\n  Dest SHA256:   {}\n  \
-                        The copy may have been corrupted. Please verify the destination file and retry.",
-                        source_hex,
-                        dest_hex
-                    );
-                }
-            }
-
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("\nError during copy: {}", e);
-            Err(e)
+    // Print summary for multiple files
+    if total_files > 1 {
+        println!(
+            "\nCopied {} of {} files ({} total)",
+            successful_copies,
+            total_files,
+            HumanBytes(total_bytes_copied)
+        );
+        if args.rm && successful_copies > 0 {
+            println!("Source files removed after verification.");
         }
     }
+
+    // Report failures
+    if !failures.is_empty() {
+        eprintln!("\nFailures ({}):", failures.len());
+        for (path, error) in &failures {
+            eprintln!("  {}: {}", path.display(), error);
+        }
+        anyhow::bail!("{} file(s) failed to copy", failures.len());
+    }
+
+    Ok(())
 }
 
 /// Result of a copy operation, including bytes copied and source hash
@@ -218,8 +452,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 async fn copy_with_progress(
-    source: &PathBuf,
-    destination: &PathBuf,
+    source: &Path,
+    destination: &Path,
     pb: &ProgressBar,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
