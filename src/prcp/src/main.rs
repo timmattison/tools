@@ -571,25 +571,68 @@ async fn main() -> Result<()> {
                 let copy_time = format_duration(copy_result.copy_duration);
 
                 // Verify by default (unless --no-verify)
+                // This loop allows retrying verification if the user cancels but declines deletion
                 let verify_outcome = if !args.no_verify {
-                    match verify_destination(&dest_path, &copy_result.source_hash, &multi) {
-                        Ok(verify_result) => {
-                            total_verify_duration += verify_result.verify_duration;
-                            let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
-                            let verify_time = format_duration(verify_result.verify_duration);
-                            VerifyOutcome::Passed {
-                                speed: verify_speed,
-                                time: verify_time,
+                    loop {
+                        match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown) {
+                            Ok(verify_result) => {
+                                total_verify_duration += verify_result.verify_duration;
+                                let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
+                                let verify_time = format_duration(verify_result.verify_duration);
+                                break VerifyOutcome::Passed {
+                                    speed: verify_speed,
+                                    time: verify_time,
+                                };
                             }
-                        }
-                        Err(error_msg) => {
-                            eprintln!("\n{}", error_msg);
-                            if args.continue_on_error {
-                                failures.push((source.clone(), error_msg));
-                            } else {
-                                anyhow::bail!("{}", error_msg);
+                            Err(VerifyError::Cancelled) => {
+                                // User pressed Ctrl+C during verification - prompt for confirmation
+                                eprint!(
+                                    "\nVerification cancelled. Delete destination file '{}'? (y/N): ",
+                                    dest_path.display()
+                                );
+                                io::stderr().flush()?;
+
+                                // Temporarily disable raw mode for input
+                                raw_mode_guard.disable_temporarily();
+
+                                let mut input = String::new();
+                                io::stdin().read_line(&mut input)?;
+
+                                // Re-enable raw mode
+                                raw_mode_guard.restore();
+
+                                // Reset shutdown flag to allow continuing
+                                shutdown.store(false, Ordering::SeqCst);
+
+                                if input.trim().eq_ignore_ascii_case("y") {
+                                    // User confirmed deletion
+                                    if let Err(e) = fs::remove_file(&dest_path) {
+                                        eprintln!("Warning: Failed to remove destination file: {}", e);
+                                    } else {
+                                        eprintln!("Destination file deleted.");
+                                    }
+                                    let error_msg = "Verification cancelled by user".to_string();
+                                    if args.continue_on_error {
+                                        failures.push((source.clone(), error_msg));
+                                    } else {
+                                        anyhow::bail!("Verification cancelled by user");
+                                    }
+                                    break VerifyOutcome::Failed;
+                                } else {
+                                    // User declined deletion - restart verification
+                                    eprintln!("Restarting verification...");
+                                    continue;
+                                }
                             }
-                            VerifyOutcome::Failed
+                            Err(VerifyError::Failed(error_msg)) => {
+                                eprintln!("\n{}", error_msg);
+                                if args.continue_on_error {
+                                    failures.push((source.clone(), error_msg));
+                                } else {
+                                    anyhow::bail!("{}", error_msg);
+                                }
+                                break VerifyOutcome::Failed;
+                            }
                         }
                     }
                 } else {
@@ -789,6 +832,17 @@ struct VerifyResult {
     verify_duration: Duration,
 }
 
+/// Error type for verification operations.
+///
+/// Distinguishes between user cancellation (Ctrl+C) and actual verification
+/// failures, allowing different handling for each case.
+enum VerifyError {
+    /// User cancelled verification with Ctrl+C
+    Cancelled,
+    /// Verification failed (hash mismatch, I/O error, etc.)
+    Failed(String),
+}
+
 /// Outcome of the verification step for a file copy.
 ///
 /// This enum makes the verification semantics explicit rather than using
@@ -806,14 +860,28 @@ enum VerifyOutcome {
     Failed,
 }
 
-/// Calculate SHA256 hash of a file with optional progress indicator
-fn calculate_file_hash(path: &Path, pb: Option<&ProgressBar>) -> Result<Sha256Hash> {
+/// Calculate SHA256 hash of a file with optional progress indicator and cancellation support.
+///
+/// If `shutdown` is provided and becomes true during calculation, returns an error
+/// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
+fn calculate_file_hash(
+    path: &Path,
+    pb: Option<&ProgressBar>,
+    shutdown: Option<&Arc<AtomicBool>>,
+) -> Result<Sha256Hash> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut bytes_hashed = 0u64;
 
     loop {
+        // Check for cancellation before each read
+        if let Some(shutdown_flag) = shutdown {
+            if shutdown_flag.load(Ordering::SeqCst) {
+                anyhow::bail!("Verification cancelled by user");
+            }
+        }
+
         let bytes_read = file.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
@@ -872,20 +940,22 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
 /// Verify destination matches the expected hash.
 ///
 /// This function performs SHA256 hash verification to ensure the copy was
-/// successful. Returns `Ok(VerifyResult)` on success, or `Err(error_message)`
-/// if verification fails.
+/// successful. Returns `Ok(VerifyResult)` on success, or `Err(VerifyError)`
+/// if verification fails or is cancelled.
 ///
 /// Shows a progress bar for the hash verification process.
+/// Supports cancellation via Ctrl+C through the shutdown flag.
 fn verify_destination(
     destination: &Path,
     expected_hash: &Sha256Hash,
     multi: &MultiProgress,
-) -> Result<VerifyResult, String> {
+    shutdown: &Arc<AtomicBool>,
+) -> Result<VerifyResult, VerifyError> {
     let start_time = Instant::now();
 
     // Get file size for progress bar
     let file_size = fs::metadata(destination)
-        .map_err(|e| format!("Failed to get destination metadata: {}", e))?
+        .map_err(|e| VerifyError::Failed(format!("Failed to get destination metadata: {}", e)))?
         .len();
 
     // Create progress bar for hash verification
@@ -902,15 +972,20 @@ fn verify_destination(
                 "{{spinner:.yellow}} {} [{{bar:40.yellow/dim}}] {{bytes}}/{{total_bytes}} (verifying)",
                 safe_filename
             ))
-            .map_err(|e| format!("Failed to create progress bar: {}", e))?
+            .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
             .progress_chars("█▉▊▋▌▍▎▏  "),
     );
 
-    // Calculate destination hash with progress
-    let dest_hash = calculate_file_hash(destination, Some(&pb))
+    // Calculate destination hash with progress (supports cancellation)
+    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown))
         .map_err(|e| {
             pb.finish_and_clear();
-            format!("Failed to verify destination: {}", e)
+            let error_msg = e.to_string();
+            if error_msg.contains("cancelled") {
+                VerifyError::Cancelled
+            } else {
+                VerifyError::Failed(format!("Failed to verify destination: {}", e))
+            }
         })?;
 
     pb.finish_and_clear();
@@ -918,11 +993,11 @@ fn verify_destination(
 
     // Verify hashes match
     if *expected_hash != dest_hash {
-        return Err(format!(
+        return Err(VerifyError::Failed(format!(
             "Hash mismatch!\n  Expected: {}\n  Got:      {}",
             expected_hash.to_hex(),
             dest_hash.to_hex()
-        ));
+        )));
     }
 
     let verify_duration = start_time.elapsed();
