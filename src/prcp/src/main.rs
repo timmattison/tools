@@ -327,12 +327,16 @@ fn parse_buffer_size(s: &str) -> Result<usize, String> {
 
 /// Format a buffer size for display (e.g., 16777216 -> "16MB")
 fn format_buffer_size(size: usize) -> String {
-    if size >= 1024 * 1024 * 1024 && size.is_multiple_of(1024 * 1024 * 1024) {
-        format!("{}GB", size / (1024 * 1024 * 1024))
-    } else if size >= 1024 * 1024 && size.is_multiple_of(1024 * 1024) {
-        format!("{}MB", size / (1024 * 1024))
-    } else if size >= 1024 && size.is_multiple_of(1024) {
-        format!("{}KB", size / 1024)
+    const KB: usize = 1024;
+    const MB: usize = 1024 * 1024;
+    const GB: usize = 1024 * 1024 * 1024;
+
+    if size >= GB && size % GB == 0 {
+        format!("{}GB", size / GB)
+    } else if size >= MB && size % MB == 0 {
+        format!("{}MB", size / MB)
+    } else if size >= KB && size % KB == 0 {
+        format!("{}KB", size / KB)
     } else {
         format!("{} bytes", size)
     }
@@ -504,6 +508,10 @@ async fn main() -> Result<()> {
                 continue;
             }
 
+            // Poll with 250ms timeout to reduce CPU usage while maintaining reasonable
+            // responsiveness to key presses (Ctrl+C, space to pause, etc.).
+            // This adds up to 250ms latency to key handling but significantly reduces
+            // idle CPU consumption compared to shorter polling intervals.
             if event::poll(Duration::from_millis(250)).unwrap_or(false) {
                 match event::read() {
                     Ok(Event::Key(key_event)) => {
@@ -1031,8 +1039,10 @@ fn calculate_file_hash(
     let mut last_width = term_width_rx.map(|rx| *rx.borrow());
 
     // Throttle UI updates to 5 per second max (every 200ms)
-    // Check time every 8 iterations to reduce Instant::now() overhead
     const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+    // Check time every 8 iterations to reduce Instant::now() overhead.
+    // At the default 16MB buffer size, this means checking every 128MB of data,
+    // which balances responsiveness against syscall overhead.
     const TIME_CHECK_INTERVAL: u32 = 8;
     let mut last_update = Instant::now();
     let mut iteration_count: u32 = 0;
@@ -1402,11 +1412,12 @@ fn try_preallocate(file: &File, size: u64) {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn try_preallocate(_file: &File, _size: u64) {}
 
-/// Hint to the OS that we're doing sequential I/O.
+/// Hint to the OS that we're doing sequential reads.
 ///
 /// This allows the kernel to optimize read-ahead and caching strategies
-/// for sequential access patterns. Errors are silently ignored since
-/// this is just a performance hint.
+/// for sequential access patterns. This hint is specifically for read
+/// operations - write files do not benefit from this hint.
+/// Errors are silently ignored since this is just a performance hint.
 #[cfg(target_os = "linux")]
 fn hint_sequential_io(file: &File) {
     use std::os::unix::io::AsRawFd;
@@ -1459,9 +1470,6 @@ async fn copy_with_progress(
 
     let dst_file = File::create(destination).context("Failed to create destination file")?;
 
-    // Hint sequential write pattern for destination file
-    hint_sequential_io(&dst_file);
-
     // Preallocate space to reduce fragmentation and improve write performance
     try_preallocate(&dst_file, file_size);
 
@@ -1477,8 +1485,10 @@ async fn copy_with_progress(
     let mut last_width = *term_width_rx.borrow();
 
     // Throttle UI updates to 5 per second max (every 200ms)
-    // Check time every 8 iterations to reduce Instant::now() overhead
     const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+    // Check time every 8 iterations to reduce Instant::now() overhead.
+    // At the default 16MB buffer size, this means checking every 128MB of data,
+    // which balances responsiveness against syscall overhead.
     const TIME_CHECK_INTERVAL: u32 = 8;
     let mut last_update = Instant::now();
     let mut iteration_count: u32 = 0;
