@@ -416,7 +416,7 @@ async fn main() -> Result<()> {
             let should_overwrite = if args.yes {
                 true
             } else {
-                eprintln!(
+                eprint!(
                     "\nDestination '{}' already exists. Overwrite? (y/N): ",
                     dest_path.display()
                 );
