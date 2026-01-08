@@ -162,6 +162,11 @@ struct Args {
     #[arg(long, short = 'r')]
     rm: bool,
 
+    /// Skip Blake3 verification after copy (not allowed with --rm).
+    /// Since Blake3 is extremely fast, verification typically adds minimal overhead.
+    #[arg(long)]
+    no_verify: bool,
+
     /// Continue copying remaining files if one fails
     #[arg(long)]
     continue_on_error: bool,
@@ -395,6 +400,11 @@ async fn main() -> Result<()> {
     // Handle shell setup (doesn't require sources/destination)
     if args.shell_setup {
         return setup_shell_integration();
+    }
+
+    // Validate flag combinations
+    if args.rm && args.no_verify {
+        anyhow::bail!("Cannot use --rm with --no-verify: verification is required to safely remove source files.");
     }
 
     // Parse paths: all but last are sources, last is destination
@@ -633,11 +643,27 @@ async fn main() -> Result<()> {
                 successful_copies += 1;
                 total_bytes_copied += copy_result.bytes_copied;
 
-                // Handle --rm flag: verify copy and remove source
-                if args.rm {
-                    if let Err(error_msg) =
-                        verify_and_remove_source(source, &dest_path, &copy_result.source_hash)
-                    {
+                // Verify copy by default (unless --no-verify)
+                let verified = if !args.no_verify {
+                    match verify_destination(&dest_path, &copy_result.source_hash) {
+                        Ok(()) => true,
+                        Err(error_msg) => {
+                            eprintln!("\n{}", error_msg);
+                            if args.continue_on_error {
+                                failures.push((source.clone(), error_msg));
+                            } else {
+                                anyhow::bail!("{}", error_msg);
+                            }
+                            false
+                        }
+                    }
+                } else {
+                    true // Skip verification, treat as "verified" for --rm purposes (but --rm + --no-verify is invalid)
+                };
+
+                // Handle --rm flag: remove source only if verification passed
+                if args.rm && verified {
+                    if let Err(error_msg) = remove_source(source) {
                         eprintln!("\n{}", error_msg);
                         if args.continue_on_error {
                             failures.push((source.clone(), error_msg));
@@ -653,8 +679,11 @@ async fn main() -> Result<()> {
                         HumanBytes(copy_result.bytes_copied),
                         dest_path.display()
                     );
+                    if !args.no_verify {
+                        println!("Verified with Blake3 hash.");
+                    }
                     if args.rm {
-                        println!("Source file removed after verification.");
+                        println!("Source file removed.");
                     }
                 }
             }
@@ -887,34 +916,35 @@ fn escape_template_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
 }
 
-/// Verify destination matches source and remove the source file.
+/// Verify that the destination file matches the expected hash.
 ///
 /// This function performs Blake3 hash verification to ensure the copy was
-/// successful before removing the source. Returns `Ok(())` on success,
-/// or `Err(error_message)` if verification or removal fails.
-fn verify_and_remove_source(
-    source: &Path,
+/// successful. Returns `Ok(())` on success, or `Err(error_message)` if
+/// verification fails.
+fn verify_destination(
     destination: &Path,
     expected_hash: &blake3::Hash,
 ) -> Result<(), String> {
     // Calculate destination hash
     let dest_hash = calculate_file_hash(destination)
-        .map_err(|e| format!("Failed to verify destination: {}. Source NOT removed.", e))?;
+        .map_err(|e| format!("Failed to verify destination: {}", e))?;
 
     // Verify hashes match
     if expected_hash != &dest_hash {
         return Err(format!(
-            "Hash mismatch! Source NOT removed.\n  Source: {}\n  Dest:   {}",
+            "Hash mismatch!\n  Expected: {}\n  Got:      {}",
             expected_hash.to_hex(),
             dest_hash.to_hex()
         ));
     }
 
-    // Safe to remove source
-    fs::remove_file(source)
-        .map_err(|e| format!("Failed to remove source '{}': {}", source.display(), e))?;
-
     Ok(())
+}
+
+/// Remove the source file after successful verification.
+fn remove_source(source: &Path) -> Result<(), String> {
+    fs::remove_file(source)
+        .map_err(|e| format!("Failed to remove source '{}': {}", source.display(), e))
 }
 
 /// Message sent from reader thread to writer thread (used in parallel copy mode)
