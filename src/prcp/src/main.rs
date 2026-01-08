@@ -48,6 +48,9 @@ const PARALLEL_HASH_THRESHOLD: usize = 1024 * 1024;
 /// Shared format string for progress stats (bytes, percentage, speed, ETA).
 const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_per_sec}, {eta})";
 
+/// Progress bar characters for smooth progress visualization.
+const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
+
 /// RAII guard for terminal raw mode state management.
 /// Ensures raw mode is properly restored even if an error occurs.
 struct RawModeGuard {
@@ -325,7 +328,6 @@ fn setup_shell_integration() -> Result<()> {
     Ok(())
 }
 
-
 /// Resolve source patterns into a list of files
 ///
 /// Handles both literal file paths and glob patterns (*, ?, []).
@@ -452,13 +454,24 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Set up shutdown flag
+    // Set up shutdown flag (can be reset if user declines cancellation)
     let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Set up key listener done flag (only set when operation is truly complete)
+    let key_listener_done = Arc::new(AtomicBool::new(false));
+
+    // Set up input active flag (pauses key listener while prompting user)
+    let input_active = Arc::new(AtomicBool::new(false));
 
     // Set up pause/resume handling
     let paused = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown_key_listener = shutdown.clone();
+    let done_key_listener = key_listener_done.clone();
+    let input_active_key_listener = input_active.clone();
+
+    // Set up terminal width watch channel for dynamic resize handling
+    let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
 
     // Set up terminal width watch channel for dynamic resize handling
     let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
@@ -594,6 +607,9 @@ async fn main() -> Result<()> {
             let should_overwrite = if args.yes {
                 true
             } else {
+                // Pause key listener while prompting
+                input_active.store(true, Ordering::SeqCst);
+
                 eprint!(
                     "\nDestination '{}' already exists. Overwrite? (y/N): ",
                     dest_path.display()
@@ -606,8 +622,9 @@ async fn main() -> Result<()> {
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
 
-                // Re-enable raw mode
+                // Re-enable raw mode and resume key listener
                 raw_mode_guard.restore();
+                input_active.store(false, Ordering::SeqCst);
 
                 input.trim().eq_ignore_ascii_case("y")
             };
@@ -668,9 +685,12 @@ async fn main() -> Result<()> {
             file_size,
             args.buffer_size,
             &file_pb,
+            &filename,
             paused.clone(),
             shutdown.clone(),
+            input_active.clone(),
             &mut rx,
+            &term_width_rx,
         )
         .await;
 
@@ -1105,9 +1125,6 @@ fn escape_template_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
 }
 
-/// Progress bar characters for smooth progress visualization.
-const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
-
 /// Get the current terminal width, with a fallback default.
 fn get_terminal_width() -> u16 {
     crossterm::terminal::size()
@@ -1299,9 +1316,12 @@ async fn copy_with_progress(
     file_size: u64,
     buffer_size: usize,
     pb: &ProgressBar,
+    filename: &str,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
+    term_width_rx: &watch::Receiver<u16>,
 ) -> Result<CopyResult> {
     if same_device(source, destination) {
         copy_sequential(source, destination, file_size, buffer_size, pb, paused, shutdown, rx).await
@@ -1628,4 +1648,106 @@ async fn copy_parallel(
         source_hash: hasher.finalize(),
         copy_duration: start_time.elapsed(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod format_duration_tests {
+        use super::*;
+
+        #[test]
+        fn zero_duration() {
+            assert_eq!(format_duration(Duration::ZERO), "0.0ms");
+        }
+
+        #[test]
+        fn sub_millisecond() {
+            assert_eq!(format_duration(Duration::from_micros(500)), "0.5ms");
+        }
+
+        #[test]
+        fn milliseconds() {
+            assert_eq!(format_duration(Duration::from_millis(500)), "500.0ms");
+        }
+
+        #[test]
+        fn one_second() {
+            assert_eq!(format_duration(Duration::from_secs(1)), "1.00s");
+        }
+
+        #[test]
+        fn seconds_with_decimal() {
+            assert_eq!(format_duration(Duration::from_millis(1500)), "1.50s");
+        }
+
+        #[test]
+        fn large_duration() {
+            assert_eq!(format_duration(Duration::from_secs(3600)), "3600.00s");
+        }
+    }
+
+    mod format_speed_tests {
+        use super::*;
+
+        #[test]
+        fn zero_duration_returns_na() {
+            // Our implementation returns "N/A" for zero duration
+            assert_eq!(format_speed(1000, Duration::ZERO), "N/A");
+        }
+
+        #[test]
+        fn zero_bytes() {
+            // 0 bytes over any time is 0 B/s
+            assert_eq!(format_speed(0, Duration::from_secs(1)), "0 B/s");
+        }
+
+        #[test]
+        fn one_byte_per_second() {
+            assert_eq!(format_speed(1, Duration::from_secs(1)), "1 B/s");
+        }
+
+        #[test]
+        fn kilobytes_per_second() {
+            // 1024 bytes in 1 second = 1 KiB/s
+            assert_eq!(format_speed(1024, Duration::from_secs(1)), "1.00 KiB/s");
+        }
+
+        #[test]
+        fn megabytes_per_second() {
+            // 1 MiB in 1 second = 1 MiB/s
+            let mib = 1024 * 1024;
+            assert_eq!(format_speed(mib, Duration::from_secs(1)), "1.00 MiB/s");
+        }
+
+        #[test]
+        fn gigabytes_per_second() {
+            // 1 GiB in 1 second = 1 GiB/s
+            let gib = 1024 * 1024 * 1024;
+            assert_eq!(format_speed(gib, Duration::from_secs(1)), "1.00 GiB/s");
+        }
+
+        #[test]
+        fn fractional_time() {
+            // 1 MiB in 0.5 seconds = 2 MiB/s
+            let mib = 1024 * 1024;
+            assert_eq!(format_speed(mib, Duration::from_millis(500)), "2.00 MiB/s");
+        }
+
+        #[test]
+        fn very_small_duration() {
+            // Tests the overflow protection for very fast copies
+            let result = format_speed(1024 * 1024 * 1024, Duration::from_nanos(1));
+            // Should not panic, and should return something reasonable
+            assert!(result.ends_with("/s"));
+        }
+
+        #[test]
+        fn very_large_bytes() {
+            // Test with u64::MAX bytes
+            let result = format_speed(u64::MAX, Duration::from_secs(1));
+            assert!(result.ends_with("/s"));
+        }
+    }
 }
