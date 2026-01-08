@@ -1034,6 +1034,85 @@ fn same_device(_source: &Path, _destination: &Path) -> bool {
 
 /// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
 ///
+/// On Unix: Uses memory-mapped I/O with chunked iteration for optimal performance.
+/// Memory mapping eliminates read syscall overhead while chunked iteration enables
+/// progress tracking and cancellation.
+///
+/// On other platforms: Uses buffered I/O with parallel hashing for large buffers.
+///
+/// If `shutdown` is provided and becomes true during calculation, returns an error
+/// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
+///
+/// If `term_width_rx` and `filename` are provided, the progress bar style will be
+/// updated when the terminal is resized.
+#[cfg(unix)]
+fn calculate_file_hash_with_progress(
+    path: &Path,
+    pb: Option<&ProgressBar>,
+    shutdown: Option<&Arc<AtomicBool>>,
+    term_width_rx: Option<&watch::Receiver<u16>>,
+    filename: Option<&str>,
+) -> Result<blake3::Hash> {
+    use memmap2::Mmap;
+
+    let file = File::open(path).context("Failed to open file for hash verification")?;
+    let file_size = file.metadata()?.len();
+
+    // Handle empty files (mmap fails on zero-length files)
+    if file_size == 0 {
+        return Ok(blake3::Hasher::new().finalize());
+    }
+
+    // Memory-map the file for efficient hashing
+    // SAFETY: File is opened read-only and we don't modify the mapping
+    let mmap = unsafe { Mmap::map(&file) }.context("Failed to memory-map file for hashing")?;
+
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes_hashed = 0u64;
+
+    // Track last terminal width for resize detection
+    let mut last_width = term_width_rx.map(|rx| *rx.borrow());
+
+    // Iterate over mmap in chunks for progress tracking
+    for chunk in mmap.chunks(DEFAULT_BUFFER_SIZE) {
+        // Check for terminal resize and update progress bar style
+        if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
+            (term_width_rx, pb, filename, last_width.as_mut())
+        {
+            let current_width = *rx.borrow();
+            if current_width != *prev_width {
+                *prev_width = current_width;
+                if let Ok(style) = create_verify_style(fname, current_width) {
+                    progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+        }
+
+        // Check for cancellation before each chunk
+        if let Some(shutdown_flag) = shutdown {
+            if shutdown_flag.load(Ordering::SeqCst) {
+                anyhow::bail!("Verification cancelled by user");
+            }
+        }
+
+        // Use parallel hashing for large chunks
+        if chunk.len() >= PARALLEL_HASH_THRESHOLD {
+            hasher.update_rayon(chunk);
+        } else {
+            hasher.update(chunk);
+        }
+
+        bytes_hashed += chunk.len() as u64;
+        if let Some(progress) = pb {
+            progress.set_position(bytes_hashed);
+        }
+    }
+
+    Ok(hasher.finalize())
+}
+
+/// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
+///
 /// Uses buffered I/O with parallel hashing for large buffers. This provides
 /// good performance while allowing progress updates for very large files.
 ///
@@ -1042,6 +1121,7 @@ fn same_device(_source: &Path, _destination: &Path) -> bool {
 ///
 /// If `term_width_rx` and `filename` are provided, the progress bar style will be
 /// updated when the terminal is resized.
+#[cfg(not(unix))]
 fn calculate_file_hash_with_progress(
     path: &Path,
     pb: Option<&ProgressBar>,
