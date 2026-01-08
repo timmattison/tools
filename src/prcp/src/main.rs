@@ -377,18 +377,23 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Set up shutdown flag
+    // Set up shutdown flag (can be reset if user declines cancellation)
     let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Set up key listener done flag (only set when operation is truly complete)
+    let key_listener_done = Arc::new(AtomicBool::new(false));
 
     // Set up pause/resume handling
     let paused = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown_key_listener = shutdown.clone();
+    let done_key_listener = key_listener_done.clone();
 
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
-            if shutdown_key_listener.load(Ordering::SeqCst) {
+            // Only exit when operation is truly complete (not just when user pressed Ctrl+C)
+            if done_key_listener.load(Ordering::SeqCst) {
                 break;
             }
 
@@ -401,8 +406,8 @@ async fn main() -> Result<()> {
                         KeyCode::Char('c')
                             if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
+                            // Just set the flag, don't break - user may decline cancellation
                             shutdown_key_listener.store(true, Ordering::SeqCst);
-                            break;
                         }
                         _ => {}
                     }
@@ -723,7 +728,7 @@ async fn main() -> Result<()> {
                     failures.push((source.clone(), error_msg));
                 } else {
                     // Clean up and bail (raw mode cleaned up by RawModeGuard on drop)
-                    shutdown.store(true, Ordering::SeqCst);
+                    key_listener_done.store(true, Ordering::SeqCst);
                     drop(raw_mode_guard); // Explicitly drop to restore terminal before cleanup
                     if let Some(ref pb) = overall_pb {
                         pb.finish_and_clear();
@@ -740,8 +745,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Signal shutdown to stop the key listener
-    shutdown.store(true, Ordering::SeqCst);
+    // Signal key listener to exit (operation complete)
+    key_listener_done.store(true, Ordering::SeqCst);
 
     // Restore terminal state (drop the guard to disable raw mode)
     drop(raw_mode_guard);
