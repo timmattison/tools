@@ -414,9 +414,11 @@ async fn main() -> Result<()> {
     // Overall progress bar (only shown for multiple files)
     let overall_pb = if total_files > 1 {
         let pb = multi.add(ProgressBar::new(total_files as u64));
+        // Calculate bar width dynamically: "Files [bar] 999/999" = ~20 chars overhead
+        let bar_width = calculate_bar_width(get_terminal_width(), 20);
         pb.set_style(
             ProgressStyle::default_bar()
-                .template("{prefix:.bold} [{bar:40.green/dim}] {pos}/{len}")?
+                .template(&format!("{{prefix:.bold}} [{{bar:{}.green/dim}}] {{pos}}/{{len}}", bar_width))?
                 .progress_chars("█▉▊▋▌▍▎▏  "),
         );
         pb.set_prefix("Files");
@@ -537,11 +539,19 @@ async fn main() -> Result<()> {
         // (indicatif templates use {placeholder} syntax)
         let safe_filename = escape_template_braces(&filename);
 
+        // Calculate bar width dynamically:
+        // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename.len()
+        // Clamp filename length to avoid u16 overflow (filenames > 65535 chars are unrealistic)
+        #[allow(clippy::cast_possible_truncation)]
+        let filename_len = filename.len().min(u16::MAX as usize) as u16;
+        let overhead = 60 + filename_len;
+        let bar_width = calculate_bar_width(get_terminal_width(), overhead);
+
         file_pb.set_style(
             ProgressStyle::default_bar()
                 .template(&format!(
-                    "{{spinner:.green}} {} [{{bar:40.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})",
-                    safe_filename
+                    "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})",
+                    safe_filename, bar_width
                 ))?
                 .progress_chars("█▉▊▋▌▍▎▏  "),
         );
@@ -903,6 +913,25 @@ fn escape_template_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
 }
 
+/// Get the current terminal width, with a fallback default.
+fn get_terminal_width() -> u16 {
+    crossterm::terminal::size()
+        .map(|(w, _)| w)
+        .unwrap_or(80) // Default to 80 columns if detection fails
+}
+
+/// Calculate the progress bar width based on terminal width and fixed element overhead.
+///
+/// The bar width is calculated by subtracting the overhead from the terminal width,
+/// then clamping to a reasonable range (min 10, max 100 characters).
+fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
+    const MIN_BAR_WIDTH: u16 = 10;
+    const MAX_BAR_WIDTH: u16 = 100;
+
+    let available = terminal_width.saturating_sub(fixed_overhead);
+    available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
+}
+
 /// Format a duration in a human-readable way (e.g., "1.23s", "45.6ms")
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs_f64();
@@ -965,12 +994,20 @@ fn verify_destination(
         .unwrap_or_else(|| destination.display().to_string());
     let safe_filename = escape_template_braces(&filename);
 
+    // Calculate bar width dynamically:
+    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename.len()
+    // Clamp filename length to avoid u16 overflow (filenames > 65535 chars are unrealistic)
+    #[allow(clippy::cast_possible_truncation)]
+    let filename_len = filename.len().min(u16::MAX as usize) as u16;
+    let overhead = 70 + filename_len;
+    let bar_width = calculate_bar_width(get_terminal_width(), overhead);
+
     let pb = multi.add(ProgressBar::new(file_size));
     pb.set_style(
         ProgressStyle::default_bar()
             .template(&format!(
-                "{{spinner:.yellow}} {} [{{bar:40.yellow/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}}) verifying",
-                safe_filename
+                "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}}) verifying",
+                safe_filename, bar_width
             ))
             .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
             .progress_chars("█▉▊▋▌▍▎▏  "),
