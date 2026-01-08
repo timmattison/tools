@@ -523,9 +523,11 @@ fn try_create_worktree(
         cmd.args(["worktree", "add", worktree_path, "-b", branch_name]);
     }
 
-    // Spawn the process with piped stderr so we can both display progress and capture errors
+    // Spawn the process with piped stderr so we can both display progress and capture errors.
+    // stdin is explicitly closed to prevent hangs if git ever prompts for input.
     let child = cmd
         .current_dir(repo_root)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn();
