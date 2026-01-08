@@ -245,8 +245,8 @@ fn resolve_sources(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
         );
     }
 
-    // Note: The empty check is omitted as it's unreachable - clap requires at least one
-    // source pattern, and each pattern either adds files or returns an error above.
+    // Note: Empty sources are handled upstream (args.paths.len() < 2 check),
+    // so resolve_sources is never called with an empty slice.
 
     Ok(files)
 }
