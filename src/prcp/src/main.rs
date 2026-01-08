@@ -310,15 +310,17 @@ fn parse_buffer_size(s: &str) -> Result<usize, String> {
 
     if size < MIN_BUFFER_SIZE {
         return Err(format!(
-            "Buffer size {} is below minimum (4KB)",
-            format_buffer_size(size)
+            "Buffer size {} is below minimum of 4KB ({})",
+            format_buffer_size(size),
+            MIN_BUFFER_SIZE
         ));
     }
 
     if size > MAX_BUFFER_SIZE {
         return Err(format!(
-            "Buffer size {} exceeds maximum (1GB)",
-            format_buffer_size(size)
+            "Buffer size {} exceeds maximum of 1GB ({})",
+            format_buffer_size(size),
+            MAX_BUFFER_SIZE
         ));
     }
 
@@ -508,11 +510,10 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            // Poll with 250ms timeout to reduce CPU usage while maintaining reasonable
-            // responsiveness to key presses (Ctrl+C, space to pause, etc.).
-            // This adds up to 250ms latency to key handling but significantly reduces
-            // idle CPU consumption compared to shorter polling intervals.
-            if event::poll(Duration::from_millis(250)).unwrap_or(false) {
+            // Poll with 150ms timeout to balance CPU usage and key responsiveness.
+            // This provides acceptable latency for Ctrl+C and pause toggle while
+            // still reducing idle CPU consumption compared to shorter intervals.
+            if event::poll(Duration::from_millis(150)).unwrap_or(false) {
                 match event::read() {
                     Ok(Event::Key(key_event)) => {
                         match key_event.code {
@@ -1041,8 +1042,8 @@ fn calculate_file_hash(
     // Throttle UI updates to 5 per second max (every 200ms)
     const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
     // Check time every 8 iterations to reduce Instant::now() overhead.
-    // At the default 16MB buffer size, this means checking every 128MB of data,
-    // which balances responsiveness against syscall overhead.
+    // With the default 16MB buffer, this checks every ~128MB. With smaller buffers
+    // (e.g., 4KB), checks are more frequent (~32KB) but overhead remains acceptable.
     const TIME_CHECK_INTERVAL: u32 = 8;
     let mut last_update = Instant::now();
     let mut iteration_count: u32 = 0;
@@ -1374,7 +1375,8 @@ fn try_preallocate(file: &File, size: u64) {
 fn try_preallocate(file: &File, size: u64) {
     use std::os::unix::io::AsRawFd;
 
-    // macOS uses fcntl with F_PREALLOCATE
+    // macOS uses fcntl with F_PREALLOCATE.
+    // Constants and struct layout from <sys/fcntl.h> - libc crate doesn't expose these.
     #[repr(C)]
     struct FStore {
         fst_flags: libc::c_uint,
@@ -1387,7 +1389,7 @@ fn try_preallocate(file: &File, size: u64) {
     const F_ALLOCATECONTIG: libc::c_uint = 0x02; // Allocate contiguous space
     const F_ALLOCATEALL: libc::c_uint = 0x04; // Allocate all requested space or none
     const F_PEOFPOSMODE: libc::c_int = 3; // Position relative to physical end of file
-    const F_PREALLOCATE: libc::c_int = 42; // Preallocate storage
+    const F_PREALLOCATE: libc::c_int = 42; // Preallocate storage (from <sys/fcntl.h>)
 
     #[allow(clippy::cast_possible_wrap)]
     let mut fstore = FStore {
@@ -1432,6 +1434,7 @@ fn hint_sequential_io(file: &File) {
 #[cfg(target_os = "macos")]
 fn hint_sequential_io(file: &File) {
     use std::os::unix::io::AsRawFd;
+    // Constant from <sys/fcntl.h> - libc crate doesn't expose this.
     const F_RDAHEAD: libc::c_int = 45; // Turn read-ahead on/off
     unsafe {
         // Enable read-ahead (1 = on)
@@ -1487,8 +1490,8 @@ async fn copy_with_progress(
     // Throttle UI updates to 5 per second max (every 200ms)
     const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
     // Check time every 8 iterations to reduce Instant::now() overhead.
-    // At the default 16MB buffer size, this means checking every 128MB of data,
-    // which balances responsiveness against syscall overhead.
+    // With the default 16MB buffer, this checks every ~128MB. With smaller buffers
+    // (e.g., 4KB), checks are more frequent (~32KB) but overhead remains acceptable.
     const TIME_CHECK_INTERVAL: u32 = 8;
     let mut last_update = Instant::now();
     let mut iteration_count: u32 = 0;
