@@ -10,7 +10,6 @@ crossterm = "0.29.0"
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
 blake3 = "1"
-memmap2 = "0.9"
 libc = "0.2"
 glob = "0.3"
 dirs = "6.0"

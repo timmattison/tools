@@ -980,77 +980,6 @@ enum VerifyOutcome {
     Failed,
 }
 
-/// Chunk size for mmap-based verification (64MB).
-/// Larger chunks improve performance but use more memory for progress updates.
-const MMAP_CHUNK_SIZE: usize = 64 * 1024 * 1024;
-
-/// Calculate Blake3 hash of a file using memory mapping (Unix only).
-///
-/// Memory mapping eliminates read syscall overhead by letting the kernel handle
-/// paging. We iterate through chunks for progress updates and cancellation checks.
-#[cfg(unix)]
-fn calculate_file_hash_mmap(
-    path: &Path,
-    pb: Option<&ProgressBar>,
-    shutdown: Option<&Arc<AtomicBool>>,
-    term_width_rx: Option<&watch::Receiver<u16>>,
-    filename: Option<&str>,
-) -> Result<Blake3Hash> {
-    let file = File::open(path).context("Failed to open file for hash verification")?;
-    // On Unix platforms (where this function is compiled), usize is typically 64-bit
-    #[allow(clippy::cast_possible_truncation)]
-    let file_size = file.metadata()?.len() as usize;
-
-    // For empty files, return hash of empty data
-    if file_size == 0 {
-        let hasher = blake3::Hasher::new();
-        return Ok(Blake3Hash::from(hasher.finalize()));
-    }
-
-    // Safety: mmap requires the file to exist and be readable.
-    // The file handle remains open for the lifetime of the Mmap.
-    let mmap = unsafe {
-        memmap2::Mmap::map(&file).context("Failed to memory-map file for verification")?
-    };
-
-    let mut hasher = blake3::Hasher::new();
-    let mut bytes_hashed = 0usize;
-
-    // Track last terminal width for resize detection
-    let mut last_width = term_width_rx.map(|rx| *rx.borrow());
-
-    for chunk in mmap.chunks(MMAP_CHUNK_SIZE) {
-        // Check for terminal resize and update progress bar style
-        if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
-            (term_width_rx, pb, filename, last_width.as_mut())
-        {
-            let current_width = *rx.borrow();
-            if current_width != *prev_width {
-                *prev_width = current_width;
-                if let Ok(style) = create_verify_style(fname, current_width) {
-                    progress.set_style(style.progress_chars(PROGRESS_CHARS));
-                }
-            }
-        }
-
-        // Check for cancellation before processing each chunk
-        if let Some(shutdown_flag) = shutdown {
-            if shutdown_flag.load(Ordering::SeqCst) {
-                anyhow::bail!("Verification cancelled by user");
-            }
-        }
-
-        hasher.update(chunk);
-
-        bytes_hashed += chunk.len();
-        if let Some(progress) = pb {
-            progress.set_position(bytes_hashed as u64);
-        }
-    }
-
-    Ok(Blake3Hash::from(hasher.finalize()))
-}
-
 /// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
 ///
 /// If `shutdown` is provided and becomes true during calculation, returns an error
@@ -1058,30 +987,6 @@ fn calculate_file_hash_mmap(
 ///
 /// If `term_width_rx` and `filename` are provided, the progress bar style will be
 /// updated when the terminal is resized.
-///
-/// On Unix platforms, this uses memory-mapped I/O for better performance during
-/// verification. The `buffer_size` parameter is ignored when mmap is used.
-#[cfg(unix)]
-fn calculate_file_hash(
-    path: &Path,
-    pb: Option<&ProgressBar>,
-    shutdown: Option<&Arc<AtomicBool>>,
-    term_width_rx: Option<&watch::Receiver<u16>>,
-    filename: Option<&str>,
-    _buffer_size: usize,
-) -> Result<Blake3Hash> {
-    // Use mmap-based hashing on Unix for better performance
-    calculate_file_hash_mmap(path, pb, shutdown, term_width_rx, filename)
-}
-
-/// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
-///
-/// If `shutdown` is provided and becomes true during calculation, returns an error
-/// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
-///
-/// If `term_width_rx` and `filename` are provided, the progress bar style will be
-/// updated when the terminal is resized.
-#[cfg(not(unix))]
 fn calculate_file_hash(
     path: &Path,
     pb: Option<&ProgressBar>,
