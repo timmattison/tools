@@ -1,3 +1,9 @@
+// Clippy lints to catch common issues
+#![warn(clippy::unwrap_used)] // Prefer explicit error handling
+#![warn(clippy::expect_used)] // Prefer explicit error handling
+#![warn(clippy::panic)] // Avoid panics in library code
+#![deny(clippy::unimplemented)] // Don't leave unimplemented!() in code
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -11,6 +17,51 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task;
+
+/// RAII guard for terminal raw mode state management.
+/// Ensures raw mode is properly restored even if an error occurs.
+struct RawModeGuard {
+    was_enabled: bool,
+    currently_raw: bool,
+}
+
+impl RawModeGuard {
+    /// Create a new guard and enable raw mode if possible
+    fn new() -> Self {
+        let was_enabled = crossterm::terminal::enable_raw_mode().is_ok();
+        Self {
+            was_enabled,
+            currently_raw: was_enabled,
+        }
+    }
+
+    /// Temporarily disable raw mode for user input (returns true if was enabled)
+    fn disable_temporarily(&mut self) -> bool {
+        if self.currently_raw {
+            let _ = crossterm::terminal::disable_raw_mode();
+            self.currently_raw = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Re-enable raw mode if it was previously enabled
+    fn restore(&mut self) {
+        if self.was_enabled && !self.currently_raw {
+            let _ = crossterm::terminal::enable_raw_mode();
+            self.currently_raw = true;
+        }
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.currently_raw {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Progress copy - copy files with progress bar", long_about = None)]
@@ -29,6 +80,10 @@ struct Args {
     /// Continue copying remaining files if one fails
     #[arg(long)]
     continue_on_error: bool,
+
+    /// Skip all confirmation prompts (assume yes)
+    #[arg(long, short = 'y')]
+    yes: bool,
 }
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
@@ -37,22 +92,44 @@ const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
 ///
 /// Handles both literal file paths and glob patterns (*, ?, []).
 /// Returns an error if a glob pattern matches no files or a literal path doesn't exist.
+/// Glob iteration errors (e.g., permission denied) are collected and reported.
 fn resolve_sources(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
+    let mut glob_errors: Vec<String> = Vec::new();
 
     for pattern in patterns {
         let pattern_str = pattern.to_string_lossy();
 
         // Check if pattern contains glob characters
         if pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('[') {
-            let matches: Vec<_> = glob::glob(&pattern_str)
-                .with_context(|| format!("Invalid glob pattern '{}'", pattern_str))?
-                .filter_map(|r| r.ok())
-                .filter(|p| p.is_file())
-                .collect();
+            let glob_iter = glob::glob(&pattern_str)
+                .with_context(|| format!("Invalid glob pattern '{}'", pattern_str))?;
+
+            let mut matches = Vec::new();
+            for entry in glob_iter {
+                match entry {
+                    Ok(path) => {
+                        if path.is_file() {
+                            matches.push(path);
+                        }
+                    }
+                    Err(e) => {
+                        // Collect glob errors (e.g., permission denied) for reporting
+                        glob_errors.push(format!("{}: {}", e.path().display(), e.error()));
+                    }
+                }
+            }
 
             if matches.is_empty() {
-                anyhow::bail!("No files match pattern '{}'", pattern_str);
+                if glob_errors.is_empty() {
+                    anyhow::bail!("No files match pattern '{}'", pattern_str);
+                } else {
+                    anyhow::bail!(
+                        "No files match pattern '{}'. Errors encountered:\n  {}",
+                        pattern_str,
+                        glob_errors.join("\n  ")
+                    );
+                }
             }
             files.extend(matches);
         } else {
@@ -65,6 +142,14 @@ fn resolve_sources(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
             }
             files.push(pattern.clone());
         }
+    }
+
+    // Warn about glob errors even if we found some files
+    if !glob_errors.is_empty() {
+        eprintln!(
+            "Warning: Some paths could not be accessed during glob expansion:\n  {}",
+            glob_errors.join("\n  ")
+        );
     }
 
     if files.is_empty() {
@@ -92,13 +177,12 @@ async fn main() -> Result<()> {
                 args.destination.display()
             );
         }
-        // Create destination directory if needed (idempotent if already exists as dir)
-        fs::create_dir_all(&args.destination)
-            .context("Failed to create destination directory")?;
+        // Note: Directory creation is deferred until we're about to copy the first file
+        // This avoids creating empty directories if all operations fail
     }
 
     // Warn about potentially dangerous combination
-    if args.rm && args.continue_on_error && total_files > 1 {
+    if args.rm && args.continue_on_error && total_files > 1 && !args.yes {
         eprintln!("Warning: Using --rm with --continue-on-error may result in partial moves.");
         eprintln!("Some source files may be deleted while others remain if errors occur.");
         eprint!("Continue? (y/N): ");
@@ -146,8 +230,8 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Enable raw mode for keyboard input
-    let raw_mode_enabled = crossterm::terminal::enable_raw_mode().is_ok();
+    // Enable raw mode for keyboard input (uses RAII guard for safety)
+    let mut raw_mode_guard = RawModeGuard::new();
 
     // Set up multi-progress display
     let multi = MultiProgress::new();
@@ -209,26 +293,28 @@ async fn main() -> Result<()> {
 
         // Check if destination exists
         if destination.exists() {
-            eprintln!(
-                "\nDestination '{}' already exists. Overwrite? (y/N): ",
-                destination.display()
-            );
-            io::stderr().flush()?;
+            let should_overwrite = if args.yes {
+                true
+            } else {
+                eprintln!(
+                    "\nDestination '{}' already exists. Overwrite? (y/N): ",
+                    destination.display()
+                );
+                io::stderr().flush()?;
 
-            // Temporarily disable raw mode for input
-            if raw_mode_enabled {
-                let _ = crossterm::terminal::disable_raw_mode();
-            }
+                // Temporarily disable raw mode for input (guard ensures restoration)
+                raw_mode_guard.disable_temporarily();
 
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
 
-            // Re-enable raw mode
-            if raw_mode_enabled {
-                let _ = crossterm::terminal::enable_raw_mode();
-            }
+                // Re-enable raw mode
+                raw_mode_guard.restore();
 
-            if !input.trim().eq_ignore_ascii_case("y") {
+                input.trim().eq_ignore_ascii_case("y")
+            };
+
+            if !should_overwrite {
                 let error_msg = "Skipped (destination exists)".to_string();
                 if args.continue_on_error || total_files > 1 {
                     failures.push((source.clone(), error_msg));
@@ -270,11 +356,15 @@ async fn main() -> Result<()> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| source.display().to_string());
 
+        // Escape braces in filename to prevent template injection
+        // (indicatif templates use {placeholder} syntax)
+        let safe_filename = escape_template_braces(&filename);
+
         file_pb.set_style(
             ProgressStyle::default_bar()
                 .template(&format!(
                     "{{spinner:.green}} {} [{{bar:40.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})",
-                    filename
+                    safe_filename
                 ))?
                 .progress_chars("█▉▊▋▌▍▎▏  "),
         );
@@ -362,11 +452,9 @@ async fn main() -> Result<()> {
                 if args.continue_on_error {
                     failures.push((source.clone(), error_msg));
                 } else {
-                    // Clean up and bail
+                    // Clean up and bail (raw mode cleaned up by RawModeGuard on drop)
                     shutdown.store(true, Ordering::SeqCst);
-                    if raw_mode_enabled {
-                        let _ = crossterm::terminal::disable_raw_mode();
-                    }
+                    drop(raw_mode_guard); // Explicitly drop to restore terminal before cleanup
                     if let Some(ref pb) = overall_pb {
                         pb.finish_and_clear();
                     }
@@ -385,10 +473,8 @@ async fn main() -> Result<()> {
     // Signal shutdown to stop the key listener
     shutdown.store(true, Ordering::SeqCst);
 
-    // Disable raw mode
-    if raw_mode_enabled {
-        let _ = crossterm::terminal::disable_raw_mode();
-    }
+    // Restore terminal state (drop the guard to disable raw mode)
+    drop(raw_mode_guard);
 
     // Finish overall progress bar
     if let Some(pb) = overall_pb {
@@ -449,6 +535,12 @@ fn calculate_file_hash(path: &Path) -> Result<[u8; 32]> {
 /// Convert a byte array to a hex string
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Escape braces in a string for use in indicatif templates.
+/// Indicatif uses `{placeholder}` syntax, so literal braces must be doubled.
+fn escape_template_braces(s: &str) -> String {
+    s.replace('{', "{{").replace('}', "}}")
 }
 
 async fn copy_with_progress(
