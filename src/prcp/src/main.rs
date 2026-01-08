@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task;
 
 /// RAII guard for terminal raw mode state management.
@@ -393,6 +393,9 @@ async fn main() -> Result<()> {
     let done_key_listener = key_listener_done.clone();
     let input_active_key_listener = input_active.clone();
 
+    // Set up terminal width watch channel for dynamic resize handling
+    let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
+
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
@@ -409,19 +412,26 @@ async fn main() -> Result<()> {
             }
 
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                if let Ok(Event::Key(key_event)) = event::read() {
-                    match key_event.code {
-                        KeyCode::Char(' ') => {
-                            let _ = tx.send(());
+                match event::read() {
+                    Ok(Event::Key(key_event)) => {
+                        match key_event.code {
+                            KeyCode::Char(' ') => {
+                                let _ = tx.send(());
+                            }
+                            KeyCode::Char('c')
+                                if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                // Just set the flag, don't break - user may decline cancellation
+                                shutdown_key_listener.store(true, Ordering::SeqCst);
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char('c')
-                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            // Just set the flag, don't break - user may decline cancellation
-                            shutdown_key_listener.store(true, Ordering::SeqCst);
-                        }
-                        _ => {}
                     }
+                    Ok(Event::Resize(width, _height)) => {
+                        // Terminal was resized - broadcast the new width
+                        let _ = term_width_tx.send(width);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -434,13 +444,12 @@ async fn main() -> Result<()> {
     let multi = MultiProgress::new();
 
     // Overall progress bar (only shown for multiple files)
+    // Track last terminal width to detect resize
+    let mut last_overall_width = *term_width_rx.borrow();
     let overall_pb = if total_files > 1 {
         let pb = multi.add(ProgressBar::new(total_files as u64));
-        // Calculate bar width dynamically: "Files [bar] 999/999" = ~20 chars overhead
-        let bar_width = calculate_bar_width(get_terminal_width(), 20);
         pb.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!("{{prefix:.bold}} [{{bar:{}.green/dim}}] {{pos}}/{{len}}", bar_width))?
+            create_overall_style(last_overall_width)?
                 .progress_chars(PROGRESS_CHARS),
         );
         pb.set_prefix("Files");
@@ -458,6 +467,17 @@ async fn main() -> Result<()> {
 
     // Copy each file
     for source in &sources {
+        // Check for terminal resize and update overall progress bar style
+        let current_width = *term_width_rx.borrow();
+        if current_width != last_overall_width {
+            last_overall_width = current_width;
+            if let Some(ref pb) = overall_pb {
+                if let Ok(style) = create_overall_style(current_width) {
+                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+        }
+
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("\nCopy cancelled by user");
@@ -561,24 +581,10 @@ async fn main() -> Result<()> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| source.display().to_string());
 
-        // Escape braces in filename to prevent template injection
-        // (indicatif templates use {placeholder} syntax)
-        let safe_filename = escape_template_braces(&filename);
-
-        // Calculate bar width dynamically:
-        // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename.len()
-        // Clamp filename length to avoid u16 overflow (filenames > 65535 chars are unrealistic)
-        #[allow(clippy::cast_possible_truncation)]
-        let filename_len = filename.len().min(u16::MAX as usize) as u16;
-        let overhead = 60 + filename_len;
-        let bar_width = calculate_bar_width(get_terminal_width(), overhead);
-
+        // Set initial style using current terminal width
+        let current_width = *term_width_rx.borrow();
         file_pb.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!(
-                    "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {}",
-                    safe_filename, bar_width, PROGRESS_STATS_FORMAT
-                ))?
+            create_copy_style(&filename, current_width)?
                 .progress_chars(PROGRESS_CHARS),
         );
 
@@ -587,10 +593,12 @@ async fn main() -> Result<()> {
             source,
             &dest_path,
             &file_pb,
+            &filename,
             paused.clone(),
             shutdown.clone(),
             input_active.clone(),
             &mut rx,
+            &term_width_rx,
         )
         .await;
 
@@ -611,7 +619,7 @@ async fn main() -> Result<()> {
                 // This loop allows retrying verification if the user cancels but declines deletion
                 let verify_outcome = if !args.no_verify {
                     loop {
-                        match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown) {
+                        match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown, &term_width_rx) {
                             Ok(verify_result) => {
                                 total_verify_duration += verify_result.verify_duration;
                                 let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
@@ -901,21 +909,42 @@ enum VerifyOutcome {
     Failed,
 }
 
-/// Calculate SHA256 hash of a file with optional progress indicator and cancellation support.
+/// Calculate SHA256 hash of a file with optional progress indicator, cancellation, and resize support.
 ///
 /// If `shutdown` is provided and becomes true during calculation, returns an error
 /// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
+///
+/// If `term_width_rx` and `filename` are provided, the progress bar style will be
+/// updated when the terminal is resized.
 fn calculate_file_hash(
     path: &Path,
     pb: Option<&ProgressBar>,
     shutdown: Option<&Arc<AtomicBool>>,
+    term_width_rx: Option<&watch::Receiver<u16>>,
+    filename: Option<&str>,
 ) -> Result<Sha256Hash> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut bytes_hashed = 0u64;
 
+    // Track last terminal width for resize detection
+    let mut last_width = term_width_rx.map(|rx| *rx.borrow());
+
     loop {
+        // Check for terminal resize and update progress bar style
+        if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
+            (term_width_rx, pb, filename, last_width.as_mut())
+        {
+            let current_width = *rx.borrow();
+            if current_width != *prev_width {
+                *prev_width = current_width;
+                if let Ok(style) = create_verify_style(fname, current_width) {
+                    progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+        }
+
         // Check for cancellation before each read
         if let Some(shutdown_flag) = shutdown {
             if shutdown_flag.load(Ordering::SeqCst) {
@@ -963,6 +992,52 @@ fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
     available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
 }
 
+/// Create a progress style for the overall files progress bar.
+fn create_overall_style(terminal_width: u16) -> Result<ProgressStyle> {
+    // "Files [bar] 999/999" = ~20 chars overhead
+    let bar_width = calculate_bar_width(terminal_width, 20);
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "{{prefix:.bold}} [{{bar:{}.green/dim}}] {{pos}}/{{len}}",
+            bar_width
+        ))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Create a progress style for the copy progress bar.
+fn create_copy_style(filename: &str, terminal_width: u16) -> Result<ProgressStyle> {
+    let safe_filename = escape_template_braces(filename);
+    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename.len()
+    #[allow(clippy::cast_possible_truncation)]
+    let filename_len = filename.len().min(u16::MAX as usize) as u16;
+    let overhead = 60 + filename_len;
+    let bar_width = calculate_bar_width(terminal_width, overhead);
+
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {}",
+            safe_filename, bar_width, PROGRESS_STATS_FORMAT
+        ))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Create a progress style for the verification progress bar.
+fn create_verify_style(filename: &str, terminal_width: u16) -> Result<ProgressStyle> {
+    let safe_filename = escape_template_braces(filename);
+    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename.len()
+    #[allow(clippy::cast_possible_truncation)]
+    let filename_len = filename.len().min(u16::MAX as usize) as u16;
+    let overhead = 70 + filename_len;
+    let bar_width = calculate_bar_width(terminal_width, overhead);
+
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {} verifying",
+            safe_filename, bar_width, PROGRESS_STATS_FORMAT
+        ))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
 /// Format a duration in a human-readable way (e.g., "1.23s", "45.6ms")
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs_f64();
@@ -1005,11 +1080,13 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
 ///
 /// Shows a progress bar for the hash verification process.
 /// Supports cancellation via Ctrl+C through the shutdown flag.
+/// Supports dynamic resize through the terminal width watch channel.
 fn verify_destination(
     destination: &Path,
     expected_hash: &Sha256Hash,
     multi: &MultiProgress,
     shutdown: &Arc<AtomicBool>,
+    term_width_rx: &watch::Receiver<u16>,
 ) -> Result<VerifyResult, VerifyError> {
     let start_time = Instant::now();
 
@@ -1023,29 +1100,18 @@ fn verify_destination(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| destination.display().to_string());
-    let safe_filename = escape_template_braces(&filename);
 
-    // Calculate bar width dynamically:
-    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename.len()
-    // Clamp filename length to avoid u16 overflow (filenames > 65535 chars are unrealistic)
-    #[allow(clippy::cast_possible_truncation)]
-    let filename_len = filename.len().min(u16::MAX as usize) as u16;
-    let overhead = 70 + filename_len;
-    let bar_width = calculate_bar_width(get_terminal_width(), overhead);
-
+    // Set initial style using current terminal width
+    let current_width = *term_width_rx.borrow();
     let pb = multi.add(ProgressBar::new(file_size));
     pb.set_style(
-        ProgressStyle::default_bar()
-            .template(&format!(
-                "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {} verifying",
-                safe_filename, bar_width, PROGRESS_STATS_FORMAT
-            ))
+        create_verify_style(&filename, current_width)
             .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
             .progress_chars(PROGRESS_CHARS),
     );
 
-    // Calculate destination hash with progress (supports cancellation)
-    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown))
+    // Calculate destination hash with progress (supports cancellation and resize)
+    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown), Some(term_width_rx), Some(&filename))
         .map_err(|e| {
             pb.finish_and_clear();
             let error_msg = e.to_string();
@@ -1155,14 +1221,17 @@ fn read_yes_no_with_ctrlc() -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // All parameters serve distinct purposes for progress/cancellation/resize
 async fn copy_with_progress(
     source: &Path,
     destination: &Path,
     pb: &ProgressBar,
+    filename: &str,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
+    term_width_rx: &watch::Receiver<u16>,
 ) -> Result<CopyResult> {
     let start_time = Instant::now();
     let mut src_file = File::open(source).context("Failed to open source file")?;
@@ -1176,7 +1245,19 @@ async fn copy_with_progress(
     let mut total_bytes = 0u64;
     let mut hasher = Sha256::new();
 
+    // Track last terminal width for resize detection
+    let mut last_width = *term_width_rx.borrow();
+
     loop {
+        // Check for terminal resize and update progress bar style
+        let current_width = *term_width_rx.borrow();
+        if current_width != last_width {
+            last_width = current_width;
+            if let Ok(style) = create_copy_style(filename, current_width) {
+                pb.set_style(style.progress_chars(PROGRESS_CHARS));
+            }
+        }
+
         // Check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
             if prompt_cancel_copy(destination, &input_active) {
@@ -1200,6 +1281,15 @@ async fn copy_with_progress(
 
         // Wait while paused
         while paused.load(Ordering::SeqCst) {
+            // Check for terminal resize while paused
+            let current_width = *term_width_rx.borrow();
+            if current_width != last_width {
+                last_width = current_width;
+                if let Ok(style) = create_copy_style(filename, current_width) {
+                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+
             // Check for shutdown while paused - prompt user for confirmation
             if shutdown.load(Ordering::SeqCst) {
                 if prompt_cancel_copy(destination, &input_active) {
