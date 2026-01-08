@@ -9,7 +9,7 @@ indicatif = "0.18.0"
 crossterm = "0.29.0"
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
-blake3 = "1.5"
+blake3 = { version = "1.5", features = ["rayon"] }
 glob = "0.3"
 dirs = "6.0"
 colored = "3.0"

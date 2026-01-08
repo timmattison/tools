@@ -539,6 +539,7 @@ async fn main() -> Result<()> {
         let result = copy_with_progress(
             source,
             &dest_path,
+            file_size,
             &file_pb,
             paused.clone(),
             shutdown.clone(),
@@ -696,6 +697,7 @@ fn same_device(_source: &Path, _destination: &Path) -> bool {
 
 /// Calculate Blake3 hash of a file by reading it completely.
 /// Uses F_NOCACHE on macOS for better throughput on large files.
+/// Uses parallel hashing via Rayon for better CPU utilization on large buffers.
 fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
     let file = File::open(path).context("Failed to open file for hash verification")?;
     // Ignore F_NOCACHE errors - it's an optimization, not required
@@ -710,7 +712,8 @@ fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
         if bytes_read == 0 {
             break;
         }
-        hasher.update(&buffer[..bytes_read]);
+        // Use parallel hashing for better CPU utilization on large buffers
+        hasher.update_rayon(&buffer[..bytes_read]);
     }
 
     Ok(hasher.finalize())
@@ -769,15 +772,16 @@ enum CopyMessage {
 async fn copy_with_progress(
     source: &Path,
     destination: &Path,
+    file_size: u64,
     pb: &ProgressBar,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<CopyResult> {
     if same_device(source, destination) {
-        copy_sequential(source, destination, pb, paused, shutdown, rx).await
+        copy_sequential(source, destination, file_size, pb, paused, shutdown, rx).await
     } else {
-        copy_parallel(source, destination, pb, paused, shutdown, rx).await
+        copy_parallel(source, destination, file_size, pb, paused, shutdown, rx).await
     }
 }
 
@@ -786,6 +790,7 @@ async fn copy_with_progress(
 async fn copy_sequential(
     source: &Path,
     destination: &Path,
+    file_size: u64,
     pb: &ProgressBar,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
@@ -795,6 +800,11 @@ async fn copy_sequential(
     let dst_file = File::create(destination).context("Failed to create destination file")?;
     let _ = disable_page_cache(&src_file);
     let _ = disable_page_cache(&dst_file);
+
+    // Pre-allocate destination file to help filesystem allocate contiguous blocks.
+    // This reduces fragmentation and can improve write performance.
+    // Ignore errors - pre-allocation is an optimization, not a requirement.
+    let _ = dst_file.set_len(file_size);
 
     // Use RAII guard to ensure partial file cleanup on any error path
     // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
@@ -843,7 +853,8 @@ async fn copy_sequential(
         };
 
         // Hash and write (sequential - no head thrashing on same device)
-        hasher.update(&buffer[..bytes_read]);
+        // Use parallel hashing for better CPU utilization on large buffers
+        hasher.update_rayon(&buffer[..bytes_read]);
 
         // Write to destination
         guard
@@ -887,6 +898,7 @@ async fn copy_sequential(
 async fn copy_parallel(
     source: &Path,
     destination: &Path,
+    file_size: u64,
     pb: &ProgressBar,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
@@ -900,6 +912,11 @@ async fn copy_parallel(
     let dst_file = File::create(&dst_path).context("Failed to create destination file")?;
     let _ = disable_page_cache(&src_file);
     let _ = disable_page_cache(&dst_file);
+
+    // Pre-allocate destination file to help filesystem allocate contiguous blocks.
+    // This reduces fragmentation and can improve write performance.
+    // Ignore errors - pre-allocation is an optimization, not a requirement.
+    let _ = dst_file.set_len(file_size);
 
     // Use RAII guard to ensure partial file cleanup on any error path
     // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
@@ -994,8 +1011,8 @@ async fn copy_parallel(
         // Try to receive data with timeout to allow checking pause/shutdown
         match data_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(CopyMessage::Data(data)) => {
-                // Hash and write
-                hasher.update(&data);
+                // Hash and write (parallel hashing for better CPU utilization)
+                hasher.update_rayon(&data);
                 guard
                     .file_mut()
                     .write_all(&data)
