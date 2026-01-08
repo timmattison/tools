@@ -152,9 +152,8 @@ fn resolve_sources(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
         );
     }
 
-    if files.is_empty() {
-        anyhow::bail!("No source files specified");
-    }
+    // Note: The empty check is omitted as it's unreachable - clap requires at least one
+    // source pattern, and each pattern either adds files or returns an error above.
 
     Ok(files)
 }
@@ -388,47 +387,13 @@ async fn main() -> Result<()> {
                 successful_copies += 1;
                 total_bytes_copied += copy_result.bytes_copied;
 
-                // Handle --rm flag
+                // Handle --rm flag: verify copy and remove source
                 if args.rm {
-                    let dest_hash = match calculate_file_hash(&destination) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            let error_msg =
-                                format!("Failed to verify destination: {}. Source NOT removed.", e);
-                            eprintln!("\n{}", error_msg);
-                            if args.continue_on_error {
-                                failures.push((source.clone(), error_msg));
-                                if let Some(ref pb) = overall_pb {
-                                    pb.inc(1);
-                                }
-                                continue;
-                            } else {
-                                anyhow::bail!("{}", error_msg);
-                            }
-                        }
-                    };
-
-                    if copy_result.source_hash == dest_hash {
-                        if let Err(e) = fs::remove_file(source) {
-                            let error_msg = format!("Failed to remove source: {}", e);
-                            if args.continue_on_error {
-                                failures.push((source.clone(), error_msg));
-                            } else {
-                                anyhow::bail!(
-                                    "Failed to remove source file '{}': {}",
-                                    source.display(),
-                                    e
-                                );
-                            }
-                        }
-                    } else {
-                        let error_msg = format!(
-                            "Hash mismatch! Source NOT removed.\n  Source: {}\n  Dest:   {}",
-                            hex_encode(&copy_result.source_hash),
-                            hex_encode(&dest_hash)
-                        );
+                    if let Err(error_msg) =
+                        verify_and_remove_source(source, &destination, &copy_result.source_hash)
+                    {
+                        eprintln!("\n{}", error_msg);
                         if args.continue_on_error {
-                            eprintln!("\n{}", error_msg);
                             failures.push((source.clone(), error_msg));
                         } else {
                             anyhow::bail!("{}", error_msg);
@@ -541,6 +506,36 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Indicatif uses `{placeholder}` syntax, so literal braces must be doubled.
 fn escape_template_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
+}
+
+/// Verify destination matches source and remove the source file.
+///
+/// This function performs SHA256 hash verification to ensure the copy was
+/// successful before removing the source. Returns `Ok(())` on success,
+/// or `Err(error_message)` if verification or removal fails.
+fn verify_and_remove_source(
+    source: &Path,
+    destination: &Path,
+    expected_hash: &[u8; 32],
+) -> Result<(), String> {
+    // Calculate destination hash
+    let dest_hash = calculate_file_hash(destination)
+        .map_err(|e| format!("Failed to verify destination: {}. Source NOT removed.", e))?;
+
+    // Verify hashes match
+    if expected_hash != &dest_hash {
+        return Err(format!(
+            "Hash mismatch! Source NOT removed.\n  Source: {}\n  Dest:   {}",
+            hex_encode(expected_hash),
+            hex_encode(&dest_hash)
+        ));
+    }
+
+    // Safe to remove source
+    fs::remove_file(source)
+        .map_err(|e| format!("Failed to remove source '{}': {}", source.display(), e))?;
+
+    Ok(())
 }
 
 async fn copy_with_progress(
