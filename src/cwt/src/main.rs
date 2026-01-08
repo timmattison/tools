@@ -73,10 +73,12 @@ macro_rules! error {
 /// - 2: Git command error
 /// - 3: Worktree not found
 /// - 4: Could not determine current worktree (for -f/-p)
+/// - 5: Shell setup failed
 #[derive(Parser)]
 #[command(name = "cwt")]
 #[command(about = "Change to a different git worktree")]
 #[command(version)]
+#[allow(clippy::struct_excessive_bools)] // CLI flags are naturally bool-heavy
 struct Cli {
     /// Go to the next worktree (wraps around).
     #[arg(short = 'f', long, conflicts_with_all = ["prev", "target", "shell_setup"])]
@@ -118,17 +120,14 @@ impl Worktree {
 
     /// Get the branch name for display, or short commit hash for detached HEAD.
     fn display_branch(&self) -> String {
-        match &self.branch {
-            Some(branch) => branch.clone(),
-            None => {
-                // Show short commit hash for detached HEAD
-                let short_hash = if self.head.len() >= SHORT_COMMIT_HASH_LENGTH {
-                    &self.head[..SHORT_COMMIT_HASH_LENGTH]
-                } else {
-                    &self.head
-                };
-                format!("HEAD@{}", short_hash)
-            }
+        if let Some(branch) = &self.branch { branch.clone() } else {
+            // Show short commit hash for detached HEAD
+            let short_hash = if self.head.len() >= SHORT_COMMIT_HASH_LENGTH {
+                &self.head[..SHORT_COMMIT_HASH_LENGTH]
+            } else {
+                &self.head
+            };
+            format!("HEAD@{short_hash}")
         }
     }
 }
@@ -155,7 +154,8 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
 
     for line in output.lines() {
         if line.is_empty() {
-            // End of a worktree block, save if we have the required fields
+            // End of a worktree block, save if we have the required fields.
+            // Note: .take() already leaves the Option as None, so no need to reassign.
             if let (Some(path), Some(head)) = (current_path.take(), current_head.take()) {
                 worktrees.push(Worktree {
                     path,
@@ -163,9 +163,6 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
                     branch: current_branch.take(),
                 });
             }
-            current_path = None;
-            current_head = None;
-            current_branch = None;
         } else if let Some(path) = line.strip_prefix("worktree ") {
             current_path = Some(PathBuf::from(path));
         } else if let Some(head) = line.strip_prefix("HEAD ") {
@@ -201,11 +198,11 @@ fn get_worktrees(repo_root: &Path) -> Result<Vec<Worktree>, String> {
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
         .output()
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
+        .map_err(|e| format!("Failed to execute git: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git worktree list failed: {}", stderr));
+        return Err(format!("git worktree list failed: {stderr}"));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -213,9 +210,13 @@ fn get_worktrees(repo_root: &Path) -> Result<Vec<Worktree>, String> {
 }
 
 /// Finds the index of the current worktree in the sorted list.
-fn find_current_worktree(worktrees: &[Worktree]) -> Option<usize> {
-    let current = find_git_repo()?;
-    let canonical = std::fs::canonicalize(&current).ok()?;
+///
+/// # Arguments
+///
+/// * `worktrees` - The list of worktrees to search
+/// * `repo_root` - The root of the current repository (avoids redundant `find_git_repo()` call)
+fn find_current_worktree(worktrees: &[Worktree], repo_root: &Path) -> Option<usize> {
+    let canonical = std::fs::canonicalize(repo_root).ok()?;
 
     worktrees.iter().position(|wt| {
         std::fs::canonicalize(&wt.path)
@@ -332,9 +333,8 @@ fn setup_shell_integration() -> Result<(), String> {
         }
         _ => {
             return Err(format!(
-                "Unsupported shell: {}. Please manually add the shell integration to your config.\n\
-                 See the README for shell integration examples: https://github.com/timmattison/tools#cwt-change-worktree",
-                shell_name
+                "Unsupported shell: {shell_name}. Please manually add the shell integration to your config.\n\
+                 See the README for shell integration examples: https://github.com/timmattison/tools#cwt-change-worktree"
             ));
         }
     };
@@ -391,19 +391,16 @@ fn main() {
         match setup_shell_integration() {
             Ok(()) => exit(0),
             Err(e) => {
-                eprintln!("Error: {}", e);
+                eprintln!("Error: {e}");
                 exit(exit_codes::SHELL_SETUP_ERROR);
             }
         }
     }
 
     // Find git repo root
-    let repo_root = match find_git_repo() {
-        Some(root) => root,
-        None => {
-            error!(cli.quiet, "Error: Not in a git repository");
-            exit(exit_codes::NOT_IN_REPO);
-        }
+    let Some(repo_root) = find_git_repo() else {
+        error!(cli.quiet, "Error: Not in a git repository");
+        exit(exit_codes::NOT_IN_REPO);
     };
 
     // Get all worktrees
@@ -420,52 +417,43 @@ fn main() {
         exit(exit_codes::GIT_COMMAND_ERROR);
     }
 
-    // Find current worktree
-    let current_idx = find_current_worktree(&worktrees);
+    // Find current worktree (pass repo_root to avoid redundant find_git_repo() call)
+    let current_idx = find_current_worktree(&worktrees, &repo_root);
 
     // Handle different modes
     if cli.forward {
         // Next worktree (wrap around)
-        let target_idx = match current_idx {
-            Some(i) => (i + 1) % worktrees.len(),
-            None => {
-                error!(cli.quiet, "Error: Could not determine current worktree");
-                exit(exit_codes::CURRENT_UNKNOWN);
-            }
+        let target_idx = if let Some(i) = current_idx { (i + 1) % worktrees.len() } else {
+            error!(cli.quiet, "Error: Could not determine current worktree");
+            exit(exit_codes::CURRENT_UNKNOWN);
         };
         println!("{}", worktrees[target_idx].path.display());
     } else if cli.prev {
         // Previous worktree (wrap around)
-        let target_idx = match current_idx {
-            Some(i) => {
-                if i == 0 {
-                    worktrees.len() - 1
-                } else {
-                    i - 1
-                }
+        let target_idx = if let Some(i) = current_idx {
+            if i == 0 {
+                worktrees.len() - 1
+            } else {
+                i - 1
             }
-            None => {
-                error!(cli.quiet, "Error: Could not determine current worktree");
-                exit(exit_codes::CURRENT_UNKNOWN);
-            }
+        } else {
+            error!(cli.quiet, "Error: Could not determine current worktree");
+            exit(exit_codes::CURRENT_UNKNOWN);
         };
         println!("{}", worktrees[target_idx].path.display());
     } else if let Some(name) = &cli.target {
         // Find by name
-        match find_worktree_by_name(&worktrees, name) {
-            Some(idx) => {
-                println!("{}", worktrees[idx].path.display());
+        if let Some(idx) = find_worktree_by_name(&worktrees, name) {
+            println!("{}", worktrees[idx].path.display());
+        } else {
+            error!(cli.quiet, "Error: Worktree '{}' not found", name);
+            error!(cli.quiet, "Available worktrees:");
+            for wt in &worktrees {
+                let dir = wt.dir_name().unwrap_or("<unknown>");
+                let branch = wt.display_branch();
+                error!(cli.quiet, "  {} [{}]", dir, branch);
             }
-            None => {
-                error!(cli.quiet, "Error: Worktree '{}' not found", name);
-                error!(cli.quiet, "Available worktrees:");
-                for wt in &worktrees {
-                    let dir = wt.dir_name().unwrap_or("<unknown>");
-                    let branch = wt.display_branch();
-                    error!(cli.quiet, "  {} [{}]", dir, branch);
-                }
-                exit(exit_codes::WORKTREE_NOT_FOUND);
-            }
+            exit(exit_codes::WORKTREE_NOT_FOUND);
         }
     } else {
         // No args: display list

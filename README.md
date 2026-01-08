@@ -1120,3 +1120,4 @@ wt absurd-rock    # By directory name
 - `2`: Git command error
 - `3`: Worktree not found
 - `4`: Could not determine current worktree (for -f/-p)
+- `5`: Shell setup failed
