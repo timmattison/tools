@@ -473,17 +473,6 @@ async fn main() -> Result<()> {
     // Set up terminal width watch channel for dynamic resize handling
     let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
 
-    // Set up terminal width watch channel for dynamic resize handling
-    let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
-
-    // Set up flag for when user is being prompted for input
-    let input_active = Arc::new(AtomicBool::new(false));
-    let input_active_key_listener = input_active.clone();
-
-    // Set up flag for when operation is complete
-    let key_listener_done = Arc::new(AtomicBool::new(false));
-    let done_key_listener = key_listener_done.clone();
-
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
@@ -1321,12 +1310,12 @@ async fn copy_with_progress(
     shutdown: Arc<AtomicBool>,
     input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
-    term_width_rx: &watch::Receiver<u16>,
+    _term_width_rx: &watch::Receiver<u16>,
 ) -> Result<CopyResult> {
     if same_device(source, destination) {
-        copy_sequential(source, destination, file_size, buffer_size, pb, paused, shutdown, rx).await
+        copy_sequential(source, destination, file_size, buffer_size, pb, filename, paused, shutdown, input_active, rx).await
     } else {
-        copy_parallel(source, destination, file_size, buffer_size, pb, paused, shutdown, rx).await
+        copy_parallel(source, destination, file_size, buffer_size, pb, filename, paused, shutdown, input_active, rx).await
     }
 }
 
@@ -1338,8 +1327,10 @@ async fn copy_sequential(
     file_size: u64,
     buffer_size: usize,
     pb: &ProgressBar,
+    filename: &str,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<CopyResult> {
     let start_time = Instant::now();
@@ -1362,9 +1353,35 @@ async fn copy_sequential(
     let mut hasher = blake3::Hasher::new();
 
     loop {
-        // Check for shutdown - guard will clean up partial file automatically
+        // Check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
-            return Err(anyhow::anyhow!("Copy cancelled by user"));
+            // Pause key listener while prompting
+            input_active.store(true, Ordering::SeqCst);
+
+            // Clear progress bar line and prompt user
+            pb.set_message("");
+            eprint!(
+                "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
+                filename
+            );
+            let _ = io::stderr().flush();
+
+            // Temporarily disable raw mode for input
+            let _ = crossterm::terminal::disable_raw_mode();
+
+            let mut input = String::new();
+            let read_result = io::stdin().read_line(&mut input);
+
+            // Re-enable raw mode and resume key listener
+            let _ = crossterm::terminal::enable_raw_mode();
+            input_active.store(false, Ordering::SeqCst);
+
+            if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+                return Err(anyhow::anyhow!("Copy cancelled by user"));
+            }
+
+            // User declined cancellation - reset shutdown flag and continue
+            shutdown.store(false, Ordering::SeqCst);
         }
 
         // Check for pause toggle
@@ -1379,9 +1396,34 @@ async fn copy_sequential(
 
         // Wait while paused
         while paused.load(Ordering::SeqCst) {
-            // Check for shutdown while paused - guard will clean up partial file automatically
+            // Check for shutdown while paused - prompt user for confirmation
             if shutdown.load(Ordering::SeqCst) {
-                return Err(anyhow::anyhow!("Copy cancelled by user"));
+                // Pause key listener while prompting
+                input_active.store(true, Ordering::SeqCst);
+
+                pb.set_message("");
+                eprint!(
+                    "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
+                    filename
+                );
+                let _ = io::stderr().flush();
+
+                // Temporarily disable raw mode for input
+                let _ = crossterm::terminal::disable_raw_mode();
+
+                let mut input = String::new();
+                let read_result = io::stdin().read_line(&mut input);
+
+                // Re-enable raw mode and resume key listener
+                let _ = crossterm::terminal::enable_raw_mode();
+                input_active.store(false, Ordering::SeqCst);
+
+                if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+                    return Err(anyhow::anyhow!("Copy cancelled by user"));
+                }
+
+                // User declined cancellation - reset shutdown flag and continue
+                shutdown.store(false, Ordering::SeqCst);
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1453,8 +1495,10 @@ async fn copy_parallel(
     file_size: u64,
     buffer_size: usize,
     pb: &ProgressBar,
+    filename: &str,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<CopyResult> {
     let start_time = Instant::now();
@@ -1553,18 +1597,69 @@ async fn copy_parallel(
             }
         }
 
-        // Non-blocking check for shutdown
+        // Non-blocking check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
-            // Wait for reader to notice and exit
-            let _ = reader_handle.join();
-            return Err(anyhow::anyhow!("Copy cancelled by user"));
+            // Pause key listener while prompting
+            input_active.store(true, Ordering::SeqCst);
+
+            // Clear progress bar line and prompt user
+            pb.set_message("");
+            eprint!(
+                "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
+                filename
+            );
+            let _ = io::stderr().flush();
+
+            // Temporarily disable raw mode for input
+            let _ = crossterm::terminal::disable_raw_mode();
+
+            let mut input = String::new();
+            let read_result = io::stdin().read_line(&mut input);
+
+            // Re-enable raw mode and resume key listener
+            let _ = crossterm::terminal::enable_raw_mode();
+            input_active.store(false, Ordering::SeqCst);
+
+            if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+                // Wait for reader to notice and exit
+                let _ = reader_handle.join();
+                return Err(anyhow::anyhow!("Copy cancelled by user"));
+            }
+
+            // User declined cancellation - reset shutdown flag and continue
+            shutdown.store(false, Ordering::SeqCst);
         }
 
         // Wait while paused (but keep checking for shutdown/unpause)
         while paused.load(Ordering::SeqCst) {
             if shutdown.load(Ordering::SeqCst) {
-                let _ = reader_handle.join();
-                return Err(anyhow::anyhow!("Copy cancelled by user"));
+                // Pause key listener while prompting
+                input_active.store(true, Ordering::SeqCst);
+
+                pb.set_message("");
+                eprint!(
+                    "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
+                    filename
+                );
+                let _ = io::stderr().flush();
+
+                // Temporarily disable raw mode for input
+                let _ = crossterm::terminal::disable_raw_mode();
+
+                let mut input = String::new();
+                let read_result = io::stdin().read_line(&mut input);
+
+                // Re-enable raw mode and resume key listener
+                let _ = crossterm::terminal::enable_raw_mode();
+                input_active.store(false, Ordering::SeqCst);
+
+                if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+                    let _ = reader_handle.join();
+                    return Err(anyhow::anyhow!("Copy cancelled by user"));
+                }
+
+                // User declined cancellation - reset shutdown flag and continue
+                shutdown.store(false, Ordering::SeqCst);
             }
 
             if rx.try_recv().is_ok() {
