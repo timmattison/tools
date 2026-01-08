@@ -901,6 +901,10 @@ async fn copy_parallel(
     let _ = disable_page_cache(&src_file);
     let _ = disable_page_cache(&dst_file);
 
+    // Use RAII guard to ensure partial file cleanup on any error path
+    // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
+    let mut guard = PartialFileGuard::new(&dst_path, dst_file);
+
     // Channel for passing data from reader to writer (bounded to limit memory)
     let (data_tx, data_rx) = std::sync::mpsc::sync_channel::<CopyMessage>(2);
 
@@ -951,7 +955,6 @@ async fn copy_parallel(
     });
 
     // Writer runs in the main task context, receiving from channel
-    let mut file = dst_file;
     let mut hasher = blake3::Hasher::new();
     let mut total_bytes = 0u64;
 
@@ -993,7 +996,9 @@ async fn copy_parallel(
             Ok(CopyMessage::Data(data)) => {
                 // Hash and write
                 hasher.update(&data);
-                file.write_all(&data)
+                guard
+                    .file_mut()
+                    .write_all(&data)
                     .context("Failed to write to destination file")?;
                 total_bytes += data.len() as u64;
                 pb.set_position(total_bytes);
@@ -1025,9 +1030,16 @@ async fn copy_parallel(
         .join()
         .map_err(|_| anyhow::anyhow!("Reader thread panicked"))?;
 
-    // Finalize
-    file.flush().context("Failed to flush destination file")?;
-    file.sync_all()
+    // Defuse the guard and get the file back for final operations
+    // From this point on, the file will NOT be cleaned up on error
+    let mut dst_file = guard.defuse();
+
+    // Ensure all data is written and synced to disk
+    dst_file
+        .flush()
+        .context("Failed to flush destination file")?;
+    dst_file
+        .sync_all()
         .context("Failed to sync destination file to disk")?;
 
     // Copy file permissions
@@ -1035,7 +1047,7 @@ async fn copy_parallel(
     fs::set_permissions(&dst_path, metadata.permissions())?;
 
     // Explicitly close the destination file
-    drop(file);
+    drop(dst_file);
 
     Ok(CopyResult {
         bytes_copied: total_bytes,
