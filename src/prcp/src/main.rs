@@ -1007,21 +1007,12 @@ fn calculate_file_hash(
     // Track last terminal width for resize detection
     let mut last_width = term_width_rx.map(|rx| *rx.borrow());
 
-    loop {
-        // Check for terminal resize and update progress bar style
-        if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
-            (term_width_rx, pb, filename, last_width.as_mut())
-        {
-            let current_width = *rx.borrow();
-            if current_width != *prev_width {
-                *prev_width = current_width;
-                if let Ok(style) = create_verify_style(fname, current_width) {
-                    progress.set_style(style.progress_chars(PROGRESS_CHARS));
-                }
-            }
-        }
+    // Throttle UI updates to 5 per second max (every 200ms)
+    const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+    let mut last_update = Instant::now();
 
-        // Check for cancellation before each read
+    loop {
+        // Check for cancellation before each read (keep responsive)
         if let Some(shutdown_flag) = shutdown {
             if shutdown_flag.load(Ordering::SeqCst) {
                 anyhow::bail!("Verification cancelled by user");
@@ -1034,11 +1025,35 @@ fn calculate_file_hash(
         }
 
         hasher.update(&buffer[..bytes_read]);
-
         bytes_hashed += bytes_read as u64;
-        if let Some(progress) = pb {
-            progress.set_position(bytes_hashed);
+
+        // Throttle UI updates to reduce overhead
+        let now = Instant::now();
+        if now.duration_since(last_update) >= UPDATE_INTERVAL {
+            last_update = now;
+
+            // Check for terminal resize and update progress bar style
+            if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
+                (term_width_rx, pb, filename, last_width.as_mut())
+            {
+                let current_width = *rx.borrow();
+                if current_width != *prev_width {
+                    *prev_width = current_width;
+                    if let Ok(style) = create_verify_style(fname, current_width) {
+                        progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                    }
+                }
+            }
+
+            if let Some(progress) = pb {
+                progress.set_position(bytes_hashed);
+            }
         }
+    }
+
+    // Final progress update to ensure we show 100%
+    if let Some(progress) = pb {
+        progress.set_position(bytes_hashed);
     }
 
     Ok(Blake3Hash::from(hasher.finalize()))
@@ -1432,17 +1447,12 @@ async fn copy_with_progress(
     // Track last terminal width for resize detection
     let mut last_width = *term_width_rx.borrow();
 
-    loop {
-        // Check for terminal resize and update progress bar style
-        let current_width = *term_width_rx.borrow();
-        if current_width != last_width {
-            last_width = current_width;
-            if let Ok(style) = create_copy_style(filename, current_width) {
-                pb.set_style(style.progress_chars(PROGRESS_CHARS));
-            }
-        }
+    // Throttle UI updates to 5 per second max (every 200ms)
+    const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+    let mut last_update = Instant::now();
 
-        // Check for shutdown - prompt user for confirmation
+    loop {
+        // Check for shutdown - prompt user for confirmation (keep responsive)
         if shutdown.load(Ordering::SeqCst) {
             if prompt_cancel_copy(destination, &input_active) {
                 return Err(anyhow::anyhow!(
@@ -1453,7 +1463,7 @@ async fn copy_with_progress(
             shutdown.store(false, Ordering::SeqCst);
         }
 
-        // Check for pause toggle
+        // Check for pause toggle (keep responsive)
         if rx.try_recv().is_ok() {
             let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
             if !was_paused {
@@ -1511,8 +1521,27 @@ async fn copy_with_progress(
             .context("Failed to write to destination file")?;
 
         total_bytes += bytes_read as u64;
-        pb.set_position(total_bytes);
+
+        // Throttle UI updates to reduce overhead
+        let now = Instant::now();
+        if now.duration_since(last_update) >= UPDATE_INTERVAL {
+            last_update = now;
+
+            // Check for terminal resize and update progress bar style
+            let current_width = *term_width_rx.borrow();
+            if current_width != last_width {
+                last_width = current_width;
+                if let Ok(style) = create_copy_style(filename, current_width) {
+                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+
+            pb.set_position(total_bytes);
+        }
     }
+
+    // Final progress update to ensure we show 100%
+    pb.set_position(total_bytes);
 
     // Defuse the guard and get the file back for final operations
     // From this point on, the file will NOT be cleaned up on error
