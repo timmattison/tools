@@ -64,6 +64,63 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// RAII guard for cleaning up partial destination files on error.
+/// Ensures the destination file is properly closed and removed if the copy fails.
+/// This handles all error paths consistently, including Ctrl+C cancellation,
+/// I/O errors, and any other failures during the copy operation.
+struct PartialFileGuard<'a> {
+    destination: &'a Path,
+    file: Option<File>,
+    defused: bool,
+}
+
+impl<'a> PartialFileGuard<'a> {
+    /// Create a new guard that will clean up the destination file on drop unless defused.
+    fn new(destination: &'a Path, file: File) -> Self {
+        Self {
+            destination,
+            file: Some(file),
+            defused: false,
+        }
+    }
+
+    /// Get a mutable reference to the underlying file for I/O operations.
+    ///
+    /// # Panics
+    /// Panics if called after `defuse()` - this is a programming error.
+    #[allow(clippy::expect_used)] // Invariant: file is always Some until defuse()
+    fn file_mut(&mut self) -> &mut File {
+        self.file
+            .as_mut()
+            .expect("PartialFileGuard: file already consumed")
+    }
+
+    /// Defuse the guard and return the file for final operations.
+    /// After calling this, the guard will NOT clean up the destination file on drop.
+    /// Returns the file so the caller can perform final flush/sync operations.
+    ///
+    /// # Panics
+    /// Panics if called more than once - this is a programming error.
+    #[allow(clippy::expect_used)] // Invariant: file is always Some until defuse()
+    fn defuse(mut self) -> File {
+        self.defused = true;
+        self.file
+            .take()
+            .expect("PartialFileGuard: file already consumed")
+    }
+}
+
+impl Drop for PartialFileGuard<'_> {
+    fn drop(&mut self) {
+        if !self.defused {
+            // Close the file handle first (important for Windows compatibility)
+            drop(self.file.take());
+            // Now remove the partial file - ignore errors since we're already in cleanup
+            let _ = fs::remove_file(self.destination);
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Progress copy - copy files with progress bar", long_about = None)]
 struct Args {
@@ -654,17 +711,19 @@ async fn copy_with_progress(
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<CopyResult> {
     let mut src_file = File::open(source).context("Failed to open source file")?;
-    let mut dst_file = File::create(destination).context("Failed to create destination file")?;
+    let dst_file = File::create(destination).context("Failed to create destination file")?;
+
+    // Use RAII guard to ensure partial file cleanup on any error path
+    // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
+    let mut guard = PartialFileGuard::new(destination, dst_file);
 
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut total_bytes = 0u64;
     let mut hasher = Sha256::new();
 
     loop {
-        // Check for shutdown
+        // Check for shutdown - guard will clean up partial file automatically
         if shutdown.load(Ordering::SeqCst) {
-            // Clean up partial destination file
-            let _ = fs::remove_file(destination);
             return Err(anyhow::anyhow!("Copy cancelled by user"));
         }
 
@@ -680,10 +739,8 @@ async fn copy_with_progress(
 
         // Wait while paused
         while paused.load(Ordering::SeqCst) {
-            // Check for shutdown while paused
+            // Check for shutdown while paused - guard will clean up partial file automatically
             if shutdown.load(Ordering::SeqCst) {
-                // Clean up partial destination file
-                let _ = fs::remove_file(destination);
                 return Err(anyhow::anyhow!("Copy cancelled by user"));
             }
 
@@ -707,13 +764,18 @@ async fn copy_with_progress(
         hasher.update(&buffer[..bytes_read]);
 
         // Write to destination
-        dst_file
+        guard
+            .file_mut()
             .write_all(&buffer[..bytes_read])
             .context("Failed to write to destination file")?;
 
         total_bytes += bytes_read as u64;
         pb.set_position(total_bytes);
     }
+
+    // Defuse the guard and get the file back for final operations
+    // From this point on, the file will NOT be cleaned up on error
+    let mut dst_file = guard.defuse();
 
     // Ensure all data is written and synced to disk
     dst_file
