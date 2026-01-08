@@ -273,24 +273,24 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       to apply exports to current shell.
     - To install: `cargo install --git https://github.com/timmattison/tools aws2env`
 - aa
-    - AWS Account - quickly get AWS account information without a pager. Runs the equivalent of
-      `aws sts get-caller-identity` but as a simple Rust binary that outputs JSON directly to stdout.
-      Perfect for when you need to check which AWS account you're using frequently and don't want to
-      type the full AWS CLI command or deal with pager output.
-    - To install: `cargo install --git https://github.com/timmattison/tools aa`
+  - AWS Account - quickly get AWS account information without a pager. Runs the equivalent of
+    `aws sts get-caller-identity` but as a simple Rust binary that outputs JSON directly to stdout.
+    Perfect for when you need to check which AWS account you're using frequently and don't want to
+    type the full AWS CLI command or deal with pager output.
+  - To install: `cargo install --git https://github.com/timmattison/tools aa`
 - nwt
-    - New Worktree - Creates a new git worktree with a randomly generated Docker-style name
-      (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
-      names, checking out existing refs, running commands after creation, and opening worktrees
-      in new tmux windows. Worktrees are created in a `{repo-name}-worktrees` directory alongside
-      the repository.
-    - To install: `cargo install --git https://github.com/timmattison/tools nwt`
+  - New Worktree - Creates a new git worktree with a randomly generated Docker-style name
+    (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
+    names, checking out existing refs, running commands after creation, and opening worktrees
+    in new tmux windows. Worktrees are created in a `{repo-name}-worktrees` directory alongside
+    the repository.
+  - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
-    - Change Worktree - Navigate between git worktrees in a repository. Shows a list of all
-      worktrees with the current one highlighted, or cycle through them with `-f` (forward) and
-      `-p` (previous). Can also jump directly to a worktree by directory name or branch name.
-      Use `--shell-setup` to automatically add shell integration to your config.
-    - To install: `cargo install --git https://github.com/timmattison/tools cwt`
+  - Change Worktree - Navigate between git worktrees in a repository. Shows a list of all
+    worktrees with the current one highlighted, or cycle through them with `-f` (forward) and
+    `-p` (previous). Can also jump directly to a worktree by directory name or branch name.
+    Use `--shell-setup` to automatically add shell integration to your config.
+  - To install: `cargo install --git https://github.com/timmattison/tools cwt`
 
 ## dirhash
 

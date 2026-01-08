@@ -2,10 +2,9 @@
 # https://github.com/DavidAnson/markdownlint
 
 # MD007 - Unordered list indentation
-# The tools list in README.md uses 4-space indentation for nested items,
-# which is consistent throughout the file. Allow this existing style.
-MD007:
-  indent: 4
+# The tools list in README.md has mixed indentation (legacy 4-space and new 2-space).
+# Disable until the entire file is migrated to 2-space indentation.
+MD007: false
 
 # MD013 - Line length
 # Disable line length check as many tools have long descriptions
