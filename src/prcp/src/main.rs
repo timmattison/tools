@@ -9,9 +9,10 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
-use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
+#[cfg(target_os = "macos")]
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -584,29 +585,50 @@ async fn main() -> Result<()> {
 /// Result of a copy operation, including bytes copied and source hash
 struct CopyResult {
     bytes_copied: u64,
-    source_hash: [u8; 32],
+    source_hash: blake3::Hash,
 }
 
-/// Calculate SHA256 hash of a file by reading it completely
-fn calculate_file_hash(path: &Path) -> Result<[u8; 32]> {
-    let mut file = File::open(path).context("Failed to open file for hash verification")?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; BUFFER_SIZE];
+/// Disable page cache for a file on macOS using F_NOCACHE.
+/// This improves throughput for large sequential reads/writes by avoiding
+/// unnecessary memory copies through the kernel page cache.
+#[cfg(target_os = "macos")]
+fn disable_page_cache(file: &File) -> Result<()> {
+    // F_NOCACHE = 48 on macOS
+    const F_NOCACHE: libc::c_int = 48;
+    let fd = file.as_raw_fd();
+    let result = unsafe { libc::fcntl(fd, F_NOCACHE, 1) };
+    if result == -1 {
+        anyhow::bail!("Failed to set F_NOCACHE: {}", io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn disable_page_cache(_file: &File) -> Result<()> {
+    // No-op on non-macOS platforms
+    Ok(())
+}
+
+/// Calculate Blake3 hash of a file by reading it completely.
+/// Uses F_NOCACHE on macOS for better throughput on large files.
+fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
+    let file = File::open(path).context("Failed to open file for hash verification")?;
+    // Ignore F_NOCACHE errors - it's an optimization, not required
+    let _ = disable_page_cache(&file);
+
+    let mut reader = io::BufReader::with_capacity(BUFFER_SIZE, file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0u8; BUFFER_SIZE];
 
     loop {
-        let bytes_read = file.read(&mut buffer)?;
+        let bytes_read = reader.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
         hasher.update(&buffer[..bytes_read]);
     }
 
-    Ok(hasher.finalize().into())
-}
-
-/// Convert a byte array to a hex string
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    Ok(hasher.finalize())
 }
 
 /// Escape braces in a string for use in indicatif templates.
@@ -617,13 +639,13 @@ fn escape_template_braces(s: &str) -> String {
 
 /// Verify destination matches source and remove the source file.
 ///
-/// This function performs SHA256 hash verification to ensure the copy was
+/// This function performs Blake3 hash verification to ensure the copy was
 /// successful before removing the source. Returns `Ok(())` on success,
 /// or `Err(error_message)` if verification or removal fails.
 fn verify_and_remove_source(
     source: &Path,
     destination: &Path,
-    expected_hash: &[u8; 32],
+    expected_hash: &blake3::Hash,
 ) -> Result<(), String> {
     // Calculate destination hash
     let dest_hash = calculate_file_hash(destination)
@@ -633,8 +655,8 @@ fn verify_and_remove_source(
     if expected_hash != &dest_hash {
         return Err(format!(
             "Hash mismatch! Source NOT removed.\n  Source: {}\n  Dest:   {}",
-            hex_encode(expected_hash),
-            hex_encode(&dest_hash)
+            expected_hash.to_hex(),
+            dest_hash.to_hex()
         ));
     }
 
@@ -645,6 +667,21 @@ fn verify_and_remove_source(
     Ok(())
 }
 
+/// Message sent from reader thread to writer thread
+enum CopyMessage {
+    /// Data chunk to write (buffer contents, length)
+    Data(Vec<u8>),
+    /// End of file reached
+    Eof,
+    /// Error occurred during read
+    Error(String),
+}
+
+/// Performs the copy operation using dedicated reader/writer threads for true parallelism.
+/// This architecture allows:
+/// - Reader thread: continuously reads into buffers, sends to channel
+/// - Writer thread: receives from channel, hashes, writes to disk
+/// - Main async task: handles pause/resume/shutdown coordination
 async fn copy_with_progress(
     source: &Path,
     destination: &Path,
@@ -653,19 +690,70 @@ async fn copy_with_progress(
     shutdown: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<CopyResult> {
-    let mut src_file = File::open(source).context("Failed to open source file")?;
-    let mut dst_file = File::create(destination).context("Failed to create destination file")?;
+    let src_path = source.to_path_buf();
+    let dst_path = destination.to_path_buf();
 
-    let mut buffer = vec![0; BUFFER_SIZE];
+    // Open files with F_NOCACHE
+    let src_file = File::open(&src_path).context("Failed to open source file")?;
+    let dst_file = File::create(&dst_path).context("Failed to create destination file")?;
+    let _ = disable_page_cache(&src_file);
+    let _ = disable_page_cache(&dst_file);
+
+    // Channel for passing data from reader to writer (bounded to limit memory)
+    let (data_tx, data_rx) = std::sync::mpsc::sync_channel::<CopyMessage>(2);
+
+    // Shared state for coordination
+    let reader_paused = Arc::clone(&paused);
+    let reader_shutdown = Arc::clone(&shutdown);
+
+    // Spawn reader thread
+    let reader_handle = std::thread::spawn(move || {
+        let mut file = src_file;
+        let mut buffer = vec![0u8; BUFFER_SIZE];
+
+        loop {
+            // Check for shutdown
+            if reader_shutdown.load(Ordering::SeqCst) {
+                let _ = data_tx.send(CopyMessage::Error("Cancelled".to_string()));
+                return;
+            }
+
+            // Wait while paused
+            while reader_paused.load(Ordering::SeqCst) {
+                if reader_shutdown.load(Ordering::SeqCst) {
+                    let _ = data_tx.send(CopyMessage::Error("Cancelled".to_string()));
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
+            // Read chunk
+            match file.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = data_tx.send(CopyMessage::Eof);
+                    return;
+                }
+                Ok(n) => {
+                    // Send copy of data (only the bytes that were read)
+                    let data = buffer[..n].to_vec();
+                    if data_tx.send(CopyMessage::Data(data)).is_err() {
+                        return; // Receiver dropped, exit
+                    }
+                }
+                Err(e) => {
+                    let _ = data_tx.send(CopyMessage::Error(e.to_string()));
+                    return;
+                }
+            }
+        }
+    });
+
+    // Writer runs in the main task context, receiving from channel
+    let mut file = dst_file;
+    let mut hasher = blake3::Hasher::new();
     let mut total_bytes = 0u64;
-    let mut hasher = Sha256::new();
 
     loop {
-        // Check for shutdown
-        if shutdown.load(Ordering::SeqCst) {
-            return Err(anyhow::anyhow!("Copy cancelled by user"));
-        }
-
         // Check for pause toggle
         if rx.try_recv().is_ok() {
             let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
@@ -676,61 +764,79 @@ async fn copy_with_progress(
             }
         }
 
-        // Wait while paused
+        // Non-blocking check for shutdown
+        if shutdown.load(Ordering::SeqCst) {
+            // Wait for reader to notice and exit
+            let _ = reader_handle.join();
+            return Err(anyhow::anyhow!("Copy cancelled by user"));
+        }
+
+        // Wait while paused (but keep checking for shutdown/unpause)
         while paused.load(Ordering::SeqCst) {
-            // Check for shutdown while paused
             if shutdown.load(Ordering::SeqCst) {
+                let _ = reader_handle.join();
                 return Err(anyhow::anyhow!("Copy cancelled by user"));
             }
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
-
-            // Check for unpause
             if rx.try_recv().is_ok() {
                 paused.store(false, Ordering::SeqCst);
                 pb.set_message("");
             }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        // Read from source
-        let bytes_read = match src_file.read(&mut buffer) {
-            Ok(0) => break, // EOF
-            Ok(n) => n,
-            Err(e) => return Err(e.into()),
-        };
-
-        // Update hash with the data we just read
-        hasher.update(&buffer[..bytes_read]);
-
-        // Write to destination
-        dst_file
-            .write_all(&buffer[..bytes_read])
-            .context("Failed to write to destination file")?;
-
-        total_bytes += bytes_read as u64;
-        pb.set_position(total_bytes);
+        // Try to receive data with timeout to allow checking pause/shutdown
+        match data_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(CopyMessage::Data(data)) => {
+                // Hash and write
+                hasher.update(&data);
+                file.write_all(&data)
+                    .context("Failed to write to destination file")?;
+                total_bytes += data.len() as u64;
+                pb.set_position(total_bytes);
+            }
+            Ok(CopyMessage::Eof) => {
+                break;
+            }
+            Ok(CopyMessage::Error(e)) => {
+                let _ = reader_handle.join();
+                if e == "Cancelled" {
+                    return Err(anyhow::anyhow!("Copy cancelled by user"));
+                }
+                return Err(anyhow::anyhow!("Read error: {}", e));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Continue loop to check pause/shutdown
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Reader thread exited unexpectedly
+                let _ = reader_handle.join();
+                return Err(anyhow::anyhow!("Reader thread disconnected unexpectedly"));
+            }
+        }
     }
 
-    // Ensure all data is written and synced to disk
-    dst_file
-        .flush()
-        .context("Failed to flush destination file")?;
-    dst_file
-        .sync_all()
+    // Wait for reader thread to complete
+    reader_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Reader thread panicked"))?;
+
+    // Finalize
+    file.flush().context("Failed to flush destination file")?;
+    file.sync_all()
         .context("Failed to sync destination file to disk")?;
 
     // Copy file permissions
-    let metadata = fs::metadata(source)?;
-    fs::set_permissions(destination, metadata.permissions())?;
+    let metadata = fs::metadata(&src_path)?;
+    fs::set_permissions(&dst_path, metadata.permissions())?;
 
-    // Explicitly close the destination file before verification can occur
-    drop(dst_file);
-
-    // Finalize the hash
-    let source_hash: [u8; 32] = hasher.finalize().into();
+    // Explicitly close the destination file
+    drop(file);
 
     Ok(CopyResult {
         bytes_copied: total_bytes,
-        source_hash,
+        source_hash: hasher.finalize(),
     })
 }
