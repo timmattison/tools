@@ -15,7 +15,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task;
 
@@ -360,6 +360,7 @@ async fn main() -> Result<()> {
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     let mut successful_copies = 0u64;
     let mut total_bytes_copied = 0u64;
+    let overall_start = Instant::now();
 
     // Copy each file
     for source in &sources {
@@ -494,29 +495,71 @@ async fn main() -> Result<()> {
                 successful_copies += 1;
                 total_bytes_copied += copy_result.bytes_copied;
 
+                // Build stats for this file
+                let copy_speed = format_speed(copy_result.bytes_copied, copy_result.copy_duration);
+                let copy_time = format_duration(copy_result.copy_duration);
+
                 // Handle --rm flag: verify copy and remove source
-                if args.rm {
-                    if let Err(error_msg) =
-                        verify_and_remove_source(source, &dest_path, &copy_result.source_hash, &multi)
-                    {
-                        eprintln!("\n{}", error_msg);
-                        if args.continue_on_error {
-                            failures.push((source.clone(), error_msg));
-                        } else {
-                            anyhow::bail!("{}", error_msg);
+                let verify_stats = if args.rm {
+                    match verify_and_remove_source(source, &dest_path, &copy_result.source_hash, &multi) {
+                        Ok(verify_result) => {
+                            let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
+                            let verify_time = format_duration(verify_result.verify_duration);
+                            Some((verify_speed, verify_time))
+                        }
+                        Err(error_msg) => {
+                            eprintln!("\n{}", error_msg);
+                            if args.continue_on_error {
+                                failures.push((source.clone(), error_msg));
+                            } else {
+                                anyhow::bail!("{}", error_msg);
+                            }
+                            None
                         }
                     }
-                }
+                } else {
+                    None
+                };
 
-                if total_files == 1 {
+                // Print per-file stats
+                let filename = source
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| source.display().to_string());
+
+                if let Some((verify_speed, verify_time)) = verify_stats {
                     println!(
-                        "\nSuccessfully copied {} to '{}'",
+                        "{} {} -> '{}' ({}, copy: {} @ {}, verify: {} @ {})",
+                        "ok".green(),
+                        filename,
+                        dest_path.display(),
                         HumanBytes(copy_result.bytes_copied),
-                        dest_path.display()
+                        copy_time,
+                        copy_speed,
+                        verify_time,
+                        verify_speed
                     );
-                    if args.rm {
-                        println!("Source file removed after verification.");
-                    }
+                } else if args.rm {
+                    // --rm was used but verification failed (error already printed)
+                    println!(
+                        "{} {} -> '{}' ({}, copy: {} @ {})",
+                        "partial".yellow(),
+                        filename,
+                        dest_path.display(),
+                        HumanBytes(copy_result.bytes_copied),
+                        copy_time,
+                        copy_speed
+                    );
+                } else {
+                    println!(
+                        "{} {} -> '{}' ({}, {} @ {})",
+                        "ok".green(),
+                        filename,
+                        dest_path.display(),
+                        HumanBytes(copy_result.bytes_copied),
+                        copy_time,
+                        copy_speed
+                    );
                 }
             }
             Err(e) => {
@@ -557,14 +600,20 @@ async fn main() -> Result<()> {
     let _ = key_task.await;
 
     // Print summary for multiple files
-    if total_files > 1 {
+    if total_files > 1 && successful_copies > 0 {
+        let overall_duration = overall_start.elapsed();
+        let overall_speed = format_speed(total_bytes_copied, overall_duration);
+        let overall_time = format_duration(overall_duration);
         println!(
-            "\nCopied {} of {} files ({} total)",
+            "\n{} Copied {} of {} files ({} in {} @ {})",
+            "Summary:".bold(),
             successful_copies,
             total_files,
-            HumanBytes(total_bytes_copied)
+            HumanBytes(total_bytes_copied),
+            overall_time,
+            overall_speed
         );
-        if args.rm && successful_copies > 0 {
+        if args.rm {
             println!("Source files removed after verification.");
         }
     }
@@ -581,10 +630,16 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Result of a copy operation, including bytes copied and source hash
+/// Result of a copy operation, including bytes copied, source hash, and timing
 struct CopyResult {
     bytes_copied: u64,
     source_hash: [u8; 32],
+    copy_duration: Duration,
+}
+
+/// Result of a verification operation, including timing information
+struct VerifyResult {
+    verify_duration: Duration,
 }
 
 /// Calculate SHA256 hash of a file with optional progress indicator
@@ -620,10 +675,30 @@ fn escape_template_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
 }
 
+/// Format a duration in a human-readable way (e.g., "1.23s", "45.6ms")
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs_f64();
+    if secs >= 1.0 {
+        format!("{:.2}s", secs)
+    } else {
+        format!("{:.1}ms", secs * 1000.0)
+    }
+}
+
+/// Calculate and format transfer speed as bytes per second
+fn format_speed(bytes: u64, duration: Duration) -> String {
+    let secs = duration.as_secs_f64();
+    if secs == 0.0 {
+        return "instant".to_string();
+    }
+    let bytes_per_sec = bytes as f64 / secs;
+    format!("{}/s", HumanBytes(bytes_per_sec as u64))
+}
+
 /// Verify destination matches source and remove the source file.
 ///
 /// This function performs SHA256 hash verification to ensure the copy was
-/// successful before removing the source. Returns `Ok(())` on success,
+/// successful before removing the source. Returns `Ok(VerifyResult)` on success,
 /// or `Err(error_message)` if verification or removal fails.
 ///
 /// Shows a progress bar for the hash verification process.
@@ -632,7 +707,9 @@ fn verify_and_remove_source(
     destination: &Path,
     expected_hash: &[u8; 32],
     multi: &MultiProgress,
-) -> Result<(), String> {
+) -> Result<VerifyResult, String> {
+    let start_time = Instant::now();
+
     // Get file size for progress bar
     let file_size = fs::metadata(destination)
         .map_err(|e| format!("Failed to get destination metadata: {}. Source NOT removed.", e))?
@@ -679,7 +756,8 @@ fn verify_and_remove_source(
     fs::remove_file(source)
         .map_err(|e| format!("Failed to remove source '{}': {}", source.display(), e))?;
 
-    Ok(())
+    let verify_duration = start_time.elapsed();
+    Ok(VerifyResult { verify_duration })
 }
 
 async fn copy_with_progress(
@@ -690,6 +768,7 @@ async fn copy_with_progress(
     shutdown: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<CopyResult> {
+    let start_time = Instant::now();
     let mut src_file = File::open(source).context("Failed to open source file")?;
     let mut dst_file = File::create(destination).context("Failed to create destination file")?;
 
@@ -765,9 +844,11 @@ async fn copy_with_progress(
 
     // Finalize the hash
     let source_hash: [u8; 32] = hasher.finalize().into();
+    let copy_duration = start_time.elapsed();
 
     Ok(CopyResult {
         bytes_copied: total_bytes,
         source_hash,
+        copy_duration,
     })
 }
