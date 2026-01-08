@@ -497,7 +497,7 @@ async fn main() -> Result<()> {
                 // Handle --rm flag: verify copy and remove source
                 if args.rm {
                     if let Err(error_msg) =
-                        verify_and_remove_source(source, &dest_path, &copy_result.source_hash)
+                        verify_and_remove_source(source, &dest_path, &copy_result.source_hash, &multi)
                     {
                         eprintln!("\n{}", error_msg);
                         if args.continue_on_error {
@@ -587,11 +587,12 @@ struct CopyResult {
     source_hash: [u8; 32],
 }
 
-/// Calculate SHA256 hash of a file by reading it completely
-fn calculate_file_hash(path: &Path) -> Result<[u8; 32]> {
+/// Calculate SHA256 hash of a file with optional progress indicator
+fn calculate_file_hash(path: &Path, pb: Option<&ProgressBar>) -> Result<[u8; 32]> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; BUFFER_SIZE];
+    let mut bytes_hashed = 0u64;
 
     loop {
         let bytes_read = file.read(&mut buffer)?;
@@ -599,6 +600,10 @@ fn calculate_file_hash(path: &Path) -> Result<[u8; 32]> {
             break;
         }
         hasher.update(&buffer[..bytes_read]);
+        bytes_hashed += bytes_read as u64;
+        if let Some(progress) = pb {
+            progress.set_position(bytes_hashed);
+        }
     }
 
     Ok(hasher.finalize().into())
@@ -620,14 +625,46 @@ fn escape_template_braces(s: &str) -> String {
 /// This function performs SHA256 hash verification to ensure the copy was
 /// successful before removing the source. Returns `Ok(())` on success,
 /// or `Err(error_message)` if verification or removal fails.
+///
+/// Shows a progress bar for the hash verification process.
 fn verify_and_remove_source(
     source: &Path,
     destination: &Path,
     expected_hash: &[u8; 32],
+    multi: &MultiProgress,
 ) -> Result<(), String> {
-    // Calculate destination hash
-    let dest_hash = calculate_file_hash(destination)
-        .map_err(|e| format!("Failed to verify destination: {}. Source NOT removed.", e))?;
+    // Get file size for progress bar
+    let file_size = fs::metadata(destination)
+        .map_err(|e| format!("Failed to get destination metadata: {}. Source NOT removed.", e))?
+        .len();
+
+    // Create progress bar for hash verification
+    let filename = destination
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| destination.display().to_string());
+    let safe_filename = escape_template_braces(&filename);
+
+    let pb = multi.add(ProgressBar::new(file_size));
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(&format!(
+                "{{spinner:.yellow}} {} [{{bar:40.yellow/dim}}] {{bytes}}/{{total_bytes}} (verifying)",
+                safe_filename
+            ))
+            .map_err(|e| format!("Failed to create progress bar: {}", e))?
+            .progress_chars("█▉▊▋▌▍▎▏  "),
+    );
+
+    // Calculate destination hash with progress
+    let dest_hash = calculate_file_hash(destination, Some(&pb))
+        .map_err(|e| {
+            pb.finish_and_clear();
+            format!("Failed to verify destination: {}. Source NOT removed.", e)
+        })?;
+
+    pb.finish_and_clear();
+    multi.remove(&pb);
 
     // Verify hashes match
     if expected_hash != &dest_hash {
