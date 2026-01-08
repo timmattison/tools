@@ -996,6 +996,10 @@ fn calculate_file_hash(
     buffer_size: usize,
 ) -> Result<Blake3Hash> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
+
+    // Hint sequential read pattern for better kernel read-ahead
+    hint_sequential_io(&file);
+
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0; buffer_size];
     let mut bytes_hashed = 0u64;
