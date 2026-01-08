@@ -37,10 +37,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       ignore files by default. See below for an example.
     - To install: `cargo install --git https://github.com/timmattison/tools dirhash`
 - prcp
-    - Copies a file and shows the progress in the console with a beautiful progress bar using Unicode block characters.
-      Useful for when you're copying large files and you don't want to keep opening a new terminal window to run `du -sh`
-      to see how much has been copied. You can press the space bar to pause the copy and press it again to resume.
-      Press Ctrl+C to cancel and cleanly exit.
+    - Copies files with a beautiful progress bar using Unicode block characters. Supports wildcards, multi-file copy,
+      and move mode (`--rm`) that verifies SHA256 before removing source. Press space to pause/resume, Ctrl+C to cancel.
+      Run `prcp --shell-setup` to add a `prmv` command for convenient moves.
     - To install: `cargo install --git https://github.com/timmattison/tools prcp`
 - prgz
     - Similar to `prcp` but instead of copying a file it gzip compresses it. It shows the progress in the console.
@@ -367,7 +366,7 @@ fi
 
 ## prcp
 
-Simply run `prcp <source> <destination>` and you'll see the progress of the copy in the console.
+Copy files with a beautiful progress bar: `prcp <source>... <destination>`
 
 **Features:**
 - Beautiful progress bar with Unicode block characters (█▉▊▋▌▍▎▏)
@@ -377,6 +376,19 @@ Simply run `prcp <source> <destination>` and you'll see the progress of the copy
 - Ctrl+C to cancel cleanly with proper terminal cleanup
 - 16MB buffer size for efficient copying
 - Preserves file permissions
+- Wildcard/glob support (e.g., `prcp *.txt backup/`)
+- Multi-file copy with overall progress tracking
+- Move mode with `--rm` flag (verifies SHA256 hash before removing source)
+- `--continue-on-error` to keep going if some files fail
+- `-y` to skip confirmation prompts
+
+**Shell Integration:**
+
+Run `prcp --shell-setup` to add a `prmv` function to your shell config. This provides a convenient move command:
+
+```bash
+prmv file.txt destination/   # Same as: prcp --rm file.txt destination/
+```
 
 ## prhash
 
