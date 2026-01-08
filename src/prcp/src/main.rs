@@ -12,7 +12,7 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
-use sha2::{Digest, Sha256};
+// Blake3 imported via blake3 crate (no Digest trait needed)
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -135,11 +135,11 @@ struct Args {
     #[arg(long)]
     shell_setup: bool,
 
-    /// Remove source files after successful copy (verified by SHA256 hash)
+    /// Remove source files after successful copy (verified by Blake3 hash)
     #[arg(long, short = 'r')]
     rm: bool,
 
-    /// Skip SHA256 verification after copy (not allowed with --rm)
+    /// Skip Blake3 verification after copy (not allowed with --rm)
     #[arg(long)]
     no_verify: bool,
 
@@ -150,6 +150,10 @@ struct Args {
     /// Skip all confirmation prompts (assume yes)
     #[arg(long, short = 'y')]
     yes: bool,
+
+    /// I/O buffer size (e.g., 16M, 64M, 1G). Default: 16M. Range: 4K-1G.
+    #[arg(long, default_value = "16M", value_parser = parse_buffer_size)]
+    buffer_size: usize,
 }
 
 /// The shell integration code to add to shell config files.
@@ -243,7 +247,73 @@ fn setup_shell_integration() -> Result<()> {
     Ok(())
 }
 
-const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
+/// Minimum allowed buffer size (4KB)
+const MIN_BUFFER_SIZE: usize = 4 * 1024;
+/// Maximum allowed buffer size (1GB)
+const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 1024;
+
+/// Parse a human-readable buffer size string (e.g., "16M", "64M", "1G").
+///
+/// Supported suffixes:
+/// - K/KB: kilobytes (1024 bytes)
+/// - M/MB: megabytes (1024^2 bytes)
+/// - G/GB: gigabytes (1024^3 bytes)
+///
+/// Returns an error if the value is outside the valid range (4KB - 1GB).
+fn parse_buffer_size(s: &str) -> Result<usize, String> {
+    let s = s.trim().to_uppercase();
+
+    // Find where the numeric part ends and suffix begins
+    let (num_str, suffix) = match s.find(|c: char| !c.is_ascii_digit()) {
+        Some(idx) => s.split_at(idx),
+        None => (s.as_str(), ""),
+    };
+
+    let base: usize = num_str
+        .parse()
+        .map_err(|_| format!("Invalid number: {}", num_str))?;
+
+    let multiplier: usize = match suffix {
+        "" => 1,
+        "K" | "KB" => 1024,
+        "M" | "MB" => 1024 * 1024,
+        "G" | "GB" => 1024 * 1024 * 1024,
+        _ => return Err(format!("Unknown suffix: {}. Use K, M, or G.", suffix)),
+    };
+
+    let size = base
+        .checked_mul(multiplier)
+        .ok_or_else(|| "Buffer size overflow".to_string())?;
+
+    if size < MIN_BUFFER_SIZE {
+        return Err(format!(
+            "Buffer size {} is below minimum (4KB)",
+            format_buffer_size(size)
+        ));
+    }
+
+    if size > MAX_BUFFER_SIZE {
+        return Err(format!(
+            "Buffer size {} exceeds maximum (1GB)",
+            format_buffer_size(size)
+        ));
+    }
+
+    Ok(size)
+}
+
+/// Format a buffer size for display (e.g., 16777216 -> "16MB")
+fn format_buffer_size(size: usize) -> String {
+    if size >= 1024 * 1024 * 1024 && size.is_multiple_of(1024 * 1024 * 1024) {
+        format!("{}GB", size / (1024 * 1024 * 1024))
+    } else if size >= 1024 * 1024 && size.is_multiple_of(1024 * 1024) {
+        format!("{}MB", size / (1024 * 1024))
+    } else if size >= 1024 && size.is_multiple_of(1024) {
+        format!("{}KB", size / 1024)
+    } else {
+        format!("{} bytes", size)
+    }
+}
 
 /// Progress bar characters for smooth progress visualization.
 const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
@@ -599,6 +669,7 @@ async fn main() -> Result<()> {
             input_active.clone(),
             &mut rx,
             &term_width_rx,
+            args.buffer_size,
         )
         .await;
 
@@ -619,7 +690,7 @@ async fn main() -> Result<()> {
                 // This loop allows retrying verification if the user cancels but declines deletion
                 let verify_outcome = if !args.no_verify {
                     loop {
-                        match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown, &term_width_rx) {
+                        match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown, &term_width_rx, args.buffer_size) {
                             Ok(verify_result) => {
                                 total_verify_duration += verify_result.verify_duration;
                                 let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
@@ -848,31 +919,31 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// A SHA-256 hash value.
+/// A Blake3 hash value.
 ///
 /// This newtype wrapper provides type safety to ensure we don't accidentally
 /// confuse hash values with other byte arrays, and provides convenient methods
 /// for hash operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Sha256Hash([u8; 32]);
+struct Blake3Hash(blake3::Hash);
 
-impl Sha256Hash {
+impl Blake3Hash {
     /// Convert the hash to a hexadecimal string representation.
     fn to_hex(self) -> String {
-        self.0.iter().map(|b| format!("{:02x}", b)).collect()
+        self.0.to_hex().to_string()
     }
 }
 
-impl From<[u8; 32]> for Sha256Hash {
-    fn from(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+impl From<blake3::Hash> for Blake3Hash {
+    fn from(hash: blake3::Hash) -> Self {
+        Self(hash)
     }
 }
 
 /// Result of a copy operation, including bytes copied, source hash, and timing
 struct CopyResult {
     bytes_copied: u64,
-    source_hash: Sha256Hash,
+    source_hash: Blake3Hash,
     copy_duration: Duration,
 }
 
@@ -909,23 +980,128 @@ enum VerifyOutcome {
     Failed,
 }
 
-/// Calculate SHA256 hash of a file with optional progress indicator, cancellation, and resize support.
+/// Threshold for using parallel Blake3 hashing (1MB).
+/// Chunks larger than this use `update_rayon()` for SIMD-parallel hashing.
+const PARALLEL_HASH_THRESHOLD: usize = 1024 * 1024;
+
+/// Chunk size for mmap-based verification (64MB).
+/// Larger chunks improve performance but use more memory for progress updates.
+const MMAP_CHUNK_SIZE: usize = 64 * 1024 * 1024;
+
+/// Calculate Blake3 hash of a file using memory mapping (Unix only).
+///
+/// Memory mapping eliminates read syscall overhead by letting the kernel handle
+/// paging. We iterate through chunks for progress updates and cancellation checks.
+#[cfg(unix)]
+fn calculate_file_hash_mmap(
+    path: &Path,
+    pb: Option<&ProgressBar>,
+    shutdown: Option<&Arc<AtomicBool>>,
+    term_width_rx: Option<&watch::Receiver<u16>>,
+    filename: Option<&str>,
+) -> Result<Blake3Hash> {
+    let file = File::open(path).context("Failed to open file for hash verification")?;
+    // On Unix platforms (where this function is compiled), usize is typically 64-bit
+    #[allow(clippy::cast_possible_truncation)]
+    let file_size = file.metadata()?.len() as usize;
+
+    // For empty files, return hash of empty data
+    if file_size == 0 {
+        let hasher = blake3::Hasher::new();
+        return Ok(Blake3Hash::from(hasher.finalize()));
+    }
+
+    // Safety: mmap requires the file to exist and be readable.
+    // The file handle remains open for the lifetime of the Mmap.
+    let mmap = unsafe {
+        memmap2::Mmap::map(&file).context("Failed to memory-map file for verification")?
+    };
+
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes_hashed = 0usize;
+
+    // Track last terminal width for resize detection
+    let mut last_width = term_width_rx.map(|rx| *rx.borrow());
+
+    for chunk in mmap.chunks(MMAP_CHUNK_SIZE) {
+        // Check for terminal resize and update progress bar style
+        if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
+            (term_width_rx, pb, filename, last_width.as_mut())
+        {
+            let current_width = *rx.borrow();
+            if current_width != *prev_width {
+                *prev_width = current_width;
+                if let Ok(style) = create_verify_style(fname, current_width) {
+                    progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+        }
+
+        // Check for cancellation before processing each chunk
+        if let Some(shutdown_flag) = shutdown {
+            if shutdown_flag.load(Ordering::SeqCst) {
+                anyhow::bail!("Verification cancelled by user");
+            }
+        }
+
+        // Use parallel hashing for large chunks
+        if chunk.len() >= PARALLEL_HASH_THRESHOLD {
+            hasher.update_rayon(chunk);
+        } else {
+            hasher.update(chunk);
+        }
+
+        bytes_hashed += chunk.len();
+        if let Some(progress) = pb {
+            progress.set_position(bytes_hashed as u64);
+        }
+    }
+
+    Ok(Blake3Hash::from(hasher.finalize()))
+}
+
+/// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
 ///
 /// If `shutdown` is provided and becomes true during calculation, returns an error
 /// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
 ///
 /// If `term_width_rx` and `filename` are provided, the progress bar style will be
 /// updated when the terminal is resized.
+///
+/// On Unix platforms, this uses memory-mapped I/O for better performance during
+/// verification. The `buffer_size` parameter is ignored when mmap is used.
+#[cfg(unix)]
 fn calculate_file_hash(
     path: &Path,
     pb: Option<&ProgressBar>,
     shutdown: Option<&Arc<AtomicBool>>,
     term_width_rx: Option<&watch::Receiver<u16>>,
     filename: Option<&str>,
-) -> Result<Sha256Hash> {
+    _buffer_size: usize,
+) -> Result<Blake3Hash> {
+    // Use mmap-based hashing on Unix for better performance
+    calculate_file_hash_mmap(path, pb, shutdown, term_width_rx, filename)
+}
+
+/// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
+///
+/// If `shutdown` is provided and becomes true during calculation, returns an error
+/// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
+///
+/// If `term_width_rx` and `filename` are provided, the progress bar style will be
+/// updated when the terminal is resized.
+#[cfg(not(unix))]
+fn calculate_file_hash(
+    path: &Path,
+    pb: Option<&ProgressBar>,
+    shutdown: Option<&Arc<AtomicBool>>,
+    term_width_rx: Option<&watch::Receiver<u16>>,
+    filename: Option<&str>,
+    buffer_size: usize,
+) -> Result<Blake3Hash> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0; BUFFER_SIZE];
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0; buffer_size];
     let mut bytes_hashed = 0u64;
 
     // Track last terminal width for resize detection
@@ -956,15 +1132,21 @@ fn calculate_file_hash(
         if bytes_read == 0 {
             break;
         }
-        hasher.update(&buffer[..bytes_read]);
+
+        // Use parallel hashing for large chunks (>= 1MB)
+        if bytes_read >= PARALLEL_HASH_THRESHOLD {
+            hasher.update_rayon(&buffer[..bytes_read]);
+        } else {
+            hasher.update(&buffer[..bytes_read]);
+        }
+
         bytes_hashed += bytes_read as u64;
         if let Some(progress) = pb {
             progress.set_position(bytes_hashed);
         }
     }
 
-    let hash_bytes: [u8; 32] = hasher.finalize().into();
-    Ok(Sha256Hash::from(hash_bytes))
+    Ok(Blake3Hash::from(hasher.finalize()))
 }
 
 /// Escape braces in a string for use in indicatif templates.
@@ -1074,7 +1256,7 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
 
 /// Verify destination matches the expected hash.
 ///
-/// This function performs SHA256 hash verification to ensure the copy was
+/// This function performs Blake3 hash verification to ensure the copy was
 /// successful. Returns `Ok(VerifyResult)` on success, or `Err(VerifyError)`
 /// if verification fails or is cancelled.
 ///
@@ -1083,10 +1265,11 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
 /// Supports dynamic resize through the terminal width watch channel.
 fn verify_destination(
     destination: &Path,
-    expected_hash: &Sha256Hash,
+    expected_hash: &Blake3Hash,
     multi: &MultiProgress,
     shutdown: &Arc<AtomicBool>,
     term_width_rx: &watch::Receiver<u16>,
+    buffer_size: usize,
 ) -> Result<VerifyResult, VerifyError> {
     let start_time = Instant::now();
 
@@ -1111,7 +1294,7 @@ fn verify_destination(
     );
 
     // Calculate destination hash with progress (supports cancellation and resize)
-    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown), Some(term_width_rx), Some(&filename))
+    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown), Some(term_width_rx), Some(&filename), buffer_size)
         .map_err(|e| {
             pb.finish_and_clear();
             let error_msg = e.to_string();
@@ -1221,6 +1404,95 @@ fn read_yes_no_with_ctrlc() -> bool {
     }
 }
 
+/// Attempt to preallocate space for the destination file.
+///
+/// This helps the filesystem allocate contiguous blocks, reducing fragmentation
+/// and potentially improving write performance. Errors are silently ignored
+/// since preallocation is an optimization, not a requirement.
+#[cfg(target_os = "linux")]
+fn try_preallocate(file: &File, size: u64) {
+    use std::os::unix::io::AsRawFd;
+    // posix_fallocate returns 0 on success, error code on failure
+    // We ignore the result since this is just an optimization
+    #[allow(clippy::cast_possible_wrap)] // size as libc::off_t is safe for typical file sizes
+    unsafe {
+        libc::posix_fallocate(file.as_raw_fd(), 0, size as libc::off_t);
+    }
+}
+
+/// Attempt to preallocate space on macOS using F_PREALLOCATE.
+#[cfg(target_os = "macos")]
+fn try_preallocate(file: &File, size: u64) {
+    use std::os::unix::io::AsRawFd;
+
+    // macOS uses fcntl with F_PREALLOCATE
+    #[repr(C)]
+    struct FStore {
+        fst_flags: libc::c_uint,
+        fst_posmode: libc::c_int,
+        fst_offset: libc::off_t,
+        fst_length: libc::off_t,
+        fst_bytesalloc: libc::off_t,
+    }
+
+    const F_ALLOCATECONTIG: libc::c_uint = 0x02; // Allocate contiguous space
+    const F_ALLOCATEALL: libc::c_uint = 0x04; // Allocate all requested space or none
+    const F_PEOFPOSMODE: libc::c_int = 3; // Position relative to physical end of file
+    const F_PREALLOCATE: libc::c_int = 42; // Preallocate storage
+
+    #[allow(clippy::cast_possible_wrap)]
+    let mut fstore = FStore {
+        fst_flags: F_ALLOCATECONTIG | F_ALLOCATEALL,
+        fst_posmode: F_PEOFPOSMODE,
+        fst_offset: 0,
+        fst_length: size as libc::off_t,
+        fst_bytesalloc: 0,
+    };
+
+    unsafe {
+        // Try contiguous allocation first, fall back to any allocation
+        if libc::fcntl(file.as_raw_fd(), F_PREALLOCATE, &mut fstore) == -1 {
+            // If contiguous allocation fails, try non-contiguous
+            fstore.fst_flags = F_ALLOCATEALL;
+            let _ = libc::fcntl(file.as_raw_fd(), F_PREALLOCATE, &mut fstore);
+        }
+    }
+}
+
+/// No-op on platforms without preallocation support.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn try_preallocate(_file: &File, _size: u64) {}
+
+/// Hint to the OS that we're doing sequential I/O.
+///
+/// This allows the kernel to optimize read-ahead and caching strategies
+/// for sequential access patterns. Errors are silently ignored since
+/// this is just a performance hint.
+#[cfg(target_os = "linux")]
+fn hint_sequential_io(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    // POSIX_FADV_SEQUENTIAL hints that file will be accessed sequentially
+    // We ignore the result since this is just a hint
+    unsafe {
+        libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
+    }
+}
+
+/// Hint for sequential I/O on macOS using F_RDAHEAD.
+#[cfg(target_os = "macos")]
+fn hint_sequential_io(file: &File) {
+    use std::os::unix::io::AsRawFd;
+    const F_RDAHEAD: libc::c_int = 45; // Turn read-ahead on/off
+    unsafe {
+        // Enable read-ahead (1 = on)
+        let _ = libc::fcntl(file.as_raw_fd(), F_RDAHEAD, 1);
+    }
+}
+
+/// No-op on platforms without sequential I/O hints.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn hint_sequential_io(_file: &File) {}
+
 #[allow(clippy::too_many_arguments)] // All parameters serve distinct purposes for progress/cancellation/resize
 async fn copy_with_progress(
     source: &Path,
@@ -1232,18 +1504,35 @@ async fn copy_with_progress(
     input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
     term_width_rx: &watch::Receiver<u16>,
+    buffer_size: usize,
 ) -> Result<CopyResult> {
     let start_time = Instant::now();
     let mut src_file = File::open(source).context("Failed to open source file")?;
+
+    // Get source file size for preallocation
+    let file_size = src_file
+        .metadata()
+        .context("Failed to get source file metadata")?
+        .len();
+
+    // Hint sequential read pattern for source file
+    hint_sequential_io(&src_file);
+
     let dst_file = File::create(destination).context("Failed to create destination file")?;
+
+    // Hint sequential write pattern for destination file
+    hint_sequential_io(&dst_file);
+
+    // Preallocate space to reduce fragmentation and improve write performance
+    try_preallocate(&dst_file, file_size);
 
     // Use RAII guard to ensure partial file cleanup on any error path
     // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
     let mut guard = PartialFileGuard::new(destination, dst_file);
 
-    let mut buffer = vec![0; BUFFER_SIZE];
+    let mut buffer = vec![0; buffer_size];
     let mut total_bytes = 0u64;
-    let mut hasher = Sha256::new();
+    let mut hasher = blake3::Hasher::new();
 
     // Track last terminal width for resize detection
     let mut last_width = *term_width_rx.borrow();
@@ -1317,8 +1606,12 @@ async fn copy_with_progress(
             Err(e) => return Err(e.into()),
         };
 
-        // Update hash with the data we just read
-        hasher.update(&buffer[..bytes_read]);
+        // Update hash with the data we just read (use parallel hashing for large chunks)
+        if bytes_read >= PARALLEL_HASH_THRESHOLD {
+            hasher.update_rayon(&buffer[..bytes_read]);
+        } else {
+            hasher.update(&buffer[..bytes_read]);
+        }
 
         // Write to destination
         guard
@@ -1350,8 +1643,7 @@ async fn copy_with_progress(
     drop(dst_file);
 
     // Finalize the hash
-    let hash_bytes: [u8; 32] = hasher.finalize().into();
-    let source_hash = Sha256Hash::from(hash_bytes);
+    let source_hash = Blake3Hash::from(hasher.finalize());
     let copy_duration = start_time.elapsed();
 
     Ok(CopyResult {
@@ -1458,6 +1750,79 @@ mod tests {
             // Test with u64::MAX bytes
             let result = format_speed(u64::MAX, Duration::from_secs(1));
             assert!(result.ends_with("/s"));
+        }
+    }
+
+    mod parse_buffer_size_tests {
+        use super::*;
+
+        #[test]
+        fn parse_bytes_no_suffix() {
+            assert_eq!(parse_buffer_size("65536").unwrap(), 65536);
+        }
+
+        #[test]
+        fn parse_kilobytes() {
+            assert_eq!(parse_buffer_size("4K").unwrap(), 4 * 1024);
+            assert_eq!(parse_buffer_size("4KB").unwrap(), 4 * 1024);
+            assert_eq!(parse_buffer_size("4k").unwrap(), 4 * 1024);
+        }
+
+        #[test]
+        fn parse_megabytes() {
+            assert_eq!(parse_buffer_size("16M").unwrap(), 16 * 1024 * 1024);
+            assert_eq!(parse_buffer_size("16MB").unwrap(), 16 * 1024 * 1024);
+            assert_eq!(parse_buffer_size("16m").unwrap(), 16 * 1024 * 1024);
+        }
+
+        #[test]
+        fn parse_gigabytes() {
+            assert_eq!(parse_buffer_size("1G").unwrap(), 1024 * 1024 * 1024);
+            assert_eq!(parse_buffer_size("1GB").unwrap(), 1024 * 1024 * 1024);
+        }
+
+        #[test]
+        fn parse_with_whitespace() {
+            assert_eq!(parse_buffer_size("  16M  ").unwrap(), 16 * 1024 * 1024);
+        }
+
+        #[test]
+        fn reject_below_minimum() {
+            let result = parse_buffer_size("1K");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("below minimum"));
+        }
+
+        #[test]
+        fn reject_above_maximum() {
+            let result = parse_buffer_size("2G");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("exceeds maximum"));
+        }
+
+        #[test]
+        fn reject_invalid_suffix() {
+            let result = parse_buffer_size("16X");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("Unknown suffix"));
+        }
+
+        #[test]
+        fn reject_invalid_number() {
+            let result = parse_buffer_size("abc");
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn accept_boundary_minimum() {
+            // Exactly 4KB should be accepted
+            assert_eq!(parse_buffer_size("4K").unwrap(), 4 * 1024);
+        }
+
+        #[test]
+        fn accept_boundary_maximum() {
+            // Exactly 1GB should be accepted
+            assert_eq!(parse_buffer_size("1G").unwrap(), 1024 * 1024 * 1024);
         }
     }
 }
