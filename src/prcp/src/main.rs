@@ -245,6 +245,12 @@ fn setup_shell_integration() -> Result<()> {
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
 
+/// Progress bar characters for smooth progress visualization.
+const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
+
+/// Shared format string for progress stats (bytes, percentage, speed, ETA).
+const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_per_sec}, {eta})";
+
 /// Resolve source patterns into a list of files
 ///
 /// Handles both literal file paths and glob patterns (*, ?, []).
@@ -419,7 +425,7 @@ async fn main() -> Result<()> {
         pb.set_style(
             ProgressStyle::default_bar()
                 .template(&format!("{{prefix:.bold}} [{{bar:{}.green/dim}}] {{pos}}/{{len}}", bar_width))?
-                .progress_chars("█▉▊▋▌▍▎▏  "),
+                .progress_chars(PROGRESS_CHARS),
         );
         pb.set_prefix("Files");
         Some(pb)
@@ -550,10 +556,10 @@ async fn main() -> Result<()> {
         file_pb.set_style(
             ProgressStyle::default_bar()
                 .template(&format!(
-                    "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})",
-                    safe_filename, bar_width
+                    "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {}",
+                    safe_filename, bar_width, PROGRESS_STATS_FORMAT
                 ))?
-                .progress_chars("█▉▊▋▌▍▎▏  "),
+                .progress_chars(PROGRESS_CHARS),
         );
 
         // Perform the copy
@@ -1006,11 +1012,11 @@ fn verify_destination(
     pb.set_style(
         ProgressStyle::default_bar()
             .template(&format!(
-                "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}}) verifying",
-                safe_filename, bar_width
+                "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {} verifying",
+                safe_filename, bar_width, PROGRESS_STATS_FORMAT
             ))
             .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
-            .progress_chars("█▉▊▋▌▍▎▏  "),
+            .progress_chars(PROGRESS_CHARS),
     );
 
     // Calculate destination hash with progress (supports cancellation)
