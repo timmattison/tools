@@ -574,15 +574,18 @@ fn try_create_worktree(
     if status.success() {
         WorktreeResult::Success
     } else {
-        // Check for path/directory collision (TOCTOU race condition)
-        // Git says "'{path}' already exists" when the directory exists
-        if stderr.contains("already exists") && !stderr.contains("branch") {
-            return WorktreeResult::PathCollision;
+        // Check for branch already exists first using git's specific error format.
+        // Git says: "fatal: A branch named '<branch>' already exists."
+        // We check for "A branch named" specifically to avoid false positives when
+        // the path contains the word "branch" (e.g., "/path/to/branch-test/").
+        if stderr.contains("A branch named") {
+            return WorktreeResult::BranchExists(branch_name.to_string());
         }
 
-        // Check for branch already exists
-        if stderr.contains("already exists") && stderr.contains("branch") {
-            return WorktreeResult::BranchExists(branch_name.to_string());
+        // Check for path/directory collision (TOCTOU race condition)
+        // Git says: "fatal: '<path>' already exists"
+        if stderr.contains("already exists") {
+            return WorktreeResult::PathCollision;
         }
 
         // Check for ref already checked out
