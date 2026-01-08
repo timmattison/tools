@@ -663,6 +663,8 @@ async fn copy_with_progress(
     loop {
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
+            // Clean up partial destination file
+            let _ = fs::remove_file(destination);
             return Err(anyhow::anyhow!("Copy cancelled by user"));
         }
 
@@ -680,6 +682,8 @@ async fn copy_with_progress(
         while paused.load(Ordering::SeqCst) {
             // Check for shutdown while paused
             if shutdown.load(Ordering::SeqCst) {
+                // Clean up partial destination file
+                let _ = fs::remove_file(destination);
                 return Err(anyhow::anyhow!("Copy cancelled by user"));
             }
 
