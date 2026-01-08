@@ -715,11 +715,16 @@ async fn main() -> Result<()> {
                                 // Pause key listener while prompting
                                 input_active.store(true, Ordering::SeqCst);
 
+                                // Disable raw mode to print prompt cleanly
+                                let _ = crossterm::terminal::disable_raw_mode();
                                 eprint!(
                                     "\nVerification cancelled. Delete destination file '{}'? (y/N): ",
                                     dest_path.display()
                                 );
                                 io::stderr().flush()?;
+
+                                // Re-enable raw mode to capture Ctrl+C as key event
+                                let _ = crossterm::terminal::enable_raw_mode();
 
                                 // Use crossterm events to capture Ctrl+C as "yes"
                                 let confirmed = read_yes_no_with_ctrlc();
@@ -1337,6 +1342,35 @@ fn remove_source(source: &Path) -> Result<(), String> {
         .map_err(|e| format!("Failed to remove source '{}': {}", source.display(), e))
 }
 
+/// Prompt user to confirm copy cancellation.
+///
+/// Returns true if user confirms cancellation, false to continue.
+/// Uses crossterm event reading to capture Ctrl+C as a key event (not SIGINT).
+/// Pressing Ctrl+C at this prompt is treated as confirmation to cancel.
+fn prompt_cancel_copy(filename: &str, input_active: &Arc<AtomicBool>) -> bool {
+    // Pause key listener while we handle input ourselves
+    input_active.store(true, Ordering::SeqCst);
+
+    // Disable raw mode temporarily to print prompt with proper line handling
+    let _ = crossterm::terminal::disable_raw_mode();
+    eprint!(
+        "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
+        filename
+    );
+    let _ = io::stderr().flush();
+
+    // Re-enable raw mode to capture Ctrl+C as key event (not SIGINT)
+    let _ = crossterm::terminal::enable_raw_mode();
+
+    // Read user response using crossterm events
+    let confirmed = read_yes_no_with_ctrlc();
+
+    // Resume key listener
+    input_active.store(false, Ordering::SeqCst);
+
+    confirmed
+}
+
 /// Message sent from reader thread to writer thread (used in parallel copy mode)
 enum CopyMessage {
     /// Data chunk to write (buffer, bytes_read).
@@ -1408,27 +1442,10 @@ async fn copy_sequential(
     loop {
         // Check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
-            // Pause key listener while prompting
-            input_active.store(true, Ordering::SeqCst);
-
-            // Clear progress bar line and prompt user
             pb.set_message("");
-            eprint!(
-                "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
-                filename
-            );
-            let _ = io::stderr().flush();
-
-            // Use crossterm events to capture Ctrl+C as "yes"
-            let confirmed = read_yes_no_with_ctrlc();
-
-            // Resume key listener
-            input_active.store(false, Ordering::SeqCst);
-
-            if confirmed {
+            if prompt_cancel_copy(filename, &input_active) {
                 return Err(anyhow::anyhow!("Copy cancelled by user"));
             }
-
             // User declined cancellation - reset shutdown flag and continue
             shutdown.store(false, Ordering::SeqCst);
         }
@@ -1447,26 +1464,10 @@ async fn copy_sequential(
         while paused.load(Ordering::SeqCst) {
             // Check for shutdown while paused - prompt user for confirmation
             if shutdown.load(Ordering::SeqCst) {
-                // Pause key listener while prompting
-                input_active.store(true, Ordering::SeqCst);
-
                 pb.set_message("");
-                eprint!(
-                    "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
-                    filename
-                );
-                let _ = io::stderr().flush();
-
-                // Use crossterm events to capture Ctrl+C as "yes"
-                let confirmed = read_yes_no_with_ctrlc();
-
-                // Resume key listener
-                input_active.store(false, Ordering::SeqCst);
-
-                if confirmed {
+                if prompt_cancel_copy(filename, &input_active) {
                     return Err(anyhow::anyhow!("Copy cancelled by user"));
                 }
-
                 // User declined cancellation - reset shutdown flag and continue
                 shutdown.store(false, Ordering::SeqCst);
             }
@@ -1644,29 +1645,12 @@ async fn copy_parallel(
 
         // Non-blocking check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
-            // Pause key listener while prompting
-            input_active.store(true, Ordering::SeqCst);
-
-            // Clear progress bar line and prompt user
             pb.set_message("");
-            eprint!(
-                "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
-                filename
-            );
-            let _ = io::stderr().flush();
-
-            // Use crossterm events to capture Ctrl+C as "yes"
-            let confirmed = read_yes_no_with_ctrlc();
-
-            // Resume key listener
-            input_active.store(false, Ordering::SeqCst);
-
-            if confirmed {
+            if prompt_cancel_copy(filename, &input_active) {
                 // Wait for reader to notice and exit
                 let _ = reader_handle.join();
                 return Err(anyhow::anyhow!("Copy cancelled by user"));
             }
-
             // User declined cancellation - reset shutdown flag and continue
             shutdown.store(false, Ordering::SeqCst);
         }
@@ -1674,27 +1658,11 @@ async fn copy_parallel(
         // Wait while paused (but keep checking for shutdown/unpause)
         while paused.load(Ordering::SeqCst) {
             if shutdown.load(Ordering::SeqCst) {
-                // Pause key listener while prompting
-                input_active.store(true, Ordering::SeqCst);
-
                 pb.set_message("");
-                eprint!(
-                    "\nCancel copy of '{}'? Partial file will be deleted. (y/N): ",
-                    filename
-                );
-                let _ = io::stderr().flush();
-
-                // Use crossterm events to capture Ctrl+C as "yes"
-                let confirmed = read_yes_no_with_ctrlc();
-
-                // Resume key listener
-                input_active.store(false, Ordering::SeqCst);
-
-                if confirmed {
+                if prompt_cancel_copy(filename, &input_active) {
                     let _ = reader_handle.join();
                     return Err(anyhow::anyhow!("Copy cancelled by user"));
                 }
-
                 // User declined cancellation - reset shutdown flag and continue
                 shutdown.store(false, Ordering::SeqCst);
             }
