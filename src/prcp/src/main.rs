@@ -3,6 +3,9 @@
 #![warn(clippy::expect_used)] // Prefer explicit error handling
 #![warn(clippy::panic)] // Avoid panics in library code
 #![deny(clippy::unimplemented)] // Don't leave unimplemented!() in code
+#![warn(clippy::cast_possible_truncation)] // Warn on lossy casts (e.g., f64 to u64)
+#![warn(clippy::cast_sign_loss)] // Warn when casting signed to unsigned
+#![warn(clippy::cast_precision_loss)] // Warn when casting to float loses precision
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -629,36 +632,45 @@ async fn main() -> Result<()> {
     let _ = key_task.await;
 
     // Print summary for multiple files
-    if total_files > 1 && successful_copies > 0 {
-        let copy_speed = format_speed(total_bytes_copied, total_copy_duration);
-        let copy_time = format_duration(total_copy_duration);
+    if total_files > 1 {
+        if successful_copies > 0 {
+            let copy_speed = format_speed(total_bytes_copied, total_copy_duration);
+            let copy_time = format_duration(total_copy_duration);
 
-        if !args.no_verify && total_verify_duration > Duration::ZERO {
-            let verify_speed = format_speed(total_bytes_copied, total_verify_duration);
-            let verify_time = format_duration(total_verify_duration);
-            println!(
-                "\n{} Copied {} of {} files ({}, copy: {} @ {}, verify: {} @ {})",
-                "Summary:".bold(),
-                successful_copies,
-                total_files,
-                HumanBytes(total_bytes_copied),
-                copy_time,
-                copy_speed,
-                verify_time,
-                verify_speed
-            );
-            if args.rm {
-                println!("Source files removed after verification.");
+            if !args.no_verify && total_verify_duration > Duration::ZERO {
+                let verify_speed = format_speed(total_bytes_copied, total_verify_duration);
+                let verify_time = format_duration(total_verify_duration);
+                println!(
+                    "\n{} Copied {} of {} files ({}, copy: {} @ {}, verify: {} @ {})",
+                    "Summary:".bold(),
+                    successful_copies,
+                    total_files,
+                    HumanBytes(total_bytes_copied),
+                    copy_time,
+                    copy_speed,
+                    verify_time,
+                    verify_speed
+                );
+                if args.rm {
+                    println!("Source files removed after verification.");
+                }
+            } else {
+                println!(
+                    "\n{} Copied {} of {} files ({}, {} @ {})",
+                    "Summary:".bold(),
+                    successful_copies,
+                    total_files,
+                    HumanBytes(total_bytes_copied),
+                    copy_time,
+                    copy_speed
+                );
             }
         } else {
+            // All copies failed - show summary without timing stats
             println!(
-                "\n{} Copied {} of {} files ({}, {} @ {})",
+                "\n{} Copied 0 of {} files",
                 "Summary:".bold(),
-                successful_copies,
-                total_files,
-                HumanBytes(total_bytes_copied),
-                copy_time,
-                copy_speed
+                total_files
             );
         }
     }
@@ -730,14 +742,28 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-/// Calculate and format transfer speed as bytes per second
+/// Calculate and format transfer speed as bytes per second.
+///
+/// Handles edge cases including zero duration and potential overflow
+/// when converting from f64 to u64.
+#[allow(clippy::cast_precision_loss)] // Precision loss is acceptable for human-readable display
 fn format_speed(bytes: u64, duration: Duration) -> String {
     let secs = duration.as_secs_f64();
     if secs == 0.0 {
         return "instant".to_string();
     }
     let bytes_per_sec = bytes as f64 / secs;
-    format!("{}/s", HumanBytes(bytes_per_sec as u64))
+    // Clamp to u64::MAX to prevent overflow when casting from f64.
+    // We also handle negative values (which shouldn't occur) by treating them as 0.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bytes_per_sec_u64 = if bytes_per_sec <= 0.0 {
+        0
+    } else if bytes_per_sec >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        bytes_per_sec as u64
+    };
+    format!("{}/s", HumanBytes(bytes_per_sec_u64))
 }
 
 /// Verify destination matches the expected hash.
