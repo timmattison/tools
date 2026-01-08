@@ -79,6 +79,10 @@ struct Args {
     #[arg(long, short = 'r')]
     rm: bool,
 
+    /// Skip SHA256 verification after copy (not allowed with --rm)
+    #[arg(long)]
+    no_verify: bool,
+
     /// Continue copying remaining files if one fails
     #[arg(long)]
     continue_on_error: bool,
@@ -258,6 +262,11 @@ async fn main() -> Result<()> {
     // Handle shell setup (doesn't require sources/destination)
     if args.shell_setup {
         return setup_shell_integration();
+    }
+
+    // Validate flag combinations
+    if args.rm && args.no_verify {
+        anyhow::bail!("Cannot use --rm with --no-verify: verification is required to safely remove source files.");
     }
 
     // Parse paths: all but last are sources, last is destination
@@ -501,14 +510,14 @@ async fn main() -> Result<()> {
                 let copy_speed = format_speed(copy_result.bytes_copied, copy_result.copy_duration);
                 let copy_time = format_duration(copy_result.copy_duration);
 
-                // Handle --rm flag: verify copy and remove source
-                let verify_stats = if args.rm {
-                    match verify_and_remove_source(source, &dest_path, &copy_result.source_hash, &multi) {
+                // Verify by default (unless --no-verify)
+                let (verify_stats, verification_passed) = if !args.no_verify {
+                    match verify_destination(&dest_path, &copy_result.source_hash, &multi) {
                         Ok(verify_result) => {
                             total_verify_duration += verify_result.verify_duration;
                             let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
                             let verify_time = format_duration(verify_result.verify_duration);
-                            Some((verify_speed, verify_time))
+                            (Some((verify_speed, verify_time)), true)
                         }
                         Err(error_msg) => {
                             eprintln!("\n{}", error_msg);
@@ -517,11 +526,30 @@ async fn main() -> Result<()> {
                             } else {
                                 anyhow::bail!("{}", error_msg);
                             }
-                            None
+                            (None, false)
                         }
                     }
                 } else {
-                    None
+                    (None, true) // No verification requested, consider it "passed" for removal
+                };
+
+                // Remove source if --rm and verification passed
+                let removed = if args.rm && verification_passed {
+                    match fs::remove_file(source) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            let error_msg = format!("Failed to remove source '{}': {}", source.display(), e);
+                            eprintln!("\n{}", error_msg);
+                            if args.continue_on_error {
+                                failures.push((source.clone(), error_msg));
+                            } else {
+                                anyhow::bail!("{}", error_msg);
+                            }
+                            false
+                        }
+                    }
+                } else {
+                    false
                 };
 
                 // Print per-file stats
@@ -530,10 +558,18 @@ async fn main() -> Result<()> {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| source.display().to_string());
 
+                let status = if !verification_passed {
+                    "fail".red()
+                } else if args.rm && !removed {
+                    "partial".yellow()
+                } else {
+                    "ok".green()
+                };
+
                 if let Some((verify_speed, verify_time)) = verify_stats {
                     println!(
                         "{} {} -> '{}' ({}, copy: {} @ {}, verify: {} @ {})",
-                        "ok".green(),
+                        status,
                         filename,
                         dest_path.display(),
                         HumanBytes(copy_result.bytes_copied),
@@ -542,21 +578,11 @@ async fn main() -> Result<()> {
                         verify_time,
                         verify_speed
                     );
-                } else if args.rm {
-                    // --rm was used but verification failed (error already printed)
-                    println!(
-                        "{} {} -> '{}' ({}, copy: {} @ {})",
-                        "partial".yellow(),
-                        filename,
-                        dest_path.display(),
-                        HumanBytes(copy_result.bytes_copied),
-                        copy_time,
-                        copy_speed
-                    );
                 } else {
+                    // --no-verify was used
                     println!(
                         "{} {} -> '{}' ({}, {} @ {})",
-                        "ok".green(),
+                        status,
                         filename,
                         dest_path.display(),
                         HumanBytes(copy_result.bytes_copied),
@@ -607,7 +633,7 @@ async fn main() -> Result<()> {
         let copy_speed = format_speed(total_bytes_copied, total_copy_duration);
         let copy_time = format_duration(total_copy_duration);
 
-        if args.rm && total_verify_duration > Duration::ZERO {
+        if !args.no_verify && total_verify_duration > Duration::ZERO {
             let verify_speed = format_speed(total_bytes_copied, total_verify_duration);
             let verify_time = format_duration(total_verify_duration);
             println!(
@@ -621,7 +647,9 @@ async fn main() -> Result<()> {
                 verify_time,
                 verify_speed
             );
-            println!("Source files removed after verification.");
+            if args.rm {
+                println!("Source files removed after verification.");
+            }
         } else {
             println!(
                 "\n{} Copied {} of {} files ({}, {} @ {})",
@@ -712,15 +740,14 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
     format!("{}/s", HumanBytes(bytes_per_sec as u64))
 }
 
-/// Verify destination matches source and remove the source file.
+/// Verify destination matches the expected hash.
 ///
 /// This function performs SHA256 hash verification to ensure the copy was
-/// successful before removing the source. Returns `Ok(VerifyResult)` on success,
-/// or `Err(error_message)` if verification or removal fails.
+/// successful. Returns `Ok(VerifyResult)` on success, or `Err(error_message)`
+/// if verification fails.
 ///
 /// Shows a progress bar for the hash verification process.
-fn verify_and_remove_source(
-    source: &Path,
+fn verify_destination(
     destination: &Path,
     expected_hash: &[u8; 32],
     multi: &MultiProgress,
@@ -729,7 +756,7 @@ fn verify_and_remove_source(
 
     // Get file size for progress bar
     let file_size = fs::metadata(destination)
-        .map_err(|e| format!("Failed to get destination metadata: {}. Source NOT removed.", e))?
+        .map_err(|e| format!("Failed to get destination metadata: {}", e))?
         .len();
 
     // Create progress bar for hash verification
@@ -754,7 +781,7 @@ fn verify_and_remove_source(
     let dest_hash = calculate_file_hash(destination, Some(&pb))
         .map_err(|e| {
             pb.finish_and_clear();
-            format!("Failed to verify destination: {}. Source NOT removed.", e)
+            format!("Failed to verify destination: {}", e)
         })?;
 
     pb.finish_and_clear();
@@ -763,15 +790,11 @@ fn verify_and_remove_source(
     // Verify hashes match
     if expected_hash != &dest_hash {
         return Err(format!(
-            "Hash mismatch! Source NOT removed.\n  Source: {}\n  Dest:   {}",
+            "Hash mismatch!\n  Expected: {}\n  Got:      {}",
             hex_encode(expected_hash),
             hex_encode(&dest_hash)
         ));
     }
-
-    // Safe to remove source
-    fs::remove_file(source)
-        .map_err(|e| format!("Failed to remove source '{}': {}", source.display(), e))?;
 
     let verify_duration = start_time.elapsed();
     Ok(VerifyResult { verify_duration })
