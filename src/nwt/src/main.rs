@@ -1,7 +1,9 @@
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, ExitStatus, Stdio};
+use std::thread;
 
 use clap::Parser;
 use names::Generator;
@@ -504,54 +506,97 @@ enum WorktreeResult {
 /// Attempts to create a git worktree at the given path.
 ///
 /// Returns a `WorktreeResult` indicating success or the type of failure.
+///
+/// This function displays git's progress output (e.g., "Updating files: X%") in real-time
+/// while also capturing stderr for error classification. This is done by spawning a thread
+/// that reads stderr and both echoes it to the terminal and captures it for later analysis.
 fn try_create_worktree(
     repo_root: &std::path::Path,
     worktree_path: &str,
     branch_name: &str,
     checkout_ref: Option<&str>,
 ) -> WorktreeResult {
-    let output = if let Some(ref_name) = checkout_ref {
-        Command::new("git")
-            .args(["worktree", "add", worktree_path, ref_name])
-            .current_dir(repo_root)
-            .output()
+    let mut cmd = Command::new("git");
+    if let Some(ref_name) = checkout_ref {
+        cmd.args(["worktree", "add", worktree_path, ref_name]);
     } else {
-        Command::new("git")
-            .args(["worktree", "add", worktree_path, "-b", branch_name])
-            .current_dir(repo_root)
-            .output()
+        cmd.args(["worktree", "add", worktree_path, "-b", branch_name]);
+    }
+
+    // Spawn the process with piped stderr so we can both display progress and capture errors.
+    // stdin is explicitly closed to prevent hangs if git ever prompts for input.
+    let child = cmd
+        .current_dir(repo_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let mut child = match child {
+        Ok(c) => c,
+        Err(e) => return WorktreeResult::CommandError(e),
     };
 
-    match output {
-        Ok(result) => {
-            if result.status.success() {
-                WorktreeResult::Success
-            } else {
-                let stderr = String::from_utf8_lossy(&result.stderr);
+    // Take ownership of stderr and spawn a thread to read/display/capture it
+    let stderr = child.stderr.take().expect("stderr was piped");
+    let stderr_thread = thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut captured = Vec::new();
+        let mut buf = [0u8; 1024];
 
-                // Check for path/directory collision (TOCTOU race condition)
-                // Git says "'{path}' already exists" when the directory exists
-                if stderr.contains("already exists") && !stderr.contains("branch") {
-                    return WorktreeResult::PathCollision;
+        loop {
+            match stderr.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    // Echo to terminal so user sees progress
+                    eprint!("{}", String::from_utf8_lossy(&buf[..n]));
+                    // Capture for error analysis
+                    captured.extend_from_slice(&buf[..n]);
                 }
-
-                // Check for branch already exists
-                if stderr.contains("already exists") && stderr.contains("branch") {
-                    return WorktreeResult::BranchExists(branch_name.to_string());
-                }
-
-                // Check for ref already checked out
-                if stderr.contains("is already used by worktree")
-                    || stderr.contains("is already checked out")
-                {
-                    let ref_name = checkout_ref.unwrap_or(branch_name);
-                    return WorktreeResult::RefInUse(ref_name.to_string());
-                }
-
-                WorktreeResult::GitError(stderr.to_string())
+                Err(_) => break,
             }
         }
-        Err(e) => WorktreeResult::CommandError(e),
+
+        String::from_utf8_lossy(&captured).into_owned()
+    });
+
+    // Wait for the process to complete
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(e) => return WorktreeResult::CommandError(e),
+    };
+
+    // Get the captured stderr. If the thread panicked, we still want meaningful error handling.
+    let stderr = stderr_thread
+        .join()
+        .unwrap_or_else(|_| "Error: Failed to capture stderr output from git command".to_string());
+
+    if status.success() {
+        WorktreeResult::Success
+    } else {
+        // Check for branch already exists first using git's specific error format.
+        // Git says: "fatal: A branch named '<branch>' already exists."
+        // We check for "A branch named" specifically to avoid false positives when
+        // the path contains the word "branch" (e.g., "/path/to/branch-test/").
+        if stderr.contains("A branch named") {
+            return WorktreeResult::BranchExists(branch_name.to_string());
+        }
+
+        // Check for path/directory collision (TOCTOU race condition)
+        // Git says: "fatal: '<path>' already exists"
+        if stderr.contains("already exists") {
+            return WorktreeResult::PathCollision;
+        }
+
+        // Check for ref already checked out
+        if stderr.contains("is already used by worktree")
+            || stderr.contains("is already checked out")
+        {
+            let ref_name = checkout_ref.unwrap_or(branch_name);
+            return WorktreeResult::RefInUse(ref_name.to_string());
+        }
+
+        WorktreeResult::GitError(stderr)
     }
 }
 
