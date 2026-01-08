@@ -980,10 +980,6 @@ enum VerifyOutcome {
     Failed,
 }
 
-/// Threshold for using parallel Blake3 hashing (1MB).
-/// Chunks larger than this use `update_rayon()` for SIMD-parallel hashing.
-const PARALLEL_HASH_THRESHOLD: usize = 1024 * 1024;
-
 /// Chunk size for mmap-based verification (64MB).
 /// Larger chunks improve performance but use more memory for progress updates.
 const MMAP_CHUNK_SIZE: usize = 64 * 1024 * 1024;
@@ -1044,12 +1040,7 @@ fn calculate_file_hash_mmap(
             }
         }
 
-        // Use parallel hashing for large chunks
-        if chunk.len() >= PARALLEL_HASH_THRESHOLD {
-            hasher.update_rayon(chunk);
-        } else {
-            hasher.update(chunk);
-        }
+        hasher.update(chunk);
 
         bytes_hashed += chunk.len();
         if let Some(progress) = pb {
@@ -1133,12 +1124,7 @@ fn calculate_file_hash(
             break;
         }
 
-        // Use parallel hashing for large chunks (>= 1MB)
-        if bytes_read >= PARALLEL_HASH_THRESHOLD {
-            hasher.update_rayon(&buffer[..bytes_read]);
-        } else {
-            hasher.update(&buffer[..bytes_read]);
-        }
+        hasher.update(&buffer[..bytes_read]);
 
         bytes_hashed += bytes_read as u64;
         if let Some(progress) = pb {
@@ -1606,12 +1592,8 @@ async fn copy_with_progress(
             Err(e) => return Err(e.into()),
         };
 
-        // Update hash with the data we just read (use parallel hashing for large chunks)
-        if bytes_read >= PARALLEL_HASH_THRESHOLD {
-            hasher.update_rayon(&buffer[..bytes_read]);
-        } else {
-            hasher.update(&buffer[..bytes_read]);
-        }
+        // Update hash with the data we just read
+        hasher.update(&buffer[..bytes_read]);
 
         // Write to destination
         guard
