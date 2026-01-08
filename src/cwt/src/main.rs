@@ -63,7 +63,7 @@ macro_rules! error {
 /// }
 ///
 /// alias wtf='wt -f'  # Next worktree
-/// alias wtp='wt -p'  # Previous worktree
+/// alias wtb='wt -p'  # Previous worktree (back)
 /// ```
 ///
 /// # Exit Codes
@@ -298,7 +298,7 @@ function wt() {
 
 # Quick navigation aliases (reuse wt function for proper error handling)
 alias wtf='wt -f'  # Next worktree
-alias wtp='wt -p'  # Previous worktree
+alias wtb='wt -p'  # Previous worktree (back)
 "#;
 
 /// Marker to detect if shell integration is already installed.
@@ -378,7 +378,7 @@ fn setup_shell_integration() -> Result<(), String> {
     println!("Available commands:");
     println!("  {}      - List worktrees or change to one", "wt".yellow());
     println!("  {} - Next worktree", "wtf".yellow());
-    println!("  {} - Previous worktree", "wtp".yellow());
+    println!("  {} - Previous worktree (back)", "wtb".yellow());
 
     Ok(())
 }
