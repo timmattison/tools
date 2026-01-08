@@ -383,11 +383,15 @@ async fn main() -> Result<()> {
     // Set up key listener done flag (only set when operation is truly complete)
     let key_listener_done = Arc::new(AtomicBool::new(false));
 
+    // Set up input active flag (pauses key listener while prompting user)
+    let input_active = Arc::new(AtomicBool::new(false));
+
     // Set up pause/resume handling
     let paused = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown_key_listener = shutdown.clone();
     let done_key_listener = key_listener_done.clone();
+    let input_active_key_listener = input_active.clone();
 
     // Spawn key listener task
     let key_task = task::spawn(async move {
@@ -395,6 +399,13 @@ async fn main() -> Result<()> {
             // Only exit when operation is truly complete (not just when user pressed Ctrl+C)
             if done_key_listener.load(Ordering::SeqCst) {
                 break;
+            }
+
+            // Skip event reading while user is being prompted for input
+            // This prevents the key listener from consuming keystrokes meant for stdin
+            if input_active_key_listener.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
             }
 
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
@@ -486,6 +497,9 @@ async fn main() -> Result<()> {
             let should_overwrite = if args.yes {
                 true
             } else {
+                // Pause key listener while prompting
+                input_active.store(true, Ordering::SeqCst);
+
                 eprint!(
                     "\nDestination '{}' already exists. Overwrite? (y/N): ",
                     dest_path.display()
@@ -498,8 +512,9 @@ async fn main() -> Result<()> {
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
 
-                // Re-enable raw mode
+                // Re-enable raw mode and resume key listener
                 raw_mode_guard.restore();
+                input_active.store(false, Ordering::SeqCst);
 
                 input.trim().eq_ignore_ascii_case("y")
             };
@@ -574,6 +589,7 @@ async fn main() -> Result<()> {
             &file_pb,
             paused.clone(),
             shutdown.clone(),
+            input_active.clone(),
             &mut rx,
         )
         .await;
@@ -607,6 +623,9 @@ async fn main() -> Result<()> {
                             }
                             Err(VerifyError::Cancelled) => {
                                 // User pressed Ctrl+C during verification - prompt for confirmation
+                                // Pause key listener while prompting
+                                input_active.store(true, Ordering::SeqCst);
+
                                 eprint!(
                                     "\nVerification cancelled. Delete destination file '{}'? (y/N): ",
                                     dest_path.display()
@@ -619,8 +638,9 @@ async fn main() -> Result<()> {
                                 let mut input = String::new();
                                 io::stdin().read_line(&mut input)?;
 
-                                // Re-enable raw mode
+                                // Re-enable raw mode and resume key listener
                                 raw_mode_guard.restore();
+                                input_active.store(false, Ordering::SeqCst);
 
                                 // Reset shutdown flag to allow continuing
                                 shutdown.store(false, Ordering::SeqCst);
@@ -1055,9 +1075,10 @@ fn verify_destination(
 /// Prompt user to confirm copy cancellation.
 ///
 /// Returns true if user confirms cancellation, false to continue.
-/// Temporarily disables raw mode for user input.
-fn prompt_cancel_copy(destination: &Path) -> bool {
-    // Disable raw mode for user input
+/// Temporarily disables raw mode and pauses key listener for user input.
+fn prompt_cancel_copy(destination: &Path, input_active: &Arc<AtomicBool>) -> bool {
+    // Pause key listener and disable raw mode for user input
+    input_active.store(true, Ordering::SeqCst);
     let _ = crossterm::terminal::disable_raw_mode();
 
     eprint!(
@@ -1070,8 +1091,9 @@ fn prompt_cancel_copy(destination: &Path) -> bool {
     let confirmed = io::stdin().read_line(&mut input).is_ok()
         && input.trim().eq_ignore_ascii_case("y");
 
-    // Re-enable raw mode
+    // Re-enable raw mode and resume key listener
     let _ = crossterm::terminal::enable_raw_mode();
+    input_active.store(false, Ordering::SeqCst);
 
     confirmed
 }
@@ -1082,6 +1104,7 @@ async fn copy_with_progress(
     pb: &ProgressBar,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<CopyResult> {
     let start_time = Instant::now();
@@ -1099,7 +1122,7 @@ async fn copy_with_progress(
     loop {
         // Check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
-            if prompt_cancel_copy(destination) {
+            if prompt_cancel_copy(destination, &input_active) {
                 return Err(anyhow::anyhow!(
                     "Copy cancelled by user (partial destination file deleted)"
                 ));
@@ -1122,7 +1145,7 @@ async fn copy_with_progress(
         while paused.load(Ordering::SeqCst) {
             // Check for shutdown while paused - prompt user for confirmation
             if shutdown.load(Ordering::SeqCst) {
-                if prompt_cancel_copy(destination) {
+                if prompt_cancel_copy(destination, &input_active) {
                     return Err(anyhow::anyhow!(
                         "Copy cancelled by user (partial destination file deleted)"
                     ));
