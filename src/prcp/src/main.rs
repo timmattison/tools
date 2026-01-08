@@ -1047,6 +1047,30 @@ fn verify_destination(
     Ok(VerifyResult { verify_duration })
 }
 
+/// Prompt user to confirm copy cancellation.
+///
+/// Returns true if user confirms cancellation, false to continue.
+/// Temporarily disables raw mode for user input.
+fn prompt_cancel_copy(destination: &Path) -> bool {
+    // Disable raw mode for user input
+    let _ = crossterm::terminal::disable_raw_mode();
+
+    eprint!(
+        "\nCancel copy? Partial file '{}' will be deleted. (y/N): ",
+        destination.display()
+    );
+    let _ = io::stderr().flush();
+
+    let mut input = String::new();
+    let confirmed = io::stdin().read_line(&mut input).is_ok()
+        && input.trim().eq_ignore_ascii_case("y");
+
+    // Re-enable raw mode
+    let _ = crossterm::terminal::enable_raw_mode();
+
+    confirmed
+}
+
 async fn copy_with_progress(
     source: &Path,
     destination: &Path,
@@ -1068,9 +1092,15 @@ async fn copy_with_progress(
     let mut hasher = Sha256::new();
 
     loop {
-        // Check for shutdown - guard will clean up partial file automatically
+        // Check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
-            return Err(anyhow::anyhow!("Copy cancelled by user"));
+            if prompt_cancel_copy(destination) {
+                return Err(anyhow::anyhow!(
+                    "Copy cancelled by user (partial destination file deleted)"
+                ));
+            }
+            // User declined cancellation - reset flag and continue
+            shutdown.store(false, Ordering::SeqCst);
         }
 
         // Check for pause toggle
@@ -1085,9 +1115,15 @@ async fn copy_with_progress(
 
         // Wait while paused
         while paused.load(Ordering::SeqCst) {
-            // Check for shutdown while paused - guard will clean up partial file automatically
+            // Check for shutdown while paused - prompt user for confirmation
             if shutdown.load(Ordering::SeqCst) {
-                return Err(anyhow::anyhow!("Copy cancelled by user"));
+                if prompt_cancel_copy(destination) {
+                    return Err(anyhow::anyhow!(
+                        "Copy cancelled by user (partial destination file deleted)"
+                    ));
+                }
+                // User declined cancellation - reset flag and continue
+                shutdown.store(false, Ordering::SeqCst);
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
