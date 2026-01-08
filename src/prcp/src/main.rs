@@ -514,13 +514,16 @@ async fn main() -> Result<()> {
                 let copy_time = format_duration(copy_result.copy_duration);
 
                 // Verify by default (unless --no-verify)
-                let (verify_stats, verification_passed) = if !args.no_verify {
+                let verify_outcome = if !args.no_verify {
                     match verify_destination(&dest_path, &copy_result.source_hash, &multi) {
                         Ok(verify_result) => {
                             total_verify_duration += verify_result.verify_duration;
                             let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
                             let verify_time = format_duration(verify_result.verify_duration);
-                            (Some((verify_speed, verify_time)), true)
+                            VerifyOutcome::Passed {
+                                speed: verify_speed,
+                                time: verify_time,
+                            }
                         }
                         Err(error_msg) => {
                             eprintln!("\n{}", error_msg);
@@ -529,15 +532,16 @@ async fn main() -> Result<()> {
                             } else {
                                 anyhow::bail!("{}", error_msg);
                             }
-                            (None, false)
+                            VerifyOutcome::Failed
                         }
                     }
                 } else {
-                    (None, true) // No verification requested, consider it "passed" for removal
+                    VerifyOutcome::Skipped
                 };
 
-                // Remove source if --rm and verification passed
-                let removed = if args.rm && verification_passed {
+                // Remove source if --rm and verification passed (or was skipped, which is blocked by flag validation)
+                let should_allow_removal = matches!(verify_outcome, VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped);
+                let removed = if args.rm && should_allow_removal {
                     match fs::remove_file(source) {
                         Ok(()) => true,
                         Err(e) => {
@@ -561,37 +565,40 @@ async fn main() -> Result<()> {
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| source.display().to_string());
 
-                let status = if !verification_passed {
-                    "fail".red()
-                } else if args.rm && !removed {
-                    "partial".yellow()
-                } else {
-                    "ok".green()
+                let status = match &verify_outcome {
+                    VerifyOutcome::Failed => "fail".red(),
+                    VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped if args.rm && !removed => {
+                        "partial".yellow()
+                    }
+                    _ => "ok".green(),
                 };
 
-                if let Some((verify_speed, verify_time)) = verify_stats {
-                    println!(
-                        "{} {} -> '{}' ({}, copy: {} @ {}, verify: {} @ {})",
-                        status,
-                        filename,
-                        dest_path.display(),
-                        HumanBytes(copy_result.bytes_copied),
-                        copy_time,
-                        copy_speed,
-                        verify_time,
-                        verify_speed
-                    );
-                } else {
-                    // --no-verify was used
-                    println!(
-                        "{} {} -> '{}' ({}, {} @ {})",
-                        status,
-                        filename,
-                        dest_path.display(),
-                        HumanBytes(copy_result.bytes_copied),
-                        copy_time,
-                        copy_speed
-                    );
+                match &verify_outcome {
+                    VerifyOutcome::Passed { speed, time, .. } => {
+                        println!(
+                            "{} {} -> '{}' ({}, copy: {} @ {}, verify: {} @ {})",
+                            status,
+                            filename,
+                            dest_path.display(),
+                            HumanBytes(copy_result.bytes_copied),
+                            copy_time,
+                            copy_speed,
+                            time,
+                            speed
+                        );
+                    }
+                    VerifyOutcome::Skipped | VerifyOutcome::Failed => {
+                        // --no-verify was used, or verification failed (error already printed)
+                        println!(
+                            "{} {} -> '{}' ({}, {} @ {})",
+                            status,
+                            filename,
+                            dest_path.display(),
+                            HumanBytes(copy_result.bytes_copied),
+                            copy_time,
+                            copy_speed
+                        );
+                    }
                 }
             }
             Err(e) => {
@@ -637,6 +644,10 @@ async fn main() -> Result<()> {
             let copy_speed = format_speed(total_bytes_copied, total_copy_duration);
             let copy_time = format_duration(total_copy_duration);
 
+            // Show verify stats only if verification was enabled AND at least one
+            // verification succeeded. If verification was enabled but all failed,
+            // total_verify_duration remains ZERO and we skip verify stats (the per-file
+            // output already showed the failures).
             if !args.no_verify && total_verify_duration > Duration::ZERO {
                 let verify_speed = format_speed(total_bytes_copied, total_verify_duration);
                 let verify_time = format_duration(total_verify_duration);
@@ -655,6 +666,7 @@ async fn main() -> Result<()> {
                     println!("Source files removed after verification.");
                 }
             } else {
+                // Either --no-verify was used, or all verifications failed
                 println!(
                     "\n{} Copied {} of {} files ({}, {} @ {})",
                     "Summary:".bold(),
@@ -687,10 +699,31 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// A SHA-256 hash value.
+///
+/// This newtype wrapper provides type safety to ensure we don't accidentally
+/// confuse hash values with other byte arrays, and provides convenient methods
+/// for hash operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sha256Hash([u8; 32]);
+
+impl Sha256Hash {
+    /// Convert the hash to a hexadecimal string representation.
+    fn to_hex(self) -> String {
+        self.0.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+impl From<[u8; 32]> for Sha256Hash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
 /// Result of a copy operation, including bytes copied, source hash, and timing
 struct CopyResult {
     bytes_copied: u64,
-    source_hash: [u8; 32],
+    source_hash: Sha256Hash,
     copy_duration: Duration,
 }
 
@@ -699,8 +732,25 @@ struct VerifyResult {
     verify_duration: Duration,
 }
 
+/// Outcome of the verification step for a file copy.
+///
+/// This enum makes the verification semantics explicit rather than using
+/// a confusing tuple of `(Option<stats>, bool)` where `true` could mean
+/// either "verification passed" or "verification was skipped".
+enum VerifyOutcome {
+    /// Verification was performed and succeeded, includes timing stats for display
+    Passed {
+        speed: String,
+        time: String,
+    },
+    /// Verification was skipped (--no-verify flag)
+    Skipped,
+    /// Verification was performed but failed
+    Failed,
+}
+
 /// Calculate SHA256 hash of a file with optional progress indicator
-fn calculate_file_hash(path: &Path, pb: Option<&ProgressBar>) -> Result<[u8; 32]> {
+fn calculate_file_hash(path: &Path, pb: Option<&ProgressBar>) -> Result<Sha256Hash> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; BUFFER_SIZE];
@@ -718,12 +768,8 @@ fn calculate_file_hash(path: &Path, pb: Option<&ProgressBar>) -> Result<[u8; 32]
         }
     }
 
-    Ok(hasher.finalize().into())
-}
-
-/// Convert a byte array to a hex string
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    let hash_bytes: [u8; 32] = hasher.finalize().into();
+    Ok(Sha256Hash::from(hash_bytes))
 }
 
 /// Escape braces in a string for use in indicatif templates.
@@ -748,11 +794,11 @@ fn format_duration(duration: Duration) -> String {
 /// when converting from f64 to u64.
 #[allow(clippy::cast_precision_loss)] // Precision loss is acceptable for human-readable display
 fn format_speed(bytes: u64, duration: Duration) -> String {
-    let secs = duration.as_secs_f64();
-    if secs == 0.0 {
+    // Use Duration's is_zero() instead of floating-point equality comparison
+    if duration.is_zero() {
         return "instant".to_string();
     }
-    let bytes_per_sec = bytes as f64 / secs;
+    let bytes_per_sec = bytes as f64 / duration.as_secs_f64();
     // Clamp to u64::MAX to prevent overflow when casting from f64.
     // We also handle negative values (which shouldn't occur) by treating them as 0.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -775,7 +821,7 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
 /// Shows a progress bar for the hash verification process.
 fn verify_destination(
     destination: &Path,
-    expected_hash: &[u8; 32],
+    expected_hash: &Sha256Hash,
     multi: &MultiProgress,
 ) -> Result<VerifyResult, String> {
     let start_time = Instant::now();
@@ -814,11 +860,11 @@ fn verify_destination(
     multi.remove(&pb);
 
     // Verify hashes match
-    if expected_hash != &dest_hash {
+    if *expected_hash != dest_hash {
         return Err(format!(
             "Hash mismatch!\n  Expected: {}\n  Got:      {}",
-            hex_encode(expected_hash),
-            hex_encode(&dest_hash)
+            expected_hash.to_hex(),
+            dest_hash.to_hex()
         ));
     }
 
@@ -909,7 +955,8 @@ async fn copy_with_progress(
     drop(dst_file);
 
     // Finalize the hash
-    let source_hash: [u8; 32] = hasher.finalize().into();
+    let hash_bytes: [u8; 32] = hasher.finalize().into();
+    let source_hash = Sha256Hash::from(hash_bytes);
     let copy_duration = start_time.elapsed();
 
     Ok(CopyResult {
@@ -917,4 +964,105 @@ async fn copy_with_progress(
         source_hash,
         copy_duration,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod format_duration_tests {
+        use super::*;
+
+        #[test]
+        fn zero_duration() {
+            assert_eq!(format_duration(Duration::ZERO), "0.0ms");
+        }
+
+        #[test]
+        fn sub_millisecond() {
+            assert_eq!(format_duration(Duration::from_micros(500)), "0.5ms");
+        }
+
+        #[test]
+        fn milliseconds() {
+            assert_eq!(format_duration(Duration::from_millis(500)), "500.0ms");
+        }
+
+        #[test]
+        fn one_second() {
+            assert_eq!(format_duration(Duration::from_secs(1)), "1.00s");
+        }
+
+        #[test]
+        fn seconds_with_decimal() {
+            assert_eq!(format_duration(Duration::from_millis(1500)), "1.50s");
+        }
+
+        #[test]
+        fn large_duration() {
+            assert_eq!(format_duration(Duration::from_secs(3600)), "3600.00s");
+        }
+    }
+
+    mod format_speed_tests {
+        use super::*;
+
+        #[test]
+        fn zero_duration_returns_instant() {
+            assert_eq!(format_speed(1000, Duration::ZERO), "instant");
+        }
+
+        #[test]
+        fn zero_bytes() {
+            // 0 bytes over any time is 0 B/s
+            assert_eq!(format_speed(0, Duration::from_secs(1)), "0 B/s");
+        }
+
+        #[test]
+        fn one_byte_per_second() {
+            assert_eq!(format_speed(1, Duration::from_secs(1)), "1 B/s");
+        }
+
+        #[test]
+        fn kilobytes_per_second() {
+            // 1024 bytes in 1 second = 1 KiB/s
+            assert_eq!(format_speed(1024, Duration::from_secs(1)), "1.00 KiB/s");
+        }
+
+        #[test]
+        fn megabytes_per_second() {
+            // 1 MiB in 1 second = 1 MiB/s
+            let mib = 1024 * 1024;
+            assert_eq!(format_speed(mib, Duration::from_secs(1)), "1.00 MiB/s");
+        }
+
+        #[test]
+        fn gigabytes_per_second() {
+            // 1 GiB in 1 second = 1 GiB/s
+            let gib = 1024 * 1024 * 1024;
+            assert_eq!(format_speed(gib, Duration::from_secs(1)), "1.00 GiB/s");
+        }
+
+        #[test]
+        fn fractional_time() {
+            // 1 MiB in 0.5 seconds = 2 MiB/s
+            let mib = 1024 * 1024;
+            assert_eq!(format_speed(mib, Duration::from_millis(500)), "2.00 MiB/s");
+        }
+
+        #[test]
+        fn very_small_duration() {
+            // Tests the overflow protection for very fast copies
+            let result = format_speed(1024 * 1024 * 1024, Duration::from_nanos(1));
+            // Should not panic, and should return something reasonable
+            assert!(result.ends_with("/s") || result == "instant");
+        }
+
+        #[test]
+        fn very_large_bytes() {
+            // Test with u64::MAX bytes
+            let result = format_speed(u64::MAX, Duration::from_secs(1));
+            assert!(result.ends_with("/s"));
+        }
+    }
 }
