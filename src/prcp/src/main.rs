@@ -3,6 +3,12 @@
 #![warn(clippy::expect_used)] // Prefer explicit error handling
 #![warn(clippy::panic)] // Avoid panics in library code
 #![deny(clippy::unimplemented)] // Don't leave unimplemented!() in code
+#![warn(clippy::cast_possible_truncation)] // Catch potential data loss in casts
+#![warn(clippy::cast_sign_loss)] // Catch sign loss in casts
+#![warn(clippy::cast_precision_loss)] // Catch precision loss in float casts
+#![warn(clippy::large_futures)] // Catch futures too large to box efficiently
+#![warn(clippy::semicolon_if_nothing_returned)] // Ensure consistent semicolon usage
+#![warn(clippy::unused_async)] // Catch async functions that don't await
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -25,9 +31,19 @@ use tokio::task;
 /// Default buffer size for I/O operations (16MB)
 const DEFAULT_BUFFER_SIZE: usize = 16 * 1024 * 1024;
 
+/// Minimum allowed buffer size (4KB) - smaller values cause excessive syscall overhead
+const MIN_BUFFER_SIZE: usize = 4 * 1024;
+
+/// Maximum allowed buffer size (1GB) - larger values risk OOM
+const MAX_BUFFER_SIZE: usize = 1024 * 1024 * 1024;
+
 /// Channel depth for parallel copy operations.
 /// Higher values allow more read-ahead but use more memory.
 const CHANNEL_DEPTH: usize = 4;
+
+/// Threshold for using parallel hashing (1MB).
+/// Below this size, single-threaded hashing is faster due to reduced thread overhead.
+const PARALLEL_HASH_THRESHOLD: usize = 1024 * 1024;
 
 /// RAII guard for terminal raw mode state management.
 /// Ensures raw mode is properly restored even if an error occurs.
@@ -160,7 +176,8 @@ struct Args {
     buffer_size: usize,
 }
 
-/// Parse buffer size from string, supporting suffixes like K, M, G
+/// Parse buffer size from string, supporting suffixes like K, M, G.
+/// Validates that the size is within acceptable bounds (4KB - 1GB).
 fn parse_buffer_size(s: &str) -> Result<usize, String> {
     let s = s.trim().to_uppercase();
     let (num_str, multiplier) = if s.ends_with("G") || s.ends_with("GB") {
@@ -173,11 +190,40 @@ fn parse_buffer_size(s: &str) -> Result<usize, String> {
         (s.as_str(), 1)
     };
 
-    num_str
+    let size = num_str
         .trim()
         .parse::<usize>()
-        .map(|n| n * multiplier)
-        .map_err(|e| format!("Invalid buffer size '{}': {}", s, e))
+        .map(|n| n.saturating_mul(multiplier))
+        .map_err(|e| format!("Invalid buffer size '{}': {}", s, e))?;
+
+    if size < MIN_BUFFER_SIZE {
+        return Err(format!(
+            "Buffer size {} is too small (minimum: 4KB)",
+            format_size(size)
+        ));
+    }
+
+    if size > MAX_BUFFER_SIZE {
+        return Err(format!(
+            "Buffer size {} is too large (maximum: 1GB)",
+            format_size(size)
+        ));
+    }
+
+    Ok(size)
+}
+
+/// Format a byte size for human-readable error messages
+fn format_size(bytes: usize) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{}GB", bytes / (1024 * 1024 * 1024))
+    } else if bytes >= 1024 * 1024 {
+        format!("{}MB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{}KB", bytes / 1024)
+    } else {
+        format!("{}B", bytes)
+    }
 }
 
 /// The shell integration code to add to shell config files.
@@ -680,82 +726,77 @@ struct CopyResult {
     source_hash: blake3::Hash,
 }
 
-/// Disable page cache for a file on macOS using F_NOCACHE.
-/// This improves throughput for large sequential reads/writes by avoiding
-/// unnecessary memory copies through the kernel page cache.
+/// Hint to the OS for optimal sequential I/O performance.
+/// On macOS: disables page cache (F_NOCACHE) for large sequential transfers.
+/// On Linux: enables sequential read-ahead (posix_fadvise).
+/// This is a best-effort optimization - failures are silently ignored.
 #[cfg(target_os = "macos")]
-fn disable_page_cache(file: &File) -> Result<()> {
+fn hint_sequential_io(file: &File) {
     // F_NOCACHE = 48 on macOS
     const F_NOCACHE: libc::c_int = 48;
     let fd = file.as_raw_fd();
-    let result = unsafe { libc::fcntl(fd, F_NOCACHE, 1) };
-    if result == -1 {
-        anyhow::bail!("Failed to set F_NOCACHE: {}", io::Error::last_os_error());
-    }
-    Ok(())
+    // Ignore result - this is purely an optimization hint
+    let _ = unsafe { libc::fcntl(fd, F_NOCACHE, 1) };
 }
 
-/// Hint to kernel that file will be accessed sequentially on Linux.
-/// This enables read-ahead and can improve performance for large files.
+/// Hint to the OS for optimal sequential I/O performance.
+/// On macOS: disables page cache (F_NOCACHE) for large sequential transfers.
+/// On Linux: enables sequential read-ahead (posix_fadvise).
+/// This is a best-effort optimization - failures are silently ignored.
 #[cfg(target_os = "linux")]
-fn disable_page_cache(file: &File) -> Result<()> {
+fn hint_sequential_io(file: &File) {
     let fd = file.as_raw_fd();
     // POSIX_FADV_SEQUENTIAL = 2: expect sequential access
-    let result = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
-    if result != 0 {
-        anyhow::bail!(
-            "Failed to set POSIX_FADV_SEQUENTIAL: {}",
-            io::Error::from_raw_os_error(result)
-        );
-    }
-    Ok(())
+    // Ignore result - this is purely an optimization hint
+    let _ = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
 }
 
+/// Hint to the OS for optimal sequential I/O performance.
+/// No-op on platforms without specific sequential I/O hints.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn disable_page_cache(_file: &File) -> Result<()> {
+fn hint_sequential_io(_file: &File) {
     // No-op on other platforms
-    Ok(())
 }
 
-/// Pre-allocate space for a file using fallocate on Linux (faster than set_len).
-/// Falls back to set_len on other platforms.
+/// Pre-allocate space for a file to help filesystem allocate contiguous blocks.
+/// On Linux: uses fallocate for faster allocation.
+/// On other platforms: uses set_len as a fallback.
+/// This is a best-effort optimization - failures are silently ignored.
 #[cfg(target_os = "linux")]
-fn preallocate_file(file: &File, size: u64) -> Result<()> {
+fn try_preallocate(file: &File, size: u64) {
     let fd = file.as_raw_fd();
     // Use fallocate for faster pre-allocation on Linux
     let result = unsafe { libc::fallocate(fd, 0, 0, size as libc::off_t) };
     if result == -1 {
         // Fall back to set_len if fallocate fails (e.g., unsupported filesystem)
-        file.set_len(size)?;
+        let _ = file.set_len(size);
     }
-    Ok(())
 }
 
+/// Pre-allocate space for a file to help filesystem allocate contiguous blocks.
+/// On Linux: uses fallocate for faster allocation.
+/// On other platforms: uses set_len as a fallback.
+/// This is a best-effort optimization - failures are silently ignored.
 #[cfg(not(target_os = "linux"))]
-fn preallocate_file(file: &File, size: u64) -> Result<()> {
-    file.set_len(size)?;
-    Ok(())
+fn try_preallocate(file: &File, size: u64) {
+    let _ = file.set_len(size);
 }
 
-/// Tell kernel we're done with this file's data, allowing it to drop from cache.
+/// Hint to kernel that we're done with this file's data, allowing cache eviction.
 /// Useful after copying to free up memory for subsequent operations.
+/// This is a best-effort optimization - failures are silently ignored.
 #[cfg(target_os = "linux")]
-fn advise_dontneed(file: &File) -> Result<()> {
+fn hint_dontneed(file: &File) {
     let fd = file.as_raw_fd();
-    let result = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) };
-    if result != 0 {
-        anyhow::bail!(
-            "Failed to set POSIX_FADV_DONTNEED: {}",
-            io::Error::from_raw_os_error(result)
-        );
-    }
-    Ok(())
+    // Ignore result - this is purely a hint to the kernel
+    let _ = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) };
 }
 
+/// Hint to kernel that we're done with this file's data, allowing cache eviction.
+/// No-op on platforms without POSIX_FADV_DONTNEED support.
 #[cfg(not(target_os = "linux"))]
-fn advise_dontneed(_file: &File) -> Result<()> {
+fn hint_dontneed(_file: &File) {
     // No-op on other platforms
-    Ok(())
 }
 
 /// Check if source and destination are on the same physical device.
@@ -810,16 +851,18 @@ fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
     hasher.update_rayon(&mmap);
 
     // Advise kernel we're done with this data
-    let _ = advise_dontneed(&file);
+    hint_dontneed(&file);
 
     Ok(hasher.finalize())
 }
 
 /// Calculate Blake3 hash of a file using buffered I/O (non-Unix fallback).
+/// Uses single-threaded hashing for each buffer since update_rayon has overhead
+/// for small chunks that doesn't benefit buffered reads.
 #[cfg(not(unix))]
 fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
     let file = File::open(path).context("Failed to open file for hash verification")?;
-    let _ = disable_page_cache(&file);
+    hint_sequential_io(&file);
 
     let mut reader = io::BufReader::with_capacity(DEFAULT_BUFFER_SIZE, file);
     let mut hasher = blake3::Hasher::new();
@@ -830,7 +873,9 @@ fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
         if bytes_read == 0 {
             break;
         }
-        hasher.update_rayon(&buffer[..bytes_read]);
+        // Use single-threaded update for buffered reads - parallel hashing
+        // has overhead that doesn't benefit chunked reads
+        hasher.update(&buffer[..bytes_read]);
     }
 
     Ok(hasher.finalize())
@@ -874,8 +919,9 @@ fn verify_and_remove_source(
 
 /// Message sent from reader thread to writer thread (used in parallel copy mode)
 enum CopyMessage {
-    /// Data chunk to write (buffer contents, length)
-    Data(Vec<u8>),
+    /// Data chunk to write (buffer, bytes_read).
+    /// Buffer capacity is preserved to avoid reallocation when returned to pool.
+    Data(Vec<u8>, usize),
     /// End of file reached
     Eof,
     /// Error occurred during read
@@ -917,13 +963,13 @@ async fn copy_sequential(
 ) -> Result<CopyResult> {
     let mut src_file = File::open(source).context("Failed to open source file")?;
     let dst_file = File::create(destination).context("Failed to create destination file")?;
-    let _ = disable_page_cache(&src_file);
-    let _ = disable_page_cache(&dst_file);
+    hint_sequential_io(&src_file);
+    hint_sequential_io(&dst_file);
 
     // Pre-allocate destination file to help filesystem allocate contiguous blocks.
     // Uses fallocate on Linux for faster allocation.
     // Ignore errors - pre-allocation is an optimization, not a requirement.
-    let _ = preallocate_file(&dst_file, file_size);
+    try_preallocate(&dst_file, file_size);
 
     // Use RAII guard to ensure partial file cleanup on any error path
     // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
@@ -971,9 +1017,13 @@ async fn copy_sequential(
             Err(e) => return Err(e.into()),
         };
 
-        // Hash and write (sequential - no head thrashing on same device)
-        // Use parallel hashing for better CPU utilization on large buffers
-        hasher.update_rayon(&buffer[..bytes_read]);
+        // Hash (sequential copy - no head thrashing on same device)
+        // Use parallel hashing only for large chunks where it's beneficial
+        if bytes_read >= PARALLEL_HASH_THRESHOLD {
+            hasher.update_rayon(&buffer[..bytes_read]);
+        } else {
+            hasher.update(&buffer[..bytes_read]);
+        }
 
         // Write to destination
         guard
@@ -1030,13 +1080,13 @@ async fn copy_parallel(
     // Open files with sequential access hints
     let src_file = File::open(&src_path).context("Failed to open source file")?;
     let dst_file = File::create(&dst_path).context("Failed to create destination file")?;
-    let _ = disable_page_cache(&src_file);
-    let _ = disable_page_cache(&dst_file);
+    hint_sequential_io(&src_file);
+    hint_sequential_io(&dst_file);
 
     // Pre-allocate destination file to help filesystem allocate contiguous blocks.
     // Uses fallocate on Linux for faster allocation.
     // Ignore errors - pre-allocation is an optimization, not a requirement.
-    let _ = preallocate_file(&dst_file, file_size);
+    try_preallocate(&dst_file, file_size);
 
     // Use RAII guard to ensure partial file cleanup on any error path
     // (Ctrl+C, I/O errors, etc.). The guard is defused on successful completion.
@@ -1091,9 +1141,8 @@ async fn copy_parallel(
                     return;
                 }
                 Ok(n) => {
-                    // Truncate buffer to actual bytes read and send
-                    buffer.truncate(n);
-                    if data_tx.send(CopyMessage::Data(buffer)).is_err() {
+                    // Send buffer with bytes_read - preserves buffer capacity for reuse
+                    if data_tx.send(CopyMessage::Data(buffer, n)).is_err() {
                         return; // Receiver dropped, exit
                     }
                 }
@@ -1144,19 +1193,25 @@ async fn copy_parallel(
 
         // Try to receive data with timeout to allow checking pause/shutdown
         match data_rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(CopyMessage::Data(mut data)) => {
-                // Hash and write (parallel hashing for better CPU utilization)
-                hasher.update_rayon(&data);
+            Ok(CopyMessage::Data(buffer, bytes_read)) => {
+                let data = &buffer[..bytes_read];
+
+                // Use parallel hashing only for large chunks where it's beneficial
+                if bytes_read >= PARALLEL_HASH_THRESHOLD {
+                    hasher.update_rayon(data);
+                } else {
+                    hasher.update(data);
+                }
+
                 guard
                     .file_mut()
-                    .write_all(&data)
+                    .write_all(data)
                     .context("Failed to write to destination file")?;
-                total_bytes += data.len() as u64;
+                total_bytes += bytes_read as u64;
                 pb.set_position(total_bytes);
 
-                // Return buffer to pool for reuse (resize back to full capacity)
-                data.resize(buffer_size, 0);
-                let _ = buffer_return_tx.try_send(data);
+                // Return buffer to pool for reuse (capacity is preserved since we used slice)
+                let _ = buffer_return_tx.try_send(buffer);
             }
             Ok(CopyMessage::Eof) => {
                 break;
