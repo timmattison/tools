@@ -645,7 +645,7 @@ async fn main() -> Result<()> {
 
                 // Verify copy by default (unless --no-verify)
                 let verified = if !args.no_verify {
-                    match verify_destination(&dest_path, &copy_result.source_hash) {
+                    match verify_destination(&dest_path, &copy_result.source_hash, &multi) {
                         Ok(()) => true,
                         Err(error_msg) => {
                             eprintln!("\n{}", error_msg);
@@ -811,23 +811,6 @@ fn try_preallocate(file: &File, size: u64) {
     let _ = file.set_len(size);
 }
 
-/// Hint to kernel that we're done with this file's data, allowing cache eviction.
-/// Useful after copying to free up memory for subsequent operations.
-/// This is a best-effort optimization - failures are silently ignored.
-#[cfg(target_os = "linux")]
-fn hint_dontneed(file: &File) {
-    let fd = file.as_raw_fd();
-    // Ignore result - this is purely a hint to the kernel
-    let _ = unsafe { libc::posix_fadvise(fd, 0, 0, libc::POSIX_FADV_DONTNEED) };
-}
-
-/// Hint to kernel that we're done with this file's data, allowing cache eviction.
-/// No-op on platforms without POSIX_FADV_DONTNEED support.
-#[cfg(not(target_os = "linux"))]
-fn hint_dontneed(_file: &File) {
-    // No-op on other platforms
-}
-
 /// Check if source and destination are on the same physical device.
 /// Used to decide between parallel (different devices) and sequential (same device) I/O.
 /// On spinning HDDs, parallel read/write to the same device causes head thrashing.
@@ -854,60 +837,50 @@ fn same_device(_source: &Path, _destination: &Path) -> bool {
     true
 }
 
-/// Calculate Blake3 hash of a file using memory-mapped I/O on Unix.
-/// Memory mapping eliminates read syscall overhead and allows the kernel to
-/// optimize page access patterns. Falls back to buffered I/O on other platforms.
-/// Uses parallel hashing via Rayon for better CPU utilization.
-#[cfg(unix)]
-fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
-    use memmap2::Mmap;
-
-    let file = File::open(path).context("Failed to open file for hash verification")?;
-    let metadata = file.metadata()?;
-    let file_size = metadata.len();
-
-    // Handle empty files (mmap fails on zero-length files)
-    if file_size == 0 {
-        return Ok(blake3::Hasher::new().finalize());
-    }
-
-    // Memory-map the file for efficient hashing
-    // SAFETY: File is opened read-only and we don't modify the mapping
-    let mmap = unsafe { Mmap::map(&file) }.context("Failed to memory-map file for hashing")?;
-
-    // Hash the entire file in one call for maximum parallelism
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_rayon(&mmap);
-
-    // Advise kernel we're done with this data
-    hint_dontneed(&file);
-
-    Ok(hasher.finalize())
-}
-
-/// Calculate Blake3 hash of a file using buffered I/O (non-Unix fallback).
-/// Uses single-threaded hashing for each buffer since update_rayon has overhead
-/// for small chunks that doesn't benefit buffered reads.
-#[cfg(not(unix))]
-fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
+/// Calculate Blake3 hash of a file with optional progress tracking.
+///
+/// Uses buffered I/O with parallel hashing for large buffers. This provides
+/// good performance while allowing progress updates for very large files.
+/// If a progress bar is provided, it will be updated as the file is read.
+fn calculate_file_hash_with_progress(
+    path: &Path,
+    pb: Option<&ProgressBar>,
+) -> Result<blake3::Hash> {
     let file = File::open(path).context("Failed to open file for hash verification")?;
     hint_sequential_io(&file);
 
     let mut reader = io::BufReader::with_capacity(DEFAULT_BUFFER_SIZE, file);
     let mut hasher = blake3::Hasher::new();
     let mut buffer = vec![0u8; DEFAULT_BUFFER_SIZE];
+    let mut bytes_hashed = 0u64;
 
     loop {
         let bytes_read = reader.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
-        // Use single-threaded update for buffered reads - parallel hashing
-        // has overhead that doesn't benefit chunked reads
-        hasher.update(&buffer[..bytes_read]);
+
+        // Use parallel hashing for large chunks
+        if bytes_read >= PARALLEL_HASH_THRESHOLD {
+            hasher.update_rayon(&buffer[..bytes_read]);
+        } else {
+            hasher.update(&buffer[..bytes_read]);
+        }
+
+        bytes_hashed += bytes_read as u64;
+        if let Some(progress) = pb {
+            progress.set_position(bytes_hashed);
+        }
     }
 
     Ok(hasher.finalize())
+}
+
+/// Calculate Blake3 hash of a file (without progress tracking).
+/// Convenience wrapper for cases where progress isn't needed.
+#[allow(dead_code)]
+fn calculate_file_hash(path: &Path) -> Result<blake3::Hash> {
+    calculate_file_hash_with_progress(path, None)
 }
 
 /// Escape braces in a string for use in indicatif templates.
@@ -916,18 +889,52 @@ fn escape_template_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
 }
 
+/// Progress bar characters for smooth progress visualization.
+const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
+
 /// Verify that the destination file matches the expected hash.
 ///
 /// This function performs Blake3 hash verification to ensure the copy was
-/// successful. Returns `Ok(())` on success, or `Err(error_message)` if
-/// verification fails.
+/// successful. Shows a progress bar during verification for large files.
+/// Returns `Ok(())` on success, or `Err(error_message)` if verification fails.
 fn verify_destination(
     destination: &Path,
     expected_hash: &blake3::Hash,
+    multi: &MultiProgress,
 ) -> Result<(), String> {
-    // Calculate destination hash
-    let dest_hash = calculate_file_hash(destination)
-        .map_err(|e| format!("Failed to verify destination: {}", e))?;
+    // Get file size for progress bar
+    let file_size = fs::metadata(destination)
+        .map_err(|e| format!("Failed to get destination metadata: {}", e))?
+        .len();
+
+    // Get filename for display
+    let filename = destination
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| destination.display().to_string());
+    let safe_filename = escape_template_braces(&filename);
+
+    // Create verification progress bar
+    let pb = multi.add(ProgressBar::new(file_size));
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template(&format!(
+                "{{spinner:.yellow}} {} [{{bar:40.yellow/dim}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}) verifying",
+                safe_filename
+            ))
+            .map_err(|e| format!("Failed to create progress bar: {}", e))?
+            .progress_chars(PROGRESS_CHARS),
+    );
+
+    // Calculate destination hash with progress
+    let dest_hash = calculate_file_hash_with_progress(destination, Some(&pb))
+        .map_err(|e| {
+            pb.finish_and_clear();
+            format!("Failed to verify destination: {}", e)
+        })?;
+
+    pb.finish_and_clear();
+    multi.remove(&pb);
 
     // Verify hashes match
     if expected_hash != &dest_hash {
