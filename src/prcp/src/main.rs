@@ -6,10 +6,11 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -66,12 +67,13 @@ impl Drop for RawModeGuard {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Progress copy - copy files with progress bar", long_about = None)]
 struct Args {
-    /// Source files or glob patterns to copy
-    #[arg(required = true, num_args = 1..)]
-    sources: Vec<PathBuf>,
+    /// Source file(s) and destination (last argument is destination)
+    #[arg(num_args = 0..)]
+    paths: Vec<PathBuf>,
 
-    /// Destination file or directory path
-    destination: PathBuf,
+    /// Add shell integration (prmv function) to your shell config
+    #[arg(long)]
+    shell_setup: bool,
 
     /// Remove source files after successful copy (verified by SHA256 hash)
     #[arg(long, short = 'r')]
@@ -84,6 +86,97 @@ struct Args {
     /// Skip all confirmation prompts (assume yes)
     #[arg(long, short = 'y')]
     yes: bool,
+}
+
+/// The shell integration code to add to shell config files.
+const SHELL_INTEGRATION: &str = r#"
+# prcp - Progress Copy shell integration
+# Added by: prcp --shell-setup
+function prmv() {
+    prcp --rm "$@"
+}
+"#;
+
+/// Marker to detect if shell integration is already installed.
+const SHELL_INTEGRATION_MARKER: &str = "prcp - Progress Copy shell integration";
+
+/// Sets up shell integration by adding the prmv function to the user's shell config.
+fn setup_shell_integration() -> Result<()> {
+    // Get home directory
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+
+    // Detect shell from SHELL environment variable
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let shell_name = Path::new(&shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    // Determine which config file to use
+    let config_file = match shell_name {
+        "zsh" => home.join(".zshrc"),
+        "bash" => {
+            // Prefer .bashrc, but use .bash_profile on macOS if .bashrc doesn't exist
+            let bashrc = home.join(".bashrc");
+            let bash_profile = home.join(".bash_profile");
+            if bashrc.exists() {
+                bashrc
+            } else if bash_profile.exists() {
+                bash_profile
+            } else {
+                bashrc // Create .bashrc if neither exists
+            }
+        }
+        _ => {
+            anyhow::bail!(
+                "Unsupported shell: {}. Please manually add the shell integration to your config.\n\
+                 Add this to your shell config:\n{}",
+                shell_name,
+                SHELL_INTEGRATION
+            );
+        }
+    };
+
+    // Check if already installed
+    if config_file.exists() {
+        let contents = fs::read_to_string(&config_file)
+            .with_context(|| format!("Could not read {}", config_file.display()))?;
+
+        if contents.contains(SHELL_INTEGRATION_MARKER) {
+            println!(
+                "{} Shell integration already installed in {}",
+                "✓".green(),
+                config_file.display()
+            );
+            return Ok(());
+        }
+    }
+
+    // Append shell integration to config file
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_file)
+        .with_context(|| format!("Could not open {}", config_file.display()))?;
+
+    file.write_all(SHELL_INTEGRATION.as_bytes())
+        .with_context(|| format!("Could not write to {}", config_file.display()))?;
+
+    println!(
+        "{} Shell integration added to {}",
+        "✓".green(),
+        config_file.display()
+    );
+    println!();
+    println!("To activate, run:");
+    println!("  {} {}", "source".cyan(), config_file.display());
+    println!();
+    println!("Or open a new terminal window.");
+    println!();
+    println!("Available commands:");
+    println!("  {} - Copy files with progress, removing sources after verification", "prmv".yellow());
+
+    Ok(())
 }
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
@@ -162,18 +255,32 @@ fn resolve_sources(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Handle shell setup (doesn't require sources/destination)
+    if args.shell_setup {
+        return setup_shell_integration();
+    }
+
+    // Parse paths: all but last are sources, last is destination
+    if args.paths.len() < 2 {
+        anyhow::bail!("Usage: prcp <source>... <destination>\n\nAt least one source and a destination are required.");
+    }
+
+    let (source_paths, destination) = args.paths.split_at(args.paths.len() - 1);
+    let destination = destination[0].clone();
+    let source_paths: Vec<PathBuf> = source_paths.to_vec();
+
     // Resolve all source files (handles glob patterns)
-    let sources = resolve_sources(&args.sources)?;
+    let sources = resolve_sources(&source_paths)?;
     let total_files = sources.len();
 
     // Validate destination for multi-file operations
     if total_files > 1 {
         // For multiple files, destination must be a directory
         // Check if exists and is NOT a directory (error case)
-        if args.destination.exists() && !args.destination.is_dir() {
+        if destination.exists() && !destination.is_dir() {
             anyhow::bail!(
                 "Destination '{}' is not a directory (required for multiple source files)",
-                args.destination.display()
+                destination.display()
             );
         }
         // Note: Directory creation is deferred until we're about to copy the first file
@@ -263,13 +370,13 @@ async fn main() -> Result<()> {
         }
 
         // Resolve destination path
-        let destination = if args.destination.is_dir() {
+        let dest_path = if destination.is_dir() {
             let filename = source
                 .file_name()
                 .ok_or_else(|| anyhow::anyhow!("Source '{}' has no filename", source.display()))?;
-            args.destination.join(filename)
+            destination.join(filename)
         } else {
-            args.destination.clone()
+            destination.clone()
         };
 
         // Get file metadata
@@ -291,13 +398,13 @@ async fn main() -> Result<()> {
         let file_size = metadata.len();
 
         // Check if destination exists
-        if destination.exists() {
+        if dest_path.exists() {
             let should_overwrite = if args.yes {
                 true
             } else {
                 eprintln!(
                     "\nDestination '{}' already exists. Overwrite? (y/N): ",
-                    destination.display()
+                    dest_path.display()
                 );
                 io::stderr().flush()?;
 
@@ -329,7 +436,7 @@ async fn main() -> Result<()> {
         }
 
         // Create parent directories if needed
-        if let Some(parent) = destination.parent() {
+        if let Some(parent) = dest_path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
                 let error_msg = format!("Failed to create directory: {}", e);
                 if args.continue_on_error {
@@ -341,7 +448,7 @@ async fn main() -> Result<()> {
                 } else {
                     anyhow::bail!(
                         "Failed to create destination directory for '{}': {}",
-                        destination.display(),
+                        dest_path.display(),
                         e
                     );
                 }
@@ -371,7 +478,7 @@ async fn main() -> Result<()> {
         // Perform the copy
         let result = copy_with_progress(
             source,
-            &destination,
+            &dest_path,
             &file_pb,
             paused.clone(),
             shutdown.clone(),
@@ -390,7 +497,7 @@ async fn main() -> Result<()> {
                 // Handle --rm flag: verify copy and remove source
                 if args.rm {
                     if let Err(error_msg) =
-                        verify_and_remove_source(source, &destination, &copy_result.source_hash)
+                        verify_and_remove_source(source, &dest_path, &copy_result.source_hash)
                     {
                         eprintln!("\n{}", error_msg);
                         if args.continue_on_error {
@@ -405,7 +512,7 @@ async fn main() -> Result<()> {
                     println!(
                         "\nSuccessfully copied {} to '{}'",
                         HumanBytes(copy_result.bytes_copied),
-                        destination.display()
+                        dest_path.display()
                     );
                     if args.rm {
                         println!("Source file removed after verification.");
