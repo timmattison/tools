@@ -175,11 +175,11 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       across multiple repositories.
     - To install: `cargo install --git https://github.com/timmattison/tools gitdiggin`
 - gr8
-  - Displays GitHub API rate limit information in a user-friendly format. Fetches rate limits using the GitHub CLI
-    (`gh api rate_limit`), converts epoch timestamps to local time in ISO 8601 format, and color-codes the output
-    (green for healthy, yellow for under 20% remaining, red for exceeded). Shows limits for all API resource types
-    including core, GraphQL, search, code scanning, and more. Requires GitHub CLI to be installed and authenticated.
-  - To install: `cargo install --git https://github.com/timmattison/tools gr8`
+    - Displays GitHub API rate limit information in a user-friendly format. Fetches rate limits using the GitHub CLI
+      (`gh api rate_limit`), converts epoch timestamps to local time in ISO 8601 format, and color-codes the output
+      (green for healthy, yellow for under 20% remaining, red for exceeded). Shows limits for all API resource types
+      including core, GraphQL, search, code scanning, and more. Requires GitHub CLI to be installed and authenticated.
+    - To install: `cargo install --git https://github.com/timmattison/tools gr8`
 - glo
     - Finds and displays large objects in Git repositories. Useful for identifying files that are bloating your
       repository
@@ -273,11 +273,24 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       to apply exports to current shell.
     - To install: `cargo install --git https://github.com/timmattison/tools aws2env`
 - aa
-    - AWS Account - quickly get AWS account information without a pager. Runs the equivalent of 
-      `aws sts get-caller-identity` but as a simple Rust binary that outputs JSON directly to stdout. 
-      Perfect for when you need to check which AWS account you're using frequently and don't want to 
-      type the full AWS CLI command or deal with pager output.
-    - To install: `cargo install --git https://github.com/timmattison/tools aa`
+  - AWS Account - quickly get AWS account information without a pager. Runs the equivalent of
+    `aws sts get-caller-identity` but as a simple Rust binary that outputs JSON directly to stdout.
+    Perfect for when you need to check which AWS account you're using frequently and don't want to
+    type the full AWS CLI command or deal with pager output.
+  - To install: `cargo install --git https://github.com/timmattison/tools aa`
+- nwt
+  - New Worktree - Creates a new git worktree with a randomly generated Docker-style name
+    (e.g., "absurd-rock", "zesty-penguin"). Supports config files (~/.nwt.toml), custom branch
+    names, checking out existing refs, running commands after creation, and opening worktrees
+    in new tmux windows. Worktrees are created in a `{repo-name}-worktrees` directory alongside
+    the repository.
+  - To install: `cargo install --git https://github.com/timmattison/tools nwt`
+- cwt
+  - Change Worktree - Navigate between git worktrees in a repository. Shows a list of all
+    worktrees with the current one highlighted, or cycle through them with `-f` (forward) and
+    `-p` (previous). Can also jump directly to a worktree by directory name or branch name.
+    Use `--shell-setup` to automatically add shell integration to your config.
+  - To install: `cargo install --git https://github.com/timmattison/tools cwt`
 
 ## dirhash
 
@@ -939,3 +952,172 @@ wolly -v --try-both-ports B0:4F:13:10:4A:FC
 
 **Issue**: Device won't wake after long shutdown period
 - **Solution**: Some systems lose WoL capability if unplugged. Ensure continuous power supply
+
+## nwt (new worktree)
+
+Creates a new git worktree with a randomly generated Docker-style name (e.g., "absurd-rock", "zesty-penguin").
+
+### Basic Usage
+
+```bash
+nwt                           # Create worktree with random name
+nwt -b feature-branch         # Create with specific branch name
+nwt -c main                   # Check out existing ref
+nwt --run "pnpm install"      # Run command after creation
+nwt --tmux                    # Open in new tmux window
+```
+
+### Options
+
+- `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name
+- `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
+- `--run <COMMAND>`: Run a command in the new worktree after creation
+- `--tmux`: Open the new worktree in a new tmux window (Unix only)
+- `-q, --quiet`: Suppress non-error messages
+
+### Config File
+
+Create `~/.nwt.toml` to set defaults:
+
+```toml
+# Default branch name (optional)
+branch = "feature"
+
+# Or default ref to checkout (optional, conflicts with branch)
+checkout = "main"
+
+# Default command to run after creation
+run = "pnpm install"
+
+# Open in tmux by default
+tmux = true
+
+# Suppress output by default
+quiet = false
+```
+
+### Examples
+
+Create a new worktree and install dependencies:
+```bash
+nwt --run "pnpm install"
+```
+
+Create a worktree from an existing branch:
+```bash
+nwt -c feature-branch
+```
+
+Create worktree and open in tmux:
+```bash
+nwt --tmux --run "code ."
+```
+
+## cwt (change worktree)
+
+Navigate between git worktrees in a repository. Lists all worktrees, cycles through them, or jumps to a specific one by name.
+
+### Basic Usage
+
+```bash
+cwt                           # Show list of worktrees with current highlighted
+cwt -f                        # Go to next worktree (wraps around)
+cwt -p                        # Go to previous worktree (wraps around)
+cwt main                      # Go to worktree by branch name
+cwt absurd-rock               # Go to worktree by directory name
+```
+
+### Options
+
+- `-f, --forward`: Go to the next worktree in the sorted list (wraps around)
+- `-p, --prev`: Go to the previous worktree (wraps around)
+- `[TARGET]`: Worktree to switch to (directory name or branch name)
+- `--shell-setup`: Automatically add shell integration to your ~/.zshrc or ~/.bashrc
+- `-q, --quiet`: Suppress error messages
+
+### Shell Integration
+
+The easiest way to set up shell integration is:
+
+```bash
+cwt --shell-setup
+```
+
+This automatically adds the `wt` function and aliases to your shell config. Run `source ~/.zshrc` (or `~/.bashrc`) to activate, or open a new terminal.
+
+> **Note:** `--shell-setup` currently supports bash and zsh only. Fish users should use the manual setup below.
+
+#### Manual Setup
+
+If you prefer to add it manually, since a program can't change the parent shell's directory, cwt outputs the target path to stdout. Add these shell functions to enable directory changing:
+
+#### Bash / Zsh (~/.bashrc or ~/.zshrc)
+
+```bash
+# Change to a git worktree
+function wt() {
+    if [ $# -eq 0 ]; then
+        # No args: show list interactively
+        cwt
+    else
+        local target=$(cwt "$@")
+        if [ $? -eq 0 ] && [ -n "$target" ]; then
+            cd "$target"
+        fi
+    fi
+}
+
+# Quick navigation aliases (reuse wt function for proper error handling)
+alias wtf='wt -f'  # Next worktree
+alias wtp='wt -p'  # Previous worktree
+```
+
+#### Fish (~/.config/fish/config.fish)
+
+```fish
+function wt
+    if test (count $argv) -eq 0
+        cwt
+    else
+        set -l target (cwt $argv)
+        if test $status -eq 0 -a -n "$target"
+            cd $target
+        end
+    end
+end
+
+# Quick navigation aliases (reuse wt function for proper error handling)
+alias wtf 'wt -f'
+alias wtp 'wt -p'
+```
+
+### Examples
+
+Show all worktrees with current highlighted:
+```bash
+cwt
+#   /path/to/repo                    [main]
+# > /path/to/repo-worktrees/absurd   [feature-branch]
+#   /path/to/repo-worktrees/zen      [fix-bug]
+```
+
+Cycle through worktrees:
+```bash
+wt -f    # Move to next worktree
+wt -p    # Move to previous worktree
+```
+
+Jump to specific worktree:
+```bash
+wt main           # By branch name
+wt absurd-rock    # By directory name
+```
+
+### Exit Codes
+
+- `0`: Success
+- `1`: Not in a git repository
+- `2`: Git command error
+- `3`: Worktree not found
+- `4`: Could not determine current worktree (for -f/-p)
+- `5`: Shell setup failed
