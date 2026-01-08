@@ -5,7 +5,7 @@ use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -196,7 +196,7 @@ struct CopyResult {
 }
 
 /// Calculate SHA256 hash of a file by reading it completely
-fn calculate_file_hash(path: &PathBuf) -> Result<[u8; 32]> {
+fn calculate_file_hash(path: &Path) -> Result<[u8; 32]> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; BUFFER_SIZE];
