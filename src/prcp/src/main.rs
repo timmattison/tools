@@ -360,7 +360,8 @@ async fn main() -> Result<()> {
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     let mut successful_copies = 0u64;
     let mut total_bytes_copied = 0u64;
-    let overall_start = Instant::now();
+    let mut total_copy_duration = Duration::ZERO;
+    let mut total_verify_duration = Duration::ZERO;
 
     // Copy each file
     for source in &sources {
@@ -494,6 +495,7 @@ async fn main() -> Result<()> {
             Ok(copy_result) => {
                 successful_copies += 1;
                 total_bytes_copied += copy_result.bytes_copied;
+                total_copy_duration += copy_result.copy_duration;
 
                 // Build stats for this file
                 let copy_speed = format_speed(copy_result.bytes_copied, copy_result.copy_duration);
@@ -503,6 +505,7 @@ async fn main() -> Result<()> {
                 let verify_stats = if args.rm {
                     match verify_and_remove_source(source, &dest_path, &copy_result.source_hash, &multi) {
                         Ok(verify_result) => {
+                            total_verify_duration += verify_result.verify_duration;
                             let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
                             let verify_time = format_duration(verify_result.verify_duration);
                             Some((verify_speed, verify_time))
@@ -601,20 +604,34 @@ async fn main() -> Result<()> {
 
     // Print summary for multiple files
     if total_files > 1 && successful_copies > 0 {
-        let overall_duration = overall_start.elapsed();
-        let overall_speed = format_speed(total_bytes_copied, overall_duration);
-        let overall_time = format_duration(overall_duration);
-        println!(
-            "\n{} Copied {} of {} files ({} in {} @ {})",
-            "Summary:".bold(),
-            successful_copies,
-            total_files,
-            HumanBytes(total_bytes_copied),
-            overall_time,
-            overall_speed
-        );
-        if args.rm {
+        let copy_speed = format_speed(total_bytes_copied, total_copy_duration);
+        let copy_time = format_duration(total_copy_duration);
+
+        if args.rm && total_verify_duration > Duration::ZERO {
+            let verify_speed = format_speed(total_bytes_copied, total_verify_duration);
+            let verify_time = format_duration(total_verify_duration);
+            println!(
+                "\n{} Copied {} of {} files ({}, copy: {} @ {}, verify: {} @ {})",
+                "Summary:".bold(),
+                successful_copies,
+                total_files,
+                HumanBytes(total_bytes_copied),
+                copy_time,
+                copy_speed,
+                verify_time,
+                verify_speed
+            );
             println!("Source files removed after verification.");
+        } else {
+            println!(
+                "\n{} Copied {} of {} files ({}, {} @ {})",
+                "Summary:".bold(),
+                successful_copies,
+                total_files,
+                HumanBytes(total_bytes_copied),
+                copy_time,
+                copy_speed
+            );
         }
     }
 
