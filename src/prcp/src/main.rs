@@ -3,6 +3,9 @@
 #![warn(clippy::expect_used)] // Prefer explicit error handling
 #![warn(clippy::panic)] // Avoid panics in library code
 #![deny(clippy::unimplemented)] // Don't leave unimplemented!() in code
+#![warn(clippy::cast_possible_truncation)] // Warn on lossy casts (e.g., f64 to u64)
+#![warn(clippy::cast_sign_loss)] // Warn when casting signed to unsigned
+#![warn(clippy::cast_precision_loss)] // Warn when casting to float loses precision
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -15,8 +18,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch};
 use tokio::task;
 
 /// RAII guard for terminal raw mode state management.
@@ -136,6 +139,10 @@ struct Args {
     #[arg(long, short = 'r')]
     rm: bool,
 
+    /// Skip SHA256 verification after copy (not allowed with --rm)
+    #[arg(long)]
+    no_verify: bool,
+
     /// Continue copying remaining files if one fails
     #[arg(long)]
     continue_on_error: bool,
@@ -238,6 +245,12 @@ fn setup_shell_integration() -> Result<()> {
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
 
+/// Progress bar characters for smooth progress visualization.
+const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
+
+/// Shared format string for progress stats (bytes, percentage, speed, ETA).
+const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_per_sec}, {eta})";
+
 /// Resolve source patterns into a list of files
 ///
 /// Handles both literal file paths and glob patterns (*, ?, []).
@@ -317,6 +330,11 @@ async fn main() -> Result<()> {
         return setup_shell_integration();
     }
 
+    // Validate flag combinations
+    if args.rm && args.no_verify {
+        anyhow::bail!("Cannot use --rm with --no-verify: verification is required to safely remove source files.");
+    }
+
     // Parse paths: all but last are sources, last is destination
     if args.paths.len() < 2 {
         anyhow::bail!("Usage: prcp <source>... <destination>\n\nAt least one source and a destination are required.");
@@ -359,35 +377,61 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Set up shutdown flag
+    // Set up shutdown flag (can be reset if user declines cancellation)
     let shutdown = Arc::new(AtomicBool::new(false));
+
+    // Set up key listener done flag (only set when operation is truly complete)
+    let key_listener_done = Arc::new(AtomicBool::new(false));
+
+    // Set up input active flag (pauses key listener while prompting user)
+    let input_active = Arc::new(AtomicBool::new(false));
 
     // Set up pause/resume handling
     let paused = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown_key_listener = shutdown.clone();
+    let done_key_listener = key_listener_done.clone();
+    let input_active_key_listener = input_active.clone();
+
+    // Set up terminal width watch channel for dynamic resize handling
+    let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
 
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
-            if shutdown_key_listener.load(Ordering::SeqCst) {
+            // Only exit when operation is truly complete (not just when user pressed Ctrl+C)
+            if done_key_listener.load(Ordering::SeqCst) {
                 break;
             }
 
+            // Skip event reading while user is being prompted for input
+            // This prevents the key listener from consuming keystrokes meant for stdin
+            if input_active_key_listener.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                if let Ok(Event::Key(key_event)) = event::read() {
-                    match key_event.code {
-                        KeyCode::Char(' ') => {
-                            let _ = tx.send(());
+                match event::read() {
+                    Ok(Event::Key(key_event)) => {
+                        match key_event.code {
+                            KeyCode::Char(' ') => {
+                                let _ = tx.send(());
+                            }
+                            KeyCode::Char('c')
+                                if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                // Just set the flag, don't break - user may decline cancellation
+                                shutdown_key_listener.store(true, Ordering::SeqCst);
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char('c')
-                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            shutdown_key_listener.store(true, Ordering::SeqCst);
-                            break;
-                        }
-                        _ => {}
                     }
+                    Ok(Event::Resize(width, _height)) => {
+                        // Terminal was resized - broadcast the new width
+                        let _ = term_width_tx.send(width);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -400,12 +444,13 @@ async fn main() -> Result<()> {
     let multi = MultiProgress::new();
 
     // Overall progress bar (only shown for multiple files)
+    // Track last terminal width to detect resize
+    let mut last_overall_width = *term_width_rx.borrow();
     let overall_pb = if total_files > 1 {
         let pb = multi.add(ProgressBar::new(total_files as u64));
         pb.set_style(
-            ProgressStyle::default_bar()
-                .template("{prefix:.bold} [{bar:40.green/dim}] {pos}/{len}")?
-                .progress_chars("█▉▊▋▌▍▎▏  "),
+            create_overall_style(last_overall_width)?
+                .progress_chars(PROGRESS_CHARS),
         );
         pb.set_prefix("Files");
         Some(pb)
@@ -417,9 +462,22 @@ async fn main() -> Result<()> {
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     let mut successful_copies = 0u64;
     let mut total_bytes_copied = 0u64;
+    let mut total_copy_duration = Duration::ZERO;
+    let mut total_verify_duration = Duration::ZERO;
 
     // Copy each file
     for source in &sources {
+        // Check for terminal resize and update overall progress bar style
+        let current_width = *term_width_rx.borrow();
+        if current_width != last_overall_width {
+            last_overall_width = current_width;
+            if let Some(ref pb) = overall_pb {
+                if let Ok(style) = create_overall_style(current_width) {
+                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+        }
+
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("\nCopy cancelled by user");
@@ -459,6 +517,9 @@ async fn main() -> Result<()> {
             let should_overwrite = if args.yes {
                 true
             } else {
+                // Pause key listener while prompting
+                input_active.store(true, Ordering::SeqCst);
+
                 eprint!(
                     "\nDestination '{}' already exists. Overwrite? (y/N): ",
                     dest_path.display()
@@ -471,8 +532,9 @@ async fn main() -> Result<()> {
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
 
-                // Re-enable raw mode
+                // Re-enable raw mode and resume key listener
                 raw_mode_guard.restore();
+                input_active.store(false, Ordering::SeqCst);
 
                 input.trim().eq_ignore_ascii_case("y")
             };
@@ -519,17 +581,11 @@ async fn main() -> Result<()> {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| source.display().to_string());
 
-        // Escape braces in filename to prevent template injection
-        // (indicatif templates use {placeholder} syntax)
-        let safe_filename = escape_template_braces(&filename);
-
+        // Set initial style using current terminal width
+        let current_width = *term_width_rx.borrow();
         file_pb.set_style(
-            ProgressStyle::default_bar()
-                .template(&format!(
-                    "{{spinner:.green}} {} [{{bar:40.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}})",
-                    safe_filename
-                ))?
-                .progress_chars("█▉▊▋▌▍▎▏  "),
+            create_copy_style(&filename, current_width)?
+                .progress_chars(PROGRESS_CHARS),
         );
 
         // Perform the copy
@@ -537,9 +593,12 @@ async fn main() -> Result<()> {
             source,
             &dest_path,
             &file_pb,
+            &filename,
             paused.clone(),
             shutdown.clone(),
+            input_active.clone(),
             &mut rx,
+            &term_width_rx,
         )
         .await;
 
@@ -550,29 +609,144 @@ async fn main() -> Result<()> {
             Ok(copy_result) => {
                 successful_copies += 1;
                 total_bytes_copied += copy_result.bytes_copied;
+                total_copy_duration += copy_result.copy_duration;
 
-                // Handle --rm flag: verify copy and remove source
-                if args.rm {
-                    if let Err(error_msg) =
-                        verify_and_remove_source(source, &dest_path, &copy_result.source_hash)
-                    {
-                        eprintln!("\n{}", error_msg);
-                        if args.continue_on_error {
-                            failures.push((source.clone(), error_msg));
-                        } else {
-                            anyhow::bail!("{}", error_msg);
+                // Build stats for this file
+                let copy_speed = format_speed(copy_result.bytes_copied, copy_result.copy_duration);
+                let copy_time = format_duration(copy_result.copy_duration);
+
+                // Verify by default (unless --no-verify)
+                // This loop allows retrying verification if the user cancels but declines deletion
+                let verify_outcome = if !args.no_verify {
+                    loop {
+                        match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown, &term_width_rx) {
+                            Ok(verify_result) => {
+                                total_verify_duration += verify_result.verify_duration;
+                                let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
+                                let verify_time = format_duration(verify_result.verify_duration);
+                                break VerifyOutcome::Passed {
+                                    speed: verify_speed,
+                                    time: verify_time,
+                                };
+                            }
+                            Err(VerifyError::Cancelled) => {
+                                // User pressed Ctrl+C during verification - prompt for confirmation
+                                // Pause key listener while prompting
+                                input_active.store(true, Ordering::SeqCst);
+
+                                eprint!(
+                                    "\nVerification cancelled. Delete destination file '{}'? (y/N): ",
+                                    dest_path.display()
+                                );
+                                io::stderr().flush()?;
+
+                                // Temporarily disable raw mode for input
+                                raw_mode_guard.disable_temporarily();
+
+                                let mut input = String::new();
+                                io::stdin().read_line(&mut input)?;
+
+                                // Re-enable raw mode and resume key listener
+                                raw_mode_guard.restore();
+                                input_active.store(false, Ordering::SeqCst);
+
+                                // Reset shutdown flag to allow continuing
+                                shutdown.store(false, Ordering::SeqCst);
+
+                                if input.trim().eq_ignore_ascii_case("y") {
+                                    // User confirmed deletion
+                                    if let Err(e) = fs::remove_file(&dest_path) {
+                                        eprintln!("Warning: Failed to remove destination file: {}", e);
+                                    } else {
+                                        eprintln!("Destination file deleted.");
+                                    }
+                                    let error_msg = "Verification cancelled by user".to_string();
+                                    if args.continue_on_error {
+                                        failures.push((source.clone(), error_msg));
+                                    } else {
+                                        anyhow::bail!("Verification cancelled by user");
+                                    }
+                                    break VerifyOutcome::Failed;
+                                } else {
+                                    // User declined deletion - restart verification
+                                    eprintln!("Restarting verification...");
+                                    continue;
+                                }
+                            }
+                            Err(VerifyError::Failed(error_msg)) => {
+                                eprintln!("\n{}", error_msg);
+                                if args.continue_on_error {
+                                    failures.push((source.clone(), error_msg));
+                                } else {
+                                    anyhow::bail!("{}", error_msg);
+                                }
+                                break VerifyOutcome::Failed;
+                            }
                         }
                     }
-                }
+                } else {
+                    VerifyOutcome::Skipped
+                };
 
-                if total_files == 1 {
-                    println!(
-                        "\nSuccessfully copied {} to '{}'",
-                        HumanBytes(copy_result.bytes_copied),
-                        dest_path.display()
-                    );
-                    if args.rm {
-                        println!("Source file removed after verification.");
+                // Remove source if --rm and verification passed (or was skipped, which is blocked by flag validation)
+                let should_allow_removal = matches!(verify_outcome, VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped);
+                let removed = if args.rm && should_allow_removal {
+                    match fs::remove_file(source) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            let error_msg = format!("Failed to remove source '{}': {}", source.display(), e);
+                            eprintln!("\n{}", error_msg);
+                            if args.continue_on_error {
+                                failures.push((source.clone(), error_msg));
+                            } else {
+                                anyhow::bail!("{}", error_msg);
+                            }
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                // Print per-file stats
+                let filename = source
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| source.display().to_string());
+
+                let status = match &verify_outcome {
+                    VerifyOutcome::Failed => "fail".red(),
+                    VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped if args.rm && !removed => {
+                        "partial".yellow()
+                    }
+                    _ => "ok".green(),
+                };
+
+                match &verify_outcome {
+                    VerifyOutcome::Passed { speed, time, .. } => {
+                        println!(
+                            "{} {} -> '{}' ({}, copy: {} @ {}, verify: {} @ {})",
+                            status,
+                            filename,
+                            dest_path.display(),
+                            HumanBytes(copy_result.bytes_copied),
+                            copy_time,
+                            copy_speed,
+                            time,
+                            speed
+                        );
+                    }
+                    VerifyOutcome::Skipped | VerifyOutcome::Failed => {
+                        // --no-verify was used, or verification failed (error already printed)
+                        println!(
+                            "{} {} -> '{}' ({}, {} @ {})",
+                            status,
+                            filename,
+                            dest_path.display(),
+                            HumanBytes(copy_result.bytes_copied),
+                            copy_time,
+                            copy_speed
+                        );
                     }
                 }
             }
@@ -582,7 +756,7 @@ async fn main() -> Result<()> {
                     failures.push((source.clone(), error_msg));
                 } else {
                     // Clean up and bail (raw mode cleaned up by RawModeGuard on drop)
-                    shutdown.store(true, Ordering::SeqCst);
+                    key_listener_done.store(true, Ordering::SeqCst);
                     drop(raw_mode_guard); // Explicitly drop to restore terminal before cleanup
                     if let Some(ref pb) = overall_pb {
                         pb.finish_and_clear();
@@ -599,8 +773,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Signal shutdown to stop the key listener
-    shutdown.store(true, Ordering::SeqCst);
+    // Signal key listener to exit (operation complete)
+    key_listener_done.store(true, Ordering::SeqCst);
 
     // Restore terminal state (drop the guard to disable raw mode)
     drop(raw_mode_guard);
@@ -615,14 +789,50 @@ async fn main() -> Result<()> {
 
     // Print summary for multiple files
     if total_files > 1 {
-        println!(
-            "\nCopied {} of {} files ({} total)",
-            successful_copies,
-            total_files,
-            HumanBytes(total_bytes_copied)
-        );
-        if args.rm && successful_copies > 0 {
-            println!("Source files removed after verification.");
+        if successful_copies > 0 {
+            let copy_speed = format_speed(total_bytes_copied, total_copy_duration);
+            let copy_time = format_duration(total_copy_duration);
+
+            // Show verify stats only if verification was enabled AND at least one
+            // verification succeeded. If verification was enabled but all failed,
+            // total_verify_duration remains ZERO and we skip verify stats (the per-file
+            // output already showed the failures).
+            if !args.no_verify && total_verify_duration > Duration::ZERO {
+                let verify_speed = format_speed(total_bytes_copied, total_verify_duration);
+                let verify_time = format_duration(total_verify_duration);
+                println!(
+                    "\n{} Copied {} of {} files ({}, copy: {} @ {}, verify: {} @ {})",
+                    "Summary:".bold(),
+                    successful_copies,
+                    total_files,
+                    HumanBytes(total_bytes_copied),
+                    copy_time,
+                    copy_speed,
+                    verify_time,
+                    verify_speed
+                );
+                if args.rm {
+                    println!("Source files removed after verification.");
+                }
+            } else {
+                // Either --no-verify was used, or all verifications failed
+                println!(
+                    "\n{} Copied {} of {} files ({}, {} @ {})",
+                    "Summary:".bold(),
+                    successful_copies,
+                    total_files,
+                    HumanBytes(total_bytes_copied),
+                    copy_time,
+                    copy_speed
+                );
+            }
+        } else {
+            // All copies failed - show summary without timing stats
+            println!(
+                "\n{} Copied 0 of {} files",
+                "Summary:".bold(),
+                total_files
+            );
         }
     }
 
@@ -638,32 +848,123 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Result of a copy operation, including bytes copied and source hash
-struct CopyResult {
-    bytes_copied: u64,
-    source_hash: [u8; 32],
+/// A SHA-256 hash value.
+///
+/// This newtype wrapper provides type safety to ensure we don't accidentally
+/// confuse hash values with other byte arrays, and provides convenient methods
+/// for hash operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sha256Hash([u8; 32]);
+
+impl Sha256Hash {
+    /// Convert the hash to a hexadecimal string representation.
+    fn to_hex(self) -> String {
+        self.0.iter().map(|b| format!("{:02x}", b)).collect()
+    }
 }
 
-/// Calculate SHA256 hash of a file by reading it completely
-fn calculate_file_hash(path: &Path) -> Result<[u8; 32]> {
+impl From<[u8; 32]> for Sha256Hash {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+/// Result of a copy operation, including bytes copied, source hash, and timing
+struct CopyResult {
+    bytes_copied: u64,
+    source_hash: Sha256Hash,
+    copy_duration: Duration,
+}
+
+/// Result of a verification operation, including timing information
+struct VerifyResult {
+    verify_duration: Duration,
+}
+
+/// Error type for verification operations.
+///
+/// Distinguishes between user cancellation (Ctrl+C) and actual verification
+/// failures, allowing different handling for each case.
+enum VerifyError {
+    /// User cancelled verification with Ctrl+C
+    Cancelled,
+    /// Verification failed (hash mismatch, I/O error, etc.)
+    Failed(String),
+}
+
+/// Outcome of the verification step for a file copy.
+///
+/// This enum makes the verification semantics explicit rather than using
+/// a confusing tuple of `(Option<stats>, bool)` where `true` could mean
+/// either "verification passed" or "verification was skipped".
+enum VerifyOutcome {
+    /// Verification was performed and succeeded, includes timing stats for display
+    Passed {
+        speed: String,
+        time: String,
+    },
+    /// Verification was skipped (--no-verify flag)
+    Skipped,
+    /// Verification was performed but failed
+    Failed,
+}
+
+/// Calculate SHA256 hash of a file with optional progress indicator, cancellation, and resize support.
+///
+/// If `shutdown` is provided and becomes true during calculation, returns an error
+/// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
+///
+/// If `term_width_rx` and `filename` are provided, the progress bar style will be
+/// updated when the terminal is resized.
+fn calculate_file_hash(
+    path: &Path,
+    pb: Option<&ProgressBar>,
+    shutdown: Option<&Arc<AtomicBool>>,
+    term_width_rx: Option<&watch::Receiver<u16>>,
+    filename: Option<&str>,
+) -> Result<Sha256Hash> {
     let mut file = File::open(path).context("Failed to open file for hash verification")?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0; BUFFER_SIZE];
+    let mut bytes_hashed = 0u64;
+
+    // Track last terminal width for resize detection
+    let mut last_width = term_width_rx.map(|rx| *rx.borrow());
 
     loop {
+        // Check for terminal resize and update progress bar style
+        if let (Some(rx), Some(progress), Some(fname), Some(prev_width)) =
+            (term_width_rx, pb, filename, last_width.as_mut())
+        {
+            let current_width = *rx.borrow();
+            if current_width != *prev_width {
+                *prev_width = current_width;
+                if let Ok(style) = create_verify_style(fname, current_width) {
+                    progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+        }
+
+        // Check for cancellation before each read
+        if let Some(shutdown_flag) = shutdown {
+            if shutdown_flag.load(Ordering::SeqCst) {
+                anyhow::bail!("Verification cancelled by user");
+            }
+        }
+
         let bytes_read = file.read(&mut buffer)?;
         if bytes_read == 0 {
             break;
         }
         hasher.update(&buffer[..bytes_read]);
+        bytes_hashed += bytes_read as u64;
+        if let Some(progress) = pb {
+            progress.set_position(bytes_hashed);
+        }
     }
 
-    Ok(hasher.finalize().into())
-}
-
-/// Convert a byte array to a hex string
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    let hash_bytes: [u8; 32] = hasher.finalize().into();
+    Ok(Sha256Hash::from(hash_bytes))
 }
 
 /// Escape braces in a string for use in indicatif templates.
@@ -672,44 +973,267 @@ fn escape_template_braces(s: &str) -> String {
     s.replace('{', "{{").replace('}', "}}")
 }
 
-/// Verify destination matches source and remove the source file.
-///
-/// This function performs SHA256 hash verification to ensure the copy was
-/// successful before removing the source. Returns `Ok(())` on success,
-/// or `Err(error_message)` if verification or removal fails.
-fn verify_and_remove_source(
-    source: &Path,
-    destination: &Path,
-    expected_hash: &[u8; 32],
-) -> Result<(), String> {
-    // Calculate destination hash
-    let dest_hash = calculate_file_hash(destination)
-        .map_err(|e| format!("Failed to verify destination: {}. Source NOT removed.", e))?;
-
-    // Verify hashes match
-    if expected_hash != &dest_hash {
-        return Err(format!(
-            "Hash mismatch! Source NOT removed.\n  Source: {}\n  Dest:   {}",
-            hex_encode(expected_hash),
-            hex_encode(&dest_hash)
-        ));
-    }
-
-    // Safe to remove source
-    fs::remove_file(source)
-        .map_err(|e| format!("Failed to remove source '{}': {}", source.display(), e))?;
-
-    Ok(())
+/// Get the current terminal width, with a fallback default.
+fn get_terminal_width() -> u16 {
+    crossterm::terminal::size()
+        .map(|(w, _)| w)
+        .unwrap_or(80) // Default to 80 columns if detection fails
 }
 
+/// Calculate the progress bar width based on terminal width and fixed element overhead.
+///
+/// The bar width is calculated by subtracting the overhead from the terminal width,
+/// then clamping to a reasonable range (min 10, max 100 characters).
+fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
+    const MIN_BAR_WIDTH: u16 = 10;
+    const MAX_BAR_WIDTH: u16 = 100;
+
+    let available = terminal_width.saturating_sub(fixed_overhead);
+    available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
+}
+
+/// Create a progress style for the overall files progress bar.
+fn create_overall_style(terminal_width: u16) -> Result<ProgressStyle> {
+    // "Files [bar] 999/999" = ~20 chars overhead
+    let bar_width = calculate_bar_width(terminal_width, 20);
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "{{prefix:.bold}} [{{bar:{}.green/dim}}] {{pos}}/{{len}}",
+            bar_width
+        ))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Create a progress style for the copy progress bar.
+fn create_copy_style(filename: &str, terminal_width: u16) -> Result<ProgressStyle> {
+    let safe_filename = escape_template_braces(filename);
+    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename.len()
+    #[allow(clippy::cast_possible_truncation)]
+    let filename_len = filename.len().min(u16::MAX as usize) as u16;
+    let overhead = 60 + filename_len;
+    let bar_width = calculate_bar_width(terminal_width, overhead);
+
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {}",
+            safe_filename, bar_width, PROGRESS_STATS_FORMAT
+        ))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Create a progress style for the verification progress bar.
+fn create_verify_style(filename: &str, terminal_width: u16) -> Result<ProgressStyle> {
+    let safe_filename = escape_template_braces(filename);
+    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename.len()
+    #[allow(clippy::cast_possible_truncation)]
+    let filename_len = filename.len().min(u16::MAX as usize) as u16;
+    let overhead = 70 + filename_len;
+    let bar_width = calculate_bar_width(terminal_width, overhead);
+
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {} verifying",
+            safe_filename, bar_width, PROGRESS_STATS_FORMAT
+        ))
+        .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Format a duration in a human-readable way (e.g., "1.23s", "45.6ms")
+fn format_duration(duration: Duration) -> String {
+    let secs = duration.as_secs_f64();
+    if secs >= 1.0 {
+        format!("{:.2}s", secs)
+    } else {
+        format!("{:.1}ms", secs * 1000.0)
+    }
+}
+
+/// Calculate and format transfer speed as bytes per second.
+///
+/// Handles edge cases including zero duration and potential overflow
+/// when converting from f64 to u64.
+#[allow(clippy::cast_precision_loss)] // Precision loss is acceptable for human-readable display
+fn format_speed(bytes: u64, duration: Duration) -> String {
+    // Use Duration's is_zero() instead of floating-point equality comparison
+    if duration.is_zero() {
+        return "instant".to_string();
+    }
+    let bytes_per_sec = bytes as f64 / duration.as_secs_f64();
+    // Clamp to u64::MAX to prevent overflow when casting from f64.
+    // We also handle negative values (which shouldn't occur) by treating them as 0.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bytes_per_sec_u64 = if bytes_per_sec <= 0.0 {
+        0
+    } else if bytes_per_sec >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        bytes_per_sec as u64
+    };
+    format!("{}/s", HumanBytes(bytes_per_sec_u64))
+}
+
+/// Verify destination matches the expected hash.
+///
+/// This function performs SHA256 hash verification to ensure the copy was
+/// successful. Returns `Ok(VerifyResult)` on success, or `Err(VerifyError)`
+/// if verification fails or is cancelled.
+///
+/// Shows a progress bar for the hash verification process.
+/// Supports cancellation via Ctrl+C through the shutdown flag.
+/// Supports dynamic resize through the terminal width watch channel.
+fn verify_destination(
+    destination: &Path,
+    expected_hash: &Sha256Hash,
+    multi: &MultiProgress,
+    shutdown: &Arc<AtomicBool>,
+    term_width_rx: &watch::Receiver<u16>,
+) -> Result<VerifyResult, VerifyError> {
+    let start_time = Instant::now();
+
+    // Get file size for progress bar
+    let file_size = fs::metadata(destination)
+        .map_err(|e| VerifyError::Failed(format!("Failed to get destination metadata: {}", e)))?
+        .len();
+
+    // Create progress bar for hash verification
+    let filename = destination
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| destination.display().to_string());
+
+    // Set initial style using current terminal width
+    let current_width = *term_width_rx.borrow();
+    let pb = multi.add(ProgressBar::new(file_size));
+    pb.set_style(
+        create_verify_style(&filename, current_width)
+            .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
+            .progress_chars(PROGRESS_CHARS),
+    );
+
+    // Calculate destination hash with progress (supports cancellation and resize)
+    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown), Some(term_width_rx), Some(&filename))
+        .map_err(|e| {
+            pb.finish_and_clear();
+            let error_msg = e.to_string();
+            if error_msg.contains("cancelled") {
+                VerifyError::Cancelled
+            } else {
+                VerifyError::Failed(format!("Failed to verify destination: {}", e))
+            }
+        })?;
+
+    pb.finish_and_clear();
+    multi.remove(&pb);
+
+    // Verify hashes match
+    if *expected_hash != dest_hash {
+        return Err(VerifyError::Failed(format!(
+            "Hash mismatch!\n  Expected: {}\n  Got:      {}",
+            expected_hash.to_hex(),
+            dest_hash.to_hex()
+        )));
+    }
+
+    let verify_duration = start_time.elapsed();
+    Ok(VerifyResult { verify_duration })
+}
+
+/// Prompt user to confirm copy cancellation.
+///
+/// Returns true if user confirms cancellation, false to continue.
+/// Uses crossterm event reading to capture Ctrl+C as a key event (not SIGINT).
+/// Pressing Ctrl+C at this prompt is treated as confirmation to cancel.
+fn prompt_cancel_copy(destination: &Path, input_active: &Arc<AtomicBool>) -> bool {
+    // Pause key listener while we handle input ourselves
+    input_active.store(true, Ordering::SeqCst);
+
+    // Disable raw mode temporarily to print prompt with proper line handling
+    let _ = crossterm::terminal::disable_raw_mode();
+    eprint!(
+        "\nCancel copy? Partial file '{}' will be deleted. (y/N): ",
+        destination.display()
+    );
+    let _ = io::stderr().flush();
+
+    // Re-enable raw mode to capture Ctrl+C as key event (not SIGINT)
+    let _ = crossterm::terminal::enable_raw_mode();
+
+    // Read user response using crossterm events
+    let confirmed = read_yes_no_with_ctrlc();
+
+    // Resume key listener
+    input_active.store(false, Ordering::SeqCst);
+
+    confirmed
+}
+
+/// Read a yes/no response using crossterm events.
+/// Returns true for 'y'/'Y' or Ctrl+C, false for any other input followed by Enter.
+fn read_yes_no_with_ctrlc() -> bool {
+    let mut input = String::new();
+
+    loop {
+        if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+            if let Ok(Event::Key(key_event)) = event::read() {
+                // Only process key press events, not release events
+                if key_event.kind != crossterm::event::KeyEventKind::Press {
+                    continue;
+                }
+
+                match key_event.code {
+                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Ctrl+C means "yes, cancel"
+                        // Print newline for clean output
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        eprintln!();
+                        let _ = crossterm::terminal::enable_raw_mode();
+                        return true;
+                    }
+                    KeyCode::Enter => {
+                        // Print newline for clean output
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        eprintln!();
+                        let _ = crossterm::terminal::enable_raw_mode();
+                        // Check if input was "y" or "Y"
+                        return input.trim().eq_ignore_ascii_case("y");
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                        // Echo the character
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        eprint!("{}", c);
+                        let _ = io::stderr().flush();
+                        let _ = crossterm::terminal::enable_raw_mode();
+                    }
+                    KeyCode::Backspace => {
+                        if input.pop().is_some() {
+                            // Erase character from display
+                            let _ = crossterm::terminal::disable_raw_mode();
+                            eprint!("\x08 \x08"); // backspace, space, backspace
+                            let _ = io::stderr().flush();
+                            let _ = crossterm::terminal::enable_raw_mode();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // All parameters serve distinct purposes for progress/cancellation/resize
 async fn copy_with_progress(
     source: &Path,
     destination: &Path,
     pb: &ProgressBar,
+    filename: &str,
     paused: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    input_active: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
+    term_width_rx: &watch::Receiver<u16>,
 ) -> Result<CopyResult> {
+    let start_time = Instant::now();
     let mut src_file = File::open(source).context("Failed to open source file")?;
     let dst_file = File::create(destination).context("Failed to create destination file")?;
 
@@ -721,10 +1245,28 @@ async fn copy_with_progress(
     let mut total_bytes = 0u64;
     let mut hasher = Sha256::new();
 
+    // Track last terminal width for resize detection
+    let mut last_width = *term_width_rx.borrow();
+
     loop {
-        // Check for shutdown - guard will clean up partial file automatically
+        // Check for terminal resize and update progress bar style
+        let current_width = *term_width_rx.borrow();
+        if current_width != last_width {
+            last_width = current_width;
+            if let Ok(style) = create_copy_style(filename, current_width) {
+                pb.set_style(style.progress_chars(PROGRESS_CHARS));
+            }
+        }
+
+        // Check for shutdown - prompt user for confirmation
         if shutdown.load(Ordering::SeqCst) {
-            return Err(anyhow::anyhow!("Copy cancelled by user"));
+            if prompt_cancel_copy(destination, &input_active) {
+                return Err(anyhow::anyhow!(
+                    "Copy cancelled by user (partial destination file deleted)"
+                ));
+            }
+            // User declined cancellation - reset flag and continue
+            shutdown.store(false, Ordering::SeqCst);
         }
 
         // Check for pause toggle
@@ -739,9 +1281,24 @@ async fn copy_with_progress(
 
         // Wait while paused
         while paused.load(Ordering::SeqCst) {
-            // Check for shutdown while paused - guard will clean up partial file automatically
+            // Check for terminal resize while paused
+            let current_width = *term_width_rx.borrow();
+            if current_width != last_width {
+                last_width = current_width;
+                if let Ok(style) = create_copy_style(filename, current_width) {
+                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+
+            // Check for shutdown while paused - prompt user for confirmation
             if shutdown.load(Ordering::SeqCst) {
-                return Err(anyhow::anyhow!("Copy cancelled by user"));
+                if prompt_cancel_copy(destination, &input_active) {
+                    return Err(anyhow::anyhow!(
+                        "Copy cancelled by user (partial destination file deleted)"
+                    ));
+                }
+                // User declined cancellation - reset flag and continue
+                shutdown.store(false, Ordering::SeqCst);
             }
 
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -793,10 +1350,114 @@ async fn copy_with_progress(
     drop(dst_file);
 
     // Finalize the hash
-    let source_hash: [u8; 32] = hasher.finalize().into();
+    let hash_bytes: [u8; 32] = hasher.finalize().into();
+    let source_hash = Sha256Hash::from(hash_bytes);
+    let copy_duration = start_time.elapsed();
 
     Ok(CopyResult {
         bytes_copied: total_bytes,
         source_hash,
+        copy_duration,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod format_duration_tests {
+        use super::*;
+
+        #[test]
+        fn zero_duration() {
+            assert_eq!(format_duration(Duration::ZERO), "0.0ms");
+        }
+
+        #[test]
+        fn sub_millisecond() {
+            assert_eq!(format_duration(Duration::from_micros(500)), "0.5ms");
+        }
+
+        #[test]
+        fn milliseconds() {
+            assert_eq!(format_duration(Duration::from_millis(500)), "500.0ms");
+        }
+
+        #[test]
+        fn one_second() {
+            assert_eq!(format_duration(Duration::from_secs(1)), "1.00s");
+        }
+
+        #[test]
+        fn seconds_with_decimal() {
+            assert_eq!(format_duration(Duration::from_millis(1500)), "1.50s");
+        }
+
+        #[test]
+        fn large_duration() {
+            assert_eq!(format_duration(Duration::from_secs(3600)), "3600.00s");
+        }
+    }
+
+    mod format_speed_tests {
+        use super::*;
+
+        #[test]
+        fn zero_duration_returns_instant() {
+            assert_eq!(format_speed(1000, Duration::ZERO), "instant");
+        }
+
+        #[test]
+        fn zero_bytes() {
+            // 0 bytes over any time is 0 B/s
+            assert_eq!(format_speed(0, Duration::from_secs(1)), "0 B/s");
+        }
+
+        #[test]
+        fn one_byte_per_second() {
+            assert_eq!(format_speed(1, Duration::from_secs(1)), "1 B/s");
+        }
+
+        #[test]
+        fn kilobytes_per_second() {
+            // 1024 bytes in 1 second = 1 KiB/s
+            assert_eq!(format_speed(1024, Duration::from_secs(1)), "1.00 KiB/s");
+        }
+
+        #[test]
+        fn megabytes_per_second() {
+            // 1 MiB in 1 second = 1 MiB/s
+            let mib = 1024 * 1024;
+            assert_eq!(format_speed(mib, Duration::from_secs(1)), "1.00 MiB/s");
+        }
+
+        #[test]
+        fn gigabytes_per_second() {
+            // 1 GiB in 1 second = 1 GiB/s
+            let gib = 1024 * 1024 * 1024;
+            assert_eq!(format_speed(gib, Duration::from_secs(1)), "1.00 GiB/s");
+        }
+
+        #[test]
+        fn fractional_time() {
+            // 1 MiB in 0.5 seconds = 2 MiB/s
+            let mib = 1024 * 1024;
+            assert_eq!(format_speed(mib, Duration::from_millis(500)), "2.00 MiB/s");
+        }
+
+        #[test]
+        fn very_small_duration() {
+            // Tests the overflow protection for very fast copies
+            let result = format_speed(1024 * 1024 * 1024, Duration::from_nanos(1));
+            // Should not panic, and should return something reasonable
+            assert!(result.ends_with("/s") || result == "instant");
+        }
+
+        #[test]
+        fn very_large_bytes() {
+            // Test with u64::MAX bytes
+            let result = format_speed(u64::MAX, Duration::from_secs(1));
+            assert!(result.ends_with("/s"));
+        }
+    }
 }
