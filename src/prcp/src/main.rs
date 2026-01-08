@@ -721,20 +721,16 @@ async fn main() -> Result<()> {
                                 );
                                 io::stderr().flush()?;
 
-                                // Temporarily disable raw mode for input
-                                raw_mode_guard.disable_temporarily();
+                                // Use crossterm events to capture Ctrl+C as "yes"
+                                let confirmed = read_yes_no_with_ctrlc();
 
-                                let mut input = String::new();
-                                io::stdin().read_line(&mut input)?;
-
-                                // Re-enable raw mode and resume key listener
-                                raw_mode_guard.restore();
+                                // Resume key listener
                                 input_active.store(false, Ordering::SeqCst);
 
                                 // Reset shutdown flag to allow continuing
                                 shutdown.store(false, Ordering::SeqCst);
 
-                                if input.trim().eq_ignore_ascii_case("y") {
+                                if confirmed {
                                     // Delete the unverified file
                                     if let Err(e) = fs::remove_file(&dest_path) {
                                         eprintln!("Warning: Failed to remove destination file: {}", e);
@@ -1278,6 +1274,63 @@ fn verify_destination(
     })
 }
 
+/// Read a yes/no response using crossterm events.
+/// Returns true for 'y'/'Y' or Ctrl+C, false for any other input followed by Enter.
+/// This allows Ctrl+C to be captured as "yes, cancel" rather than terminating the process.
+fn read_yes_no_with_ctrlc() -> bool {
+    use crossterm::event::KeyEventKind;
+
+    let mut input = String::new();
+
+    loop {
+        if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+            if let Ok(Event::Key(key_event)) = event::read() {
+                // Only process key press events, not release events
+                if key_event.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                match key_event.code {
+                    KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        // Ctrl+C means "yes, cancel"
+                        // Print newline for clean output
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        eprintln!();
+                        let _ = crossterm::terminal::enable_raw_mode();
+                        return true;
+                    }
+                    KeyCode::Enter => {
+                        // Print newline for clean output
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        eprintln!();
+                        let _ = crossterm::terminal::enable_raw_mode();
+                        // Check if input was "y" or "Y"
+                        return input.trim().eq_ignore_ascii_case("y");
+                    }
+                    KeyCode::Char(c) => {
+                        input.push(c);
+                        // Echo the character
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        eprint!("{}", c);
+                        let _ = io::stderr().flush();
+                        let _ = crossterm::terminal::enable_raw_mode();
+                    }
+                    KeyCode::Backspace => {
+                        if input.pop().is_some() {
+                            // Erase character from display
+                            let _ = crossterm::terminal::disable_raw_mode();
+                            eprint!("\x08 \x08"); // backspace, space, backspace
+                            let _ = io::stderr().flush();
+                            let _ = crossterm::terminal::enable_raw_mode();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
 /// Remove the source file after successful verification.
 fn remove_source(source: &Path) -> Result<(), String> {
     fs::remove_file(source)
@@ -1366,17 +1419,13 @@ async fn copy_sequential(
             );
             let _ = io::stderr().flush();
 
-            // Temporarily disable raw mode for input
-            let _ = crossterm::terminal::disable_raw_mode();
+            // Use crossterm events to capture Ctrl+C as "yes"
+            let confirmed = read_yes_no_with_ctrlc();
 
-            let mut input = String::new();
-            let read_result = io::stdin().read_line(&mut input);
-
-            // Re-enable raw mode and resume key listener
-            let _ = crossterm::terminal::enable_raw_mode();
+            // Resume key listener
             input_active.store(false, Ordering::SeqCst);
 
-            if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+            if confirmed {
                 return Err(anyhow::anyhow!("Copy cancelled by user"));
             }
 
@@ -1408,17 +1457,13 @@ async fn copy_sequential(
                 );
                 let _ = io::stderr().flush();
 
-                // Temporarily disable raw mode for input
-                let _ = crossterm::terminal::disable_raw_mode();
+                // Use crossterm events to capture Ctrl+C as "yes"
+                let confirmed = read_yes_no_with_ctrlc();
 
-                let mut input = String::new();
-                let read_result = io::stdin().read_line(&mut input);
-
-                // Re-enable raw mode and resume key listener
-                let _ = crossterm::terminal::enable_raw_mode();
+                // Resume key listener
                 input_active.store(false, Ordering::SeqCst);
 
-                if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+                if confirmed {
                     return Err(anyhow::anyhow!("Copy cancelled by user"));
                 }
 
@@ -1610,17 +1655,13 @@ async fn copy_parallel(
             );
             let _ = io::stderr().flush();
 
-            // Temporarily disable raw mode for input
-            let _ = crossterm::terminal::disable_raw_mode();
+            // Use crossterm events to capture Ctrl+C as "yes"
+            let confirmed = read_yes_no_with_ctrlc();
 
-            let mut input = String::new();
-            let read_result = io::stdin().read_line(&mut input);
-
-            // Re-enable raw mode and resume key listener
-            let _ = crossterm::terminal::enable_raw_mode();
+            // Resume key listener
             input_active.store(false, Ordering::SeqCst);
 
-            if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+            if confirmed {
                 // Wait for reader to notice and exit
                 let _ = reader_handle.join();
                 return Err(anyhow::anyhow!("Copy cancelled by user"));
@@ -1643,17 +1684,13 @@ async fn copy_parallel(
                 );
                 let _ = io::stderr().flush();
 
-                // Temporarily disable raw mode for input
-                let _ = crossterm::terminal::disable_raw_mode();
+                // Use crossterm events to capture Ctrl+C as "yes"
+                let confirmed = read_yes_no_with_ctrlc();
 
-                let mut input = String::new();
-                let read_result = io::stdin().read_line(&mut input);
-
-                // Re-enable raw mode and resume key listener
-                let _ = crossterm::terminal::enable_raw_mode();
+                // Resume key listener
                 input_active.store(false, Ordering::SeqCst);
 
-                if read_result.is_ok() && input.trim().eq_ignore_ascii_case("y") {
+                if confirmed {
                     let _ = reader_handle.join();
                     return Err(anyhow::anyhow!("Copy cancelled by user"));
                 }
