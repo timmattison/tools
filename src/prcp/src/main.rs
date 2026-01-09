@@ -194,6 +194,10 @@ struct Args {
     /// Treat all source paths as literal filenames (disable glob expansion)
     #[arg(long)]
     literal: bool,
+
+    /// Suppress per-file status messages (only show progress bar)
+    #[arg(long, short = 'q')]
+    quiet: bool,
 }
 
 /// The shell integration code to add to shell config files.
@@ -890,46 +894,49 @@ async fn main() -> Result<()> {
                     false
                 };
 
-                // Print per-file stats
-                let filename = source
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| source.display().to_string());
+                // Print per-file stats (unless quiet mode, but always show problems)
+                let is_problem = matches!(verify_outcome, VerifyOutcome::Failed)
+                    || (args.rm && !removed);
 
-                let status = match &verify_outcome {
-                    VerifyOutcome::Failed => "fail".red(),
-                    VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped if args.rm && !removed => {
-                        "partial".yellow()
-                    }
-                    _ => "ok".green(),
-                };
+                if !args.quiet || is_problem {
+                    let status = match &verify_outcome {
+                        VerifyOutcome::Failed => "fail".red(),
+                        VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped
+                            if args.rm && !removed =>
+                        {
+                            "partial".yellow()
+                        }
+                        _ => "ok".green(),
+                    };
 
-                match &verify_outcome {
-                    VerifyOutcome::Passed { speed, time, .. } => {
-                        println!(
-                            "{} {} -> '{}' ({}, copy: {} @ {}, verify: {} @ {})",
-                            status,
-                            filename,
-                            dest_path.display(),
-                            HumanBytes(copy_result.bytes_copied),
-                            copy_time,
-                            copy_speed,
-                            time,
-                            speed
-                        );
-                    }
-                    VerifyOutcome::Skipped | VerifyOutcome::Failed => {
-                        // --no-verify was used, or verification failed (error already printed)
-                        println!(
-                            "{} {} -> '{}' ({}, {} @ {})",
-                            status,
-                            filename,
-                            dest_path.display(),
-                            HumanBytes(copy_result.bytes_copied),
-                            copy_time,
-                            copy_speed
-                        );
-                    }
+                    let line = match &verify_outcome {
+                        VerifyOutcome::Passed { speed, time, .. } => {
+                            format!(
+                                "{} {} -> '{}' ({}, copy: {} @ {}, verify: {} @ {})",
+                                status,
+                                filename,
+                                dest_path.display(),
+                                HumanBytes(copy_result.bytes_copied),
+                                copy_time,
+                                copy_speed,
+                                time,
+                                speed
+                            )
+                        }
+                        VerifyOutcome::Skipped | VerifyOutcome::Failed => {
+                            // --no-verify was used, or verification failed (error already printed)
+                            format!(
+                                "{} {} -> '{}' ({}, {} @ {})",
+                                status,
+                                filename,
+                                dest_path.display(),
+                                HumanBytes(copy_result.bytes_copied),
+                                copy_time,
+                                copy_speed
+                            )
+                        }
+                    };
+                    let _ = multi.println(line);
                 }
             }
             Err(e) => {
