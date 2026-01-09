@@ -376,7 +376,7 @@ fn setup_shell_integration() -> Result<(), String> {
     println!("Or open a new terminal window.");
     println!();
     println!("Available commands:");
-    println!("  {}      - List worktrees or change to one", "wt".yellow());
+    println!("  {}  - List worktrees or change to one", "wt".yellow());
     println!("  {} - Next worktree", "wtf".yellow());
     println!("  {} - Previous worktree (back)", "wtb".yellow());
 
