@@ -191,6 +191,10 @@ struct Args {
     #[arg(long, default_value = "16M", value_parser = parse_buffer_size)]
     buffer_size: usize,
 
+    /// Force sequential copy even for cross-device transfers (useful for benchmarking)
+    #[arg(long)]
+    sequential: bool,
+
     /// Treat all source paths as literal filenames (disable glob expansion)
     #[arg(long)]
     literal: bool,
@@ -530,6 +534,32 @@ async fn main() -> Result<()> {
     // but watch::channel requires both tx and rx to be created together
     let (_term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
 
+    // Spawn SIGINT signal handler as backup to key listener
+    // This ensures graceful shutdown even if raw mode isn't capturing Ctrl+C
+    // (e.g., when spawned threads interfere with terminal handling)
+    //
+    // Uses tokio::select! to race between Ctrl+C and a periodic check of the done flag.
+    // This prevents the task from blocking indefinitely on ctrl_c().await when the
+    // operation completes normally (which would cause a hang when awaiting this task).
+    let shutdown_signal = shutdown.clone();
+    let done_signal = key_listener_done.clone();
+    let signal_task = task::spawn(async move {
+        loop {
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    if result.is_ok() {
+                        shutdown_signal.store(true, Ordering::SeqCst);
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if done_signal.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
@@ -780,6 +810,7 @@ async fn main() -> Result<()> {
             &mut rx,
             &term_width_rx,
             args.buffer_size,
+            args.sequential,
         )
         .await;
 
@@ -956,13 +987,14 @@ async fn main() -> Result<()> {
                         pb.finish_and_clear();
                     }
                     let _ = key_task.await;
+                    let _ = signal_task.await;
                     anyhow::bail!("Failed to copy '{}': {}", source.display(), e);
                 }
             }
         }
     }
 
-    // Signal key listener to exit (operation complete)
+    // Signal key listener and signal handler to exit (operation complete)
     key_listener_done.store(true, Ordering::SeqCst);
 
     // Restore terminal state (drop the guard to disable raw mode)
@@ -973,8 +1005,9 @@ async fn main() -> Result<()> {
         pb.finish_and_clear();
     }
 
-    // Wait for key task to finish
+    // Wait for background tasks to finish
     let _ = key_task.await;
+    let _ = signal_task.await;
 
     // Check for early exit error (set during verification cancellation)
     if let Some(error_msg) = early_exit_error {
@@ -1113,6 +1146,19 @@ enum VerifyOutcome {
     Skipped,
     /// Verification was performed but failed
     Failed,
+}
+
+/// Message sent from reader thread to writer task in parallel copy mode.
+///
+/// This enum is used for communication over a bounded channel between
+/// the dedicated reader thread and the async writer task.
+enum CopyMessage {
+    /// Data chunk with buffer and bytes_read
+    Data(Vec<u8>, usize),
+    /// End of file reached
+    Eof,
+    /// Read error occurred
+    Error(String),
 }
 
 /// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
@@ -1632,8 +1678,95 @@ fn hint_sequential_io(file: &File) {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn hint_sequential_io(_file: &File) {}
 
+/// Check if source and destination are on the same physical device.
+///
+/// Used to decide between sequential and parallel copy strategies:
+/// - Same device (e.g., spinning HDD): use sequential I/O to avoid head thrashing
+/// - Different devices (e.g., SSD to SSD): use parallel I/O for better throughput
+///
+/// Returns true (assume same device) if metadata cannot be read, as a safe default.
+#[cfg(unix)]
+fn same_device(source: &Path, destination: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let src_dev = match fs::metadata(source) {
+        Ok(m) => m.dev(),
+        Err(_) => return true, // Can't determine, assume same device (safe default)
+    };
+
+    // For destination, check the parent directory since the file may not exist yet
+    let dst_dir = destination.parent().unwrap_or(destination);
+    let dst_dev = match fs::metadata(dst_dir) {
+        Ok(m) => m.dev(),
+        Err(_) => return true, // Can't determine, assume same device (safe default)
+    };
+
+    src_dev == dst_dev
+}
+
+/// On non-Unix platforms, assume same device (safer default, uses sequential I/O).
+#[cfg(not(unix))]
+fn same_device(_source: &Path, _destination: &Path) -> bool {
+    true
+}
+
+/// Copy a file with progress display, automatically choosing between sequential and parallel strategies.
+///
+/// Strategy selection:
+/// - If `force_sequential` is true: always use sequential copy
+/// - If source and destination are on the same device: use sequential copy (avoids HDD head thrashing)
+/// - Otherwise: use parallel copy for better throughput on cross-device transfers
 #[allow(clippy::too_many_arguments)] // All parameters serve distinct purposes for progress/cancellation/resize
 async fn copy_with_progress(
+    source: &Path,
+    destination: &Path,
+    pb: &ProgressBar,
+    filename: &str,
+    paused: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    input_active: Arc<AtomicBool>,
+    rx: &mut mpsc::UnboundedReceiver<()>,
+    term_width_rx: &watch::Receiver<u16>,
+    buffer_size: usize,
+    force_sequential: bool,
+) -> Result<CopyResult> {
+    if force_sequential || same_device(source, destination) {
+        copy_sequential(
+            source,
+            destination,
+            pb,
+            filename,
+            paused,
+            shutdown,
+            input_active,
+            rx,
+            term_width_rx,
+            buffer_size,
+        )
+        .await
+    } else {
+        copy_parallel(
+            source,
+            destination,
+            pb,
+            filename,
+            paused,
+            shutdown,
+            input_active,
+            rx,
+            term_width_rx,
+            buffer_size,
+        )
+        .await
+    }
+}
+
+/// Sequential copy implementation for same-device scenarios.
+///
+/// Performs read→hash→write in sequence. This is optimal for spinning HDDs
+/// to avoid head thrashing, and is the fallback for non-Unix platforms.
+#[allow(clippy::too_many_arguments)] // All parameters serve distinct purposes for progress/cancellation/resize
+async fn copy_sequential(
     source: &Path,
     destination: &Path,
     pb: &ProgressBar,
@@ -1794,6 +1927,271 @@ async fn copy_with_progress(
     fs::set_permissions(destination, metadata.permissions())?;
 
     // Explicitly close the destination file before verification can occur
+    drop(dst_file);
+
+    // Finalize the hash
+    let source_hash = Blake3Hash::from(hasher.finalize());
+    let copy_duration = start_time.elapsed();
+
+    Ok(CopyResult {
+        bytes_copied: total_bytes,
+        source_hash,
+        copy_duration,
+    })
+}
+
+/// Channel depth for parallel copy operations.
+/// Higher values allow more read-ahead but use more memory.
+const PARALLEL_CHANNEL_DEPTH: usize = 4;
+
+/// Parallel copy implementation for cross-device scenarios.
+///
+/// Uses a dedicated reader thread with a bounded channel to overlap read and write
+/// operations. This is optimal for cross-device transfers (e.g., SSD to SSD) where
+/// both devices can operate simultaneously.
+///
+/// Architecture:
+/// - Reader thread: reads chunks from source, sends via bounded channel
+/// - Writer (async): receives from channel, hashes with Blake3, writes to destination
+///
+/// Cancellation handling (per issue #86 guidance):
+/// - Reader does NOT check shutdown flag (avoids race conditions)
+/// - Reader respects pause flag
+/// - When cancelling: set paused=false, drop receiver to disconnect channel
+/// - Reader exits naturally when its send() fails
+#[allow(clippy::too_many_arguments)] // All parameters serve distinct purposes for progress/cancellation/resize
+async fn copy_parallel(
+    source: &Path,
+    destination: &Path,
+    pb: &ProgressBar,
+    filename: &str,
+    paused: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
+    input_active: Arc<AtomicBool>,
+    rx: &mut mpsc::UnboundedReceiver<()>,
+    term_width_rx: &watch::Receiver<u16>,
+    buffer_size: usize,
+) -> Result<CopyResult> {
+    let start_time = Instant::now();
+
+    // Open source file
+    let src_file = File::open(source).context("Failed to open source file")?;
+
+    // Get source file size for preallocation
+    let file_size = src_file
+        .metadata()
+        .context("Failed to get source file metadata")?
+        .len();
+
+    // Hint sequential read pattern for source file
+    hint_sequential_io(&src_file);
+
+    // Create destination file
+    let dst_file = File::create(destination).context("Failed to create destination file")?;
+
+    // Preallocate space to reduce fragmentation and improve write performance
+    try_preallocate(&dst_file, file_size);
+
+    // Use RAII guard to ensure partial file cleanup on any error path
+    let mut guard = PartialFileGuard::new(destination, dst_file);
+
+    // Bounded channel for reader → writer communication
+    let (data_tx, data_rx) = std::sync::mpsc::sync_channel::<CopyMessage>(PARALLEL_CHANNEL_DEPTH);
+
+    // Shared pause flag for reader thread
+    let reader_paused = Arc::clone(&paused);
+
+    // Spawn reader thread
+    // Note: Reader does NOT check shutdown flag per issue #86 guidance.
+    // It exits when channel send() fails (receiver dropped during cancellation).
+    let reader_buffer_size = buffer_size;
+    let reader_handle = std::thread::spawn(move || {
+        let mut file = src_file;
+
+        loop {
+            // Respect pause flag (but NOT shutdown - that's handled via channel disconnect)
+            while reader_paused.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+
+            // Allocate buffer for this chunk
+            // Note: Buffer pool optimization deferred to follow-up issue
+            let mut buffer = create_uninit_buffer(reader_buffer_size);
+
+            // Read chunk from source
+            match file.read(&mut buffer) {
+                Ok(0) => {
+                    // EOF reached
+                    let _ = data_tx.send(CopyMessage::Eof);
+                    return;
+                }
+                Ok(n) => {
+                    // Send data to writer
+                    // If send fails, receiver was dropped (cancellation) - exit silently
+                    if data_tx.send(CopyMessage::Data(buffer, n)).is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    // Send error to writer
+                    let _ = data_tx.send(CopyMessage::Error(e.to_string()));
+                    return;
+                }
+            }
+        }
+    });
+
+    // Writer runs in the main async task
+    let mut hasher = blake3::Hasher::new();
+    let mut total_bytes = 0_u64;
+
+    // Track last terminal width for resize detection
+    let mut last_width = *term_width_rx.borrow();
+
+    // Throttle UI updates to 5 per second max (every 200ms)
+    const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+    const TIME_CHECK_INTERVAL: u32 = 8;
+    let mut last_update = Instant::now();
+    let mut iteration_count: u32 = 0;
+
+    loop {
+        // Check for pause toggle
+        if rx.try_recv().is_ok() {
+            let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
+            if !was_paused {
+                pb.set_message("PAUSED - Press space to resume");
+            } else {
+                pb.set_message("");
+            }
+        }
+
+        // Check for shutdown - prompt user for confirmation
+        if shutdown.load(Ordering::SeqCst) {
+            if prompt_cancel_copy(destination, &input_active) {
+                // User confirmed cancellation
+                // Per issue #86: unpause reader so it can exit, then drop receiver
+                paused.store(false, Ordering::SeqCst);
+                drop(data_rx);
+                // Don't block waiting for reader - it will exit on its own
+                return Err(anyhow::anyhow!(
+                    "Copy cancelled by user (partial destination file deleted)"
+                ));
+            }
+            // User declined cancellation - reset flag and continue
+            shutdown.store(false, Ordering::SeqCst);
+        }
+
+        // Wait while paused (but keep checking for shutdown/unpause)
+        while paused.load(Ordering::SeqCst) {
+            // Check for terminal resize while paused
+            let current_width = *term_width_rx.borrow();
+            if current_width != last_width {
+                last_width = current_width;
+                if let Ok(style) = create_copy_style(filename, current_width) {
+                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                }
+            }
+
+            // Check for shutdown while paused
+            if shutdown.load(Ordering::SeqCst) {
+                if prompt_cancel_copy(destination, &input_active) {
+                    paused.store(false, Ordering::SeqCst);
+                    drop(data_rx);
+                    return Err(anyhow::anyhow!(
+                        "Copy cancelled by user (partial destination file deleted)"
+                    ));
+                }
+                shutdown.store(false, Ordering::SeqCst);
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Check for unpause
+            if rx.try_recv().is_ok() {
+                paused.store(false, Ordering::SeqCst);
+                pb.set_message("");
+            }
+        }
+
+        // Try to receive data from reader with timeout (allows checking pause/shutdown)
+        match data_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(CopyMessage::Data(buffer, bytes_read)) => {
+                // Hash the data
+                hasher.update(&buffer[..bytes_read]);
+
+                // Write to destination
+                guard
+                    .file_mut()
+                    .write_all(&buffer[..bytes_read])
+                    .context("Failed to write to destination file")?;
+
+                total_bytes += bytes_read as u64;
+                iteration_count = iteration_count.wrapping_add(1);
+
+                // Throttle UI updates
+                if iteration_count % TIME_CHECK_INTERVAL == 0 {
+                    let now = Instant::now();
+                    if now.duration_since(last_update) >= UPDATE_INTERVAL {
+                        last_update = now;
+
+                        // Check for terminal resize
+                        let current_width = *term_width_rx.borrow();
+                        if current_width != last_width {
+                            last_width = current_width;
+                            if let Ok(style) = create_copy_style(filename, current_width) {
+                                pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                            }
+                        }
+
+                        pb.set_position(total_bytes);
+                    }
+                }
+            }
+            Ok(CopyMessage::Eof) => {
+                // Reader finished successfully
+                break;
+            }
+            Ok(CopyMessage::Error(e)) => {
+                // Reader encountered an error
+                return Err(anyhow::anyhow!("Read error: {}", e));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // No data yet, continue loop to check pause/shutdown
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Reader thread exited unexpectedly (shouldn't happen in normal operation)
+                return Err(anyhow::anyhow!("Reader thread disconnected unexpectedly"));
+            }
+        }
+    }
+
+    // Final progress update
+    pb.set_position(total_bytes);
+
+    // Wait for reader thread to complete (it should already be done after sending Eof)
+    // Use a timeout to avoid blocking indefinitely
+    let join_result = reader_handle.join();
+    if join_result.is_err() {
+        return Err(anyhow::anyhow!("Reader thread panicked"));
+    }
+
+    // Defuse the guard and get the file back for final operations
+    let mut dst_file = guard.defuse();
+
+    // Ensure all data is written and synced to disk
+    dst_file
+        .flush()
+        .context("Failed to flush destination file")?;
+    dst_file
+        .sync_all()
+        .context("Failed to sync destination file to disk")?;
+
+    // Copy file permissions
+    let metadata = fs::metadata(source)?;
+    fs::set_permissions(destination, metadata.permissions())?;
+
+    // Explicitly close the destination file
     drop(dst_file);
 
     // Finalize the hash
@@ -1991,6 +2389,62 @@ mod tests {
         fn accept_boundary_maximum() {
             // Exactly 1GB should be accepted
             assert_eq!(parse_buffer_size("1G").unwrap(), 1024 * 1024 * 1024);
+        }
+    }
+
+    #[cfg(unix)]
+    mod same_device_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        #[test]
+        fn files_in_same_directory_are_same_device() {
+            let temp_dir = TempDir::new().unwrap();
+            let file1 = temp_dir.path().join("file1.txt");
+            let file2 = temp_dir.path().join("file2.txt");
+
+            // Create the source file
+            fs::write(&file1, "test content").unwrap();
+
+            // file2 doesn't exist yet, but same_device checks parent directory
+            assert!(same_device(&file1, &file2));
+        }
+
+        #[test]
+        fn source_and_dest_in_same_temp_dir() {
+            let temp_dir = TempDir::new().unwrap();
+            let source = temp_dir.path().join("source.txt");
+            let dest = temp_dir.path().join("subdir/dest.txt");
+
+            // Create source file and destination directory
+            fs::write(&source, "test content").unwrap();
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+            // Both are in the same temp filesystem
+            assert!(same_device(&source, &dest));
+        }
+
+        #[test]
+        fn nonexistent_source_returns_true_as_safe_default() {
+            let temp_dir = TempDir::new().unwrap();
+            let nonexistent = temp_dir.path().join("does_not_exist.txt");
+            let dest = temp_dir.path().join("dest.txt");
+
+            // When source doesn't exist, returns true (safe default for sequential I/O)
+            assert!(same_device(&nonexistent, &dest));
+        }
+
+        #[test]
+        fn nonexistent_dest_parent_returns_true_as_safe_default() {
+            let temp_dir = TempDir::new().unwrap();
+            let source = temp_dir.path().join("source.txt");
+            let dest_with_nonexistent_parent = temp_dir.path().join("no/such/dir/dest.txt");
+
+            fs::write(&source, "test content").unwrap();
+
+            // When destination parent doesn't exist, returns true (safe default)
+            assert!(same_device(&source, &dest_with_nonexistent_parent));
         }
     }
 }
