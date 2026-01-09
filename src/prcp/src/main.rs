@@ -525,16 +525,25 @@ async fn main() -> Result<()> {
     // Spawn SIGINT signal handler as backup to key listener
     // This ensures graceful shutdown even if raw mode isn't capturing Ctrl+C
     // (e.g., when spawned threads interfere with terminal handling)
+    //
+    // Uses tokio::select! to race between Ctrl+C and a periodic check of the done flag.
+    // This prevents the task from blocking indefinitely on ctrl_c().await when the
+    // operation completes normally (which would cause a hang when awaiting this task).
     let shutdown_signal = shutdown.clone();
     let done_signal = key_listener_done.clone();
     let signal_task = task::spawn(async move {
         loop {
-            if done_signal.load(Ordering::SeqCst) {
-                break;
-            }
-            // Wait for SIGINT (Ctrl+C)
-            if tokio::signal::ctrl_c().await.is_ok() {
-                shutdown_signal.store(true, Ordering::SeqCst);
+            tokio::select! {
+                result = tokio::signal::ctrl_c() => {
+                    if result.is_ok() {
+                        shutdown_signal.store(true, Ordering::SeqCst);
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if done_signal.load(Ordering::SeqCst) {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -2339,6 +2348,62 @@ mod tests {
         fn accept_boundary_maximum() {
             // Exactly 1GB should be accepted
             assert_eq!(parse_buffer_size("1G").unwrap(), 1024 * 1024 * 1024);
+        }
+    }
+
+    #[cfg(unix)]
+    mod same_device_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        #[test]
+        fn files_in_same_directory_are_same_device() {
+            let temp_dir = TempDir::new().unwrap();
+            let file1 = temp_dir.path().join("file1.txt");
+            let file2 = temp_dir.path().join("file2.txt");
+
+            // Create the source file
+            fs::write(&file1, "test content").unwrap();
+
+            // file2 doesn't exist yet, but same_device checks parent directory
+            assert!(same_device(&file1, &file2));
+        }
+
+        #[test]
+        fn source_and_dest_in_same_temp_dir() {
+            let temp_dir = TempDir::new().unwrap();
+            let source = temp_dir.path().join("source.txt");
+            let dest = temp_dir.path().join("subdir/dest.txt");
+
+            // Create source file and destination directory
+            fs::write(&source, "test content").unwrap();
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+
+            // Both are in the same temp filesystem
+            assert!(same_device(&source, &dest));
+        }
+
+        #[test]
+        fn nonexistent_source_returns_true_as_safe_default() {
+            let temp_dir = TempDir::new().unwrap();
+            let nonexistent = temp_dir.path().join("does_not_exist.txt");
+            let dest = temp_dir.path().join("dest.txt");
+
+            // When source doesn't exist, returns true (safe default for sequential I/O)
+            assert!(same_device(&nonexistent, &dest));
+        }
+
+        #[test]
+        fn nonexistent_dest_parent_returns_true_as_safe_default() {
+            let temp_dir = TempDir::new().unwrap();
+            let source = temp_dir.path().join("source.txt");
+            let dest_with_nonexistent_parent = temp_dir.path().join("no/such/dir/dest.txt");
+
+            fs::write(&source, "test content").unwrap();
+
+            // When destination parent doesn't exist, returns true (safe default)
+            assert!(same_device(&source, &dest_with_nonexistent_parent));
         }
     }
 }
