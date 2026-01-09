@@ -2,7 +2,7 @@
 name = "prcp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.80"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
