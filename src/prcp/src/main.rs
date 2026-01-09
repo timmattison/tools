@@ -604,6 +604,9 @@ async fn main() -> Result<()> {
     let mut total_copy_duration = Duration::ZERO;
     let mut total_verify_duration = Duration::ZERO;
 
+    // Track early exit errors (for proper cleanup before returning)
+    let mut early_exit_error: Option<String> = None;
+
     // Track completed files for batch progress display
     let mut completed_files = 0_usize;
 
@@ -766,94 +769,68 @@ async fn main() -> Result<()> {
                 let copy_time = format_duration(copy_result.copy_duration);
 
                 // Verify by default (unless --no-verify)
-                // This loop allows retrying verification if the user cancels but declines deletion
+                // Cancellation prompt and resume happen inside verify_destination now
                 let verify_outcome = if !args.no_verify {
-                    loop {
-                        match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown, &term_width_rx, args.buffer_size) {
-                            Ok(verify_result) => {
-                                total_verify_duration += verify_result.verify_duration;
-                                let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
-                                let verify_time = format_duration(verify_result.verify_duration);
+                    match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown, &input_active, &term_width_rx, args.buffer_size) {
+                        Ok(verify_result) => {
+                            total_verify_duration += verify_result.verify_duration;
+                            let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
+                            let verify_time = format_duration(verify_result.verify_duration);
 
-                                // Update batch progress for completed verification
-                                batch_bytes_processed = batch_bytes_processed.saturating_add(copy_result.bytes_copied);
-                                if let Some(ref pb) = batch_pb {
-                                    pb.set_position(batch_bytes_processed);
-                                }
-
-                                break VerifyOutcome::Passed {
-                                    speed: verify_speed,
-                                    time: verify_time,
-                                };
+                            // Update batch progress for completed verification
+                            batch_bytes_processed = batch_bytes_processed.saturating_add(copy_result.bytes_copied);
+                            if let Some(ref pb) = batch_pb {
+                                pb.set_position(batch_bytes_processed);
                             }
-                            Err(VerifyError::Cancelled) => {
-                                // User pressed Ctrl+C during verification - prompt for confirmation
-                                // Pause key listener while prompting
-                                input_active.store(true, Ordering::SeqCst);
 
-                                eprint!(
-                                    "\nVerification cancelled. Delete destination file '{}'? (y/N): ",
-                                    dest_path.display()
-                                );
-                                io::stderr().flush()?;
-
-                                // Temporarily disable raw mode for input
-                                raw_mode_guard.disable_temporarily();
-
-                                let mut input = String::new();
-                                io::stdin().read_line(&mut input)?;
-
-                                // Re-enable raw mode and resume key listener
-                                raw_mode_guard.restore();
-                                input_active.store(false, Ordering::SeqCst);
-
-                                // Reset shutdown flag to allow continuing
-                                shutdown.store(false, Ordering::SeqCst);
-
-                                if input.trim().eq_ignore_ascii_case("y") {
-                                    // User confirmed deletion
-                                    if let Err(e) = fs::remove_file(&dest_path) {
-                                        eprintln!("Warning: Failed to remove destination file: {}", e);
-                                    } else {
-                                        eprintln!("Destination file deleted.");
-                                    }
-                                    let error_msg = "Verification cancelled by user".to_string();
-                                    if args.continue_on_error {
-                                        failures.push((source.clone(), error_msg));
-                                    } else {
-                                        anyhow::bail!("Verification cancelled by user");
-                                    }
-                                    // Reduce batch total since verify won't complete
-                                    if let Some(ref pb) = batch_pb {
-                                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
-                                        pb.set_length(current_total_batch_bytes);
-                                    }
-                                    break VerifyOutcome::Failed;
-                                } else {
-                                    // User declined deletion - restart verification
-                                    eprintln!("Restarting verification...");
-                                    continue;
-                                }
+                            VerifyOutcome::Passed {
+                                speed: verify_speed,
+                                time: verify_time,
                             }
-                            Err(VerifyError::Failed(error_msg)) => {
-                                eprintln!("\n{}", error_msg);
-                                if args.continue_on_error {
-                                    failures.push((source.clone(), error_msg));
-                                } else {
-                                    anyhow::bail!("{}", error_msg);
-                                }
-                                // Reduce batch total since verify failed
-                                if let Some(ref pb) = batch_pb {
-                                    current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
-                                    pb.set_length(current_total_batch_bytes);
-                                }
-                                break VerifyOutcome::Failed;
+                        }
+                        Err(VerifyError::Cancelled) => {
+                            // User already confirmed cancellation via prompt inside verify_destination
+                            if let Err(e) = fs::remove_file(&dest_path) {
+                                eprintln!("Warning: Failed to remove destination file: {}", e);
+                            } else {
+                                eprintln!("Destination file deleted.");
                             }
+                            // Reduce batch total since verify won't complete
+                            if let Some(ref pb) = batch_pb {
+                                current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
+                                pb.set_length(current_total_batch_bytes);
+                            }
+                            if args.continue_on_error {
+                                failures.push((source.clone(), "Verification cancelled by user".to_string()));
+                                VerifyOutcome::Failed
+                            } else {
+                                early_exit_error = Some("Verification cancelled by user".to_string());
+                                VerifyOutcome::Failed
+                            }
+                        }
+                        Err(VerifyError::Failed(error_msg)) => {
+                            eprintln!("\n{}", error_msg);
+                            // Reduce batch total since verify failed
+                            if let Some(ref pb) = batch_pb {
+                                current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
+                                pb.set_length(current_total_batch_bytes);
+                            }
+                            if args.continue_on_error {
+                                failures.push((source.clone(), error_msg));
+                            } else {
+                                early_exit_error = Some(error_msg);
+                            }
+                            VerifyOutcome::Failed
                         }
                     }
                 } else {
                     VerifyOutcome::Skipped
                 };
+
+                // Exit early if verification was cancelled (cleanup will happen at end of main)
+                if early_exit_error.is_some() {
+                    break;
+                }
 
                 // Update completed file count and batch progress message
                 if matches!(verify_outcome, VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped) {
@@ -961,6 +938,11 @@ async fn main() -> Result<()> {
 
     // Wait for key task to finish
     let _ = key_task.await;
+
+    // Check for early exit error (set during verification cancellation)
+    if let Some(error_msg) = early_exit_error {
+        anyhow::bail!("{}", error_msg);
+    }
 
     // Print summary for multiple files
     if total_files > 1 {
@@ -1086,8 +1068,11 @@ enum VerifyOutcome {
 
 /// Calculate Blake3 hash of a file with optional progress indicator, cancellation, and resize support.
 ///
-/// If `shutdown` is provided and becomes true during calculation, returns an error
-/// indicating cancellation. This allows the caller to handle Ctrl+C gracefully.
+/// If `shutdown` is provided and becomes true during calculation, the behavior depends
+/// on whether `input_active` is also provided:
+/// - With `input_active`: Prompts user to confirm cancellation. If declined, resets
+///   shutdown flag and resumes hashing from current position (state preserved).
+/// - Without `input_active`: Returns error immediately for caller to handle.
 ///
 /// If `term_width_rx` and `filename` are provided, the progress bar style will be
 /// updated when the terminal is resized.
@@ -1095,6 +1080,7 @@ fn calculate_file_hash(
     path: &Path,
     pb: Option<&ProgressBar>,
     shutdown: Option<&Arc<AtomicBool>>,
+    input_active: Option<&Arc<AtomicBool>>,
     term_width_rx: Option<&watch::Receiver<u16>>,
     filename: Option<&str>,
     buffer_size: usize,
@@ -1124,7 +1110,21 @@ fn calculate_file_hash(
         // Check for cancellation before each read (keep responsive)
         if let Some(shutdown_flag) = shutdown {
             if shutdown_flag.load(Ordering::SeqCst) {
-                anyhow::bail!("Verification cancelled by user");
+                // If we have input_active, prompt user (verification case with resume support)
+                if let Some(input_flag) = input_active {
+                    if prompt_cancel_verification(path, input_flag) {
+                        // User confirmed cancellation
+                        anyhow::bail!("Verification cancelled by user");
+                    }
+                    // User declined - reset flag and resume
+                    shutdown_flag.store(false, Ordering::SeqCst);
+                    if let Some(progress) = pb {
+                        progress.set_message("Resuming...");
+                    }
+                } else {
+                    // No input_active = just bail (copy hashing case)
+                    anyhow::bail!("Verification cancelled by user");
+                }
             }
         }
 
@@ -1309,13 +1309,16 @@ fn format_speed(bytes: u64, duration: Duration) -> String {
 /// if verification fails or is cancelled.
 ///
 /// Shows a progress bar for the hash verification process.
-/// Supports cancellation via Ctrl+C through the shutdown flag.
+/// Supports cancellation via Ctrl+C through the shutdown flag. If cancelled,
+/// prompts user to confirm deletion - if declined, verification resumes from
+/// the current position without restarting.
 /// Supports dynamic resize through the terminal width watch channel.
 fn verify_destination(
     destination: &Path,
     expected_hash: &Blake3Hash,
     multi: &MultiProgress,
     shutdown: &Arc<AtomicBool>,
+    input_active: &Arc<AtomicBool>,
     term_width_rx: &watch::Receiver<u16>,
     buffer_size: usize,
 ) -> Result<VerifyResult, VerifyError> {
@@ -1341,8 +1344,8 @@ fn verify_destination(
         ProgressBar::new(file_size).with_style(style)
     );
 
-    // Calculate destination hash with progress (supports cancellation and resize)
-    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown), Some(term_width_rx), Some(&filename), buffer_size)
+    // Calculate destination hash with progress (supports cancellation with resume and resize)
+    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown), Some(input_active), Some(term_width_rx), Some(&filename), buffer_size)
         .map_err(|e| {
             pb.finish_and_clear();
             let error_msg = e.to_string();
@@ -1382,6 +1385,35 @@ fn prompt_cancel_copy(destination: &Path, input_active: &Arc<AtomicBool>) -> boo
     let _ = crossterm::terminal::disable_raw_mode();
     eprint!(
         "\nCancel copy? Partial file '{}' will be deleted. (y/N): ",
+        destination.display()
+    );
+    let _ = io::stderr().flush();
+
+    // Re-enable raw mode to capture Ctrl+C as key event (not SIGINT)
+    let _ = crossterm::terminal::enable_raw_mode();
+
+    // Read user response using crossterm events
+    let confirmed = read_yes_no_with_ctrlc();
+
+    // Resume key listener
+    input_active.store(false, Ordering::SeqCst);
+
+    confirmed
+}
+
+/// Prompt user to confirm verification cancellation.
+///
+/// Returns true if user confirms cancellation, false to continue/resume.
+/// Uses crossterm event reading to capture Ctrl+C as a key event (not SIGINT).
+/// Pressing Ctrl+C at this prompt is treated as confirmation to cancel.
+fn prompt_cancel_verification(destination: &Path, input_active: &Arc<AtomicBool>) -> bool {
+    // Pause key listener while we handle input ourselves
+    input_active.store(true, Ordering::SeqCst);
+
+    // Disable raw mode temporarily to print prompt with proper line handling
+    let _ = crossterm::terminal::disable_raw_mode();
+    eprint!(
+        "\nCancel verification? File '{}' will be deleted. (y/N): ",
         destination.display()
     );
     let _ = io::stderr().flush();
