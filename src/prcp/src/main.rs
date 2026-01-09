@@ -62,6 +62,15 @@ impl RawModeGuard {
         }
     }
 
+    /// Create a disabled guard that never enables raw mode.
+    /// Used for multi-file copies where raw mode breaks MultiProgress.
+    fn disabled() -> Self {
+        Self {
+            was_enabled: false,
+            currently_raw: false,
+        }
+    }
+
     /// Temporarily disable raw mode for user input (returns true if was enabled)
     fn disable_temporarily(&mut self) -> bool {
         if self.currently_raw {
@@ -497,7 +506,9 @@ async fn main() -> Result<()> {
     let input_active_key_listener = input_active.clone();
 
     // Set up terminal width watch channel for dynamic resize handling
-    let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
+    // Note: term_width_tx is unused since we let indicatif handle resize internally,
+    // but watch::channel requires both tx and rx to be created together
+    let (_term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
 
     // Spawn key listener task
     let key_task = task::spawn(async move {
@@ -517,49 +528,71 @@ async fn main() -> Result<()> {
             // Poll with 150ms timeout to balance CPU usage and key responsiveness.
             // This provides acceptable latency for Ctrl+C and pause toggle while
             // still reducing idle CPU consumption compared to shorter intervals.
+            // Note: We only handle key events here. Resize events are intentionally
+            // ignored since indicatif handles terminal resize internally.
             if event::poll(Duration::from_millis(150)).unwrap_or(false) {
-                match event::read() {
-                    Ok(Event::Key(key_event)) => {
-                        match key_event.code {
-                            KeyCode::Char(' ') => {
-                                let _ = tx.send(());
-                            }
-                            KeyCode::Char('c')
-                                if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
-                                // Just set the flag, don't break - user may decline cancellation
-                                shutdown_key_listener.store(true, Ordering::SeqCst);
-                            }
-                            _ => {}
+                if let Ok(Event::Key(key_event)) = event::read() {
+                    match key_event.code {
+                        KeyCode::Char(' ') => {
+                            let _ = tx.send(());
                         }
+                        KeyCode::Char('c')
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            // Just set the flag, don't break - user may decline cancellation
+                            shutdown_key_listener.store(true, Ordering::SeqCst);
+                        }
+                        _ => {}
                     }
-                    Ok(Event::Resize(width, _height)) => {
-                        // Terminal was resized - broadcast the new width
-                        let _ = term_width_tx.send(width);
-                    }
-                    _ => {}
                 }
             }
         }
     });
 
     // Enable raw mode for keyboard input (uses RAII guard for safety)
-    let mut raw_mode_guard = RawModeGuard::new();
+    // Only enable for single-file copies - raw mode breaks indicatif's MultiProgress
+    // because \n doesn't include \r in raw mode, causing progress bars to scroll.
+    // For multi-file copies, Ctrl+C still works via terminal SIGINT.
+    let mut raw_mode_guard = if total_files == 1 {
+        RawModeGuard::new()
+    } else {
+        RawModeGuard::disabled()
+    };
 
     // Set up multi-progress display
     let multi = MultiProgress::new();
 
-    // Overall progress bar (only shown for multiple files)
-    // Track last terminal width to detect resize
-    let mut last_overall_width = *term_width_rx.borrow();
-    let overall_pb = if total_files > 1 {
-        let pb = multi.add(ProgressBar::new(total_files as u64));
-        pb.set_style(
-            create_overall_style(last_overall_width)?
-                .progress_chars(PROGRESS_CHARS),
-        );
-        pb.set_prefix("Files");
-        Some(pb)
+    // Get initial terminal width for progress bar styles
+    let initial_width = *term_width_rx.borrow();
+
+    // Calculate total bytes upfront for batch progress (only for multiple files)
+    let verify_enabled = !args.no_verify;
+    let total_batch_bytes = if total_files > 1 {
+        // Calculate total batch work; if it fails, we'll continue without the batch progress bar
+        calculate_total_batch_bytes(&sources, verify_enabled).ok()
+    } else {
+        None
+    };
+
+    // Track current total batch work (may decrease if files are skipped)
+    let mut current_total_batch_bytes = total_batch_bytes.unwrap_or(0);
+    let mut batch_bytes_processed = 0_u64;
+
+    // Combined batch progress bar (only shown for multiple files)
+    // Shows both file count and byte progress in a single bar to avoid
+    // raw mode conflicts with multiple progress bars
+    let batch_pb = if total_files > 1 && total_batch_bytes.is_some() {
+        // Configure progress bar fully before adding to MultiProgress to minimize redraws
+        // Show file count initially - speed/ETA will show once progress starts
+        let initial_msg = format!("(0/{})", total_files);
+        let pb = ProgressBar::new(current_total_batch_bytes)
+            .with_style(
+                create_batch_style(initial_width)?
+                    .progress_chars(PROGRESS_CHARS),
+            )
+            .with_prefix("Batch")
+            .with_message(initial_msg);
+        Some(multi.add(pb))
     } else {
         None
     };
@@ -574,19 +607,11 @@ async fn main() -> Result<()> {
     // Track early exit errors (for proper cleanup before returning)
     let mut early_exit_error: Option<String> = None;
 
+    // Track completed files for batch progress display
+    let mut completed_files = 0_usize;
+
     // Copy each file
     for source in &sources {
-        // Check for terminal resize and update overall progress bar style
-        let current_width = *term_width_rx.borrow();
-        if current_width != last_overall_width {
-            last_overall_width = current_width;
-            if let Some(ref pb) = overall_pb {
-                if let Ok(style) = create_overall_style(current_width) {
-                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
-                }
-            }
-        }
-
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             eprintln!("\nCopy cancelled by user");
@@ -610,9 +635,9 @@ async fn main() -> Result<()> {
                 let error_msg = format!("Failed to read metadata: {}", e);
                 if args.continue_on_error {
                     failures.push((source.clone(), error_msg));
-                    if let Some(ref pb) = overall_pb {
-                        pb.inc(1);
-                    }
+                    // Note: We can't reduce batch total here since we don't know the file size
+                    // The total was calculated from source files that could be read, so if
+                    // metadata fails now, it may not have been included in the first place
                     continue;
                 } else {
                     anyhow::bail!("Failed to read metadata for '{}': {}", source.display(), e);
@@ -620,6 +645,13 @@ async fn main() -> Result<()> {
             }
         };
         let file_size = metadata.len();
+
+        // Calculate bytes this file contributes to batch work (copy + optional verify)
+        let file_batch_bytes = if verify_enabled {
+            file_size.saturating_mul(2)
+        } else {
+            file_size
+        };
 
         // Check if destination exists
         if dest_path.exists() {
@@ -652,8 +684,10 @@ async fn main() -> Result<()> {
                 let error_msg = "Skipped (destination exists)".to_string();
                 if args.continue_on_error || total_files > 1 {
                     failures.push((source.clone(), error_msg));
-                    if let Some(ref pb) = overall_pb {
-                        pb.inc(1);
+                    // Reduce batch total for skipped file
+                    if let Some(ref pb) = batch_pb {
+                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        pb.set_length(current_total_batch_bytes);
                     }
                     continue;
                 } else {
@@ -669,8 +703,10 @@ async fn main() -> Result<()> {
                 let error_msg = format!("Failed to create directory: {}", e);
                 if args.continue_on_error {
                     failures.push((source.clone(), error_msg));
-                    if let Some(ref pb) = overall_pb {
-                        pb.inc(1);
+                    // Reduce batch total for skipped file
+                    if let Some(ref pb) = batch_pb {
+                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        pb.set_length(current_total_batch_bytes);
                     }
                     continue;
                 } else {
@@ -684,17 +720,18 @@ async fn main() -> Result<()> {
         }
 
         // Create per-file progress bar
-        let file_pb = multi.add(ProgressBar::new(file_size));
         let filename = source
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| source.display().to_string());
 
-        // Set initial style using current terminal width
+        // Configure progress bar fully before adding to MultiProgress to minimize redraws
         let current_width = *term_width_rx.borrow();
-        file_pb.set_style(
-            create_copy_style(&filename, current_width)?
-                .progress_chars(PROGRESS_CHARS),
+        let file_pb = multi.add(
+            ProgressBar::new(file_size).with_style(
+                create_copy_style(&filename, current_width)?
+                    .progress_chars(PROGRESS_CHARS),
+            )
         );
 
         // Perform the copy
@@ -721,6 +758,12 @@ async fn main() -> Result<()> {
                 total_bytes_copied += copy_result.bytes_copied;
                 total_copy_duration += copy_result.copy_duration;
 
+                // Update batch progress for completed copy
+                batch_bytes_processed = batch_bytes_processed.saturating_add(copy_result.bytes_copied);
+                if let Some(ref pb) = batch_pb {
+                    pb.set_position(batch_bytes_processed);
+                }
+
                 // Build stats for this file
                 let copy_speed = format_speed(copy_result.bytes_copied, copy_result.copy_duration);
                 let copy_time = format_duration(copy_result.copy_duration);
@@ -733,6 +776,13 @@ async fn main() -> Result<()> {
                             total_verify_duration += verify_result.verify_duration;
                             let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
                             let verify_time = format_duration(verify_result.verify_duration);
+
+                            // Update batch progress for completed verification
+                            batch_bytes_processed = batch_bytes_processed.saturating_add(copy_result.bytes_copied);
+                            if let Some(ref pb) = batch_pb {
+                                pb.set_position(batch_bytes_processed);
+                            }
+
                             VerifyOutcome::Passed {
                                 speed: verify_speed,
                                 time: verify_time,
@@ -745,6 +795,11 @@ async fn main() -> Result<()> {
                             } else {
                                 eprintln!("Destination file deleted.");
                             }
+                            // Reduce batch total since verify won't complete
+                            if let Some(ref pb) = batch_pb {
+                                current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
+                                pb.set_length(current_total_batch_bytes);
+                            }
                             if args.continue_on_error {
                                 failures.push((source.clone(), "Verification cancelled by user".to_string()));
                                 VerifyOutcome::Failed
@@ -755,6 +810,11 @@ async fn main() -> Result<()> {
                         }
                         Err(VerifyError::Failed(error_msg)) => {
                             eprintln!("\n{}", error_msg);
+                            // Reduce batch total since verify failed
+                            if let Some(ref pb) = batch_pb {
+                                current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
+                                pb.set_length(current_total_batch_bytes);
+                            }
                             if args.continue_on_error {
                                 failures.push((source.clone(), error_msg));
                             } else {
@@ -770,6 +830,14 @@ async fn main() -> Result<()> {
                 // Exit early if verification was cancelled (cleanup will happen at end of main)
                 if early_exit_error.is_some() {
                     break;
+                }
+
+                // Update completed file count and batch progress message
+                if matches!(verify_outcome, VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped) {
+                    completed_files += 1;
+                    if let Some(ref pb) = batch_pb {
+                        pb.set_message(format!("({}/{})", completed_files, total_files));
+                    }
                 }
 
                 // Remove source if --rm and verification passed (or was skipped, which is blocked by flag validation)
@@ -838,22 +906,22 @@ async fn main() -> Result<()> {
                 let error_msg = format!("{}", e);
                 if args.continue_on_error {
                     failures.push((source.clone(), error_msg));
+                    // Reduce batch total for failed copy (both copy and verify bytes if applicable)
+                    if let Some(ref pb) = batch_pb {
+                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        pb.set_length(current_total_batch_bytes);
+                    }
                 } else {
                     // Clean up and bail (raw mode cleaned up by RawModeGuard on drop)
                     key_listener_done.store(true, Ordering::SeqCst);
                     drop(raw_mode_guard); // Explicitly drop to restore terminal before cleanup
-                    if let Some(ref pb) = overall_pb {
+                    if let Some(ref pb) = batch_pb {
                         pb.finish_and_clear();
                     }
                     let _ = key_task.await;
                     anyhow::bail!("Failed to copy '{}': {}", source.display(), e);
                 }
             }
-        }
-
-        // Update overall progress
-        if let Some(ref pb) = overall_pb {
-            pb.inc(1);
         }
     }
 
@@ -863,8 +931,8 @@ async fn main() -> Result<()> {
     // Restore terminal state (drop the guard to disable raw mode)
     drop(raw_mode_guard);
 
-    // Finish overall progress bar
-    if let Some(pb) = overall_pb {
+    // Finish progress bar
+    if let Some(pb) = batch_pb {
         pb.finish_and_clear();
     }
 
@@ -1128,16 +1196,42 @@ fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
     available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
 }
 
-/// Create a progress style for the overall files progress bar.
-fn create_overall_style(terminal_width: u16) -> Result<ProgressStyle> {
-    // "Files [bar] 999/999" = ~20 chars overhead
-    let bar_width = calculate_bar_width(terminal_width, 20);
+/// Shared format string for batch progress stats (bytes, speed, ETA).
+/// {msg} is used for file count and status (e.g., "(0/3) estimating..." or "(2/3)")
+const BATCH_PROGRESS_STATS_FORMAT: &str = "{msg} {bytes}/{total_bytes} @ {bytes_per_sec} (~{eta} remaining)";
+
+/// Create a progress style for the batch progress bar.
+///
+/// Shows file count, total bytes processed, throughput, and estimated time remaining.
+fn create_batch_style(terminal_width: u16) -> Result<ProgressStyle> {
+    // "Batch [bar] (99/99) 999.99 GiB/999.99 GiB @ 999.99 MiB/s (~99:99:99 remaining)" = ~85 chars overhead
+    let bar_width = calculate_bar_width(terminal_width, 85);
     ProgressStyle::default_bar()
         .template(&format!(
-            "{{prefix:.bold}} [{{bar:{}.green/dim}}] {{pos}}/{{len}}",
-            bar_width
+            "{{prefix:.bold}} [{{bar:{}.blue/dim}}] {}",
+            bar_width, BATCH_PROGRESS_STATS_FORMAT
         ))
         .map_err(|e| anyhow::anyhow!("{}", e))
+}
+
+/// Calculate total bytes to process from all source files.
+///
+/// Returns the sum of all file sizes. If verification is enabled, the total work
+/// is doubled since each byte needs to be read twice (once for copy, once for verify).
+///
+/// Returns an error if any source file's metadata cannot be read.
+fn calculate_total_batch_bytes(sources: &[PathBuf], verify_enabled: bool) -> Result<u64> {
+    let mut total_bytes = 0_u64;
+    for source in sources {
+        let metadata = fs::metadata(source)
+            .with_context(|| format!("Failed to read metadata for '{}'", source.display()))?;
+        total_bytes = total_bytes.saturating_add(metadata.len());
+    }
+    // If verification is enabled, we read each byte twice
+    if verify_enabled {
+        total_bytes = total_bytes.saturating_mul(2);
+    }
+    Ok(total_bytes)
 }
 
 /// Create a progress style for the copy progress bar.
@@ -1241,13 +1335,13 @@ fn verify_destination(
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| destination.display().to_string());
 
-    // Set initial style using current terminal width
+    // Configure progress bar fully before adding to MultiProgress to minimize redraws
     let current_width = *term_width_rx.borrow();
-    let pb = multi.add(ProgressBar::new(file_size));
-    pb.set_style(
-        create_verify_style(&filename, current_width)
-            .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
-            .progress_chars(PROGRESS_CHARS),
+    let style = create_verify_style(&filename, current_width)
+        .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
+        .progress_chars(PROGRESS_CHARS);
+    let pb = multi.add(
+        ProgressBar::new(file_size).with_style(style)
     );
 
     // Calculate destination hash with progress (supports cancellation with resume and resize)
@@ -1665,6 +1759,7 @@ async fn copy_with_progress(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)] // Tests use unwrap for brevity and clear failure messages
 mod tests {
     use super::*;
 
