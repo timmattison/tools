@@ -179,7 +179,7 @@ struct Args {
     #[arg(long)]
     continue_on_error: bool,
 
-    /// Overwrite all existing destination files without prompting
+    /// Skip all confirmation prompts (assume yes)
     #[arg(long, short = 'y')]
     yes: bool,
 
