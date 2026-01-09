@@ -179,9 +179,13 @@ struct Args {
     #[arg(long)]
     continue_on_error: bool,
 
-    /// Skip all confirmation prompts (assume yes)
+    /// Overwrite all existing destination files without prompting
     #[arg(long, short = 'y')]
     yes: bool,
+
+    /// Skip all existing destination files without prompting
+    #[arg(long, short = 's')]
+    skip_existing: bool,
 
     /// I/O buffer size (e.g., 16M, 64M, 1G). Default: 16M. Range: 4K-1G.
     #[arg(long, default_value = "16M", value_parser = parse_buffer_size)]
@@ -455,6 +459,10 @@ async fn main() -> Result<()> {
         anyhow::bail!("Cannot use --rm with --no-verify: verification is required to safely remove source files.");
     }
 
+    if args.yes && args.skip_existing {
+        anyhow::bail!("Cannot use --yes with --skip-existing: these options are mutually exclusive.");
+    }
+
     // Parse paths: all but last are sources, last is destination
     if args.paths.len() < 2 {
         anyhow::bail!("Usage: prcp <source>... <destination>\n\nAt least one source and a destination are required.");
@@ -607,6 +615,8 @@ async fn main() -> Result<()> {
 
     // Track failures for --continue-on-error mode
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
+    // Track files skipped due to --skip-existing (not counted as failures)
+    let mut skipped_existing: Vec<PathBuf> = Vec::new();
     let mut successful_copies = 0_u64;
     let mut total_bytes_copied = 0_u64;
     let mut total_copy_duration = Duration::ZERO;
@@ -665,6 +675,8 @@ async fn main() -> Result<()> {
         if dest_path.exists() {
             let should_overwrite = if args.yes {
                 true
+            } else if args.skip_existing {
+                false
             } else {
                 // Pause key listener while prompting
                 input_active.store(true, Ordering::SeqCst);
@@ -689,8 +701,18 @@ async fn main() -> Result<()> {
             };
 
             if !should_overwrite {
-                let error_msg = "Skipped (destination exists)".to_string();
-                if args.continue_on_error || total_files > 1 {
+                // When --skip-existing is used, track as skipped (not a failure)
+                // Otherwise, track as a failure or cancel the operation
+                if args.skip_existing {
+                    skipped_existing.push(source.clone());
+                    // Reduce batch total for skipped file
+                    if let Some(ref pb) = batch_pb {
+                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        pb.set_length(current_total_batch_bytes);
+                    }
+                    continue;
+                } else if args.continue_on_error || total_files > 1 {
+                    let error_msg = "Skipped (destination exists)".to_string();
                     failures.push((source.clone(), error_msg));
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
@@ -998,6 +1020,18 @@ async fn main() -> Result<()> {
                 "Summary:".bold(),
                 total_files
             );
+        }
+    }
+
+    // Report skipped files (when using --skip-existing)
+    if !skipped_existing.is_empty() {
+        println!("\nSkipped {} file(s) (already exist):", skipped_existing.len());
+        for path in &skipped_existing {
+            let filename = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            println!("  {}", filename);
         }
     }
 
