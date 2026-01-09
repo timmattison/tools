@@ -17,6 +17,9 @@ struct Cli {
 
     #[arg(long, help = "Include git worktrees in the search")]
     worktrees: bool,
+
+    #[arg(long, help = "Force delete orphaned target directories that cargo clean doesn't remove")]
+    force: bool,
 }
 
 
@@ -107,6 +110,7 @@ fn main() {
     
     let mut total_cleaned = 0;
     let mut total_size_freed = 0u64;
+    let mut total_not_deleted = 0u64;
     let mut projects_found = 0;
     let mut total_failed = 0;
     
@@ -121,17 +125,50 @@ fn main() {
             let cargo_toml_path = entry.path().join("Cargo.toml");
             if cargo_toml_path.exists() {
                 projects_found += 1;
-                let target_size = calculate_target_size(entry.path());
-                
-                if target_size > 0 {
-                    println!("Found Rust project: {} (target size: {})", 
-                            entry.path().display(), 
-                            format_size(target_size));
-                    
+                let size_before = calculate_target_size(entry.path());
+
+                if size_before > 0 {
+                    println!("Found Rust project: {} (target size: {})",
+                            entry.path().display(),
+                            format_size(size_before));
+
                     match run_cargo_clean(entry.path(), cli.dry_run) {
                         Ok(_) => {
                             total_cleaned += 1;
-                            total_size_freed += target_size;
+
+                            // In dry-run mode, report the potential savings
+                            if cli.dry_run {
+                                total_size_freed += size_before;
+                            } else {
+                                // Measure actual space freed
+                                let size_after = calculate_target_size(entry.path());
+                                let actually_freed = size_before.saturating_sub(size_after);
+                                total_size_freed += actually_freed;
+
+                                // Handle orphaned target directories
+                                if size_after > 0 {
+                                    if cli.force {
+                                        // Force delete orphaned target
+                                        let target_dir = entry.path().join("target");
+                                        if target_dir.exists() {
+                                            match std::fs::remove_dir_all(&target_dir) {
+                                                Ok(_) => {
+                                                    total_size_freed += size_after;
+                                                    println!("  Force deleted orphaned target: {}", format_size(size_after));
+                                                }
+                                                Err(e) => {
+                                                    total_not_deleted += size_after;
+                                                    println!("  Warning: Failed to force delete: {}", e);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        total_not_deleted += size_after;
+                                        println!("  Warning: {} could not be deleted (use --force to remove orphaned targets)",
+                                                format_size(size_after));
+                                    }
+                                }
+                            }
                         }
                         Err(_) => {
                             total_failed += 1;
@@ -150,7 +187,10 @@ fn main() {
         println!("Projects failed: {} (see warnings above)", total_failed);
     }
     println!("Space freed: {}", format_size(total_size_freed));
-    
+    if total_not_deleted > 0 {
+        println!("Could not delete: {}", format_size(total_not_deleted));
+    }
+
     if cli.dry_run {
         println!("\nThis was a dry run. Use without --dry-run to actually clean projects.");
     }
