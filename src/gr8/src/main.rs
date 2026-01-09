@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Utc};
 use colored::Colorize;
 use serde::Deserialize;
 use std::process::Command;
@@ -73,6 +73,30 @@ fn format_reset_time(epoch: i64) -> String {
     }
 }
 
+/// Calculates the time remaining until the reset timestamp and formats it as a human-readable string
+/// Returns None if the reset time is in the past or invalid
+/// Returns format like "1h 23m 45s" for times with hours, "5m 30s" for shorter durations
+fn format_time_until_reset(epoch: i64) -> Option<String> {
+    let now = Utc::now().timestamp();
+    let remaining_seconds = epoch - now;
+
+    if remaining_seconds <= 0 {
+        return None;
+    }
+
+    let hours = remaining_seconds / 3600;
+    let minutes = (remaining_seconds % 3600) / 60;
+    let seconds = remaining_seconds % 60;
+
+    if hours > 0 {
+        Some(format!("{}h {}m {}s", hours, minutes, seconds))
+    } else if minutes > 0 {
+        Some(format!("{}m {}s", minutes, seconds))
+    } else {
+        Some(format!("{}s", seconds))
+    }
+}
+
 /// Determines the appropriate color for a rate limit based on remaining percentage
 /// Returns colored string for the remaining count with proper padding applied first.
 /// Padding is applied before colorization to ensure proper column alignment.
@@ -102,17 +126,28 @@ fn colorize_remaining(rate_limit: &RateLimit) -> String {
 }
 
 /// Prints a formatted row for a single rate limit resource
+/// When the rate limit is exceeded (remaining = 0), also displays the time until reset
 fn print_rate_limit_row(name: &str, rate_limit: &RateLimit) {
     let reset_time = format_reset_time(rate_limit.reset);
     let remaining_colored = colorize_remaining(rate_limit);
 
+    // Show time until reset when limit is exceeded
+    let time_until_reset = if rate_limit.remaining == 0 {
+        format_time_until_reset(rate_limit.reset)
+            .map(|t| format!(" ({})", t))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     println!(
-        "{:<30} {:<8} {:<8} {} {}",
+        "{:<30} {:<8} {:<8} {} {}{}",
         name,
         rate_limit.limit,
         rate_limit.used,
         remaining_colored,
-        reset_time
+        reset_time,
+        time_until_reset
     );
 }
 
@@ -152,4 +187,51 @@ fn main() -> Result<()> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_time_until_reset_past_returns_none() {
+        let past_epoch = Utc::now().timestamp() - 100;
+        assert_eq!(format_time_until_reset(past_epoch), None);
+    }
+
+    #[test]
+    fn test_format_time_until_reset_zero_returns_none() {
+        let now_epoch = Utc::now().timestamp();
+        assert_eq!(format_time_until_reset(now_epoch), None);
+    }
+
+    #[test]
+    fn test_format_time_until_reset_seconds_only() {
+        let future_epoch = Utc::now().timestamp() + 45;
+        assert_eq!(format_time_until_reset(future_epoch), Some("45s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_minutes_and_seconds() {
+        let future_epoch = Utc::now().timestamp() + 130; // 2m 10s
+        assert_eq!(format_time_until_reset(future_epoch), Some("2m 10s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_hours_minutes_seconds() {
+        let future_epoch = Utc::now().timestamp() + 3665; // 1h 1m 5s
+        assert_eq!(format_time_until_reset(future_epoch), Some("1h 1m 5s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_exact_hour() {
+        let future_epoch = Utc::now().timestamp() + 3600; // 1h 0m 0s
+        assert_eq!(format_time_until_reset(future_epoch), Some("1h 0m 0s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_exact_minute() {
+        let future_epoch = Utc::now().timestamp() + 60; // 1m 0s
+        assert_eq!(format_time_until_reset(future_epoch), Some("1m 0s".to_string()));
+    }
 }
