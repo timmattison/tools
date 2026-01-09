@@ -186,6 +186,10 @@ struct Args {
     /// I/O buffer size (e.g., 16M, 64M, 1G). Default: 16M. Range: 4K-1G.
     #[arg(long, default_value = "16M", value_parser = parse_buffer_size)]
     buffer_size: usize,
+
+    /// Treat all source paths as literal filenames (disable glob expansion)
+    #[arg(long)]
+    literal: bool,
 }
 
 /// The shell integration code to add to shell config files.
@@ -368,15 +372,19 @@ const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_
 /// Handles both literal file paths and glob patterns (*, ?, []).
 /// Returns an error if a glob pattern matches no files or a literal path doesn't exist.
 /// Glob iteration errors (e.g., permission denied) are collected and reported.
-fn resolve_sources(patterns: &[PathBuf]) -> Result<Vec<PathBuf>> {
+///
+/// If `literal` is true, all paths are treated as literal filenames and glob
+/// expansion is disabled. This is useful for filenames containing glob characters
+/// like brackets (e.g., `[Artist Name] - Song.mp3`).
+fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut glob_errors: Vec<String> = Vec::new();
 
     for pattern in patterns {
         let pattern_str = pattern.to_string_lossy();
 
-        // Check if pattern contains glob characters
-        if pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('[') {
+        // Check if pattern contains glob characters (skip if --literal is set)
+        if !literal && (pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('[')) {
             let glob_iter = glob::glob(&pattern_str)
                 .with_context(|| format!("Invalid glob pattern '{}'", pattern_str))?;
 
@@ -457,7 +465,7 @@ async fn main() -> Result<()> {
     let source_paths: Vec<PathBuf> = source_paths.to_vec();
 
     // Resolve all source files (handles glob patterns)
-    let sources = resolve_sources(&source_paths)?;
+    let sources = resolve_sources(&source_paths, args.literal)?;
     let total_files = sources.len();
 
     // Validate destination for multi-file operations
