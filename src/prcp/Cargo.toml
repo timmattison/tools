@@ -2,6 +2,7 @@
 name = "prcp"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.80"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -9,7 +10,31 @@ indicatif = "0.18.0"
 crossterm = "0.29.0"
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
-sha2 = "0.10"
+blake3 = "1"
+libc = "0.2"
 glob = "0.3"
 dirs = "6.0"
 colored = "3.0"
+
+[lints.rust]
+# Require explicit handling of must-use values
+unused_must_use = "warn"
+
+[lints.clippy]
+# Catch potential issues with number literals that could be constants
+unreadable_literal = "warn"
+# Warn on functions with many arguments (consider refactoring)
+too_many_arguments = "warn"
+# Warn on large enum variants that could impact performance
+large_enum_variant = "warn"
+# Catch potential issues with casts
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+# Documentation quality
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+# FFI safety: require explicit handling of unsafe blocks
+undocumented_unsafe_blocks = "warn"
+# Catch numeric literals that should use type suffixes for clarity
+unseparated_literal_suffix = "warn"
