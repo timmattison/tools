@@ -1081,7 +1081,7 @@ function wt() {
 
 # Quick navigation aliases (reuse wt function for proper error handling)
 alias wtf='wt -f'  # Next worktree
-alias wtp='wt -p'  # Previous worktree
+alias wtb='wt -p'  # Previous worktree (back)
 ```
 
 #### Fish (~/.config/fish/config.fish)
@@ -1100,7 +1100,7 @@ end
 
 # Quick navigation aliases (reuse wt function for proper error handling)
 alias wtf 'wt -f'
-alias wtp 'wt -p'
+alias wtb 'wt -p'
 ```
 
 ### Examples
