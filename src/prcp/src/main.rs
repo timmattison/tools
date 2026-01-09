@@ -292,6 +292,10 @@ fn parse_buffer_size(s: &str) -> Result<usize, String> {
         None => (s.as_str(), ""),
     };
 
+    if num_str.is_empty() {
+        return Err("Buffer size must start with a number (e.g., 16M, 64M, 1G)".to_string());
+    }
+
     let base: usize = num_str
         .parse()
         .map_err(|_| format!("Invalid number: {}", num_str))?;
@@ -1786,6 +1790,19 @@ mod tests {
         fn reject_invalid_number() {
             let result = parse_buffer_size("abc");
             assert!(result.is_err());
+            assert!(result.unwrap_err().contains("must start with a number"));
+        }
+
+        #[test]
+        fn reject_empty_input() {
+            let result = parse_buffer_size("");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("must start with a number"));
+
+            // Whitespace-only should also fail
+            let result = parse_buffer_size("   ");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("must start with a number"));
         }
 
         #[test]
