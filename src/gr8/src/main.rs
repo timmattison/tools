@@ -188,3 +188,50 @@ fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_time_until_reset_past_returns_none() {
+        let past_epoch = Utc::now().timestamp() - 100;
+        assert_eq!(format_time_until_reset(past_epoch), None);
+    }
+
+    #[test]
+    fn test_format_time_until_reset_zero_returns_none() {
+        let now_epoch = Utc::now().timestamp();
+        assert_eq!(format_time_until_reset(now_epoch), None);
+    }
+
+    #[test]
+    fn test_format_time_until_reset_seconds_only() {
+        let future_epoch = Utc::now().timestamp() + 45;
+        assert_eq!(format_time_until_reset(future_epoch), Some("45s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_minutes_and_seconds() {
+        let future_epoch = Utc::now().timestamp() + 130; // 2m 10s
+        assert_eq!(format_time_until_reset(future_epoch), Some("2m 10s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_hours_minutes_seconds() {
+        let future_epoch = Utc::now().timestamp() + 3665; // 1h 1m 5s
+        assert_eq!(format_time_until_reset(future_epoch), Some("1h 1m 5s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_exact_hour() {
+        let future_epoch = Utc::now().timestamp() + 3600; // 1h 0m 0s
+        assert_eq!(format_time_until_reset(future_epoch), Some("1h 0m 0s".to_string()));
+    }
+
+    #[test]
+    fn test_format_time_until_reset_exact_minute() {
+        let future_epoch = Utc::now().timestamp() + 60; // 1m 0s
+        assert_eq!(format_time_until_reset(future_epoch), Some("1m 0s".to_string()));
+    }
+}
