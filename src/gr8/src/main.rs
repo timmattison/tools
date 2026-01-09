@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Utc};
 use colored::Colorize;
 use serde::Deserialize;
 use std::process::Command;
@@ -73,6 +73,30 @@ fn format_reset_time(epoch: i64) -> String {
     }
 }
 
+/// Calculates the time remaining until the reset timestamp and formats it as a human-readable string
+/// Returns None if the reset time is in the past or invalid
+/// Returns format like "1h 23m 45s" for times with hours, "5m 30s" for shorter durations
+fn format_time_until_reset(epoch: i64) -> Option<String> {
+    let now = Utc::now().timestamp();
+    let remaining_seconds = epoch - now;
+
+    if remaining_seconds <= 0 {
+        return None;
+    }
+
+    let hours = remaining_seconds / 3600;
+    let minutes = (remaining_seconds % 3600) / 60;
+    let seconds = remaining_seconds % 60;
+
+    if hours > 0 {
+        Some(format!("{}h {}m {}s", hours, minutes, seconds))
+    } else if minutes > 0 {
+        Some(format!("{}m {}s", minutes, seconds))
+    } else {
+        Some(format!("{}s", seconds))
+    }
+}
+
 /// Determines the appropriate color for a rate limit based on remaining percentage
 /// Returns colored string for the remaining count with proper padding applied first.
 /// Padding is applied before colorization to ensure proper column alignment.
@@ -102,17 +126,28 @@ fn colorize_remaining(rate_limit: &RateLimit) -> String {
 }
 
 /// Prints a formatted row for a single rate limit resource
+/// When the rate limit is exceeded (remaining = 0), also displays the time until reset
 fn print_rate_limit_row(name: &str, rate_limit: &RateLimit) {
     let reset_time = format_reset_time(rate_limit.reset);
     let remaining_colored = colorize_remaining(rate_limit);
 
+    // Show time until reset when limit is exceeded
+    let time_until_reset = if rate_limit.remaining == 0 {
+        format_time_until_reset(rate_limit.reset)
+            .map(|t| format!(" ({})", t))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     println!(
-        "{:<30} {:<8} {:<8} {} {}",
+        "{:<30} {:<8} {:<8} {} {}{}",
         name,
         rate_limit.limit,
         rate_limit.used,
         remaining_colored,
-        reset_time
+        reset_time,
+        time_until_reset
     );
 }
 
