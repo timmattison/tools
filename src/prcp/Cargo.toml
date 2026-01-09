@@ -30,6 +30,11 @@ large_enum_variant = "warn"
 # Catch potential issues with casts
 cast_possible_truncation = "warn"
 cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
 # Documentation quality
 missing_errors_doc = "warn"
 missing_panics_doc = "warn"
+# FFI safety: require explicit handling of unsafe blocks
+undocumented_unsafe_blocks = "warn"
+# Catch numeric literals that should use type suffixes for clarity
+unseparated_literal_suffix = "warn"

@@ -562,8 +562,8 @@ async fn main() -> Result<()> {
 
     // Track failures for --continue-on-error mode
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
-    let mut successful_copies = 0u64;
-    let mut total_bytes_copied = 0u64;
+    let mut successful_copies = 0_u64;
+    let mut total_bytes_copied = 0_u64;
     let mut total_copy_duration = Duration::ZERO;
     let mut total_verify_duration = Duration::ZERO;
 
@@ -1034,7 +1034,7 @@ fn calculate_file_hash(
 
     let mut hasher = blake3::Hasher::new();
     let mut buffer = create_uninit_buffer(buffer_size);
-    let mut bytes_hashed = 0u64;
+    let mut bytes_hashed = 0_u64;
 
     // Track last terminal width for resize detection
     let mut last_width = term_width_rx.map(|rx| *rx.borrow());
@@ -1364,7 +1364,10 @@ fn try_preallocate(file: &File, size: u64) {
     use std::os::unix::io::AsRawFd;
     // posix_fallocate returns 0 on success, error code on failure
     // We ignore the result since this is just an optimization
-    #[allow(clippy::cast_possible_wrap)] // size as libc::off_t is safe for typical file sizes
+    // SAFETY: posix_fallocate is a standard POSIX function. We pass a valid file descriptor
+    // obtained from AsRawFd, offset 0, and the file size. The cast to off_t is safe for
+    // typical file sizes (up to i64::MAX bytes). Errors are ignored as this is an optimization.
+    #[allow(clippy::cast_possible_wrap)]
     unsafe {
         libc::posix_fallocate(file.as_raw_fd(), 0, size as libc::off_t);
     }
@@ -1376,36 +1379,36 @@ fn try_preallocate(file: &File, size: u64) {
     use std::os::unix::io::AsRawFd;
 
     // macOS uses fcntl with F_PREALLOCATE.
-    // Constants and struct layout from <sys/fcntl.h> - libc crate doesn't expose these.
+    // The fstore_t struct layout matches macOS <sys/fcntl.h>.
+    // Using u32 for fst_flags to match the C typedef (u_int32_t).
     #[repr(C)]
     struct FStore {
-        fst_flags: libc::c_uint,
+        fst_flags: u32,
         fst_posmode: libc::c_int,
         fst_offset: libc::off_t,
         fst_length: libc::off_t,
         fst_bytesalloc: libc::off_t,
     }
 
-    const F_ALLOCATECONTIG: libc::c_uint = 0x02; // Allocate contiguous space
-    const F_ALLOCATEALL: libc::c_uint = 0x04; // Allocate all requested space or none
-    const F_PEOFPOSMODE: libc::c_int = 3; // Position relative to physical end of file
-    const F_PREALLOCATE: libc::c_int = 42; // Preallocate storage (from <sys/fcntl.h>)
-
     #[allow(clippy::cast_possible_wrap)]
     let mut fstore = FStore {
-        fst_flags: F_ALLOCATECONTIG | F_ALLOCATEALL,
-        fst_posmode: F_PEOFPOSMODE,
+        fst_flags: libc::F_ALLOCATECONTIG | libc::F_ALLOCATEALL,
+        fst_posmode: libc::F_PEOFPOSMODE,
         fst_offset: 0,
         fst_length: size as libc::off_t,
         fst_bytesalloc: 0,
     };
 
+    // SAFETY: fcntl with F_PREALLOCATE is a macOS-specific system call for file preallocation.
+    // We pass a valid file descriptor from AsRawFd and a pointer to our properly initialized
+    // FStore struct that matches the C fstore_t layout. The fallback to non-contiguous
+    // allocation is safe as we only modify fst_flags before the second call.
     unsafe {
         // Try contiguous allocation first, fall back to any allocation
-        if libc::fcntl(file.as_raw_fd(), F_PREALLOCATE, &mut fstore) == -1 {
+        if libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut fstore) == -1 {
             // If contiguous allocation fails, try non-contiguous
-            fstore.fst_flags = F_ALLOCATEALL;
-            let _ = libc::fcntl(file.as_raw_fd(), F_PREALLOCATE, &mut fstore);
+            fstore.fst_flags = libc::F_ALLOCATEALL;
+            let _ = libc::fcntl(file.as_raw_fd(), libc::F_PREALLOCATE, &mut fstore);
         }
     }
 }
@@ -1423,8 +1426,10 @@ fn try_preallocate(_file: &File, _size: u64) {}
 #[cfg(target_os = "linux")]
 fn hint_sequential_io(file: &File) {
     use std::os::unix::io::AsRawFd;
-    // POSIX_FADV_SEQUENTIAL hints that file will be accessed sequentially
-    // We ignore the result since this is just a hint
+    // SAFETY: posix_fadvise is a standard POSIX function for advising the kernel about
+    // file access patterns. We pass a valid file descriptor from AsRawFd, offset 0,
+    // length 0 (meaning the entire file), and POSIX_FADV_SEQUENTIAL to enable read-ahead.
+    // Errors are ignored as this is just a performance hint.
     unsafe {
         libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL);
     }
@@ -1434,11 +1439,13 @@ fn hint_sequential_io(file: &File) {
 #[cfg(target_os = "macos")]
 fn hint_sequential_io(file: &File) {
     use std::os::unix::io::AsRawFd;
-    // Constant from <sys/fcntl.h> - libc crate doesn't expose this.
-    const F_RDAHEAD: libc::c_int = 45; // Turn read-ahead on/off
+    // SAFETY: fcntl with F_RDAHEAD is a macOS-specific system call to control read-ahead.
+    // We pass a valid file descriptor from AsRawFd and 1 to enable read-ahead.
+    // Errors are ignored as this is just a performance hint.
     unsafe {
         // Enable read-ahead (1 = on)
-        let _ = libc::fcntl(file.as_raw_fd(), F_RDAHEAD, 1);
+        // F_RDAHEAD (45) from <sys/fcntl.h> - not exposed by libc crate
+        let _ = libc::fcntl(file.as_raw_fd(), libc::F_RDAHEAD, 1);
     }
 }
 
@@ -1481,7 +1488,7 @@ async fn copy_with_progress(
     let mut guard = PartialFileGuard::new(destination, dst_file);
 
     let mut buffer = create_uninit_buffer(buffer_size);
-    let mut total_bytes = 0u64;
+    let mut total_bytes = 0_u64;
     let mut hasher = blake3::Hasher::new();
 
     // Track last terminal width for resize detection
