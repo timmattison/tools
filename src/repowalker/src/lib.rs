@@ -62,9 +62,19 @@ pub fn find_main_repo() -> Option<PathBuf> {
         return None;
     }
 
-    // Output is like: /path/to/main-repo/.git
+    // Output is like: /path/to/main-repo/.git (usually absolute, but can be relative)
     let common_dir = String::from_utf8(output.stdout).ok()?.trim().to_string();
     let common_path = PathBuf::from(&common_dir);
+
+    // Handle both absolute and relative paths from git rev-parse.
+    // In practice, --git-common-dir returns absolute paths from worktrees because the
+    // worktree's .git file contains an absolute gitdir: reference. However, git doesn't
+    // guarantee this, so we handle relative paths defensively by joining with git_dir.
+    let common_path = if common_path.is_absolute() {
+        common_path
+    } else {
+        git_dir.join(&common_path)
+    };
 
     // The parent of the .git directory is the repo root
     common_path.parent().map(|p| p.to_path_buf())
