@@ -7,7 +7,7 @@ use std::thread;
 
 use clap::Parser;
 use names::Generator;
-use repowalker::find_git_repo;
+use repowalker::find_main_repo;
 use serde::Deserialize;
 
 /// Configuration file schema for nwt.
@@ -641,12 +641,15 @@ fn main() {
         exit(exit_codes::TMUX_NOT_RUNNING);
     }
 
-    // Find git repo root
-    let repo_root = match find_git_repo() {
+    // Find the main git repo root (resolves to main repo even from worktree)
+    let repo_root = match find_main_repo() {
         Some(root) => root,
         None => {
             error!(config.quiet, "Error: Not in a git repository");
-            error!(config.quiet, "Please run this command from within a git repository.");
+            error!(
+                config.quiet,
+                "Please run this command from within a git repository or worktree."
+            );
             exit(exit_codes::NOT_IN_REPO);
         }
     };
