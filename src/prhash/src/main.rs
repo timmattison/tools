@@ -43,6 +43,34 @@ struct Args {
 }
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
+const MAX_FILENAME_DISPLAY_LEN: usize = 60; // Max characters for filename in progress message
+
+/// Truncates a path for display, keeping the filename visible
+fn truncate_path_for_display(path: &std::path::Path, max_len: usize) -> String {
+    let display = path.display().to_string();
+    if display.len() <= max_len {
+        return display;
+    }
+
+    // Try to keep the filename visible by truncating from the middle
+    if let Some(filename) = path.file_name() {
+        let filename_str = filename.to_string_lossy();
+        if filename_str.len() < max_len - 4 {
+            // We have room for filename + ellipsis + some parent path
+            let remaining = max_len - filename_str.len() - 4; // 4 for ".../""
+            let parent = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            if !parent.is_empty() && remaining > 0 {
+                let truncated_parent: String = parent.chars().take(remaining).collect();
+                return format!("{}.../{}", truncated_parent, filename_str);
+            }
+        }
+        // Filename itself is too long, just truncate from start
+        return format!("...{}", &display[display.len().saturating_sub(max_len - 3)..]);
+    }
+
+    // Fallback: simple truncation from the end
+    format!("{}...", &display[..max_len - 3])
+}
 
 enum HashState {
     Md5(Md5),
@@ -164,7 +192,7 @@ async fn main() -> Result<()> {
     
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        pb.set_message(format!("Hashing {} ({}/{})", file.display(), idx + 1, args.files.len()));
+        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx + 1, args.files.len()));
         
         let result = hash_file_with_progress(
             file,
@@ -177,18 +205,14 @@ async fn main() -> Result<()> {
         
         match result {
             Ok(hash) => {
-                // Clear progress and print result immediately in shasum format
-                pb.suspend(|| {
-                    println!("{}  {}", hash, file.display());
-                });
+                // Print result above progress bar in shasum format
+                pb.println(format!("{}  {}", hash, file.display()));
             }
             Err(e) => {
                 if e.to_string().contains("cancelled by user") {
                     break;
                 }
-                pb.suspend(|| {
-                    eprintln!("prhash: {}: {}", file.display(), e);
-                });
+                pb.println(format!("prhash: {}: {}", file.display(), e));
             }
         }
     }
@@ -234,9 +258,9 @@ async fn hash_file_with_progress(
         if rx.try_recv().is_ok() {
             let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
             if !was_paused {
-                pb.set_message(format!("PAUSED - Press space to resume | Hashing {}", file.display()));
+                pb.set_message(format!("PAUSED - Press space to resume | Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
             } else {
-                pb.set_message(format!("Hashing {}", file.display()));
+                pb.set_message(format!("Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
             }
         }
         
@@ -252,7 +276,7 @@ async fn hash_file_with_progress(
             // Check for unpause
             if rx.try_recv().is_ok() {
                 paused.store(false, Ordering::SeqCst);
-                pb.set_message(format!("Hashing {}", file.display()));
+                pb.set_message(format!("Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
             }
         }
         
