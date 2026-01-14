@@ -98,7 +98,9 @@ enum HashState {
     Sha1(Sha1),
     Sha256(Sha256),
     Sha512(Sha512),
-    /// Boxed to reduce enum size (Blake3Hasher is ~1920 bytes vs ~224 for others)
+    /// Boxed to reduce enum size. Without boxing, Blake3Hasher would bloat the
+    /// enum to its size (~1.9KB), wasting memory for the smaller hash variants.
+    /// See `test_blake3_hasher_size_justifies_boxing` for size verification.
     Blake3(Box<Blake3Hasher>),
 }
 
@@ -442,5 +444,45 @@ mod tests {
         let path = Path::new("/home/user/file.txt");
         let result = truncate_path_for_display(path, 0);
         assert!(result.is_empty(), "Result should be empty for max_len 0: {}", result);
+    }
+
+    /// Verifies that Blake3Hasher is significantly larger than other hashers,
+    /// justifying the use of Box to reduce enum size.
+    ///
+    /// This test documents the size difference and will fail if the size
+    /// relationship changes (e.g., if blake3 crate reduces hasher size),
+    /// prompting a review of whether boxing is still necessary.
+    #[test]
+    fn test_blake3_hasher_size_justifies_boxing() {
+        let blake3_size = std::mem::size_of::<Blake3Hasher>();
+        let sha512_size = std::mem::size_of::<Sha512>();
+        let sha256_size = std::mem::size_of::<Sha256>();
+        let sha1_size = std::mem::size_of::<Sha1>();
+        let md5_size = std::mem::size_of::<Md5>();
+
+        // Find the largest non-Blake3 hasher
+        let largest_other = sha512_size.max(sha256_size).max(sha1_size).max(md5_size);
+
+        // Blake3Hasher should be significantly larger (at least 4x) to justify boxing.
+        // If this fails, the boxing optimization may no longer be worthwhile.
+        assert!(
+            blake3_size >= largest_other * 4,
+            "Blake3Hasher ({} bytes) should be at least 4x larger than the largest \
+             other hasher ({} bytes) to justify boxing. Current ratio: {:.1}x. \
+             Consider removing Box if blake3 has been optimized.",
+            blake3_size,
+            largest_other,
+            blake3_size as f64 / largest_other as f64
+        );
+
+        // Also verify HashState with boxing is smaller than without
+        let boxed_hash_state_size = std::mem::size_of::<HashState>();
+        // A pointer is 8 bytes on 64-bit, so boxed enum should be much smaller than Blake3Hasher
+        assert!(
+            boxed_hash_state_size < blake3_size,
+            "HashState ({} bytes) should be smaller than raw Blake3Hasher ({} bytes)",
+            boxed_hash_state_size,
+            blake3_size
+        );
     }
 }

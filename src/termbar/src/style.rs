@@ -253,17 +253,27 @@ mod tests {
     /// Helper to extract bar width from a template string.
     /// Looks for pattern like `{bar:XX.` where XX is the width.
     ///
-    /// # Safety Note
-    /// This function uses byte-offset string slicing which is safe here because
-    /// indicatif templates are always ASCII. Do not copy this pattern for
-    /// user-facing strings that may contain multi-byte UTF-8 characters.
+    /// Uses character iteration instead of byte slicing to be robust against
+    /// templates containing unicode characters (e.g., emoji filenames).
     fn extract_bar_width(template: &str) -> Option<u16> {
-        // SAFETY: indicatif templates use ASCII-only syntax ({bar:, etc.),
-        // so byte offsets are guaranteed to be valid UTF-8 boundaries.
-        let bar_start = template.find("{bar:")?;
-        let after_bar = &template[bar_start + 5..];
-        let dot_pos = after_bar.find('.')?;
-        after_bar[..dot_pos].parse().ok()
+        // Find "{bar:" pattern using character iteration, not byte offsets.
+        // This handles templates with unicode filenames correctly.
+        let bar_marker: Vec<char> = "{bar:".chars().collect();
+        let chars: Vec<char> = template.chars().collect();
+
+        // Find the start position of "{bar:" in character indices
+        let bar_start = chars
+            .windows(bar_marker.len())
+            .position(|window| window == bar_marker)?;
+
+        // Extract digits after "{bar:" until we hit a non-digit
+        let width_str: String = chars
+            .iter()
+            .skip(bar_start + bar_marker.len())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+
+        width_str.parse().ok()
     }
 
     #[test]
