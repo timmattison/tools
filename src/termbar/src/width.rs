@@ -110,11 +110,9 @@ impl TerminalWidthWatcher {
 
                 let mut sigwinch = match signal(SignalKind::window_change()) {
                     Ok(s) => s,
-                    Err(_e) => {
+                    Err(_) => {
                         // Non-critical: progress bar resize won't work,
                         // but crossterm Event::Resize may still work.
-                        #[cfg(debug_assertions)]
-                        eprintln!("Debug: SIGWINCH handler setup failed: {_e}");
                         return;
                     }
                 };

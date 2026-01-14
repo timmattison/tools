@@ -136,6 +136,8 @@ mod tests {
         assert_eq!(escape_template_braces("{test}"), "{{test}}");
         assert_eq!(escape_template_braces("file{1}.txt"), "file{{1}}.txt");
         assert_eq!(escape_template_braces("{}"), "{{}}");
+        // Empty string should return empty string
+        assert_eq!(escape_template_braces(""), "");
     }
 
     #[test]

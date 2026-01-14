@@ -3,7 +3,7 @@
 //! This module provides builders for creating progress bar styles that
 //! automatically adjust to the terminal width.
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressStyle;
 
 use crate::error::{Result, TermbarError};
 use crate::{calculate_bar_width, escape_template_braces, PROGRESS_CHARS};
@@ -137,25 +137,6 @@ impl ProgressStyleBuilder {
             .template(&template)
             .map_err(|e| TermbarError::StyleCreation(e.to_string()))?
             .progress_chars(&self.progress_chars))
-    }
-
-    /// Apply the progress style to an existing progress bar.
-    ///
-    /// This is a convenience method for updating a progress bar's style
-    /// after a terminal resize.
-    ///
-    /// # Arguments
-    ///
-    /// * `pb` - The progress bar to update.
-    /// * `terminal_width` - The current terminal width in columns.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the progress style template is invalid.
-    pub fn apply(&self, pb: &ProgressBar, terminal_width: u16) -> Result<()> {
-        let style = self.build(terminal_width)?;
-        pb.set_style(style);
-        Ok(())
     }
 
     /// Create the template string for this style type.

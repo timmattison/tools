@@ -13,7 +13,7 @@ use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar};
 use shellsetup::ShellIntegration;
-use termbar::{ProgressStyleBuilder, TerminalWidth};
+use termbar::{ProgressStyleBuilder, TerminalWidthWatcher};
 // Blake3 imported via blake3 crate (no Digest trait needed)
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -478,10 +478,10 @@ async fn main() -> Result<()> {
     let done_key_listener = key_listener_done.clone();
     let input_active_key_listener = input_active.clone();
 
-    // Set up terminal width watch channel for dynamic resize handling.
-    // The transmitter is used by both the SIGWINCH handler (Unix) and
-    // key_task (via crossterm Event::Resize) to update width on terminal resize.
-    let (term_width_tx, term_width_rx) = watch::channel(TerminalWidth::get_or_default());
+    // Set up terminal width watcher for dynamic resize handling.
+    // Uses the termbar library for consistent width detection and SIGWINCH handling.
+    let term_width_watcher = TerminalWidthWatcher::new();
+    let term_width_rx = term_width_watcher.receiver();
 
     // Spawn SIGINT signal handler as backup to key listener
     // This ensures graceful shutdown even if raw mode isn't capturing Ctrl+C
@@ -513,45 +513,10 @@ async fn main() -> Result<()> {
     // This catches resize events even when raw mode is disabled (multi-file mode).
     // In single-file mode (raw mode enabled), crossterm's Event::Resize may also
     // fire; watch channels handle duplicate updates gracefully.
-    #[cfg(unix)]
-    let resize_task = {
-        let term_width_tx = term_width_tx.clone();
-        let done_resize = key_listener_done.clone();
-        task::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
+    let resize_task = term_width_watcher.spawn_sigwinch_handler(key_listener_done.clone());
 
-            let mut sigwinch = match signal(SignalKind::window_change()) {
-                Ok(s) => s,
-                Err(_e) => {
-                    // Non-critical: progress bar resize won't work in multi-file mode,
-                    // but crossterm Event::Resize may still work in single-file mode.
-                    #[cfg(debug_assertions)]
-                    eprintln!("Debug: SIGWINCH handler setup failed: {_e}");
-                    return;
-                }
-            };
-
-            loop {
-                tokio::select! {
-                    _ = sigwinch.recv() => {
-                        let new_width = TerminalWidth::get_or_default();
-                        let _ = term_width_tx.send(new_width);
-                    }
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                        if done_resize.load(Ordering::SeqCst) {
-                            break;
-                        }
-                    }
-                }
-            }
-        })
-    };
-
-    #[cfg(not(unix))]
-    let resize_task = task::spawn(async {});
-
-    // Move term_width_tx to key_task (SIGWINCH handler already cloned it)
-    let term_width_tx_key = term_width_tx;
+    // Clone sender for key_task to handle crossterm Event::Resize
+    let term_width_tx_key = term_width_watcher.sender().clone();
 
     // Spawn key listener task
     let key_task = task::spawn(async move {
