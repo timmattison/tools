@@ -139,7 +139,7 @@ impl GitHubClient {
         loop {
             let response = self
                 .client
-                .get(&format!("https://api.github.com/orgs/{}/repos", org))
+                .get(format!("https://api.github.com/orgs/{}/repos", org))
                 .query(&[
                     ("per_page", per_page.to_string()),
                     ("page", page.to_string()),
@@ -207,7 +207,7 @@ impl GitHubClient {
     pub async fn archive_repository(&self, owner: &str, repo: &str) -> Result<()> {
         let response = self
             .client
-            .patch(&format!(
+            .patch(format!(
                 "https://api.github.com/repos/{}/{}",
                 owner, repo
             ))

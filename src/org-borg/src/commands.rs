@@ -215,7 +215,7 @@ async fn clone_repositories(
                             e
                         );
                     } else {
-                        println!("{} Archived {}", "📦".to_string(), repo.name.yellow());
+                        println!("📦 Archived {}", repo.name.yellow());
                     }
                 }
             }
