@@ -34,9 +34,9 @@ enum HashAlgorithm {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Progress hash - compute file hashes with progress bar", long_about = None)]
 struct Args {
-    /// Hash algorithm to use
+    /// Hash algorithm to use (defaults to blake3)
     #[arg(short = 'a', long, value_enum)]
-    algorithm: HashAlgorithm,
+    algorithm: Option<HashAlgorithm>,
     
     /// Files to hash
     files: Vec<PathBuf>,
@@ -90,7 +90,16 @@ async fn main() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     
     let args = Args::parse();
-    
+
+    // Default to blake3 if no algorithm specified
+    let algorithm = match args.algorithm {
+        Some(alg) => alg,
+        None => {
+            eprintln!("prhash: using blake3 (no algorithm specified)");
+            HashAlgorithm::Blake3
+        }
+    };
+
     if args.files.is_empty() {
         anyhow::bail!("No files specified");
     }
@@ -159,7 +168,7 @@ async fn main() -> Result<()> {
         
         let result = hash_file_with_progress(
             file,
-            args.algorithm,
+            algorithm,
             &pb,
             paused.clone(),
             shutdown.clone(),
