@@ -3,7 +3,7 @@ use clap::{Parser, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -231,6 +231,9 @@ async fn main() -> Result<()> {
                 // break shell pipelines like `prhash file.txt > hashes.txt`.
                 pb.suspend(|| {
                     println!("{}  {}", hash, file.display());
+                    // Return cursor to column 0 for progress bar (needed in raw mode)
+                    print!("\r");
+                    let _ = std::io::stdout().flush();
                 });
             }
             Err(e) => {
