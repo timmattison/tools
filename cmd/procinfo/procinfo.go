@@ -205,5 +205,5 @@ func displayProcessInfo(pid string, showEnv, showFiles, showNetwork, verbose boo
 		}
 	}
 
-	fmt.Println("\n")
+	fmt.Println()
 }

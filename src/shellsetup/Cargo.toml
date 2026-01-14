@@ -1,24 +1,21 @@
 [package]
-name = "cwt"
+name = "shellsetup"
 version = "0.1.0"
 edition.workspace = true
-
-[[bin]]
-name = "cwt"
-path = "src/main.rs"
+description = "Shell integration library for adding tool functions to shell config files"
+license = "MIT"
 
 [dependencies]
-repowalker.workspace = true
-shellsetup.workspace = true
-clap.workspace = true
 colored.workspace = true
+dirs.workspace = true
+thiserror.workspace = true
 
 [lints.rust]
 # Enforce stricter checks to catch issues early
 unsafe_code = "deny"
 
 [lints.clippy]
-# Pedantic lints help catch subtle issues like redundant code
+# Pedantic lints help catch subtle issues
 pedantic = { level = "warn", priority = -1 }
 # Allow certain pedantic lints that are too strict for this codebase
 missing_errors_doc = "allow"

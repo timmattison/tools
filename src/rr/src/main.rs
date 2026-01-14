@@ -147,9 +147,9 @@ fn main() {
 
                                 // Handle orphaned target directories
                                 if size_after > 0 {
+                                    let target_dir = entry.path().join("target");
                                     if cli.force {
                                         // Force delete orphaned target
-                                        let target_dir = entry.path().join("target");
                                         if target_dir.exists() {
                                             match std::fs::remove_dir_all(&target_dir) {
                                                 Ok(_) => {
@@ -164,8 +164,9 @@ fn main() {
                                         }
                                     } else {
                                         total_not_deleted += size_after;
-                                        println!("  Warning: {} could not be deleted (use --force to remove orphaned targets)",
-                                                format_size(size_after));
+                                        println!("  Warning: {} in {} could not be deleted (use --force to remove orphaned targets)",
+                                                format_size(size_after),
+                                                target_dir.display());
                                     }
                                 }
                             }

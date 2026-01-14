@@ -123,6 +123,7 @@ windows-sys = { version = "0.60", features = [
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 repowalker = { path = "src/repowalker" }
+shellsetup = { path = "src/shellsetup" }
 
 [workspace.lints.rust]
 # Require explicit handling of must-use values

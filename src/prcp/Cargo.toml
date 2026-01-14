@@ -13,7 +13,7 @@ tokio.workspace = true
 blake3.workspace = true
 libc.workspace = true
 glob.workspace = true
-dirs.workspace = true
+shellsetup.workspace = true
 colored.workspace = true
 
 [dev-dependencies]

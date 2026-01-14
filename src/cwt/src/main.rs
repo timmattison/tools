@@ -1,11 +1,10 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 use clap::Parser;
 use colored::Colorize;
 use repowalker::find_git_repo;
+use shellsetup::ShellIntegration;
 
 /// Exit codes for different error conditions.
 mod exit_codes {
@@ -92,8 +91,13 @@ struct Cli {
     #[arg(conflicts_with_all = ["forward", "prev", "shell_setup"])]
     target: Option<String>,
 
-    /// Add shell integration (wt function and aliases) to your shell config.
-    #[arg(long, conflicts_with_all = ["forward", "prev", "target"])]
+    /// Add shell integration to your shell config. Adds these commands:
+    ///
+    ///   wt [target]  - List worktrees or change to one
+    ///   wtf          - Next worktree (forward)
+    ///   wtb          - Previous worktree (back)
+    ///   wtm          - Main worktree
+    #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target"])]
     shell_setup: bool,
 
     /// Suppress error messages.
@@ -280,10 +284,8 @@ fn display_worktree_list(worktrees: &[Worktree], current_idx: Option<usize>) {
     }
 }
 
-/// The shell integration code to add to shell config files.
-const SHELL_INTEGRATION: &str = r#"
-# cwt - Change Worktree shell integration
-# Added by: cwt --shell-setup
+/// The shell code to add to shell config files.
+const SHELL_CODE: &str = r#"
 function wt() {
     if [ $# -eq 0 ]; then
         # No args: show list interactively
@@ -296,91 +298,23 @@ function wt() {
     fi
 }
 
-# Quick navigation aliases (reuse wt function for proper error handling)
+# Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
+alias wtm='wt main'  # Main worktree
 "#;
 
-/// Marker to detect if shell integration is already installed.
-const SHELL_INTEGRATION_MARKER: &str = "cwt - Change Worktree shell integration";
-
 /// Sets up shell integration by adding the wt function to the user's shell config.
-fn setup_shell_integration() -> Result<(), String> {
-    // Get home directory
-    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
+    let integration = ShellIntegration::new("cwt", "Change Worktree", SHELL_CODE)
+        .with_command("wt", "List worktrees or change to one")
+        .with_command("wtf", "Next worktree")
+        .with_command("wtb", "Previous worktree (back)")
+        .with_command("wtm", "Main worktree")
+        // Old installations ended with this alias (before end marker was added)
+        .with_old_end_marker("alias wtb='wt -p'");
 
-    // Detect shell from SHELL environment variable
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let shell_name = Path::new(&shell)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    // Determine which config file to use
-    let config_file = match shell_name {
-        "zsh" => home.join(".zshrc"),
-        "bash" => {
-            // Prefer .bashrc, but use .bash_profile on macOS if .bashrc doesn't exist
-            let bashrc = home.join(".bashrc");
-            let bash_profile = home.join(".bash_profile");
-            if bashrc.exists() {
-                bashrc
-            } else if bash_profile.exists() {
-                bash_profile
-            } else {
-                bashrc // Create .bashrc if neither exists
-            }
-        }
-        _ => {
-            return Err(format!(
-                "Unsupported shell: {shell_name}. Please manually add the shell integration to your config.\n\
-                 See the README for shell integration examples: https://github.com/timmattison/tools#cwt-change-worktree"
-            ));
-        }
-    };
-
-    // Check if already installed
-    if config_file.exists() {
-        let contents = fs::read_to_string(&config_file)
-            .map_err(|e| format!("Could not read {}: {}", config_file.display(), e))?;
-
-        if contents.contains(SHELL_INTEGRATION_MARKER) {
-            println!(
-                "{} Shell integration already installed in {}",
-                "✓".green(),
-                config_file.display()
-            );
-            return Ok(());
-        }
-    }
-
-    // Append shell integration to config file
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&config_file)
-        .map_err(|e| format!("Could not open {}: {}", config_file.display(), e))?;
-
-    file.write_all(SHELL_INTEGRATION.as_bytes())
-        .map_err(|e| format!("Could not write to {}: {}", config_file.display(), e))?;
-
-    println!(
-        "{} Shell integration added to {}",
-        "✓".green(),
-        config_file.display()
-    );
-    println!();
-    println!("To activate, run:");
-    println!("  {} {}", "source".cyan(), config_file.display());
-    println!();
-    println!("Or open a new terminal window.");
-    println!();
-    println!("Available commands:");
-    println!("  {}  - List worktrees or change to one", "wt".yellow());
-    println!("  {} - Next worktree", "wtf".yellow());
-    println!("  {} - Previous worktree (back)", "wtb".yellow());
-
-    Ok(())
+    integration.setup()
 }
 
 fn main() {
@@ -615,5 +549,10 @@ mod tests {
         let worktrees = parse_worktree_list(output);
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].branch, Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_shell_code_contains_wtm() {
+        assert!(SHELL_CODE.contains("alias wtm='wt main'"));
     }
 }
