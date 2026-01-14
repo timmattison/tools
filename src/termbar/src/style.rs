@@ -252,7 +252,14 @@ mod tests {
 
     /// Helper to extract bar width from a template string.
     /// Looks for pattern like `{bar:XX.` where XX is the width.
+    ///
+    /// # Safety Note
+    /// This function uses byte-offset string slicing which is safe here because
+    /// indicatif templates are always ASCII. Do not copy this pattern for
+    /// user-facing strings that may contain multi-byte UTF-8 characters.
     fn extract_bar_width(template: &str) -> Option<u16> {
+        // SAFETY: indicatif templates use ASCII-only syntax ({bar:, etc.),
+        // so byte offsets are guaranteed to be valid UTF-8 boundaries.
         let bar_start = template.find("{bar:")?;
         let after_bar = &template[bar_start + 5..];
         let dot_pos = after_bar.find('.')?;

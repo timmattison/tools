@@ -207,6 +207,10 @@ impl TerminalWidthWatcher {
     /// Consider using [`spawn_sigwinch_handler_with_shutdown`](Self::spawn_sigwinch_handler_with_shutdown)
     /// for cleaner shutdown semantics. This method polls the `done` flag every 100ms,
     /// while the shutdown channel version exits immediately when signaled.
+    ///
+    /// The 100ms polling interval balances responsiveness (shutdown within 100ms)
+    /// against CPU usage (10 wakeups/second when idle). This is acceptable for
+    /// short-lived operations like file copies where the overhead is negligible.
     #[must_use]
     pub fn spawn_sigwinch_handler(&self, done: Arc<AtomicBool>) -> JoinHandle<()> {
         #[cfg(unix)]
