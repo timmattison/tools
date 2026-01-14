@@ -21,10 +21,6 @@ use git::{get_git_user_email, ProgressCallback, ScanOptions, ScanProgress, Searc
 use ollama::OllamaClient;
 use ui::ProgressDisplay;
 
-// Allow holding locks across await points - these are intentional and safe because:
-// 1. The first case runs in a blocking task with no contention
-// 2. The second case runs after the UI thread has joined
-#[allow(clippy::await_holding_lock)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -171,10 +167,14 @@ async fn main() -> Result<()> {
         
         // We'll use spawn_blocking to avoid the nested runtime issue
         tokio::task::spawn_blocking(move || {
+            // Clone the result data to avoid holding the lock across await
+            let result_data = {
+                let guard = result.lock().unwrap();
+                guard.clone()
+            };
             // Block on the async operation
             tokio::runtime::Handle::current().block_on(async move {
-                let result_guard = result.lock().unwrap();
-                if let Err(e) = display_results(&result_guard, &args, use_ollama, Some(progress_clone), cancellation_token).await {
+                if let Err(e) = display_results(&result_data, &args, use_ollama, Some(progress_clone), cancellation_token).await {
                     eprintln!("Error displaying results: {}", e);
                 }
             })
@@ -199,7 +199,8 @@ async fn main() -> Result<()> {
     
     // After TUI exits, print the results to stdout (if not cancelled)
     if !user_cancelled {
-        let result = search_result.lock().unwrap();
+        // Clone to avoid holding lock across await
+        let result = search_result.lock().unwrap().clone();
         // Use a new cancellation token that won't be cancelled for final output
         display_results(&result, &args, use_ollama, None, CancellationToken::new()).await?;
     }

@@ -22,18 +22,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Progress information for the UI
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub struct ProgressInfo {
-    pub dirs_checked: usize,
-    pub repos_found: usize,
-    pub current_path: String,
-    pub start_time: Instant,
-    pub threshold_time: DateTime<Local>,
-    pub end_time: Option<DateTime<Local>>,
-}
-
 /// Simple progress display for the terminal UI
 pub struct ProgressDisplay {
     dirs_checked: Arc<AtomicUsize>,
@@ -101,11 +89,6 @@ impl ProgressDisplay {
     }
 
     // Ollama status methods
-    #[allow(dead_code)]
-    pub fn set_ollama_active(&self, active: bool) {
-        self.ollama_active.store(active, Ordering::Relaxed);
-    }
-
     pub fn is_ollama_active(&self) -> bool {
         self.ollama_active.load(Ordering::Relaxed)
     }
@@ -136,11 +119,6 @@ impl ProgressDisplay {
 
     pub fn should_show_ollama_panel(&self) -> bool {
         self.is_ollama_active()
-    }
-
-    #[allow(dead_code)]
-    pub fn should_exit_ui(&self) -> bool {
-        self.is_scan_complete()
     }
 
     pub fn cancellation_token(&self) -> CancellationToken {

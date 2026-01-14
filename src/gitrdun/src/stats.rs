@@ -20,21 +20,23 @@ impl GitOpStats {
         self.total_duration += duration;
     }
 
+    /// Calculate the average duration per operation.
+    ///
+    /// Uses nanosecond arithmetic to correctly handle counts exceeding `u32::MAX`.
     pub fn average(&self) -> Duration {
         if self.count == 0 {
-            Duration::new(0, 0)
+            Duration::ZERO
         } else {
-            self.total_duration / u32::try_from(self.count).unwrap_or(u32::MAX)
+            // Use nanoseconds to avoid u32 overflow issues with Duration::div
+            let total_nanos = self.total_duration.as_nanos();
+            let avg_nanos = total_nanos / u128::from(self.count);
+            // Safe: average of durations can't exceed the max duration
+            Duration::from_nanos(u64::try_from(avg_nanos).unwrap_or(u64::MAX))
         }
     }
 
     pub fn count(&self) -> u64 {
         self.count
-    }
-
-    #[allow(dead_code)]
-    pub fn total_duration(&self) -> Duration {
-        self.total_duration
     }
 }
 

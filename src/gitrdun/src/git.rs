@@ -61,35 +61,6 @@ pub fn is_git_repository(path: &Path, stats: &GitStats) -> Result<bool> {
     Ok(result)
 }
 
-/// Get the Git directory path
-///
-/// # Errors
-///
-/// Returns an error if the path is not a git repository.
-#[allow(dead_code)]
-pub fn get_git_dir(path: &Path, stats: &GitStats) -> Result<PathBuf> {
-    let timer = Timer::new();
-    
-    // Quick check for .git directory first
-    let git_path = path.join(".git");
-    if git_path.exists() && git_path.is_dir() {
-        stats.record_git_dir(timer.elapsed());
-        return Ok(git_path);
-    }
-
-    // Try to open as git repository using git2
-    match Repository::open(path) {
-        Ok(_) => {
-            stats.record_git_dir(timer.elapsed());
-            Ok(git_path)
-        }
-        Err(e) => {
-            stats.record_git_dir(timer.elapsed());
-            Err(anyhow!("Not a git repository: {}", e))
-        }
-    }
-}
-
 /// Get the current git user email
 ///
 /// # Errors
@@ -164,7 +135,7 @@ impl CommitInfo {
 }
 
 /// Search results from a repository scan
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub repositories: HashMap<PathBuf, Vec<CommitInfo>>,
     pub inaccessible_dirs: Vec<String>,

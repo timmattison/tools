@@ -30,13 +30,12 @@ struct OllamaRequest {
     stream: bool,
 }
 
-/// Ollama API response chunk structure
+/// Ollama API response chunk structure.
+///
+/// Note: The API also returns `model` and `created_at` fields which we ignore
+/// since they're not needed for our use case.
 #[derive(Deserialize)]
 struct OllamaResponseChunk {
-    #[allow(dead_code)]
-    model: Option<String>,
-    #[allow(dead_code)]
-    created_at: Option<String>,
     response: String,
     done: bool,
 }
