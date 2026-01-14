@@ -198,6 +198,10 @@ struct Args {
     #[arg(long)]
     sequential: bool,
 
+    /// Disable buffer pool for parallel copy (allocates new buffer per chunk instead of reusing)
+    #[arg(long)]
+    no_buffer_pool: bool,
+
     /// Treat all source paths as literal filenames (disable glob expansion)
     #[arg(long)]
     literal: bool,
@@ -815,6 +819,7 @@ async fn main() -> Result<()> {
             &term_width_rx,
             args.buffer_size,
             args.sequential,
+            !args.no_buffer_pool,
         )
         .await;
 
@@ -1735,6 +1740,7 @@ async fn copy_with_progress(
     term_width_rx: &watch::Receiver<u16>,
     buffer_size: usize,
     force_sequential: bool,
+    use_buffer_pool: bool,
 ) -> Result<CopyResult> {
     if force_sequential || same_device(source, destination) {
         copy_sequential(
@@ -1762,6 +1768,7 @@ async fn copy_with_progress(
             rx,
             term_width_rx,
             buffer_size,
+            use_buffer_pool,
         )
         .await
     }
@@ -1977,6 +1984,7 @@ async fn copy_parallel(
     rx: &mut mpsc::UnboundedReceiver<()>,
     term_width_rx: &watch::Receiver<u16>,
     buffer_size: usize,
+    use_buffer_pool: bool,
 ) -> Result<CopyResult> {
     let start_time = Instant::now();
 
@@ -2004,6 +2012,18 @@ async fn copy_parallel(
     // Bounded channel for reader → writer communication
     let (data_tx, data_rx) = std::sync::mpsc::sync_channel::<CopyMessage>(PARALLEL_CHANNEL_DEPTH);
 
+    // Buffer pool: writer returns used buffers to reader for reuse (reduces allocation overhead)
+    let (buffer_return_tx, buffer_return_rx) = if use_buffer_pool {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(PARALLEL_CHANNEL_DEPTH);
+        // Pre-allocate buffer pool
+        for _ in 0..PARALLEL_CHANNEL_DEPTH {
+            let _ = tx.send(create_uninit_buffer(buffer_size));
+        }
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
+
     // Shared pause flag for reader thread
     let reader_paused = Arc::clone(&paused);
 
@@ -2020,9 +2040,14 @@ async fn copy_parallel(
                 std::thread::sleep(Duration::from_millis(50));
             }
 
-            // Allocate buffer for this chunk
-            // Note: Buffer pool optimization deferred to follow-up issue
-            let mut buffer = create_uninit_buffer(reader_buffer_size);
+            // Get buffer from pool or allocate new one
+            let mut buffer = if let Some(ref rx) = buffer_return_rx {
+                // Try to get a recycled buffer from the pool (short timeout to avoid stalling)
+                rx.recv_timeout(Duration::from_millis(10))
+                    .unwrap_or_else(|_| create_uninit_buffer(reader_buffer_size))
+            } else {
+                create_uninit_buffer(reader_buffer_size)
+            };
 
             // Read chunk from source
             match file.read(&mut buffer) {
@@ -2151,6 +2176,12 @@ async fn copy_parallel(
 
                         pb.set_position(total_bytes);
                     }
+                }
+
+                // Return buffer to pool for reuse (if buffer pool is enabled)
+                if let Some(ref tx) = buffer_return_tx {
+                    // try_send to avoid blocking if pool is full (buffer will be dropped instead)
+                    let _ = tx.try_send(buffer);
                 }
             }
             Ok(CopyMessage::Eof) => {
