@@ -154,7 +154,10 @@ async fn clone_repositories(
 ) -> Result<()> {
     let multi_progress = MultiProgress::new();
     let main_pb = multi_progress.add(ProgressBar::new(repos.len() as u64));
-    // Calculate dynamic progress bar width based on terminal size
+    // Calculate dynamic progress bar width based on terminal size.
+    // Note: Width is calculated once at start; the progress bar won't resize
+    // if the terminal is resized during the operation. This is acceptable for
+    // the relatively short duration of repository cloning operations.
     let terminal_width = TerminalWidth::get_or_default();
     // Overhead: spinner(2) + brackets(4) + pos/len(15) + text(15) + spaces(4) = ~40
     let bar_width = calculate_bar_width(terminal_width, 40);
