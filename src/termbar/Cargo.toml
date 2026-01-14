@@ -1,0 +1,12 @@
+[package]
+name = "termbar"
+version = "0.1.0"
+edition.workspace = true
+description = "Terminal progress bar library with resize support"
+license = "MIT"
+
+[dependencies]
+crossterm.workspace = true
+indicatif.workspace = true
+tokio.workspace = true
+thiserror.workspace = true

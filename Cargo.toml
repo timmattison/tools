@@ -124,6 +124,7 @@ clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
+termbar = { path = "src/termbar" }
 
 [workspace.lints.rust]
 # Require explicit handling of must-use values

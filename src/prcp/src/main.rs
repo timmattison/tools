@@ -11,8 +11,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar};
 use shellsetup::ShellIntegration;
+use termbar::{ProgressStyleBuilder, TerminalWidth};
 // Blake3 imported via blake3 crate (no Digest trait needed)
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -302,12 +303,6 @@ fn format_buffer_size(size: usize) -> String {
     }
 }
 
-/// Progress bar characters for smooth progress visualization.
-const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
-
-/// Shared format string for progress stats (bytes, percentage, speed, ETA).
-const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_per_sec}, {eta})";
-
 /// Resolve source patterns into a list of files.
 ///
 /// # Behavior
@@ -486,7 +481,7 @@ async fn main() -> Result<()> {
     // Set up terminal width watch channel for dynamic resize handling.
     // The transmitter is used by both the SIGWINCH handler (Unix) and
     // key_task (via crossterm Event::Resize) to update width on terminal resize.
-    let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
+    let (term_width_tx, term_width_rx) = watch::channel(TerminalWidth::get_or_default());
 
     // Spawn SIGINT signal handler as backup to key listener
     // This ensures graceful shutdown even if raw mode isn't capturing Ctrl+C
@@ -539,7 +534,7 @@ async fn main() -> Result<()> {
             loop {
                 tokio::select! {
                     _ = sigwinch.recv() => {
-                        let new_width = get_terminal_width();
+                        let new_width = TerminalWidth::get_or_default();
                         let _ = term_width_tx.send(new_width);
                     }
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {
@@ -641,8 +636,9 @@ async fn main() -> Result<()> {
         let initial_msg = format!("(0/{})", total_files);
         let pb = ProgressBar::new(current_total_batch_bytes)
             .with_style(
-                create_batch_style(initial_width)?
-                    .progress_chars(PROGRESS_CHARS),
+                ProgressStyleBuilder::batch()
+                    .build(initial_width)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
             )
             .with_prefix("Batch")
             .with_message(initial_msg);
@@ -797,8 +793,9 @@ async fn main() -> Result<()> {
         let current_width = *term_width_rx.borrow();
         let file_pb = multi.add(
             ProgressBar::new(file_size).with_style(
-                create_copy_style(&filename, current_width)?
-                    .progress_chars(PROGRESS_CHARS),
+                ProgressStyleBuilder::copy(&filename)
+                    .build(current_width)
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
             )
         );
 
@@ -1251,8 +1248,8 @@ fn calculate_file_hash(
                     let current_width = *rx.borrow();
                     if current_width != *prev_width {
                         *prev_width = current_width;
-                        if let Ok(style) = create_verify_style(fname, current_width) {
-                            progress.set_style(style.progress_chars(PROGRESS_CHARS));
+                        if let Ok(style) = ProgressStyleBuilder::verify(fname).build(current_width) {
+                            progress.set_style(style);
                         }
                     }
                 }
@@ -1270,49 +1267,6 @@ fn calculate_file_hash(
     }
 
     Ok(Blake3Hash::from(hasher.finalize()))
-}
-
-/// Escape braces in a string for use in indicatif templates.
-/// Indicatif uses `{placeholder}` syntax, so literal braces must be doubled.
-fn escape_template_braces(s: &str) -> String {
-    s.replace('{', "{{").replace('}', "}}")
-}
-
-/// Get the current terminal width, with a fallback default.
-fn get_terminal_width() -> u16 {
-    crossterm::terminal::size()
-        .map(|(w, _)| w)
-        .unwrap_or(80) // Default to 80 columns if detection fails
-}
-
-/// Calculate the progress bar width based on terminal width and fixed element overhead.
-///
-/// The bar width is calculated by subtracting the overhead from the terminal width,
-/// then clamping to a reasonable range (min 10, max 100 characters).
-fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
-    const MIN_BAR_WIDTH: u16 = 10;
-    const MAX_BAR_WIDTH: u16 = 100;
-
-    let available = terminal_width.saturating_sub(fixed_overhead);
-    available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
-}
-
-/// Shared format string for batch progress stats (bytes, speed, ETA).
-/// {msg} is used for file count and status (e.g., "(0/3) estimating..." or "(2/3)")
-const BATCH_PROGRESS_STATS_FORMAT: &str = "{msg} {bytes}/{total_bytes} @ {bytes_per_sec} (~{eta} remaining)";
-
-/// Create a progress style for the batch progress bar.
-///
-/// Shows file count, total bytes processed, throughput, and estimated time remaining.
-fn create_batch_style(terminal_width: u16) -> Result<ProgressStyle> {
-    // "Batch [bar] (99/99) 999.99 GiB/999.99 GiB @ 999.99 MiB/s (~99:99:99 remaining)" = ~85 chars overhead
-    let bar_width = calculate_bar_width(terminal_width, 85);
-    ProgressStyle::default_bar()
-        .template(&format!(
-            "{{prefix:.bold}} [{{bar:{}.blue/dim}}] {}",
-            bar_width, BATCH_PROGRESS_STATS_FORMAT
-        ))
-        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Calculate total bytes to process from all source files.
@@ -1333,40 +1287,6 @@ fn calculate_total_batch_bytes(sources: &[PathBuf], verify_enabled: bool) -> Res
         total_bytes = total_bytes.saturating_mul(2);
     }
     Ok(total_bytes)
-}
-
-/// Create a progress style for the copy progress bar.
-fn create_copy_style(filename: &str, terminal_width: u16) -> Result<ProgressStyle> {
-    let safe_filename = escape_template_braces(filename);
-    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename.len()
-    #[allow(clippy::cast_possible_truncation)]
-    let filename_len = filename.len().min(u16::MAX as usize) as u16;
-    let overhead = 60 + filename_len;
-    let bar_width = calculate_bar_width(terminal_width, overhead);
-
-    ProgressStyle::default_bar()
-        .template(&format!(
-            "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {}",
-            safe_filename, bar_width, PROGRESS_STATS_FORMAT
-        ))
-        .map_err(|e| anyhow::anyhow!("{}", e))
-}
-
-/// Create a progress style for the verification progress bar.
-fn create_verify_style(filename: &str, terminal_width: u16) -> Result<ProgressStyle> {
-    let safe_filename = escape_template_braces(filename);
-    // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename.len()
-    #[allow(clippy::cast_possible_truncation)]
-    let filename_len = filename.len().min(u16::MAX as usize) as u16;
-    let overhead = 70 + filename_len;
-    let bar_width = calculate_bar_width(terminal_width, overhead);
-
-    ProgressStyle::default_bar()
-        .template(&format!(
-            "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {} verifying",
-            safe_filename, bar_width, PROGRESS_STATS_FORMAT
-        ))
-        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 /// Format a duration in a human-readable way (e.g., "1.23s", "45.6ms")
@@ -1438,9 +1358,9 @@ fn verify_destination(
 
     // Configure progress bar fully before adding to MultiProgress to minimize redraws
     let current_width = *term_width_rx.borrow();
-    let style = create_verify_style(&filename, current_width)
-        .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?
-        .progress_chars(PROGRESS_CHARS);
+    let style = ProgressStyleBuilder::verify(&filename)
+        .build(current_width)
+        .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?;
     let pb = multi.add(
         ProgressBar::new(file_size).with_style(style)
     );
@@ -1849,8 +1769,8 @@ async fn copy_sequential(
             let current_width = *term_width_rx.borrow();
             if current_width != last_width {
                 last_width = current_width;
-                if let Ok(style) = create_copy_style(filename, current_width) {
-                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                if let Ok(style) = ProgressStyleBuilder::copy(filename).build(current_width) {
+                    pb.set_style(style);
                 }
             }
 
@@ -1903,8 +1823,8 @@ async fn copy_sequential(
                 let current_width = *term_width_rx.borrow();
                 if current_width != last_width {
                     last_width = current_width;
-                    if let Ok(style) = create_copy_style(filename, current_width) {
-                        pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                    if let Ok(style) = ProgressStyleBuilder::copy(filename).build(current_width) {
+                        pb.set_style(style);
                     }
                 }
 
@@ -2093,8 +2013,8 @@ async fn copy_parallel(
             let current_width = *term_width_rx.borrow();
             if current_width != last_width {
                 last_width = current_width;
-                if let Ok(style) = create_copy_style(filename, current_width) {
-                    pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                if let Ok(style) = ProgressStyleBuilder::copy(filename).build(current_width) {
+                    pb.set_style(style);
                 }
             }
 
@@ -2144,8 +2064,8 @@ async fn copy_parallel(
                         let current_width = *term_width_rx.borrow();
                         if current_width != last_width {
                             last_width = current_width;
-                            if let Ok(style) = create_copy_style(filename, current_width) {
-                                pb.set_style(style.progress_chars(PROGRESS_CHARS));
+                            if let Ok(style) = ProgressStyleBuilder::copy(filename).build(current_width) {
+                                pb.set_style(style);
                             }
                         }
 

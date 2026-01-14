@@ -5,6 +5,7 @@ use colored::Colorize;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::path::Path;
 use std::sync::Arc;
+use termbar::{calculate_bar_width, TerminalWidth};
 use tokio::sync::Semaphore;
 
 const MAX_CONCURRENT_CLONES: usize = 5;
@@ -153,9 +154,16 @@ async fn clone_repositories(
 ) -> Result<()> {
     let multi_progress = MultiProgress::new();
     let main_pb = multi_progress.add(ProgressBar::new(repos.len() as u64));
+    // Calculate dynamic progress bar width based on terminal size
+    let terminal_width = TerminalWidth::get_or_default();
+    // Overhead: spinner(2) + brackets(4) + pos/len(15) + text(15) + spaces(4) = ~40
+    let bar_width = calculate_bar_width(terminal_width, 40);
     main_pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{bar:40.cyan/blue}] {pos}/{len} repositories")
+            .template(&format!(
+                "{{spinner:.green}} [{{bar:{}.cyan/blue}}] {{pos}}/{{len}} repositories",
+                bar_width
+            ))
             .unwrap()
             .progress_chars("=>-"),
     );

@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use termbar::{calculate_bar_width, TerminalWidth, PROGRESS_CHARS};
 use tokio::sync::mpsc;
 use tokio::task;
 
@@ -170,12 +171,18 @@ async fn main() -> Result<()> {
         total_size += metadata.len();
     }
     
-    // Set up progress bar
+    // Set up progress bar with dynamic width calculation
+    let terminal_width = TerminalWidth::get_or_default();
+    // Overhead: spinner(2) + elapsed(12) + bytes/total(25) + speed/eta(25) + msg(60+) + brackets/spaces(10) = ~135
+    let bar_width = calculate_bar_width(terminal_width, 135);
     let pb = ProgressBar::new(total_size);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta}) {msg}")?
-            .progress_chars("█▉▊▋▌▍▎▏  ")
+            .template(&format!(
+                "{{spinner:.green}} [{{elapsed_precise}}] [{{bar:{}.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}}) {{msg}}",
+                bar_width
+            ))?
+            .progress_chars(PROGRESS_CHARS)
     );
     
     // Set up pause/resume handling

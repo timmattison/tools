@@ -15,6 +15,7 @@ libc.workspace = true
 glob.workspace = true
 shellsetup.workspace = true
 colored.workspace = true
+termbar.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
