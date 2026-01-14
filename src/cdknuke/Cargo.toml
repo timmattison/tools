@@ -1,12 +1,15 @@
 [package]
 name = "cdknuke"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [[bin]]
 name = "cdknuke"
 path = "src/main.rs"
 
 [dependencies]
-repowalker = { path = "../repowalker" }
-clap = { version = "4.5", features = ["derive"] }
+repowalker.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

@@ -1,11 +1,14 @@
 [package]
 name = "repotidy"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [[bin]]
 name = "repotidy"
 path = "src/main.rs"
 
 [dependencies]
-repowalker = { path = "../repowalker" }
+repowalker.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,149 @@
+[workspace]
+resolver = "2"
+members = ["src/*"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Tim Mattison"]
+
+[workspace.dependencies]
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# CLI parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures = "0.3"
+
+# AWS SDK
+aws-config = "1.8"
+aws-credential-types = "1.2"
+aws-sdk-sts = "1.80"
+
+# File system
+walkdir = "2.5"
+ignore = "0.4"
+dirs = "6.0"
+glob = "0.3"
+notify = "8.1"
+
+# Git
+git2 = "0.20"
+gix = "0.72"
+
+# Hashing
+blake3 = "1.8"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+
+# Terminal UI
+crossterm = "0.29"
+ratatui = "0.29"
+colored = "3.0"
+indicatif = "0.18"
+dialoguer = "0.11"
+terminal_size = "0.4"
+termion = "4.0"
+atty = "0.2"
+
+# Clipboard
+arboard = "3.6"
+
+# Networking
+reqwest = { version = "0.12", features = ["json", "stream"] }
+url = "2.5"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+chrono-english = "0.1"
+
+# Concurrency
+rayon = "1.10"
+crossbeam = "0.8"
+parking_lot = "0.12"
+
+# Image processing
+image = "0.25"
+qrcode = "0.14"
+base64 = "0.22"
+
+# Random
+rand = "0.9"
+names = { version = "0.14", default-features = false }
+
+# System info
+sysinfo = "0.36"
+libc = "0.2"
+which = "8.0"
+listeners = "0.2"
+get_if_addrs = "0.5"
+
+# Memory mapping
+memmap2 = "0.9"
+
+# Audio
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Misc
+tiktoken-rs = "0.5"
+num-format = "0.4"
+human_bytes = "0.4"
+
+# Dev dependencies
+tempfile = "3"
+tempdir = "0.3"
+mockito = "1.7"
+
+# Platform-specific
+procfs = "0.17"
+windows-sys = { version = "0.60", features = [
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Foundation",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading"
+] }
+
+# Internal crates
+clipboardmon = { path = "src/clipboardmon" }
+filewalker = { path = "src/filewalker" }
+repowalker = { path = "src/repowalker" }
+shellsetup = { path = "src/shellsetup" }
+
+[workspace.lints.rust]
+# Require explicit handling of must-use values
+unused_must_use = "warn"
+
+[workspace.lints.clippy]
+# Catch potential issues with number literals that could be constants
+unreadable_literal = "warn"
+# Warn on functions with many arguments (consider refactoring)
+too_many_arguments = "warn"
+# Warn on large enum variants that could impact performance
+large_enum_variant = "warn"
+# Catch potential issues with casts
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+# Documentation quality
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+# FFI safety: require explicit handling of unsafe blocks
+undocumented_unsafe_blocks = "warn"
+# Catch numeric literals that should use type suffixes for clarity
+unseparated_literal_suffix = "warn"

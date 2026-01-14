@@ -1,9 +1,12 @@
 [package]
 name = "idear"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-anyhow = "1.0"
-walkdir = "2.5"
+clap.workspace = true
+anyhow.workspace = true
+walkdir.workspace = true
+
+[lints]
+workspace = true

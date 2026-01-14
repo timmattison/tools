@@ -1,16 +1,19 @@
 [package]
 name = "clipboard-random"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 description = "Generate random data and copy it to the clipboard/paste buffer"
-
-[dependencies]
-clap = { version = "4.5", features = ["derive"] }
-rand = "0.9.2"
-arboard = "3.6"
-anyhow = "1.0"
-base64 = "0.22"
 
 [[bin]]
 name = "clipboard-random"
 path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rand.workspace = true
+arboard.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+
+[lints]
+workspace = true

@@ -1,12 +1,15 @@
 [package]
 name = "safeboard"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-clipboardmon = { path = "../clipboardmon" }
-clap = { version = "4", features = ["derive"] }
-anyhow = "1.0"
-env_logger = "0.11"
-rodio = { version = "0.20.1", default-features = false, features = ["wav"] }
-log = "0.4"
+clipboardmon.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
+rodio.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

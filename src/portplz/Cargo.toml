@@ -1,9 +1,12 @@
 [package]
 name = "portplz"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-sha2 = "0.10"
-clap = { version = "4", features = ["derive"] }
-gix = "0.72.1"
+sha2.workspace = true
+clap.workspace = true
+gix.workspace = true
+
+[lints]
+workspace = true

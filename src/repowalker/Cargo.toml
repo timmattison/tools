@@ -1,8 +1,11 @@
 [package]
 name = "repowalker"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-ignore = "0.4"
-walkdir = "2"
+ignore.workspace = true
+walkdir.workspace = true
+
+[lints]
+workspace = true

@@ -1,9 +1,12 @@
 [package]
 name = "tc"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-tiktoken-rs = "0.5"
-anyhow = "1.0"
+clap.workspace = true
+tiktoken-rs.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true
