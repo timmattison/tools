@@ -32,6 +32,11 @@ impl FileWalker {
         self
     }
     
+    /// Walk through all files in the configured paths, applying the filter if set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handler closure returns an error.
     pub fn walk<F>(&self, mut handler: F) -> Result<()>
     where
         F: FnMut(&DirEntry) -> Result<()>,
@@ -71,6 +76,11 @@ impl FileWalker {
         Ok(())
     }
     
+    /// Walk through all files in the configured paths, grouping entries by their source path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the handler closure returns an error.
     pub fn walk_with_path_separation<F>(&self, mut handler: F) -> Result<()>
     where
         F: FnMut(&str, &[DirEntry]) -> Result<()>,
@@ -130,15 +140,14 @@ pub fn format_count(count: u64) -> String {
     // Format with thousands separators
     let s = count.to_string();
     let mut result = String::new();
-    let mut chars = s.chars().rev().enumerate();
-    
-    while let Some((i, c)) = chars.next() {
+
+    for (i, c) in s.chars().rev().enumerate() {
         if i > 0 && i % 3 == 0 {
             result.push(',');
         }
         result.push(c);
     }
-    
+
     result.chars().rev().collect()
 }
 

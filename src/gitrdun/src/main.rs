@@ -17,10 +17,14 @@ mod stats;
 mod ui;
 
 use cli::Args;
-use git::{get_git_user_email, ProgressCallback, SearchResult};
+use git::{get_git_user_email, ProgressCallback, ScanOptions, ScanProgress, SearchResult};
 use ollama::OllamaClient;
 use ui::ProgressDisplay;
 
+// Allow holding locks across await points - these are intentional and safe because:
+// 1. The first case runs in a blocking task with no contention
+// 2. The second case runs after the UI thread has joined
+#[allow(clippy::await_holding_lock)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -77,6 +81,14 @@ async fn main() -> Result<()> {
         })
     };
 
+    // Create scan options
+    let scan_options = ScanOptions {
+        search_all_branches: args.all,
+        filter_by_user: args.filter_user,
+        find_nested: args.find_nested,
+        ignore_failures: args.ignore_failures,
+    };
+
     // Start the scanning process in background threads
     let scan_handles: Vec<_> = paths
         .iter()
@@ -88,30 +100,27 @@ async fn main() -> Result<()> {
             let scanning_cancelled = Arc::clone(&scanning_cancelled);
             let user_email = user_email.clone();
             let progress_callback = Arc::clone(&progress_callback);
-            
-            let search_all_branches = args.all;
-            let filter_by_user = args.filter_user;
-            let find_nested = args.find_nested;
-            let ignore_failures = args.ignore_failures;
+            let options = scan_options.clone();
 
             thread::spawn(move || {
                 // Check for cancellation before starting
                 if scanning_cancelled.load(Ordering::Relaxed) {
                     return;
                 }
-                
+
+                let progress = ScanProgress {
+                    dirs_checked: &dirs_checked,
+                    repos_found: &repos_found,
+                    progress_callback: Some(&progress_callback),
+                };
+
                 // Perform the actual directory scan
                 if let Err(e) = git::scan_path(
                     &path,
                     &result,
                     &user_email,
-                    search_all_branches,
-                    filter_by_user,
-                    find_nested,
-                    ignore_failures,
-                    &dirs_checked,
-                    &repos_found,
-                    Some(&progress_callback),
+                    &options,
+                    &progress,
                 ) {
                     eprintln!("Error scanning {}: {}", path.display(), e);
                 }
@@ -165,7 +174,7 @@ async fn main() -> Result<()> {
             // Block on the async operation
             tokio::runtime::Handle::current().block_on(async move {
                 let result_guard = result.lock().unwrap();
-                if let Err(e) = display_results(&*result_guard, &args, use_ollama, Some(progress_clone), cancellation_token).await {
+                if let Err(e) = display_results(&result_guard, &args, use_ollama, Some(progress_clone), cancellation_token).await {
                     eprintln!("Error displaying results: {}", e);
                 }
             })
@@ -192,7 +201,7 @@ async fn main() -> Result<()> {
     if !user_cancelled {
         let result = search_result.lock().unwrap();
         // Use a new cancellation token that won't be cancelled for final output
-        display_results(&*result, &args, use_ollama, None, CancellationToken::new()).await?;
+        display_results(&result, &args, use_ollama, None, CancellationToken::new()).await?;
     }
 
     Ok(())
@@ -202,7 +211,7 @@ async fn main() -> Result<()> {
 fn generate_auto_filename(args: &Args) -> PathBuf {
     let now = Local::now();
     let timestamp = now.format("%Y-%m-%d-%H%M%S");
-    let duration_str = args.start.replace(' ', "").replace(':', "");
+    let duration_str = args.start.replace([' ', ':'], "");
     
     let filename = if args.end.is_some() {
         format!("gitrdun-results-{}-{}-to-end.txt", timestamp, duration_str)

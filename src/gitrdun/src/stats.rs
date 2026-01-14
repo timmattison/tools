@@ -24,7 +24,7 @@ impl GitOpStats {
         if self.count == 0 {
             Duration::new(0, 0)
         } else {
-            self.total_duration / self.count as u32
+            self.total_duration / u32::try_from(self.count).unwrap_or(u32::MAX)
         }
     }
 
@@ -32,8 +32,15 @@ impl GitOpStats {
         self.count
     }
 
+    #[allow(dead_code)]
     pub fn total_duration(&self) -> Duration {
         self.total_duration
+    }
+}
+
+impl Default for GitOpStats {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

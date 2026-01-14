@@ -3,6 +3,10 @@ use chrono::{DateTime, Duration, Local, TimeZone};
 use chrono_english::{parse_date_string, Dialect};
 
 /// Parse a duration string with support for days (d) and weeks (w)
+///
+/// # Errors
+///
+/// Returns an error if the duration string cannot be parsed.
 pub fn parse_duration(duration_str: &str) -> Result<Duration> {
     // Check for day format (e.g., "6d")
     if let Some(days_str) = duration_str.strip_suffix('d') {
@@ -44,13 +48,16 @@ pub fn parse_duration(duration_str: &str) -> Result<Duration> {
 }
 
 /// Parse a time string into a DateTime
+///
+/// # Errors
+///
+/// Returns an error if the time string cannot be parsed.
 pub fn parse_time_string(time_str: &str) -> Result<DateTime<Local>> {
     let now = Local::now();
 
     // Try parsing with chrono-english first
-    match parse_date_string(time_str, now, Dialect::Uk) {
-        Ok(parsed_date) => return Ok(parsed_date),
-        Err(_) => {} // Continue to try other formats
+    if let Ok(parsed_date) = parse_date_string(time_str, now, Dialect::Uk) {
+        return Ok(parsed_date);
     }
 
     // Try standard date formats
@@ -64,7 +71,7 @@ pub fn parse_time_string(time_str: &str) -> Result<DateTime<Local>> {
 
     for format in &formats {
         if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(time_str, format) {
-            return Ok(Local.from_local_datetime(&naive_dt).single().unwrap_or_else(|| Local::now()));
+            return Ok(Local.from_local_datetime(&naive_dt).single().unwrap_or_else(Local::now));
         }
     }
 

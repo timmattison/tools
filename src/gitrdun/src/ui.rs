@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 /// Progress information for the UI
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ProgressInfo {
     pub dirs_checked: usize,
@@ -100,6 +101,7 @@ impl ProgressDisplay {
     }
 
     // Ollama status methods
+    #[allow(dead_code)]
     pub fn set_ollama_active(&self, active: bool) {
         self.ollama_active.store(active, Ordering::Relaxed);
     }
@@ -136,6 +138,7 @@ impl ProgressDisplay {
         self.is_ollama_active()
     }
 
+    #[allow(dead_code)]
     pub fn should_exit_ui(&self) -> bool {
         self.is_scan_complete()
     }
@@ -144,6 +147,11 @@ impl ProgressDisplay {
         self.cancellation_token.clone()
     }
 
+    /// Run the interactive terminal UI.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal setup fails or if the UI loop encounters an error.
     pub fn run_interactive(&self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -381,6 +389,10 @@ impl ProgressDisplay {
     }
 
     /// Simple non-interactive progress display for when TUI is not desired
+    ///
+    /// # Panics
+    ///
+    /// Panics if stdout flush fails.
     pub fn print_simple_progress(&self) {
         let dirs_checked = self.dirs_checked.load(Ordering::Relaxed);
         let repos_found = self.repos_found.load(Ordering::Relaxed);

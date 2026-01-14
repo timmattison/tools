@@ -14,9 +14,9 @@ const MODEL_CONTEXT_SIZES: &[(&str, usize)] = &[
     ("llama2:13b", 4096),
     ("mistral:7b", 8192),
     ("qwen3:30b-a3b", 32768),
-    ("gpt-oss", 131072),
-    ("gpt-oss:20b", 131072),
-    ("gpt-oss:120b", 131072),
+    ("gpt-oss", 131_072),
+    ("gpt-oss:20b", 131_072),
+    ("gpt-oss:120b", 131_072),
 ];
 
 /// Default context size if model not found
@@ -33,7 +33,9 @@ struct OllamaRequest {
 /// Ollama API response chunk structure
 #[derive(Deserialize)]
 struct OllamaResponseChunk {
+    #[allow(dead_code)]
     model: Option<String>,
+    #[allow(dead_code)]
     created_at: Option<String>,
     response: String,
     done: bool,
@@ -60,6 +62,10 @@ impl OllamaClient {
     }
 
     /// Generate a summary of commits for a repository
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Ollama API call fails or if the response cannot be parsed.
     pub async fn generate_summary(
         &self,
         repo_path: &Path,
@@ -118,6 +124,10 @@ Use the commit information to understand the changes in depth."#,
     }
 
     /// Generate a meta-summary across multiple repositories
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Ollama API call fails or if the response cannot be parsed.
     pub async fn generate_meta_summary(
         &self,
         summaries: &[String],
