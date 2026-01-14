@@ -1079,9 +1079,10 @@ function wt() {
     fi
 }
 
-# Quick navigation aliases (reuse wt function for proper error handling)
+# Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
+alias wtm='wt main'  # Main worktree
 ```
 
 #### Fish (~/.config/fish/config.fish)
@@ -1098,9 +1099,10 @@ function wt
     end
 end
 
-# Quick navigation aliases (reuse wt function for proper error handling)
-alias wtf 'wt -f'
-alias wtb 'wt -p'
+# Quick navigation aliases
+alias wtf 'wt -f'  # Next worktree
+alias wtb 'wt -p'  # Previous worktree (back)
+alias wtm 'wt main'  # Main worktree
 ```
 
 ### Examples
@@ -1123,6 +1125,7 @@ Jump to specific worktree:
 ```bash
 wt main           # By branch name
 wt absurd-rock    # By directory name
+wtm               # Quick alias for main worktree
 ```
 
 ### Exit Codes

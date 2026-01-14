@@ -296,13 +296,114 @@ function wt() {
     fi
 }
 
-# Quick navigation aliases (reuse wt function for proper error handling)
+# Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
+alias wtm='wt main'  # Main worktree
+# End cwt shell integration
 "#;
 
 /// Marker to detect if shell integration is already installed.
 const SHELL_INTEGRATION_MARKER: &str = "cwt - Change Worktree shell integration";
+
+/// End marker for shell integration block (used for upgrades).
+const SHELL_INTEGRATION_END_MARKER: &str = "# End cwt shell integration";
+
+/// Old alias marker used to detect the end of old-style installations.
+/// This is the last alias line in the old version (before wtm was added).
+const OLD_SHELL_INTEGRATION_END: &str = "alias wtb='wt -p'";
+
+/// Replaces the shell integration block between start and end markers.
+///
+/// Preserves all content before and after the block.
+fn replace_shell_integration_block(contents: &str) -> String {
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut result = Vec::new();
+    let mut in_block = false;
+    let mut block_replaced = false;
+
+    for line in lines {
+        if !in_block && line.contains(SHELL_INTEGRATION_MARKER) {
+            // Start of block - skip until end marker
+            in_block = true;
+            continue;
+        }
+
+        if in_block {
+            if line.contains(SHELL_INTEGRATION_END_MARKER) {
+                // End of block - insert new integration and continue
+                // Trim leading newline from SHELL_INTEGRATION since we're inserting mid-file
+                result.push(SHELL_INTEGRATION.trim());
+                in_block = false;
+                block_replaced = true;
+            }
+            // Skip lines within the block
+            continue;
+        }
+
+        result.push(line);
+    }
+
+    // If we never found the end marker, something went wrong - append anyway
+    if !block_replaced {
+        result.push(SHELL_INTEGRATION.trim());
+    }
+
+    result.join("\n") + "\n"
+}
+
+/// Upgrades old-style shell integration (without end marker) to new format.
+///
+/// Finds the block by looking for the start marker and the old last alias line.
+fn upgrade_old_shell_integration(contents: &str) -> String {
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut result = Vec::new();
+    let mut in_block = false;
+    let mut block_replaced = false;
+
+    for line in lines {
+        if !in_block && line.contains(SHELL_INTEGRATION_MARKER) {
+            // Start of old block - skip until we find the old end
+            in_block = true;
+            continue;
+        }
+
+        if in_block {
+            if line.contains(OLD_SHELL_INTEGRATION_END) {
+                // End of old block - insert new integration
+                result.push(SHELL_INTEGRATION.trim());
+                in_block = false;
+                block_replaced = true;
+            }
+            // Skip lines within the old block
+            continue;
+        }
+
+        result.push(line);
+    }
+
+    // If we never found the old end marker, just append the new block
+    if !block_replaced {
+        result.push(SHELL_INTEGRATION.trim());
+    }
+
+    result.join("\n") + "\n"
+}
+
+/// Prints activation instructions after shell integration is added or updated.
+fn print_activation_instructions(config_file: &Path) {
+    println!();
+    println!("To activate, run:");
+    println!("  {} {}", "source".cyan(), config_file.display());
+    println!();
+    println!("Or open a new terminal window.");
+    println!();
+    println!("Available commands:");
+    println!("  {}  - List worktrees or change to one", "wt".yellow());
+    println!("  {} - Next worktree", "wtf".yellow());
+    println!("  {} - Previous worktree (back)", "wtb".yellow());
+    println!("  {} - Main worktree", "wtm".yellow());
+}
 
 /// Sets up shell integration by adding the wt function to the user's shell config.
 fn setup_shell_integration() -> Result<(), String> {
@@ -339,17 +440,35 @@ fn setup_shell_integration() -> Result<(), String> {
         }
     };
 
-    // Check if already installed
+    // Check if already installed and handle upgrades
     if config_file.exists() {
         let contents = fs::read_to_string(&config_file)
             .map_err(|e| format!("Could not read {}: {}", config_file.display(), e))?;
 
         if contents.contains(SHELL_INTEGRATION_MARKER) {
-            println!(
-                "{} Shell integration already installed in {}",
-                "✓".green(),
-                config_file.display()
-            );
+            // Check if this is a new-style installation (has end marker)
+            if contents.contains(SHELL_INTEGRATION_END_MARKER) {
+                // New-style: replace the entire block
+                let new_contents = replace_shell_integration_block(&contents);
+                fs::write(&config_file, new_contents)
+                    .map_err(|e| format!("Could not write {}: {}", config_file.display(), e))?;
+                println!(
+                    "{} Shell integration updated in {}",
+                    "✓".green(),
+                    config_file.display()
+                );
+            } else {
+                // Old-style (no end marker): upgrade to new format
+                let new_contents = upgrade_old_shell_integration(&contents);
+                fs::write(&config_file, new_contents)
+                    .map_err(|e| format!("Could not write {}: {}", config_file.display(), e))?;
+                println!(
+                    "{} Shell integration upgraded in {}",
+                    "✓".green(),
+                    config_file.display()
+                );
+            }
+            print_activation_instructions(&config_file);
             return Ok(());
         }
     }
@@ -369,16 +488,7 @@ fn setup_shell_integration() -> Result<(), String> {
         "✓".green(),
         config_file.display()
     );
-    println!();
-    println!("To activate, run:");
-    println!("  {} {}", "source".cyan(), config_file.display());
-    println!();
-    println!("Or open a new terminal window.");
-    println!();
-    println!("Available commands:");
-    println!("  {}  - List worktrees or change to one", "wt".yellow());
-    println!("  {} - Next worktree", "wtf".yellow());
-    println!("  {} - Previous worktree (back)", "wtb".yellow());
+    print_activation_instructions(&config_file);
 
     Ok(())
 }
@@ -615,5 +725,72 @@ mod tests {
         let worktrees = parse_worktree_list(output);
         assert_eq!(worktrees.len(), 1);
         assert_eq!(worktrees[0].branch, Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_replace_shell_integration_block() {
+        let old_contents = r#"# Some other config
+export FOO=bar
+
+# cwt - Change Worktree shell integration
+# Added by: cwt --shell-setup
+function wt() {
+    old content
+}
+alias wtf='wt -f'
+alias wtb='wt -p'
+# End cwt shell integration
+
+# More config after
+export BAZ=qux
+"#;
+        let new_contents = replace_shell_integration_block(old_contents);
+
+        // Should preserve content before
+        assert!(new_contents.contains("export FOO=bar"));
+        // Should preserve content after
+        assert!(new_contents.contains("export BAZ=qux"));
+        // Should have the new wtm alias
+        assert!(new_contents.contains("alias wtm='wt main'"));
+        // Should have end marker
+        assert!(new_contents.contains(SHELL_INTEGRATION_END_MARKER));
+        // Should not have old content
+        assert!(!new_contents.contains("old content"));
+    }
+
+    #[test]
+    fn test_upgrade_old_shell_integration() {
+        let old_contents = r#"# Some other config
+export FOO=bar
+
+# cwt - Change Worktree shell integration
+# Added by: cwt --shell-setup
+function wt() {
+    old content
+}
+alias wtf='wt -f'  # Next worktree
+alias wtb='wt -p'  # Previous worktree (back)
+
+# More config after
+export BAZ=qux
+"#;
+        let new_contents = upgrade_old_shell_integration(old_contents);
+
+        // Should preserve content before
+        assert!(new_contents.contains("export FOO=bar"));
+        // Should preserve content after
+        assert!(new_contents.contains("export BAZ=qux"));
+        // Should have the new wtm alias
+        assert!(new_contents.contains("alias wtm='wt main'"));
+        // Should have end marker now
+        assert!(new_contents.contains(SHELL_INTEGRATION_END_MARKER));
+        // Should not have old content
+        assert!(!new_contents.contains("old content"));
+    }
+
+    #[test]
+    fn test_shell_integration_contains_wtm() {
+        assert!(SHELL_INTEGRATION.contains("alias wtm='wt main'"));
+        assert!(SHELL_INTEGRATION.contains(SHELL_INTEGRATION_END_MARKER));
     }
 }
