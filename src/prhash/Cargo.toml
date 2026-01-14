@@ -3,6 +3,14 @@ name = "prhash"
 version = "0.1.0"
 edition = "2021"
 
+[lints.clippy]
+# Prevent potential panics from arithmetic operations (subtraction overflow, etc.)
+arithmetic_side_effects = "warn"
+# Warn about indexing/slicing that could panic
+indexing_slicing = "warn"
+# Warn about string slicing which can panic on UTF-8 character boundaries
+string_slice = "warn"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.18.0"

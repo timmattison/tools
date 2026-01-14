@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{ProgressBar, ProgressStyle};
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,6 +43,54 @@ struct Args {
 }
 
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
+const MAX_FILENAME_DISPLAY_LEN: usize = 60; // Max characters for filename in progress message
+
+/// Truncates a path for display, keeping the filename visible.
+///
+/// # Arguments
+/// * `path` - The path to truncate
+/// * `max_len` - Maximum length of the output string (must be >= 4 for meaningful output)
+///
+/// # Returns
+/// A string representation of the path, truncated if necessary to fit within `max_len`.
+/// When truncating, the function prioritizes keeping the filename visible.
+fn truncate_path_for_display(path: &Path, max_len: usize) -> String {
+    let display = path.display().to_string();
+    if display.len() <= max_len {
+        return display;
+    }
+
+    // Need at least 4 chars for "...X" format
+    if max_len < 4 {
+        return display.chars().take(max_len).collect();
+    }
+
+    // Try to keep the filename visible by truncating from the middle
+    if let Some(filename) = path.file_name() {
+        let filename_str = filename.to_string_lossy();
+        let filename_char_count = filename_str.chars().count();
+        if filename_char_count < max_len.saturating_sub(4) {
+            // We have room for filename + ellipsis + some parent path
+            let remaining = max_len.saturating_sub(filename_char_count).saturating_sub(4); // 4 for ".../"
+            let parent = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            if !parent.is_empty() && remaining > 0 {
+                let truncated_parent: String = parent.chars().take(remaining).collect();
+                return format!("{}.../{}", truncated_parent, filename_str);
+            }
+        }
+        // Filename itself is too long, just truncate from start (keep end visible)
+        // Use character-based iteration to avoid UTF-8 boundary panics
+        let display_char_count = display.chars().count();
+        let skip_count = display_char_count.saturating_sub(max_len.saturating_sub(3));
+        let truncated: String = display.chars().skip(skip_count).collect();
+        return format!("...{}", truncated);
+    }
+
+    // Fallback: simple truncation from the end
+    // Use character-based iteration to avoid UTF-8 boundary panics
+    let truncated: String = display.chars().take(max_len.saturating_sub(3)).collect();
+    format!("{}...", truncated)
+}
 
 enum HashState {
     Md5(Md5),
@@ -164,7 +212,7 @@ async fn main() -> Result<()> {
     
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        pb.set_message(format!("Hashing {} ({}/{})", file.display(), idx + 1, args.files.len()));
+        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx + 1, args.files.len()));
         
         let result = hash_file_with_progress(
             file,
@@ -177,7 +225,10 @@ async fn main() -> Result<()> {
         
         match result {
             Ok(hash) => {
-                // Clear progress and print result immediately in shasum format
+                // Print result to stdout in shasum format.
+                // IMPORTANT: Must use pb.suspend + println! to write to stdout.
+                // pb.println() writes to stderr (progress bar's target), which would
+                // break shell pipelines like `prhash file.txt > hashes.txt`.
                 pb.suspend(|| {
                     println!("{}  {}", hash, file.display());
                 });
@@ -186,9 +237,8 @@ async fn main() -> Result<()> {
                 if e.to_string().contains("cancelled by user") {
                     break;
                 }
-                pb.suspend(|| {
-                    eprintln!("prhash: {}: {}", file.display(), e);
-                });
+                // Errors go to stderr, so pb.println() is appropriate here
+                pb.println(format!("prhash: {}: {}", file.display(), e));
             }
         }
     }
@@ -234,9 +284,9 @@ async fn hash_file_with_progress(
         if rx.try_recv().is_ok() {
             let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
             if !was_paused {
-                pb.set_message(format!("PAUSED - Press space to resume | Hashing {}", file.display()));
+                pb.set_message(format!("PAUSED - Press space to resume | Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
             } else {
-                pb.set_message(format!("Hashing {}", file.display()));
+                pb.set_message(format!("Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
             }
         }
         
@@ -252,7 +302,7 @@ async fn hash_file_with_progress(
             // Check for unpause
             if rx.try_recv().is_ok() {
                 paused.store(false, Ordering::SeqCst);
-                pb.set_message(format!("Hashing {}", file.display()));
+                pb.set_message(format!("Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
             }
         }
         
@@ -272,4 +322,104 @@ async fn hash_file_with_progress(
     Ok(hasher.finalize())
 }
 
-use std::fs;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_path_short_path() {
+        let path = Path::new("/home/user/file.txt");
+        let result = truncate_path_for_display(path, 60);
+        assert_eq!(result, "/home/user/file.txt");
+    }
+
+    #[test]
+    fn test_truncate_path_exact_length() {
+        let path = Path::new("/a/b/c.txt");
+        let result = truncate_path_for_display(path, 10);
+        assert_eq!(result, "/a/b/c.txt");
+    }
+
+    #[test]
+    fn test_truncate_path_long_path_keeps_filename() {
+        let path = Path::new("/very/long/path/to/some/deeply/nested/directory/file.txt");
+        let result = truncate_path_for_display(path, 30);
+        // Should contain the filename
+        assert!(result.contains("file.txt"), "Result should contain filename: {}", result);
+        // Should have ellipsis
+        assert!(result.contains("..."), "Result should contain ellipsis: {}", result);
+        // Should be within max length
+        assert!(result.len() <= 30, "Result length {} exceeds max 30", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_very_long_filename() {
+        let path = Path::new("/dir/this_is_a_very_long_filename_that_exceeds_the_limit.txt");
+        let result = truncate_path_for_display(path, 30);
+        // Should start with ellipsis when filename is too long
+        assert!(result.starts_with("..."), "Result should start with ellipsis: {}", result);
+        assert!(result.len() <= 30, "Result length {} exceeds max 30", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_small_max_len() {
+        let path = Path::new("/home/user/file.txt");
+        // Test with very small max_len
+        let result = truncate_path_for_display(path, 3);
+        assert!(result.len() <= 3, "Result length {} exceeds max 3", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_min_meaningful_length() {
+        let path = Path::new("/home/user/file.txt");
+        let result = truncate_path_for_display(path, 4);
+        // Should produce something meaningful with 4 chars (e.g., "...t" or similar)
+        assert!(result.len() <= 4, "Result length {} exceeds max 4", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_just_filename() {
+        let path = Path::new("file.txt");
+        let result = truncate_path_for_display(path, 60);
+        assert_eq!(result, "file.txt");
+    }
+
+    #[test]
+    fn test_truncate_path_preserves_extension() {
+        let path = Path::new("/very/long/path/document.pdf");
+        let result = truncate_path_for_display(path, 20);
+        // The extension should be preserved when possible
+        assert!(result.contains(".pdf") || result.ends_with("pdf"),
+            "Result should preserve extension: {}", result);
+    }
+
+    #[test]
+    fn test_truncate_path_utf8_safety() {
+        // Test with non-ASCII characters to ensure no UTF-8 boundary panics
+        // Chinese characters (each is 3 bytes in UTF-8)
+        let path = Path::new("/home/用户/文档/very/long/path/to/文件.txt");
+        let result = truncate_path_for_display(path, 20);
+        // Should not panic and should be within length limit
+        assert!(result.chars().count() <= 20,
+            "Result char count {} exceeds max 20: {}", result.chars().count(), result);
+
+        // Test with emoji (4 bytes in UTF-8)
+        let path_emoji = Path::new("/home/user/📁/documents/file.txt");
+        let result_emoji = truncate_path_for_display(path_emoji, 15);
+        assert!(result_emoji.chars().count() <= 15,
+            "Result char count {} exceeds max 15: {}", result_emoji.chars().count(), result_emoji);
+
+        // Test very long filename with UTF-8
+        let path_long = Path::new("/dir/这是一个非常长的中文文件名称.txt");
+        let result_long = truncate_path_for_display(path_long, 20);
+        assert!(result_long.chars().count() <= 20,
+            "Result char count {} exceeds max 20: {}", result_long.chars().count(), result_long);
+    }
+
+    #[test]
+    fn test_truncate_path_edge_case_max_len_zero() {
+        let path = Path::new("/home/user/file.txt");
+        let result = truncate_path_for_display(path, 0);
+        assert!(result.is_empty(), "Result should be empty for max_len 0: {}", result);
+    }
+}
