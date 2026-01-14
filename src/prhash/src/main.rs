@@ -4,7 +4,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,19 +45,32 @@ struct Args {
 const BUFFER_SIZE: usize = 16 * 1024 * 1024; // 16MB buffer
 const MAX_FILENAME_DISPLAY_LEN: usize = 60; // Max characters for filename in progress message
 
-/// Truncates a path for display, keeping the filename visible
-fn truncate_path_for_display(path: &std::path::Path, max_len: usize) -> String {
+/// Truncates a path for display, keeping the filename visible.
+///
+/// # Arguments
+/// * `path` - The path to truncate
+/// * `max_len` - Maximum length of the output string (must be >= 4 for meaningful output)
+///
+/// # Returns
+/// A string representation of the path, truncated if necessary to fit within `max_len`.
+/// When truncating, the function prioritizes keeping the filename visible.
+fn truncate_path_for_display(path: &Path, max_len: usize) -> String {
     let display = path.display().to_string();
     if display.len() <= max_len {
         return display;
     }
 
+    // Need at least 4 chars for "...X" format
+    if max_len < 4 {
+        return display.chars().take(max_len).collect();
+    }
+
     // Try to keep the filename visible by truncating from the middle
     if let Some(filename) = path.file_name() {
         let filename_str = filename.to_string_lossy();
-        if filename_str.len() < max_len - 4 {
+        if filename_str.len() < max_len.saturating_sub(4) {
             // We have room for filename + ellipsis + some parent path
-            let remaining = max_len - filename_str.len() - 4; // 4 for ".../""
+            let remaining = max_len.saturating_sub(filename_str.len()).saturating_sub(4); // 4 for ".../"
             let parent = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
             if !parent.is_empty() && remaining > 0 {
                 let truncated_parent: String = parent.chars().take(remaining).collect();
@@ -65,11 +78,12 @@ fn truncate_path_for_display(path: &std::path::Path, max_len: usize) -> String {
             }
         }
         // Filename itself is too long, just truncate from start
-        return format!("...{}", &display[display.len().saturating_sub(max_len - 3)..]);
+        return format!("...{}", &display[display.len().saturating_sub(max_len.saturating_sub(3))..]);
     }
 
     // Fallback: simple truncation from the end
-    format!("{}...", &display[..max_len - 3])
+    let end_idx = max_len.saturating_sub(3).min(display.len());
+    format!("{}...", &display[..end_idx])
 }
 
 enum HashState {
@@ -205,13 +219,19 @@ async fn main() -> Result<()> {
         
         match result {
             Ok(hash) => {
-                // Print result above progress bar in shasum format
-                pb.println(format!("{}  {}", hash, file.display()));
+                // Print result to stdout in shasum format.
+                // IMPORTANT: Must use pb.suspend + println! to write to stdout.
+                // pb.println() writes to stderr (progress bar's target), which would
+                // break shell pipelines like `prhash file.txt > hashes.txt`.
+                pb.suspend(|| {
+                    println!("{}  {}", hash, file.display());
+                });
             }
             Err(e) => {
                 if e.to_string().contains("cancelled by user") {
                     break;
                 }
+                // Errors go to stderr, so pb.println() is appropriate here
                 pb.println(format!("prhash: {}: {}", file.display(), e));
             }
         }
@@ -297,3 +317,75 @@ async fn hash_file_with_progress(
 }
 
 use std::fs;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_path_short_path() {
+        let path = Path::new("/home/user/file.txt");
+        let result = truncate_path_for_display(path, 60);
+        assert_eq!(result, "/home/user/file.txt");
+    }
+
+    #[test]
+    fn test_truncate_path_exact_length() {
+        let path = Path::new("/a/b/c.txt");
+        let result = truncate_path_for_display(path, 10);
+        assert_eq!(result, "/a/b/c.txt");
+    }
+
+    #[test]
+    fn test_truncate_path_long_path_keeps_filename() {
+        let path = Path::new("/very/long/path/to/some/deeply/nested/directory/file.txt");
+        let result = truncate_path_for_display(path, 30);
+        // Should contain the filename
+        assert!(result.contains("file.txt"), "Result should contain filename: {}", result);
+        // Should have ellipsis
+        assert!(result.contains("..."), "Result should contain ellipsis: {}", result);
+        // Should be within max length
+        assert!(result.len() <= 30, "Result length {} exceeds max 30", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_very_long_filename() {
+        let path = Path::new("/dir/this_is_a_very_long_filename_that_exceeds_the_limit.txt");
+        let result = truncate_path_for_display(path, 30);
+        // Should start with ellipsis when filename is too long
+        assert!(result.starts_with("..."), "Result should start with ellipsis: {}", result);
+        assert!(result.len() <= 30, "Result length {} exceeds max 30", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_small_max_len() {
+        let path = Path::new("/home/user/file.txt");
+        // Test with very small max_len
+        let result = truncate_path_for_display(path, 3);
+        assert!(result.len() <= 3, "Result length {} exceeds max 3", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_min_meaningful_length() {
+        let path = Path::new("/home/user/file.txt");
+        let result = truncate_path_for_display(path, 4);
+        // Should produce something meaningful with 4 chars (e.g., "...t" or similar)
+        assert!(result.len() <= 4, "Result length {} exceeds max 4", result.len());
+    }
+
+    #[test]
+    fn test_truncate_path_just_filename() {
+        let path = Path::new("file.txt");
+        let result = truncate_path_for_display(path, 60);
+        assert_eq!(result, "file.txt");
+    }
+
+    #[test]
+    fn test_truncate_path_preserves_extension() {
+        let path = Path::new("/very/long/path/document.pdf");
+        let result = truncate_path_for_display(path, 20);
+        // The extension should be preserved when possible
+        assert!(result.contains(".pdf") || result.ends_with("pdf"),
+            "Result should preserve extension: {}", result);
+    }
+}
