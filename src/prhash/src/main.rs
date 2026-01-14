@@ -222,7 +222,9 @@ async fn main() -> Result<()> {
     
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx.saturating_add(1), args.files.len()));
+        // idx + 1 is safe: idx comes from enumerate() over args.files which is bounded by memory,
+        // so idx < usize::MAX and idx + 1 cannot overflow.
+        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx + 1, args.files.len()));
         
         let result = hash_file_with_progress(
             file,

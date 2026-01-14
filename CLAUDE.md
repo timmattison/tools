@@ -60,7 +60,8 @@ The `termbar` library provides:
 - Progress bar width calculation that adapts to terminal size
 - Pre-built progress bar styles (copy, verify, batch, hash)
 - Escape function for template braces in filenames
-- Optional async terminal resize watching via SIGWINCH
+- Unicode-aware display width calculation for filenames
+- Optional async terminal resize watching via SIGWINCH with clean shutdown
 
 ### Usage
 
@@ -77,6 +78,30 @@ let style = ProgressStyleBuilder::copy("myfile.txt")
 let bar_width = calculate_bar_width(width, 80); // 80 = overhead
 let template = format!("{{spinner}} [{{bar:{}.cyan}}] {{msg}}", bar_width);
 ```
+
+### Terminal Resize Watching (Recommended Approach)
+
+For applications that need to respond to terminal resize events, use the shutdown channel API:
+
+```rust
+use termbar::TerminalWidthWatcher;
+
+// Create watcher with shutdown channel (recommended)
+let (watcher, resize_task, shutdown_tx) = TerminalWidthWatcher::with_sigwinch_channel();
+
+// Get current width or watch for changes
+let width = watcher.current_width();
+let receiver = watcher.receiver();
+
+// When done, signal shutdown by dropping the sender or sending explicitly
+drop(shutdown_tx);  // or shutdown_tx.send(())
+resize_task.await;
+```
+
+This approach is preferred over the legacy `Arc<AtomicBool>` polling method because:
+- Clean shutdown without 100ms polling overhead
+- Immediate task termination when signaled
+- More idiomatic async Rust patterns
 
 ### Available Style Builders
 

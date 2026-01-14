@@ -126,24 +126,52 @@ pub fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
     available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
 }
 
-/// Convert a string's byte length to u16, capping at [`u16::MAX`].
+/// Calculate a string's terminal display width as u16, capping at [`u16::MAX`].
 ///
-/// This is useful for calculating terminal display widths where string lengths
-/// need to be combined with other u16 values. Filenames longer than 65535 bytes
-/// are extremely rare in practice, so capping at u16::MAX is safe for display
-/// calculations.
-///
-/// # Important: Byte Length vs Display Width
-///
-/// This function returns the **byte length** of the string, not the display width.
-/// For ASCII strings, these are equivalent. However, for strings containing:
+/// This function uses the `unicode-width` crate to calculate the actual number
+/// of terminal columns a string will occupy when displayed. This correctly handles:
 /// - Multi-byte UTF-8 characters (e.g., emoji 🎉, CJK characters 中文)
 /// - Zero-width characters (e.g., combining marks)
-/// - Wide characters (characters that occupy 2 terminal columns)
+/// - Wide characters that occupy 2 terminal columns (e.g., CJK ideographs)
 ///
-/// The byte length may differ from the actual terminal display width.
-/// For most filenames (which are typically ASCII), this is not an issue.
-/// If precise display width is needed, consider using a crate like `unicode-width`.
+/// # Arguments
+///
+/// * `s` - The string to measure.
+///
+/// # Returns
+///
+/// The string's terminal display width as u16, or [`u16::MAX`] if the width exceeds u16 range.
+///
+/// # Example
+///
+/// ```
+/// use termbar::str_display_width_as_u16;
+///
+/// // ASCII: 1 byte = 1 column
+/// assert_eq!(str_display_width_as_u16("hello"), 5);
+/// assert_eq!(str_display_width_as_u16(""), 0);
+///
+/// // Emoji: typically 2 columns wide
+/// assert_eq!(str_display_width_as_u16("🎉"), 2);
+///
+/// // CJK: 2 columns per character
+/// assert_eq!(str_display_width_as_u16("中"), 2);
+/// ```
+#[must_use]
+pub fn str_display_width_as_u16(s: &str) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    u16::try_from(s.width()).unwrap_or(u16::MAX)
+}
+
+/// Convert a string's byte length to u16, capping at [`u16::MAX`].
+///
+/// **Deprecated**: Use [`str_display_width_as_u16`] instead for accurate terminal
+/// display width calculations. This function is kept for cases where byte length
+/// is specifically needed.
+///
+/// This function returns the **byte length** of the string, not the display width.
+/// For ASCII strings, these are equivalent. However, for strings containing
+/// multi-byte UTF-8 characters, the byte length may differ from the display width.
 ///
 /// # Arguments
 ///
@@ -152,18 +180,8 @@ pub fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
 /// # Returns
 ///
 /// The string byte length as u16, or [`u16::MAX`] if the length exceeds u16 range.
-///
-/// # Example
-///
-/// ```
-/// use termbar::str_len_as_u16;
-///
-/// assert_eq!(str_len_as_u16("hello"), 5);
-/// assert_eq!(str_len_as_u16(""), 0);
-/// // Note: emoji is 4 bytes but displays as ~2 columns
-/// assert_eq!(str_len_as_u16("🎉"), 4);
-/// ```
 #[must_use]
+#[deprecated(since = "0.1.1", note = "Use str_display_width_as_u16 for accurate terminal display width")]
 pub fn str_len_as_u16(s: &str) -> u16 {
     u16::try_from(s.len()).unwrap_or(u16::MAX)
 }
@@ -220,19 +238,31 @@ mod tests {
     }
 
     #[test]
-    fn test_str_len_as_u16() {
-        assert_eq!(str_len_as_u16(""), 0);
-        assert_eq!(str_len_as_u16("hello"), 5);
-        assert_eq!(str_len_as_u16("file{1}.txt"), 11);
+    fn test_str_display_width_as_u16() {
+        // ASCII: 1 byte = 1 column
+        assert_eq!(str_display_width_as_u16(""), 0);
+        assert_eq!(str_display_width_as_u16("hello"), 5);
+        assert_eq!(str_display_width_as_u16("file{1}.txt"), 11);
     }
 
     #[test]
-    fn test_str_len_as_u16_unicode() {
-        // Emoji: 4 bytes but displays as ~2 columns
-        assert_eq!(str_len_as_u16("🎉"), 4);
+    fn test_str_display_width_as_u16_unicode() {
+        // Emoji: 4 bytes but displays as 2 columns
+        assert_eq!(str_display_width_as_u16("🎉"), 2);
         // CJK: 3 bytes per character but each displays as 2 columns
-        assert_eq!(str_len_as_u16("中"), 3);
-        // Mixed: demonstrates byte vs display width difference
-        assert_eq!(str_len_as_u16("file🎉.txt"), 12); // 4 + 4 + 4
+        assert_eq!(str_display_width_as_u16("中"), 2);
+        // Mixed: "file" (4 cols) + 🎉 (2 cols) + ".txt" (4 cols) = 10 columns
+        assert_eq!(str_display_width_as_u16("file🎉.txt"), 10);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn test_str_len_as_u16_deprecated() {
+        // Test byte length (deprecated function)
+        assert_eq!(str_len_as_u16("hello"), 5);
+        // Emoji: 4 bytes in UTF-8
+        assert_eq!(str_len_as_u16("🎉"), 4);
+        // "file" (4 bytes) + 🎉 (4 bytes) + ".txt" (4 bytes) = 12 bytes
+        assert_eq!(str_len_as_u16("file🎉.txt"), 12);
     }
 }

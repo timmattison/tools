@@ -10,6 +10,7 @@ crossterm.workspace = true
 indicatif.workspace = true
 tokio.workspace = true
 thiserror.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true
