@@ -64,6 +64,15 @@ pub enum ShellSetupError {
 /// Result type for shell setup operations.
 pub type Result<T> = std::result::Result<T, ShellSetupError>;
 
+/// Result of a block transformation operation.
+#[derive(Debug)]
+struct BlockTransformResult {
+    /// The transformed content.
+    content: String,
+    /// Whether a warning should be shown (e.g., end marker not found).
+    needs_warning: bool,
+}
+
 /// A command that will be available after shell integration is set up.
 #[derive(Debug, Clone)]
 pub struct ShellCommand {
@@ -233,35 +242,39 @@ impl ShellIntegration {
 
             if contents.contains(&start_marker) {
                 // Check if this is a new-style installation (has end marker)
-                if contents.contains(&end_marker) {
+                let (result, action) = if contents.contains(&end_marker) {
                     // New-style: replace the entire block
-                    let new_contents = self.replace_block(&contents);
-                    fs::write(&config_file, new_contents).map_err(|e| {
-                        ShellSetupError::WriteError {
-                            path: config_file.clone(),
-                            source: e,
-                        }
-                    })?;
-                    println!(
-                        "{} Shell integration updated in {}",
-                        "✓".green(),
-                        config_file.display()
-                    );
+                    (self.replace_block(&contents), "updated")
                 } else {
                     // Old-style (no end marker): upgrade to new format
-                    let new_contents = self.upgrade_old_installation(&contents);
-                    fs::write(&config_file, new_contents).map_err(|e| {
-                        ShellSetupError::WriteError {
-                            path: config_file.clone(),
-                            source: e,
-                        }
-                    })?;
-                    println!(
-                        "{} Shell integration upgraded in {}",
-                        "✓".green(),
+                    (self.upgrade_old_installation(&contents), "upgraded")
+                };
+
+                fs::write(&config_file, &result.content).map_err(|e| {
+                    ShellSetupError::WriteError {
+                        path: config_file.clone(),
+                        source: e,
+                    }
+                })?;
+
+                // Print warning if end marker wasn't found
+                if result.needs_warning {
+                    eprintln!(
+                        "{} End marker not found for {} shell integration in {}. \
+                         Content after the start marker may have been removed. \
+                         Please verify this file.",
+                        "Warning:".yellow(),
+                        self.tool_name,
                         config_file.display()
                     );
                 }
+
+                println!(
+                    "{} Shell integration {} in {}",
+                    "✓".green(),
+                    action,
+                    config_file.display()
+                );
                 self.print_activation_instructions(&config_file);
                 return Ok(());
             }
@@ -295,9 +308,9 @@ impl ShellIntegration {
 
     /// Replaces the shell integration block between start and end markers.
     ///
-    /// If the end marker is not found after the start marker, prints a warning
-    /// to stderr and appends the new block (content after start marker may be lost).
-    fn replace_block(&self, contents: &str) -> String {
+    /// Returns a `BlockTransformResult` with the transformed content and a flag
+    /// indicating if a warning should be shown (end marker not found).
+    fn replace_block(&self, contents: &str) -> BlockTransformResult {
         let lines: Vec<&str> = contents.lines().collect();
         let mut result: Vec<String> = Vec::new();
         let mut in_block = false;
@@ -328,26 +341,22 @@ impl ShellIntegration {
             result.push(line.to_string());
         }
 
-        // If we never found the end marker, warn user and append new block
+        // If we never found the end marker, append new block and flag for warning
         if !block_replaced {
-            eprintln!(
-                "{} End marker not found for {} shell integration. \
-                 Content after the start marker may have been removed. \
-                 Please verify your shell config file.",
-                "Warning:".yellow(),
-                self.tool_name
-            );
             result.push(new_block.trim().to_string());
         }
 
-        result.join("\n") + "\n"
+        BlockTransformResult {
+            content: result.join("\n") + "\n",
+            needs_warning: !block_replaced,
+        }
     }
 
     /// Upgrades old-style shell integration (without end marker) to new format.
     ///
-    /// If none of the old end markers are found after the start marker, prints a warning
-    /// to stderr and appends the new block (content after start marker may be lost).
-    fn upgrade_old_installation(&self, contents: &str) -> String {
+    /// Returns a `BlockTransformResult` with the transformed content and a flag
+    /// indicating if a warning should be shown (old end marker not found).
+    fn upgrade_old_installation(&self, contents: &str) -> BlockTransformResult {
         let lines: Vec<&str> = contents.lines().collect();
         let mut result: Vec<String> = Vec::new();
         let mut in_block = false;
@@ -383,19 +392,15 @@ impl ShellIntegration {
             result.push(line.to_string());
         }
 
-        // If we never found the old end marker, warn user and append new block
+        // If we never found the old end marker, append new block and flag for warning
         if !block_replaced {
-            eprintln!(
-                "{} Could not find expected end of old {} shell integration block. \
-                 Content after the start marker may have been removed. \
-                 Please verify your shell config file.",
-                "Warning:".yellow(),
-                self.tool_name
-            );
             result.push(new_block.trim().to_string());
         }
 
-        result.join("\n") + "\n"
+        BlockTransformResult {
+            content: result.join("\n") + "\n",
+            needs_warning: !block_replaced,
+        }
     }
 
     /// Prints activation instructions after shell integration is added or updated.
@@ -471,17 +476,19 @@ function tt() {
 # More config
 export BAZ=qux
 "#;
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
+        // Should not need warning (end marker was found)
+        assert!(!result.needs_warning);
         // Should preserve content before and after
-        assert!(new_contents.contains("export FOO=bar"));
-        assert!(new_contents.contains("export BAZ=qux"));
+        assert!(result.content.contains("export FOO=bar"));
+        assert!(result.content.contains("export BAZ=qux"));
         // Should have new content
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains("testtool \"$@\""));
         // Should not have old content
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(!result.content.contains("OLD CONTENT"));
         // Should have end marker
-        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(result.content.contains(&integration.end_marker()));
     }
 
     #[test]
@@ -500,17 +507,19 @@ alias ttv='tt --verbose'
 # More config
 export BAZ=qux
 "#;
-        let new_contents = integration.upgrade_old_installation(old_contents);
+        let result = integration.upgrade_old_installation(old_contents);
 
+        // Should not need warning (old end marker was found)
+        assert!(!result.needs_warning);
         // Should preserve content before and after
-        assert!(new_contents.contains("export FOO=bar"));
-        assert!(new_contents.contains("export BAZ=qux"));
+        assert!(result.content.contains("export FOO=bar"));
+        assert!(result.content.contains("export BAZ=qux"));
         // Should have new content
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains("testtool \"$@\""));
         // Should not have old content
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(!result.content.contains("OLD CONTENT"));
         // Should have end marker now
-        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(result.content.contains(&integration.end_marker()));
     }
 
     #[test]
@@ -549,16 +558,18 @@ alias ttv='tt --verbose'
 # Other config
 export PATH=/usr/bin
 "#;
-        let new_contents = integration.upgrade_old_installation(old_contents);
+        let result = integration.upgrade_old_installation(old_contents);
 
+        // Should not need warning (old end marker was found)
+        assert!(!result.needs_warning);
         // Should have new content (new block starts with newline internally)
-        assert!(new_contents.contains(&integration.start_marker()));
+        assert!(result.content.contains(&integration.start_marker()));
         // Should preserve content after
-        assert!(new_contents.contains("export PATH=/usr/bin"));
+        assert!(result.content.contains("export PATH=/usr/bin"));
         // Should not have old content
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(!result.content.contains("OLD CONTENT"));
         // Should have end marker
-        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(result.content.contains(&integration.end_marker()));
     }
 
     #[test]
@@ -573,16 +584,18 @@ function tt() {
     OLD CONTENT
 }
 alias ttv='tt --verbose'"#;
-        let new_contents = integration.upgrade_old_installation(old_contents);
+        let result = integration.upgrade_old_installation(old_contents);
 
+        // Should not need warning (old end marker was found)
+        assert!(!result.needs_warning);
         // Should preserve content before
-        assert!(new_contents.contains("export PATH=/usr/bin"));
+        assert!(result.content.contains("export PATH=/usr/bin"));
         // Should have new content
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains("testtool \"$@\""));
         // Should not have old content
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(!result.content.contains("OLD CONTENT"));
         // Should have end marker
-        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(result.content.contains(&integration.end_marker()));
     }
 
     #[test]
@@ -594,15 +607,17 @@ function tt() {
     OLD CONTENT
 }
 alias ttv='tt --verbose'"#;
-        let new_contents = integration.upgrade_old_installation(old_contents);
+        let result = integration.upgrade_old_installation(old_contents);
 
+        // Should not need warning (old end marker was found)
+        assert!(!result.needs_warning);
         // Should have new content
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains("testtool \"$@\""));
         // Should not have old content
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(!result.content.contains("OLD CONTENT"));
         // Should have both markers
-        assert!(new_contents.contains(&integration.start_marker()));
-        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(result.content.contains(&integration.start_marker()));
+        assert!(result.content.contains(&integration.end_marker()));
     }
 
     #[test]
@@ -621,13 +636,15 @@ FIRST_MARKER
 SHOULD_BE_PRESERVED
 SECOND_MARKER
 "#;
-        let new_contents = integration.upgrade_old_installation(old_contents);
+        let result = integration.upgrade_old_installation(old_contents);
 
+        // Should not need warning (old end marker was found)
+        assert!(!result.needs_warning);
         // Should preserve content after first marker
-        assert!(new_contents.contains("SHOULD_BE_PRESERVED"));
-        assert!(new_contents.contains("SECOND_MARKER"));
+        assert!(result.content.contains("SHOULD_BE_PRESERVED"));
+        assert!(result.content.contains("SECOND_MARKER"));
         // Should not have old content before first marker
-        assert!(!new_contents.contains("OLD LINE 1"));
+        assert!(!result.content.contains("OLD LINE 1"));
     }
 
     #[test]
@@ -647,13 +664,15 @@ function old_tt() {
 # More config
 export BAZ=qux
 "#;
-        let new_contents = integration.upgrade_old_installation(old_contents);
+        let result = integration.upgrade_old_installation(old_contents);
 
+        // Should need warning (no old end marker found)
+        assert!(result.needs_warning);
         // When no old end marker is found, should append the new block
         // The old content after the start marker should be skipped until EOF
         // Then new block appended
-        assert!(new_contents.contains(&integration.end_marker()));
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains(&integration.end_marker()));
+        assert!(result.content.contains("testtool \"$@\""));
     }
 
     // ========== Edge case tests for new format replacement ==========
@@ -671,14 +690,16 @@ function tt() {
 # Other config
 export PATH=/usr/bin
 "#;
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
+        // Should not need warning (end marker was found)
+        assert!(!result.needs_warning);
         // Should have new content
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains("testtool \"$@\""));
         // Should preserve content after
-        assert!(new_contents.contains("export PATH=/usr/bin"));
+        assert!(result.content.contains("export PATH=/usr/bin"));
         // Should not have old content
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(!result.content.contains("OLD CONTENT"));
     }
 
     #[test]
@@ -693,14 +714,16 @@ function tt() {
     OLD CONTENT
 }
 # End testtool shell integration"#;
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
+        // Should not need warning (end marker was found)
+        assert!(!result.needs_warning);
         // Should preserve content before
-        assert!(new_contents.contains("export PATH=/usr/bin"));
+        assert!(result.content.contains("export PATH=/usr/bin"));
         // Should have new content
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains("testtool \"$@\""));
         // Should not have old content
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(!result.content.contains("OLD CONTENT"));
     }
 
     #[test]
@@ -712,14 +735,16 @@ function tt() {
     OLD CONTENT
 }
 # End testtool shell integration"#;
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
+        // Should not need warning (end marker was found)
+        assert!(!result.needs_warning);
         // Should have new content only
-        assert!(new_contents.contains("testtool \"$@\""));
-        assert!(!new_contents.contains("OLD CONTENT"));
+        assert!(result.content.contains("testtool \"$@\""));
+        assert!(!result.content.contains("OLD CONTENT"));
         // Should have markers
-        assert!(new_contents.contains(&integration.start_marker()));
-        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(result.content.contains(&integration.start_marker()));
+        assert!(result.content.contains(&integration.end_marker()));
     }
 
     #[test]
@@ -732,11 +757,13 @@ function old() { echo "old"; }
 # No end marker
 export FOO=bar
 "#;
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
+        // Should need warning (no end marker found)
+        assert!(result.needs_warning);
         // Should have the new block appended
-        assert!(new_contents.contains(&integration.end_marker()));
-        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(result.content.contains(&integration.end_marker()));
+        assert!(result.content.contains("testtool \"$@\""));
     }
 
     // ========== Idempotency tests ==========
@@ -757,10 +784,13 @@ function tt() {
 export BAZ=qux
 "#;
         let first_replace = integration.replace_block(initial);
-        let second_replace = integration.replace_block(&first_replace);
+        let second_replace = integration.replace_block(&first_replace.content);
 
         // Running replace twice should produce identical results
-        assert_eq!(first_replace, second_replace);
+        assert_eq!(first_replace.content, second_replace.content);
+        // Neither should need warning
+        assert!(!first_replace.needs_warning);
+        assert!(!second_replace.needs_warning);
     }
 
     #[test]
@@ -781,10 +811,13 @@ export BAZ=qux
         // First upgrade from old format
         let upgraded = integration.upgrade_old_installation(old_format);
         // Then replace (simulating running --shell-setup again)
-        let replaced = integration.replace_block(&upgraded);
+        let replaced = integration.replace_block(&upgraded.content);
 
         // Should be identical
-        assert_eq!(upgraded, replaced);
+        assert_eq!(upgraded.content, replaced.content);
+        // Neither should need warning
+        assert!(!upgraded.needs_warning);
+        assert!(!replaced.needs_warning);
     }
 
     // ========== Content preservation tests ==========
@@ -793,20 +826,20 @@ export BAZ=qux
     fn test_preserves_blank_lines_before_block() {
         let integration = create_test_integration();
         let old_contents = "export FOO=bar\n\n\n# testtool - Test Tool shell integration\nOLD\n# End testtool shell integration\n";
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
         // Should preserve the blank lines before the block
-        assert!(new_contents.starts_with("export FOO=bar\n\n\n"));
+        assert!(result.content.starts_with("export FOO=bar\n\n\n"));
     }
 
     #[test]
     fn test_preserves_blank_lines_after_block() {
         let integration = create_test_integration();
         let old_contents = "# testtool - Test Tool shell integration\nOLD\n# End testtool shell integration\n\n\nexport FOO=bar\n";
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
         // Should preserve the blank lines after the block
-        assert!(new_contents.contains("\n\nexport FOO=bar"));
+        assert!(result.content.contains("\n\nexport FOO=bar"));
     }
 
     #[test]
@@ -823,11 +856,11 @@ OLD
 # === ANOTHER SECTION ===
 export BAZ=qux
 "#;
-        let new_contents = integration.replace_block(old_contents);
+        let result = integration.replace_block(old_contents);
 
-        assert!(new_contents.contains("# === MY CUSTOM SECTION ==="));
-        assert!(new_contents.contains("# === END CUSTOM ==="));
-        assert!(new_contents.contains("# === ANOTHER SECTION ==="));
+        assert!(result.content.contains("# === MY CUSTOM SECTION ==="));
+        assert!(result.content.contains("# === END CUSTOM ==="));
+        assert!(result.content.contains("# === ANOTHER SECTION ==="));
     }
 
     // ========== Real-world cwt format tests ==========
@@ -881,18 +914,20 @@ alias wtb='wt -p'  # Previous worktree (back)
 # Other aliases
 alias ll='ls -la'
 "#;
-        let new_contents = integration.upgrade_old_installation(old_zshrc);
+        let result = integration.upgrade_old_installation(old_zshrc);
 
+        // Should not need warning (old end marker was found)
+        assert!(!result.needs_warning);
         // Should preserve user config before
-        assert!(new_contents.contains("export EDITOR=vim"));
+        assert!(result.content.contains("export EDITOR=vim"));
         // Should preserve other aliases after
-        assert!(new_contents.contains("alias ll='ls -la'"));
+        assert!(result.content.contains("alias ll='ls -la'"));
         // Should have new wtm alias
-        assert!(new_contents.contains("alias wtm='wt main'"));
+        assert!(result.content.contains("alias wtm='wt main'"));
         // Should have end marker now
-        assert!(new_contents.contains("# End cwt shell integration"));
+        assert!(result.content.contains("# End cwt shell integration"));
         // Should not have duplicate alias definitions
-        let wtf_count = new_contents.matches("alias wtf=").count();
+        let wtf_count = result.content.matches("alias wtf=").count();
         assert_eq!(wtf_count, 1, "Should only have one wtf alias");
     }
 
@@ -928,15 +963,57 @@ alias wtm='wt main'
 # Other aliases
 alias ll='ls -la'
 "#;
-        let new_contents = integration.replace_block(current_zshrc);
+        let result = integration.replace_block(current_zshrc);
 
+        // Should not need warning (end marker was found)
+        assert!(!result.needs_warning);
         // Should preserve user config
-        assert!(new_contents.contains("export EDITOR=vim"));
-        assert!(new_contents.contains("alias ll='ls -la'"));
+        assert!(result.content.contains("export EDITOR=vim"));
+        assert!(result.content.contains("alias ll='ls -la'"));
         // Should have new alias
-        assert!(new_contents.contains("alias wtn='wt -n'"));
+        assert!(result.content.contains("alias wtn='wt -n'"));
         // Should have end marker
-        assert!(new_contents.contains("# End cwt shell integration"));
+        assert!(result.content.contains("# End cwt shell integration"));
+    }
+
+    #[test]
+    fn test_prcp_old_format_upgrade() {
+        // Simulates the actual old prcp format (before end marker was added)
+        let integration = ShellIntegration::new(
+            "prcp",
+            "Progress Copy",
+            r#"
+function prmv() {
+    prcp --rm "$@"
+}
+"#,
+        )
+        .with_old_end_marker(r#"prcp --rm "$@""#);
+
+        let old_zshrc = r#"# User config
+export EDITOR=vim
+
+# prcp - Progress Copy shell integration
+# Added by: prcp --shell-setup
+function prmv() {
+    prcp --rm "$@"
+}
+
+# Other aliases
+alias ll='ls -la'
+"#;
+        let result = integration.upgrade_old_installation(old_zshrc);
+
+        // Should not need warning (old end marker was found)
+        assert!(!result.needs_warning);
+        // Should preserve user config before
+        assert!(result.content.contains("export EDITOR=vim"));
+        // Should preserve other aliases after
+        assert!(result.content.contains("alias ll='ls -la'"));
+        // Should have end marker now
+        assert!(result.content.contains("# End prcp shell integration"));
+        // Should have new function
+        assert!(result.content.contains("function prmv()"));
     }
 
     // ========== Safety tests ==========
@@ -1011,15 +1088,17 @@ function prmv() { OLD_PRCP; }
         // Replacing cwt should not affect prcp
         let after_cwt_replace = cwt.replace_block(file_with_both);
 
-        assert!(after_cwt_replace.contains("function wt() { cwt; }"));
-        assert!(after_cwt_replace.contains("function prmv() { OLD_PRCP; }"));
-        assert!(!after_cwt_replace.contains("OLD_CWT"));
+        assert!(!after_cwt_replace.needs_warning);
+        assert!(after_cwt_replace.content.contains("function wt() { cwt; }"));
+        assert!(after_cwt_replace.content.contains("function prmv() { OLD_PRCP; }"));
+        assert!(!after_cwt_replace.content.contains("OLD_CWT"));
 
         // Replacing prcp should not affect cwt
-        let after_prcp_replace = prcp.replace_block(&after_cwt_replace);
+        let after_prcp_replace = prcp.replace_block(&after_cwt_replace.content);
 
-        assert!(after_prcp_replace.contains("function wt() { cwt; }"));
-        assert!(after_prcp_replace.contains("function prmv() { prcp --rm; }"));
-        assert!(!after_prcp_replace.contains("OLD_PRCP"));
+        assert!(!after_prcp_replace.needs_warning);
+        assert!(after_prcp_replace.content.contains("function wt() { cwt; }"));
+        assert!(after_prcp_replace.content.contains("function prmv() { prcp --rm; }"));
+        assert!(!after_prcp_replace.content.contains("OLD_PRCP"));
     }
 }

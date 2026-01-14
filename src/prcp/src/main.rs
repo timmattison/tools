@@ -217,7 +217,9 @@ function prmv() {
 /// Sets up shell integration by adding the prmv function to the user's shell config.
 fn setup_shell_integration() -> Result<()> {
     let integration = ShellIntegration::new("prcp", "Progress Copy", SHELL_CODE)
-        .with_command("prmv", "Copy files with progress, removing sources after verification");
+        .with_command("prmv", "Copy files with progress, removing sources after verification")
+        // Old installations ended with this line (before end marker was added)
+        .with_old_end_marker(r#"prcp --rm "$@""#);
     integration.setup().map_err(|e| anyhow::anyhow!("{}", e))
 }
 
