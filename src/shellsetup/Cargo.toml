@@ -9,3 +9,16 @@ license = "MIT"
 colored = "3.0"
 dirs = "6.0"
 thiserror = "2.0"
+
+[lints.rust]
+# Enforce stricter checks to catch issues early
+unsafe_code = "deny"
+
+[lints.clippy]
+# Pedantic lints help catch subtle issues
+pedantic = { level = "warn", priority = -1 }
+# Allow certain pedantic lints that are too strict for this codebase
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

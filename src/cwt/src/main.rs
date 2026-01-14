@@ -305,7 +305,7 @@ alias wtm='wt main'  # Main worktree
 "#;
 
 /// Sets up shell integration by adding the wt function to the user's shell config.
-fn setup_shell_integration() -> Result<(), String> {
+fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
     let integration = ShellIntegration::new("cwt", "Change Worktree", SHELL_CODE)
         .with_command("wt", "List worktrees or change to one")
         .with_command("wtf", "Next worktree")
@@ -314,7 +314,7 @@ fn setup_shell_integration() -> Result<(), String> {
         // Old installations ended with this alias (before end marker was added)
         .with_old_end_marker("alias wtb='wt -p'");
 
-    integration.setup().map_err(|e| e.to_string())
+    integration.setup()
 }
 
 fn main() {

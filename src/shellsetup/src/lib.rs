@@ -149,6 +149,7 @@ impl ShellIntegration {
     }
 
     /// Adds a command to the list of available commands shown after setup.
+    #[must_use]
     pub fn with_command(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
         self.commands.push(ShellCommand::new(name, description));
         self
@@ -159,6 +160,7 @@ impl ShellIntegration {
     /// Use this when upgrading from a version that didn't have the standard
     /// end marker. The setup will look for this pattern to find the end of
     /// the old installation block.
+    #[must_use]
     pub fn with_old_end_marker(mut self, marker: impl Into<String>) -> Self {
         self.old_end_markers.push(marker.into());
         self
@@ -183,6 +185,11 @@ impl ShellIntegration {
             self.shell_code.trim_end(),
             self.end_marker()
         )
+    }
+
+    /// Checks if any line in the contents exactly matches the given marker.
+    fn has_marker_line(contents: &str, marker: &str) -> bool {
+        contents.lines().any(|line| line.trim() == marker)
     }
 
     /// Sets up shell integration by adding or upgrading the shell config.
@@ -240,9 +247,10 @@ impl ShellIntegration {
             let start_marker = self.start_marker();
             let end_marker = self.end_marker();
 
-            if contents.contains(&start_marker) {
+            // Use exact line matching to detect markers (avoids false positives)
+            if Self::has_marker_line(&contents, &start_marker) {
                 // Check if this is a new-style installation (has end marker)
-                let (result, action) = if contents.contains(&end_marker) {
+                let (result, action) = if Self::has_marker_line(&contents, &end_marker) {
                     // New-style: replace the entire block
                     (self.replace_block(&contents), "updated")
                 } else {
@@ -321,14 +329,16 @@ impl ShellIntegration {
         let new_block = self.full_block();
 
         for line in lines {
-            if !in_block && line.contains(&start_marker) {
+            // Use exact match for start marker to avoid false positives
+            if !in_block && line.trim() == start_marker {
                 // Start of block - skip until end marker
                 in_block = true;
                 continue;
             }
 
             if in_block {
-                if line.contains(&end_marker) {
+                // Use exact match for end marker
+                if line.trim() == end_marker {
                     // End of block - insert new integration
                     result.push(new_block.trim().to_string());
                     in_block = false;
@@ -366,14 +376,17 @@ impl ShellIntegration {
         let new_block = self.full_block();
 
         for line in lines {
-            if !in_block && line.contains(&start_marker) {
+            // Use exact match for start marker to avoid false positives
+            if !in_block && line.trim() == start_marker {
                 // Start of old block - skip until we find the old end
                 in_block = true;
                 continue;
             }
 
             if in_block {
-                // Check if this line matches any old end marker
+                // Check if this line matches any old end marker.
+                // Use contains() here because old end markers may appear with
+                // trailing comments (e.g., "alias wtb='wt -p'  # Previous worktree")
                 let is_old_end = self
                     .old_end_markers
                     .iter()
@@ -764,6 +777,21 @@ export FOO=bar
         // Should have the new block appended
         assert!(result.content.contains(&integration.end_marker()));
         assert!(result.content.contains("testtool \"$@\""));
+        // IMPORTANT: Content after start marker is LOST when no end marker found.
+        // This is expected behavior - the warning alerts users to verify their file.
+        assert!(
+            !result.content.contains("export FOO=bar"),
+            "Content after start marker should be removed when no end marker found"
+        );
+        assert!(
+            !result.content.contains("function old()"),
+            "Old function should be removed"
+        );
+        // Content BEFORE the start marker should be preserved
+        assert!(
+            result.content.contains("# Some config"),
+            "Content before start marker should be preserved"
+        );
     }
 
     // ========== Idempotency tests ==========

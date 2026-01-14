@@ -220,7 +220,8 @@ fn setup_shell_integration() -> Result<()> {
         .with_command("prmv", "Copy files with progress, removing sources after verification")
         // Old installations ended with this line (before end marker was added)
         .with_old_end_marker(r#"prcp --rm "$@""#);
-    integration.setup().map_err(|e| anyhow::anyhow!("{}", e))
+    // Use ? operator to convert ShellSetupError -> anyhow::Error, preserving the error chain
+    Ok(integration.setup()?)
 }
 
 /// Minimum allowed buffer size (4KB)
