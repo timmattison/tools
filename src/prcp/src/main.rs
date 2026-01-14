@@ -12,8 +12,9 @@ use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
+use shellsetup::ShellIntegration;
 // Blake3 imported via blake3 crate (no Digest trait needed)
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -163,8 +164,10 @@ struct Args {
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
-    /// Add shell integration (prmv function) to your shell config
-    #[arg(long)]
+    /// Add shell integration to your shell config. Adds these commands:
+    ///
+    ///   prmv <src...> <dst>  - Copy with progress, remove sources after verification
+    #[arg(long, verbatim_doc_comment)]
     shell_setup: bool,
 
     /// Remove source files after successful copy (verified by Blake3 hash)
@@ -204,95 +207,21 @@ struct Args {
     quiet: bool,
 }
 
-/// The shell integration code to add to shell config files.
-const SHELL_INTEGRATION: &str = r#"
-# prcp - Progress Copy shell integration
-# Added by: prcp --shell-setup
+/// The shell code to add to shell config files.
+const SHELL_CODE: &str = r#"
 function prmv() {
     prcp --rm "$@"
 }
 "#;
 
-/// Marker to detect if shell integration is already installed.
-const SHELL_INTEGRATION_MARKER: &str = "prcp - Progress Copy shell integration";
-
 /// Sets up shell integration by adding the prmv function to the user's shell config.
 fn setup_shell_integration() -> Result<()> {
-    // Get home directory
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    // Detect shell from SHELL environment variable
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let shell_name = Path::new(&shell)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    // Determine which config file to use
-    let config_file = match shell_name {
-        "zsh" => home.join(".zshrc"),
-        "bash" => {
-            // Prefer .bashrc, but use .bash_profile on macOS if .bashrc doesn't exist
-            let bashrc = home.join(".bashrc");
-            let bash_profile = home.join(".bash_profile");
-            if bashrc.exists() {
-                bashrc
-            } else if bash_profile.exists() {
-                bash_profile
-            } else {
-                bashrc // Create .bashrc if neither exists
-            }
-        }
-        _ => {
-            anyhow::bail!(
-                "Unsupported shell: {}. Please manually add the shell integration to your config.\n\
-                 Add this to your shell config:\n{}",
-                shell_name,
-                SHELL_INTEGRATION
-            );
-        }
-    };
-
-    // Check if already installed
-    if config_file.exists() {
-        let contents = fs::read_to_string(&config_file)
-            .with_context(|| format!("Could not read {}", config_file.display()))?;
-
-        if contents.contains(SHELL_INTEGRATION_MARKER) {
-            println!(
-                "{} Shell integration already installed in {}",
-                "✓".green(),
-                config_file.display()
-            );
-            return Ok(());
-        }
-    }
-
-    // Append shell integration to config file
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&config_file)
-        .with_context(|| format!("Could not open {}", config_file.display()))?;
-
-    file.write_all(SHELL_INTEGRATION.as_bytes())
-        .with_context(|| format!("Could not write to {}", config_file.display()))?;
-
-    println!(
-        "{} Shell integration added to {}",
-        "✓".green(),
-        config_file.display()
-    );
-    println!();
-    println!("To activate, run:");
-    println!("  {} {}", "source".cyan(), config_file.display());
-    println!();
-    println!("Or open a new terminal window.");
-    println!();
-    println!("Available commands:");
-    println!("  {} - Copy files with progress, removing sources after verification", "prmv".yellow());
-
-    Ok(())
+    let integration = ShellIntegration::new("prcp", "Progress Copy", SHELL_CODE)
+        .with_command("prmv", "Copy files with progress, removing sources after verification")
+        // Old installations ended with this line (before end marker was added)
+        .with_old_end_marker(r#"prcp --rm "$@""#);
+    // Use ? operator to convert ShellSetupError -> anyhow::Error, preserving the error chain
+    Ok(integration.setup()?)
 }
 
 /// Minimum allowed buffer size (4KB)
