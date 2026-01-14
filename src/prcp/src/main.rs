@@ -483,10 +483,10 @@ async fn main() -> Result<()> {
     let done_key_listener = key_listener_done.clone();
     let input_active_key_listener = input_active.clone();
 
-    // Set up terminal width watch channel for dynamic resize handling
-    // Note: term_width_tx is unused since we let indicatif handle resize internally,
-    // but watch::channel requires both tx and rx to be created together
-    let (_term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
+    // Set up terminal width watch channel for dynamic resize handling.
+    // The transmitter is used by both the SIGWINCH handler (Unix) and
+    // key_task (via crossterm Event::Resize) to update width on terminal resize.
+    let (term_width_tx, term_width_rx) = watch::channel(get_terminal_width());
 
     // Spawn SIGINT signal handler as backup to key listener
     // This ensures graceful shutdown even if raw mode isn't capturing Ctrl+C
@@ -514,6 +514,44 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Spawn SIGWINCH signal handler for terminal resize (Unix only).
+    // This catches resize events even when raw mode is disabled (multi-file mode).
+    // In single-file mode (raw mode enabled), crossterm's Event::Resize may also
+    // fire; watch channels handle duplicate updates gracefully.
+    #[cfg(unix)]
+    let resize_task = {
+        let term_width_tx = term_width_tx.clone();
+        let done_resize = key_listener_done.clone();
+        task::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+
+            let mut sigwinch = match signal(SignalKind::window_change()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+
+            loop {
+                tokio::select! {
+                    _ = sigwinch.recv() => {
+                        let new_width = get_terminal_width();
+                        let _ = term_width_tx.send(new_width);
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                        if done_resize.load(Ordering::SeqCst) {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    #[cfg(not(unix))]
+    let resize_task = task::spawn(async {});
+
+    // Move term_width_tx to key_task (SIGWINCH handler already cloned it)
+    let term_width_tx_key = term_width_tx;
+
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
@@ -532,19 +570,25 @@ async fn main() -> Result<()> {
             // Poll with 150ms timeout to balance CPU usage and key responsiveness.
             // This provides acceptable latency for Ctrl+C and pause toggle while
             // still reducing idle CPU consumption compared to shorter intervals.
-            // Note: We only handle key events here. Resize events are intentionally
-            // ignored since indicatif handles terminal resize internally.
+            // Handles both key events (pause/cancel) and resize events (terminal width).
             if event::poll(Duration::from_millis(150)).unwrap_or(false) {
-                if let Ok(Event::Key(key_event)) = event::read() {
-                    match key_event.code {
-                        KeyCode::Char(' ') => {
-                            let _ = tx.send(());
-                        }
-                        KeyCode::Char('c')
-                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
-                            // Just set the flag, don't break - user may decline cancellation
-                            shutdown_key_listener.store(true, Ordering::SeqCst);
+                if let Ok(event) = event::read() {
+                    match event {
+                        Event::Key(key_event) => match key_event.code {
+                            KeyCode::Char(' ') => {
+                                let _ = tx.send(());
+                            }
+                            KeyCode::Char('c')
+                                if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                // Just set the flag, don't break - user may decline cancellation
+                                shutdown_key_listener.store(true, Ordering::SeqCst);
+                            }
+                            _ => {}
+                        },
+                        Event::Resize(width, _) => {
+                            // Update terminal width for progress bar resizing
+                            let _ = term_width_tx_key.send(width);
                         }
                         _ => {}
                     }
@@ -942,6 +986,7 @@ async fn main() -> Result<()> {
                     }
                     let _ = key_task.await;
                     let _ = signal_task.await;
+                    let _ = resize_task.await;
                     anyhow::bail!("Failed to copy '{}': {}", source.display(), e);
                 }
             }
@@ -962,6 +1007,7 @@ async fn main() -> Result<()> {
     // Wait for background tasks to finish
     let _ = key_task.await;
     let _ = signal_task.await;
+    let _ = resize_task.await;
 
     // Check for early exit error (set during verification cancellation)
     if let Some(error_msg) = early_exit_error {
