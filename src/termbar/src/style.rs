@@ -6,7 +6,7 @@
 use indicatif::ProgressStyle;
 
 use crate::error::{Result, TermbarError};
-use crate::{calculate_bar_width, escape_template_braces, PROGRESS_CHARS};
+use crate::{calculate_bar_width, escape_template_braces, str_len_as_u16, PROGRESS_CHARS};
 
 /// Common format string for progress stats (bytes, percentage, speed, ETA).
 const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_per_sec}, {eta})";
@@ -148,7 +148,7 @@ impl ProgressStyleBuilder {
                     .as_ref()
                     .map(|s| escape_template_braces(s))
                     .unwrap_or_default();
-                let filename_len = filename.len().min(u16::MAX as usize) as u16;
+                let filename_len = str_len_as_u16(&filename);
                 // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename.len()
                 let overhead = 60 + filename_len;
                 let bar_width = calculate_bar_width(terminal_width, overhead);
@@ -163,7 +163,7 @@ impl ProgressStyleBuilder {
                     .as_ref()
                     .map(|s| escape_template_braces(s))
                     .unwrap_or_default();
-                let filename_len = filename.len().min(u16::MAX as usize) as u16;
+                let filename_len = str_len_as_u16(&filename);
                 // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename.len()
                 let overhead = 70 + filename_len;
                 let bar_width = calculate_bar_width(terminal_width, overhead);

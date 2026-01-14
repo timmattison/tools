@@ -8,10 +8,6 @@ pub enum TermbarError {
     /// Failed to create a progress style.
     #[error("Failed to create progress style: {0}")]
     StyleCreation(String),
-
-    /// Invalid template format.
-    #[error("Invalid template format: {0}")]
-    InvalidTemplate(String),
 }
 
 /// Result type for termbar operations.

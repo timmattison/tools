@@ -126,6 +126,34 @@ pub fn calculate_bar_width(terminal_width: u16, fixed_overhead: u16) -> u16 {
     available.clamp(MIN_BAR_WIDTH, MAX_BAR_WIDTH)
 }
 
+/// Convert a string's length to u16, capping at [`u16::MAX`].
+///
+/// This is useful for calculating terminal display widths where string lengths
+/// need to be combined with other u16 values. Filenames longer than 65535 bytes
+/// are extremely rare in practice, so capping at u16::MAX is safe for display
+/// calculations.
+///
+/// # Arguments
+///
+/// * `s` - The string to measure.
+///
+/// # Returns
+///
+/// The string length as u16, or [`u16::MAX`] if the length exceeds u16 range.
+///
+/// # Example
+///
+/// ```
+/// use termbar::str_len_as_u16;
+///
+/// assert_eq!(str_len_as_u16("hello"), 5);
+/// assert_eq!(str_len_as_u16(""), 0);
+/// ```
+#[must_use]
+pub fn str_len_as_u16(s: &str) -> u16 {
+    u16::try_from(s.len()).unwrap_or(u16::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +203,12 @@ mod tests {
         assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
         assert!(DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH);
         assert!(!PROGRESS_CHARS.is_empty());
+    }
+
+    #[test]
+    fn test_str_len_as_u16() {
+        assert_eq!(str_len_as_u16(""), 0);
+        assert_eq!(str_len_as_u16("hello"), 5);
+        assert_eq!(str_len_as_u16("file{1}.txt"), 11);
     }
 }
