@@ -1,0 +1,11 @@
+[package]
+name = "shellsetup"
+version = "0.1.0"
+edition = "2021"
+description = "Shell integration library for adding tool functions to shell config files"
+license = "MIT"
+
+[dependencies]
+colored = "3.0"
+dirs = "6.0"
+thiserror = "2.0"
