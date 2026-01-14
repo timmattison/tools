@@ -366,11 +366,10 @@ impl ProgressDisplay {
         Ok(())
     }
 
-    /// Simple non-interactive progress display for when TUI is not desired
+    /// Simple non-interactive progress display for when TUI is not desired.
     ///
-    /// # Panics
-    ///
-    /// Panics if stdout flush fails.
+    /// Flush errors (e.g., broken pipe) are silently ignored since they indicate
+    /// the output is no longer being consumed.
     pub fn print_simple_progress(&self) {
         let dirs_checked = self.dirs_checked.load(Ordering::Relaxed);
         let repos_found = self.repos_found.load(Ordering::Relaxed);
@@ -427,7 +426,7 @@ impl ProgressDisplay {
         }
         
         use std::io::Write;
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush();
     }
 }
 

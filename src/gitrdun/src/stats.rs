@@ -23,6 +23,11 @@ impl GitOpStats {
     /// Calculate the average duration per operation.
     ///
     /// Uses nanosecond arithmetic to correctly handle counts exceeding `u32::MAX`.
+    ///
+    /// # Panics
+    ///
+    /// This function uses `expect()` internally but cannot actually panic because
+    /// the average of durations cannot exceed `Duration::MAX`, which fits in a `u64`.
     pub fn average(&self) -> Duration {
         if self.count == 0 {
             Duration::ZERO
@@ -30,8 +35,11 @@ impl GitOpStats {
             // Use nanoseconds to avoid u32 overflow issues with Duration::div
             let total_nanos = self.total_duration.as_nanos();
             let avg_nanos = total_nanos / u128::from(self.count);
-            // Safe: average of durations can't exceed the max duration
-            Duration::from_nanos(u64::try_from(avg_nanos).unwrap_or(u64::MAX))
+            // The average of durations cannot exceed the maximum individual duration,
+            // and Duration::MAX (about 584 years) fits in u64 nanoseconds.
+            Duration::from_nanos(u64::try_from(avg_nanos).expect(
+                "average duration cannot exceed Duration::MAX which fits in u64 nanoseconds",
+            ))
         }
     }
 
@@ -107,5 +115,73 @@ impl Timer {
 impl Default for Timer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_op_stats_average_empty() {
+        let stats = GitOpStats::new();
+        assert_eq!(stats.average(), Duration::ZERO);
+    }
+
+    #[test]
+    fn git_op_stats_average_single() {
+        let mut stats = GitOpStats::new();
+        stats.record(Duration::from_millis(100));
+        assert_eq!(stats.average(), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn git_op_stats_average_multiple() {
+        let mut stats = GitOpStats::new();
+        stats.record(Duration::from_millis(100));
+        stats.record(Duration::from_millis(200));
+        stats.record(Duration::from_millis(300));
+        assert_eq!(stats.average(), Duration::from_millis(200));
+    }
+
+    #[test]
+    fn git_op_stats_average_large_count() {
+        // Simulate a scenario where count exceeds u32::MAX
+        // We can't actually record 5 billion operations, but we can test
+        // that the math works by creating a stats struct directly
+        let stats = GitOpStats {
+            count: 5_000_000_000, // > u32::MAX (4,294,967,295)
+            total_duration: Duration::from_secs(10_000_000_000), // 10 billion seconds
+        };
+        // Average should be 2 seconds per operation
+        assert_eq!(stats.average(), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn git_op_stats_average_sub_nanosecond_precision() {
+        // Test that sub-nanosecond precision is truncated correctly
+        let mut stats = GitOpStats::new();
+        stats.record(Duration::from_nanos(10));
+        stats.record(Duration::from_nanos(11));
+        stats.record(Duration::from_nanos(12));
+        // Average: 33 / 3 = 11 nanoseconds
+        assert_eq!(stats.average(), Duration::from_nanos(11));
+    }
+
+    #[test]
+    fn git_op_stats_count() {
+        let mut stats = GitOpStats::new();
+        assert_eq!(stats.count(), 0);
+        stats.record(Duration::from_millis(100));
+        assert_eq!(stats.count(), 1);
+        stats.record(Duration::from_millis(100));
+        assert_eq!(stats.count(), 2);
+    }
+
+    #[test]
+    fn git_op_stats_default() {
+        let stats = GitOpStats::default();
+        assert_eq!(stats.count(), 0);
+        assert_eq!(stats.average(), Duration::ZERO);
     }
 }

@@ -49,16 +49,14 @@ const SKIP_DIRS: &[&str] = &[
     "node_modules", "vendor", ".idea", ".vscode", "dist", "build",
 ];
 
-/// Check if a directory is a Git repository
+/// Check if a directory is a Git repository.
 ///
-/// # Errors
-///
-/// This function returns `Ok(bool)` and does not error.
-pub fn is_git_repository(path: &Path, stats: &GitStats) -> Result<bool> {
+/// Returns `true` if the path is a valid git repository, `false` otherwise.
+pub fn is_git_repository(path: &Path, stats: &GitStats) -> bool {
     let timer = Timer::new();
     let result = Repository::open(path).is_ok();
     stats.record_git_dir(timer.elapsed());
-    Ok(result)
+    result
 }
 
 /// Get the current git user email
@@ -226,7 +224,7 @@ pub fn scan_path(
 
         // Check if this is a git repository
         let mut result_guard = result.lock().unwrap();
-        if is_git_repository(path, &result_guard.stats)? {
+        if is_git_repository(path, &result_guard.stats) {
             let abs_path = path.canonicalize()?;
 
             // Skip if we've already processed this repository
