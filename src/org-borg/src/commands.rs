@@ -159,7 +159,7 @@ async fn clone_repositories(
     // if the terminal is resized during the operation. This is acceptable for
     // the relatively short duration of repository cloning operations.
     let terminal_width = TerminalWidth::get_or_default();
-    // Overhead: spinner(2) + brackets(4) + pos/len(15) + text(15) + spaces(4) = ~40
+    // Overhead: spinner(2) + brackets(4) + pos/len(15) + text(15) + spaces(4) = 40
     let bar_width = calculate_bar_width(terminal_width, 40);
     main_pb.set_style(
         ProgressStyle::default_bar()
