@@ -104,6 +104,7 @@ env_logger = "0.11"
 tiktoken-rs = "0.5"
 num-format = "0.4"
 human_bytes = "0.4"
+unicode-width = "0.2"
 
 # Dev dependencies
 tempfile = "3"
@@ -124,6 +125,7 @@ clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
+termbar = { path = "src/termbar" }
 
 [workspace.lints.rust]
 # Require explicit handling of must-use values

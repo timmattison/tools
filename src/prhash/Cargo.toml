@@ -14,6 +14,7 @@ sha2.workspace = true
 md-5.workspace = true
 sha1.workspace = true
 hex.workspace = true
+termbar.workspace = true
 
 [lints.clippy]
 # Prevent potential panics from arithmetic operations (subtraction overflow, etc.)

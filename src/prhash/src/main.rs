@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use termbar::{calculate_bar_width, TerminalWidth, PROGRESS_CHARS};
 use tokio::sync::mpsc;
 use tokio::task;
 
@@ -97,7 +98,10 @@ enum HashState {
     Sha1(Sha1),
     Sha256(Sha256),
     Sha512(Sha512),
-    Blake3(Blake3Hasher),
+    /// Boxed to reduce enum size. Without boxing, Blake3Hasher would bloat the
+    /// enum to its size (~1.9KB), wasting memory for the smaller hash variants.
+    /// See `test_blake3_hasher_size_justifies_boxing` for size verification.
+    Blake3(Box<Blake3Hasher>),
 }
 
 impl HashState {
@@ -107,7 +111,7 @@ impl HashState {
             HashAlgorithm::Sha1 => HashState::Sha1(Sha1::new()),
             HashAlgorithm::Sha256 => HashState::Sha256(Sha256::new()),
             HashAlgorithm::Sha512 => HashState::Sha512(Sha512::new()),
-            HashAlgorithm::Blake3 => HashState::Blake3(Blake3Hasher::new()),
+            HashAlgorithm::Blake3 => HashState::Blake3(Box::new(Blake3Hasher::new())),
         }
     }
     
@@ -167,15 +171,23 @@ async fn main() -> Result<()> {
     for file in &args.files {
         let metadata = fs::metadata(file)
             .context(format!("Failed to read metadata for '{}'", file.display()))?;
-        total_size += metadata.len();
+        total_size = total_size
+            .checked_add(metadata.len())
+            .context("Total file size overflowed u64")?;
     }
     
-    // Set up progress bar
+    // Set up progress bar with dynamic width calculation
+    let terminal_width = TerminalWidth::get_or_default();
+    // Overhead: spinner(2) + elapsed(12) + bytes/total(25) + speed/eta(25) + msg(60+) + brackets/spaces(10) = ~135
+    let bar_width = calculate_bar_width(terminal_width, 135);
     let pb = ProgressBar::new(total_size);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta}) {msg}")?
-            .progress_chars("█▉▊▋▌▍▎▏  ")
+            .template(&format!(
+                "{{spinner:.green}} [{{elapsed_precise}}] [{{bar:{}.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, {{eta}}) {{msg}}",
+                bar_width
+            ))?
+            .progress_chars(PROGRESS_CHARS)
     );
     
     // Set up pause/resume handling
@@ -212,7 +224,11 @@ async fn main() -> Result<()> {
     
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx + 1, args.files.len()));
+        // SAFETY: idx comes from enumerate() over args.files which is bounded by memory,
+        // so idx < usize::MAX and idx + 1 cannot overflow.
+        #[allow(clippy::arithmetic_side_effects)]
+        let file_num = idx + 1;
+        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), file_num, args.files.len()));
         
         let result = hash_file_with_progress(
             file,
@@ -318,6 +334,9 @@ async fn hash_file_with_progress(
         };
         
         // Update hash
+        // SAFETY: bytes_read is the return value from read(), which guarantees
+        // bytes_read <= buffer.len(), so this slice is always valid.
+        #[allow(clippy::indexing_slicing)]
         hasher.update(&buffer[..bytes_read]);
         
         pb.inc(bytes_read as u64);
@@ -425,5 +444,45 @@ mod tests {
         let path = Path::new("/home/user/file.txt");
         let result = truncate_path_for_display(path, 0);
         assert!(result.is_empty(), "Result should be empty for max_len 0: {}", result);
+    }
+
+    /// Verifies that Blake3Hasher is significantly larger than other hashers,
+    /// justifying the use of Box to reduce enum size.
+    ///
+    /// This test documents the size difference and will fail if the size
+    /// relationship changes (e.g., if blake3 crate reduces hasher size),
+    /// prompting a review of whether boxing is still necessary.
+    #[test]
+    fn test_blake3_hasher_size_justifies_boxing() {
+        let blake3_size = std::mem::size_of::<Blake3Hasher>();
+        let sha512_size = std::mem::size_of::<Sha512>();
+        let sha256_size = std::mem::size_of::<Sha256>();
+        let sha1_size = std::mem::size_of::<Sha1>();
+        let md5_size = std::mem::size_of::<Md5>();
+
+        // Find the largest non-Blake3 hasher
+        let largest_other = sha512_size.max(sha256_size).max(sha1_size).max(md5_size);
+
+        // Blake3Hasher should be significantly larger (at least 4x) to justify boxing.
+        // If this fails, the boxing optimization may no longer be worthwhile.
+        assert!(
+            blake3_size >= largest_other * 4,
+            "Blake3Hasher ({} bytes) should be at least 4x larger than the largest \
+             other hasher ({} bytes) to justify boxing. Current ratio: {:.1}x. \
+             Consider removing Box if blake3 has been optimized.",
+            blake3_size,
+            largest_other,
+            blake3_size as f64 / largest_other as f64
+        );
+
+        // Also verify HashState with boxing is smaller than without
+        let boxed_hash_state_size = std::mem::size_of::<HashState>();
+        // A pointer is 8 bytes on 64-bit, so boxed enum should be much smaller than Blake3Hasher
+        assert!(
+            boxed_hash_state_size < blake3_size,
+            "HashState ({} bytes) should be smaller than raw Blake3Hasher ({} bytes)",
+            boxed_hash_state_size,
+            blake3_size
+        );
     }
 }

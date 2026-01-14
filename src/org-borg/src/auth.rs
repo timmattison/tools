@@ -4,7 +4,7 @@ use std::process::Command;
 /// Get GitHub token from gh CLI if available
 pub fn get_gh_token() -> Result<Option<String>> {
     let output = Command::new("gh")
-        .args(&["auth", "token"])
+        .args(["auth", "token"])
         .output();
 
     match output {
@@ -26,7 +26,7 @@ pub fn get_gh_token() -> Result<Option<String>> {
 /// Get GitHub authentication status from gh CLI
 pub fn get_gh_auth_status() -> Result<Option<String>> {
     let output = Command::new("gh")
-        .args(&["auth", "status"])
+        .args(["auth", "status"])
         .output();
 
     match output {

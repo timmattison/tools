@@ -48,3 +48,70 @@ fn setup_shell_integration() -> Result<()> {
 
 - `cwt` - Change Worktree (provides `wt`, `wtf`, `wtb`, `wtm` commands)
 - `prcp` - Progress Copy (provides `prmv` command)
+
+## Progress Bar Display
+
+All tools in this repository that display progress bars **should** use the `termbar` library crate located at `src/termbar/`.
+
+### Why
+
+The `termbar` library provides:
+- Terminal width detection with fallback
+- Progress bar width calculation that adapts to terminal size
+- Pre-built progress bar styles (copy, verify, batch, hash)
+- Escape function for template braces in filenames
+- Unicode-aware display width calculation for filenames
+- Optional async terminal resize watching via SIGWINCH with clean shutdown
+
+### Usage
+
+```rust
+use termbar::{ProgressStyleBuilder, TerminalWidth, calculate_bar_width, PROGRESS_CHARS};
+
+// Create a copy-style progress bar
+let width = TerminalWidth::get_or_default();
+let style = ProgressStyleBuilder::copy("myfile.txt")
+    .build(width)
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+// Or use width calculation for custom templates
+let bar_width = calculate_bar_width(width, 80); // 80 = overhead
+let template = format!("{{spinner}} [{{bar:{}.cyan}}] {{msg}}", bar_width);
+```
+
+### Terminal Resize Watching
+
+For applications that need to respond to terminal resize events:
+
+```rust
+use termbar::TerminalWidthWatcher;
+
+// Create watcher with automatic SIGWINCH handling
+let (watcher, resize_task, shutdown_tx) = TerminalWidthWatcher::with_sigwinch_channel();
+
+// Get current width or watch for changes
+let width = watcher.current_width();
+let receiver = watcher.receiver();
+
+// When done, signal shutdown by dropping the sender or sending explicitly
+drop(shutdown_tx);  // or shutdown_tx.send(())
+resize_task.await;
+```
+
+Benefits of the channel-based shutdown:
+- Clean shutdown without polling overhead
+- Immediate task termination when signaled
+- Idiomatic async Rust patterns
+
+### Available Style Builders
+
+- `ProgressStyleBuilder::copy(filename)` - File copy operations (cyan bar)
+- `ProgressStyleBuilder::verify(filename)` - File verification (yellow bar)
+- `ProgressStyleBuilder::batch()` - Batch operations with file counts (blue bar)
+- `ProgressStyleBuilder::hash()` - Hash operations with message (cyan bar)
+
+### Tools Currently Using termbar
+
+- `prcp` - Progress Copy (copy, verify, and batch styles)
+- `prhash` - Progress Hash (custom template with dynamic width)
+- `org-borg` - Organization Backup (custom template with dynamic width)
