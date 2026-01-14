@@ -513,6 +513,10 @@ async fn main() -> Result<()> {
     // This catches resize events even when raw mode is disabled (multi-file mode).
     // In single-file mode (raw mode enabled), crossterm's Event::Resize may also
     // fire; watch channels handle duplicate updates gracefully.
+    //
+    // Note: We use the legacy AtomicBool-based API here (rather than the recommended
+    // channel-based shutdown) because key_listener_done is already shared across
+    // multiple tasks (signal handler, key listener, copy tasks) for coordinated shutdown.
     let resize_task = term_width_watcher.spawn_sigwinch_handler(key_listener_done.clone());
 
     // Clone sender for key_task to handle crossterm Event::Resize

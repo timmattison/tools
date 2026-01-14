@@ -62,8 +62,9 @@ pub const MAX_BAR_WIDTH: u16 = 100;
 
 /// Default progress characters for smooth sub-character progress visualization.
 ///
-/// These characters provide 8 levels of progress within each character cell:
-/// `█▉▊▋▌▍▎▏  `
+/// The string contains 10 characters used by indicatif for progress rendering:
+/// - 8 partial block characters (`█▉▊▋▌▍▎▏`) for sub-character progress levels
+/// - 2 space characters for the empty/background portion of the bar
 pub const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
 
 /// Escape braces in a string for use in indicatif templates.

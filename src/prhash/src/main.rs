@@ -222,9 +222,11 @@ async fn main() -> Result<()> {
     
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        // idx + 1 is safe: idx comes from enumerate() over args.files which is bounded by memory,
+        // SAFETY: idx comes from enumerate() over args.files which is bounded by memory,
         // so idx < usize::MAX and idx + 1 cannot overflow.
-        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx + 1, args.files.len()));
+        #[allow(clippy::arithmetic_side_effects)]
+        let file_num = idx + 1;
+        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), file_num, args.files.len()));
         
         let result = hash_file_with_progress(
             file,

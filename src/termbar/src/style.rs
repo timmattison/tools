@@ -140,15 +140,16 @@ impl ProgressStyleBuilder {
     }
 
     /// Create the template string for this style type.
-    fn create_template(&self, terminal_width: u16) -> String {
+    ///
+    /// This is exposed as `pub(crate)` for testing purposes.
+    pub(crate) fn create_template(&self, terminal_width: u16) -> String {
         match &self.style_type {
             StyleType::Copy => {
-                let filename = self
-                    .custom_filename
-                    .as_ref()
-                    .map(|s| escape_template_braces(s))
-                    .unwrap_or_default();
-                let filename_display_width = str_display_width_as_u16(&filename);
+                // Calculate display width on the ORIGINAL filename, not the escaped version.
+                // Escaped braces ({{ and }}) are template syntax that render as single characters.
+                let original = self.custom_filename.as_deref().unwrap_or_default();
+                let filename_display_width = str_display_width_as_u16(original);
+                let filename = escape_template_braces(original);
                 // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename display width
                 let overhead = 60 + filename_display_width;
                 let bar_width = calculate_bar_width(terminal_width, overhead);
@@ -158,12 +159,11 @@ impl ProgressStyleBuilder {
                 )
             }
             StyleType::Verify => {
-                let filename = self
-                    .custom_filename
-                    .as_ref()
-                    .map(|s| escape_template_braces(s))
-                    .unwrap_or_default();
-                let filename_display_width = str_display_width_as_u16(&filename);
+                // Calculate display width on the ORIGINAL filename, not the escaped version.
+                // Escaped braces ({{ and }}) are template syntax that render as single characters.
+                let original = self.custom_filename.as_deref().unwrap_or_default();
+                let filename_display_width = str_display_width_as_u16(original);
+                let filename = escape_template_braces(original);
                 // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename display width
                 let overhead = 70 + filename_display_width;
                 let bar_width = calculate_bar_width(terminal_width, overhead);
@@ -248,5 +248,87 @@ mod tests {
         // Filenames with braces should be escaped
         let style = ProgressStyleBuilder::copy("file{1}.txt").build(80);
         assert!(style.is_ok());
+    }
+
+    /// Helper to extract bar width from a template string.
+    /// Looks for pattern like `{bar:XX.` where XX is the width.
+    fn extract_bar_width(template: &str) -> Option<u16> {
+        let bar_start = template.find("{bar:")?;
+        let after_bar = &template[bar_start + 5..];
+        let dot_pos = after_bar.find('.')?;
+        after_bar[..dot_pos].parse().ok()
+    }
+
+    #[test]
+    fn test_bar_width_same_for_braces_vs_no_braces_copy() {
+        // Regression test: bar width should be based on DISPLAY width, not escaped length.
+        // "abcde" and "a{b}c" both have display width 5, so bar width should be identical.
+        let template_no_braces = ProgressStyleBuilder::copy("abcde").create_template(120);
+        let template_with_braces = ProgressStyleBuilder::copy("a{b}c").create_template(120);
+
+        let width_no_braces = extract_bar_width(&template_no_braces)
+            .expect("Failed to extract bar width from template without braces");
+        let width_with_braces = extract_bar_width(&template_with_braces)
+            .expect("Failed to extract bar width from template with braces");
+
+        assert_eq!(
+            width_no_braces, width_with_braces,
+            "Bar width should be identical for filenames with same display width.\n\
+             Without braces: {} (width {})\n\
+             With braces: {} (width {})",
+            template_no_braces, width_no_braces, template_with_braces, width_with_braces
+        );
+    }
+
+    #[test]
+    fn test_bar_width_same_for_braces_vs_no_braces_verify() {
+        // Regression test for verify style
+        let template_no_braces = ProgressStyleBuilder::verify("abcde").create_template(120);
+        let template_with_braces = ProgressStyleBuilder::verify("a{b}c").create_template(120);
+
+        let width_no_braces = extract_bar_width(&template_no_braces)
+            .expect("Failed to extract bar width from template without braces");
+        let width_with_braces = extract_bar_width(&template_with_braces)
+            .expect("Failed to extract bar width from template with braces");
+
+        assert_eq!(
+            width_no_braces, width_with_braces,
+            "Bar width should be identical for filenames with same display width"
+        );
+    }
+
+    #[test]
+    fn test_template_escapes_braces_correctly() {
+        // Verify that braces are properly escaped in the template
+        let template = ProgressStyleBuilder::copy("file{1}.txt").create_template(120);
+
+        // The filename should appear with doubled braces
+        assert!(
+            template.contains("file{{1}}.txt"),
+            "Template should contain escaped braces: {}",
+            template
+        );
+    }
+
+    #[test]
+    fn test_unicode_filename_display_width() {
+        // Test that Unicode filenames use display width, not byte length.
+        // "file🎉.txt" is 12 bytes but only 10 display columns (emoji is 2 wide).
+        // "file1234.txt" is 12 bytes and 12 display columns.
+        let template_emoji = ProgressStyleBuilder::copy("file🎉.txt").create_template(120);
+        let template_ascii = ProgressStyleBuilder::copy("file1234.txt").create_template(120);
+
+        let width_emoji = extract_bar_width(&template_emoji)
+            .expect("Failed to extract bar width from emoji template");
+        let width_ascii = extract_bar_width(&template_ascii)
+            .expect("Failed to extract bar width from ASCII template");
+
+        // Emoji filename has smaller display width (10 vs 12), so bar should be wider
+        assert!(
+            width_emoji > width_ascii,
+            "Emoji filename (10 cols) should have wider bar than ASCII (12 cols).\n\
+             Emoji bar: {}, ASCII bar: {}",
+            width_emoji, width_ascii
+        );
     }
 }
