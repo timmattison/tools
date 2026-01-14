@@ -395,8 +395,12 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
     for pattern in patterns {
         let pattern_str = pattern.to_string_lossy();
 
-        // Check if pattern contains glob characters (skip if --literal is set)
-        if !literal && (pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('[')) {
+        // Check if literal path exists first (like `mv` does) - this allows paths
+        // with glob characters (e.g., [brackets]) to work when they're literal filenames
+        let literal_exists = pattern.is_file();
+
+        // Check if pattern contains glob characters (skip if --literal is set or path exists)
+        if !literal && !literal_exists && (pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('[')) {
             let glob_iter = glob::glob(&pattern_str)
                 .with_context(|| format!("Invalid glob pattern '{}'", pattern_str))?;
 
