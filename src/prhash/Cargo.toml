@@ -8,6 +8,8 @@ edition = "2021"
 arithmetic_side_effects = "warn"
 # Warn about indexing/slicing that could panic
 indexing_slicing = "warn"
+# Warn about string slicing which can panic on UTF-8 character boundaries
+string_slice = "warn"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
