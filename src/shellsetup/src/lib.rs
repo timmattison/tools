@@ -513,4 +513,493 @@ export BAZ=qux
         assert_eq!(integration.old_end_markers.len(), 2);
         assert!(integration.old_end_markers.contains(&"marker1".to_string()));
     }
+
+    // ========== Edge case tests for old format upgrade ==========
+
+    #[test]
+    fn test_upgrade_old_format_at_file_start() {
+        let integration = create_test_integration();
+        let old_contents = r#"# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD CONTENT
+}
+alias ttv='tt --verbose'
+
+# Other config
+export PATH=/usr/bin
+"#;
+        let new_contents = integration.upgrade_old_installation(old_contents);
+
+        // Should have new content (new block starts with newline internally)
+        assert!(new_contents.contains(&integration.start_marker()));
+        // Should preserve content after
+        assert!(new_contents.contains("export PATH=/usr/bin"));
+        // Should not have old content
+        assert!(!new_contents.contains("OLD CONTENT"));
+        // Should have end marker
+        assert!(new_contents.contains(&integration.end_marker()));
+    }
+
+    #[test]
+    fn test_upgrade_old_format_at_file_end() {
+        let integration = create_test_integration();
+        let old_contents = r#"# Other config
+export PATH=/usr/bin
+
+# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD CONTENT
+}
+alias ttv='tt --verbose'"#;
+        let new_contents = integration.upgrade_old_installation(old_contents);
+
+        // Should preserve content before
+        assert!(new_contents.contains("export PATH=/usr/bin"));
+        // Should have new content
+        assert!(new_contents.contains("testtool \"$@\""));
+        // Should not have old content
+        assert!(!new_contents.contains("OLD CONTENT"));
+        // Should have end marker
+        assert!(new_contents.contains(&integration.end_marker()));
+    }
+
+    #[test]
+    fn test_upgrade_old_format_only_block() {
+        let integration = create_test_integration();
+        let old_contents = r#"# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD CONTENT
+}
+alias ttv='tt --verbose'"#;
+        let new_contents = integration.upgrade_old_installation(old_contents);
+
+        // Should have new content
+        assert!(new_contents.contains("testtool \"$@\""));
+        // Should not have old content
+        assert!(!new_contents.contains("OLD CONTENT"));
+        // Should have both markers
+        assert!(new_contents.contains(&integration.start_marker()));
+        assert!(new_contents.contains(&integration.end_marker()));
+    }
+
+    #[test]
+    fn test_upgrade_stops_at_first_old_end_marker() {
+        let integration = ShellIntegration::new(
+            "testtool",
+            "Test Tool",
+            "\nfunction tt() {\n    testtool \"$@\"\n}\n",
+        )
+        .with_old_end_marker("FIRST_MARKER")
+        .with_old_end_marker("SECOND_MARKER");
+
+        let old_contents = r#"# testtool - Test Tool shell integration
+OLD LINE 1
+FIRST_MARKER
+SHOULD_BE_PRESERVED
+SECOND_MARKER
+"#;
+        let new_contents = integration.upgrade_old_installation(old_contents);
+
+        // Should preserve content after first marker
+        assert!(new_contents.contains("SHOULD_BE_PRESERVED"));
+        assert!(new_contents.contains("SECOND_MARKER"));
+        // Should not have old content before first marker
+        assert!(!new_contents.contains("OLD LINE 1"));
+    }
+
+    #[test]
+    fn test_upgrade_no_old_end_marker_appends_new_block() {
+        let integration = create_test_integration();
+        // Old content has start marker but no matching end marker
+        let old_contents = r#"# Some config
+export FOO=bar
+
+# testtool - Test Tool shell integration
+# This is old content with no end marker
+function old_tt() {
+    echo "old"
+}
+# No matching end marker here
+
+# More config
+export BAZ=qux
+"#;
+        let new_contents = integration.upgrade_old_installation(old_contents);
+
+        // When no old end marker is found, should append the new block
+        // The old content after the start marker should be skipped until EOF
+        // Then new block appended
+        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(new_contents.contains("testtool \"$@\""));
+    }
+
+    // ========== Edge case tests for new format replacement ==========
+
+    #[test]
+    fn test_replace_block_at_file_start() {
+        let integration = create_test_integration();
+        let old_contents = r#"# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD CONTENT
+}
+# End testtool shell integration
+
+# Other config
+export PATH=/usr/bin
+"#;
+        let new_contents = integration.replace_block(old_contents);
+
+        // Should have new content
+        assert!(new_contents.contains("testtool \"$@\""));
+        // Should preserve content after
+        assert!(new_contents.contains("export PATH=/usr/bin"));
+        // Should not have old content
+        assert!(!new_contents.contains("OLD CONTENT"));
+    }
+
+    #[test]
+    fn test_replace_block_at_file_end() {
+        let integration = create_test_integration();
+        let old_contents = r#"# Other config
+export PATH=/usr/bin
+
+# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD CONTENT
+}
+# End testtool shell integration"#;
+        let new_contents = integration.replace_block(old_contents);
+
+        // Should preserve content before
+        assert!(new_contents.contains("export PATH=/usr/bin"));
+        // Should have new content
+        assert!(new_contents.contains("testtool \"$@\""));
+        // Should not have old content
+        assert!(!new_contents.contains("OLD CONTENT"));
+    }
+
+    #[test]
+    fn test_replace_block_only_block() {
+        let integration = create_test_integration();
+        let old_contents = r#"# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD CONTENT
+}
+# End testtool shell integration"#;
+        let new_contents = integration.replace_block(old_contents);
+
+        // Should have new content only
+        assert!(new_contents.contains("testtool \"$@\""));
+        assert!(!new_contents.contains("OLD CONTENT"));
+        // Should have markers
+        assert!(new_contents.contains(&integration.start_marker()));
+        assert!(new_contents.contains(&integration.end_marker()));
+    }
+
+    #[test]
+    fn test_replace_block_missing_end_marker_appends() {
+        let integration = create_test_integration();
+        // Has start marker but no end marker - should append new block
+        let old_contents = r#"# Some config
+# testtool - Test Tool shell integration
+function old() { echo "old"; }
+# No end marker
+export FOO=bar
+"#;
+        let new_contents = integration.replace_block(old_contents);
+
+        // Should have the new block appended
+        assert!(new_contents.contains(&integration.end_marker()));
+        assert!(new_contents.contains("testtool \"$@\""));
+    }
+
+    // ========== Idempotency tests ==========
+
+    #[test]
+    fn test_replace_is_idempotent() {
+        let integration = create_test_integration();
+        let initial = r#"# Config
+export FOO=bar
+
+# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD
+}
+# End testtool shell integration
+
+export BAZ=qux
+"#;
+        let first_replace = integration.replace_block(initial);
+        let second_replace = integration.replace_block(&first_replace);
+
+        // Running replace twice should produce identical results
+        assert_eq!(first_replace, second_replace);
+    }
+
+    #[test]
+    fn test_upgrade_then_replace_is_idempotent() {
+        let integration = create_test_integration();
+        let old_format = r#"# Config
+export FOO=bar
+
+# testtool - Test Tool shell integration
+# Added by: testtool --shell-setup
+function tt() {
+    OLD
+}
+alias ttv='tt --verbose'
+
+export BAZ=qux
+"#;
+        // First upgrade from old format
+        let upgraded = integration.upgrade_old_installation(old_format);
+        // Then replace (simulating running --shell-setup again)
+        let replaced = integration.replace_block(&upgraded);
+
+        // Should be identical
+        assert_eq!(upgraded, replaced);
+    }
+
+    // ========== Content preservation tests ==========
+
+    #[test]
+    fn test_preserves_blank_lines_before_block() {
+        let integration = create_test_integration();
+        let old_contents = "export FOO=bar\n\n\n# testtool - Test Tool shell integration\nOLD\n# End testtool shell integration\n";
+        let new_contents = integration.replace_block(old_contents);
+
+        // Should preserve the blank lines before the block
+        assert!(new_contents.starts_with("export FOO=bar\n\n\n"));
+    }
+
+    #[test]
+    fn test_preserves_blank_lines_after_block() {
+        let integration = create_test_integration();
+        let old_contents = "# testtool - Test Tool shell integration\nOLD\n# End testtool shell integration\n\n\nexport FOO=bar\n";
+        let new_contents = integration.replace_block(old_contents);
+
+        // Should preserve the blank lines after the block
+        assert!(new_contents.contains("\n\nexport FOO=bar"));
+    }
+
+    #[test]
+    fn test_preserves_comments_around_block() {
+        let integration = create_test_integration();
+        let old_contents = r#"# === MY CUSTOM SECTION ===
+export FOO=bar
+# === END CUSTOM ===
+
+# testtool - Test Tool shell integration
+OLD
+# End testtool shell integration
+
+# === ANOTHER SECTION ===
+export BAZ=qux
+"#;
+        let new_contents = integration.replace_block(old_contents);
+
+        assert!(new_contents.contains("# === MY CUSTOM SECTION ==="));
+        assert!(new_contents.contains("# === END CUSTOM ==="));
+        assert!(new_contents.contains("# === ANOTHER SECTION ==="));
+    }
+
+    // ========== Real-world cwt format tests ==========
+
+    #[test]
+    fn test_cwt_old_format_upgrade() {
+        // Simulates the actual old cwt format (before wtm was added)
+        let integration = ShellIntegration::new(
+            "cwt",
+            "Change Worktree",
+            r#"
+function wt() {
+    if [ $# -eq 0 ]; then
+        cwt
+    else
+        local target=$(cwt "$@")
+        if [ $? -eq 0 ] && [ -n "$target" ]; then
+            cd "$target"
+        fi
+    fi
+}
+
+# Quick navigation aliases
+alias wtf='wt -f'
+alias wtb='wt -p'
+alias wtm='wt main'
+"#,
+        )
+        .with_old_end_marker("alias wtb='wt -p'");
+
+        let old_zshrc = r#"# User config
+export EDITOR=vim
+
+# cwt - Change Worktree shell integration
+# Added by: cwt --shell-setup
+function wt() {
+    if [ $# -eq 0 ]; then
+        cwt
+    else
+        local target=$(cwt "$@")
+        if [ $? -eq 0 ] && [ -n "$target" ]; then
+            cd "$target"
+        fi
+    fi
+}
+
+# Quick navigation aliases
+alias wtf='wt -f'  # Next worktree
+alias wtb='wt -p'  # Previous worktree (back)
+
+# Other aliases
+alias ll='ls -la'
+"#;
+        let new_contents = integration.upgrade_old_installation(old_zshrc);
+
+        // Should preserve user config before
+        assert!(new_contents.contains("export EDITOR=vim"));
+        // Should preserve other aliases after
+        assert!(new_contents.contains("alias ll='ls -la'"));
+        // Should have new wtm alias
+        assert!(new_contents.contains("alias wtm='wt main'"));
+        // Should have end marker now
+        assert!(new_contents.contains("# End cwt shell integration"));
+        // Should not have duplicate alias definitions
+        let wtf_count = new_contents.matches("alias wtf=").count();
+        assert_eq!(wtf_count, 1, "Should only have one wtf alias");
+    }
+
+    #[test]
+    fn test_cwt_new_format_replacement() {
+        let integration = ShellIntegration::new(
+            "cwt",
+            "Change Worktree",
+            r#"
+function wt() {
+    cwt "$@"
+}
+alias wtf='wt -f'
+alias wtb='wt -p'
+alias wtm='wt main'
+alias wtn='wt -n'
+"#,
+        );
+
+        let current_zshrc = r#"# User config
+export EDITOR=vim
+
+# cwt - Change Worktree shell integration
+# Added by: cwt --shell-setup
+function wt() {
+    cwt "$@"
+}
+alias wtf='wt -f'
+alias wtb='wt -p'
+alias wtm='wt main'
+# End cwt shell integration
+
+# Other aliases
+alias ll='ls -la'
+"#;
+        let new_contents = integration.replace_block(current_zshrc);
+
+        // Should preserve user config
+        assert!(new_contents.contains("export EDITOR=vim"));
+        assert!(new_contents.contains("alias ll='ls -la'"));
+        // Should have new alias
+        assert!(new_contents.contains("alias wtn='wt -n'"));
+        // Should have end marker
+        assert!(new_contents.contains("# End cwt shell integration"));
+    }
+
+    // ========== Safety tests ==========
+
+    #[test]
+    fn test_shell_code_no_dangerous_patterns() {
+        let integration = create_test_integration();
+        let block = integration.full_block();
+
+        // Should not contain dangerous commands
+        assert!(!block.contains("rm -rf"));
+        assert!(!block.contains("rm -f /"));
+        assert!(!block.contains("> /dev/"));
+        assert!(!block.contains("chmod 777"));
+        assert!(!block.contains("curl | sh"));
+        assert!(!block.contains("wget | sh"));
+        assert!(!block.contains("eval"));
+    }
+
+    #[test]
+    fn test_markers_are_valid_shell_comments() {
+        let integration = create_test_integration();
+
+        // Markers should start with # (valid shell comment)
+        assert!(integration.start_marker().starts_with('#'));
+        assert!(integration.end_marker().starts_with('#'));
+
+        // Markers should not contain shell special characters that could break
+        let start = integration.start_marker();
+        let end = integration.end_marker();
+        assert!(!start.contains('`'));
+        assert!(!start.contains('$'));
+        assert!(!start.contains('\\'));
+        assert!(!end.contains('`'));
+        assert!(!end.contains('$'));
+        assert!(!end.contains('\\'));
+    }
+
+    #[test]
+    fn test_block_ends_with_newline() {
+        let integration = create_test_integration();
+        let block = integration.full_block();
+
+        // Block should end with newline for proper file formatting
+        assert!(block.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_added_by_comment_included() {
+        let integration = create_test_integration();
+        let block = integration.full_block();
+
+        // Should include "Added by" comment for attribution
+        assert!(block.contains("# Added by: testtool --shell-setup"));
+    }
+
+    // ========== Multiple tool coexistence test ==========
+
+    #[test]
+    fn test_different_tools_dont_interfere() {
+        let cwt = ShellIntegration::new("cwt", "Change Worktree", "\nfunction wt() { cwt; }\n");
+        let prcp = ShellIntegration::new("prcp", "Progress Copy", "\nfunction prmv() { prcp --rm; }\n");
+
+        let file_with_both = r#"# cwt - Change Worktree shell integration
+function wt() { OLD_CWT; }
+# End cwt shell integration
+
+# prcp - Progress Copy shell integration
+function prmv() { OLD_PRCP; }
+# End prcp shell integration
+"#;
+        // Replacing cwt should not affect prcp
+        let after_cwt_replace = cwt.replace_block(file_with_both);
+
+        assert!(after_cwt_replace.contains("function wt() { cwt; }"));
+        assert!(after_cwt_replace.contains("function prmv() { OLD_PRCP; }"));
+        assert!(!after_cwt_replace.contains("OLD_CWT"));
+
+        // Replacing prcp should not affect cwt
+        let after_prcp_replace = prcp.replace_block(&after_cwt_replace);
+
+        assert!(after_prcp_replace.contains("function wt() { cwt; }"));
+        assert!(after_prcp_replace.contains("function prmv() { prcp --rm; }"));
+        assert!(!after_prcp_replace.contains("OLD_PRCP"));
+    }
 }
