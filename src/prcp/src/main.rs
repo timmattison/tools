@@ -527,7 +527,13 @@ async fn main() -> Result<()> {
 
             let mut sigwinch = match signal(SignalKind::window_change()) {
                 Ok(s) => s,
-                Err(_) => return,
+                Err(_e) => {
+                    // Non-critical: progress bar resize won't work in multi-file mode,
+                    // but crossterm Event::Resize may still work in single-file mode.
+                    #[cfg(debug_assertions)]
+                    eprintln!("Debug: SIGWINCH handler setup failed: {_e}");
+                    return;
+                }
             };
 
             loop {
