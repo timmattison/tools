@@ -379,28 +379,51 @@ const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
 /// Shared format string for progress stats (bytes, percentage, speed, ETA).
 const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_per_sec}, {eta})";
 
-/// Resolve source patterns into a list of files
+/// Resolve source patterns into a list of files.
 ///
-/// Handles both literal file paths and glob patterns (*, ?, []).
-/// Returns an error if a glob pattern matches no files or a literal path doesn't exist.
-/// Glob iteration errors (e.g., permission denied) are collected and reported.
+/// # Behavior
 ///
-/// If `literal` is true, all paths are treated as literal filenames and glob
-/// expansion is disabled. This is useful for filenames containing glob characters
-/// like brackets (e.g., `[Artist Name] - Song.mp3`).
+/// For each pattern:
+/// 1. If the path exists as a literal file, use it directly (no glob expansion)
+/// 2. If `literal` is false and the path contains glob characters (*, ?, []),
+///    expand the glob and collect matching files
+/// 3. Otherwise, return an error (path doesn't exist or is not a file)
+///
+/// This "literal-first" approach (like `mv` and `cp`) allows filenames containing
+/// glob characters (e.g., `[Artist Name] - Song.mp3`) to work without escaping.
+///
+/// # Arguments
+///
+/// * `patterns` - Paths that may be literal files or glob patterns
+/// * `literal` - If true, disable glob expansion entirely (all paths treated as literals)
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - A glob pattern matches no files
+/// - A literal path doesn't exist or is not a file
+/// - Glob iteration encounters errors (collected and reported)
 fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     let mut glob_errors: Vec<String> = Vec::new();
 
     for pattern in patterns {
+        // Check if literal path exists first (like `mv` does) - this allows paths
+        // with glob characters (e.g., [brackets]) to work when they're literal filenames.
+        // This single is_file() check avoids redundant syscalls in the common case.
+        if pattern.is_file() {
+            files.push(pattern.clone());
+            continue;
+        }
+
         let pattern_str = pattern.to_string_lossy();
 
-        // Check if literal path exists first (like `mv` does) - this allows paths
-        // with glob characters (e.g., [brackets]) to work when they're literal filenames
-        let literal_exists = pattern.is_file();
-
-        // Check if pattern contains glob characters (skip if --literal is set or path exists)
-        if !literal && !literal_exists && (pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('[')) {
+        // Check if pattern contains glob characters (skip glob expansion if --literal is set)
+        if !literal
+            && (pattern_str.contains('*')
+                || pattern_str.contains('?')
+                || pattern_str.contains('['))
+        {
             let glob_iter = glob::glob(&pattern_str)
                 .with_context(|| format!("Invalid glob pattern '{}'", pattern_str))?;
 
@@ -432,14 +455,12 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
             }
             files.extend(matches);
         } else {
-            // Literal path - validate it exists and is a file
+            // Literal path that doesn't exist as a file - provide specific error
             if !pattern.exists() {
                 anyhow::bail!("Source '{}' does not exist", pattern.display());
             }
-            if !pattern.is_file() {
-                anyhow::bail!("Source '{}' is not a file", pattern.display());
-            }
-            files.push(pattern.clone());
+            // Path exists but is not a file (e.g., directory)
+            anyhow::bail!("Source '{}' is not a file", pattern.display());
         }
     }
 
@@ -2449,6 +2470,134 @@ mod tests {
 
             // When destination parent doesn't exist, returns true (safe default)
             assert!(same_device(&source, &dest_with_nonexistent_parent));
+        }
+    }
+
+    mod resolve_sources_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        #[test]
+        fn literal_file_is_resolved() {
+            let temp_dir = TempDir::new().unwrap();
+            let file = temp_dir.path().join("test.txt");
+            fs::write(&file, "content").unwrap();
+
+            let result = resolve_sources(&[file.clone()], false).unwrap();
+            assert_eq!(result, vec![file]);
+        }
+
+        #[test]
+        fn file_with_brackets_is_treated_literally() {
+            let temp_dir = TempDir::new().unwrap();
+            // Create a file with brackets in the name (glob character)
+            let file = temp_dir.path().join("[brackets].txt");
+            fs::write(&file, "content").unwrap();
+
+            // Without --literal flag, but file exists literally
+            let result = resolve_sources(&[file.clone()], false).unwrap();
+            assert_eq!(result, vec![file]);
+        }
+
+        #[test]
+        fn glob_pattern_expands_when_no_literal_match() {
+            let temp_dir = TempDir::new().unwrap();
+            let file1 = temp_dir.path().join("test1.txt");
+            let file2 = temp_dir.path().join("test2.txt");
+            fs::write(&file1, "content1").unwrap();
+            fs::write(&file2, "content2").unwrap();
+
+            let pattern = temp_dir.path().join("*.txt");
+            let result = resolve_sources(&[pattern], false).unwrap();
+
+            assert_eq!(result.len(), 2);
+            assert!(result.contains(&file1));
+            assert!(result.contains(&file2));
+        }
+
+        #[test]
+        fn literal_flag_disables_glob_expansion() {
+            let temp_dir = TempDir::new().unwrap();
+            let file = temp_dir.path().join("test.txt");
+            fs::write(&file, "content").unwrap();
+
+            // Pattern that would match, but --literal is set
+            let pattern = temp_dir.path().join("*.txt");
+            let result = resolve_sources(&[pattern], true);
+
+            // Should fail because "*.txt" doesn't exist as a literal file
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("does not exist"));
+        }
+
+        #[test]
+        fn nonexistent_literal_path_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            let nonexistent = temp_dir.path().join("does_not_exist.txt");
+
+            let result = resolve_sources(&[nonexistent], false);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("does not exist"));
+        }
+
+        #[test]
+        fn directory_path_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            let dir = temp_dir.path().join("subdir");
+            fs::create_dir(&dir).unwrap();
+
+            let result = resolve_sources(&[dir], false);
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("not a file"));
+        }
+
+        #[test]
+        fn glob_pattern_with_no_matches_returns_error() {
+            let temp_dir = TempDir::new().unwrap();
+            // Create a .txt file but search for .xyz
+            let file = temp_dir.path().join("test.txt");
+            fs::write(&file, "content").unwrap();
+
+            let pattern = temp_dir.path().join("*.xyz");
+            let result = resolve_sources(&[pattern], false);
+
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("No files match pattern"));
+        }
+
+        #[test]
+        fn multiple_sources_are_resolved() {
+            let temp_dir = TempDir::new().unwrap();
+            let file1 = temp_dir.path().join("file1.txt");
+            let file2 = temp_dir.path().join("file2.txt");
+            fs::write(&file1, "content1").unwrap();
+            fs::write(&file2, "content2").unwrap();
+
+            let result = resolve_sources(&[file1.clone(), file2.clone()], false).unwrap();
+            assert_eq!(result, vec![file1, file2]);
+        }
+
+        #[test]
+        fn literal_file_takes_priority_over_glob_interpretation() {
+            let temp_dir = TempDir::new().unwrap();
+            // Create files that would match [abc].txt as a glob
+            let a_file = temp_dir.path().join("a.txt");
+            let b_file = temp_dir.path().join("b.txt");
+            // Also create the literal [abc].txt file
+            let bracket_file = temp_dir.path().join("[abc].txt");
+
+            fs::write(&a_file, "a").unwrap();
+            fs::write(&b_file, "b").unwrap();
+            fs::write(&bracket_file, "brackets").unwrap();
+
+            // When [abc].txt exists, it should be used literally, NOT expanded to a.txt, b.txt
+            let result = resolve_sources(&[bracket_file.clone()], false).unwrap();
+            assert_eq!(result, vec![bracket_file]);
         }
     }
 }
