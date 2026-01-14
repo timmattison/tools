@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task;
 
 /// Create a buffer without zeroing memory.
@@ -514,10 +514,11 @@ async fn main() -> Result<()> {
     // In single-file mode (raw mode enabled), crossterm's Event::Resize may also
     // fire; watch channels handle duplicate updates gracefully.
     //
-    // Note: We use the legacy AtomicBool-based API here (rather than the recommended
-    // channel-based shutdown) because key_listener_done is already shared across
-    // multiple tasks (signal handler, key listener, copy tasks) for coordinated shutdown.
-    let resize_task = term_width_watcher.spawn_sigwinch_handler(key_listener_done.clone());
+    // Uses channel-based shutdown for clean termination without polling overhead.
+    // Wrapped in Option because we may consume it in an early exit path.
+    let (resize_shutdown_tx, resize_shutdown_rx) = oneshot::channel();
+    let mut resize_shutdown_tx = Some(resize_shutdown_tx);
+    let resize_task = term_width_watcher.spawn_sigwinch_handler_with_shutdown(resize_shutdown_rx);
 
     // Clone sender for key_task to handle crossterm Event::Resize
     let term_width_tx_key = term_width_watcher.sender().clone();
@@ -952,6 +953,7 @@ async fn main() -> Result<()> {
                 } else {
                     // Clean up and bail (raw mode cleaned up by RawModeGuard on drop)
                     key_listener_done.store(true, Ordering::SeqCst);
+                    drop(resize_shutdown_tx.take()); // Signal resize task to exit
                     drop(raw_mode_guard); // Explicitly drop to restore terminal before cleanup
                     if let Some(ref pb) = batch_pb {
                         pb.finish_and_clear();
@@ -967,6 +969,7 @@ async fn main() -> Result<()> {
 
     // Signal key listener and signal handler to exit (operation complete)
     key_listener_done.store(true, Ordering::SeqCst);
+    drop(resize_shutdown_tx.take()); // Signal resize task to exit
 
     // Restore terminal state (drop the guard to disable raw mode)
     drop(raw_mode_guard);

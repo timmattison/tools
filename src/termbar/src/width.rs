@@ -3,8 +3,6 @@
 //! This module provides utilities for getting the current terminal width
 //! and watching for terminal resize events.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -52,13 +50,10 @@ impl TerminalWidth {
 /// using a tokio watch channel. It can optionally spawn a SIGWINCH signal handler
 /// on Unix systems.
 ///
-/// # Shutdown Mechanism
+/// # Usage
 ///
-/// The watcher provides two shutdown mechanisms:
-/// - **Shutdown channel**: Use [`spawn_sigwinch_handler_with_shutdown`](Self::spawn_sigwinch_handler_with_shutdown)
-///   for clean shutdown via a oneshot channel (recommended).
-/// - **AtomicBool polling**: Use [`spawn_sigwinch_handler`](Self::spawn_sigwinch_handler)
-///   for backward compatibility with existing code using `Arc<AtomicBool>`.
+/// Use [`with_sigwinch_channel`](Self::with_sigwinch_channel) to create a watcher
+/// with automatic resize handling and clean channel-based shutdown.
 pub struct TerminalWidthWatcher {
     sender: watch::Sender<u16>,
     receiver: watch::Receiver<u16>,
@@ -69,33 +64,12 @@ impl TerminalWidthWatcher {
     ///
     /// Initializes the watcher with the current terminal width.
     /// The watcher does not automatically listen for resize events;
-    /// use [`with_sigwinch`](Self::with_sigwinch) for automatic resize detection.
+    /// use [`with_sigwinch_channel`](Self::with_sigwinch_channel) for automatic resize detection.
     #[must_use]
     pub fn new() -> Self {
         let initial_width = TerminalWidth::get_or_default();
         let (sender, receiver) = watch::channel(initial_width);
         Self { sender, receiver }
-    }
-
-    /// Create a new terminal width watcher with SIGWINCH handler (Unix only).
-    ///
-    /// This spawns a background task that listens for terminal resize signals
-    /// and updates the width automatically. The task will exit when the `done`
-    /// flag is set to `true`.
-    ///
-    /// # Arguments
-    ///
-    /// * `done` - A shared flag that signals when to stop watching for resize events.
-    ///
-    /// # Returns
-    ///
-    /// A tuple containing the watcher and a handle to the background task.
-    /// The task should be awaited during cleanup.
-    #[must_use]
-    pub fn with_sigwinch(done: Arc<AtomicBool>) -> (Self, JoinHandle<()>) {
-        let watcher = Self::new();
-        let task = watcher.spawn_sigwinch_handler(done);
-        (watcher, task)
     }
 
     /// Create a new terminal width watcher with SIGWINCH handler using a shutdown channel.
@@ -187,68 +161,6 @@ impl TerminalWidthWatcher {
         #[cfg(not(unix))]
         {
             let _ = shutdown_rx;
-            tokio::task::spawn(async {})
-        }
-    }
-
-    /// Spawn a SIGWINCH signal handler task (legacy API).
-    ///
-    /// On Unix systems, this listens for SIGWINCH signals (terminal resize)
-    /// and updates the terminal width accordingly.
-    ///
-    /// On non-Unix systems, this returns a no-op task.
-    ///
-    /// # Arguments
-    ///
-    /// * `done` - A shared flag that signals when to stop watching for resize events.
-    ///
-    /// # Note
-    ///
-    /// Consider using [`spawn_sigwinch_handler_with_shutdown`](Self::spawn_sigwinch_handler_with_shutdown)
-    /// for cleaner shutdown semantics. This method polls the `done` flag every 100ms,
-    /// while the shutdown channel version exits immediately when signaled.
-    ///
-    /// The 100ms polling interval balances responsiveness (shutdown within 100ms)
-    /// against CPU usage (10 wakeups/second when idle). This is acceptable for
-    /// short-lived operations like file copies where the overhead is negligible.
-    #[must_use]
-    pub fn spawn_sigwinch_handler(&self, done: Arc<AtomicBool>) -> JoinHandle<()> {
-        #[cfg(unix)]
-        {
-            let sender = self.sender.clone();
-            tokio::task::spawn(async move {
-                use tokio::signal::unix::{signal, SignalKind};
-
-                let mut sigwinch = match signal(SignalKind::window_change()) {
-                    Ok(s) => s,
-                    Err(_e) => {
-                        // Non-critical: progress bar resize won't work,
-                        // but crossterm Event::Resize may still work.
-                        #[cfg(debug_assertions)]
-                        eprintln!("Debug: SIGWINCH handler setup failed: {_e}");
-                        return;
-                    }
-                };
-
-                loop {
-                    tokio::select! {
-                        _ = sigwinch.recv() => {
-                            let new_width = TerminalWidth::get_or_default();
-                            let _ = sender.send(new_width);
-                        }
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                            if done.load(Ordering::SeqCst) {
-                                break;
-                            }
-                        }
-                    }
-                }
-            })
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = done;
             tokio::task::spawn(async {})
         }
     }

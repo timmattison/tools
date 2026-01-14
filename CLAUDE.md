@@ -79,14 +79,14 @@ let bar_width = calculate_bar_width(width, 80); // 80 = overhead
 let template = format!("{{spinner}} [{{bar:{}.cyan}}] {{msg}}", bar_width);
 ```
 
-### Terminal Resize Watching (Recommended Approach)
+### Terminal Resize Watching
 
-For applications that need to respond to terminal resize events, use the shutdown channel API:
+For applications that need to respond to terminal resize events:
 
 ```rust
 use termbar::TerminalWidthWatcher;
 
-// Create watcher with shutdown channel (recommended)
+// Create watcher with automatic SIGWINCH handling
 let (watcher, resize_task, shutdown_tx) = TerminalWidthWatcher::with_sigwinch_channel();
 
 // Get current width or watch for changes
@@ -98,10 +98,10 @@ drop(shutdown_tx);  // or shutdown_tx.send(())
 resize_task.await;
 ```
 
-This approach is preferred over the legacy `Arc<AtomicBool>` polling method because:
-- Clean shutdown without 100ms polling overhead
+Benefits of the channel-based shutdown:
+- Clean shutdown without polling overhead
 - Immediate task termination when signaled
-- More idiomatic async Rust patterns
+- Idiomatic async Rust patterns
 
 ### Available Style Builders
 

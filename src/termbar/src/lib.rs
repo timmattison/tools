@@ -25,12 +25,10 @@
 //! # Async resize watching
 //!
 //! ```rust,ignore
-//! use std::sync::atomic::{AtomicBool, Ordering};
-//! use std::sync::Arc;
 //! use termbar::TerminalWidthWatcher;
 //!
-//! let done = Arc::new(AtomicBool::new(false));
-//! let (watcher, resize_task) = TerminalWidthWatcher::with_sigwinch(done.clone());
+//! // Create watcher with automatic SIGWINCH handling
+//! let (watcher, resize_task, shutdown_tx) = TerminalWidthWatcher::with_sigwinch_channel();
 //!
 //! // Get current width
 //! let width = watcher.current_width();
@@ -38,8 +36,8 @@
 //! // Get receiver for watching changes
 //! let receiver = watcher.receiver();
 //!
-//! // When done, signal the task to stop
-//! done.store(true, Ordering::SeqCst);
+//! // When done, signal the task to stop by dropping the shutdown sender
+//! drop(shutdown_tx);
 //! resize_task.await;
 //! ```
 
@@ -164,29 +162,6 @@ pub fn str_display_width_as_u16(s: &str) -> u16 {
     u16::try_from(s.width()).unwrap_or(u16::MAX)
 }
 
-/// Convert a string's byte length to u16, capping at [`u16::MAX`].
-///
-/// **Deprecated**: Use [`str_display_width_as_u16`] instead for accurate terminal
-/// display width calculations. This function is kept for cases where byte length
-/// is specifically needed.
-///
-/// This function returns the **byte length** of the string, not the display width.
-/// For ASCII strings, these are equivalent. However, for strings containing
-/// multi-byte UTF-8 characters, the byte length may differ from the display width.
-///
-/// # Arguments
-///
-/// * `s` - The string to measure.
-///
-/// # Returns
-///
-/// The string byte length as u16, or [`u16::MAX`] if the length exceeds u16 range.
-#[must_use]
-#[deprecated(since = "0.1.1", note = "Use str_display_width_as_u16 for accurate terminal display width")]
-pub fn str_len_as_u16(s: &str) -> u16 {
-    u16::try_from(s.len()).unwrap_or(u16::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,16 +229,5 @@ mod tests {
         assert_eq!(str_display_width_as_u16("中"), 2);
         // Mixed: "file" (4 cols) + 🎉 (2 cols) + ".txt" (4 cols) = 10 columns
         assert_eq!(str_display_width_as_u16("file🎉.txt"), 10);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_str_len_as_u16_deprecated() {
-        // Test byte length (deprecated function)
-        assert_eq!(str_len_as_u16("hello"), 5);
-        // Emoji: 4 bytes in UTF-8
-        assert_eq!(str_len_as_u16("🎉"), 4);
-        // "file" (4 bytes) + 🎉 (4 bytes) + ".txt" (4 bytes) = 12 bytes
-        assert_eq!(str_len_as_u16("file🎉.txt"), 12);
     }
 }
