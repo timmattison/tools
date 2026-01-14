@@ -98,7 +98,8 @@ enum HashState {
     Sha1(Sha1),
     Sha256(Sha256),
     Sha512(Sha512),
-    Blake3(Blake3Hasher),
+    /// Boxed to reduce enum size (Blake3Hasher is ~1920 bytes vs ~224 for others)
+    Blake3(Box<Blake3Hasher>),
 }
 
 impl HashState {
@@ -108,7 +109,7 @@ impl HashState {
             HashAlgorithm::Sha1 => HashState::Sha1(Sha1::new()),
             HashAlgorithm::Sha256 => HashState::Sha256(Sha256::new()),
             HashAlgorithm::Sha512 => HashState::Sha512(Sha512::new()),
-            HashAlgorithm::Blake3 => HashState::Blake3(Blake3Hasher::new()),
+            HashAlgorithm::Blake3 => HashState::Blake3(Box::new(Blake3Hasher::new())),
         }
     }
     
@@ -168,7 +169,9 @@ async fn main() -> Result<()> {
     for file in &args.files {
         let metadata = fs::metadata(file)
             .context(format!("Failed to read metadata for '{}'", file.display()))?;
-        total_size += metadata.len();
+        total_size = total_size
+            .checked_add(metadata.len())
+            .context("Total file size overflowed u64")?;
     }
     
     // Set up progress bar with dynamic width calculation
@@ -219,7 +222,7 @@ async fn main() -> Result<()> {
     
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx + 1, args.files.len()));
+        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), idx.saturating_add(1), args.files.len()));
         
         let result = hash_file_with_progress(
             file,
@@ -325,6 +328,9 @@ async fn hash_file_with_progress(
         };
         
         // Update hash
+        // SAFETY: bytes_read is the return value from read(), which guarantees
+        // bytes_read <= buffer.len(), so this slice is always valid.
+        #[allow(clippy::indexing_slicing)]
         hasher.update(&buffer[..bytes_read]);
         
         pb.inc(bytes_read as u64);
