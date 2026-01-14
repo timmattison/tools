@@ -164,8 +164,10 @@ struct Args {
     #[arg(num_args = 0..)]
     paths: Vec<PathBuf>,
 
-    /// Add shell integration (prmv function) to your shell config
-    #[arg(long)]
+    /// Add shell integration to your shell config. Adds these commands:
+    ///
+    ///   prmv <src...> <dst>  - Copy with progress, remove sources after verification
+    #[arg(long, verbatim_doc_comment)]
     shell_setup: bool,
 
     /// Remove source files after successful copy (verified by Blake3 hash)

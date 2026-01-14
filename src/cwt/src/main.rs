@@ -91,8 +91,13 @@ struct Cli {
     #[arg(conflicts_with_all = ["forward", "prev", "shell_setup"])]
     target: Option<String>,
 
-    /// Add shell integration (wt function and aliases) to your shell config.
-    #[arg(long, conflicts_with_all = ["forward", "prev", "target"])]
+    /// Add shell integration to your shell config. Adds these commands:
+    ///
+    ///   wt [target]  - List worktrees or change to one
+    ///   wtf          - Next worktree (forward)
+    ///   wtb          - Previous worktree (back)
+    ///   wtm          - Main worktree
+    #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target"])]
     shell_setup: bool,
 
     /// Suppress error messages.
