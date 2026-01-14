@@ -1,14 +1,17 @@
 [package]
 name = "runat"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [[bin]]
 name = "runat"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = "0.26"
-crossterm = "0.27"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4.5", features = ["derive"] }
+ratatui.workspace = true
+crossterm.workspace = true
+chrono.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

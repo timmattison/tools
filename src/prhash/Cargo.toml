@@ -1,16 +1,19 @@
 [package]
 name = "prhash"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-indicatif = "0.18.0"
-crossterm = "0.29.0"
-anyhow = "1.0"
-tokio = { version = "1", features = ["full"] }
-blake3 = "1.8"
-sha2 = "0.10"
-md-5 = "0.10"
-sha1 = "0.10"
-hex = "0.4"
+clap.workspace = true
+indicatif.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+blake3.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

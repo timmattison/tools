@@ -1,15 +1,18 @@
 [package]
 name = "update-aws-credentials"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 authors = ["Tim Mattison"]
 description = "Takes AWS credentials from clipboard and updates AWS credentials file"
 
 [dependencies]
-arboard = "3.6.0"
-aws-config = "1.8.3"
-aws-credential-types = "1.2.4"
-aws-sdk-sts = "1.80.0"
-tokio = { version = "1.47.0", features = ["full"] }
-anyhow = "1.0.98"
-dirs = "6.0.0"
+arboard.workspace = true
+aws-config.workspace = true
+aws-credential-types.workspace = true
+aws-sdk-sts.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+dirs.workspace = true
+
+[lints]
+workspace = true

@@ -1,9 +1,12 @@
 [package]
 name = "cf"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-filewalker = { path = "../filewalker" }
-anyhow = "1.0"
+clap.workspace = true
+filewalker.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true
