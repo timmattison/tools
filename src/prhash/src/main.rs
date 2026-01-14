@@ -231,9 +231,10 @@ async fn main() -> Result<()> {
                 // break shell pipelines like `prhash file.txt > hashes.txt`.
                 pb.suspend(|| {
                     println!("{}  {}", hash, file.display());
-                    // Return cursor to column 0 for progress bar (needed in raw mode)
+                    // Return cursor to column 0 for progress bar (needed in raw mode).
+                    // Flush errors are ignored as they're non-critical for display purposes.
                     print!("\r");
-                    let _ = std::io::stdout().flush();
+                    std::io::stdout().flush().ok();
                 });
             }
             Err(e) => {
