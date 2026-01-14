@@ -294,6 +294,9 @@ impl ShellIntegration {
     }
 
     /// Replaces the shell integration block between start and end markers.
+    ///
+    /// If the end marker is not found after the start marker, prints a warning
+    /// to stderr and appends the new block (content after start marker may be lost).
     fn replace_block(&self, contents: &str) -> String {
         let lines: Vec<&str> = contents.lines().collect();
         let mut result: Vec<String> = Vec::new();
@@ -325,8 +328,15 @@ impl ShellIntegration {
             result.push(line.to_string());
         }
 
-        // If we never found the end marker, something went wrong - append anyway
+        // If we never found the end marker, warn user and append new block
         if !block_replaced {
+            eprintln!(
+                "{} End marker not found for {} shell integration. \
+                 Content after the start marker may have been removed. \
+                 Please verify your shell config file.",
+                "Warning:".yellow(),
+                self.tool_name
+            );
             result.push(new_block.trim().to_string());
         }
 
@@ -334,6 +344,9 @@ impl ShellIntegration {
     }
 
     /// Upgrades old-style shell integration (without end marker) to new format.
+    ///
+    /// If none of the old end markers are found after the start marker, prints a warning
+    /// to stderr and appends the new block (content after start marker may be lost).
     fn upgrade_old_installation(&self, contents: &str) -> String {
         let lines: Vec<&str> = contents.lines().collect();
         let mut result: Vec<String> = Vec::new();
@@ -370,8 +383,15 @@ impl ShellIntegration {
             result.push(line.to_string());
         }
 
-        // If we never found the old end marker, just append the new block
+        // If we never found the old end marker, warn user and append new block
         if !block_replaced {
+            eprintln!(
+                "{} Could not find expected end of old {} shell integration block. \
+                 Content after the start marker may have been removed. \
+                 Please verify your shell config file.",
+                "Warning:".yellow(),
+                self.tool_name
+            );
             result.push(new_block.trim().to_string());
         }
 
