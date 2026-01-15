@@ -149,3 +149,7 @@ missing_panics_doc = "warn"
 undocumented_unsafe_blocks = "warn"
 # Catch numeric literals that should use type suffixes for clarity
 unseparated_literal_suffix = "warn"
+# Prevent holding locks across await points (potential deadlocks)
+await_holding_lock = "warn"
+# Prevent suppressing warnings without explanation
+allow_attributes_without_reason = "warn"

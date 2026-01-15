@@ -12,44 +12,58 @@ use crate::stats::{GitStats, Timer};
 /// Progress callback function type
 pub type ProgressCallback = dyn Fn(usize, usize, &str) + Send + Sync;
 
+/// Options for scanning repositories
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    /// Whether to search all branches
+    pub search_all_branches: bool,
+    /// Whether to filter commits by user email
+    pub filter_by_user: bool,
+    /// Whether to find nested repositories
+    pub find_nested: bool,
+    /// Whether to ignore access failures
+    pub ignore_failures: bool,
+}
+
+/// Progress tracking for repository scanning
+pub struct ScanProgress<'a> {
+    /// Counter for directories checked
+    pub dirs_checked: &'a Arc<AtomicUsize>,
+    /// Counter for repositories found
+    pub repos_found: &'a Arc<AtomicUsize>,
+    /// Optional callback for progress updates
+    pub progress_callback: Option<&'a Arc<ProgressCallback>>,
+}
+
+/// Options for processing a git repository
+#[derive(Debug, Clone)]
+pub struct RepoProcessOptions {
+    /// Whether to search all branches
+    pub search_all_branches: bool,
+    /// Whether to filter commits by user email
+    pub filter_by_user: bool,
+}
+
 /// Directories to skip while walking the filesystem
 const SKIP_DIRS: &[&str] = &[
     "node_modules", "vendor", ".idea", ".vscode", "dist", "build",
 ];
 
-/// Check if a directory is a Git repository
-pub fn is_git_repository(path: &Path, stats: &GitStats) -> Result<bool> {
+/// Check if a directory is a Git repository.
+///
+/// Returns `true` if the path is a valid git repository, `false` otherwise.
+pub fn is_git_repository(path: &Path, stats: &GitStats) -> bool {
     let timer = Timer::new();
     let result = Repository::open(path).is_ok();
     stats.record_git_dir(timer.elapsed());
-    Ok(result)
-}
-
-/// Get the Git directory path
-pub fn get_git_dir(path: &Path, stats: &GitStats) -> Result<PathBuf> {
-    let timer = Timer::new();
-    
-    // Quick check for .git directory first
-    let git_path = path.join(".git");
-    if git_path.exists() && git_path.is_dir() {
-        stats.record_git_dir(timer.elapsed());
-        return Ok(git_path);
-    }
-
-    // Try to open as git repository using git2
-    match Repository::open(path) {
-        Ok(_) => {
-            stats.record_git_dir(timer.elapsed());
-            Ok(git_path)
-        }
-        Err(e) => {
-            stats.record_git_dir(timer.elapsed());
-            Err(anyhow!("Not a git repository: {}", e))
-        }
-    }
+    result
 }
 
 /// Get the current git user email
+///
+/// # Errors
+///
+/// Returns an error if the git config cannot be read or user.email is not set.
 pub fn get_git_user_email(stats: &GitStats) -> Result<String> {
     let timer = Timer::new();
     
@@ -119,7 +133,7 @@ impl CommitInfo {
 }
 
 /// Search results from a repository scan
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub repositories: HashMap<PathBuf, Vec<CommitInfo>>,
     pub inaccessible_dirs: Vec<String>,
@@ -145,17 +159,20 @@ impl SearchResult {
 }
 
 /// Scan a path for Git repositories and collect commits
+///
+/// # Errors
+///
+/// Returns an error if directory walking fails or if a repository cannot be processed.
+///
+/// # Panics
+///
+/// Panics if the result mutex is poisoned.
 pub fn scan_path(
     search_path: &Path,
     result: &Arc<Mutex<SearchResult>>,
     user_email: &str,
-    search_all_branches: bool,
-    filter_by_user: bool,
-    find_nested: bool,
-    ignore_failures: bool,
-    dirs_checked: &Arc<AtomicUsize>,
-    repos_found: &Arc<AtomicUsize>,
-    progress_callback: Option<&Arc<ProgressCallback>>,
+    options: &ScanOptions,
+    progress: &ScanProgress<'_>,
 ) -> Result<()> {
     // Add the search path to abs_paths in the result
     if let Ok(mut result_guard) = result.lock() {
@@ -170,7 +187,7 @@ pub fn scan_path(
             if !e.file_type().is_dir() {
                 return true;
             }
-            
+
             let name = e.file_name().to_str().unwrap_or("");
             !SKIP_DIRS.contains(&name)
         });
@@ -181,7 +198,7 @@ pub fn scan_path(
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                if !ignore_failures {
+                if !options.ignore_failures {
                     if let Ok(mut result) = result.lock() {
                         result.inaccessible_dirs.push(format!("Walk error: {}", e));
                     }
@@ -195,21 +212,21 @@ pub fn scan_path(
         }
 
         let path = entry.path();
-        
+
         // Increment directories checked counter
-        let dirs_count = dirs_checked.fetch_add(1, Ordering::Relaxed) + 1;
-        
+        let dirs_count = progress.dirs_checked.fetch_add(1, Ordering::Relaxed) + 1;
+
         // Call progress callback if provided
-        if let Some(callback) = progress_callback {
-            let repos_count = repos_found.load(Ordering::Relaxed);
+        if let Some(callback) = progress.progress_callback {
+            let repos_count = progress.repos_found.load(Ordering::Relaxed);
             callback(dirs_count, repos_count, &path.display().to_string());
         }
-        
+
         // Check if this is a git repository
         let mut result_guard = result.lock().unwrap();
-        if is_git_repository(path, &result_guard.stats)? {
+        if is_git_repository(path, &result_guard.stats) {
             let abs_path = path.canonicalize()?;
-            
+
             // Skip if we've already processed this repository
             if unique_repos.contains(&abs_path) {
                 continue;
@@ -217,13 +234,18 @@ pub fn scan_path(
             unique_repos.insert(abs_path.clone());
 
             // Increment repositories found counter
-            let repos_count = repos_found.fetch_add(1, Ordering::Relaxed) + 1;
-            
+            let repos_count = progress.repos_found.fetch_add(1, Ordering::Relaxed) + 1;
+
             // Update progress with new repo count
-            if let Some(callback) = progress_callback {
-                let dirs_count = dirs_checked.load(Ordering::Relaxed);
+            if let Some(callback) = progress.progress_callback {
+                let dirs_count = progress.dirs_checked.load(Ordering::Relaxed);
                 callback(dirs_count, repos_count, &path.display().to_string());
             }
+
+            let repo_options = RepoProcessOptions {
+                search_all_branches: options.search_all_branches,
+                filter_by_user: options.filter_by_user,
+            };
 
             // Process the repository
             match process_git_repo(
@@ -232,9 +254,7 @@ pub fn scan_path(
                 result_guard.threshold,
                 result_guard.end_time,
                 user_email,
-                search_all_branches,
-                filter_by_user,
-                ignore_failures,
+                &repo_options,
             ) {
                 Ok(commits) => {
                     if !commits.is_empty() {
@@ -243,7 +263,7 @@ pub fn scan_path(
                     }
                 }
                 Err(e) => {
-                    if !ignore_failures {
+                    if !options.ignore_failures {
                         result_guard.inaccessible_dirs.push(format!(
                             "{} (git error: {})", path.display(), e
                         ));
@@ -252,7 +272,7 @@ pub fn scan_path(
             }
 
             // Skip subdirectories unless find_nested is enabled
-            if !find_nested {
+            if !options.find_nested {
                 continue;
             }
         }
@@ -268,16 +288,14 @@ fn process_git_repo(
     threshold: DateTime<Local>,
     end_time: Option<DateTime<Local>>,
     user_email: &str,
-    search_all_branches: bool,
-    filter_by_user: bool,
-    _ignore_failures: bool,
+    options: &RepoProcessOptions,
 ) -> Result<Vec<CommitInfo>> {
     let timer = Timer::new();
-    
+
     let repo = Repository::open(repo_path)?;
     let mut commits = Vec::new();
 
-    if search_all_branches {
+    if options.search_all_branches {
         // Get all branches
         match repo.branches(Some(BranchType::Local)) {
             Ok(branches) => {
@@ -286,7 +304,7 @@ fn process_git_repo(
                         Ok((branch, _)) => {
                             if let Some(oid) = branch.get().target() {
                                 match get_commits_from_oid(
-                                    &repo, oid, threshold, end_time, user_email, filter_by_user
+                                    &repo, oid, threshold, end_time, user_email, options.filter_by_user
                                 ) {
                                     Ok(branch_commits) => commits.extend(branch_commits),
                                     Err(_) => continue, // Skip this branch if commits can't be read
@@ -299,7 +317,7 @@ fn process_git_repo(
             }
             Err(_) => {
                 // If we can't get branches, fall back to HEAD
-                return process_head_only(&repo, threshold, end_time, user_email, filter_by_user, stats);
+                return process_head_only(&repo, threshold, end_time, user_email, options.filter_by_user, stats);
             }
         }
     } else {
@@ -308,7 +326,7 @@ fn process_git_repo(
             Ok(head) => {
                 if let Some(oid) = head.target() {
                     match get_commits_from_oid(
-                        &repo, oid, threshold, end_time, user_email, filter_by_user
+                        &repo, oid, threshold, end_time, user_email, options.filter_by_user
                     ) {
                         Ok(head_commits) => commits = head_commits,
                         Err(_) => {

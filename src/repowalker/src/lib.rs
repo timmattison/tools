@@ -131,11 +131,13 @@ impl RepoWalker {
                     return false;
                 }
                 
-                if skip_worktrees && e.file_type().is_dir() && is_git_worktree(e.path()) {
-                    if e.path() != root {
-                        println!("Skipping git worktree directory: {}", e.path().display());
-                        return false;
-                    }
+                if skip_worktrees
+                    && e.file_type().is_dir()
+                    && is_git_worktree(e.path())
+                    && e.path() != root
+                {
+                    println!("Skipping git worktree directory: {}", e.path().display());
+                    return false;
                 }
                 
                 true
@@ -161,11 +163,12 @@ impl RepoWalker {
         if self.skip_worktrees {
             let root = self.root.clone();
             builder.filter_entry(move |entry| {
-                if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-                    if is_git_worktree(entry.path()) && entry.path() != root {
-                        println!("Skipping git worktree directory: {}", entry.path().display());
-                        return false;
-                    }
+                if entry.file_type().is_some_and(|ft| ft.is_dir())
+                    && is_git_worktree(entry.path())
+                    && entry.path() != root
+                {
+                    println!("Skipping git worktree directory: {}", entry.path().display());
+                    return false;
                 }
                 true
             });

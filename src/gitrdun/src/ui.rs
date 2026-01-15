@@ -22,17 +22,6 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// Progress information for the UI
-#[derive(Debug, Clone)]
-pub struct ProgressInfo {
-    pub dirs_checked: usize,
-    pub repos_found: usize,
-    pub current_path: String,
-    pub start_time: Instant,
-    pub threshold_time: DateTime<Local>,
-    pub end_time: Option<DateTime<Local>>,
-}
-
 /// Simple progress display for the terminal UI
 pub struct ProgressDisplay {
     dirs_checked: Arc<AtomicUsize>,
@@ -100,10 +89,6 @@ impl ProgressDisplay {
     }
 
     // Ollama status methods
-    pub fn set_ollama_active(&self, active: bool) {
-        self.ollama_active.store(active, Ordering::Relaxed);
-    }
-
     pub fn is_ollama_active(&self) -> bool {
         self.ollama_active.load(Ordering::Relaxed)
     }
@@ -136,14 +121,15 @@ impl ProgressDisplay {
         self.is_ollama_active()
     }
 
-    pub fn should_exit_ui(&self) -> bool {
-        self.is_scan_complete()
-    }
-
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation_token.clone()
     }
 
+    /// Run the interactive terminal UI.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal setup fails or if the UI loop encounters an error.
     pub fn run_interactive(&self) -> Result<()> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -380,7 +366,10 @@ impl ProgressDisplay {
         Ok(())
     }
 
-    /// Simple non-interactive progress display for when TUI is not desired
+    /// Simple non-interactive progress display for when TUI is not desired.
+    ///
+    /// Flush errors (e.g., broken pipe) are silently ignored since they indicate
+    /// the output is no longer being consumed.
     pub fn print_simple_progress(&self) {
         let dirs_checked = self.dirs_checked.load(Ordering::Relaxed);
         let repos_found = self.repos_found.load(Ordering::Relaxed);
@@ -437,7 +426,7 @@ impl ProgressDisplay {
         }
         
         use std::io::Write;
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush();
     }
 }
 
