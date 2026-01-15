@@ -162,6 +162,210 @@ pub fn str_display_width_as_u16(s: &str) -> u16 {
     u16::try_from(s.width()).unwrap_or(u16::MAX)
 }
 
+/// Calculate the maximum filename display width that allows the progress bar to fit.
+///
+/// This function determines how wide a filename can be while still leaving room for:
+/// - The minimum progress bar width ([`MIN_BAR_WIDTH`] = 10 columns)
+/// - The fixed overhead (spinner, stats, brackets, etc.)
+///
+/// # Arguments
+///
+/// * `terminal_width` - The current terminal width in columns.
+/// * `base_overhead` - Fixed overhead excluding filename (e.g., 60 for copy style).
+///
+/// # Returns
+///
+/// Maximum filename display width in columns.
+///
+/// # Example
+///
+/// ```
+/// use termbar::calculate_max_filename_width;
+///
+/// // Terminal 100, overhead 60, min bar 10 -> max filename = 30
+/// assert_eq!(calculate_max_filename_width(100, 60), 30);
+///
+/// // Narrow terminal: 80 - 60 - 10 = 10 max filename
+/// assert_eq!(calculate_max_filename_width(80, 60), 10);
+/// ```
+#[must_use]
+pub fn calculate_max_filename_width(terminal_width: u16, base_overhead: u16) -> u16 {
+    // terminal_width = base_overhead + filename_width + bar_width
+    // We want: bar_width >= MIN_BAR_WIDTH
+    // So: filename_width <= terminal_width - base_overhead - MIN_BAR_WIDTH
+    terminal_width
+        .saturating_sub(base_overhead)
+        .saturating_sub(MIN_BAR_WIDTH)
+}
+
+/// Take characters from the start of a string until reaching max display width.
+///
+/// Uses unicode display width for accurate terminal column counting.
+///
+/// # Arguments
+///
+/// * `s` - The string to take characters from.
+/// * `max_width` - Maximum display width in terminal columns.
+///
+/// # Returns
+///
+/// A string containing characters from the start of `s` that fit within `max_width`.
+fn take_chars_by_width(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut result = String::new();
+    let mut width = 0;
+
+    for ch in s.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        result.push(ch);
+        width += ch_width;
+    }
+
+    result
+}
+
+/// Split a filename into basename and extension.
+///
+/// Returns `(basename, Some(extension))` or `(basename, None)`.
+/// Handles hidden files (starting with '.') correctly.
+///
+/// # Arguments
+///
+/// * `filename` - The filename to split.
+///
+/// # Returns
+///
+/// A tuple of (basename, optional extension without the dot).
+///
+/// # Examples
+///
+/// - `"file.txt"` -> `("file", Some("txt"))`
+/// - `"archive.tar.gz"` -> `("archive.tar", Some("gz"))`
+/// - `".bashrc"` -> `(".bashrc", None)`
+/// - `".hidden.txt"` -> `(".hidden", Some("txt"))`
+fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
+    // Handle hidden files: ".bashrc" -> basename=".bashrc", ext=None
+    // Handle ".hidden.txt" -> basename=".hidden", ext=Some("txt")
+
+    let search_start = if filename.starts_with('.') { 1 } else { 0 };
+
+    if let Some(dot_pos) = filename[search_start..].rfind('.') {
+        let actual_pos = search_start + dot_pos;
+        let ext = &filename[actual_pos + 1..];
+        // Only treat as extension if it's non-empty and reasonable length
+        if !ext.is_empty() && ext.len() <= 10 {
+            return (&filename[..actual_pos], Some(ext));
+        }
+    }
+
+    (filename, None)
+}
+
+/// Truncate a filename to fit within a maximum display width while preserving the extension.
+///
+/// When truncation is needed, the function produces output in the format:
+/// `beginning` + `...` + `.extension` (e.g., `"American.Psycho.2000.UN....mkv"`)
+///
+/// # Arguments
+///
+/// * `filename` - The filename to truncate (just the filename, not the full path).
+/// * `max_width` - Maximum display width in terminal columns.
+///
+/// # Returns
+///
+/// The truncated filename, or the original if it fits within `max_width`.
+///
+/// # Algorithm
+///
+/// 1. If the filename fits within `max_width`, return it unchanged
+/// 2. Extract the extension (last `.xxx` portion, if present)
+/// 3. Calculate space needed for ellipsis (`...`) and extension
+/// 4. Take as much of the beginning as will fit
+/// 5. Return `beginning....extension`
+///
+/// # Edge Cases
+///
+/// - Files with no extension: truncate to `beginning...`
+/// - Files with very long extensions: truncate the extension if needed
+/// - Files starting with `.` (hidden files): treat the part after first `.` as basename
+/// - Unicode filenames: uses display width, not byte length
+///
+/// # Example
+///
+/// ```
+/// use termbar::truncate_filename;
+///
+/// // Long filename gets truncated
+/// let truncated = truncate_filename(
+///     "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv",
+///     30
+/// );
+/// assert!(truncated.ends_with(".mkv"));
+/// assert!(truncated.contains("..."));
+///
+/// // Short filename unchanged
+/// assert_eq!(truncate_filename("file.txt", 30), "file.txt");
+/// ```
+#[must_use]
+pub fn truncate_filename(filename: &str, max_width: u16) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    let max_width = max_width as usize;
+    let current_width = filename.width();
+
+    // If it already fits, return unchanged
+    if current_width <= max_width {
+        return filename.to_string();
+    }
+
+    // Minimum useful output: "X..." (4 chars)
+    if max_width < 4 {
+        // Just take first chars up to max
+        return take_chars_by_width(filename, max_width);
+    }
+
+    // Find extension - look for last '.' that isn't at position 0
+    // Handle hidden files like ".bashrc" correctly
+    let (basename, extension) = split_filename_extension(filename);
+
+    let ellipsis = "...";
+    let ellipsis_width = 3; // "..." is always 3 columns
+
+    if let Some(ext) = extension {
+        let ext_width = ext.width();
+        let dot_ext = format!(".{}", ext);
+        let dot_ext_width = ext_width + 1; // +1 for the dot
+
+        // Check if we have room for: something + ... + .ext
+        // Minimum: 1 char + ... + .ext
+        if max_width >= 1 + ellipsis_width + dot_ext_width {
+            let basename_budget = max_width - ellipsis_width - dot_ext_width;
+            let truncated_basename = take_chars_by_width(basename, basename_budget);
+            return format!("{}{}{}", truncated_basename, ellipsis, dot_ext);
+        }
+
+        // Extension too long - truncate extension too
+        // Format: basename_part...ext_part
+        // Give half to basename, half to extension (minus ellipsis)
+        let remaining = max_width.saturating_sub(ellipsis_width);
+        let basename_budget = remaining / 2;
+        let ext_budget = remaining - basename_budget;
+
+        let truncated_basename = take_chars_by_width(basename, basename_budget);
+        let truncated_ext = take_chars_by_width(&dot_ext, ext_budget);
+        return format!("{}{}{}", truncated_basename, ellipsis, truncated_ext);
+    }
+
+    // No extension - just truncate with ellipsis at end
+    let basename_budget = max_width.saturating_sub(ellipsis_width);
+    let truncated = take_chars_by_width(filename, basename_budget);
+    format!("{}{}", truncated, ellipsis)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +433,226 @@ mod tests {
         assert_eq!(str_display_width_as_u16("中"), 2);
         // Mixed: "file" (4 cols) + 🎉 (2 cols) + ".txt" (4 cols) = 10 columns
         assert_eq!(str_display_width_as_u16("file🎉.txt"), 10);
+    }
+
+    // Tests for calculate_max_filename_width
+    #[test]
+    fn test_calculate_max_filename_width_normal() {
+        // Terminal 100, overhead 60, min bar 10 -> max filename = 30
+        assert_eq!(calculate_max_filename_width(100, 60), 30);
+    }
+
+    #[test]
+    fn test_calculate_max_filename_width_narrow() {
+        // Narrow terminal: 80 - 60 - 10 = 10 max filename
+        assert_eq!(calculate_max_filename_width(80, 60), 10);
+    }
+
+    #[test]
+    fn test_calculate_max_filename_width_very_narrow() {
+        // Very narrow terminal: 70 - 60 - 10 = 0
+        assert_eq!(calculate_max_filename_width(70, 60), 0);
+    }
+
+    #[test]
+    fn test_calculate_max_filename_width_wide() {
+        // Wide terminal: 200 - 60 - 10 = 130
+        assert_eq!(calculate_max_filename_width(200, 60), 130);
+    }
+
+    // Tests for split_filename_extension
+    #[test]
+    fn test_split_filename_extension_normal() {
+        assert_eq!(split_filename_extension("file.txt"), ("file", Some("txt")));
+        assert_eq!(split_filename_extension("document.pdf"), ("document", Some("pdf")));
+    }
+
+    #[test]
+    fn test_split_filename_extension_multiple_dots() {
+        assert_eq!(
+            split_filename_extension("archive.tar.gz"),
+            ("archive.tar", Some("gz"))
+        );
+    }
+
+    #[test]
+    fn test_split_filename_extension_hidden_file() {
+        // Hidden file with no real extension
+        assert_eq!(split_filename_extension(".bashrc"), (".bashrc", None));
+    }
+
+    #[test]
+    fn test_split_filename_extension_hidden_with_ext() {
+        // Hidden file with extension
+        assert_eq!(
+            split_filename_extension(".hidden.txt"),
+            (".hidden", Some("txt"))
+        );
+    }
+
+    #[test]
+    fn test_split_filename_extension_no_extension() {
+        assert_eq!(split_filename_extension("Makefile"), ("Makefile", None));
+        assert_eq!(split_filename_extension("README"), ("README", None));
+    }
+
+    #[test]
+    fn test_split_filename_extension_very_long_extension() {
+        // Extensions > 10 chars are not treated as extensions
+        assert_eq!(
+            split_filename_extension("file.verylongextensionname"),
+            ("file.verylongextensionname", None)
+        );
+    }
+
+    // Tests for truncate_filename
+    #[test]
+    fn test_truncate_filename_short_unchanged() {
+        assert_eq!(truncate_filename("file.txt", 30), "file.txt");
+        assert_eq!(truncate_filename("a.b", 10), "a.b");
+    }
+
+    #[test]
+    fn test_truncate_filename_empty() {
+        assert_eq!(truncate_filename("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_filename_long_with_extension() {
+        let long = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let result = truncate_filename(long, 30);
+
+        // Should end with .mkv
+        assert!(
+            result.ends_with(".mkv"),
+            "Should preserve extension: {}",
+            result
+        );
+        // Should contain ellipsis
+        assert!(result.contains("..."), "Should contain ellipsis: {}", result);
+        // Should fit within max width
+        assert!(
+            str_display_width_as_u16(&result) <= 30,
+            "Should fit: {}",
+            result
+        );
+        // Should start with beginning of original
+        assert!(
+            result.starts_with("American"),
+            "Should start with beginning: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_no_extension() {
+        let result = truncate_filename("Makefile_with_very_long_name_here", 15);
+        assert!(
+            result.ends_with("..."),
+            "Should end with ellipsis: {}",
+            result
+        );
+        assert!(
+            str_display_width_as_u16(&result) <= 15,
+            "Should fit: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_hidden_file_fits() {
+        // Hidden file that fits
+        assert_eq!(truncate_filename(".bashrc", 20), ".bashrc");
+    }
+
+    #[test]
+    fn test_truncate_filename_hidden_file_with_extension() {
+        // Hidden file with extension
+        let result = truncate_filename(".very_long_hidden_config.json", 20);
+        assert!(
+            result.ends_with(".json"),
+            "Should preserve extension: {}",
+            result
+        );
+        assert!(
+            str_display_width_as_u16(&result) <= 20,
+            "Should fit: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_minimum_width() {
+        let result = truncate_filename("longfilename.txt", 4);
+        assert!(
+            str_display_width_as_u16(&result) <= 4,
+            "Should fit in 4: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_unicode_cjk() {
+        // CJK characters (2 display columns each)
+        let result = truncate_filename("文件名称很长的文档.txt", 15);
+        assert!(
+            str_display_width_as_u16(&result) <= 15,
+            "Should fit: {}",
+            result
+        );
+        assert!(
+            result.ends_with(".txt"),
+            "Should preserve extension: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_unicode_emoji() {
+        // Emoji filename
+        let result = truncate_filename("my_cool_emoji_file_🎉🎊🎁.png", 20);
+        assert!(
+            str_display_width_as_u16(&result) <= 20,
+            "Should fit: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_exact_fit() {
+        let filename = "exactly18chars.txt"; // 18 chars
+        assert_eq!(truncate_filename(filename, 18), filename);
+    }
+
+    #[test]
+    fn test_truncate_filename_very_small_max() {
+        // max_width < 4 should just take first chars
+        let result = truncate_filename("longfilename.txt", 3);
+        assert_eq!(str_display_width_as_u16(&result), 3);
+        assert_eq!(result, "lon");
+    }
+
+    #[test]
+    fn test_progress_bar_fits_with_truncation() {
+        // Simulate the actual use case: very long filename at terminal width 80
+        let long_filename = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let terminal_width: u16 = 80;
+        let base_overhead: u16 = 60;
+
+        let max_filename_width = calculate_max_filename_width(terminal_width, base_overhead);
+        let truncated = truncate_filename(long_filename, max_filename_width);
+        let filename_width = str_display_width_as_u16(&truncated);
+
+        // Total should fit: base_overhead + filename + MIN_BAR_WIDTH <= terminal_width
+        let total = base_overhead + filename_width + MIN_BAR_WIDTH;
+        assert!(
+            total <= terminal_width,
+            "Total {} should fit in terminal {}: overhead={}, filename={}, bar={}",
+            total,
+            terminal_width,
+            base_overhead,
+            filename_width,
+            MIN_BAR_WIDTH
+        );
     }
 }
