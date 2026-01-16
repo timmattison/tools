@@ -54,7 +54,7 @@ struct Args {
     limit: usize,
 
     /// Number of CPU samples to take (more = more accurate but slower)
-    #[arg(short, long, default_value = "3")]
+    #[arg(short, long, default_value = "3", value_parser = clap::value_parser!(u32).range(1..))]
     samples: u32,
 
     /// Output as JSON
@@ -70,7 +70,7 @@ struct Args {
     watch: bool,
 
     /// Refresh interval in seconds for watch mode
-    #[arg(short, long, default_value = "2")]
+    #[arg(short, long, default_value = "2", value_parser = clap::value_parser!(u64).range(1..))]
     interval: u64,
 
     /// Tab list refresh interval in seconds for watch mode
@@ -230,7 +230,7 @@ fn run_once(args: &Args) -> Result<()> {
         };
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
-        print_human_readable(&processes, &tabs, args.samples, sample_duration_ms, false);
+        print_human_readable(&processes, tabs.as_deref(), args.samples, sample_duration_ms, false);
     }
 
     Ok(())
@@ -366,7 +366,7 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
         )?;
 
         // Print output
-        print_human_readable(&processes, &tabs, args.samples, sample_duration_ms, true);
+        print_human_readable(&processes, tabs.as_deref(), args.samples, sample_duration_ms, true);
         stdout.flush()?;
 
         // Calculate remaining time after sampling
@@ -550,7 +550,7 @@ fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
 /// Print human-readable output
 fn print_human_readable(
     processes: &[ChromeProcess],
-    tabs: &Option<Vec<TabInfo>>,
+    tabs: Option<&[TabInfo]>,
     samples: u32,
     duration_ms: u64,
     watch_mode: bool,
@@ -666,14 +666,21 @@ fn extract_domain(url: &str) -> String {
 /// Truncate string to max length (in characters) with ellipsis.
 ///
 /// This function properly handles multi-byte UTF-8 characters by counting
-/// characters rather than bytes.
+/// characters rather than bytes. The result is guaranteed to be at most
+/// `max_chars` characters long.
+///
+/// When `max_chars < 4`, there's not enough room for content plus ellipsis,
+/// so the string is truncated without ellipsis to respect the length limit.
 fn truncate_string(s: &str, max_chars: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_chars {
         s.to_string()
+    } else if max_chars < 4 {
+        // Not enough room for any content plus "...", just truncate
+        s.chars().take(max_chars).collect()
     } else {
-        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{}...", truncated)
+        let truncated: String = s.chars().take(max_chars - 3).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -750,10 +757,34 @@ mod tests {
 
     #[test]
     fn test_truncate_string_very_short_max() {
-        // Edge case: max_chars <= 3 means we can't even fit "..."
-        assert_eq!(truncate_string("hello", 3), "..."); // 0 chars + ...
-        assert_eq!(truncate_string("hello", 2), "..."); // saturating_sub gives 0
-        assert_eq!(truncate_string("hello", 0), "..."); // saturating_sub gives 0
+        // Edge case: max_chars < 4 means we can't fit content + "..."
+        // So we just truncate without ellipsis to respect the limit
+        assert_eq!(truncate_string("hello", 3), "hel"); // Just truncate, no room for ellipsis
+        assert_eq!(truncate_string("hello", 2), "he");
+        assert_eq!(truncate_string("hello", 1), "h");
+        assert_eq!(truncate_string("hello", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_string_boundary() {
+        // Test the boundary where ellipsis just fits (max_chars == 4)
+        assert_eq!(truncate_string("hello", 4), "h..."); // 1 char + ...
+        assert_eq!(truncate_string("hello world", 5), "he..."); // 2 chars + ...
+    }
+
+    #[test]
+    fn test_truncate_string_respects_max_length() {
+        // Verify the result never exceeds max_chars
+        for max in 0..=10 {
+            let result = truncate_string("hello world, this is a test", max);
+            assert!(
+                result.chars().count() <= max,
+                "truncate_string with max_chars={} produced '{}' ({} chars)",
+                max,
+                result,
+                result.chars().count()
+            );
+        }
     }
 
     #[test]
