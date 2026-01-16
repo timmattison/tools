@@ -65,6 +65,30 @@ pub const MAX_BAR_WIDTH: u16 = 100;
 /// - 2 space characters for the empty/background portion of the bar
 pub const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
 
+/// Maximum length for a file extension to be recognized as such.
+///
+/// Extensions longer than this are treated as part of the basename.
+/// This prevents unusual filenames like `file.verylongextensionname` from
+/// being split incorrectly during truncation.
+const MAX_EXTENSION_LEN: usize = 10;
+
+/// Ellipsis used when truncating filenames with an extension.
+///
+/// We use `..` (2 dots) so that when combined with the extension's dot,
+/// the result is 3 visible dots: `filename...ext` (cleaner than 4 dots).
+const ELLIPSIS_WITH_EXT: &str = "..";
+
+/// Width in terminal columns of [`ELLIPSIS_WITH_EXT`].
+const ELLIPSIS_WITH_EXT_WIDTH: usize = 2;
+
+/// Ellipsis used when truncating filenames without an extension.
+///
+/// We use `...` (3 dots) for standard truncation appearance.
+const ELLIPSIS_NO_EXT: &str = "...";
+
+/// Width in terminal columns of [`ELLIPSIS_NO_EXT`].
+const ELLIPSIS_NO_EXT_WIDTH: usize = 3;
+
 /// Escape braces in a string for use in indicatif templates.
 ///
 /// Indicatif uses `{placeholder}` syntax, so literal braces must be doubled
@@ -257,7 +281,7 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
         let actual_pos = search_start + dot_pos;
         let ext = &filename[actual_pos + 1..];
         // Only treat as extension if it's non-empty and reasonable length
-        if !ext.is_empty() && ext.len() <= 10 {
+        if !ext.is_empty() && ext.len() <= MAX_EXTENSION_LEN {
             return (&filename[..actual_pos], Some(ext));
         }
     }
@@ -267,8 +291,12 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 
 /// Truncate a filename to fit within a maximum display width while preserving the extension.
 ///
-/// When truncation is needed, the function produces output in the format:
-/// `beginning` + `...` + `.extension` (e.g., `"American.Psycho.2000.UN....mkv"`)
+/// When truncation is needed, the function produces output in one of two formats:
+/// - With extension: `beginning...ext` (e.g., `"American.Psycho.2000.UNCUT...mkv"`)
+/// - Without extension: `beginning...` (e.g., `"Makefile_with_very_long..."`)
+///
+/// The `..` ellipsis is used when an extension is present so that combined with
+/// the extension's leading dot, the result shows 3 dots total for a clean appearance.
 ///
 /// # Arguments
 ///
@@ -283,9 +311,9 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 ///
 /// 1. If the filename fits within `max_width`, return it unchanged
 /// 2. Extract the extension (last `.xxx` portion, if present)
-/// 3. Calculate space needed for ellipsis (`...`) and extension
+/// 3. Calculate space needed for ellipsis and extension
 /// 4. Take as much of the beginning as will fit
-/// 5. Return `beginning....extension`
+/// 5. Return `beginning...extension` (with extension) or `beginning...` (without)
 ///
 /// # Edge Cases
 ///
@@ -299,13 +327,13 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 /// ```
 /// use termbar::truncate_filename;
 ///
-/// // Long filename gets truncated
+/// // Long filename gets truncated (3 dots total: ".." + "." from extension)
 /// let truncated = truncate_filename(
 ///     "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv",
 ///     30
 /// );
 /// assert!(truncated.ends_with(".mkv"));
-/// assert!(truncated.contains("..."));
+/// assert!(truncated.contains("..."));  // ".." + ".mkv" appears as "...mkv"
 ///
 /// // Short filename unchanged
 /// assert_eq!(truncate_filename("file.txt", 30), "file.txt");
@@ -314,56 +342,54 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 pub fn truncate_filename(filename: &str, max_width: u16) -> String {
     use unicode_width::UnicodeWidthStr;
 
-    let max_width = max_width as usize;
+    let max_width_usize = usize::from(max_width);
     let current_width = filename.width();
 
     // If it already fits, return unchanged
-    if current_width <= max_width {
+    if current_width <= max_width_usize {
         return filename.to_string();
     }
 
     // Minimum useful output: "X..." (4 chars)
-    if max_width < 4 {
+    if max_width_usize < 4 {
         // Just take first chars up to max
-        return take_chars_by_width(filename, max_width);
+        return take_chars_by_width(filename, max_width_usize);
     }
 
     // Find extension - look for last '.' that isn't at position 0
     // Handle hidden files like ".bashrc" correctly
     let (basename, extension) = split_filename_extension(filename);
 
-    let ellipsis = "...";
-    let ellipsis_width = 3; // "..." is always 3 columns
-
     if let Some(ext) = extension {
         let ext_width = ext.width();
         let dot_ext = format!(".{}", ext);
         let dot_ext_width = ext_width + 1; // +1 for the dot
 
-        // Check if we have room for: something + ... + .ext
-        // Minimum: 1 char + ... + .ext
-        if max_width >= 1 + ellipsis_width + dot_ext_width {
-            let basename_budget = max_width - ellipsis_width - dot_ext_width;
+        // Check if we have room for: something + .. + .ext
+        // Minimum: 1 char + .. + .ext
+        // Using ELLIPSIS_WITH_EXT ("..") so result is "name...ext" (3 dots total)
+        if max_width_usize >= 1 + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width {
+            let basename_budget = max_width_usize - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width;
             let truncated_basename = take_chars_by_width(basename, basename_budget);
-            return format!("{}{}{}", truncated_basename, ellipsis, dot_ext);
+            return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, dot_ext);
         }
 
         // Extension too long - truncate extension too
-        // Format: basename_part...ext_part
+        // Format: basename_part..ext_part (still using 2-dot ellipsis)
         // Give half to basename, half to extension (minus ellipsis)
-        let remaining = max_width.saturating_sub(ellipsis_width);
+        let remaining = max_width_usize.saturating_sub(ELLIPSIS_WITH_EXT_WIDTH);
         let basename_budget = remaining / 2;
         let ext_budget = remaining - basename_budget;
 
         let truncated_basename = take_chars_by_width(basename, basename_budget);
         let truncated_ext = take_chars_by_width(&dot_ext, ext_budget);
-        return format!("{}{}{}", truncated_basename, ellipsis, truncated_ext);
+        return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, truncated_ext);
     }
 
     // No extension - just truncate with ellipsis at end
-    let basename_budget = max_width.saturating_sub(ellipsis_width);
+    let basename_budget = max_width_usize.saturating_sub(ELLIPSIS_NO_EXT_WIDTH);
     let truncated = take_chars_by_width(filename, basename_budget);
-    format!("{}{}", truncated, ellipsis)
+    format!("{}{}", truncated, ELLIPSIS_NO_EXT)
 }
 
 #[cfg(test)]
@@ -412,8 +438,9 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
-        assert!(DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH);
+        // Use const blocks for compile-time constant validation
+        const _: () = assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
+        const _: () = assert!(DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH);
         assert!(!PROGRESS_CHARS.is_empty());
     }
 
@@ -630,6 +657,22 @@ mod tests {
         let result = truncate_filename("longfilename.txt", 3);
         assert_eq!(str_display_width_as_u16(&result), 3);
         assert_eq!(result, "lon");
+    }
+
+    #[test]
+    fn test_truncate_filename_zero_width() {
+        // Edge case: max_width = 0 should return empty string
+        assert_eq!(truncate_filename("file.txt", 0), "");
+        assert_eq!(truncate_filename("", 0), "");
+        assert_eq!(truncate_filename("longfilename.txt", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_filename_one_width() {
+        // Edge case: max_width = 1 should return first char
+        let result = truncate_filename("longfilename.txt", 1);
+        assert_eq!(result, "l");
+        assert_eq!(str_display_width_as_u16(&result), 1);
     }
 
     #[test]

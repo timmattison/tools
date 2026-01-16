@@ -19,6 +19,28 @@ const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_
 const BATCH_PROGRESS_STATS_FORMAT: &str =
     "{msg} {bytes}/{total_bytes} @ {bytes_per_sec} (~{eta} remaining)";
 
+/// Base overhead for copy style progress bars.
+///
+/// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60
+/// The filename width is added to this to get total overhead.
+const COPY_STYLE_BASE_OVERHEAD: u16 = 60;
+
+/// Base overhead for verify style progress bars.
+///
+/// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70
+/// The filename width is added to this to get total overhead.
+const VERIFY_STYLE_BASE_OVERHEAD: u16 = 70;
+
+/// Base overhead for batch style progress bars.
+///
+/// Components: "Batch" prefix + brackets + stats format = ~85
+const BATCH_STYLE_OVERHEAD: u16 = 85;
+
+/// Base overhead for hash style progress bars.
+///
+/// Components: spinner(2) + brackets(4) + bytes/total(25) + speed/eta(35) + msg(variable) + spaces(4) = ~70
+const HASH_STYLE_OVERHEAD: u16 = 70;
+
 /// Builder for progress bar styles with automatic width calculation.
 ///
 /// This builder creates progress styles that adapt to the terminal width,
@@ -152,18 +174,16 @@ impl ProgressStyleBuilder {
                 // Escaped braces ({{ and }}) are template syntax that render as single characters.
                 let original = self.custom_filename.as_deref().unwrap_or_default();
 
-                // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 base overhead
-                let base_overhead: u16 = 60;
-
                 // Calculate maximum filename width that fits with minimum bar
-                let max_filename_width = calculate_max_filename_width(terminal_width, base_overhead);
+                let max_filename_width =
+                    calculate_max_filename_width(terminal_width, COPY_STYLE_BASE_OVERHEAD);
 
                 // Truncate filename if needed to ensure the line fits
                 let truncated = truncate_filename(original, max_filename_width);
                 let filename_display_width = str_display_width_as_u16(&truncated);
                 let filename = escape_template_braces(&truncated);
 
-                let overhead = base_overhead + filename_display_width;
+                let overhead = COPY_STYLE_BASE_OVERHEAD + filename_display_width;
                 let bar_width = calculate_bar_width(terminal_width, overhead);
                 format!(
                     "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {}",
@@ -175,18 +195,16 @@ impl ProgressStyleBuilder {
                 // Escaped braces ({{ and }}) are template syntax that render as single characters.
                 let original = self.custom_filename.as_deref().unwrap_or_default();
 
-                // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 base overhead
-                let base_overhead: u16 = 70;
-
                 // Calculate maximum filename width that fits with minimum bar
-                let max_filename_width = calculate_max_filename_width(terminal_width, base_overhead);
+                let max_filename_width =
+                    calculate_max_filename_width(terminal_width, VERIFY_STYLE_BASE_OVERHEAD);
 
                 // Truncate filename if needed to ensure the line fits
                 let truncated = truncate_filename(original, max_filename_width);
                 let filename_display_width = str_display_width_as_u16(&truncated);
                 let filename = escape_template_braces(&truncated);
 
-                let overhead = base_overhead + filename_display_width;
+                let overhead = VERIFY_STYLE_BASE_OVERHEAD + filename_display_width;
                 let bar_width = calculate_bar_width(terminal_width, overhead);
                 format!(
                     "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {} verifying",
@@ -194,17 +212,14 @@ impl ProgressStyleBuilder {
                 )
             }
             StyleType::Batch => {
-                // "Batch [bar] (99/99) 999.99 GiB/999.99 GiB @ 999.99 MiB/s (~99:99:99 remaining)" = ~85 chars overhead
-                let bar_width = calculate_bar_width(terminal_width, 85);
+                let bar_width = calculate_bar_width(terminal_width, BATCH_STYLE_OVERHEAD);
                 format!(
                     "{{prefix:.bold}} [{{bar:{}.blue/dim}}] {}",
                     bar_width, BATCH_PROGRESS_STATS_FORMAT
                 )
             }
             StyleType::Hash => {
-                // spinner(2) + brackets(4) + bytes/total(25) + speed/eta(35) + msg(variable) + spaces(4) = ~70 overhead
-                // We use a larger overhead to leave room for the message
-                let bar_width = calculate_bar_width(terminal_width, 70);
+                let bar_width = calculate_bar_width(terminal_width, HASH_STYLE_OVERHEAD);
                 format!(
                     "{{spinner:.green}} [{{bar:{}.cyan/blue}}] {} {{msg}}",
                     bar_width, PROGRESS_STATS_FORMAT
