@@ -22,7 +22,7 @@ fi
 # Read version from central VERSION file (we're already in repo root from cd above)
 VERSION_FILE="VERSION"
 if [ -f "$VERSION_FILE" ]; then
-    VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+    VERSION=$(tr -d '[:space:]' < "$VERSION_FILE")
 else
     echo "Warning: VERSION file not found at $VERSION_FILE, using default"
     VERSION="0.1.0"

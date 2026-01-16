@@ -218,3 +218,39 @@ All Go tools use internal/version:
 - `procinfo` - Process Info
 - `subito` - AWS IoT Subscriber
 - `symfix` - Symlink Fix
+
+## Shell Scripts
+
+Shell scripts in this repository **must** pass [ShellCheck](https://www.shellcheck.net/) validation.
+
+### Why
+
+ShellCheck catches common shell script issues:
+- Useless use of cat (UUOC) - e.g., `cat file | grep` should be `grep < file`
+- Unquoted variables that could cause word splitting
+- Missing error handling
+- Portability issues between shells
+
+### Configuration
+
+The repository includes a `.shellcheckrc` file that configures ShellCheck with sensible defaults.
+
+### Running ShellCheck
+
+```bash
+# Check all shell scripts
+shellcheck scripts/*.sh test.sh
+
+# Check a specific script
+shellcheck scripts/build-go.sh
+```
+
+### Shell Script Style Guidelines
+
+1. **Use `set -e`** at the top of scripts to exit on error
+2. **Quote variables** to prevent word splitting: `"$var"` not `$var`
+3. **Avoid UUOC**: Use `< file` instead of `cat file |`
+4. **Use `[[ ]]`** instead of `[ ]` for conditionals in bash
+5. **Handle arguments properly**: Use `while` loops with `shift` for multi-argument parsing
+6. **Provide help text**: Include `-h`/`--help` options
+7. **Avoid emojis**: Use text indicators like `[PASS]`/`[FAIL]` instead of `✓`/`✗`

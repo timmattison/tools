@@ -14,11 +14,33 @@ run_go=true
 run_rust=true
 
 # Parse arguments
-if [ "$1" = "--go" ]; then
-    run_rust=false
-elif [ "$1" = "--rust" ]; then
-    run_go=false
-fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --go)
+            run_rust=false
+            shift
+            ;;
+        --rust)
+            run_go=false
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--go] [--rust]"
+            echo ""
+            echo "Options:"
+            echo "  --go    Run only Go tests"
+            echo "  --rust  Run only Rust tests"
+            echo ""
+            echo "If no options are specified, all tests are run."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information."
+            exit 1
+            ;;
+    esac
+done
 
 exit_code=0
 
@@ -28,10 +50,10 @@ if [ "$run_go" = true ]; then
     echo "========================================="
     if go test ./... -v; then
         echo ""
-        echo "✓ Go tests passed"
+        echo "[PASS] Go tests passed"
     else
         echo ""
-        echo "✗ Go tests failed"
+        echo "[FAIL] Go tests failed"
         exit_code=1
     fi
     echo ""
@@ -43,10 +65,10 @@ if [ "$run_rust" = true ]; then
     echo "========================================="
     if cargo test --workspace; then
         echo ""
-        echo "✓ Rust tests passed"
+        echo "[PASS] Rust tests passed"
     else
         echo ""
-        echo "✗ Rust tests failed"
+        echo "[FAIL] Rust tests failed"
         exit_code=1
     fi
     echo ""
