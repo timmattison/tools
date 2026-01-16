@@ -80,7 +80,7 @@ const ELLIPSIS_WITH_EXT: &str = "..";
 
 /// Width in terminal columns of [`ELLIPSIS_WITH_EXT`].
 ///
-/// # Safety Invariant
+/// # Invariant
 ///
 /// This must equal `ELLIPSIS_WITH_EXT.len()`. Since our ellipsis is ASCII,
 /// byte length equals character count equals display width.
@@ -94,7 +94,7 @@ const ELLIPSIS_NO_EXT: &str = "...";
 
 /// Width in terminal columns of [`ELLIPSIS_NO_EXT`].
 ///
-/// # Safety Invariant
+/// # Invariant
 ///
 /// This must equal `ELLIPSIS_NO_EXT.len()`. Since our ellipsis is ASCII,
 /// byte length equals character count equals display width.
@@ -392,7 +392,8 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 ///     30
 /// );
 /// assert!(truncated.ends_with(".mkv"));
-/// assert!(truncated.contains("..."));  // ".." + ".mkv" appears as "...mkv"
+/// // The ellipsis ".." plus extension ".mkv" creates "...mkv" (3 visible dots)
+/// assert!(truncated.contains("..."));
 ///
 /// // Short filename unchanged
 /// assert_eq!(truncate_filename("file.txt", 30), "file.txt");
