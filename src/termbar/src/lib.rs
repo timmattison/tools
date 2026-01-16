@@ -96,6 +96,15 @@ const ELLIPSIS_NO_EXT_WIDTH: usize = 3;
 /// This is 4 characters to allow at least: `X...` (1 char + 3 dot ellipsis).
 const MIN_TRUNCATION_WIDTH: usize = 4;
 
+/// Minimum basename characters to show when preserving an extension.
+///
+/// When truncating a filename with an extension, we ensure at least this many
+/// characters of the basename are visible. This prevents awkward results like
+/// "...txt" with no visible filename portion. If there isn't enough space for
+/// this minimum plus the ellipsis and extension, we fall back to simple
+/// truncation without extension preservation.
+const MIN_BASENAME_CHARS: usize = 1;
+
 /// Escape braces in a string for use in indicatif templates.
 ///
 /// Indicatif uses `{placeholder}` syntax, so literal braces must be doubled
@@ -374,25 +383,33 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
         let dot_ext = format!(".{}", ext);
         let dot_ext_width = ext_width + 1; // +1 for the dot
 
-        // Check if we have room for: something + .. + .ext
-        // Minimum: 1 char + .. + .ext
+        // Check if we have room for: MIN_BASENAME_CHARS + .. + .ext
         // Using ELLIPSIS_WITH_EXT ("..") so result is "name...ext" (3 dots total)
-        if max_width_usize >= 1 + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width {
+        let min_with_ext = MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width;
+        if max_width_usize >= min_with_ext {
             let basename_budget = max_width_usize - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width;
+            // Ensure we show at least MIN_BASENAME_CHARS (should already be guaranteed by check above)
+            debug_assert!(basename_budget >= MIN_BASENAME_CHARS);
             let truncated_basename = take_chars_by_width(basename, basename_budget);
             return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, dot_ext);
         }
 
-        // Extension too long - truncate extension too
-        // Format: basename_part..ext_part (still using 2-dot ellipsis)
-        // Give 1/3 to basename, 2/3 to extension since we prioritize extension visibility
+        // Not enough room to preserve extension with minimum basename visibility.
+        // Try truncating both basename and extension, but only if we can still
+        // show at least MIN_BASENAME_CHARS of the basename.
         let remaining = max_width_usize.saturating_sub(ELLIPSIS_WITH_EXT_WIDTH);
+        // Give 1/3 to basename, 2/3 to extension since we prioritize extension visibility
         let basename_budget = remaining / 3;
-        let ext_budget = remaining - basename_budget;
 
-        let truncated_basename = take_chars_by_width(basename, basename_budget);
-        let truncated_ext = take_chars_by_width(&dot_ext, ext_budget);
-        return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, truncated_ext);
+        // If we can't show MIN_BASENAME_CHARS, fall through to no-extension truncation
+        if basename_budget >= MIN_BASENAME_CHARS {
+            let ext_budget = remaining - basename_budget;
+            let truncated_basename = take_chars_by_width(basename, basename_budget);
+            let truncated_ext = take_chars_by_width(&dot_ext, ext_budget);
+            return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, truncated_ext);
+        }
+
+        // Fall through to no-extension truncation below
     }
 
     // No extension - just truncate with ellipsis at end
@@ -583,16 +600,12 @@ mod tests {
     #[test]
     fn test_truncate_filename_no_extension() {
         let result = truncate_filename("Makefile_with_very_long_name_here", 15);
-        assert!(
-            result.ends_with("..."),
-            "Should end with ellipsis: {}",
-            result
+        // 15 chars - 3 (ellipsis) = 12 chars of basename
+        assert_eq!(
+            result, "Makefile_wit...",
+            "Should truncate to 12 chars + ellipsis"
         );
-        assert!(
-            str_display_width_as_u16(&result) <= 15,
-            "Should fit: {}",
-            result
-        );
+        assert_eq!(str_display_width_as_u16(&result), 15);
     }
 
     #[test]
@@ -619,12 +632,10 @@ mod tests {
 
     #[test]
     fn test_truncate_filename_minimum_width() {
+        // At width 4, can't preserve extension, falls back to "l..."
         let result = truncate_filename("longfilename.txt", 4);
-        assert!(
-            str_display_width_as_u16(&result) <= 4,
-            "Should fit in 4: {}",
-            result
-        );
+        assert_eq!(result, "l...", "Should be 1 char + 3 dot ellipsis");
+        assert_eq!(str_display_width_as_u16(&result), 4);
     }
 
     #[test]
@@ -719,16 +730,46 @@ mod tests {
     }
 
     #[test]
-    fn test_truncation_at_boundary() {
-        // At exactly MIN_TRUNCATION_WIDTH, we should get ellipsis
-        let result = truncate_filename("longfilename.txt", 4);
-        // Should be able to fit at least one char + ellipsis (3 dots) = 4 chars
-        // But with extension, we need more room, so it falls back to no-extension style
-        assert!(
-            str_display_width_as_u16(&result) <= 4,
-            "Result '{}' should fit in 4 columns",
-            result
+    fn test_min_basename_chars_constant() {
+        // Verify MIN_BASENAME_CHARS is used correctly
+        assert_eq!(MIN_BASENAME_CHARS, 1);
+    }
+
+    #[test]
+    fn test_falls_back_to_no_extension_when_basename_too_small() {
+        // When there's not enough room for MIN_BASENAME_CHARS + ellipsis + extension,
+        // we should fall back to simple truncation without extension preservation.
+        // "file.txt" at width 4: can't fit "f...txt" (7 chars min for extension preservation)
+        // So we should get "f..." (simple truncation)
+        let result = truncate_filename("file.txt", 4);
+        assert_eq!(
+            result, "f...",
+            "Should fall back to no-extension truncation when extension can't fit"
         );
+    }
+
+    #[test]
+    fn test_preserves_extension_with_minimum_basename() {
+        // At the boundary where we CAN fit MIN_BASENAME_CHARS + ellipsis + extension
+        // "file.txt" at width 7: "f...txt" should work
+        // min_with_ext = 1 (MIN_BASENAME_CHARS) + 2 (ellipsis) + 4 (.txt) = 7
+        let result = truncate_filename("file.txt", 7);
+        assert_eq!(
+            result, "f...txt",
+            "Should preserve extension with exactly MIN_BASENAME_CHARS"
+        );
+    }
+
+    #[test]
+    fn test_truncation_at_boundary() {
+        // At exactly MIN_TRUNCATION_WIDTH (4), we should get 1 char + 3 dots
+        // The extension can't be preserved because there's not enough room
+        let result = truncate_filename("longfilename.txt", 4);
+        assert_eq!(
+            result, "l...",
+            "At MIN_TRUNCATION_WIDTH, should get 1 char + ellipsis"
+        );
+        assert_eq!(str_display_width_as_u16(&result), 4);
     }
 
     #[test]
@@ -752,22 +793,17 @@ mod tests {
         // basename_budget=8/3=2, ext_budget=8-2=6
         // truncated_basename from "ab" = "ab" (fits in 2)
         // truncated_ext from ".longerext" with budget 6 = ".longe"
-        // Result: "ab" + ".." + ".longe" = "ab...longe" but wait, that's 10 chars
-        // Actually let me trace through again:
-        // remaining = 10 - 2 = 8
-        // basename_budget = 8 / 3 = 2
-        // ext_budget = 8 - 2 = 6
-        // truncated_basename = take_chars_by_width("ab", 2) = "ab"
-        // truncated_ext = take_chars_by_width(".longerext", 6) = ".longe"
-        // result = "ab" + ".." + ".longe" = "ab...longe" which is 10 chars
+        // Result: "ab" + ".." + ".longe" = "ab...longe" which is 10 chars
 
-        assert!(
-            str_display_width_as_u16(&result) <= 10,
-            "Result '{}' should fit in 10 columns",
-            result
+        assert_eq!(
+            result, "ab...longe",
+            "Expected exact truncation result for 'ab.longerext' at width 10"
         );
-        // Extension portion should be longer than basename portion
-        // (extension gets 2/3 of budget)
+        assert_eq!(
+            str_display_width_as_u16(&result),
+            10,
+            "Result should be exactly 10 columns"
+        );
     }
 
     #[test]
@@ -777,10 +813,9 @@ mod tests {
         // This has a 19-char extension which exceeds MAX_EXTENSION_LEN (10),
         // so it's treated as no extension - should truncate with "..." at end
         let result = truncate_filename("a.verylongextension", 8);
-        assert!(
-            result.ends_with("..."),
-            "Very long extension treated as no extension: '{}'",
-            result
+        assert_eq!(
+            result, "a.ver...",
+            "Very long extension treated as no extension"
         );
 
         // Try with a valid long extension
@@ -789,13 +824,14 @@ mod tests {
         // dot_ext = ".extension" (10 chars)
         // Need 1 + 2 + 10 = 13 for full, but only have 10
         // So we truncate: remaining = 10 - 2 = 8
-        // basename_budget = 2, ext_budget = 6
+        // basename_budget = 8/3 = 2, ext_budget = 6
+        // truncated_basename from "basename" = "ba"
         // truncated_ext from ".extension" = ".exten"
-        assert!(
-            str_display_width_as_u16(&result2) <= 10,
-            "Result '{}' should fit",
-            result2
+        assert_eq!(
+            result2, "ba...exten",
+            "Should truncate both basename and extension"
         );
+        assert_eq!(str_display_width_as_u16(&result2), 10);
     }
 
     // ========================================================================

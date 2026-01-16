@@ -519,4 +519,107 @@ mod tests {
             template
         );
     }
+
+    // ========================================================================
+    // Overhead constant verification tests
+    // ========================================================================
+    //
+    // These tests verify that the overhead constants are correctly calculated.
+    // If any of these tests fail after modifying a template format string,
+    // you need to recalculate and update the corresponding overhead constant.
+    // ========================================================================
+
+    #[test]
+    fn test_copy_style_overhead_constant_is_accurate() {
+        // Verify COPY_STYLE_BASE_OVERHEAD is correct by checking that:
+        // 1. A short filename with the exact calculated max width produces MIN_BAR_WIDTH
+        // 2. A filename 1 char shorter produces MIN_BAR_WIDTH + 1
+        use crate::MIN_BAR_WIDTH;
+
+        let terminal_width: u16 = 100;
+        // max_filename = terminal - base_overhead - MIN_BAR_WIDTH = 100 - 60 - 10 = 30
+        let expected_max_filename = terminal_width - COPY_STYLE_BASE_OVERHEAD - MIN_BAR_WIDTH;
+        assert_eq!(expected_max_filename, 30, "Sanity check on expected max filename width");
+
+        // A filename of exactly max width should result in MIN_BAR_WIDTH bar
+        let exact_fit_filename = "a".repeat(expected_max_filename as usize);
+        let template_exact = ProgressStyleBuilder::copy(&exact_fit_filename).create_template(terminal_width);
+        let bar_width_exact = extract_bar_width(&template_exact)
+            .expect("Failed to extract bar width");
+        assert_eq!(
+            bar_width_exact, MIN_BAR_WIDTH,
+            "Filename at max width should produce MIN_BAR_WIDTH. \
+             If this fails, COPY_STYLE_BASE_OVERHEAD ({}) may be incorrect. Template: {}",
+            COPY_STYLE_BASE_OVERHEAD, template_exact
+        );
+
+        // A filename 1 char shorter should give 1 more bar width
+        let shorter_filename = "a".repeat((expected_max_filename - 1) as usize);
+        let template_shorter = ProgressStyleBuilder::copy(&shorter_filename).create_template(terminal_width);
+        let bar_width_shorter = extract_bar_width(&template_shorter)
+            .expect("Failed to extract bar width");
+        assert_eq!(
+            bar_width_shorter, MIN_BAR_WIDTH + 1,
+            "Shorter filename should allow 1 more bar width. Template: {}",
+            template_shorter
+        );
+    }
+
+    #[test]
+    fn test_verify_style_overhead_constant_is_accurate() {
+        // Verify VERIFY_STYLE_BASE_OVERHEAD is correct
+        use crate::MIN_BAR_WIDTH;
+
+        let terminal_width: u16 = 100;
+        // max_filename = terminal - base_overhead - MIN_BAR_WIDTH = 100 - 70 - 10 = 20
+        let expected_max_filename = terminal_width - VERIFY_STYLE_BASE_OVERHEAD - MIN_BAR_WIDTH;
+        assert_eq!(expected_max_filename, 20, "Sanity check on expected max filename width");
+
+        let exact_fit_filename = "a".repeat(expected_max_filename as usize);
+        let template = ProgressStyleBuilder::verify(&exact_fit_filename).create_template(terminal_width);
+        let bar_width = extract_bar_width(&template).expect("Failed to extract bar width");
+
+        assert_eq!(
+            bar_width, MIN_BAR_WIDTH,
+            "Filename at max width should produce MIN_BAR_WIDTH. \
+             If this fails, VERIFY_STYLE_BASE_OVERHEAD ({}) may be incorrect. Template: {}",
+            VERIFY_STYLE_BASE_OVERHEAD, template
+        );
+    }
+
+    #[test]
+    fn test_batch_style_overhead_constant_is_accurate() {
+        // Verify BATCH_STYLE_OVERHEAD is correct
+        // Batch style doesn't have a filename, so we just verify the bar width calculation
+        use crate::MIN_BAR_WIDTH;
+
+        // At terminal_width = BATCH_STYLE_OVERHEAD + MIN_BAR_WIDTH, bar should be MIN_BAR_WIDTH
+        let terminal_width = BATCH_STYLE_OVERHEAD + MIN_BAR_WIDTH;
+        let template = ProgressStyleBuilder::batch().create_template(terminal_width);
+        let bar_width = extract_bar_width(&template).expect("Failed to extract bar width");
+
+        assert_eq!(
+            bar_width, MIN_BAR_WIDTH,
+            "At minimum terminal width, bar should be MIN_BAR_WIDTH. \
+             If this fails, BATCH_STYLE_OVERHEAD ({}) may be incorrect. Template: {}",
+            BATCH_STYLE_OVERHEAD, template
+        );
+    }
+
+    #[test]
+    fn test_hash_style_overhead_constant_is_accurate() {
+        // Verify HASH_STYLE_OVERHEAD is correct
+        use crate::MIN_BAR_WIDTH;
+
+        let terminal_width = HASH_STYLE_OVERHEAD + MIN_BAR_WIDTH;
+        let template = ProgressStyleBuilder::hash().create_template(terminal_width);
+        let bar_width = extract_bar_width(&template).expect("Failed to extract bar width");
+
+        assert_eq!(
+            bar_width, MIN_BAR_WIDTH,
+            "At minimum terminal width, bar should be MIN_BAR_WIDTH. \
+             If this fails, HASH_STYLE_OVERHEAD ({}) may be incorrect. Template: {}",
+            HASH_STYLE_OVERHEAD, template
+        );
+    }
 }
