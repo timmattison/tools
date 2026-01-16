@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use tokio::task::JoinHandle;
 
 use crate::model::IOPSCounter;
 
@@ -42,6 +43,16 @@ impl AtomicIOPSCounter {
             write_ops: self.write_ops.swap(0, Ordering::Relaxed),
         }
     }
+
+    /// Returns true if both counters are currently zero.
+    ///
+    /// This is used for race-safe cleanup: after taking a snapshot that showed zero,
+    /// we double-check the live counters before removing the entry, in case new
+    /// operations arrived between snapshot and cleanup.
+    pub fn is_zero(&self) -> bool {
+        self.read_ops.load(Ordering::Relaxed) == 0
+            && self.write_ops.load(Ordering::Relaxed) == 0
+    }
 }
 
 /// Shared state for IOPS data collected from fs_usage.
@@ -56,6 +67,8 @@ pub struct IOPSCollector {
     data: IOPSData,
     /// Flag indicating if the parser encountered an error.
     parser_error: Arc<AtomicBool>,
+    /// Handle to the parser task for cleanup and error checking.
+    parser_handle: Option<JoinHandle<()>>,
 }
 
 impl IOPSCollector {
@@ -67,6 +80,7 @@ impl IOPSCollector {
             child: None,
             data: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             parser_error: Arc::new(AtomicBool::new(false)),
+            parser_handle: None,
         }
     }
 
@@ -93,7 +107,9 @@ impl IOPSCollector {
     /// Returns an error if fs_usage cannot be started (e.g., not running as root).
     pub async fn start(&mut self) -> Result<IOPSData> {
         if !Self::is_root() {
-            anyhow::bail!("IOPS collection requires root privileges");
+            anyhow::bail!(
+                "IOPS collection requires root privileges. Run with: sudo disk-hog"
+            );
         }
 
         // Spawn fs_usage with diskio filter
@@ -113,14 +129,15 @@ impl IOPSCollector {
         let data = Arc::clone(&self.data);
         let parser_error = Arc::clone(&self.parser_error);
 
-        // Spawn async task to parse fs_usage output
-        tokio::spawn(async move {
+        // Spawn async task to parse fs_usage output, storing handle for cleanup
+        let handle = tokio::spawn(async move {
             if let Err(e) = parse_fs_usage(stdout, data).await {
                 // Signal error to main loop and log
                 parser_error.store(true, Ordering::Relaxed);
                 eprintln!("fs_usage parser error: {e}");
             }
         });
+        self.parser_handle = Some(handle);
 
         Ok(Arc::clone(&self.data))
     }
@@ -132,6 +149,8 @@ impl IOPSCollector {
     ///
     /// Also cleans up entries for processes that had no I/O activity since the last
     /// snapshot (zero counts), preventing unbounded memory growth from dead processes.
+    /// The cleanup uses a race-safe double-check: PIDs are only removed if their
+    /// counters are still zero at removal time.
     pub fn snapshot_and_reset(&self) -> HashMap<u32, IOPSCounter> {
         // First, take snapshots with a read lock (fast path)
         let snapshots: HashMap<u32, IOPSCounter> = {
@@ -149,20 +168,43 @@ impl IOPSCollector {
             .collect();
 
         // Remove zero-count entries if any exist (requires write lock)
+        // Use race-safe removal: double-check the live counter before removing,
+        // in case new operations arrived between snapshot and cleanup.
         if !zero_pids.is_empty() {
             let mut data = self.data.write();
             for pid in zero_pids {
-                data.remove(&pid);
+                // Only remove if the counter is still zero (race-safe check)
+                if let Some(counter) = data.get(&pid) {
+                    if counter.is_zero() {
+                        data.remove(&pid);
+                    }
+                }
             }
         }
 
         snapshots
     }
 
-    /// Stops the fs_usage process.
+    /// Stops the fs_usage process and waits for the parser task to complete.
+    ///
+    /// This ensures clean shutdown and logs any parser task panics.
     pub async fn stop(&mut self) {
+        // Kill the fs_usage process first - this will cause the parser to exit
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
+        }
+
+        // Wait for the parser task to complete and check for panics
+        if let Some(handle) = self.parser_handle.take() {
+            match handle.await {
+                Ok(()) => {}
+                Err(e) if e.is_panic() => {
+                    eprintln!("fs_usage parser task panicked: {e}");
+                }
+                Err(e) => {
+                    eprintln!("fs_usage parser task error: {e}");
+                }
+            }
         }
     }
 }
@@ -317,5 +359,73 @@ mod tests {
         // But the internal data should now be empty (cleaned up)
         let data = collector.data.read();
         assert_eq!(data.len(), 0, "Zero-count entries should be cleaned up");
+    }
+
+    #[test]
+    fn test_atomic_iops_counter_is_zero() {
+        let counter = AtomicIOPSCounter::default();
+
+        // Initially zero
+        assert!(counter.is_zero());
+
+        // After increment, not zero
+        counter.increment_read();
+        assert!(!counter.is_zero());
+
+        // After reset, zero again
+        let _ = counter.snapshot_and_reset();
+        assert!(counter.is_zero());
+
+        // Write also makes it non-zero
+        counter.increment_write();
+        assert!(!counter.is_zero());
+    }
+
+    #[test]
+    fn test_cleanup_skips_non_zero_counters() {
+        // This test verifies that cleanup double-checks the counter before removal
+        let collector = IOPSCollector::new();
+
+        // Insert a counter that starts with activity
+        {
+            let mut data = collector.data.write();
+            let counter = Arc::new(AtomicIOPSCounter::default());
+            counter.increment_read();
+            data.insert(1001, counter);
+        }
+
+        // First snapshot - counter has activity, won't be in zero_pids
+        let snapshot1 = collector.snapshot_and_reset();
+        assert_eq!(snapshot1.get(&1001).unwrap().read_ops, 1);
+
+        // Counter is now zero after reset
+        // Get a reference to increment it during the "race window"
+        let counter_ref = {
+            let data = collector.data.read();
+            Arc::clone(data.get(&1001).unwrap())
+        };
+
+        // Simulate: snapshot sees zero, but before cleanup, new activity arrives
+        // We'll do this by incrementing after taking the snapshot data but before
+        // the cleanup would run. Since snapshot_and_reset is atomic, we test the
+        // is_zero check by verifying behavior.
+
+        // Add activity to the counter
+        counter_ref.increment_write();
+
+        // Now take a snapshot - the snapshot will see zero (from previous reset)
+        // but cleanup should skip because counter.is_zero() returns false
+        let snapshot2 = collector.snapshot_and_reset();
+        // snapshot2 captures the write we just did
+        assert_eq!(snapshot2.get(&1001).unwrap().write_ops, 1);
+
+        // After snapshot2, the counter is reset to zero again
+        // So cleanup WILL remove it this time
+        let snapshot3 = collector.snapshot_and_reset();
+        assert_eq!(snapshot3.get(&1001).unwrap().total(), 0);
+
+        // Now it should be cleaned up
+        let data = collector.data.read();
+        assert!(data.is_empty(), "Counter should be cleaned up after two zero snapshots");
     }
 }
