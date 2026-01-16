@@ -2,6 +2,9 @@
 //!
 //! Shows high-CPU Chrome processes and lists open tabs to help identify
 //! problematic tabs causing high CPU usage.
+//!
+//! **Note**: Tab enumeration requires macOS (uses AppleScript). Process monitoring
+//! works on all platforms supported by `sysinfo`.
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -16,12 +19,17 @@ use crossterm::{
 use human_bytes::human_bytes;
 use serde::{Deserialize, Serialize};
 use std::io::{stdout, Write};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+
+/// Sampling interval in milliseconds for CPU measurements
+const SAMPLE_INTERVAL_MS: u64 = 300;
+
+/// Minimum interval between tab refreshes in watch mode (seconds)
+const TAB_REFRESH_INTERVAL_SECS: u64 = 5;
 
 /// Identify which Chrome processes are using the most CPU
 #[derive(Parser)]
@@ -29,7 +37,9 @@ use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 #[command(
     about = "Identify which Chrome processes are using the most CPU",
     long_about = "Shows high-CPU Chrome processes and lists open tabs to help identify \
-                  problematic tabs causing high CPU usage."
+                  problematic tabs causing high CPU usage.\n\n\
+                  Note: Tab enumeration requires macOS (uses AppleScript). Process monitoring \
+                  works on all platforms."
 )]
 struct Args {
     /// Maximum number of processes to show
@@ -134,6 +144,36 @@ struct Output {
     sample_duration_ms: u64,
 }
 
+/// Cache for tab information to avoid frequent AppleScript calls
+struct TabCache {
+    tabs: Option<Vec<TabInfo>>,
+    last_refresh: Option<Instant>,
+}
+
+impl TabCache {
+    fn new() -> Self {
+        Self {
+            tabs: None,
+            last_refresh: None,
+        }
+    }
+
+    /// Get tabs, refreshing if stale or not yet fetched
+    fn get_tabs(&mut self, refresh_interval_secs: u64) -> Option<Vec<TabInfo>> {
+        let should_refresh = self
+            .last_refresh
+            .map(|t| t.elapsed().as_secs() >= refresh_interval_secs)
+            .unwrap_or(true);
+
+        if should_refresh {
+            self.tabs = get_chrome_tabs().ok();
+            self.last_refresh = Some(Instant::now());
+        }
+
+        self.tabs.clone()
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -147,8 +187,8 @@ fn main() -> Result<()> {
 /// Run once and exit
 fn run_once(args: &Args) -> Result<()> {
     // Sample CPU usage
-    let sample_duration_ms = u64::from(args.samples) * 300;
-    let processes = sample_chrome_processes(args.samples)?;
+    let sample_duration_ms = u64::from(args.samples) * SAMPLE_INTERVAL_MS;
+    let processes = sample_chrome_processes(args.samples);
 
     // Get tabs unless disabled
     let tabs = if args.no_tabs {
@@ -167,11 +207,7 @@ fn run_once(args: &Args) -> Result<()> {
 
     // Limit and sort processes by CPU
     let mut processes = processes;
-    processes.sort_by(|a, b| {
-        b.cpu_percent
-            .partial_cmp(&a.cpu_percent)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_processes_by_cpu(&mut processes);
     processes.truncate(args.limit);
 
     if args.json {
@@ -223,7 +259,7 @@ fn ctrlc_handler(running: Arc<AtomicBool>) {
 /// Main watch loop
 fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
     let mut stdout = stdout();
-    let sample_duration_ms = u64::from(args.samples) * 300;
+    let sample_duration_ms = u64::from(args.samples) * SAMPLE_INTERVAL_MS;
 
     // Keep a persistent System instance for more accurate CPU readings
     let mut sys = System::new_with_specifics(
@@ -236,6 +272,9 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
         true,
         ProcessRefreshKind::everything(),
     );
+
+    // Tab cache to avoid frequent AppleScript calls
+    let mut tab_cache = TabCache::new();
 
     while running.load(Ordering::SeqCst) {
         // Check for 'q' key press (non-blocking)
@@ -253,7 +292,7 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
 
         // Sample CPU
         for _ in 0..args.samples {
-            thread::sleep(Duration::from_millis(300));
+            thread::sleep(Duration::from_millis(SAMPLE_INTERVAL_MS));
             sys.refresh_processes_specifics(
                 sysinfo::ProcessesToUpdate::All,
                 true,
@@ -266,39 +305,18 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
             }
         }
 
-        // Collect Chrome processes
-        let mut processes: Vec<ChromeProcess> = sys
-            .processes()
-            .values()
-            .filter(|p| {
-                let name = p.name().to_string_lossy();
-                name.contains("Google Chrome") || name.contains("Chrome Helper")
-            })
-            .map(|p| {
-                let name = p.name().to_string_lossy().to_string();
-                ChromeProcess {
-                    pid: p.pid().as_u32(),
-                    name: name.clone(),
-                    cpu_percent: p.cpu_usage(),
-                    memory_bytes: p.memory(),
-                    process_type: ProcessType::from_name(&name),
-                }
-            })
-            .collect();
+        // Collect Chrome processes using shared helper
+        let mut processes = collect_chrome_processes(&sys);
 
         // Sort and limit
-        processes.sort_by(|a, b| {
-            b.cpu_percent
-                .partial_cmp(&a.cpu_percent)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        sort_processes_by_cpu(&mut processes);
         processes.truncate(args.limit);
 
-        // Get tabs unless disabled
+        // Get tabs unless disabled (with caching)
         let tabs = if args.no_tabs {
             None
         } else {
-            get_chrome_tabs().ok()
+            tab_cache.get_tabs(TAB_REFRESH_INTERVAL_SECS)
         };
 
         // Clear screen and move cursor to top
@@ -313,22 +331,56 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
         print_human_readable(&processes, &tabs, args.samples, sample_duration_ms, true);
         stdout.flush()?;
 
-        // Brief pause before checking for quit again
-        thread::sleep(Duration::from_millis(
-            args.interval.saturating_sub(1) * 1000,
-        ));
+        // Calculate remaining time after sampling
+        // Total desired interval minus the time spent sampling
+        let sampling_time_ms = u64::from(args.samples) * SAMPLE_INTERVAL_MS;
+        let interval_ms = args.interval * 1000;
+        let remaining_ms = interval_ms.saturating_sub(sampling_time_ms);
+
+        if remaining_ms > 0 {
+            thread::sleep(Duration::from_millis(remaining_ms));
+        }
     }
 
     Ok(())
 }
 
-/// Sample Chrome process CPU usage over multiple intervals
+/// Collect Chrome processes from a System instance
+fn collect_chrome_processes(sys: &System) -> Vec<ChromeProcess> {
+    sys.processes()
+        .values()
+        .filter(|p| {
+            let name = p.name().to_string_lossy();
+            name.contains("Google Chrome") || name.contains("Chrome Helper")
+        })
+        .map(|p| {
+            let name = p.name().to_string_lossy().to_string();
+            ChromeProcess {
+                pid: p.pid().as_u32(),
+                name: name.clone(),
+                cpu_percent: p.cpu_usage(),
+                memory_bytes: p.memory(),
+                process_type: ProcessType::from_name(&name),
+            }
+        })
+        .collect()
+}
+
+/// Sort processes by CPU usage (descending)
+fn sort_processes_by_cpu(processes: &mut [ChromeProcess]) {
+    processes.sort_by(|a, b| {
+        b.cpu_percent
+            .partial_cmp(&a.cpu_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Sample Chrome process CPU usage over multiple intervals.
 ///
-/// # Errors
-///
-/// Returns an error if the system info cannot be retrieved.
-fn sample_chrome_processes(samples: u32) -> Result<Vec<ChromeProcess>> {
-    let interval = Duration::from_millis(300);
+/// Creates a new System instance, takes multiple CPU samples at regular intervals,
+/// and returns the collected Chrome processes with their averaged CPU usage.
+fn sample_chrome_processes(samples: u32) -> Vec<ChromeProcess> {
+    let interval = Duration::from_millis(SAMPLE_INTERVAL_MS);
 
     let mut sys = System::new_with_specifics(
         RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
@@ -352,34 +404,22 @@ fn sample_chrome_processes(samples: u32) -> Result<Vec<ChromeProcess>> {
     }
 
     // Now collect Chrome processes with accurate CPU readings
-    let processes: Vec<ChromeProcess> = sys
-        .processes()
-        .values()
-        .filter(|p| {
-            let name = p.name().to_string_lossy();
-            name.contains("Google Chrome") || name.contains("Chrome Helper")
-        })
-        .map(|p| {
-            let name = p.name().to_string_lossy().to_string();
-            ChromeProcess {
-                pid: p.pid().as_u32(),
-                name: name.clone(),
-                cpu_percent: p.cpu_usage(),
-                memory_bytes: p.memory(),
-                process_type: ProcessType::from_name(&name),
-            }
-        })
-        .collect();
-
-    Ok(processes)
+    collect_chrome_processes(&sys)
 }
 
-/// Get Chrome tabs using AppleScript
+/// Get Chrome tabs using AppleScript (macOS only)
 ///
 /// # Errors
 ///
-/// Returns an error if Chrome is not running or AppleScript fails.
+/// Returns an error if:
+/// - Not running on macOS
+/// - Chrome is not running
+/// - AppleScript execution fails
+/// - Automation permission is denied
+#[cfg(target_os = "macos")]
 fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
+    use std::process::Command;
+
     let script = r#"
         tell application "System Events"
             if not (exists process "Google Chrome") then
@@ -449,6 +489,16 @@ fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
     Ok(tabs)
 }
 
+/// Get Chrome tabs (non-macOS stub)
+///
+/// Tab enumeration is only supported on macOS via AppleScript.
+#[cfg(not(target_os = "macos"))]
+fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
+    Err(anyhow::anyhow!(
+        "Tab enumeration is only supported on macOS (requires AppleScript)"
+    ))
+}
+
 /// Print human-readable output
 fn print_human_readable(
     processes: &[ChromeProcess],
@@ -469,6 +519,7 @@ fn print_human_readable(
     }
 
     // Header with timestamp in watch mode
+    #[allow(clippy::cast_precision_loss, reason = "duration_ms is small enough that f64 precision is sufficient")]
     let duration_secs = duration_ms as f64 / 1000.0;
     if watch_mode {
         let now = Local::now();
@@ -501,6 +552,7 @@ fn print_human_readable(
     // Process rows
     for p in processes {
         let cpu_str = format!("{:.1}%", p.cpu_percent);
+        #[allow(clippy::cast_precision_loss, reason = "memory_bytes fits comfortably in f64 for display purposes")]
         let mem_str = human_bytes(p.memory_bytes as f64);
         let type_str = format!("{}", p.process_type);
 
@@ -561,12 +613,17 @@ fn extract_domain(url: &str) -> String {
         .to_string()
 }
 
-/// Truncate string to max length with ellipsis
-fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+/// Truncate string to max length (in characters) with ellipsis.
+///
+/// This function properly handles multi-byte UTF-8 characters by counting
+/// characters rather than bytes.
+fn truncate_string(s: &str, max_chars: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max_chars {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let truncated: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     }
 }
 
@@ -599,8 +656,106 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_string() {
+    fn test_truncate_string_ascii() {
         assert_eq!(truncate_string("short", 10), "short");
         assert_eq!(truncate_string("this is a long string", 10), "this is...");
+    }
+
+    #[test]
+    fn test_truncate_string_exact_length() {
+        assert_eq!(truncate_string("exactly10!", 10), "exactly10!");
+    }
+
+    #[test]
+    fn test_truncate_string_utf8_japanese() {
+        // Japanese characters (3 bytes each in UTF-8)
+        let japanese = "日本語テスト";
+        assert_eq!(japanese.chars().count(), 6);
+
+        // Should not panic and should truncate correctly
+        assert_eq!(truncate_string(japanese, 10), "日本語テスト"); // 6 chars, fits
+        assert_eq!(truncate_string(japanese, 5), "日本..."); // truncate to 2 + ...
+    }
+
+    #[test]
+    fn test_truncate_string_utf8_emoji() {
+        // Emoji (4 bytes each in UTF-8)
+        let emoji = "🎉🎊🎈🎁🎀";
+        assert_eq!(emoji.chars().count(), 5);
+
+        assert_eq!(truncate_string(emoji, 5), "🎉🎊🎈🎁🎀"); // exactly 5, fits
+        assert_eq!(truncate_string(emoji, 4), "🎉..."); // truncate to 1 + ...
+    }
+
+    #[test]
+    fn test_truncate_string_utf8_mixed() {
+        // Mixed ASCII and multi-byte characters
+        // "Hello" (5) + "世界" (2) + "🌍" (1) = 8 chars
+        let mixed = "Hello世界🌍";
+        assert_eq!(mixed.chars().count(), 8);
+
+        assert_eq!(truncate_string(mixed, 8), "Hello世界🌍"); // exactly 8, fits
+        assert_eq!(truncate_string(mixed, 7), "Hell..."); // truncate to 4 + ...
+    }
+
+    #[test]
+    fn test_truncate_string_very_short_max() {
+        // Edge case: max_chars <= 3 means we can't even fit "..."
+        assert_eq!(truncate_string("hello", 3), "..."); // 0 chars + ...
+        assert_eq!(truncate_string("hello", 2), "..."); // saturating_sub gives 0
+        assert_eq!(truncate_string("hello", 0), "..."); // saturating_sub gives 0
+    }
+
+    #[test]
+    fn test_sort_processes_by_cpu() {
+        let mut processes = vec![
+            ChromeProcess {
+                pid: 1,
+                name: "p1".to_string(),
+                cpu_percent: 10.0,
+                memory_bytes: 100,
+                process_type: ProcessType::Renderer,
+            },
+            ChromeProcess {
+                pid: 2,
+                name: "p2".to_string(),
+                cpu_percent: 50.0,
+                memory_bytes: 200,
+                process_type: ProcessType::Renderer,
+            },
+            ChromeProcess {
+                pid: 3,
+                name: "p3".to_string(),
+                cpu_percent: 25.0,
+                memory_bytes: 150,
+                process_type: ProcessType::Renderer,
+            },
+        ];
+
+        sort_processes_by_cpu(&mut processes);
+
+        assert_eq!(processes[0].pid, 2); // 50%
+        assert_eq!(processes[1].pid, 3); // 25%
+        assert_eq!(processes[2].pid, 1); // 10%
+    }
+
+    #[test]
+    fn test_tab_cache_freshness() {
+        let mut cache = TabCache::new();
+
+        // First call should trigger refresh (last_refresh is None)
+        assert!(cache
+            .last_refresh
+            .map(|t| t.elapsed().as_secs() >= 5)
+            .unwrap_or(true));
+
+        // Simulate a refresh
+        cache.last_refresh = Some(std::time::Instant::now());
+
+        // Immediately after, should not need refresh
+        assert!(!cache
+            .last_refresh
+            .map(|t| t.elapsed().as_secs() >= 5)
+            .unwrap_or(true));
     }
 }
