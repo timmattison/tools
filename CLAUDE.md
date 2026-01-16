@@ -193,6 +193,8 @@ func main() {
 }
 ```
 
+**Important:** Always define version flags in `main()`, not in `init()`. This keeps all flag definitions in one place and makes the code more readable. All Go tools in this repository follow this pattern.
+
 **Build with ldflags** using `scripts/build-go.sh` to inject git info:
 
 ```bash

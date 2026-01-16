@@ -23,13 +23,19 @@ package version
 
 import "fmt"
 
-// These variables are set at build time via ldflags.
+// These variables are set at build time via ldflags when using scripts/build-go.sh.
+// The default values are used when building with plain `go build` (without ldflags),
+// which is useful for development but should not be used for release builds.
+// The Version default should match the VERSION file in the repository root.
 var (
-	// Version is the semantic version (e.g., "0.1.0")
+	// Version is the semantic version (e.g., "0.1.0").
+	// Default matches VERSION file; overridden by ldflags in release builds.
 	Version = "0.1.0"
-	// GitHash is the short git commit hash (e.g., "abc1234")
+	// GitHash is the short git commit hash (e.g., "abc1234").
+	// Default is "unknown" when not built with ldflags.
 	GitHash = "unknown"
-	// GitDirty is "dirty", "clean", or "unknown"
+	// GitDirty is "dirty", "clean", or "unknown".
+	// Default is "unknown" when not built with ldflags.
 	GitDirty = "unknown"
 )
 
