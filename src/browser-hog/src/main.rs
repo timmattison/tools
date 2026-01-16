@@ -45,7 +45,10 @@ const DEFAULT_TERMINAL_WIDTH: u16 = 80;
     about = "Identify which Chrome processes are using the most CPU",
     long_about = "Shows high-CPU Chrome processes and lists open tabs to help identify \
                   problematic tabs causing high CPU usage.\n\n\
-                  Note: Tab enumeration requires macOS (uses AppleScript). Process monitoring \
+                  Note: Chrome doesn't expose which process runs which tab externally. \
+                  Use Chrome's built-in Task Manager (Window → Task Manager) to see the \
+                  PID column and correlate with this tool's output.\n\n\
+                  Tab enumeration requires macOS (uses AppleScript). Process monitoring \
                   works on all platforms."
 )]
 struct Args {
@@ -642,15 +645,20 @@ fn print_human_readable(
     // Footer
     if watch_mode {
         println!(
-            "\n{} (Window → Task Manager in Chrome for PID→tab mapping)",
-            "Press 'q' to quit".dimmed()
+            "\n{} | {} for PID→tab mapping (Chrome hides this externally)",
+            "Press 'q' to quit".dimmed(),
+            "Window → Task Manager".bold()
         );
     } else {
         println!(
-            "\n{} Use Chrome's Task Manager ({}) to see which tab uses which PID.\n",
-            "Tip:".green(),
+            "\n{} Chrome doesn't expose PID-to-tab mapping externally.",
+            "Note:".cyan()
+        );
+        println!(
+            "      Use Chrome's Task Manager ({}) to correlate PIDs with tabs.",
             "Window → Task Manager".bold()
         );
+        println!("      The Task Manager shows each tab's PID in a dedicated column.\n");
     }
 }
 
