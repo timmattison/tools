@@ -1,0 +1,23 @@
+[package]
+name = "disk-hog"
+version = "0.1.0"
+edition.workspace = true
+description = "Show per-process disk I/O usage on macOS"
+
+[[bin]]
+name = "disk-hog"
+path = "src/main.rs"
+
+[dependencies]
+sysinfo.workspace = true
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+libc.workspace = true
+human_bytes.workspace = true
+regex = "1.10"
+
+[lints]
+workspace = true
