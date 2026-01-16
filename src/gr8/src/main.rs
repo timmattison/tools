@@ -45,6 +45,32 @@ struct RateLimitResponse {
     rate: RateLimit,
 }
 
+/// A rate limit paired with its resource name for display purposes
+struct NamedRateLimit<'a> {
+    name: &'a str,
+    rate_limit: &'a RateLimit,
+}
+
+/// Collects all rate limit resources into a vector for easier processing
+fn collect_rate_limits(resources: &Resources) -> Vec<NamedRateLimit<'_>> {
+    vec![
+        NamedRateLimit { name: "core", rate_limit: &resources.core },
+        NamedRateLimit { name: "graphql", rate_limit: &resources.graphql },
+        NamedRateLimit { name: "search", rate_limit: &resources.search },
+        NamedRateLimit { name: "code_search", rate_limit: &resources.code_search },
+        NamedRateLimit { name: "code_scanning_upload", rate_limit: &resources.code_scanning_upload },
+        NamedRateLimit { name: "code_scanning_autofix", rate_limit: &resources.code_scanning_autofix },
+        NamedRateLimit { name: "actions_runner_registration", rate_limit: &resources.actions_runner_registration },
+        NamedRateLimit { name: "integration_manifest", rate_limit: &resources.integration_manifest },
+        NamedRateLimit { name: "source_import", rate_limit: &resources.source_import },
+        NamedRateLimit { name: "dependency_snapshots", rate_limit: &resources.dependency_snapshots },
+        NamedRateLimit { name: "dependency_sbom", rate_limit: &resources.dependency_sbom },
+        NamedRateLimit { name: "scim", rate_limit: &resources.scim },
+        NamedRateLimit { name: "audit_log", rate_limit: &resources.audit_log },
+        NamedRateLimit { name: "audit_log_streaming", rate_limit: &resources.audit_log_streaming },
+    ]
+}
+
 /// Executes the `gh api rate_limit` command and returns the JSON output
 fn fetch_rate_limit_data() -> Result<String> {
     let output = Command::new("gh")
@@ -151,7 +177,29 @@ fn print_rate_limit_row(name: &str, rate_limit: &RateLimit) {
     );
 }
 
+/// Prints a table of rate limits with the given title
+/// Skips printing if the list is empty
+fn print_rate_limit_table(title: &str, rate_limits: &[NamedRateLimit]) {
+    if rate_limits.is_empty() {
+        return;
+    }
+
+    println!("{}\n", title);
+    println!(
+        "{:<30} {:<8} {:<8} {:<10} {}",
+        "Resource", "Limit", "Used", "Remaining", "Reset Time"
+    );
+    println!("{}", "─".repeat(79));
+
+    for named in rate_limits {
+        print_rate_limit_row(named.name, named.rate_limit);
+    }
+
+    println!();
+}
+
 /// Main entry point - fetches, parses, and displays GitHub API rate limits
+/// Displays rate limits in two tables: available (non-exhausted) first, then exhausted
 fn main() -> Result<()> {
     let json_data = fetch_rate_limit_data()?;
     let response: RateLimitResponse = serde_json::from_str(&json_data)
@@ -161,30 +209,17 @@ fn main() -> Result<()> {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("\nGitHub API Rate Limits (as of {})\n", now);
 
-    // Print table header
-    println!(
-        "{:<30} {:<8} {:<8} {:<10} {}",
-        "Resource", "Limit", "Used", "Remaining", "Reset Time"
-    );
-    println!("{}", "─".repeat(79));
+    // Collect and partition rate limits
+    let all_limits = collect_rate_limits(&response.resources);
+    let (exhausted, available): (Vec<_>, Vec<_>) = all_limits
+        .into_iter()
+        .partition(|named| named.rate_limit.remaining == 0);
 
-    // Print all resource rate limits
-    print_rate_limit_row("core", &response.resources.core);
-    print_rate_limit_row("graphql", &response.resources.graphql);
-    print_rate_limit_row("search", &response.resources.search);
-    print_rate_limit_row("code_search", &response.resources.code_search);
-    print_rate_limit_row("code_scanning_upload", &response.resources.code_scanning_upload);
-    print_rate_limit_row("code_scanning_autofix", &response.resources.code_scanning_autofix);
-    print_rate_limit_row("actions_runner_registration", &response.resources.actions_runner_registration);
-    print_rate_limit_row("integration_manifest", &response.resources.integration_manifest);
-    print_rate_limit_row("source_import", &response.resources.source_import);
-    print_rate_limit_row("dependency_snapshots", &response.resources.dependency_snapshots);
-    print_rate_limit_row("dependency_sbom", &response.resources.dependency_sbom);
-    print_rate_limit_row("scim", &response.resources.scim);
-    print_rate_limit_row("audit_log", &response.resources.audit_log);
-    print_rate_limit_row("audit_log_streaming", &response.resources.audit_log_streaming);
+    // Print available rate limits first (easier to scroll past)
+    print_rate_limit_table("Available Rate Limits", &available);
 
-    println!();
+    // Print exhausted rate limits last (easier to find at bottom of terminal)
+    print_rate_limit_table("Exhausted Rate Limits", &exhausted);
 
     Ok(())
 }
