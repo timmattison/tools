@@ -13,8 +13,19 @@ use crate::model::IOPSCounter;
 
 /// Regex to extract process name and PID from fs_usage output.
 ///
-/// Format: ProcessName.PID or ProcessName.ThreadID (we want PID)
-/// The pattern matches: non-whitespace followed by dot followed by digits at end of line.
+/// The fs_usage output format ends each line with `ProcessName.PID` where:
+/// - `ProcessName` is the executable name (may contain dots, e.g., "com.apple.WebKit")
+/// - `PID` is always the process ID (not a thread ID)
+///
+/// According to Apple's fs_usage documentation, the number at the end is the PID.
+/// Thread information, when relevant, appears elsewhere in the output format.
+/// See: `man fs_usage` on macOS.
+///
+/// The pattern `(\S+)\.(\d+)\s*$` matches:
+/// - `(\S+)` - process name (captured group 1): one or more non-whitespace characters
+/// - `\.` - literal dot separator
+/// - `(\d+)` - PID (captured group 2): one or more digits
+/// - `\s*$` - optional trailing whitespace at end of line
 ///
 /// Using LazyLock ensures the regex is compiled exactly once, even across multiple
 /// invocations of the parser (which would be wasteful to recompile each time).

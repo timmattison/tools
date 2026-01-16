@@ -21,6 +21,41 @@ use collector::iops::IOPSCollector;
 use model::{BytesPerSec, OpsPerSec, ProcessIOStats};
 use ui::AppState;
 
+/// Minimum allowed refresh rate in seconds.
+const MIN_REFRESH_SECS: f64 = 0.1;
+
+/// Maximum allowed refresh rate in seconds.
+const MAX_REFRESH_SECS: f64 = 60.0;
+
+/// Parses and validates the refresh rate argument.
+///
+/// Ensures the value is:
+/// - A valid finite positive number
+/// - Within the allowed range (0.1 to 60 seconds)
+///
+/// This validation prevents panics from `Duration::from_secs_f64()` which
+/// would occur with negative, NaN, or infinite values.
+fn parse_refresh_rate(s: &str) -> Result<f64, String> {
+    let rate: f64 = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid number"))?;
+
+    if !rate.is_finite() {
+        return Err("refresh rate must be a finite number".to_string());
+    }
+    if rate < MIN_REFRESH_SECS {
+        return Err(format!(
+            "refresh rate must be at least {MIN_REFRESH_SECS} seconds"
+        ));
+    }
+    if rate > MAX_REFRESH_SECS {
+        return Err(format!(
+            "refresh rate must be at most {MAX_REFRESH_SECS} seconds"
+        ));
+    }
+    Ok(rate)
+}
+
 #[derive(Parser)]
 #[command(
     name = "disk-hog",
@@ -28,8 +63,8 @@ use ui::AppState;
     long_about = "disk-hog displays per-process disk bandwidth and IOPS in a continuously updating terminal UI.\n\nBandwidth monitoring works without root. IOPS monitoring requires running with sudo."
 )]
 struct Args {
-    /// Refresh interval in seconds (supports decimals, e.g., 0.5)
-    #[arg(short, long, default_value = "1.0")]
+    /// Refresh interval in seconds (supports decimals, e.g., 0.5). Range: 0.1-60.
+    #[arg(short, long, default_value = "1.0", value_parser = parse_refresh_rate)]
     refresh: f64,
 
     /// Number of processes to show per pane
@@ -98,12 +133,19 @@ async fn run_app(
     // App state
     let mut state = AppState::new(args.count, is_root && !args.bandwidth_only);
 
-    // Track actual elapsed time for accurate rate calculation
-    let mut last_collection = Instant::now();
+    // Do an initial collection to prime the previous readings.
+    // This establishes the baseline for calculating deltas. We discard these
+    // results since they represent cumulative totals, not per-interval rates.
+    let _ = bandwidth_collector.collect(tick_rate);
 
-    // Do an initial collection to prime the previous readings
-    // Use tick_rate for the first interval since we don't have a real elapsed time yet
-    state.bandwidth_stats = bandwidth_collector.collect(tick_rate);
+    // Wait for the first tick interval before starting the main loop.
+    // This ensures the first displayed rates are based on a full interval,
+    // not the tiny amount of time between priming and the first loop iteration.
+    tokio::time::sleep(tick_rate).await;
+
+    // Track actual elapsed time for accurate rate calculation.
+    // Initialize this after the sleep so the first iteration measures from now.
+    let mut last_collection = Instant::now();
 
     loop {
         // Calculate actual elapsed time since last collection
@@ -194,4 +236,87 @@ fn convert_iops_to_stats(
     stats.sort_by_key(|s| Reverse(s.total_iops().unwrap_or(OpsPerSec(0))));
 
     stats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_refresh_rate_valid() {
+        assert_eq!(parse_refresh_rate("1.0").unwrap(), 1.0);
+        assert_eq!(parse_refresh_rate("0.5").unwrap(), 0.5);
+        assert_eq!(parse_refresh_rate("0.1").unwrap(), 0.1);
+        assert_eq!(parse_refresh_rate("60").unwrap(), 60.0);
+        assert_eq!(parse_refresh_rate("30.5").unwrap(), 30.5);
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_below_minimum() {
+        let result = parse_refresh_rate("0.05");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at least"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_above_maximum() {
+        let result = parse_refresh_rate("100");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at most"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_negative() {
+        let result = parse_refresh_rate("-1");
+        assert!(result.is_err());
+        // Negative values are below minimum, so they get that error
+        assert!(result.unwrap_err().contains("at least"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_zero() {
+        let result = parse_refresh_rate("0");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("at least"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_infinity() {
+        let result = parse_refresh_rate("inf");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("finite"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_nan() {
+        let result = parse_refresh_rate("NaN");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("finite"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_invalid_string() {
+        let result = parse_refresh_rate("abc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a valid number"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_empty() {
+        let result = parse_refresh_rate("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a valid number"));
+    }
+
+    #[test]
+    fn test_parse_refresh_rate_boundary_values() {
+        // Exact minimum should pass
+        assert!(parse_refresh_rate("0.1").is_ok());
+        // Exact maximum should pass
+        assert!(parse_refresh_rate("60").is_ok());
+        // Just below minimum should fail
+        assert!(parse_refresh_rate("0.09").is_err());
+        // Just above maximum should fail
+        assert!(parse_refresh_rate("60.1").is_err());
+    }
 }

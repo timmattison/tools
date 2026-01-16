@@ -195,12 +195,23 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
 ///
 /// Uses IEC binary units (KiB, MiB, GiB) where 1 KiB = 1024 bytes.
 /// Examples: "1 KiB", "2.5 MiB", "100 GiB".
+///
+/// # Precision Note
+///
+/// The `u64 as f64` cast can lose precision for values exceeding 2^53
+/// (~9 petabytes/sec). This is acceptable for disk I/O rates which are
+/// unlikely to reach such magnitudes in practice.
 fn format_bytes(rate: BytesPerSec) -> String {
     let bytes = rate.as_u64();
     if bytes == 0 {
         "0 B".to_string()
     } else {
-        human_bytes(bytes as f64)
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Precision loss only occurs above 2^53 (~9 PB/s), far beyond realistic I/O rates"
+        )]
+        let bytes_f64 = bytes as f64;
+        human_bytes(bytes_f64)
     }
 }
 
