@@ -1,11 +1,15 @@
 package main
 
 import (
-	"github.com/charmbracelet/log"
+	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal/version"
 )
 
 const ExpectedRootDirectory = "out"
@@ -13,6 +17,7 @@ const ExpectedStaticDirectory = "static"
 const StaticPattern = "/" + ExpectedStaticDirectory + "/"
 
 var root string
+var showVersion = flag.Bool("version", false, "Show version information")
 
 func fromRoot(path string) string {
 	if root == "" {
@@ -23,6 +28,13 @@ func fromRoot(path string) string {
 }
 
 func main() {
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.String("localnext"))
+		os.Exit(0)
+	}
+
 	var cwd string
 	var err error
 

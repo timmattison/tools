@@ -1,3 +1,4 @@
+use buildinfo::version_string;
 use clap::Parser;
 use dirs::home_dir;
 use std::collections::HashMap;
@@ -21,6 +22,7 @@ type Result<T> = std::result::Result<T, Aws2EnvError>;
 
 #[derive(Parser, Debug)]
 #[command(name = "aws2env")]
+#[command(version = version_string!())]
 #[command(about = "Convert AWS credentials to environment variables", long_about = None)]
 struct Args {
     /// AWS profile to use (default: "default")

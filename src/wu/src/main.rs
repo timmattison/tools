@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -8,6 +9,7 @@ use walkdir::WalkDir;
 #[derive(Parser)]
 #[command(
     name = "wu",
+    version = version_string!(),
     about = "Cross-platform tool to identify which processes have a file, directory, or device open",
     long_about = "wu (who's using) identifies which processes currently have a file, directory, or device open. When given a directory, it recursively checks all files within. Works on macOS, Linux, and Windows."
 )]

@@ -8,10 +8,11 @@ name = "runat"
 path = "src/main.rs"
 
 [dependencies]
-ratatui.workspace = true
-crossterm.workspace = true
+buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
 
 [lints]
 workspace = true

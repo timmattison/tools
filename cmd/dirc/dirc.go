@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal/version"
 	"golang.design/x/clipboard"
 )
 
@@ -15,6 +16,8 @@ func main() {
 	// Define flags
 	var help bool
 	flag.BoolVar(&help, "help", false, "Show help message")
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
 	var pasteMode bool
 	flag.BoolVar(&pasteMode, "paste", false, "Paste cd command for directory in clipboard")
 
@@ -41,6 +44,12 @@ func main() {
 	// Show help if requested
 	if help {
 		flag.Usage()
+		os.Exit(0)
+	}
+
+	// Show version if requested
+	if showVersion {
+		fmt.Println(version.String("dirc"))
 		os.Exit(0)
 	}
 

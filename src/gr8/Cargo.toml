@@ -8,11 +8,12 @@ name = "gr8"
 path = "src/main.rs"
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
+anyhow.workspace = true
+buildinfo.workspace = true
 chrono.workspace = true
 colored.workspace = true
-anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

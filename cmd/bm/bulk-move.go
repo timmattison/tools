@@ -2,23 +2,32 @@ package main
 
 import (
 	"flag"
-	"github.com/charmbracelet/log"
-	"github.com/timmattison/tools/internal"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal"
+	"github.com/timmattison/tools/internal/version"
 )
 
 var filesMoved int64
 var nameChecker internal.NameChecker
 
 func main() {
+	var showVersion = flag.Bool("version", false, "Show version information")
 	var suffixParam = flag.String("suffix", "", "suffix to search for")
 	var prefixParam = flag.String("prefix", "", "prefix to search for")
 	var substringParam = flag.String("substring", "", "substring to search for")
 	var destinationParam = flag.String("destination", "", "destination to copy files to")
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.String("bm"))
+		os.Exit(0)
+	}
 
 	paramsSpecified := 0
 

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use buildinfo::version_string;
 use clap::Parser;
 use std::fs;
 use std::io::{self, Read};
@@ -9,7 +10,7 @@ use tiktoken_rs::CoreBPE;
 #[derive(Parser)]
 #[command(name = "tc")]
 #[command(about = "Count tokens in files (like wc, but for tokens)", long_about = None)]
-#[command(version)]
+#[command(version = version_string!())]
 struct Cli {
     /// Files to count tokens in (use '-' for stdin)
     #[arg(value_name = "FILES")]

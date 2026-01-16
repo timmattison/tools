@@ -1,3 +1,4 @@
+use buildinfo::version_string;
 use clap::Parser;
 use sha2::{Sha256, Digest};
 use std::env;
@@ -5,6 +6,7 @@ use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "portplz")]
+#[command(version = version_string!())]
 #[command(about = "Generate a port number from the current directory name and git branch", long_about = None)]
 struct Cli {
     #[arg(help = "Directory path (defaults to current directory)")]

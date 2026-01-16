@@ -115,3 +115,100 @@ Benefits of the channel-based shutdown:
 - `prcp` - Progress Copy (copy, verify, and batch styles)
 - `prhash` - Progress Hash (custom template with dynamic width)
 - `org-borg` - Organization Backup (custom template with dynamic width)
+
+## Version Information
+
+All tools in this repository **must** display version information including git hash and dirty status when `--version` is used.
+
+### Why
+
+Consistent version information helps with:
+- Debugging issues by knowing exact build
+- Identifying if local modifications exist
+- Tracking which commit a binary was built from
+- Consistent user experience across all tools
+
+### Output Format
+
+```
+toolname 0.1.0 (abc1234, clean)
+toolname 0.1.0 (abc1234, dirty)
+toolname 0.1.0 (unknown, unknown)  # when git unavailable
+```
+
+### Rust Tools
+
+Use the `buildinfo` library crate located at `src/buildinfo/`:
+
+```rust
+use buildinfo::version_string;
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(version = version_string!())]
+struct Cli {
+    // ...
+}
+```
+
+The `version_string!()` macro captures at compile time:
+- Package version from Cargo.toml
+- Git commit hash (7 characters)
+- Dirty/clean status
+
+For tools without clap, add a manual check:
+
+```rust
+use buildinfo::version_string;
+
+fn main() {
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("toolname {}", version_string!());
+        return;
+    }
+    // ...
+}
+```
+
+### Go Tools
+
+Use the `internal/version` package:
+
+```go
+import (
+    "github.com/timmattison/tools/internal/version"
+)
+
+func main() {
+    var showVersion = flag.Bool("version", false, "Show version information")
+    flag.Parse()
+
+    if *showVersion {
+        fmt.Println(version.String("toolname"))
+        os.Exit(0)
+    }
+    // ...
+}
+```
+
+**Build with ldflags** using `scripts/build-go.sh` to inject git info:
+
+```bash
+./scripts/build-go.sh           # Build all Go tools
+./scripts/build-go.sh bm dirc   # Build specific tools
+```
+
+### Tools Currently Using buildinfo
+
+All Rust tools use buildinfo for version information.
+
+### Tools Currently Using internal/version
+
+All Go tools use internal/version:
+- `bm` - Bulk Move
+- `dirc` - Directory Clipboard
+- `localnext` - Local Next.js Server
+- `prgz` - Progress Gzip
+- `procinfo` - Process Info
+- `subito` - AWS IoT Subscriber
+- `symfix` - Symlink Fix

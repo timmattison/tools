@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use base64::prelude::*;
+use buildinfo::version_string;
 use clap::Parser;
 use image::{DynamicImage};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -51,7 +52,7 @@ enum VideoControl {
 /// - Disable "Background opacity" in Preferences > Profiles > Window
 /// - Reduce scrollback buffer size in Preferences > Profiles > Terminal
 #[derive(Parser, Debug)]
-#[clap(version, about, long_about = None)]
+#[clap(version = version_string!(), about, long_about = None)]
 struct Args {
     /// Image or video file to display
     #[clap(value_name = "FILE")]

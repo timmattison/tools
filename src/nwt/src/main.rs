@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command, ExitStatus, Stdio};
 use std::thread;
 
+use buildinfo::version_string;
 use clap::Parser;
 use names::Generator;
 use repowalker::find_main_repo;
@@ -380,6 +381,7 @@ const MAX_ATTEMPTS: u32 = 10;
 ///     nwt --checkout main
 #[derive(Parser)]
 #[command(name = "nwt")]
+#[command(version = version_string!())]
 #[command(about = "Create a new git worktree with a Docker-style random name")]
 #[command(long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \

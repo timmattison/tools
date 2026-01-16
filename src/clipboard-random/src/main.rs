@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use base64::{engine::general_purpose, Engine};
+use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use rand::Rng;
 
 /// Generate random data and copy it to the clipboard/paste buffer
 #[derive(Parser, Debug)]
-#[clap(version, about)]
+#[clap(version = version_string!(), about)]
 struct Args {
     #[clap(subcommand)]
     mode: Mode,

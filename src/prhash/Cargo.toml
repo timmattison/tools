@@ -4,17 +4,18 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-clap.workspace = true
-indicatif.workspace = true
-crossterm.workspace = true
 anyhow.workspace = true
-tokio.workspace = true
 blake3.workspace = true
-sha2.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+hex.workspace = true
+indicatif.workspace = true
 md-5.workspace = true
 sha1.workspace = true
-hex.workspace = true
+sha2.workspace = true
 termbar.workspace = true
+tokio.workspace = true
 
 [lints.clippy]
 # Prevent potential panics from arithmetic operations (subtraction overflow, etc.)

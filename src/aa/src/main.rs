@@ -1,10 +1,12 @@
 use anyhow::Result;
 use aws_sdk_sts::Client;
+use buildinfo::version_string;
 use clap::Parser;
 use serde_json::json;
 
 #[derive(Parser, Debug)]
 #[command(name = "aa")]
+#[command(version = version_string!())]
 #[command(about = "Display AWS account information", long_about = None)]
 struct Args {
     /// AWS profile to use

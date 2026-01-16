@@ -1,4 +1,5 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clipboardmon::{monitor_clipboard, Transformer, DEFAULT_POLL_INTERVAL};
 use serde_json::Value;
 use std::error::Error;
@@ -33,8 +34,14 @@ impl Transformer for JsonTransformer {
 }
 
 fn main() -> Result<()> {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("jsonboard {}", version_string!());
+        return Ok(());
+    }
+
     env_logger::init();
-    
+
     let transformer = JsonTransformer;
     monitor_clipboard(transformer, DEFAULT_POLL_INTERVAL)
 }

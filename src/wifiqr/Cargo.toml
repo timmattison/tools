@@ -4,10 +4,11 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-clap.workspace = true
-qrcode.workspace = true
-image.workspace = true
 anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+image.workspace = true
+qrcode.workspace = true
 
 [lints]
 workspace = true

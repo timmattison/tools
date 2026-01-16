@@ -1,4 +1,5 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::{Parser, ValueHint};
 use crossbeam::channel::{bounded, select, Sender};
 use git2::{Branch, BranchType, Commit, Repository, Sort};
@@ -28,7 +29,7 @@ fn get_repo_base() -> Result<String> {
     name = "gitdiggin",
     author = "Tim Mattison",
     about = "Recursively searches Git repositories for commits containing a specific string",
-    version,
+    version = version_string!(),
     long_about = None,
     after_help = "Examples:
   gitdiggin registration               # Search for 'registration' in commit messages

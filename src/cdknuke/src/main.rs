@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
 use std::process::exit;
+use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 
 #[derive(Parser)]
 #[command(name = "cdknuke")]
+#[command(version = version_string!())]
 #[command(about = "Remove cdk.out directories from AWS CDK projects")]
 struct Cli {
     #[arg(long, help = "Don't go to the git repository root before running")]

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/timmattison/tools/internal/version"
 )
 
 func main() {
@@ -16,6 +18,7 @@ func main() {
 	var showAll = flag.Bool("all", false, "Show all information")
 	var verbose = flag.Bool("v", false, "Verbose output")
 	var caseSensitive = flag.Bool("case-sensitive", false, "Use case-sensitive matching for process name")
+	var showVersion = flag.Bool("version", false, "Show version information")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <process-name>\n\n", os.Args[0])
@@ -26,6 +29,11 @@ func main() {
 	}
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version.String("procinfo"))
+		os.Exit(0)
+	}
 
 	if flag.NArg() < 1 {
 		flag.Usage()

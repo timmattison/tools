@@ -1,11 +1,13 @@
 use std::env;
 use std::fs;
 use std::process::exit;
+use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 
 #[derive(Parser)]
 #[command(name = "nodenuke")]
+#[command(version = version_string!())]
 #[command(about = "Remove node_modules directories and lock files")]
 struct Cli {
     #[arg(long, help = "Don't go to the git repository root before running")]

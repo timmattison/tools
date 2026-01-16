@@ -1,4 +1,5 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
@@ -7,6 +8,7 @@ use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(name = "idear")]
+#[command(version = version_string!())]
 #[command(about = "IDEA Reaper - Find directories containing only .idea subdirectories")]
 #[command(long_about = "Recursively searches for directories that contain exactly one entry: a .idea directory. This is useful for finding JetBrains IDE project directories that may have been orphaned when you delete a project directory before closing the IDE.")]
 struct Cli {

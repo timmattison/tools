@@ -1,6 +1,7 @@
-use std::process::exit;
+use buildinfo::version_string;
 use num_format::{Locale, ToFormattedString};
 use repowalker::{find_git_repo, RepoWalker};
+use std::process::exit;
 
 fn calculate_dir_size(repo_root: std::path::PathBuf) -> Result<u64, std::io::Error> {
     let mut total_size = 0u64;
@@ -26,6 +27,12 @@ fn calculate_dir_size(repo_root: std::path::PathBuf) -> Result<u64, std::io::Err
 }
 
 fn main() {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("reposize {}", version_string!());
+        return;
+    }
+
     let repo_root = match find_git_repo() {
         Some(root) => root,
         None => {
