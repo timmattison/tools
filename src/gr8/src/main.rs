@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use chrono::{Local, TimeZone, Utc};
 use colored::Colorize;
 use serde::Deserialize;
@@ -223,6 +224,12 @@ fn print_rate_limit_table(title: &str, rate_limits: &[NamedRateLimit]) {
 /// Main entry point - fetches, parses, and displays GitHub API rate limits
 /// Displays rate limits in two tables: available (non-exhausted) first, then exhausted
 fn main() -> Result<()> {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("gr8 {}", version_string!());
+        return Ok(());
+    }
+
     let json_data = fetch_rate_limit_data()?;
     let response: RateLimitResponse = serde_json::from_str(&json_data)
         .context("Failed to parse JSON response")?;

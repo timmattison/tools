@@ -8,6 +8,7 @@
 #![warn(clippy::cast_precision_loss)] // Warn when casting to float loses precision
 
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -159,7 +160,7 @@ impl Drop for PartialFileGuard<'_> {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Progress copy - copy files with progress bar", long_about = None)]
+#[command(author, version = version_string!(), about = "Progress copy - copy files with progress bar", long_about = None)]
 struct Args {
     /// Source file(s) and destination (last argument is destination)
     #[arg(num_args = 0..)]

@@ -6,13 +6,14 @@ authors = ["Tim Mattison"]
 description = "Recursively searches Git repositories for commits containing a specific string"
 
 [dependencies]
-git2.workspace = true
+anyhow.workspace = true
+buildinfo.workspace = true
 clap.workspace = true
+crossbeam.workspace = true
+git2.workspace = true
+indicatif.workspace = true
 repowalker.workspace = true
 walkdir.workspace = true
-indicatif.workspace = true
-crossbeam.workspace = true
-anyhow.workspace = true
 
 [lints]
 workspace = true

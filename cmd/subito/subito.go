@@ -3,14 +3,26 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"os"
+
 	"github.com/charmbracelet/log"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	iot "github.com/timmattison/aws-iot-core-websockets-go"
-	"os"
+	"github.com/timmattison/tools/internal/version"
 )
 
 func main() {
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
+
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version.String("subito"))
+		os.Exit(0)
+	}
 
 	topics := flag.Args()
 

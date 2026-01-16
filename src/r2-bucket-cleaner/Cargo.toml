@@ -7,13 +7,14 @@ description = "A tool to list and clear all objects from a Cloudflare R2 bucket"
 license = "MIT"
 
 [dependencies]
-tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-clap.workspace = true
 anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
 dialoguer.workspace = true
 futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

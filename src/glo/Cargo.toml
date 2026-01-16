@@ -6,12 +6,13 @@ authors = ["Tim Mattison"]
 description = "A tool to find large objects in Git repositories"
 
 [dependencies]
-git2.workspace = true
-clap.workspace = true
 anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+git2.workspace = true
 human_bytes.workspace = true
-thiserror.workspace = true
 repowalker.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

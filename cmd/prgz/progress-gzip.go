@@ -5,16 +5,18 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/charmbracelet/bubbles/progress"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/log"
-	"github.com/timmattison/tools/internal"
-	"golang.org/x/text/language"
-	"golang.org/x/text/message"
 	"io"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/bubbles/progress"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal"
+	"github.com/timmattison/tools/internal/version"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 )
 
 func sprintFloat(input float64) string {
@@ -140,8 +142,16 @@ func (m Model) View() string {
 func main() {
 	inputFilename := flag.String("input", "", "Input filename")
 	outputFilename := flag.String("output", "", "Output filename (optional, defaults to input filename with .gz appended)")
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version.String("prgz"))
+		os.Exit(0)
+	}
 
 	if *inputFilename == "" {
 		flag.Usage()

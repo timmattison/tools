@@ -1,3 +1,4 @@
+use buildinfo::version_string;
 use chrono::{DateTime, Datelike, Local, NaiveDateTime, TimeZone};
 use clap::Parser;
 use crossterm::{
@@ -21,6 +22,7 @@ use std::{
 
 #[derive(Parser)]
 #[command(name = "runat")]
+#[command(version = version_string!())]
 #[command(about = "Run a command at a specified time")]
 struct Cli {
     /// Target time in various formats (RFC3339, YYYY-MM-DD HH:MM:SS, HH:MM, etc.)

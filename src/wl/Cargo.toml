@@ -5,8 +5,9 @@ edition.workspace = true
 description = "A Rust tool that shows which program is listening on a given port"
 
 [dependencies]
-clap.workspace = true
 anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
 listeners.workspace = true
 
 [lints]

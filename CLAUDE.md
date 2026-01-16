@@ -115,3 +115,142 @@ Benefits of the channel-based shutdown:
 - `prcp` - Progress Copy (copy, verify, and batch styles)
 - `prhash` - Progress Hash (custom template with dynamic width)
 - `org-borg` - Organization Backup (custom template with dynamic width)
+
+## Version Information
+
+All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.
+
+### Why
+
+Consistent version information helps with:
+- Debugging issues by knowing exact build
+- Identifying if local modifications exist
+- Tracking which commit a binary was built from
+- Consistent user experience across all tools
+
+### Output Format
+
+```
+toolname 0.1.0 (abc1234, clean)
+toolname 0.1.0 (abc1234, dirty)
+toolname 0.1.0 (unknown, unknown)  # when git unavailable
+```
+
+### Rust Tools
+
+Use the `buildinfo` library crate located at `src/buildinfo/`:
+
+```rust
+use buildinfo::version_string;
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(version = version_string!())]
+struct Cli {
+    // ...
+}
+```
+
+The `version_string!()` macro captures at compile time:
+- Package version from Cargo.toml
+- Git commit hash (7 characters)
+- Dirty/clean status
+
+For tools without clap, add a manual check:
+
+```rust
+use buildinfo::version_string;
+
+fn main() {
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("toolname {}", version_string!());
+        return;
+    }
+    // ...
+}
+```
+
+### Go Tools
+
+Use the `internal/version` package:
+
+```go
+import (
+    "github.com/timmattison/tools/internal/version"
+)
+
+func main() {
+    var showVersion bool
+    flag.BoolVar(&showVersion, "version", false, "Show version information")
+    flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
+    flag.Parse()
+
+    if showVersion {
+        fmt.Println(version.String("toolname"))
+        os.Exit(0)
+    }
+    // ...
+}
+```
+
+**Important:** Always define version flags in `main()`, not in `init()`. This keeps all flag definitions in one place and makes the code more readable. All Go tools in this repository follow this pattern.
+
+**Build with ldflags** using `scripts/build-go.sh` to inject git info:
+
+```bash
+./scripts/build-go.sh           # Build all Go tools
+./scripts/build-go.sh bm dirc   # Build specific tools
+```
+
+The build script reads the version from the `VERSION` file at the repository root.
+
+### Tools Currently Using buildinfo
+
+All Rust tools use buildinfo for version information.
+
+### Tools Currently Using internal/version
+
+All Go tools use internal/version:
+- `bm` - Bulk Move
+- `dirc` - Directory Clipboard
+- `localnext` - Local Next.js Server
+- `prgz` - Progress Gzip
+- `procinfo` - Process Info
+- `subito` - AWS IoT Subscriber
+- `symfix` - Symlink Fix
+
+## Shell Scripts
+
+Shell scripts in this repository **must** pass [ShellCheck](https://www.shellcheck.net/) validation.
+
+### Why
+
+ShellCheck catches common shell script issues:
+- Useless use of cat (UUOC) - e.g., `cat file | grep` should be `grep < file`
+- Unquoted variables that could cause word splitting
+- Missing error handling
+- Portability issues between shells
+
+### Configuration
+
+The repository includes a `.shellcheckrc` file that configures ShellCheck with sensible defaults.
+
+### Running ShellCheck
+
+```bash
+# Check all shell scripts
+shellcheck scripts/*.sh test.sh
+
+# Check a specific script
+shellcheck scripts/build-go.sh
+```
+
+### Shell Script Style Guidelines
+
+1. **Use `set -e`** at the top of scripts to exit on error
+2. **Quote variables** to prevent word splitting: `"$var"` not `$var`
+3. **Avoid UUOC**: Use `< file` instead of `cat file |`
+4. **Use `[[ ]]`** instead of `[ ]` for conditionals in bash
+5. **Handle arguments properly**: Use `while` loops with `shift` for multi-argument parsing
+6. **Provide help text**: Include `-h`/`--help` options
+7. **Avoid emojis**: Use text indicators like `[PASS]`/`[FAIL]` instead of `✓`/`✗`

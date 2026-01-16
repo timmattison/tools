@@ -8,8 +8,9 @@ name = "cdknuke"
 path = "src/main.rs"
 
 [dependencies]
-repowalker.workspace = true
+buildinfo.workspace = true
 clap.workspace = true
+repowalker.workspace = true
 
 [lints]
 workspace = true

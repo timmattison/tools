@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
+use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 use repowalker::find_git_repo;
@@ -76,7 +77,7 @@ macro_rules! error {
 #[derive(Parser)]
 #[command(name = "cwt")]
 #[command(about = "Change to a different git worktree")]
-#[command(version)]
+#[command(version = version_string!())]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are naturally bool-heavy
 struct Cli {
     /// Go to the next worktree (wraps around).

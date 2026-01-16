@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
@@ -9,6 +10,7 @@ use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "dirhash")]
+#[command(version = version_string!())]
 #[command(about = "Calculate a hash of all files in a directory")]
 #[command(
     long_about = "Calculates SHA-512 hash for each file, then creates a final SHA-256 hash from sorted file hashes. Respects .gitignore and other ignore files."

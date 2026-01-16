@@ -8,10 +8,11 @@ name = "cwt"
 path = "src/main.rs"
 
 [dependencies]
-repowalker.workspace = true
-shellsetup.workspace = true
+buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true
+repowalker.workspace = true
+shellsetup.workspace = true
 
 [lints.rust]
 # Enforce stricter checks to catch issues early

@@ -1,12 +1,13 @@
+use buildinfo::version_string;
 use clap::Parser;
 use std::path::PathBuf;
 
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "gitrdun",
-    author = "Tim Mattison", 
+    author = "Tim Mattison",
     about = "Find and summarize recent git commits across multiple repositories",
-    version,
+    version = version_string!(),
     long_about = "gitrdun recursively searches for Git repositories and finds recent commits within a specified time range. It can optionally generate AI-powered summaries using Ollama.",
     after_help = "Examples:
   gitrdun                                    # Find commits from the last 24 hours (saves to auto file)

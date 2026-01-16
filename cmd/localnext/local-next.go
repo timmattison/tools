@@ -1,11 +1,15 @@
 package main
 
 import (
-	"github.com/charmbracelet/log"
+	"flag"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal/version"
 )
 
 const ExpectedRootDirectory = "out"
@@ -23,6 +27,17 @@ func fromRoot(path string) string {
 }
 
 func main() {
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
+
+	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version.String("localnext"))
+		os.Exit(0)
+	}
+
 	var cwd string
 	var err error
 

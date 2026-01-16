@@ -8,6 +8,7 @@ name = "repotidy"
 path = "src/main.rs"
 
 [dependencies]
+buildinfo.workspace = true
 repowalker.workspace = true
 
 [lints]

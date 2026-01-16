@@ -4,8 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-clipboardmon.workspace = true
 anyhow.workspace = true
+buildinfo.workspace = true
+clipboardmon.workspace = true
 env_logger.workspace = true
 url.workspace = true
 

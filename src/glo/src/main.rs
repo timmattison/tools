@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use git2::{ObjectType, Repository};
 use human_bytes::human_bytes;
@@ -9,7 +10,7 @@ use repowalker::find_git_repo as find_git_repo_repowalker;
 
 /// A tool to find large objects in Git repositories.
 #[derive(Parser)]
-#[clap(name = "glo", about = "Find large objects in Git repositories")]
+#[clap(name = "glo", version = version_string!(), about = "Find large objects in Git repositories")]
 struct Args {
     /// Path to the Git repository (optional, defaults to current directory)
     #[clap(long, value_name = "PATH")]

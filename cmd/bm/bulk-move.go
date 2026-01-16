@@ -3,17 +3,22 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/charmbracelet/log"
-	"github.com/timmattison/tools/internal"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal"
+	"github.com/timmattison/tools/internal/version"
 )
 
 var filesMoved int64
 var nameChecker internal.NameChecker
 
 func main() {
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 	var suffixParam = flag.String("suffix", "", "suffix to search for (e.g., .jpg, .mkv)")
 	var prefixParam = flag.String("prefix", "", "prefix to search for (e.g., IMG_, video_)")
 	var substringParam = flag.String("substring", "", "substring to search for (e.g., 2024)")
@@ -61,6 +66,11 @@ NOTES:
 	}
 
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version.String("bm"))
+		os.Exit(0)
+	}
 
 	paramsSpecified := 0
 

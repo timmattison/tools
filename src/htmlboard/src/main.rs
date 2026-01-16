@@ -1,4 +1,5 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clipboardmon::{monitor_clipboard, Transformer, DEFAULT_POLL_INTERVAL};
 use std::error::Error;
 
@@ -102,8 +103,14 @@ fn is_void_element(tag: &str) -> bool {
 }
 
 fn main() -> Result<()> {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("htmlboard {}", version_string!());
+        return Ok(());
+    }
+
     env_logger::init();
-    
+
     let transformer = HtmlTransformer;
     monitor_clipboard(transformer, DEFAULT_POLL_INTERVAL)
 }

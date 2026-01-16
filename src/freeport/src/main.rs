@@ -1,12 +1,13 @@
 use std::net::TcpListener;
 
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use rand::seq::SliceRandom;
 
 /// Find a free TCP port on localhost
 #[derive(Parser, Debug)]
-#[clap(author, version, about)]
+#[clap(author, version = version_string!(), about)]
 struct Args {
     /// Allow searching privileged ports (1-1023)
     #[clap(long)]

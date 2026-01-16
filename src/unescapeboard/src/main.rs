@@ -1,4 +1,5 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clipboardmon::{monitor_clipboard, Transformer, DEFAULT_POLL_INTERVAL};
 use std::error::Error;
 
@@ -32,8 +33,14 @@ impl Transformer for UnescapeTransformer {
 }
 
 fn main() -> Result<()> {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("unescapeboard {}", version_string!());
+        return Ok(());
+    }
+
     env_logger::init();
-    
+
     let transformer = UnescapeTransformer;
     monitor_clipboard(transformer, DEFAULT_POLL_INTERVAL)
 }

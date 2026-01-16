@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use toml;
@@ -10,7 +11,7 @@ use which::which;
 
 /// Rust Cross Compiler helper - simplifies cross-compilation setup
 #[derive(Parser, Debug)]
-#[clap(author, version, about)]
+#[clap(author, version = version_string!(), about)]
 struct Args {
     /// Parse uname string to determine target architecture
     #[clap(long, conflicts_with = "target")]

@@ -8,9 +8,10 @@ name = "goup"
 path = "src/main.rs"
 
 [dependencies]
-walkdir.workspace = true
+buildinfo.workspace = true
 clap.workspace = true
 repowalker.workspace = true
+walkdir.workspace = true
 
 [lints]
 workspace = true

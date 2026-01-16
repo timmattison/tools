@@ -9,14 +9,15 @@ name = "ic"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
+base64.workspace = true
+buildinfo.workspace = true
 clap.workspace = true
 image.workspace = true
-base64.workspace = true
-anyhow.workspace = true
-terminal_size.workspace = true
-termion.workspace = true
 libc.workspace = true
 notify.workspace = true
+terminal_size.workspace = true
+termion.workspace = true
 
 [lints]
 workspace = true
