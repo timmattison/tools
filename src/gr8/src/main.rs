@@ -229,6 +229,11 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Number of rate limit resources returned by the GitHub API.
+    /// Update this constant when adding new fields to Resources struct.
+    /// Tests will fail if this doesn't match the actual count in collect_rate_limits().
+    const RESOURCE_COUNT: usize = 14;
+
     /// Creates a RateLimit with the given remaining count for testing
     fn make_rate_limit(remaining: u32) -> RateLimit {
         RateLimit {
@@ -242,29 +247,44 @@ mod tests {
     /// Creates a Resources struct with specified remaining counts for core and graphql,
     /// all other resources get remaining=100
     fn make_resources(core_remaining: u32, graphql_remaining: u32) -> Resources {
+        make_resources_with_default(core_remaining, graphql_remaining, 100)
+    }
+
+    /// Creates a Resources struct with specified remaining counts for core and graphql,
+    /// and a configurable default for all other resources
+    fn make_resources_with_default(
+        core_remaining: u32,
+        graphql_remaining: u32,
+        default_remaining: u32,
+    ) -> Resources {
         Resources {
             core: make_rate_limit(core_remaining),
             graphql: make_rate_limit(graphql_remaining),
-            search: make_rate_limit(100),
-            code_search: make_rate_limit(100),
-            code_scanning_upload: make_rate_limit(100),
-            code_scanning_autofix: make_rate_limit(100),
-            actions_runner_registration: make_rate_limit(100),
-            integration_manifest: make_rate_limit(100),
-            source_import: make_rate_limit(100),
-            dependency_snapshots: make_rate_limit(100),
-            dependency_sbom: make_rate_limit(100),
-            scim: make_rate_limit(100),
-            audit_log: make_rate_limit(100),
-            audit_log_streaming: make_rate_limit(100),
+            search: make_rate_limit(default_remaining),
+            code_search: make_rate_limit(default_remaining),
+            code_scanning_upload: make_rate_limit(default_remaining),
+            code_scanning_autofix: make_rate_limit(default_remaining),
+            actions_runner_registration: make_rate_limit(default_remaining),
+            integration_manifest: make_rate_limit(default_remaining),
+            source_import: make_rate_limit(default_remaining),
+            dependency_snapshots: make_rate_limit(default_remaining),
+            dependency_sbom: make_rate_limit(default_remaining),
+            scim: make_rate_limit(default_remaining),
+            audit_log: make_rate_limit(default_remaining),
+            audit_log_streaming: make_rate_limit(default_remaining),
         }
     }
 
     #[test]
-    fn test_collect_rate_limits_returns_all_14_resources() {
+    fn test_collect_rate_limits_returns_all_resources() {
         let resources = make_resources(100, 100);
         let collected = collect_rate_limits(&resources);
-        assert_eq!(collected.len(), 14, "Expected 14 rate limit resources");
+        assert_eq!(
+            collected.len(),
+            RESOURCE_COUNT,
+            "Expected {} rate limit resources (update RESOURCE_COUNT if adding new resources)",
+            RESOURCE_COUNT
+        );
     }
 
     #[test]
@@ -323,36 +343,30 @@ mod tests {
         // Counts should add up
         assert_eq!(
             available.len() + exhausted.len(),
-            14,
-            "Total partitioned items should equal 14"
+            RESOURCE_COUNT,
+            "Total partitioned items should equal RESOURCE_COUNT"
         );
     }
 
     #[test]
     fn test_partition_all_exhausted() {
-        // Create resources where core and graphql are exhausted
-        let mut resources = make_resources(0, 0);
-        // Set all others to exhausted too
-        resources.search = make_rate_limit(0);
-        resources.code_search = make_rate_limit(0);
-        resources.code_scanning_upload = make_rate_limit(0);
-        resources.code_scanning_autofix = make_rate_limit(0);
-        resources.actions_runner_registration = make_rate_limit(0);
-        resources.integration_manifest = make_rate_limit(0);
-        resources.source_import = make_rate_limit(0);
-        resources.dependency_snapshots = make_rate_limit(0);
-        resources.dependency_sbom = make_rate_limit(0);
-        resources.scim = make_rate_limit(0);
-        resources.audit_log = make_rate_limit(0);
-        resources.audit_log_streaming = make_rate_limit(0);
+        // Create resources where all are exhausted (remaining=0)
+        let resources = make_resources_with_default(0, 0, 0);
 
         let all_limits = collect_rate_limits(&resources);
         let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
             .into_iter()
             .partition(|named| named.rate_limit.remaining > 0);
 
-        assert!(available.is_empty(), "All resources are exhausted, available should be empty");
-        assert_eq!(exhausted.len(), 14, "All 14 resources should be exhausted");
+        assert!(
+            available.is_empty(),
+            "All resources are exhausted, available should be empty"
+        );
+        assert_eq!(
+            exhausted.len(),
+            RESOURCE_COUNT,
+            "All resources should be exhausted"
+        );
     }
 
     #[test]
@@ -365,7 +379,11 @@ mod tests {
             .partition(|named| named.rate_limit.remaining > 0);
 
         assert!(exhausted.is_empty(), "No resources are exhausted");
-        assert_eq!(available.len(), 14, "All 14 resources should be available");
+        assert_eq!(
+            available.len(),
+            RESOURCE_COUNT,
+            "All resources should be available"
+        );
     }
 
     #[test]
