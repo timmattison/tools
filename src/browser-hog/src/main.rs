@@ -231,7 +231,13 @@ fn run_watch_mode(args: &Args) -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
-    ctrlc_handler(r);
+    if let Err(e) = setup_ctrlc_handler(r) {
+        eprintln!(
+            "{} Could not set up Ctrl+C handler: {}. Use 'q' to quit.",
+            "Warning:".yellow(),
+            e
+        );
+    }
 
     // Enable raw mode to capture key presses
     terminal::enable_raw_mode()?;
@@ -248,12 +254,33 @@ fn run_watch_mode(args: &Args) -> Result<()> {
     result
 }
 
-/// Set up Ctrl+C handler
-fn ctrlc_handler(running: Arc<AtomicBool>) {
-    // Handle Ctrl+C signal
-    let _ = ctrlc::set_handler(move || {
+/// Set up Ctrl+C handler to signal graceful shutdown.
+///
+/// # Errors
+///
+/// Returns an error if the signal handler cannot be registered (e.g., if
+/// another handler is already registered).
+fn setup_ctrlc_handler(running: Arc<AtomicBool>) -> Result<()> {
+    ctrlc::set_handler(move || {
         running.store(false, Ordering::SeqCst);
-    });
+    })
+    .context("Failed to register Ctrl+C handler")
+}
+
+/// Sleep interval between quit signal checks in milliseconds
+const SLEEP_CHECK_INTERVAL_MS: u64 = 100;
+
+/// Sleep for a duration while remaining responsive to quit signals.
+///
+/// Breaks the sleep into small chunks, checking the `running` flag between
+/// each chunk. Returns early if the flag becomes false.
+fn interruptible_sleep(total_ms: u64, running: &Arc<AtomicBool>) {
+    let mut remaining = total_ms;
+    while remaining > 0 && running.load(Ordering::SeqCst) {
+        let chunk = remaining.min(SLEEP_CHECK_INTERVAL_MS);
+        thread::sleep(Duration::from_millis(chunk));
+        remaining = remaining.saturating_sub(chunk);
+    }
 }
 
 /// Main watch loop
@@ -337,8 +364,9 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
         let interval_ms = args.interval * 1000;
         let remaining_ms = interval_ms.saturating_sub(sampling_time_ms);
 
+        // Sleep in small chunks to remain responsive to quit signals
         if remaining_ms > 0 {
-            thread::sleep(Duration::from_millis(remaining_ms));
+            interruptible_sleep(remaining_ms, running);
         }
     }
 
@@ -420,6 +448,7 @@ fn sample_chrome_processes(samples: u32) -> Vec<ChromeProcess> {
 fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
     use std::process::Command;
 
+    // Use tab character as delimiter since URLs/titles may contain pipes but not tabs
     let script = r#"
         tell application "System Events"
             if not (exists process "Google Chrome") then
@@ -438,7 +467,7 @@ fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
                     set tabIdx to tabIdx + 1
                     set tabUrl to URL of t
                     set tabTitle to title of t
-                    set output to output & winIdx & "|" & tabIdx & "|" & tabUrl & "|" & tabTitle & linefeed
+                    set output to output & winIdx & tab & tabIdx & tab & tabUrl & tab & tabTitle & linefeed
                 end repeat
             end repeat
             return output
@@ -473,7 +502,8 @@ fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
         if line.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.splitn(4, '|').collect();
+        // Split on tab character (4 fields: window, tab, url, title)
+        let parts: Vec<&str> = line.splitn(4, '\t').collect();
         if parts.len() >= 4 {
             if let (Ok(win), Ok(tab)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
                 tabs.push(TabInfo {
