@@ -4,19 +4,19 @@
 //! - `BUILD_GIT_HASH`: Short git commit hash (7 chars) or "unknown"
 //! - `BUILD_GIT_DIRTY`: "dirty", "clean", or "unknown"
 //!
-//! The git repository root is discovered dynamically using `git rev-parse --show-toplevel`,
-//! so this crate can be located anywhere within the repository.
+//! The git directory is discovered dynamically using `git rev-parse --git-dir`,
+//! which works correctly in both regular repositories and git worktrees.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Dynamically find the git repository root
-    if let Some(git_root) = get_git_root() {
-        let git_head = git_root.join(".git/HEAD");
-        let git_index = git_root.join(".git/index");
+    // Dynamically find the git directory (works in worktrees too)
+    if let Some(git_dir) = get_git_dir() {
+        let git_head = git_dir.join("HEAD");
+        let git_index = git_dir.join("index");
 
-        // Tell Cargo to rerun this if .git/HEAD or .git/index changes
+        // Tell Cargo to rerun this if HEAD or index changes
         // This ensures rebuilds when commits change or files are staged
         println!("cargo:rerun-if-changed={}", git_head.display());
         println!("cargo:rerun-if-changed={}", git_index.display());
@@ -66,9 +66,9 @@ fn get_git_dirty() -> Option<String> {
     }
 }
 
-fn get_git_root() -> Option<PathBuf> {
+fn get_git_dir() -> Option<PathBuf> {
     let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
+        .args(["rev-parse", "--git-dir"])
         .output()
         .ok()?;
 
