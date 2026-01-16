@@ -19,10 +19,51 @@ func main() {
 	var showVersion bool
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
 	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
-	var suffixParam = flag.String("suffix", "", "suffix to search for")
-	var prefixParam = flag.String("prefix", "", "prefix to search for")
-	var substringParam = flag.String("substring", "", "substring to search for")
-	var destinationParam = flag.String("destination", "", "destination to copy files to")
+	var suffixParam = flag.String("suffix", "", "suffix to search for (e.g., .jpg, .mkv)")
+	var prefixParam = flag.String("prefix", "", "prefix to search for (e.g., IMG_, video_)")
+	var substringParam = flag.String("substring", "", "substring to search for (e.g., 2024)")
+	var destinationParam = flag.String("destination", "", "destination directory to move files to (required)")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, `bm - Bulk Move
+
+Recursively find and move files matching a pattern to a destination directory.
+Named "bm" because moving lots of files is shitty.
+
+USAGE:
+    bm -suffix|-prefix|-substring <PATTERN> -destination <PATH> [directories...]
+
+OPTIONS:
+`)
+		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, `
+EXAMPLES:
+    # Move all .mkv files from current directory to backup drive
+    bm -suffix .mkv -destination /Volumes/Backup/videos
+
+    # Move camera photos (IMG_ prefix) to Pictures folder
+    bm -prefix IMG_ -destination ~/Pictures/camera ~/Downloads
+
+    # Move files containing "2024" in name to archive
+    bm -substring 2024 -destination ~/archive/2024
+
+    # Move PDFs from multiple directories
+    bm -suffix .pdf -destination ~/Documents/pdfs ~/Downloads ~/Desktop
+
+WHY USE BM INSTEAD OF MV?
+    With mv and find (verbose, easy to get wrong):
+        find . -name "*.mkv" -exec mv {} /backup/ \;
+
+    With bm (simple and clear):
+        bm -suffix .mkv -destination /backup
+
+NOTES:
+    - Exactly one of -suffix, -prefix, or -substring must be specified
+    - If no source directories are given, searches the current directory
+    - Files are moved recursively from all subdirectories
+    - Shows statistics on completion (files moved, duration, rate)
+`)
+	}
 
 	flag.Parse()
 
