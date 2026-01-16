@@ -19,8 +19,8 @@ else
     GIT_DIRTY="dirty"
 fi
 
-# Read version from central VERSION file
-VERSION_FILE="$(dirname "$0")/../VERSION"
+# Read version from central VERSION file (we're already in repo root from cd above)
+VERSION_FILE="VERSION"
 if [ -f "$VERSION_FILE" ]; then
     VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
 else
