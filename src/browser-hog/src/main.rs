@@ -24,12 +24,19 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+use terminal_size::{terminal_size, Width};
 
 /// Sampling interval in milliseconds for CPU measurements
 const SAMPLE_INTERVAL_MS: u64 = 300;
 
-/// Minimum interval between tab refreshes in watch mode (seconds)
-const TAB_REFRESH_INTERVAL_SECS: u64 = 5;
+/// Default minimum interval between tab refreshes in watch mode (seconds)
+const DEFAULT_TAB_REFRESH_INTERVAL_SECS: u64 = 5;
+
+/// Minimum table width for proper display
+const MIN_TABLE_WIDTH: u16 = 45;
+
+/// Default terminal width if detection fails
+const DEFAULT_TERMINAL_WIDTH: u16 = 80;
 
 /// Identify which Chrome processes are using the most CPU
 #[derive(Parser)]
@@ -65,6 +72,10 @@ struct Args {
     /// Refresh interval in seconds for watch mode
     #[arg(short, long, default_value = "2")]
     interval: u64,
+
+    /// Tab list refresh interval in seconds for watch mode
+    #[arg(long, default_value_t = DEFAULT_TAB_REFRESH_INTERVAL_SECS)]
+    tab_refresh: u64,
 }
 
 /// Type of Chrome process
@@ -343,7 +354,7 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
         let tabs = if args.no_tabs {
             None
         } else {
-            tab_cache.get_tabs(TAB_REFRESH_INTERVAL_SECS)
+            tab_cache.get_tabs(args.tab_refresh)
         };
 
         // Clear screen and move cursor to top
@@ -392,6 +403,13 @@ fn collect_chrome_processes(sys: &System) -> Vec<ChromeProcess> {
             }
         })
         .collect()
+}
+
+/// Get the current terminal width, with fallback to default
+fn get_terminal_width() -> u16 {
+    terminal_size()
+        .map(|(Width(w), _)| w)
+        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
 /// Sort processes by CPU usage (descending)
@@ -577,7 +595,9 @@ fn print_human_readable(
         "MEM".bold(),
         "TYPE".bold()
     );
-    println!("{}", "─".repeat(45));
+    // Use terminal width for separator, clamped to minimum
+    let separator_width = get_terminal_width().max(MIN_TABLE_WIDTH) as usize;
+    println!("{}", "─".repeat(separator_width));
 
     // Process rows
     for p in processes {
@@ -776,7 +796,7 @@ mod tests {
         // First call should trigger refresh (last_refresh is None)
         assert!(cache
             .last_refresh
-            .map(|t| t.elapsed().as_secs() >= 5)
+            .map(|t| t.elapsed().as_secs() >= DEFAULT_TAB_REFRESH_INTERVAL_SECS)
             .unwrap_or(true));
 
         // Simulate a refresh
@@ -785,7 +805,14 @@ mod tests {
         // Immediately after, should not need refresh
         assert!(!cache
             .last_refresh
-            .map(|t| t.elapsed().as_secs() >= 5)
+            .map(|t| t.elapsed().as_secs() >= DEFAULT_TAB_REFRESH_INTERVAL_SECS)
             .unwrap_or(true));
+    }
+
+    #[test]
+    fn test_get_terminal_width() {
+        // Should return some reasonable value (either detected or default)
+        let width = get_terminal_width();
+        assert!(width >= MIN_TABLE_WIDTH);
     }
 }

@@ -83,6 +83,9 @@ base64 = "0.22"
 rand = "0.9"
 names = { version = "0.14", default-features = false }
 
+# Signal handling
+ctrlc = "3.4"
+
 # System info
 sysinfo = "0.36"
 libc = "0.2"

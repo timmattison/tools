@@ -20,7 +20,8 @@ colored.workspace = true
 human_bytes.workspace = true
 crossterm.workspace = true
 chrono.workspace = true
-ctrlc = "3"
+ctrlc.workspace = true
+terminal_size.workspace = true
 
 [lints]
 workspace = true
