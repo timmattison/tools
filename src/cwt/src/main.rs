@@ -292,7 +292,7 @@ function wt() {
         cwt
     else
         local target=$(cwt "$@")
-        if [ $? -eq 0 ] && [ -n "$target" ]; then
+        if [ $? -eq 0 ] && [ -n "$target" ] && [ -d "$target" ]; then
             cd "$target"
         fi
     fi

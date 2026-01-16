@@ -30,7 +30,7 @@ function nwt() {
     local dir
     dir=$(command nwt "$@")
     local exit_code=$?
-    if [ $exit_code -eq 0 ] && [ -n "$dir" ]; then
+    if [ $exit_code -eq 0 ] && [ -n "$dir" ] && [ -d "$dir" ]; then
         echo "$dir"
         cd "$dir" || return 1
     else
