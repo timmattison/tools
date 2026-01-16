@@ -61,6 +61,30 @@ impl std::ops::Add for BytesPerSec {
 pub struct OpsPerSec(pub u64);
 
 impl OpsPerSec {
+    /// Creates a new rate from operation count and a time interval.
+    ///
+    /// Uses floating-point arithmetic internally for precision, then rounds
+    /// to the nearest whole number. This avoids precision loss when the interval
+    /// is longer than 1 second (e.g., 1 op over 2 seconds = 0 with integer division,
+    /// but correctly rounds to 1 or 0 with this approach).
+    ///
+    /// If the interval is zero, returns 0 to avoid division by zero.
+    pub fn from_ops_and_duration(ops: u64, interval: Duration) -> Self {
+        let secs = interval.as_secs_f64();
+        if secs == 0.0 {
+            Self(0)
+        } else {
+            // Use f64 for precise division, then round to nearest integer
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "ops/sec rate will always fit in u64 and be positive"
+            )]
+            let rate = (ops as f64 / secs).round() as u64;
+            Self(rate)
+        }
+    }
+
     /// Returns the inner value.
     pub fn as_u64(self) -> u64 {
         self.0
@@ -197,6 +221,50 @@ mod tests {
         let a = BytesPerSec(100);
         let b = BytesPerSec(200);
         assert_eq!((a + b).as_u64(), 300);
+    }
+
+    #[test]
+    fn test_ops_per_sec_from_duration() {
+        // Test with Duration for precision
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(1000, Duration::from_secs(1)).as_u64(),
+            1000
+        );
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(1000, Duration::from_millis(500)).as_u64(),
+            2000
+        );
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(1, Duration::from_secs(2)).as_u64(),
+            1 // Rounds to 1, not truncates to 0
+        );
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(0, Duration::from_secs(1)).as_u64(),
+            0
+        );
+        // Zero duration should return 0
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(100, Duration::ZERO).as_u64(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_ops_per_sec_precision_edge_cases() {
+        // Small values over long intervals
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(1, Duration::from_secs(3)).as_u64(),
+            0 // 0.33... rounds to 0
+        );
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(2, Duration::from_secs(3)).as_u64(),
+            1 // 0.66... rounds to 1
+        );
+        // Verify rounding behavior
+        assert_eq!(
+            OpsPerSec::from_ops_and_duration(5, Duration::from_secs(2)).as_u64(),
+            3 // 2.5 rounds to 3 (round half up)
+        );
     }
 
     #[test]

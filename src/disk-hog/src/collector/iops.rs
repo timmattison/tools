@@ -129,11 +129,34 @@ impl IOPSCollector {
     ///
     /// Call this periodically (e.g., every second) to get IOPS rates.
     /// This operation is lock-free for the counter reads themselves.
+    ///
+    /// Also cleans up entries for processes that had no I/O activity since the last
+    /// snapshot (zero counts), preventing unbounded memory growth from dead processes.
     pub fn snapshot_and_reset(&self) -> HashMap<u32, IOPSCounter> {
-        let data = self.data.read();
-        data.iter()
-            .map(|(pid, counter)| (*pid, counter.snapshot_and_reset()))
-            .collect()
+        // First, take snapshots with a read lock (fast path)
+        let snapshots: HashMap<u32, IOPSCounter> = {
+            let data = self.data.read();
+            data.iter()
+                .map(|(pid, counter)| (*pid, counter.snapshot_and_reset()))
+                .collect()
+        };
+
+        // Collect PIDs with zero counts (dead or idle processes)
+        let zero_pids: Vec<u32> = snapshots
+            .iter()
+            .filter(|(_, counter)| counter.total() == 0)
+            .map(|(pid, _)| *pid)
+            .collect();
+
+        // Remove zero-count entries if any exist (requires write lock)
+        if !zero_pids.is_empty() {
+            let mut data = self.data.write();
+            for pid in zero_pids {
+                data.remove(&pid);
+            }
+        }
+
+        snapshots
     }
 
     /// Stops the fs_usage process.
@@ -261,5 +284,38 @@ mod tests {
     fn test_parser_error_flag() {
         let collector = IOPSCollector::new();
         assert!(!collector.has_parser_error());
+    }
+
+    #[test]
+    fn test_snapshot_and_reset_cleans_up_zero_entries() {
+        let collector = IOPSCollector::new();
+
+        // Manually insert some counters
+        {
+            let mut data = collector.data.write();
+            let counter1 = Arc::new(AtomicIOPSCounter::default());
+            counter1.increment_read();
+            data.insert(1001, counter1);
+
+            let counter2 = Arc::new(AtomicIOPSCounter::default());
+            counter2.increment_write();
+            data.insert(1002, counter2);
+        }
+
+        // First snapshot should return both entries and reset them
+        let snapshot1 = collector.snapshot_and_reset();
+        assert_eq!(snapshot1.len(), 2);
+        assert_eq!(snapshot1.get(&1001).unwrap().read_ops, 1);
+        assert_eq!(snapshot1.get(&1002).unwrap().write_ops, 1);
+
+        // Second snapshot should show zero counts and trigger cleanup
+        let snapshot2 = collector.snapshot_and_reset();
+        assert_eq!(snapshot2.len(), 2); // Still 2 entries in snapshot
+        assert_eq!(snapshot2.get(&1001).unwrap().total(), 0);
+        assert_eq!(snapshot2.get(&1002).unwrap().total(), 0);
+
+        // But the internal data should now be empty (cleaned up)
+        let data = collector.data.read();
+        assert_eq!(data.len(), 0, "Zero-count entries should be cleaned up");
     }
 }

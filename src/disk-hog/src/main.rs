@@ -29,9 +29,9 @@ use ui::AppState;
     long_about = "disk-hog displays per-process disk bandwidth and IOPS in a continuously updating terminal UI.\n\nBandwidth monitoring works without root. IOPS monitoring requires running with sudo."
 )]
 struct Args {
-    /// Refresh interval in seconds
-    #[arg(short, long, default_value = "1")]
-    refresh: u64,
+    /// Refresh interval in seconds (supports decimals, e.g., 0.5)
+    #[arg(short, long, default_value = "1.0")]
+    refresh: f64,
 
     /// Number of processes to show per pane
     #[arg(short = 'n', long, default_value = "10")]
@@ -82,7 +82,7 @@ async fn run_app(
     args: Args,
     is_root: bool,
 ) -> Result<()> {
-    let tick_rate = Duration::from_secs(args.refresh);
+    let tick_rate = Duration::from_secs_f64(args.refresh);
 
     // Initialize collectors
     let mut bandwidth_collector = BandwidthCollector::new();
@@ -134,8 +134,8 @@ async fn run_app(
                 ProcessRefreshKind::nothing(),
             );
 
-            // Convert to ProcessIOStats
-            state.iops_stats = Some(convert_iops_to_stats(&iops_data, &system));
+            // Convert to ProcessIOStats using elapsed time for rate calculation
+            state.iops_stats = Some(convert_iops_to_stats(&iops_data, &system, elapsed));
         }
 
         // Render
@@ -163,9 +163,13 @@ async fn run_app(
 }
 
 /// Converts IOPS counter data to `ProcessIOStats`.
+///
+/// The `elapsed` parameter specifies the actual time since the last collection,
+/// used to calculate accurate ops-per-second rates.
 fn convert_iops_to_stats(
     iops_data: &HashMap<u32, model::IOPSCounter>,
     system: &System,
+    elapsed: Duration,
 ) -> Vec<ProcessIOStats> {
     let mut stats: Vec<ProcessIOStats> = iops_data
         .iter()
@@ -177,13 +181,17 @@ fn convert_iops_to_stats(
                 .map(|p| p.name().to_string_lossy().to_string())
                 .unwrap_or_else(|| format!("pid:{pid}"));
 
+            // Convert raw counts to rates using actual elapsed time
+            let read_ops_rate = OpsPerSec::from_ops_and_duration(counter.read_ops, elapsed);
+            let write_ops_rate = OpsPerSec::from_ops_and_duration(counter.write_ops, elapsed);
+
             ProcessIOStats {
                 pid: *pid,
                 name,
                 read_bytes_per_sec: BytesPerSec(0),
                 write_bytes_per_sec: BytesPerSec(0),
-                read_ops_per_sec: Some(OpsPerSec(counter.read_ops)),
-                write_ops_per_sec: Some(OpsPerSec(counter.write_ops)),
+                read_ops_per_sec: Some(read_ops_rate),
+                write_ops_per_sec: Some(write_ops_rate),
             }
         })
         .collect();
