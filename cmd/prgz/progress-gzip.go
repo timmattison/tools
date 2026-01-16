@@ -142,11 +142,13 @@ func (m Model) View() string {
 func main() {
 	inputFilename := flag.String("input", "", "Input filename")
 	outputFilename := flag.String("output", "", "Output filename (optional, defaults to input filename with .gz appended)")
-	showVersion := flag.Bool("version", false, "Show version information")
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 
 	flag.Parse()
 
-	if *showVersion {
+	if showVersion {
 		fmt.Println(version.String("prgz"))
 		os.Exit(0)
 	}

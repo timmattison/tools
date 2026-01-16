@@ -17,7 +17,12 @@ const ExpectedStaticDirectory = "static"
 const StaticPattern = "/" + ExpectedStaticDirectory + "/"
 
 var root string
-var showVersion = flag.Bool("version", false, "Show version information")
+var showVersion bool
+
+func init() {
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
+}
 
 func fromRoot(path string) string {
 	if root == "" {
@@ -30,7 +35,7 @@ func fromRoot(path string) string {
 func main() {
 	flag.Parse()
 
-	if *showVersion {
+	if showVersion {
 		fmt.Println(version.String("localnext"))
 		os.Exit(0)
 	}

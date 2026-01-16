@@ -13,11 +13,13 @@ import (
 )
 
 func main() {
-	showVersion := flag.Bool("version", false, "Show version information")
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 
 	flag.Parse()
 
-	if *showVersion {
+	if showVersion {
 		fmt.Println(version.String("subito"))
 		os.Exit(0)
 	}

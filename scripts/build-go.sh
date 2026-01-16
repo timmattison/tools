@@ -19,7 +19,14 @@ else
     GIT_DIRTY="dirty"
 fi
 
-VERSION="0.1.0"
+# Read version from central VERSION file
+VERSION_FILE="$(dirname "$0")/../VERSION"
+if [ -f "$VERSION_FILE" ]; then
+    VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
+else
+    echo "Warning: VERSION file not found at $VERSION_FILE, using default"
+    VERSION="0.1.0"
+fi
 
 # Build ldflags
 LDFLAGS="-X github.com/timmattison/tools/internal/version.GitHash=${GIT_HASH}"

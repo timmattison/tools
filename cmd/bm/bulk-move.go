@@ -16,7 +16,9 @@ var filesMoved int64
 var nameChecker internal.NameChecker
 
 func main() {
-	var showVersion = flag.Bool("version", false, "Show version information")
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 	var suffixParam = flag.String("suffix", "", "suffix to search for")
 	var prefixParam = flag.String("prefix", "", "prefix to search for")
 	var substringParam = flag.String("substring", "", "substring to search for")
@@ -24,7 +26,7 @@ func main() {
 
 	flag.Parse()
 
-	if *showVersion {
+	if showVersion {
 		fmt.Println(version.String("bm"))
 		os.Exit(0)
 	}

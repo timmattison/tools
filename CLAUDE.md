@@ -118,7 +118,7 @@ Benefits of the channel-based shutdown:
 
 ## Version Information
 
-All tools in this repository **must** display version information including git hash and dirty status when `--version` is used.
+All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.
 
 ### Why
 
@@ -180,10 +180,12 @@ import (
 )
 
 func main() {
-    var showVersion = flag.Bool("version", false, "Show version information")
+    var showVersion bool
+    flag.BoolVar(&showVersion, "version", false, "Show version information")
+    flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
     flag.Parse()
 
-    if *showVersion {
+    if showVersion {
         fmt.Println(version.String("toolname"))
         os.Exit(0)
     }
@@ -197,6 +199,8 @@ func main() {
 ./scripts/build-go.sh           # Build all Go tools
 ./scripts/build-go.sh bm dirc   # Build specific tools
 ```
+
+The build script reads the version from the `VERSION` file at the repository root.
 
 ### Tools Currently Using buildinfo
 

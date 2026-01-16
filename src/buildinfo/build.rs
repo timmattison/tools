@@ -3,14 +3,28 @@
 //! Sets environment variables for use by the library:
 //! - `BUILD_GIT_HASH`: Short git commit hash (7 chars) or "unknown"
 //! - `BUILD_GIT_DIRTY`: "dirty", "clean", or "unknown"
+//!
+//! # Note on Directory Structure
+//!
+//! This crate assumes it lives at `src/buildinfo/` relative to the workspace root.
+//! The `.git` directory paths are calculated relative to this location.
 
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    // Get the directory containing this build script (src/buildinfo/)
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let manifest_path = Path::new(&manifest_dir);
+
+    // Calculate paths to .git directory (workspace root is two levels up)
+    let git_head = manifest_path.join("../../.git/HEAD");
+    let git_index = manifest_path.join("../../.git/index");
+
     // Tell Cargo to rerun this if .git/HEAD or .git/index changes
     // This ensures rebuilds when commits change or files are staged
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/index");
+    println!("cargo:rerun-if-changed={}", git_head.display());
+    println!("cargo:rerun-if-changed={}", git_index.display());
 
     let git_hash = get_git_hash().unwrap_or_else(|| "unknown".to_string());
     let git_dirty = get_git_dirty().unwrap_or_else(|| "unknown".to_string());

@@ -25,6 +25,7 @@ func main() {
 	flag.StringVar(&removeToFix, "remove-to-fix", "", "String to remove from the beginning of broken symlink targets to attempt fixing them")
 	var showVersion bool
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 
 	// Custom usage message
 	flag.Usage = func() {

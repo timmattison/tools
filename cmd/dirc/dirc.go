@@ -18,6 +18,7 @@ func main() {
 	flag.BoolVar(&help, "help", false, "Show help message")
 	var showVersion bool
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 	var pasteMode bool
 	flag.BoolVar(&pasteMode, "paste", false, "Paste cd command for directory in clipboard")
 
