@@ -19,7 +19,7 @@ mod ui;
 
 use collector::bandwidth::BandwidthCollector;
 use collector::iops::IOPSCollector;
-use model::ProcessIOStats;
+use model::{BytesPerSec, OpsPerSec, ProcessIOStats};
 use ui::AppState;
 
 #[derive(Parser)]
@@ -105,8 +105,8 @@ async fn run_app(
     let mut state = AppState::new(args.count, is_root && !args.bandwidth_only);
 
     loop {
-        // Collect bandwidth data
-        state.bandwidth_stats = bandwidth_collector.collect();
+        // Collect bandwidth data (pass interval for accurate rate calculation)
+        state.bandwidth_stats = bandwidth_collector.collect(args.refresh);
 
         // Collect IOPS data if available
         if let Some(ref iops_collector) = iops_collector {
@@ -165,16 +165,16 @@ fn convert_iops_to_stats(
             ProcessIOStats {
                 pid: *pid,
                 name,
-                read_bytes_per_sec: 0,
-                write_bytes_per_sec: 0,
-                read_ops_per_sec: Some(counter.read_ops),
-                write_ops_per_sec: Some(counter.write_ops),
+                read_bytes_per_sec: BytesPerSec(0),
+                write_bytes_per_sec: BytesPerSec(0),
+                read_ops_per_sec: Some(OpsPerSec(counter.read_ops)),
+                write_ops_per_sec: Some(OpsPerSec(counter.write_ops)),
             }
         })
         .collect();
 
     // Sort by total IOPS, descending
-    stats.sort_by_key(|s| Reverse(s.total_iops().unwrap_or(0)));
+    stats.sort_by_key(|s| Reverse(s.total_iops().unwrap_or(OpsPerSec(0))));
 
     stats
 }

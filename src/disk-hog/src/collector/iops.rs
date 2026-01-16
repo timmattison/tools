@@ -104,11 +104,7 @@ impl Default for IOPSCollector {
     }
 }
 
-impl Drop for IOPSCollector {
-    fn drop(&mut self) {
-        // Child process is killed on drop due to kill_on_drop(true)
-    }
-}
+// Note: No explicit Drop impl needed - child process is killed on drop due to kill_on_drop(true)
 
 /// Parses fs_usage output and updates IOPS counters.
 async fn parse_fs_usage(

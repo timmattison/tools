@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::model::ProcessIOStats;
+use crate::model::{BytesPerSec, OpsPerSec, ProcessIOStats};
 
 /// Application state for rendering.
 pub struct AppState {
@@ -142,11 +142,9 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
                     Row::new(vec![
                         stat.pid.to_string(),
                         truncate_name(&stat.name, 20),
-                        stat.read_ops_per_sec
-                            .map_or("-".to_string(), |v| v.to_string()),
-                        stat.write_ops_per_sec
-                            .map_or("-".to_string(), |v| v.to_string()),
-                        stat.total_iops().map_or("-".to_string(), |v| v.to_string()),
+                        format_ops(stat.read_ops_per_sec),
+                        format_ops(stat.write_ops_per_sec),
+                        format_ops(stat.total_iops()),
                     ])
                 })
                 .collect()
@@ -169,8 +167,9 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(table, area);
 }
 
-/// Formats bytes as human-readable string (e.g., "1.5 MB").
-fn format_bytes(bytes: u64) -> String {
+/// Formats a bytes-per-second rate as human-readable string (e.g., "1.5 MB").
+fn format_bytes(rate: BytesPerSec) -> String {
+    let bytes = rate.as_u64();
     if bytes == 0 {
         "0 B".to_string()
     } else {
@@ -178,11 +177,75 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Formats an ops-per-second rate as a string.
+fn format_ops(rate: Option<OpsPerSec>) -> String {
+    rate.map_or("-".to_string(), |r| r.as_u64().to_string())
+}
+
 /// Truncates a name to max_len characters, adding "..." if truncated.
+///
+/// This function correctly handles multi-byte UTF-8 characters by counting
+/// characters rather than bytes, avoiding potential panics on non-ASCII input.
 fn truncate_name(name: &str, max_len: usize) -> String {
-    if name.len() <= max_len {
+    let char_count = name.chars().count();
+    if char_count <= max_len {
         name.to_string()
     } else {
-        format!("{}...", &name[..max_len.saturating_sub(3)])
+        let truncated: String = name.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_name_short() {
+        assert_eq!(truncate_name("short", 10), "short");
+    }
+
+    #[test]
+    fn test_truncate_name_exact() {
+        assert_eq!(truncate_name("exactly10!", 10), "exactly10!");
+    }
+
+    #[test]
+    fn test_truncate_name_long() {
+        assert_eq!(truncate_name("this is a very long name", 10), "this is...");
+    }
+
+    #[test]
+    fn test_truncate_name_utf8() {
+        // Japanese characters - each is 3 bytes but 1 character
+        // "日本語プロセス" = 7 characters, fits in max_len=10
+        assert_eq!(truncate_name("日本語プロセス", 10), "日本語プロセス");
+        // "日本語プロセス名前長い" = 11 characters, truncate to 7 + "..."
+        assert_eq!(
+            truncate_name("日本語プロセス名前長い", 10),
+            "日本語プロセス..."
+        );
+    }
+
+    #[test]
+    fn test_truncate_name_emoji() {
+        // Emoji test - each emoji is typically 4 bytes but 1-2 characters
+        assert_eq!(truncate_name("🚀rocket", 10), "🚀rocket");
+        assert_eq!(truncate_name("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀", 10), "🚀🚀🚀🚀🚀🚀🚀...");
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(BytesPerSec(0)), "0 B");
+        // human_bytes uses IEC units (KiB, MiB, etc.)
+        assert_eq!(format_bytes(BytesPerSec(1024)), "1 KiB");
+        assert_eq!(format_bytes(BytesPerSec(1_048_576)), "1 MiB");
+    }
+
+    #[test]
+    fn test_format_ops() {
+        assert_eq!(format_ops(None), "-");
+        assert_eq!(format_ops(Some(OpsPerSec(0))), "0");
+        assert_eq!(format_ops(Some(OpsPerSec(1234))), "1234");
     }
 }
