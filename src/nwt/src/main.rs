@@ -9,6 +9,36 @@ use clap::Parser;
 use names::Generator;
 use repowalker::find_main_repo;
 use serde::Deserialize;
+use shellsetup::ShellIntegration;
+
+/// Shell code to be installed by --shell-setup.
+///
+/// This function wraps the nwt binary and automatically changes to the new worktree
+/// directory after creation. When --tmux is specified, it skips the cd since the
+/// worktree opens in a new tmux window.
+const SHELL_CODE: &str = r#"
+function nwt() {
+    # If --tmux is specified, don't cd (worktree opens in new tmux window)
+    case " $* " in
+        *" --tmux "* | *" --tmux")
+            command nwt "$@"
+            return $?
+            ;;
+    esac
+
+    # Capture the worktree path and cd to it
+    local dir
+    dir=$(command nwt "$@")
+    local exit_code=$?
+    if [ $exit_code -eq 0 ] && [ -n "$dir" ]; then
+        echo "$dir"
+        cd "$dir" || return 1
+    else
+        [ -n "$dir" ] && echo "$dir"
+        return $exit_code
+    fi
+}
+"#;
 
 /// Configuration file schema for nwt.
 ///
@@ -324,6 +354,8 @@ mod exit_codes {
     pub const CONFIG_ERROR: i32 = 12;
     /// Tmux option specified but not running inside tmux
     pub const TMUX_NOT_RUNNING: i32 = 13;
+    /// Shell setup failed
+    pub const SHELL_SETUP_ERROR: i32 = 14;
 }
 
 /// Maximum attempts to find an available directory name before giving up.
@@ -370,6 +402,12 @@ EXAMPLES:
     nwt --run \"npm install\"          # Run a command after creation
     nwt --tmux                       # Open worktree in a new tmux window
     nwt --tmux --run \"npm install\"   # Run command in a new tmux window
+    nwt --shell-setup                # Install shell integration for auto-cd
+
+SHELL INTEGRATION:
+    Run 'nwt --shell-setup' to install a shell function that automatically
+    changes to the new worktree directory after creation. The shell function
+    skips the cd when --tmux is used (since the worktree opens in a new window).
 
 EXIT CODES:
     0  Success
@@ -384,7 +422,8 @@ EXIT CODES:
     9  Command specified with --run failed
     10 Tmux command failed
     12 Config file error (invalid TOML, validation failed)
-    13 Not running inside tmux (--tmux specified)")]
+    13 Not running inside tmux (--tmux specified)
+    14 Shell setup failed")]
 struct Cli {
     /// Specify branch name instead of generating a random one.
     #[arg(short, long, conflicts_with = "checkout")]
@@ -430,6 +469,19 @@ struct Cli {
     /// This option will fail on Windows unless tmux is installed via WSL or similar.
     #[arg(long)]
     tmux: bool,
+
+    /// Install shell integration to automatically cd into new worktrees.
+    ///
+    /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
+    /// and automatically changes directory to the new worktree after creation.
+    ///
+    /// When --tmux is used, the shell function skips the cd (since the worktree
+    /// opens in a new tmux window).
+    ///
+    /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
+    /// or open a new terminal.
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux"])]
+    shell_setup: bool,
 }
 
 /// Prints an error message to stderr unless quiet mode is enabled.
@@ -542,7 +594,7 @@ fn try_create_worktree(
     let stderr_thread = thread::spawn(move || {
         let mut stderr = stderr;
         let mut captured = Vec::new();
-        let mut buf = [0u8; 1024];
+        let mut buf = [0_u8; 1024];
 
         loop {
             match stderr.read(&mut buf) {
@@ -600,8 +652,30 @@ fn try_create_worktree(
     }
 }
 
+/// Installs shell integration for nwt.
+///
+/// Adds a shell function to ~/.zshrc or ~/.bashrc that wraps the nwt binary
+/// and automatically changes to the new worktree directory after creation.
+fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
+    let integration = ShellIntegration::new("nwt", "New Worktree", SHELL_CODE)
+        .with_command("nwt", "Create a new worktree and cd into it");
+
+    integration.setup()
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    // Handle --shell-setup before anything else (doesn't require git repo)
+    if cli.shell_setup {
+        match setup_shell_integration() {
+            Ok(()) => exit(0),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                exit(exit_codes::SHELL_SETUP_ERROR);
+            }
+        }
+    }
 
     // Load config file (missing file is OK, invalid file is error)
     let file_config = match load_config() {
@@ -1171,6 +1245,7 @@ mod tests {
             exit_codes::TMUX_FAILED,
             exit_codes::CONFIG_ERROR,
             exit_codes::TMUX_NOT_RUNNING,
+            exit_codes::SHELL_SETUP_ERROR,
         ];
 
         let mut sorted = codes.to_vec();
@@ -1305,6 +1380,48 @@ mod tests {
         // --tmux can be combined with --branch
         let result = cmd.try_get_matches_from(["nwt", "--tmux", "--branch", "feature/test"]);
         assert!(result.is_ok(), "Should accept --tmux with --branch");
+    }
+
+    #[test]
+    fn test_cli_shell_setup_parses() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // Parsing with --shell-setup should succeed
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup"]);
+        assert!(result.is_ok(), "Should accept --shell-setup option");
+
+        let matches = result.unwrap();
+        assert!(
+            matches.get_flag("shell_setup"),
+            "Should set shell_setup flag"
+        );
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup conflicts with --branch
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--branch", "feature/test"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --branch are provided"
+        );
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_tmux() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup conflicts with --tmux
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--tmux"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --tmux are provided"
+        );
     }
 
     // Unix-specific tests for shell command execution.
@@ -1492,6 +1609,7 @@ mod tests {
                 quiet: true,
                 run: None,
                 tmux: false,
+                shell_setup: false,
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
@@ -1524,6 +1642,7 @@ mod tests {
                 quiet: false,
                 run: None,
                 tmux: false,
+                shell_setup: false,
             };
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
@@ -1549,6 +1668,7 @@ mod tests {
                 quiet: true,
                 run: None,
                 tmux: false,
+                shell_setup: false,
             };
             let merged = merge_config(&cli, None);
 
@@ -1561,7 +1681,7 @@ mod tests {
 
         #[test]
         fn test_exit_code_config_error_is_unique() {
-            // Ensure CONFIG_ERROR and TMUX_NOT_RUNNING don't conflict with other exit codes
+            // Ensure CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR don't conflict with other exit codes
             let codes = [
                 exit_codes::NOT_IN_REPO,
                 exit_codes::INVALID_REPO_NAME,
@@ -1575,6 +1695,7 @@ mod tests {
                 exit_codes::TMUX_FAILED,
                 exit_codes::CONFIG_ERROR,
                 exit_codes::TMUX_NOT_RUNNING,
+                exit_codes::SHELL_SETUP_ERROR,
             ];
 
             let mut sorted = codes.to_vec();
@@ -1584,7 +1705,7 @@ mod tests {
             assert_eq!(
                 sorted.len(),
                 codes.len(),
-                "All exit codes including CONFIG_ERROR and TMUX_NOT_RUNNING should be unique"
+                "All exit codes including CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR should be unique"
             );
         }
     }
