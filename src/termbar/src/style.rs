@@ -19,26 +19,55 @@ const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_
 const BATCH_PROGRESS_STATS_FORMAT: &str =
     "{msg} {bytes}/{total_bytes} @ {bytes_per_sec} (~{eta} remaining)";
 
+// =============================================================================
+// OVERHEAD CONSTANTS
+// =============================================================================
+//
+// IMPORTANT: These overhead values must be kept in sync with the template
+// format strings in `create_template()`. If you modify a template format,
+// recalculate and update the corresponding overhead constant.
+//
+// To recalculate: count the maximum expected width of each template component:
+// - {spinner}: 2 columns (emoji spinner)
+// - {prefix}: varies (for batch: "Batch" = 5)
+// - brackets []: 2 columns
+// - space padding: count actual spaces in format
+// - {bytes}/{total_bytes}: ~25 columns (e.g., "999.99 GiB/999.99 GiB")
+// - ({percent}%): ~6 columns (e.g., "(100%)")
+// - ({bytes_per_sec}, {eta}): ~25 columns (e.g., "(999.99 MiB/s, 99:99:99)")
+// - static text like " verifying": count characters
+//
+// The bar width is terminal_width - overhead - filename_width (where applicable).
+// =============================================================================
+
 /// Base overhead for copy style progress bars.
 ///
 /// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60
 /// The filename width is added to this to get total overhead.
+///
+/// See the format string in `StyleType::Copy` match arm of `create_template()`.
 const COPY_STYLE_BASE_OVERHEAD: u16 = 60;
 
 /// Base overhead for verify style progress bars.
 ///
 /// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70
 /// The filename width is added to this to get total overhead.
+///
+/// See the format string in `StyleType::Verify` match arm of `create_template()`.
 const VERIFY_STYLE_BASE_OVERHEAD: u16 = 70;
 
 /// Base overhead for batch style progress bars.
 ///
 /// Components: "Batch" prefix + brackets + stats format = ~85
+///
+/// See the format string in `StyleType::Batch` match arm of `create_template()`.
 const BATCH_STYLE_OVERHEAD: u16 = 85;
 
 /// Base overhead for hash style progress bars.
 ///
 /// Components: spinner(2) + brackets(4) + bytes/total(25) + speed/eta(35) + msg(variable) + spaces(4) = ~70
+///
+/// See the format string in `StyleType::Hash` match arm of `create_template()`.
 const HASH_STYLE_OVERHEAD: u16 = 70;
 
 /// Builder for progress bar styles with automatic width calculation.

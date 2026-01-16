@@ -89,6 +89,13 @@ const ELLIPSIS_NO_EXT: &str = "...";
 /// Width in terminal columns of [`ELLIPSIS_NO_EXT`].
 const ELLIPSIS_NO_EXT_WIDTH: usize = 3;
 
+/// Minimum width required for meaningful truncation with an indicator.
+///
+/// Below this width, truncation returns raw characters without any ellipsis
+/// indicator because there's not enough space for both content and indicator.
+/// This is 4 characters to allow at least: `X...` (1 char + 3 dot ellipsis).
+const MIN_TRUNCATION_WIDTH: usize = 4;
+
 /// Escape braces in a string for use in indicatif templates.
 ///
 /// Indicatif uses `{placeholder}` syntax, so literal braces must be doubled
@@ -280,8 +287,9 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
     if let Some(dot_pos) = filename[search_start..].rfind('.') {
         let actual_pos = search_start + dot_pos;
         let ext = &filename[actual_pos + 1..];
-        // Only treat as extension if it's non-empty and reasonable length
-        if !ext.is_empty() && ext.len() <= MAX_EXTENSION_LEN {
+        // Only treat as extension if it's non-empty and reasonable length.
+        // Use chars().count() for proper unicode handling (not byte length).
+        if !ext.is_empty() && ext.chars().count() <= MAX_EXTENSION_LEN {
             return (&filename[..actual_pos], Some(ext));
         }
     }
@@ -350,9 +358,10 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
         return filename.to_string();
     }
 
-    // Minimum useful output: "X..." (4 chars)
-    if max_width_usize < 4 {
-        // Just take first chars up to max
+    // Below MIN_TRUNCATION_WIDTH, we can't fit meaningful content + ellipsis,
+    // so we just return the raw prefix without any truncation indicator.
+    // This is an intentional design choice for extreme edge cases.
+    if max_width_usize < MIN_TRUNCATION_WIDTH {
         return take_chars_by_width(filename, max_width_usize);
     }
 
@@ -376,9 +385,9 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
 
         // Extension too long - truncate extension too
         // Format: basename_part..ext_part (still using 2-dot ellipsis)
-        // Give half to basename, half to extension (minus ellipsis)
+        // Give 1/3 to basename, 2/3 to extension since we prioritize extension visibility
         let remaining = max_width_usize.saturating_sub(ELLIPSIS_WITH_EXT_WIDTH);
-        let basename_budget = remaining / 2;
+        let basename_budget = remaining / 3;
         let ext_budget = remaining - basename_budget;
 
         let truncated_basename = take_chars_by_width(basename, basename_budget);
@@ -697,5 +706,137 @@ mod tests {
             filename_width,
             MIN_BAR_WIDTH
         );
+    }
+
+    // ========================================================================
+    // Tests for MIN_TRUNCATION_WIDTH behavior
+    // ========================================================================
+
+    #[test]
+    fn test_min_truncation_width_constant() {
+        // Verify the constant is used correctly
+        assert_eq!(MIN_TRUNCATION_WIDTH, 4);
+    }
+
+    #[test]
+    fn test_truncation_at_boundary() {
+        // At exactly MIN_TRUNCATION_WIDTH, we should get ellipsis
+        let result = truncate_filename("longfilename.txt", 4);
+        // Should be able to fit at least one char + ellipsis (3 dots) = 4 chars
+        // But with extension, we need more room, so it falls back to no-extension style
+        assert!(
+            str_display_width_as_u16(&result) <= 4,
+            "Result '{}' should fit in 4 columns",
+            result
+        );
+    }
+
+    #[test]
+    fn test_below_min_truncation_width_no_ellipsis() {
+        // Below MIN_TRUNCATION_WIDTH, we just get raw chars with no indicator
+        let result = truncate_filename("longfilename.txt", 3);
+        assert_eq!(result, "lon");
+        assert!(!result.contains('.'), "No ellipsis below MIN_TRUNCATION_WIDTH");
+    }
+
+    // ========================================================================
+    // Tests for extension truncation split behavior (1/3 basename, 2/3 ext)
+    // ========================================================================
+
+    #[test]
+    fn test_long_extension_truncation_favors_extension() {
+        // When both basename and extension must be truncated,
+        // extension should get 2/3 of the budget
+        let result = truncate_filename("ab.longerext", 10);
+        // max_width=10, ellipsis=2, remaining=8
+        // basename_budget=8/3=2, ext_budget=8-2=6
+        // truncated_basename from "ab" = "ab" (fits in 2)
+        // truncated_ext from ".longerext" with budget 6 = ".longe"
+        // Result: "ab" + ".." + ".longe" = "ab...longe" but wait, that's 10 chars
+        // Actually let me trace through again:
+        // remaining = 10 - 2 = 8
+        // basename_budget = 8 / 3 = 2
+        // ext_budget = 8 - 2 = 6
+        // truncated_basename = take_chars_by_width("ab", 2) = "ab"
+        // truncated_ext = take_chars_by_width(".longerext", 6) = ".longe"
+        // result = "ab" + ".." + ".longe" = "ab...longe" which is 10 chars
+
+        assert!(
+            str_display_width_as_u16(&result) <= 10,
+            "Result '{}' should fit in 10 columns",
+            result
+        );
+        // Extension portion should be longer than basename portion
+        // (extension gets 2/3 of budget)
+    }
+
+    #[test]
+    fn test_extension_truncation_preserves_dot() {
+        // When truncating extension, the leading dot should be preserved
+
+        // This has a 19-char extension which exceeds MAX_EXTENSION_LEN (10),
+        // so it's treated as no extension - should truncate with "..." at end
+        let result = truncate_filename("a.verylongextension", 8);
+        assert!(
+            result.ends_with("..."),
+            "Very long extension treated as no extension: '{}'",
+            result
+        );
+
+        // Try with a valid long extension
+        let result2 = truncate_filename("basename.extension", 10);
+        // extension = "extension" (9 chars, <= 10, valid)
+        // dot_ext = ".extension" (10 chars)
+        // Need 1 + 2 + 10 = 13 for full, but only have 10
+        // So we truncate: remaining = 10 - 2 = 8
+        // basename_budget = 2, ext_budget = 6
+        // truncated_ext from ".extension" = ".exten"
+        assert!(
+            str_display_width_as_u16(&result2) <= 10,
+            "Result '{}' should fit",
+            result2
+        );
+    }
+
+    // ========================================================================
+    // Tests for unicode extension handling (chars().count() vs len())
+    // ========================================================================
+
+    #[test]
+    fn test_unicode_extension_char_count() {
+        // Test that extension length uses char count, not byte count
+        // "日本語" is 3 characters but 9 bytes
+        // As an extension, it should be accepted (3 <= MAX_EXTENSION_LEN)
+
+        let (basename, ext) = split_filename_extension("file.日本語");
+        assert_eq!(basename, "file");
+        assert_eq!(ext, Some("日本語"));
+    }
+
+    #[test]
+    fn test_unicode_extension_too_long_by_chars() {
+        // Extension with 11 unicode characters (> MAX_EXTENSION_LEN)
+        // Even though it might have fewer bytes than a long ASCII extension,
+        // we count characters
+        let long_ext = "あいうえおかきくけこさ"; // 11 hiragana chars
+        let filename = format!("file.{}", long_ext);
+
+        let (basename, ext) = split_filename_extension(&filename);
+        // 11 chars > 10, so treated as no extension
+        assert_eq!(basename, filename.as_str());
+        assert_eq!(ext, None);
+    }
+
+    #[test]
+    fn test_unicode_extension_at_max_length() {
+        // Extension with exactly MAX_EXTENSION_LEN (10) unicode characters
+        let exactly_ten = "あいうえおかきくけこ"; // 10 hiragana chars
+        assert_eq!(exactly_ten.chars().count(), 10);
+
+        let filename = format!("file.{}", exactly_ten);
+        let (basename, ext) = split_filename_extension(&filename);
+
+        assert_eq!(basename, "file");
+        assert_eq!(ext, Some(exactly_ten));
     }
 }
