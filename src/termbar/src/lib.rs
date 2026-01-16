@@ -101,16 +101,29 @@ const ELLIPSIS_NO_EXT: &str = "...";
 /// The compile-time assertion below enforces this invariant.
 const ELLIPSIS_NO_EXT_WIDTH: usize = ELLIPSIS_NO_EXT.len();
 
-// Compile-time assertions to ensure ellipsis strings remain ASCII.
+// Compile-time assertions to ensure ellipsis strings remain ASCII and
+// that the width constants stay in sync with the string definitions.
 // If someone changes these to Unicode characters (e.g., '…'), these assertions
 // will fail, prompting them to update the width calculation logic.
+//
+// We verify two things for each ellipsis:
+// 1. The string has the expected length (catches changes to the string)
+// 2. The _WIDTH constant equals the string length (catches constant drift)
 const _: () = assert!(
     ELLIPSIS_WITH_EXT.len() == 2,
     "ELLIPSIS_WITH_EXT must be exactly 2 ASCII characters"
 );
 const _: () = assert!(
+    ELLIPSIS_WITH_EXT_WIDTH == ELLIPSIS_WITH_EXT.len(),
+    "ELLIPSIS_WITH_EXT_WIDTH must equal ELLIPSIS_WITH_EXT.len()"
+);
+const _: () = assert!(
     ELLIPSIS_NO_EXT.len() == 3,
     "ELLIPSIS_NO_EXT must be exactly 3 ASCII characters"
+);
+const _: () = assert!(
+    ELLIPSIS_NO_EXT_WIDTH == ELLIPSIS_NO_EXT.len(),
+    "ELLIPSIS_NO_EXT_WIDTH must equal ELLIPSIS_NO_EXT.len()"
 );
 
 /// Minimum width required for meaningful truncation with an indicator.
@@ -607,6 +620,14 @@ mod tests {
     }
 
     #[test]
+    fn test_split_filename_extension_directory_like_names() {
+        // Current directory "." and parent directory ".." should be returned unchanged
+        // These are edge cases that might appear in path handling
+        assert_eq!(split_filename_extension("."), (".", None));
+        assert_eq!(split_filename_extension(".."), ("..", None));
+    }
+
+    #[test]
     fn test_split_filename_extension_very_long_extension() {
         // Extensions > 10 chars are not treated as extensions
         assert_eq!(
@@ -625,6 +646,18 @@ mod tests {
     #[test]
     fn test_truncate_filename_empty() {
         assert_eq!(truncate_filename("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_filename_directory_like_names() {
+        // Current directory "." and parent directory ".." should be returned unchanged
+        // since they're shorter than any reasonable max_width
+        assert_eq!(truncate_filename(".", 10), ".");
+        assert_eq!(truncate_filename("..", 10), "..");
+        // Even at width 1, "." should be unchanged
+        assert_eq!(truncate_filename(".", 1), ".");
+        // At width 1, ".." must be truncated to "."
+        assert_eq!(truncate_filename("..", 1), ".");
     }
 
     #[test]
