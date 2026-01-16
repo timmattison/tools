@@ -72,7 +72,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     - Waits for JSON to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
     - To install: `cargo install --git https://github.com/timmattison/tools jsonboard`
 - bm
-    - Bulk Move. Named "bm" because moving lots of files is shitty.
+    - Bulk Move - recursively find and move files matching a pattern to a destination directory. Named "bm" because
+      moving lots of files is shitty. Much simpler than `find ... -exec mv`, especially for common tasks like moving
+      all files of a certain type.
     - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
 - localnext
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
@@ -1136,3 +1138,95 @@ wtm               # Quick alias for main worktree
 - `3`: Worktree not found
 - `4`: Could not determine current worktree (for -f/-p)
 - `5`: Shell setup failed
+
+## bm (bulk move)
+
+Recursively find and move files matching a pattern (suffix, prefix, or substring) to a destination directory. Named "bm" because moving lots of files is shitty.
+
+### Basic Usage
+
+```bash
+bm -suffix .jpg -destination ~/Pictures/photos
+bm -prefix IMG_ -destination ~/Pictures/camera
+bm -substring 2024 -destination ~/archive/2024
+```
+
+### Options
+
+- `-suffix <SUFFIX>`: Match files ending with this string (e.g., `.jpg`, `.mkv`)
+- `-prefix <PREFIX>`: Match files starting with this string (e.g., `IMG_`, `video_`)
+- `-substring <SUBSTRING>`: Match files containing this string anywhere in the name
+- `-destination <PATH>`: Directory to move matching files to (required)
+
+**Note:** Exactly one of `-suffix`, `-prefix`, or `-substring` must be specified.
+
+### Why use bm instead of mv?
+
+**Moving all .mkv files to a backup drive:**
+
+```bash
+# With mv and find (verbose, error-prone)
+find . -name "*.mkv" -exec mv {} /Volumes/Backup/videos/ \;
+
+# With bm (simple and clear)
+bm -suffix .mkv -destination /Volumes/Backup/videos
+```
+
+**Moving camera photos scattered across subdirectories:**
+
+```bash
+# With mv and find
+find ~/Downloads -name "IMG_*" -type f -exec mv {} ~/Pictures/camera/ \;
+
+# With bm
+bm -suffix IMG_ -destination ~/Pictures/camera ~/Downloads
+```
+
+**Moving files from multiple directories:**
+
+```bash
+# With mv and find (requires multiple commands or complex logic)
+find dir1 dir2 dir3 -name "*2024*" -exec mv {} ~/archive/ \;
+
+# With bm (just list the directories)
+bm -substring 2024 -destination ~/archive dir1 dir2 dir3
+```
+
+### Features
+
+- **Recursive search**: Automatically walks through all subdirectories
+- **Pattern flexibility**: Filter by suffix, prefix, or any substring in the filename
+- **Multiple source paths**: Process multiple directories in a single command with automatic deduplication
+- **Statistics**: Reports files moved, duration, and files per second on completion
+- **Current directory default**: When no source paths are specified, searches the current directory
+
+### Examples
+
+Move all video files to an external drive:
+```bash
+bm -suffix .mp4 -destination /Volumes/External/videos
+bm -suffix .mkv -destination /Volumes/External/videos
+```
+
+Organize photos by moving all files starting with a camera prefix:
+```bash
+bm -prefix DSCN -destination ~/Pictures/nikon
+bm -prefix IMG_ -destination ~/Pictures/iphone
+```
+
+Archive files from a specific year:
+```bash
+bm -substring _2023_ -destination ~/archive/2023
+```
+
+Move files from multiple download directories:
+```bash
+bm -suffix .pdf -destination ~/Documents/pdfs ~/Downloads ~/Desktop /tmp
+```
+
+### Output
+
+On completion, bm shows a summary:
+```
+INFO Move complete filesMoved=42 duration=1.234s filesMovedPerSecond=34.02
+```
