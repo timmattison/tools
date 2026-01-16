@@ -79,7 +79,13 @@ const MAX_EXTENSION_LEN: usize = 10;
 const ELLIPSIS_WITH_EXT: &str = "..";
 
 /// Width in terminal columns of [`ELLIPSIS_WITH_EXT`].
-const ELLIPSIS_WITH_EXT_WIDTH: usize = 2;
+///
+/// # Safety Invariant
+///
+/// This must equal `ELLIPSIS_WITH_EXT.len()`. Since our ellipsis is ASCII,
+/// byte length equals character count equals display width.
+/// The compile-time assertion below enforces this invariant.
+const ELLIPSIS_WITH_EXT_WIDTH: usize = ELLIPSIS_WITH_EXT.len();
 
 /// Ellipsis used when truncating filenames without an extension.
 ///
@@ -87,7 +93,25 @@ const ELLIPSIS_WITH_EXT_WIDTH: usize = 2;
 const ELLIPSIS_NO_EXT: &str = "...";
 
 /// Width in terminal columns of [`ELLIPSIS_NO_EXT`].
-const ELLIPSIS_NO_EXT_WIDTH: usize = 3;
+///
+/// # Safety Invariant
+///
+/// This must equal `ELLIPSIS_NO_EXT.len()`. Since our ellipsis is ASCII,
+/// byte length equals character count equals display width.
+/// The compile-time assertion below enforces this invariant.
+const ELLIPSIS_NO_EXT_WIDTH: usize = ELLIPSIS_NO_EXT.len();
+
+// Compile-time assertions to ensure ellipsis strings remain ASCII.
+// If someone changes these to Unicode characters (e.g., '…'), these assertions
+// will fail, prompting them to update the width calculation logic.
+const _: () = assert!(
+    ELLIPSIS_WITH_EXT.len() == 2,
+    "ELLIPSIS_WITH_EXT must be exactly 2 ASCII characters"
+);
+const _: () = assert!(
+    ELLIPSIS_NO_EXT.len() == 3,
+    "ELLIPSIS_NO_EXT must be exactly 3 ASCII characters"
+);
 
 /// Minimum width required for meaningful truncation with an indicator.
 ///
@@ -327,10 +351,15 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 /// # Algorithm
 ///
 /// 1. If the filename fits within `max_width`, return it unchanged
-/// 2. Extract the extension (last `.xxx` portion, if present)
-/// 3. Calculate space needed for ellipsis and extension
-/// 4. Take as much of the beginning as will fit
-/// 5. Return `beginning...extension` (with extension) or `beginning...` (without)
+/// 2. If `max_width < 4`, return raw prefix (no room for content + ellipsis)
+/// 3. Extract the extension (last `.xxx` portion, if present and ≤10 chars)
+/// 4. If extension exists and fits with minimum basename (1 char + `..` + `.ext`):
+///    - Take as much basename as will fit, append `..` + `.extension`
+/// 5. If extension exists but full extension doesn't fit:
+///    - Split remaining space 1/3 to basename, 2/3 to extension (prioritizing
+///      extension visibility since it indicates file type)
+///    - This ratio ensures the extension remains recognizable even when truncated
+/// 6. If no extension or not enough space: return `beginning...`
 ///
 /// # Edge Cases
 ///
@@ -468,6 +497,34 @@ mod tests {
         const _: () = assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
         const _: () = assert!(DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH);
         assert!(!PROGRESS_CHARS.is_empty());
+    }
+
+    #[test]
+    fn test_ellipsis_constants_are_ascii() {
+        // The ellipsis width constants assume ASCII (byte length = display width).
+        // If these are changed to Unicode (e.g., '…'), the width calculation
+        // would be incorrect. These runtime checks complement the compile-time
+        // assertions in the constant definitions.
+        assert!(
+            ELLIPSIS_WITH_EXT.is_ascii(),
+            "ELLIPSIS_WITH_EXT must be ASCII for width calculation to be correct"
+        );
+        assert!(
+            ELLIPSIS_NO_EXT.is_ascii(),
+            "ELLIPSIS_NO_EXT must be ASCII for width calculation to be correct"
+        );
+
+        // Verify width constants match actual display width
+        assert_eq!(
+            ELLIPSIS_WITH_EXT_WIDTH,
+            ELLIPSIS_WITH_EXT.len(),
+            "ELLIPSIS_WITH_EXT_WIDTH must equal string length"
+        );
+        assert_eq!(
+            ELLIPSIS_NO_EXT_WIDTH,
+            ELLIPSIS_NO_EXT.len(),
+            "ELLIPSIS_NO_EXT_WIDTH must equal string length"
+        );
     }
 
     #[test]
