@@ -11,7 +11,6 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 mod collector;
 mod model;
@@ -96,10 +95,6 @@ async fn run_app(
         None
     };
 
-    // System for process name lookups (for IOPS data)
-    let refresh_kind = RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing());
-    let mut system = System::new_with_specifics(refresh_kind);
-
     // App state
     let mut state = AppState::new(args.count, is_root && !args.bandwidth_only);
 
@@ -127,15 +122,14 @@ async fn run_app(
 
             let iops_data = iops_collector.snapshot_and_reset();
 
-            // Refresh process list for name lookups
-            system.refresh_processes_specifics(
-                ProcessesToUpdate::All,
-                true,
-                ProcessRefreshKind::nothing(),
-            );
-
-            // Convert to ProcessIOStats using elapsed time for rate calculation
-            state.iops_stats = Some(convert_iops_to_stats(&iops_data, &system, elapsed));
+            // Convert to ProcessIOStats using elapsed time for rate calculation.
+            // Reuse the bandwidth_collector for process name lookups to avoid
+            // creating a duplicate System instance.
+            state.iops_stats = Some(convert_iops_to_stats(
+                &iops_data,
+                &bandwidth_collector,
+                elapsed,
+            ));
         }
 
         // Render
@@ -166,20 +160,20 @@ async fn run_app(
 ///
 /// The `elapsed` parameter specifies the actual time since the last collection,
 /// used to calculate accurate ops-per-second rates.
+///
+/// Uses the `bandwidth_collector` for process name lookups since it already
+/// maintains a `System` instance with the process list refreshed.
 fn convert_iops_to_stats(
     iops_data: &HashMap<u32, model::IOPSCounter>,
-    system: &System,
+    bandwidth_collector: &BandwidthCollector,
     elapsed: Duration,
 ) -> Vec<ProcessIOStats> {
     let mut stats: Vec<ProcessIOStats> = iops_data
         .iter()
         .filter(|(_, counter)| counter.total() > 0)
         .map(|(pid, counter)| {
-            // Look up process name
-            let name = system
-                .process(sysinfo::Pid::from_u32(*pid))
-                .map(|p| p.name().to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("pid:{pid}"));
+            // Look up process name using the shared collector
+            let name = bandwidth_collector.lookup_process_name(*pid);
 
             // Convert raw counts to rates using actual elapsed time
             let read_ops_rate = OpsPerSec::from_ops_and_duration(counter.read_ops, elapsed);

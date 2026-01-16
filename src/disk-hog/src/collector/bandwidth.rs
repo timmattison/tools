@@ -19,20 +19,42 @@ pub struct BandwidthCollector {
     previous_readings: HashMap<u32, PreviousReading>,
 }
 
+/// Returns the standard `ProcessRefreshKind` configuration for disk-hog.
+///
+/// This ensures consistent refresh behavior across the codebase and prevents
+/// accidentally forgetting to request process names (cmd). Always includes:
+/// - `with_disk_usage()` - to get read/write bytes
+/// - `with_cmd(UpdateKind::OnlyIfNotSet)` - to get process names
+#[inline]
+pub fn process_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_disk_usage()
+        .with_cmd(UpdateKind::OnlyIfNotSet)
+}
+
 impl BandwidthCollector {
     /// Creates a new bandwidth collector.
     pub fn new() -> Self {
-        let refresh_kind = RefreshKind::nothing().with_processes(
-            ProcessRefreshKind::nothing()
-                .with_disk_usage()
-                .with_cmd(UpdateKind::OnlyIfNotSet),
-        );
+        let refresh_kind = RefreshKind::nothing().with_processes(process_refresh_kind());
         let system = System::new_with_specifics(refresh_kind);
 
         Self {
             system,
             previous_readings: HashMap::new(),
         }
+    }
+
+    /// Looks up a process name by PID.
+    ///
+    /// Returns the process name if found, or a fallback string like "pid:1234"
+    /// if the process has exited or is otherwise unavailable. This fallback
+    /// can occur when a short-lived process exits between when it was observed
+    /// (e.g., by fs_usage) and when we look up its name.
+    pub fn lookup_process_name(&self, pid: u32) -> String {
+        self.system
+            .process(sysinfo::Pid::from_u32(pid))
+            .map(|p| p.name().to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("pid:{pid}"))
     }
 
     /// Collects current bandwidth stats for all processes.
@@ -45,13 +67,8 @@ impl BandwidthCollector {
     /// Returns a list of `ProcessIOStats` sorted by total bandwidth (descending).
     pub fn collect(&mut self, elapsed: Duration) -> Vec<ProcessIOStats> {
         // Refresh process disk usage
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_disk_usage()
-                .with_cmd(UpdateKind::OnlyIfNotSet),
-        );
+        self.system
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
 
         let mut stats = Vec::new();
         let mut current_pids = HashSet::new();

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -10,6 +10,16 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 
 use crate::model::IOPSCounter;
+
+/// Regex to extract process name and PID from fs_usage output.
+///
+/// Format: ProcessName.PID or ProcessName.ThreadID (we want PID)
+/// The pattern matches: non-whitespace followed by dot followed by digits at end of line.
+///
+/// Using LazyLock ensures the regex is compiled exactly once, even across multiple
+/// invocations of the parser (which would be wasteful to recompile each time).
+static PROCESS_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(\S+)\.(\d+)\s*$").expect("PROCESS_REGEX is a valid regex"));
 
 /// Atomic counter for lock-free IOPS tracking.
 ///
@@ -222,11 +232,6 @@ async fn parse_fs_usage(stdout: tokio::process::ChildStdout, data: IOPSData) -> 
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
 
-    // Regex to extract process name and PID from end of line
-    // Format: ProcessName.PID or ProcessName.ThreadID (we want PID)
-    // The pattern is: non-whitespace followed by dot followed by digits at end of line
-    let proc_regex = Regex::new(r"(\S+)\.(\d+)\s*$")?;
-
     while let Some(line) = lines.next_line().await? {
         // Parse the operation type and process info
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -244,8 +249,8 @@ async fn parse_fs_usage(stdout: tokio::process::ChildStdout, data: IOPSData) -> 
             continue;
         }
 
-        // Extract process.PID from end of line
-        if let Some(caps) = proc_regex.captures(&line) {
+        // Extract process.PID from end of line using the precompiled regex
+        if let Some(caps) = PROCESS_REGEX.captures(&line) {
             let pid: u32 = match caps.get(2).and_then(|m| m.as_str().parse().ok()) {
                 Some(pid) => pid,
                 None => continue,

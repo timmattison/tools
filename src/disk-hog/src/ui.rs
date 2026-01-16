@@ -62,8 +62,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
 /// Renders the bandwidth pane (top).
 fn render_bandwidth_pane(frame: &mut Frame, area: Rect, state: &AppState) {
+    // Title doesn't include unit hint because format_bytes() uses IEC units
+    // (KiB, MiB, GiB) which would be confusing with a "bytes/sec" label
     let block = Block::default()
-        .title(" Disk Bandwidth (bytes/sec) ")
+        .title(" Disk Bandwidth ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
 
@@ -189,7 +191,10 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(table, area);
 }
 
-/// Formats a bytes-per-second rate as human-readable string (e.g., "1.5 MB").
+/// Formats a bytes-per-second rate as human-readable string using IEC units.
+///
+/// Uses IEC binary units (KiB, MiB, GiB) where 1 KiB = 1024 bytes.
+/// Examples: "1 KiB", "2.5 MiB", "100 GiB".
 fn format_bytes(rate: BytesPerSec) -> String {
     let bytes = rate.as_u64();
     if bytes == 0 {
