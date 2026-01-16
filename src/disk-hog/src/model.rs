@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 /// Bytes per second rate (newtype for type safety).
 ///
 /// Using a newtype prevents accidentally mixing raw byte counts with rates.
@@ -5,15 +7,37 @@
 pub struct BytesPerSec(pub u64);
 
 impl BytesPerSec {
-    /// Creates a new rate from bytes and interval in seconds.
+    /// Creates a new rate from bytes and a time interval.
     ///
-    /// Divides bytes by interval to get bytes/sec. If interval is 0, returns 0.
-    pub fn from_bytes_and_interval(bytes: u64, interval_secs: u64) -> Self {
-        if interval_secs == 0 {
+    /// Uses floating-point arithmetic internally for precision, then rounds
+    /// to the nearest whole number. This avoids precision loss when the interval
+    /// is longer than 1 second (e.g., 1 byte over 2 seconds = 0 with integer division,
+    /// but correctly rounds to 1 or 0 with this approach).
+    ///
+    /// If the interval is zero, returns 0 to avoid division by zero.
+    pub fn from_bytes_and_duration(bytes: u64, interval: Duration) -> Self {
+        let secs = interval.as_secs_f64();
+        if secs == 0.0 {
             Self(0)
         } else {
-            Self(bytes / interval_secs)
+            // Use f64 for precise division, then round to nearest integer
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "bytes/sec rate will always fit in u64 and be positive"
+            )]
+            let rate = (bytes as f64 / secs).round() as u64;
+            Self(rate)
         }
+    }
+
+    /// Creates a new rate from bytes and interval in whole seconds.
+    ///
+    /// This is a convenience method that converts to Duration internally.
+    /// For sub-second precision, use `from_bytes_and_duration` directly.
+    #[cfg(test)]
+    pub fn from_bytes_and_interval(bytes: u64, interval_secs: u64) -> Self {
+        Self::from_bytes_and_duration(bytes, Duration::from_secs(interval_secs))
     }
 
     /// Returns the inner value.
@@ -112,12 +136,6 @@ pub struct IOPSCounter {
 }
 
 impl IOPSCounter {
-    /// Resets the counters to zero.
-    pub fn reset(&mut self) {
-        self.read_ops = 0;
-        self.write_ops = 0;
-    }
-
     /// Total operations (read + write).
     pub fn total(&self) -> u64 {
         self.read_ops + self.write_ops
@@ -133,6 +151,45 @@ mod tests {
         assert_eq!(BytesPerSec::from_bytes_and_interval(1000, 1).as_u64(), 1000);
         assert_eq!(BytesPerSec::from_bytes_and_interval(1000, 2).as_u64(), 500);
         assert_eq!(BytesPerSec::from_bytes_and_interval(1000, 0).as_u64(), 0);
+    }
+
+    #[test]
+    fn test_bytes_per_sec_from_duration() {
+        // Test with Duration for more precision
+        assert_eq!(
+            BytesPerSec::from_bytes_and_duration(1000, Duration::from_secs(1)).as_u64(),
+            1000
+        );
+        assert_eq!(
+            BytesPerSec::from_bytes_and_duration(1000, Duration::from_millis(500)).as_u64(),
+            2000
+        );
+        assert_eq!(
+            BytesPerSec::from_bytes_and_duration(1, Duration::from_secs(2)).as_u64(),
+            1 // Rounds to 1, not truncates to 0
+        );
+        assert_eq!(
+            BytesPerSec::from_bytes_and_duration(0, Duration::from_secs(1)).as_u64(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_bytes_per_sec_precision_edge_cases() {
+        // Small values over long intervals - previously would truncate to 0
+        assert_eq!(
+            BytesPerSec::from_bytes_and_duration(1, Duration::from_secs(3)).as_u64(),
+            0 // 0.33... rounds to 0
+        );
+        assert_eq!(
+            BytesPerSec::from_bytes_and_duration(2, Duration::from_secs(3)).as_u64(),
+            1 // 0.66... rounds to 1
+        );
+        // Verify rounding behavior
+        assert_eq!(
+            BytesPerSec::from_bytes_and_duration(5, Duration::from_secs(2)).as_u64(),
+            3 // 2.5 rounds to 3 (round half up)
+        );
     }
 
     #[test]
@@ -195,17 +252,6 @@ mod tests {
             BytesPerSec(200),
         );
         assert!(stats.total_iops().is_none());
-    }
-
-    #[test]
-    fn test_iops_counter_reset() {
-        let mut counter = IOPSCounter {
-            read_ops: 10,
-            write_ops: 20,
-        };
-        counter.reset();
-        assert_eq!(counter.read_ops, 0);
-        assert_eq!(counter.write_ops, 0);
     }
 
     #[test]

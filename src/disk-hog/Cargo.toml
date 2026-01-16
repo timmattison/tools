@@ -17,6 +17,8 @@ clap.workspace = true
 anyhow.workspace = true
 libc.workspace = true
 human_bytes.workspace = true
+unicode-width.workspace = true
+parking_lot.workspace = true
 regex = "1.10"
 
 [lints]

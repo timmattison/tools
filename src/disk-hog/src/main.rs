@@ -1,7 +1,7 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -97,20 +97,35 @@ async fn run_app(
     };
 
     // System for process name lookups (for IOPS data)
-    let refresh_kind =
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing());
+    let refresh_kind = RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing());
     let mut system = System::new_with_specifics(refresh_kind);
 
     // App state
     let mut state = AppState::new(args.count, is_root && !args.bandwidth_only);
 
+    // Track actual elapsed time for accurate rate calculation
+    let mut last_collection = Instant::now();
+
+    // Do an initial collection to prime the previous readings
+    // Use tick_rate for the first interval since we don't have a real elapsed time yet
+    state.bandwidth_stats = bandwidth_collector.collect(tick_rate);
+
     loop {
-        // Collect bandwidth data (pass interval for accurate rate calculation)
-        state.bandwidth_stats = bandwidth_collector.collect(args.refresh);
+        // Calculate actual elapsed time since last collection
+        let elapsed = last_collection.elapsed();
+        last_collection = Instant::now();
+
+        // Collect bandwidth data using actual elapsed time
+        state.bandwidth_stats = bandwidth_collector.collect(elapsed);
 
         // Collect IOPS data if available
         if let Some(ref iops_collector) = iops_collector {
-            let iops_data = iops_collector.snapshot_and_reset().await;
+            // Check for parser errors
+            if iops_collector.has_parser_error() {
+                state.iops_error = true;
+            }
+
+            let iops_data = iops_collector.snapshot_and_reset();
 
             // Refresh process list for name lookups
             system.refresh_processes_specifics(

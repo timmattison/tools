@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Row, Table},
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::model::{BytesPerSec, OpsPerSec, ProcessIOStats};
 
@@ -19,6 +20,8 @@ pub struct AppState {
     pub max_processes: usize,
     /// Whether running as root.
     pub is_root: bool,
+    /// Whether the IOPS parser encountered an error.
+    pub iops_error: bool,
 }
 
 impl AppState {
@@ -29,6 +32,7 @@ impl AppState {
             iops_stats: if is_root { Some(Vec::new()) } else { None },
             max_processes,
             is_root,
+            iops_error: false,
         }
     }
 }
@@ -76,7 +80,7 @@ fn render_bandwidth_pane(frame: &mut Frame, area: Rect, state: &AppState) {
         .map(|stat| {
             Row::new(vec![
                 stat.pid.to_string(),
-                truncate_name(&stat.name, 20),
+                truncate_to_width(&stat.name, 20),
                 format_bytes(stat.read_bytes_per_sec),
                 format_bytes(stat.write_bytes_per_sec),
                 format_bytes(stat.total_bandwidth()),
@@ -125,6 +129,24 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
+    // Show error message if parser failed
+    if state.iops_error {
+        let message = Paragraph::new(vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                "⚠ IOPS collection stopped due to an error (fs_usage parser failed)",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ])
+        .block(block)
+        .alignment(ratatui::layout::Alignment::Center);
+
+        frame.render_widget(message, area);
+        return;
+    }
+
     // Table header
     let header = Row::new(vec!["PID", "Name", "Read Ops/s", "Write Ops/s", "Total IOPS"])
         .style(Style::default().add_modifier(Modifier::BOLD))
@@ -141,7 +163,7 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
                 .map(|stat| {
                     Row::new(vec![
                         stat.pid.to_string(),
-                        truncate_name(&stat.name, 20),
+                        truncate_to_width(&stat.name, 20),
                         format_ops(stat.read_ops_per_sec),
                         format_ops(stat.write_ops_per_sec),
                         format_ops(stat.total_iops()),
@@ -182,18 +204,40 @@ fn format_ops(rate: Option<OpsPerSec>) -> String {
     rate.map_or("-".to_string(), |r| r.as_u64().to_string())
 }
 
-/// Truncates a name to max_len characters, adding "..." if truncated.
+/// Truncates a string to fit within a maximum display width.
 ///
-/// This function correctly handles multi-byte UTF-8 characters by counting
-/// characters rather than bytes, avoiding potential panics on non-ASCII input.
-fn truncate_name(name: &str, max_len: usize) -> String {
-    let char_count = name.chars().count();
-    if char_count <= max_len {
-        name.to_string()
-    } else {
-        let truncated: String = name.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{truncated}...")
+/// This function uses Unicode display width (from the `unicode-width` crate)
+/// to correctly handle characters that occupy different terminal column widths:
+/// - ASCII characters: 1 column
+/// - CJK characters (Chinese, Japanese, Korean): 2 columns
+/// - Most emoji: 2 columns
+///
+/// If truncation is needed, appends "..." and ensures the result fits within `max_width`.
+fn truncate_to_width(name: &str, max_width: usize) -> String {
+    let current_width = name.width();
+    if current_width <= max_width {
+        return name.to_string();
     }
+
+    // Need to truncate - reserve space for "..."
+    let ellipsis = "...";
+    let ellipsis_width = ellipsis.width();
+    let target_width = max_width.saturating_sub(ellipsis_width);
+
+    let mut result = String::new();
+    let mut width = 0;
+
+    for c in name.chars() {
+        let char_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if width + char_width > target_width {
+            break;
+        }
+        result.push(c);
+        width += char_width;
+    }
+
+    result.push_str(ellipsis);
+    result
 }
 
 #[cfg(test)]
@@ -201,37 +245,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_truncate_name_short() {
-        assert_eq!(truncate_name("short", 10), "short");
+    fn test_truncate_to_width_short() {
+        assert_eq!(truncate_to_width("short", 10), "short");
     }
 
     #[test]
-    fn test_truncate_name_exact() {
-        assert_eq!(truncate_name("exactly10!", 10), "exactly10!");
+    fn test_truncate_to_width_exact() {
+        assert_eq!(truncate_to_width("exactly10!", 10), "exactly10!");
     }
 
     #[test]
-    fn test_truncate_name_long() {
-        assert_eq!(truncate_name("this is a very long name", 10), "this is...");
+    fn test_truncate_to_width_long() {
+        let result = truncate_to_width("this is a very long name", 10);
+        assert!(result.width() <= 10);
+        assert!(result.ends_with("..."));
     }
 
     #[test]
-    fn test_truncate_name_utf8() {
-        // Japanese characters - each is 3 bytes but 1 character
-        // "日本語プロセス" = 7 characters, fits in max_len=10
-        assert_eq!(truncate_name("日本語プロセス", 10), "日本語プロセス");
-        // "日本語プロセス名前長い" = 11 characters, truncate to 7 + "..."
-        assert_eq!(
-            truncate_name("日本語プロセス名前長い", 10),
-            "日本語プロセス..."
-        );
+    fn test_truncate_to_width_cjk() {
+        // CJK characters are 2 columns wide each
+        // "日本語" = 3 characters, 6 columns wide
+        // Should fit in width 10
+        assert_eq!(truncate_to_width("日本語", 10), "日本語");
+
+        // "日本語プロセス" = 7 characters, 14 columns wide
+        // In max_width=10, we can fit 3 CJK chars (6 cols) + "..." (3 cols) = 9 cols
+        let result = truncate_to_width("日本語プロセス", 10);
+        assert!(result.width() <= 10);
+        assert!(result.ends_with("..."));
+        // Should be "日本語..." (3 CJK chars = 6 cols + 3 = 9 cols)
+        assert_eq!(result, "日本語...");
     }
 
     #[test]
-    fn test_truncate_name_emoji() {
-        // Emoji test - each emoji is typically 4 bytes but 1-2 characters
-        assert_eq!(truncate_name("🚀rocket", 10), "🚀rocket");
-        assert_eq!(truncate_name("🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀🚀", 10), "🚀🚀🚀🚀🚀🚀🚀...");
+    fn test_truncate_to_width_emoji() {
+        // Most emoji are 2 columns wide
+        // "🚀rocket" = 1 emoji (2 cols) + 6 ASCII chars = 8 cols
+        assert_eq!(truncate_to_width("🚀rocket", 10), "🚀rocket");
+
+        // Many emoji should be truncated
+        let result = truncate_to_width("🚀🚀🚀🚀🚀🚀", 10);
+        assert!(result.width() <= 10);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_to_width_mixed() {
+        // Mix of ASCII and CJK: "Hello世界" = 5 ASCII (5 cols) + 2 CJK (4 cols) = 9 cols
+        assert_eq!(truncate_to_width("Hello世界", 10), "Hello世界");
+
+        // Longer mixed: "Hello世界Test" = 5 + 4 + 4 = 13 cols, needs truncation
+        let result = truncate_to_width("Hello世界Test", 10);
+        assert!(result.width() <= 10);
+        assert!(result.ends_with("..."));
     }
 
     #[test]
@@ -247,5 +313,21 @@ mod tests {
         assert_eq!(format_ops(None), "-");
         assert_eq!(format_ops(Some(OpsPerSec(0))), "0");
         assert_eq!(format_ops(Some(OpsPerSec(1234))), "1234");
+    }
+
+    #[test]
+    fn test_app_state_new_with_root() {
+        let state = AppState::new(10, true);
+        assert!(state.is_root);
+        assert!(state.iops_stats.is_some());
+        assert!(!state.iops_error);
+    }
+
+    #[test]
+    fn test_app_state_new_without_root() {
+        let state = AppState::new(10, false);
+        assert!(!state.is_root);
+        assert!(state.iops_stats.is_none());
+        assert!(!state.iops_error);
     }
 }

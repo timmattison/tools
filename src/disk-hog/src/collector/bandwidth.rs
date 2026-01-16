@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
 
@@ -36,11 +37,13 @@ impl BandwidthCollector {
 
     /// Collects current bandwidth stats for all processes.
     ///
-    /// The `interval_secs` parameter specifies the time since the last collection,
-    /// used to calculate accurate bytes-per-second rates.
+    /// The `elapsed` parameter specifies the actual time since the last collection,
+    /// used to calculate accurate bytes-per-second rates. Using `Duration` allows
+    /// for sub-second precision and accounts for actual elapsed time rather than
+    /// assuming the configured interval was exact.
     ///
     /// Returns a list of `ProcessIOStats` sorted by total bandwidth (descending).
-    pub fn collect(&mut self, interval_secs: u64) -> Vec<ProcessIOStats> {
+    pub fn collect(&mut self, elapsed: Duration) -> Vec<ProcessIOStats> {
         // Refresh process disk usage
         self.system.refresh_processes_specifics(
             ProcessesToUpdate::All,
@@ -81,9 +84,9 @@ impl BandwidthCollector {
             if read_delta > 0 || write_delta > 0 {
                 let name = process.name().to_string_lossy().to_string();
 
-                // Convert deltas to rates using the interval
-                let read_rate = BytesPerSec::from_bytes_and_interval(read_delta, interval_secs);
-                let write_rate = BytesPerSec::from_bytes_and_interval(write_delta, interval_secs);
+                // Convert deltas to rates using actual elapsed time
+                let read_rate = BytesPerSec::from_bytes_and_duration(read_delta, elapsed);
+                let write_rate = BytesPerSec::from_bytes_and_duration(write_delta, elapsed);
 
                 stats.push(ProcessIOStats::new_bandwidth_only(
                     pid_u32,
