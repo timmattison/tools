@@ -38,6 +38,19 @@ const MIN_TABLE_WIDTH: u16 = 45;
 /// Default terminal width if detection fails
 const DEFAULT_TERMINAL_WIDTH: u16 = 80;
 
+/// Polling interval for keyboard events in watch mode (milliseconds)
+const EVENT_POLL_INTERVAL_MS: u64 = 100;
+
+/// Fixed overhead in tab display line: "  [W:T] " prefix + " (" + ")" suffix
+/// Assumes max window:tab indices of [99:99] = 7 chars, plus spacing = ~15 chars
+const TAB_LINE_FIXED_OVERHEAD: usize = 15;
+
+/// Maximum width allocated for domain display in tab lines
+const MAX_DOMAIN_WIDTH: usize = 35;
+
+/// Minimum width for title display (below this, truncation becomes useless)
+const MIN_TITLE_WIDTH: usize = 20;
+
 /// Identify which Chrome processes are using the most CPU
 #[derive(Parser)]
 #[command(name = "browser-hog")]
@@ -319,7 +332,7 @@ fn watch_loop(args: &Args, running: &Arc<AtomicBool>) -> Result<()> {
 
     while running.load(Ordering::SeqCst) {
         // Check for 'q' key press (non-blocking)
-        if event::poll(Duration::from_millis(100))? {
+        if event::poll(Duration::from_millis(EVENT_POLL_INTERVAL_MS))? {
             if let Event::Key(key_event) = event::read()? {
                 if key_event.code == KeyCode::Char('q')
                     || key_event.code == KeyCode::Char('Q')
@@ -415,6 +428,22 @@ fn get_terminal_width() -> u16 {
         .unwrap_or(DEFAULT_TERMINAL_WIDTH)
 }
 
+/// Calculate available width for tab title based on terminal width and domain length.
+///
+/// Allocates space dynamically: terminal width minus fixed overhead minus domain width,
+/// with a minimum to ensure titles remain readable.
+fn calculate_title_width(terminal_width: u16, domain_len: usize) -> usize {
+    let term_width = terminal_width as usize;
+    let domain_display_width = domain_len.min(MAX_DOMAIN_WIDTH);
+
+    // Available = terminal - fixed overhead - domain - some padding
+    let available = term_width
+        .saturating_sub(TAB_LINE_FIXED_OVERHEAD)
+        .saturating_sub(domain_display_width);
+
+    available.max(MIN_TITLE_WIDTH)
+}
+
 /// Sort processes by CPU usage (descending)
 fn sort_processes_by_cpu(processes: &mut [ChromeProcess]) {
     processes.sort_by(|a, b| {
@@ -427,7 +456,12 @@ fn sort_processes_by_cpu(processes: &mut [ChromeProcess]) {
 /// Sample Chrome process CPU usage over multiple intervals.
 ///
 /// Creates a new System instance, takes multiple CPU samples at regular intervals,
-/// and returns the collected Chrome processes with their averaged CPU usage.
+/// and returns the collected Chrome processes with accurate CPU usage readings.
+/// Multiple samples allow `sysinfo` to calculate delta-based CPU percentages.
+///
+/// **Note**: This function blocks for the sampling duration and is not interruptible.
+/// For single-run mode this is typically brief (~1 second with default settings).
+/// Watch mode uses a different code path with interruptible sampling.
 fn sample_chrome_processes(samples: u32) -> Vec<ChromeProcess> {
     let interval = Duration::from_millis(SAMPLE_INTERVAL_MS);
 
@@ -503,7 +537,8 @@ fn get_chrome_tabs() -> Result<Vec<TabInfo>> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("not allowed") || stderr.contains("not permitted") {
+        let stderr_lower = stderr.to_lowercase();
+        if stderr_lower.contains("not allowed") || stderr_lower.contains("not permitted") {
             return Err(anyhow::anyhow!(
                 "Automation permission denied. Enable in: System Settings > Privacy & Security > Automation"
             ));
@@ -628,10 +663,12 @@ fn print_human_readable(
     if let Some(tabs) = tabs {
         println!("\n{} ({}):\n", "Open Tabs".bold(), tabs.len());
 
+        let terminal_width = get_terminal_width();
         for tab in tabs {
             // Extract domain from URL for display
             let domain = extract_domain(&tab.url);
-            let title = truncate_string(&tab.title, 50);
+            let title_width = calculate_title_width(terminal_width, domain.chars().count());
+            let title = truncate_string(&tab.title, title_width);
 
             println!(
                 "  {} {} ({})",
@@ -852,6 +889,63 @@ mod tests {
     fn test_get_terminal_width() {
         // Should return some reasonable value (either detected or default)
         let width = get_terminal_width();
-        assert!(width >= MIN_TABLE_WIDTH);
+        // The function falls back to DEFAULT_TERMINAL_WIDTH (80) if detection fails,
+        // and MIN_TABLE_WIDTH is 45, so we expect width >= MIN_TABLE_WIDTH
+        assert!(
+            width >= MIN_TABLE_WIDTH,
+            "Terminal width {} should be at least MIN_TABLE_WIDTH ({})",
+            width,
+            MIN_TABLE_WIDTH
+        );
+    }
+
+    #[test]
+    fn test_calculate_title_width_standard_terminal() {
+        // Standard 80-char terminal with a typical domain
+        let width = calculate_title_width(80, 15); // e.g., "github.com" domain
+        // 80 - 15 (overhead) - 15 (domain) = 50
+        assert_eq!(width, 50);
+    }
+
+    #[test]
+    fn test_calculate_title_width_wide_terminal() {
+        // Wide terminal (120 chars) gives more room for titles
+        let width = calculate_title_width(120, 20);
+        // 120 - 15 - 20 = 85
+        assert_eq!(width, 85);
+    }
+
+    #[test]
+    fn test_calculate_title_width_narrow_terminal() {
+        // Narrow terminal should still give at least MIN_TITLE_WIDTH
+        let width = calculate_title_width(40, 20);
+        // 40 - 15 - 20 = 5, but min is 20
+        assert_eq!(width, MIN_TITLE_WIDTH);
+    }
+
+    #[test]
+    fn test_calculate_title_width_long_domain_capped() {
+        // Very long domain should be capped at MAX_DOMAIN_WIDTH
+        let width = calculate_title_width(80, 100); // very long domain
+        // 80 - 15 - 35 (capped) = 30
+        assert_eq!(width, 30);
+    }
+
+    #[test]
+    fn test_calculate_title_width_never_below_minimum() {
+        // Even with tiny terminal and huge domain, should return MIN_TITLE_WIDTH
+        for terminal_width in [20_u16, 30, 40, 50] {
+            for domain_len in [10, 50, 100] {
+                let width = calculate_title_width(terminal_width, domain_len);
+                assert!(
+                    width >= MIN_TITLE_WIDTH,
+                    "calculate_title_width({}, {}) = {} should be >= {}",
+                    terminal_width,
+                    domain_len,
+                    width,
+                    MIN_TITLE_WIDTH
+                );
+            }
+        }
     }
 }
