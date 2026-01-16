@@ -291,9 +291,14 @@ function wt() {
         # No args: show list interactively
         cwt
     else
-        local target=$(cwt "$@")
-        if [ $? -eq 0 ] && [ -n "$target" ]; then
+        local target
+        target=$(cwt "$@")
+        local exit_code=$?
+        if [ $exit_code -eq 0 ] && [ -n "$target" ] && [ -d "$target" ]; then
             cd "$target"
+        else
+            [ -n "$target" ] && echo "$target"
+            return $exit_code
         fi
     fi
 }
