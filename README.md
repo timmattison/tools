@@ -1179,7 +1179,7 @@ bm -suffix .mkv -destination /Volumes/Backup/videos
 find ~/Downloads -name "IMG_*" -type f -exec mv {} ~/Pictures/camera/ \;
 
 # With bm
-bm -suffix IMG_ -destination ~/Pictures/camera ~/Downloads
+bm -prefix IMG_ -destination ~/Pictures/camera ~/Downloads
 ```
 
 **Moving files from multiple directories:**
