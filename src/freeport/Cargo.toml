@@ -5,8 +5,9 @@ edition.workspace = true
 description = "A Rust tool that finds a free TCP port on localhost"
 
 [dependencies]
-clap.workspace = true
 anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
 rand.workspace = true
 
 [lints]

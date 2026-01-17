@@ -1,10 +1,11 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::Parser;
 use std::net::SocketAddr;
 
 /// Show which program is listening on a given port
 #[derive(Parser, Debug)]
-#[clap(author, version, about)]
+#[clap(author, version = version_string!(), about)]
 struct Args {
     /// The port number to check
     port: u16,

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::Parser;
 use clipboardmon::{monitor_clipboard, Transformer, DEFAULT_POLL_INTERVAL};
 use log::error;
@@ -9,6 +10,7 @@ const WARNING_PREFIX: &str = "DANGEROUS PASTE CONTENT AHEAD! ";
 
 #[derive(Parser)]
 #[command(name = "safeboard")]
+#[command(version = version_string!())]
 #[command(about = "Monitor clipboard for dangerous Unicode characters")]
 #[command(long_about = "Detects invisible Unicode characters and unsafe code points that could be used in attacks")]
 struct Cli {

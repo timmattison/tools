@@ -8,8 +8,9 @@ name = "reposize"
 path = "src/main.rs"
 
 [dependencies]
-repowalker.workspace = true
+buildinfo.workspace = true
 num-format.workspace = true
+repowalker.workspace = true
 
 [lints]
 workspace = true

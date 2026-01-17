@@ -1,4 +1,5 @@
 .idea
+bin/
 cmd/dirhash/dirhash
 cmd/prcp/prcp
 cmd/update-aws-credentials/update-aws-credentials

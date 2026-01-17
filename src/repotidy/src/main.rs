@@ -1,6 +1,7 @@
-use std::path::Path;
-use std::process::{Command, exit};
+use buildinfo::version_string;
 use repowalker::{find_git_repo, RepoWalker};
+use std::path::Path;
+use std::process::{exit, Command};
 
 fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io::Error> {
     let output = Command::new(command[0])
@@ -21,6 +22,12 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
 }
 
 fn main() {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("repotidy {}", version_string!());
+        return;
+    }
+
     let repo_root = match find_git_repo() {
         Some(root) => root,
         None => {
@@ -28,7 +35,7 @@ fn main() {
             exit(1);
         }
     };
-    
+
     let walker = RepoWalker::new(repo_root.clone())
         .respect_gitignore(false)  // Don't respect gitignore - find ALL Go projects
         .skip_node_modules(true)

@@ -1,9 +1,11 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::Parser;
 use filewalker::{FileWalker, FilterType, format_bytes};
 
 #[derive(Parser)]
 #[command(name = "sf")]
+#[command(version = version_string!())]
 #[command(about = "Calculate total size of files in directories")]
 #[command(long_about = "Calculate the total size of files in the specified directories. If no paths are provided, calculates size of files in the current directory.")]
 struct Cli {

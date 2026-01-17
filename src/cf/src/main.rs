@@ -1,9 +1,11 @@
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::Parser;
 use filewalker::{FileWalker, FilterType, format_count};
 
 #[derive(Parser)]
 #[command(name = "cf")]
+#[command(version = version_string!())]
 #[command(about = "Count files in directories")]
 #[command(long_about = "Count files in the specified directories. If no paths are provided, counts files in the current directory.")]
 struct Cli {

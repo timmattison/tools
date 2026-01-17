@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use git2::{DiffOptions, Oid, Repository};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     author,
-    version,
+    version = version_string!(),
     about = "Automatically generate git commit messages using Claude"
 )]
 struct Args {

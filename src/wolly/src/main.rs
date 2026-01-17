@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use buildinfo::version_string;
 use clap::Parser;
 use get_if_addrs::{get_if_addrs, IfAddr};
 use std::net::{UdpSocket, Ipv4Addr};
@@ -8,6 +9,7 @@ use std::time::Duration;
 /// Wake-on-LAN tool to wake computers remotely via magic packets
 #[derive(Parser, Debug)]
 #[command(name = "wolly")]
+#[command(version = version_string!())]
 #[command(about = "Wake-on-LAN tool to wake computers remotely", long_about = None)]
 struct Cli {
     /// MAC address of the target computer (formats: AA:BB:CC:DD:EE:FF, AA-BB-CC-DD-EE-FF, or AABBCCDDEEFF)

@@ -6,13 +6,14 @@ authors = ["Tim Mattison"]
 description = "Takes AWS credentials from clipboard and updates AWS credentials file"
 
 [dependencies]
+anyhow.workspace = true
 arboard.workspace = true
 aws-config.workspace = true
 aws-credential-types.workspace = true
 aws-sdk-sts.workspace = true
-tokio.workspace = true
-anyhow.workspace = true
+buildinfo.workspace = true
 dirs.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

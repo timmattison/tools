@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use memmap2::Mmap;
 use std::fs::File;
@@ -6,6 +7,7 @@ use std::io::Write;
 
 #[derive(Parser)]
 #[command(name = "hexfind")]
+#[command(version = version_string!())]
 #[command(about = "Search for a hex string in a binary file and display a hex dump with surrounding bytes")]
 #[command(long_about = None)]
 struct Cli {

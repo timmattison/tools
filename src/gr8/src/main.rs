@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use chrono::{Local, TimeZone, Utc};
 use colored::Colorize;
 use serde::Deserialize;
@@ -17,23 +18,71 @@ struct RateLimit {
     reset: i64,
 }
 
-/// Contains all GitHub API rate limit resources
-#[derive(Debug, Deserialize)]
-struct Resources {
-    core: RateLimit,
-    search: RateLimit,
-    graphql: RateLimit,
-    integration_manifest: RateLimit,
-    source_import: RateLimit,
-    code_scanning_upload: RateLimit,
-    code_scanning_autofix: RateLimit,
-    actions_runner_registration: RateLimit,
-    scim: RateLimit,
-    dependency_snapshots: RateLimit,
-    dependency_sbom: RateLimit,
-    audit_log: RateLimit,
-    audit_log_streaming: RateLimit,
-    code_search: RateLimit,
+/// A rate limit paired with its resource name for display purposes
+#[derive(Debug)]
+struct NamedRateLimit<'a> {
+    name: &'a str,
+    rate_limit: &'a RateLimit,
+}
+
+/// Macro that defines the Resources struct, RESOURCE_COUNT constant, and collect_rate_limits
+/// function from a single list of field names. This ensures they cannot get out of sync.
+///
+/// When adding a new GitHub API rate limit resource:
+/// 1. Add the field name to this macro invocation (in the order it appears in the API response)
+/// 2. That's it! The struct, constant, and collection function are all updated automatically.
+macro_rules! define_rate_limit_resources {
+    ($($name:ident),* $(,)?) => {
+        /// Contains all GitHub API rate limit resources
+        #[derive(Debug, Deserialize)]
+        struct Resources {
+            $($name: RateLimit,)*
+        }
+
+        /// Collects all rate limit resources into a vector for easier processing.
+        /// The returned vector contains all resources in the same order as defined in the struct.
+        fn collect_rate_limits(resources: &Resources) -> Vec<NamedRateLimit<'_>> {
+            vec![
+                $(NamedRateLimit { name: stringify!($name), rate_limit: &resources.$name },)*
+            ]
+        }
+
+        /// Number of rate limit resources defined in the GitHub API.
+        /// This constant is automatically kept in sync with the Resources struct and collect_rate_limits.
+        /// Only used in tests to verify the partitioning logic.
+        #[cfg(test)]
+        const RESOURCE_COUNT: usize = [$( stringify!($name) ),*].len();
+
+        /// Creates a Resources struct for testing where all resources have the given remaining count.
+        /// Uses the test module's make_rate_limit function.
+        #[cfg(test)]
+        fn make_all_resources_with_remaining(remaining: u32) -> Resources {
+            use crate::tests::make_rate_limit;
+            Resources {
+                $($name: make_rate_limit(remaining),)*
+            }
+        }
+    };
+}
+
+// Define all GitHub API rate limit resources in a single place.
+// The macro generates: Resources struct, RESOURCE_COUNT constant, collect_rate_limits function,
+// and the test helper make_all_resources_with_remaining.
+define_rate_limit_resources! {
+    core,
+    graphql,
+    search,
+    code_search,
+    code_scanning_upload,
+    code_scanning_autofix,
+    actions_runner_registration,
+    integration_manifest,
+    source_import,
+    dependency_snapshots,
+    dependency_sbom,
+    scim,
+    audit_log,
+    audit_log_streaming,
 }
 
 /// Top-level response structure from GitHub API rate_limit endpoint
@@ -41,7 +90,7 @@ struct Resources {
 struct RateLimitResponse {
     resources: Resources,
     /// Rate limit for the core API (duplicates resources.core, kept for API structure completeness)
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Required by GitHub API response structure but not used")]
     rate: RateLimit,
 }
 
@@ -151,8 +200,36 @@ fn print_rate_limit_row(name: &str, rate_limit: &RateLimit) {
     );
 }
 
+/// Prints a table of rate limits with the given title
+/// Skips printing if the list is empty
+fn print_rate_limit_table(title: &str, rate_limits: &[NamedRateLimit]) {
+    if rate_limits.is_empty() {
+        return;
+    }
+
+    println!("{}\n", title);
+    println!(
+        "{:<30} {:<8} {:<8} {:<10} Reset Time",
+        "Resource", "Limit", "Used", "Remaining"
+    );
+    println!("{}", "─".repeat(79));
+
+    for named in rate_limits {
+        print_rate_limit_row(named.name, named.rate_limit);
+    }
+
+    println!();
+}
+
 /// Main entry point - fetches, parses, and displays GitHub API rate limits
+/// Displays rate limits in two tables: available (non-exhausted) first, then exhausted
 fn main() -> Result<()> {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("gr8 {}", version_string!());
+        return Ok(());
+    }
+
     let json_data = fetch_rate_limit_data()?;
     let response: RateLimitResponse = serde_json::from_str(&json_data)
         .context("Failed to parse JSON response")?;
@@ -161,30 +238,17 @@ fn main() -> Result<()> {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S");
     println!("\nGitHub API Rate Limits (as of {})\n", now);
 
-    // Print table header
-    println!(
-        "{:<30} {:<8} {:<8} {:<10} {}",
-        "Resource", "Limit", "Used", "Remaining", "Reset Time"
-    );
-    println!("{}", "─".repeat(79));
+    // Collect and partition rate limits into available (remaining > 0) and exhausted (remaining == 0)
+    let all_limits = collect_rate_limits(&response.resources);
+    let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
+        .into_iter()
+        .partition(|named| named.rate_limit.remaining > 0);
 
-    // Print all resource rate limits
-    print_rate_limit_row("core", &response.resources.core);
-    print_rate_limit_row("graphql", &response.resources.graphql);
-    print_rate_limit_row("search", &response.resources.search);
-    print_rate_limit_row("code_search", &response.resources.code_search);
-    print_rate_limit_row("code_scanning_upload", &response.resources.code_scanning_upload);
-    print_rate_limit_row("code_scanning_autofix", &response.resources.code_scanning_autofix);
-    print_rate_limit_row("actions_runner_registration", &response.resources.actions_runner_registration);
-    print_rate_limit_row("integration_manifest", &response.resources.integration_manifest);
-    print_rate_limit_row("source_import", &response.resources.source_import);
-    print_rate_limit_row("dependency_snapshots", &response.resources.dependency_snapshots);
-    print_rate_limit_row("dependency_sbom", &response.resources.dependency_sbom);
-    print_rate_limit_row("scim", &response.resources.scim);
-    print_rate_limit_row("audit_log", &response.resources.audit_log);
-    print_rate_limit_row("audit_log_streaming", &response.resources.audit_log_streaming);
+    // Print available rate limits first (easier to scroll past)
+    print_rate_limit_table("Available Rate Limits", &available);
 
-    println!();
+    // Print exhausted rate limits last (easier to find at bottom of terminal)
+    print_rate_limit_table("Exhausted Rate Limits", &exhausted);
 
     Ok(())
 }
@@ -192,6 +256,112 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Note: RESOURCE_COUNT is defined at module level by the define_rate_limit_resources! macro,
+    // ensuring it always matches the actual number of resources.
+
+    /// Creates a RateLimit with the given remaining count for testing.
+    /// This function is used by the macro-generated make_all_resources_with_remaining.
+    pub fn make_rate_limit(remaining: u32) -> RateLimit {
+        RateLimit {
+            limit: 5000,
+            used: 5000 - remaining,
+            remaining,
+            reset: Utc::now().timestamp() + 3600,
+        }
+    }
+
+    /// Creates a Resources struct with specified remaining counts for core and graphql,
+    /// all other resources get remaining=100. Useful for testing partitioning with specific resources.
+    fn make_resources_with_specific_exhausted(core_remaining: u32, graphql_remaining: u32) -> Resources {
+        let mut resources = make_all_resources_with_remaining(100);
+        resources.core = make_rate_limit(core_remaining);
+        resources.graphql = make_rate_limit(graphql_remaining);
+        resources
+    }
+
+    #[test]
+    fn test_collect_rate_limits_returns_all_resources() {
+        let resources = make_all_resources_with_remaining(100);
+        let collected = collect_rate_limits(&resources);
+        assert_eq!(
+            collected.len(),
+            RESOURCE_COUNT,
+            "collect_rate_limits returned {} items but RESOURCE_COUNT is {} \
+             (both are generated by the same macro, so this should never fail)",
+            collected.len(),
+            RESOURCE_COUNT
+        );
+    }
+
+    #[test]
+    fn test_partition_separates_exhausted_from_available() {
+        // core exhausted (0), graphql available (100), others available (100)
+        let resources = make_resources_with_specific_exhausted(0, 100);
+        let all_limits = collect_rate_limits(&resources);
+
+        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
+            .into_iter()
+            .partition(|named| named.rate_limit.remaining > 0);
+
+        // Core should be in exhausted
+        assert!(
+            exhausted.iter().any(|n| n.name == "core"),
+            "Core (remaining=0) should be in exhausted list"
+        );
+
+        // Graphql should be in available
+        assert!(
+            available.iter().any(|n| n.name == "graphql"),
+            "Graphql (remaining=100) should be in available list"
+        );
+
+        // Counts should add up
+        assert_eq!(
+            available.len() + exhausted.len(),
+            RESOURCE_COUNT,
+            "Total partitioned items should equal RESOURCE_COUNT"
+        );
+    }
+
+    #[test]
+    fn test_partition_all_exhausted() {
+        // All resources exhausted (remaining=0)
+        let resources = make_all_resources_with_remaining(0);
+
+        let all_limits = collect_rate_limits(&resources);
+        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
+            .into_iter()
+            .partition(|named| named.rate_limit.remaining > 0);
+
+        assert!(
+            available.is_empty(),
+            "All resources are exhausted, available should be empty"
+        );
+        assert_eq!(
+            exhausted.len(),
+            RESOURCE_COUNT,
+            "All resources should be exhausted"
+        );
+    }
+
+    #[test]
+    fn test_partition_none_exhausted() {
+        // All resources available (remaining > 0)
+        let resources = make_all_resources_with_remaining(100);
+        let all_limits = collect_rate_limits(&resources);
+
+        let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
+            .into_iter()
+            .partition(|named| named.rate_limit.remaining > 0);
+
+        assert!(exhausted.is_empty(), "No resources are exhausted");
+        assert_eq!(
+            available.len(),
+            RESOURCE_COUNT,
+            "All resources should be available"
+        );
+    }
 
     #[test]
     fn test_format_time_until_reset_past_returns_none() {

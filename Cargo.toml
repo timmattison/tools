@@ -121,6 +121,7 @@ windows-sys = { version = "0.60", features = [
 ] }
 
 # Internal crates
+buildinfo = { path = "src/buildinfo" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 repowalker = { path = "src/repowalker" }

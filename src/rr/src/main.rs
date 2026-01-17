@@ -2,11 +2,13 @@ use std::env;
 use std::path::Path;
 use std::process::{Command, exit};
 use walkdir::WalkDir;
+use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 
 #[derive(Parser)]
 #[command(name = "rr")]
+#[command(version = version_string!())]
 #[command(about = "Rust remover - runs cargo clean in all Rust projects")]
 struct Cli {
     #[arg(long, help = "Don't go to the git repository root before running")]

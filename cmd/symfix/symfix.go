@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/log"
+	"github.com/timmattison/tools/internal/version"
 )
 
 func main() {
@@ -22,6 +23,9 @@ func main() {
 	flag.StringVar(&prependToFix, "prepend-to-fix", "", "String to prepend to broken symlink targets to attempt fixing them")
 	var removeToFix string
 	flag.StringVar(&removeToFix, "remove-to-fix", "", "String to remove from the beginning of broken symlink targets to attempt fixing them")
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.BoolVar(&showVersion, "V", false, "Show version information (shorthand)")
 
 	// Custom usage message
 	flag.Usage = func() {
@@ -39,6 +43,12 @@ func main() {
 
 	// Parse flags
 	flag.Parse()
+
+	// Show version if requested
+	if showVersion {
+		fmt.Println(version.String("symfix"))
+		os.Exit(0)
+	}
 
 	// Show help if requested
 	if help {

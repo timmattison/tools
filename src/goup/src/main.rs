@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
+use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 
@@ -22,7 +23,7 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Update Go dependencies in a repository", long_about = None)]
+#[command(author, version = version_string!(), about = "Update Go dependencies in a repository", long_about = None)]
 struct Args {
     /// Update to latest versions (use go get -u)
     #[arg(long, short = 'u')]

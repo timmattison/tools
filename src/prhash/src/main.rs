@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::{Parser, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -33,7 +34,7 @@ enum HashAlgorithm {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Progress hash - compute file hashes with progress bar", long_about = None)]
+#[command(author, version = version_string!(), about = "Progress hash - compute file hashes with progress bar", long_about = None)]
 struct Args {
     /// Hash algorithm to use (defaults to blake3)
     #[arg(short = 'a', long, value_enum)]

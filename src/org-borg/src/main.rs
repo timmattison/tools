@@ -4,6 +4,7 @@ mod git;
 mod github;
 
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use std::path::PathBuf;
@@ -12,7 +13,7 @@ use std::path::PathBuf;
 #[command(
     name = "org-borg",
     about = "Assimilate GitHub organization repositories - resistance is futile",
-    version
+    version = version_string!()
 )]
 struct Cli {
     #[arg(

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
+use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 
@@ -30,7 +31,7 @@ fn check_cargo_edit_installed() -> bool {
 }
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Polish Rust dependencies - update crates in a repository", long_about = None)]
+#[command(author, version = version_string!(), about = "Polish Rust dependencies - update crates in a repository", long_about = None)]
 struct Args {
     /// Use latest versions for Rust crates (requires cargo-edit)
     #[arg(long, short = 'l')]

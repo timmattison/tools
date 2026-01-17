@@ -1,0 +1,15 @@
+# ShellCheck configuration for Buffalo Tools
+# https://www.shellcheck.net/wiki/
+
+# Enable all checks by default (no disabled rules)
+# This ensures we catch:
+# - SC2002: Useless use of cat (UUOC)
+# - SC2086: Double quote to prevent word splitting
+# - SC2046: Quote to prevent word splitting/globbing
+# - And many other common shell script issues
+
+# Use bash as the default shell
+shell=bash
+
+# External sources (scripts sourced with . or source) are allowed
+external-sources=true

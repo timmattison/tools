@@ -1,11 +1,13 @@
 use std::env;
 use std::path::Path;
 use std::process::{Command, exit};
+use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
 
 #[derive(Parser)]
 #[command(name = "nodeup")]
+#[command(version = version_string!())]
 #[command(about = "Update npm/pnpm packages in directories with package.json")]
 struct Cli {
     #[arg(long, help = "Use --latest flag with npm or -L with pnpm")]

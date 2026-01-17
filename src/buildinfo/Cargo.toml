@@ -1,0 +1,12 @@
+[package]
+name = "buildinfo"
+version = "0.1.0"
+edition.workspace = true
+description = "Build-time version information for Buffalo Tools"
+license.workspace = true
+
+[dependencies]
+const_format = "0.2"
+
+[lints]
+workspace = true

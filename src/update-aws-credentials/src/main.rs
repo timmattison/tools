@@ -3,6 +3,7 @@ use arboard::Clipboard;
 use aws_config::meta::region::RegionProviderChain;
 use aws_credential_types::Credentials;
 use aws_sdk_sts::Client as StsClient;
+use buildinfo::version_string;
 use std::fs::{create_dir_all, File};
 use std::io::Write;
 
@@ -76,6 +77,12 @@ fn write_credentials(
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Handle --version flag
+    if std::env::args().any(|arg| arg == "--version" || arg == "-V") {
+        println!("update-aws-credentials {}", version_string!());
+        return Ok(());
+    }
+
     let mut clipboard = Clipboard::new().context("Failed to initialize clipboard")?;
     let clipboard_data = clipboard
         .get_text()

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use dialoguer::Confirm;
 use std::time::Instant;
@@ -8,7 +9,7 @@ mod r2_wrangler;
 use r2_wrangler::R2WranglerClient;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = version_string!(), about, long_about = None)]
 struct Args {
     /// Name of the R2 bucket
     bucket: String,

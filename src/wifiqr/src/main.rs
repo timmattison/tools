@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::Parser;
 use image::{DynamicImage, GenericImage, GenericImageView, Rgba};
 use qrcode::{QrCode, EcLevel};
 
 #[derive(Parser)]
 #[command(name = "wifiqr")]
+#[command(version = version_string!())]
 #[command(about = "Generate a QR code for WiFi network access")]
 #[command(long_about = None)]
 struct Cli {

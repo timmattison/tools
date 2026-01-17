@@ -8,9 +8,10 @@ name = "rr"
 path = "src/main.rs"
 
 [dependencies]
+buildinfo.workspace = true
+clap.workspace = true
 repowalker.workspace = true
 walkdir.workspace = true
-clap.workspace = true
 
 [lints]
 workspace = true
