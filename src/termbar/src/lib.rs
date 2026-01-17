@@ -437,11 +437,18 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
             return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, dot_ext);
         }
 
-        // Not enough room to preserve extension with minimum basename visibility.
-        // Try truncating both basename and extension, but only if we can still
-        // show at least MIN_BASENAME_CHARS of the basename.
+        // Not enough room to preserve the full extension with minimum basename visibility.
+        // This branch is only reached when the extension is long (e.g., ".extension",
+        // ".javascript"). Short extensions like ".c", ".rs", ".txt" always take the
+        // branch above because they fit within the minimum requirements.
+        //
+        // Since we're here, the extension must be truncated. We allocate 1/3 of the
+        // remaining space to basename and 2/3 to extension because:
+        // 1. The extension indicates file type, which is often more useful than
+        //    seeing more of the basename
+        // 2. For long extensions, we want to preserve enough to be recognizable
+        //    (e.g., ".javas" from ".javascript" is more useful than ".jav")
         let remaining = max_width_usize.saturating_sub(ELLIPSIS_WITH_EXT_WIDTH);
-        // Give 1/3 to basename, 2/3 to extension since we prioritize extension visibility
         let basename_budget = remaining / 3;
 
         // If we can't show MIN_BASENAME_CHARS, fall through to no-extension truncation
@@ -876,9 +883,50 @@ mod tests {
     // ========================================================================
 
     #[test]
+    fn test_short_extensions_always_preserved_fully() {
+        // Short extensions like .c, .rs, .txt should ALWAYS be preserved in full.
+        // They never reach the 1/3-2/3 split code path because they always fit
+        // within the minimum requirements (MIN_BASENAME_CHARS + ellipsis + ext).
+        //
+        // This test documents this important design invariant.
+
+        // .c extension: min_with_ext = 1 + 2 + 2 = 5
+        // At width 5, we should see "x...c" (full extension preserved)
+        let result = truncate_filename("verylongfilename.c", 5);
+        assert!(
+            result.ends_with(".c"),
+            "Short extension .c should always be fully preserved: {}",
+            result
+        );
+        assert_eq!(result, "v...c");
+
+        // .rs extension: min_with_ext = 1 + 2 + 3 = 6
+        let result = truncate_filename("verylongfilename.rs", 6);
+        assert!(
+            result.ends_with(".rs"),
+            "Short extension .rs should always be fully preserved: {}",
+            result
+        );
+        assert_eq!(result, "v...rs");
+
+        // .txt extension: min_with_ext = 1 + 2 + 4 = 7
+        let result = truncate_filename("verylongfilename.txt", 7);
+        assert!(
+            result.ends_with(".txt"),
+            "Short extension .txt should always be fully preserved: {}",
+            result
+        );
+        assert_eq!(result, "v...txt");
+    }
+
+    #[test]
     fn test_long_extension_truncation_favors_extension() {
         // When both basename and extension must be truncated,
-        // extension should get 2/3 of the budget
+        // extension should get 2/3 of the budget.
+        //
+        // NOTE: This code path is only reached for LONG extensions that
+        // can't fit fully. Short extensions like .c, .rs, .txt always
+        // take the earlier branch where they're preserved in full.
         let result = truncate_filename("ab.longerext", 10);
         // max_width=10, ellipsis=2, remaining=8
         // basename_budget=8/3=2, ext_budget=8-2=6

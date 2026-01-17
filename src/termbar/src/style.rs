@@ -45,7 +45,10 @@ const BATCH_PROGRESS_STATS_FORMAT: &str =
 /// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60
 /// The filename width is added to this to get total overhead.
 ///
-/// See the format string in `StyleType::Copy` match arm of `create_template()`.
+/// **Cross-reference:** This constant must match the template in
+/// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Copy` match arm.
+/// When modifying the template format, update this constant and run
+/// `test_copy_style_overhead_constant_is_accurate` to verify correctness.
 const COPY_STYLE_BASE_OVERHEAD: u16 = 60;
 
 /// Base overhead for verify style progress bars.
@@ -53,21 +56,30 @@ const COPY_STYLE_BASE_OVERHEAD: u16 = 60;
 /// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70
 /// The filename width is added to this to get total overhead.
 ///
-/// See the format string in `StyleType::Verify` match arm of `create_template()`.
+/// **Cross-reference:** This constant must match the template in
+/// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Verify` match arm.
+/// When modifying the template format, update this constant and run
+/// `test_verify_style_overhead_constant_is_accurate` to verify correctness.
 const VERIFY_STYLE_BASE_OVERHEAD: u16 = 70;
 
 /// Base overhead for batch style progress bars.
 ///
 /// Components: "Batch" prefix + brackets + stats format = ~85
 ///
-/// See the format string in `StyleType::Batch` match arm of `create_template()`.
+/// **Cross-reference:** This constant must match the template in
+/// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Batch` match arm.
+/// When modifying the template format, update this constant and run
+/// `test_batch_style_overhead_constant_is_accurate` to verify correctness.
 const BATCH_STYLE_OVERHEAD: u16 = 85;
 
 /// Base overhead for hash style progress bars.
 ///
 /// Components: spinner(2) + brackets(4) + bytes/total(25) + speed/eta(35) + msg(variable) + spaces(4) = ~70
 ///
-/// See the format string in `StyleType::Hash` match arm of `create_template()`.
+/// **Cross-reference:** This constant must match the template in
+/// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Hash` match arm.
+/// When modifying the template format, update this constant and run
+/// `test_hash_style_overhead_constant_is_accurate` to verify correctness.
 const HASH_STYLE_OVERHEAD: u16 = 70;
 
 /// Builder for progress bar styles with automatic width calculation.
