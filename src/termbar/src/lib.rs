@@ -126,13 +126,6 @@ const _: () = assert!(
     "ELLIPSIS_NO_EXT_WIDTH must equal ELLIPSIS_NO_EXT.len()"
 );
 
-/// Minimum width required for meaningful truncation with an indicator.
-///
-/// Below this width, truncation returns raw characters without any ellipsis
-/// indicator because there's not enough space for both content and indicator.
-/// This is 4 characters to allow at least: `X...` (1 char + 3 dot ellipsis).
-const MIN_TRUNCATION_WIDTH: usize = 4;
-
 /// Minimum basename characters to show when preserving an extension.
 ///
 /// When truncating a filename with an extension, we ensure at least this many
@@ -140,7 +133,37 @@ const MIN_TRUNCATION_WIDTH: usize = 4;
 /// "...txt" with no visible filename portion. If there isn't enough space for
 /// this minimum plus the ellipsis and extension, we fall back to simple
 /// truncation without extension preservation.
+///
+/// # Invariant
+///
+/// Must be at least 1 to ensure visible content in truncated output.
+/// The compile-time assertion below enforces this invariant.
 const MIN_BASENAME_CHARS: usize = 1;
+
+// Compile-time assertion to ensure MIN_BASENAME_CHARS is sensible.
+// A value of 0 would produce truncated filenames with no visible content.
+const _: () = assert!(
+    MIN_BASENAME_CHARS >= 1,
+    "MIN_BASENAME_CHARS must be at least 1 to ensure visible content"
+);
+
+/// Minimum width required for meaningful truncation with an indicator.
+///
+/// Below this width, truncation returns raw characters without any ellipsis
+/// indicator because there's not enough space for both content and indicator.
+///
+/// # Invariant
+///
+/// This equals `MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH` (1 + 3 = 4), allowing
+/// at least one content character plus the ellipsis indicator: `X...`
+/// The compile-time assertion below enforces this invariant.
+const MIN_TRUNCATION_WIDTH: usize = MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH;
+
+// Compile-time assertion to verify MIN_TRUNCATION_WIDTH is derived correctly.
+const _: () = assert!(
+    MIN_TRUNCATION_WIDTH == 4,
+    "MIN_TRUNCATION_WIDTH must equal MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH (currently 4)"
+);
 
 /// Escape braces in a string for use in indicatif templates.
 ///
