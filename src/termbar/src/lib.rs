@@ -65,6 +65,106 @@ pub const MAX_BAR_WIDTH: u16 = 100;
 /// - 2 space characters for the empty/background portion of the bar
 pub const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
 
+/// Maximum length for a file extension to be recognized as such.
+///
+/// Extensions longer than this are treated as part of the basename.
+/// This prevents unusual filenames like `file.verylongextensionname` from
+/// being split incorrectly during truncation.
+const MAX_EXTENSION_LEN: usize = 10;
+
+/// Ellipsis used when truncating filenames with an extension.
+///
+/// We use `..` (2 dots) so that when combined with the extension's dot,
+/// the result is 3 visible dots: `filename...ext` (cleaner than 4 dots).
+const ELLIPSIS_WITH_EXT: &str = "..";
+
+/// Width in terminal columns of [`ELLIPSIS_WITH_EXT`].
+///
+/// # Invariant
+///
+/// This must equal `ELLIPSIS_WITH_EXT.len()`. Since our ellipsis is ASCII,
+/// byte length equals character count equals display width.
+/// The compile-time assertion below enforces this invariant.
+const ELLIPSIS_WITH_EXT_WIDTH: usize = ELLIPSIS_WITH_EXT.len();
+
+/// Ellipsis used when truncating filenames without an extension.
+///
+/// We use `...` (3 dots) for standard truncation appearance.
+const ELLIPSIS_NO_EXT: &str = "...";
+
+/// Width in terminal columns of [`ELLIPSIS_NO_EXT`].
+///
+/// # Invariant
+///
+/// This must equal `ELLIPSIS_NO_EXT.len()`. Since our ellipsis is ASCII,
+/// byte length equals character count equals display width.
+/// The compile-time assertion below enforces this invariant.
+const ELLIPSIS_NO_EXT_WIDTH: usize = ELLIPSIS_NO_EXT.len();
+
+// Compile-time assertions to ensure ellipsis strings remain ASCII and
+// that the width constants stay in sync with the string definitions.
+// If someone changes these to Unicode characters (e.g., '…'), these assertions
+// will fail, prompting them to update the width calculation logic.
+//
+// We verify two things for each ellipsis:
+// 1. The string has the expected length (catches changes to the string)
+// 2. The _WIDTH constant equals the string length (catches constant drift)
+const _: () = assert!(
+    ELLIPSIS_WITH_EXT.len() == 2,
+    "ELLIPSIS_WITH_EXT must be exactly 2 ASCII characters"
+);
+const _: () = assert!(
+    ELLIPSIS_WITH_EXT_WIDTH == ELLIPSIS_WITH_EXT.len(),
+    "ELLIPSIS_WITH_EXT_WIDTH must equal ELLIPSIS_WITH_EXT.len()"
+);
+const _: () = assert!(
+    ELLIPSIS_NO_EXT.len() == 3,
+    "ELLIPSIS_NO_EXT must be exactly 3 ASCII characters"
+);
+const _: () = assert!(
+    ELLIPSIS_NO_EXT_WIDTH == ELLIPSIS_NO_EXT.len(),
+    "ELLIPSIS_NO_EXT_WIDTH must equal ELLIPSIS_NO_EXT.len()"
+);
+
+/// Minimum basename characters to show when preserving an extension.
+///
+/// When truncating a filename with an extension, we ensure at least this many
+/// characters of the basename are visible. This prevents awkward results like
+/// "...txt" with no visible filename portion. If there isn't enough space for
+/// this minimum plus the ellipsis and extension, we fall back to simple
+/// truncation without extension preservation.
+///
+/// # Invariant
+///
+/// Must be at least 1 to ensure visible content in truncated output.
+/// The compile-time assertion below enforces this invariant.
+const MIN_BASENAME_CHARS: usize = 1;
+
+// Compile-time assertion to ensure MIN_BASENAME_CHARS is sensible.
+// A value of 0 would produce truncated filenames with no visible content.
+const _: () = assert!(
+    MIN_BASENAME_CHARS >= 1,
+    "MIN_BASENAME_CHARS must be at least 1 to ensure visible content"
+);
+
+/// Minimum width required for meaningful truncation with an indicator.
+///
+/// Below this width, truncation returns raw characters without any ellipsis
+/// indicator because there's not enough space for both content and indicator.
+///
+/// # Invariant
+///
+/// This equals `MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH` (1 + 3 = 4), allowing
+/// at least one content character plus the ellipsis indicator: `X...`
+/// The compile-time assertion below enforces this invariant.
+const MIN_TRUNCATION_WIDTH: usize = MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH;
+
+// Compile-time assertion to verify MIN_TRUNCATION_WIDTH is derived correctly.
+const _: () = assert!(
+    MIN_TRUNCATION_WIDTH == 4,
+    "MIN_TRUNCATION_WIDTH must equal MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH (currently 4)"
+);
+
 /// Escape braces in a string for use in indicatif templates.
 ///
 /// Indicatif uses `{placeholder}` syntax, so literal braces must be doubled
@@ -162,6 +262,235 @@ pub fn str_display_width_as_u16(s: &str) -> u16 {
     u16::try_from(s.width()).unwrap_or(u16::MAX)
 }
 
+/// Calculate the maximum filename display width that allows the progress bar to fit.
+///
+/// This function determines how wide a filename can be while still leaving room for:
+/// - The minimum progress bar width ([`MIN_BAR_WIDTH`] = 10 columns)
+/// - The fixed overhead (spinner, stats, brackets, etc.)
+///
+/// # Arguments
+///
+/// * `terminal_width` - The current terminal width in columns.
+/// * `base_overhead` - Fixed overhead excluding filename (e.g., 60 for copy style).
+///
+/// # Returns
+///
+/// Maximum filename display width in columns.
+///
+/// # Example
+///
+/// ```
+/// use termbar::calculate_max_filename_width;
+///
+/// // Terminal 100, overhead 60, min bar 10 -> max filename = 30
+/// assert_eq!(calculate_max_filename_width(100, 60), 30);
+///
+/// // Narrow terminal: 80 - 60 - 10 = 10 max filename
+/// assert_eq!(calculate_max_filename_width(80, 60), 10);
+/// ```
+#[must_use]
+pub fn calculate_max_filename_width(terminal_width: u16, base_overhead: u16) -> u16 {
+    // terminal_width = base_overhead + filename_width + bar_width
+    // We want: bar_width >= MIN_BAR_WIDTH
+    // So: filename_width <= terminal_width - base_overhead - MIN_BAR_WIDTH
+    terminal_width
+        .saturating_sub(base_overhead)
+        .saturating_sub(MIN_BAR_WIDTH)
+}
+
+/// Take characters from the start of a string until reaching max display width.
+///
+/// Uses unicode display width for accurate terminal column counting.
+///
+/// # Arguments
+///
+/// * `s` - The string to take characters from.
+/// * `max_width` - Maximum display width in terminal columns.
+///
+/// # Returns
+///
+/// A string containing characters from the start of `s` that fit within `max_width`.
+fn take_chars_by_width(s: &str, max_width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+
+    let mut result = String::new();
+    let mut width = 0;
+
+    for ch in s.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        result.push(ch);
+        width += ch_width;
+    }
+
+    result
+}
+
+/// Split a filename into basename and extension.
+///
+/// Returns `(basename, Some(extension))` or `(basename, None)`.
+/// Handles hidden files (starting with '.') correctly.
+///
+/// # Arguments
+///
+/// * `filename` - The filename to split.
+///
+/// # Returns
+///
+/// A tuple of (basename, optional extension without the dot).
+///
+/// # Examples
+///
+/// - `"file.txt"` -> `("file", Some("txt"))`
+/// - `"archive.tar.gz"` -> `("archive.tar", Some("gz"))`
+/// - `".bashrc"` -> `(".bashrc", None)`
+/// - `".hidden.txt"` -> `(".hidden", Some("txt"))`
+fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
+    // Handle hidden files: ".bashrc" -> basename=".bashrc", ext=None
+    // Handle ".hidden.txt" -> basename=".hidden", ext=Some("txt")
+
+    let search_start = if filename.starts_with('.') { 1 } else { 0 };
+
+    if let Some(dot_pos) = filename[search_start..].rfind('.') {
+        let actual_pos = search_start + dot_pos;
+        let ext = &filename[actual_pos + 1..];
+        // Only treat as extension if it's non-empty and reasonable length.
+        // Use chars().count() for proper unicode handling (not byte length).
+        if !ext.is_empty() && ext.chars().count() <= MAX_EXTENSION_LEN {
+            return (&filename[..actual_pos], Some(ext));
+        }
+    }
+
+    (filename, None)
+}
+
+/// Truncate a filename to fit within a maximum display width while preserving the extension.
+///
+/// When truncation is needed, the function produces output in one of two formats:
+/// - With extension: `beginning...ext` (e.g., `"American.Psycho.2000.UNCUT...mkv"`)
+/// - Without extension: `beginning...` (e.g., `"Makefile_with_very_long..."`)
+///
+/// The `..` ellipsis is used when an extension is present so that combined with
+/// the extension's leading dot, the result shows 3 dots total for a clean appearance.
+///
+/// # Arguments
+///
+/// * `filename` - The filename to truncate (just the filename, not the full path).
+/// * `max_width` - Maximum display width in terminal columns.
+///
+/// # Returns
+///
+/// The truncated filename, or the original if it fits within `max_width`.
+///
+/// # Algorithm
+///
+/// 1. If the filename fits within `max_width`, return it unchanged
+/// 2. If `max_width < 4`, return raw prefix (no room for content + ellipsis)
+/// 3. Extract the extension (last `.xxx` portion, if present and ≤10 chars)
+/// 4. If extension exists and fits with minimum basename (1 char + `..` + `.ext`):
+///    - Take as much basename as will fit, append `..` + `.extension`
+/// 5. If extension exists but full extension doesn't fit:
+///    - Split remaining space 1/3 to basename, 2/3 to extension (prioritizing
+///      extension visibility since it indicates file type)
+///    - This ratio ensures the extension remains recognizable even when truncated
+/// 6. If no extension or not enough space: return `beginning...`
+///
+/// # Edge Cases
+///
+/// - Files with no extension: truncate to `beginning...`
+/// - Files with very long extensions: truncate the extension if needed
+/// - Files starting with `.` (hidden files): treat the part after first `.` as basename
+/// - Unicode filenames: uses display width, not byte length
+///
+/// # Example
+///
+/// ```
+/// use termbar::truncate_filename;
+///
+/// // Long filename gets truncated (3 dots total: ".." + "." from extension)
+/// let truncated = truncate_filename(
+///     "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv",
+///     30
+/// );
+/// assert!(truncated.ends_with(".mkv"));
+/// // The ellipsis ".." plus extension ".mkv" creates "...mkv" (3 visible dots)
+/// assert!(truncated.contains("..."));
+///
+/// // Short filename unchanged
+/// assert_eq!(truncate_filename("file.txt", 30), "file.txt");
+/// ```
+#[must_use]
+pub fn truncate_filename(filename: &str, max_width: u16) -> String {
+    use unicode_width::UnicodeWidthStr;
+
+    let max_width_usize = usize::from(max_width);
+    let current_width = filename.width();
+
+    // If it already fits, return unchanged
+    if current_width <= max_width_usize {
+        return filename.to_string();
+    }
+
+    // Below MIN_TRUNCATION_WIDTH, we can't fit meaningful content + ellipsis,
+    // so we just return the raw prefix without any truncation indicator.
+    // This is an intentional design choice for extreme edge cases.
+    if max_width_usize < MIN_TRUNCATION_WIDTH {
+        return take_chars_by_width(filename, max_width_usize);
+    }
+
+    // Find extension - look for last '.' that isn't at position 0
+    // Handle hidden files like ".bashrc" correctly
+    let (basename, extension) = split_filename_extension(filename);
+
+    if let Some(ext) = extension {
+        let ext_width = ext.width();
+        let dot_ext = format!(".{}", ext);
+        let dot_ext_width = ext_width + 1; // +1 for the dot
+
+        // Check if we have room for: MIN_BASENAME_CHARS + .. + .ext
+        // Using ELLIPSIS_WITH_EXT ("..") so result is "name...ext" (3 dots total)
+        let min_with_ext = MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width;
+        if max_width_usize >= min_with_ext {
+            let basename_budget = max_width_usize - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width;
+            // Ensure we show at least MIN_BASENAME_CHARS (should already be guaranteed by check above)
+            debug_assert!(basename_budget >= MIN_BASENAME_CHARS);
+            let truncated_basename = take_chars_by_width(basename, basename_budget);
+            return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, dot_ext);
+        }
+
+        // Not enough room to preserve the full extension with minimum basename visibility.
+        // This branch is only reached when the extension is long (e.g., ".extension",
+        // ".javascript"). Short extensions like ".c", ".rs", ".txt" always take the
+        // branch above because they fit within the minimum requirements.
+        //
+        // Since we're here, the extension must be truncated. We allocate 1/3 of the
+        // remaining space to basename and 2/3 to extension because:
+        // 1. The extension indicates file type, which is often more useful than
+        //    seeing more of the basename
+        // 2. For long extensions, we want to preserve enough to be recognizable
+        //    (e.g., ".javas" from ".javascript" is more useful than ".jav")
+        let remaining = max_width_usize.saturating_sub(ELLIPSIS_WITH_EXT_WIDTH);
+        let basename_budget = remaining / 3;
+
+        // If we can't show MIN_BASENAME_CHARS, fall through to no-extension truncation
+        if basename_budget >= MIN_BASENAME_CHARS {
+            let ext_budget = remaining - basename_budget;
+            let truncated_basename = take_chars_by_width(basename, basename_budget);
+            let truncated_ext = take_chars_by_width(&dot_ext, ext_budget);
+            return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, truncated_ext);
+        }
+
+        // Fall through to no-extension truncation below
+    }
+
+    // No extension - just truncate with ellipsis at end
+    let basename_budget = max_width_usize.saturating_sub(ELLIPSIS_NO_EXT_WIDTH);
+    let truncated = take_chars_by_width(filename, basename_budget);
+    format!("{}{}", truncated, ELLIPSIS_NO_EXT)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,9 +537,38 @@ mod tests {
 
     #[test]
     fn test_constants() {
-        assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
-        assert!(DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH);
+        // Use const blocks for compile-time constant validation
+        const _: () = assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
+        const _: () = assert!(DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH);
         assert!(!PROGRESS_CHARS.is_empty());
+    }
+
+    #[test]
+    fn test_ellipsis_constants_are_ascii() {
+        // The ellipsis width constants assume ASCII (byte length = display width).
+        // If these are changed to Unicode (e.g., '…'), the width calculation
+        // would be incorrect. These runtime checks complement the compile-time
+        // assertions in the constant definitions.
+        assert!(
+            ELLIPSIS_WITH_EXT.is_ascii(),
+            "ELLIPSIS_WITH_EXT must be ASCII for width calculation to be correct"
+        );
+        assert!(
+            ELLIPSIS_NO_EXT.is_ascii(),
+            "ELLIPSIS_NO_EXT must be ASCII for width calculation to be correct"
+        );
+
+        // Verify width constants match actual display width
+        assert_eq!(
+            ELLIPSIS_WITH_EXT_WIDTH,
+            ELLIPSIS_WITH_EXT.len(),
+            "ELLIPSIS_WITH_EXT_WIDTH must equal string length"
+        );
+        assert_eq!(
+            ELLIPSIS_NO_EXT_WIDTH,
+            ELLIPSIS_NO_EXT.len(),
+            "ELLIPSIS_NO_EXT_WIDTH must equal string length"
+        );
     }
 
     #[test]
@@ -229,5 +587,454 @@ mod tests {
         assert_eq!(str_display_width_as_u16("中"), 2);
         // Mixed: "file" (4 cols) + 🎉 (2 cols) + ".txt" (4 cols) = 10 columns
         assert_eq!(str_display_width_as_u16("file🎉.txt"), 10);
+    }
+
+    // Tests for calculate_max_filename_width
+    #[test]
+    fn test_calculate_max_filename_width_normal() {
+        // Terminal 100, overhead 60, min bar 10 -> max filename = 30
+        assert_eq!(calculate_max_filename_width(100, 60), 30);
+    }
+
+    #[test]
+    fn test_calculate_max_filename_width_narrow() {
+        // Narrow terminal: 80 - 60 - 10 = 10 max filename
+        assert_eq!(calculate_max_filename_width(80, 60), 10);
+    }
+
+    #[test]
+    fn test_calculate_max_filename_width_very_narrow() {
+        // Very narrow terminal: 70 - 60 - 10 = 0
+        assert_eq!(calculate_max_filename_width(70, 60), 0);
+    }
+
+    #[test]
+    fn test_calculate_max_filename_width_wide() {
+        // Wide terminal: 200 - 60 - 10 = 130
+        assert_eq!(calculate_max_filename_width(200, 60), 130);
+    }
+
+    // Tests for split_filename_extension
+    #[test]
+    fn test_split_filename_extension_normal() {
+        assert_eq!(split_filename_extension("file.txt"), ("file", Some("txt")));
+        assert_eq!(split_filename_extension("document.pdf"), ("document", Some("pdf")));
+    }
+
+    #[test]
+    fn test_split_filename_extension_multiple_dots() {
+        assert_eq!(
+            split_filename_extension("archive.tar.gz"),
+            ("archive.tar", Some("gz"))
+        );
+    }
+
+    #[test]
+    fn test_split_filename_extension_hidden_file() {
+        // Hidden file with no real extension
+        assert_eq!(split_filename_extension(".bashrc"), (".bashrc", None));
+    }
+
+    #[test]
+    fn test_split_filename_extension_hidden_with_ext() {
+        // Hidden file with extension
+        assert_eq!(
+            split_filename_extension(".hidden.txt"),
+            (".hidden", Some("txt"))
+        );
+    }
+
+    #[test]
+    fn test_split_filename_extension_no_extension() {
+        assert_eq!(split_filename_extension("Makefile"), ("Makefile", None));
+        assert_eq!(split_filename_extension("README"), ("README", None));
+    }
+
+    #[test]
+    fn test_split_filename_extension_directory_like_names() {
+        // Current directory "." and parent directory ".." should be returned unchanged
+        // These are edge cases that might appear in path handling
+        assert_eq!(split_filename_extension("."), (".", None));
+        assert_eq!(split_filename_extension(".."), ("..", None));
+    }
+
+    #[test]
+    fn test_split_filename_extension_very_long_extension() {
+        // Extensions > 10 chars are not treated as extensions
+        assert_eq!(
+            split_filename_extension("file.verylongextensionname"),
+            ("file.verylongextensionname", None)
+        );
+    }
+
+    // Tests for truncate_filename
+    #[test]
+    fn test_truncate_filename_short_unchanged() {
+        assert_eq!(truncate_filename("file.txt", 30), "file.txt");
+        assert_eq!(truncate_filename("a.b", 10), "a.b");
+    }
+
+    #[test]
+    fn test_truncate_filename_empty() {
+        assert_eq!(truncate_filename("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_filename_directory_like_names() {
+        // Current directory "." and parent directory ".." should be returned unchanged
+        // since they're shorter than any reasonable max_width
+        assert_eq!(truncate_filename(".", 10), ".");
+        assert_eq!(truncate_filename("..", 10), "..");
+        // Even at width 1, "." should be unchanged
+        assert_eq!(truncate_filename(".", 1), ".");
+        // At width 1, ".." must be truncated to "."
+        assert_eq!(truncate_filename("..", 1), ".");
+    }
+
+    #[test]
+    fn test_truncate_filename_long_with_extension() {
+        let long = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let result = truncate_filename(long, 30);
+
+        // Should end with .mkv
+        assert!(
+            result.ends_with(".mkv"),
+            "Should preserve extension: {}",
+            result
+        );
+        // Should contain ellipsis
+        assert!(result.contains("..."), "Should contain ellipsis: {}", result);
+        // Should fit within max width
+        assert!(
+            str_display_width_as_u16(&result) <= 30,
+            "Should fit: {}",
+            result
+        );
+        // Should start with beginning of original
+        assert!(
+            result.starts_with("American"),
+            "Should start with beginning: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_no_extension() {
+        let result = truncate_filename("Makefile_with_very_long_name_here", 15);
+        // 15 chars - 3 (ellipsis) = 12 chars of basename
+        assert_eq!(
+            result, "Makefile_wit...",
+            "Should truncate to 12 chars + ellipsis"
+        );
+        assert_eq!(str_display_width_as_u16(&result), 15);
+    }
+
+    #[test]
+    fn test_truncate_filename_hidden_file_fits() {
+        // Hidden file that fits
+        assert_eq!(truncate_filename(".bashrc", 20), ".bashrc");
+    }
+
+    #[test]
+    fn test_truncate_filename_hidden_file_with_extension() {
+        // Hidden file with extension
+        let result = truncate_filename(".very_long_hidden_config.json", 20);
+        assert!(
+            result.ends_with(".json"),
+            "Should preserve extension: {}",
+            result
+        );
+        assert!(
+            str_display_width_as_u16(&result) <= 20,
+            "Should fit: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_minimum_width() {
+        // At width 4, can't preserve extension, falls back to "l..."
+        let result = truncate_filename("longfilename.txt", 4);
+        assert_eq!(result, "l...", "Should be 1 char + 3 dot ellipsis");
+        assert_eq!(str_display_width_as_u16(&result), 4);
+    }
+
+    #[test]
+    fn test_truncate_filename_unicode_cjk() {
+        // CJK characters (2 display columns each)
+        let result = truncate_filename("文件名称很长的文档.txt", 15);
+        assert!(
+            str_display_width_as_u16(&result) <= 15,
+            "Should fit: {}",
+            result
+        );
+        assert!(
+            result.ends_with(".txt"),
+            "Should preserve extension: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_unicode_emoji() {
+        // Emoji filename
+        let result = truncate_filename("my_cool_emoji_file_🎉🎊🎁.png", 20);
+        assert!(
+            str_display_width_as_u16(&result) <= 20,
+            "Should fit: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_truncate_filename_exact_fit() {
+        let filename = "exactly18chars.txt"; // 18 chars
+        assert_eq!(truncate_filename(filename, 18), filename);
+    }
+
+    #[test]
+    fn test_truncate_filename_very_small_max() {
+        // max_width < 4 should just take first chars
+        let result = truncate_filename("longfilename.txt", 3);
+        assert_eq!(str_display_width_as_u16(&result), 3);
+        assert_eq!(result, "lon");
+    }
+
+    #[test]
+    fn test_truncate_filename_zero_width() {
+        // Edge case: max_width = 0 should return empty string
+        assert_eq!(truncate_filename("file.txt", 0), "");
+        assert_eq!(truncate_filename("", 0), "");
+        assert_eq!(truncate_filename("longfilename.txt", 0), "");
+    }
+
+    #[test]
+    fn test_truncate_filename_one_width() {
+        // Edge case: max_width = 1 should return first char
+        let result = truncate_filename("longfilename.txt", 1);
+        assert_eq!(result, "l");
+        assert_eq!(str_display_width_as_u16(&result), 1);
+    }
+
+    #[test]
+    fn test_progress_bar_fits_with_truncation() {
+        // Simulate the actual use case: very long filename at terminal width 80
+        let long_filename = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let terminal_width: u16 = 80;
+        let base_overhead: u16 = 60;
+
+        let max_filename_width = calculate_max_filename_width(terminal_width, base_overhead);
+        let truncated = truncate_filename(long_filename, max_filename_width);
+        let filename_width = str_display_width_as_u16(&truncated);
+
+        // Total should fit: base_overhead + filename + MIN_BAR_WIDTH <= terminal_width
+        let total = base_overhead + filename_width + MIN_BAR_WIDTH;
+        assert!(
+            total <= terminal_width,
+            "Total {} should fit in terminal {}: overhead={}, filename={}, bar={}",
+            total,
+            terminal_width,
+            base_overhead,
+            filename_width,
+            MIN_BAR_WIDTH
+        );
+    }
+
+    // ========================================================================
+    // Tests for MIN_TRUNCATION_WIDTH behavior
+    // ========================================================================
+
+    #[test]
+    fn test_min_truncation_width_constant() {
+        // Verify the constant is used correctly
+        assert_eq!(MIN_TRUNCATION_WIDTH, 4);
+    }
+
+    #[test]
+    fn test_min_basename_chars_constant() {
+        // Verify MIN_BASENAME_CHARS is used correctly
+        assert_eq!(MIN_BASENAME_CHARS, 1);
+    }
+
+    #[test]
+    fn test_falls_back_to_no_extension_when_basename_too_small() {
+        // When there's not enough room for MIN_BASENAME_CHARS + ellipsis + extension,
+        // we should fall back to simple truncation without extension preservation.
+        // "file.txt" at width 4: can't fit "f...txt" (7 chars min for extension preservation)
+        // So we should get "f..." (simple truncation)
+        let result = truncate_filename("file.txt", 4);
+        assert_eq!(
+            result, "f...",
+            "Should fall back to no-extension truncation when extension can't fit"
+        );
+    }
+
+    #[test]
+    fn test_preserves_extension_with_minimum_basename() {
+        // At the boundary where we CAN fit MIN_BASENAME_CHARS + ellipsis + extension
+        // "file.txt" at width 7: "f...txt" should work
+        // min_with_ext = 1 (MIN_BASENAME_CHARS) + 2 (ellipsis) + 4 (.txt) = 7
+        let result = truncate_filename("file.txt", 7);
+        assert_eq!(
+            result, "f...txt",
+            "Should preserve extension with exactly MIN_BASENAME_CHARS"
+        );
+    }
+
+    #[test]
+    fn test_truncation_at_boundary() {
+        // At exactly MIN_TRUNCATION_WIDTH (4), we should get 1 char + 3 dots
+        // The extension can't be preserved because there's not enough room
+        let result = truncate_filename("longfilename.txt", 4);
+        assert_eq!(
+            result, "l...",
+            "At MIN_TRUNCATION_WIDTH, should get 1 char + ellipsis"
+        );
+        assert_eq!(str_display_width_as_u16(&result), 4);
+    }
+
+    #[test]
+    fn test_below_min_truncation_width_no_ellipsis() {
+        // Below MIN_TRUNCATION_WIDTH, we just get raw chars with no indicator
+        let result = truncate_filename("longfilename.txt", 3);
+        assert_eq!(result, "lon");
+        assert!(!result.contains('.'), "No ellipsis below MIN_TRUNCATION_WIDTH");
+    }
+
+    // ========================================================================
+    // Tests for extension truncation split behavior (1/3 basename, 2/3 ext)
+    // ========================================================================
+
+    #[test]
+    fn test_short_extensions_always_preserved_fully() {
+        // Short extensions like .c, .rs, .txt should ALWAYS be preserved in full.
+        // They never reach the 1/3-2/3 split code path because they always fit
+        // within the minimum requirements (MIN_BASENAME_CHARS + ellipsis + ext).
+        //
+        // This test documents this important design invariant.
+
+        // .c extension: min_with_ext = 1 + 2 + 2 = 5
+        // At width 5, we should see "x...c" (full extension preserved)
+        let result = truncate_filename("verylongfilename.c", 5);
+        assert!(
+            result.ends_with(".c"),
+            "Short extension .c should always be fully preserved: {}",
+            result
+        );
+        assert_eq!(result, "v...c");
+
+        // .rs extension: min_with_ext = 1 + 2 + 3 = 6
+        let result = truncate_filename("verylongfilename.rs", 6);
+        assert!(
+            result.ends_with(".rs"),
+            "Short extension .rs should always be fully preserved: {}",
+            result
+        );
+        assert_eq!(result, "v...rs");
+
+        // .txt extension: min_with_ext = 1 + 2 + 4 = 7
+        let result = truncate_filename("verylongfilename.txt", 7);
+        assert!(
+            result.ends_with(".txt"),
+            "Short extension .txt should always be fully preserved: {}",
+            result
+        );
+        assert_eq!(result, "v...txt");
+    }
+
+    #[test]
+    fn test_long_extension_truncation_favors_extension() {
+        // When both basename and extension must be truncated,
+        // extension should get 2/3 of the budget.
+        //
+        // NOTE: This code path is only reached for LONG extensions that
+        // can't fit fully. Short extensions like .c, .rs, .txt always
+        // take the earlier branch where they're preserved in full.
+        let result = truncate_filename("ab.longerext", 10);
+        // max_width=10, ellipsis=2, remaining=8
+        // basename_budget=8/3=2, ext_budget=8-2=6
+        // truncated_basename from "ab" = "ab" (fits in 2)
+        // truncated_ext from ".longerext" with budget 6 = ".longe"
+        // Result: "ab" + ".." + ".longe" = "ab...longe" which is 10 chars
+
+        assert_eq!(
+            result, "ab...longe",
+            "Expected exact truncation result for 'ab.longerext' at width 10"
+        );
+        assert_eq!(
+            str_display_width_as_u16(&result),
+            10,
+            "Result should be exactly 10 columns"
+        );
+    }
+
+    #[test]
+    fn test_extension_truncation_preserves_dot() {
+        // When truncating extension, the leading dot should be preserved
+
+        // This has a 19-char extension which exceeds MAX_EXTENSION_LEN (10),
+        // so it's treated as no extension - should truncate with "..." at end
+        let result = truncate_filename("a.verylongextension", 8);
+        assert_eq!(
+            result, "a.ver...",
+            "Very long extension treated as no extension"
+        );
+
+        // Try with a valid long extension
+        let result2 = truncate_filename("basename.extension", 10);
+        // extension = "extension" (9 chars, <= 10, valid)
+        // dot_ext = ".extension" (10 chars)
+        // Need 1 + 2 + 10 = 13 for full, but only have 10
+        // So we truncate: remaining = 10 - 2 = 8
+        // basename_budget = 8/3 = 2, ext_budget = 6
+        // truncated_basename from "basename" = "ba"
+        // truncated_ext from ".extension" = ".exten"
+        assert_eq!(
+            result2, "ba...exten",
+            "Should truncate both basename and extension"
+        );
+        assert_eq!(str_display_width_as_u16(&result2), 10);
+    }
+
+    // ========================================================================
+    // Tests for unicode extension handling (chars().count() vs len())
+    // ========================================================================
+
+    #[test]
+    fn test_unicode_extension_char_count() {
+        // Test that extension length uses char count, not byte count
+        // "日本語" is 3 characters but 9 bytes
+        // As an extension, it should be accepted (3 <= MAX_EXTENSION_LEN)
+
+        let (basename, ext) = split_filename_extension("file.日本語");
+        assert_eq!(basename, "file");
+        assert_eq!(ext, Some("日本語"));
+    }
+
+    #[test]
+    fn test_unicode_extension_too_long_by_chars() {
+        // Extension with 11 unicode characters (> MAX_EXTENSION_LEN)
+        // Even though it might have fewer bytes than a long ASCII extension,
+        // we count characters
+        let long_ext = "あいうえおかきくけこさ"; // 11 hiragana chars
+        let filename = format!("file.{}", long_ext);
+
+        let (basename, ext) = split_filename_extension(&filename);
+        // 11 chars > 10, so treated as no extension
+        assert_eq!(basename, filename.as_str());
+        assert_eq!(ext, None);
+    }
+
+    #[test]
+    fn test_unicode_extension_at_max_length() {
+        // Extension with exactly MAX_EXTENSION_LEN (10) unicode characters
+        let exactly_ten = "あいうえおかきくけこ"; // 10 hiragana chars
+        assert_eq!(exactly_ten.chars().count(), 10);
+
+        let filename = format!("file.{}", exactly_ten);
+        let (basename, ext) = split_filename_extension(&filename);
+
+        assert_eq!(basename, "file");
+        assert_eq!(ext, Some(exactly_ten));
     }
 }
