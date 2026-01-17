@@ -82,6 +82,43 @@ impl AtomicIOPSCounter {
 /// needs write access to add new PIDs, while reads are frequent from the main loop.
 pub type IOPSData = Arc<parking_lot::RwLock<HashMap<u32, Arc<AtomicIOPSCounter>>>>;
 
+/// Statistics about the IOPS parser for diagnostics.
+///
+/// This struct is public and available for debugging purposes. While not
+/// currently displayed in the UI, it can be accessed via `IOPSCollector::parser_stats()`
+/// to diagnose issues with fs_usage parsing.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
+pub struct ParserStats {
+    /// Number of lines skipped because they couldn't be parsed.
+    ///
+    /// A non-zero value here isn't necessarily a problem - fs_usage outputs
+    /// various informational lines that aren't I/O operations. However, a
+    /// very high skip rate relative to processed lines might indicate an
+    /// issue with the parser or unexpected fs_usage output format.
+    pub skipped_lines: u64,
+    /// Number of lines successfully processed.
+    pub processed_lines: u64,
+}
+
+/// Atomic counters for parser statistics.
+#[derive(Default)]
+struct AtomicParserStats {
+    skipped_lines: AtomicU64,
+    processed_lines: AtomicU64,
+}
+
+impl AtomicParserStats {
+    /// Returns a snapshot of the current statistics.
+    #[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
+    fn snapshot(&self) -> ParserStats {
+        ParserStats {
+            skipped_lines: self.skipped_lines.load(Ordering::Relaxed),
+            processed_lines: self.processed_lines.load(Ordering::Relaxed),
+        }
+    }
+}
+
 /// IOPS collector that parses fs_usage output.
 pub struct IOPSCollector {
     child: Option<Child>,
@@ -90,6 +127,8 @@ pub struct IOPSCollector {
     parser_error: Arc<AtomicBool>,
     /// Handle to the parser task for cleanup and error checking.
     parser_handle: Option<JoinHandle<()>>,
+    /// Parser statistics for diagnostics.
+    parser_stats: Arc<AtomicParserStats>,
 }
 
 impl IOPSCollector {
@@ -102,6 +141,7 @@ impl IOPSCollector {
             data: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             parser_error: Arc::new(AtomicBool::new(false)),
             parser_handle: None,
+            parser_stats: Arc::new(AtomicParserStats::default()),
         }
     }
 
@@ -117,6 +157,16 @@ impl IOPSCollector {
     /// Check this periodically to detect if IOPS collection has stopped working.
     pub fn has_parser_error(&self) -> bool {
         self.parser_error.load(Ordering::Relaxed)
+    }
+
+    /// Returns current parser statistics for diagnostics.
+    ///
+    /// This can be useful for debugging or monitoring the health of the parser.
+    /// A high skip rate relative to processed lines might indicate issues with
+    /// the fs_usage output format or parser logic.
+    #[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
+    pub fn parser_stats(&self) -> ParserStats {
+        self.parser_stats.snapshot()
     }
 
     /// Starts the fs_usage process and begins parsing its output.
@@ -149,10 +199,11 @@ impl IOPSCollector {
         // Clone handles for the parsing task
         let data = Arc::clone(&self.data);
         let parser_error = Arc::clone(&self.parser_error);
+        let parser_stats = Arc::clone(&self.parser_stats);
 
         // Spawn async task to parse fs_usage output, storing handle for cleanup
         let handle = tokio::spawn(async move {
-            if let Err(e) = parse_fs_usage(stdout, data).await {
+            if let Err(e) = parse_fs_usage(stdout, data, parser_stats).await {
                 // Signal error to main loop and log
                 parser_error.store(true, Ordering::Relaxed);
                 eprintln!("fs_usage parser error: {e}");
@@ -239,7 +290,13 @@ impl Default for IOPSCollector {
 // Note: No explicit Drop impl needed - child process is killed on drop due to kill_on_drop(true)
 
 /// Parses fs_usage output and updates IOPS counters.
-async fn parse_fs_usage(stdout: tokio::process::ChildStdout, data: IOPSData) -> Result<()> {
+///
+/// Tracks statistics about parsed vs skipped lines for diagnostics.
+async fn parse_fs_usage(
+    stdout: tokio::process::ChildStdout,
+    data: IOPSData,
+    stats: Arc<AtomicParserStats>,
+) -> Result<()> {
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
 
@@ -247,6 +304,7 @@ async fn parse_fs_usage(stdout: tokio::process::ChildStdout, data: IOPSData) -> 
         // Parse the operation type and process info
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 2 {
+            stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
@@ -257,6 +315,9 @@ async fn parse_fs_usage(stdout: tokio::process::ChildStdout, data: IOPSData) -> 
         let is_write = operation.starts_with("Wr");
 
         if !is_read && !is_write {
+            // Not a read or write operation - this is expected for other fs_usage
+            // output lines (metadata, etc.), so we just skip without counting as error
+            stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
@@ -264,7 +325,10 @@ async fn parse_fs_usage(stdout: tokio::process::ChildStdout, data: IOPSData) -> 
         if let Some(caps) = PROCESS_REGEX.captures(&line) {
             let pid: u32 = match caps.get(2).and_then(|m| m.as_str().parse().ok()) {
                 Some(pid) => pid,
-                None => continue,
+                None => {
+                    stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
             };
 
             // Get or create counter for this PID
@@ -293,6 +357,12 @@ async fn parse_fs_usage(stdout: tokio::process::ChildStdout, data: IOPSData) -> 
             } else if is_write {
                 counter.increment_write();
             }
+
+            // Successfully processed this line
+            stats.processed_lines.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Read/write operation but couldn't extract PID - unexpected format
+            stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -443,5 +513,33 @@ mod tests {
         // Now it should be cleaned up
         let data = collector.data.read();
         assert!(data.is_empty(), "Counter should be cleaned up after two zero snapshots");
+    }
+
+    #[test]
+    fn test_parser_stats_initial_state() {
+        let collector = IOPSCollector::new();
+        let stats = collector.parser_stats();
+
+        // Initially, no lines should be processed or skipped
+        assert_eq!(stats.processed_lines, 0);
+        assert_eq!(stats.skipped_lines, 0);
+    }
+
+    #[test]
+    fn test_atomic_parser_stats_tracking() {
+        let stats = Arc::new(AtomicParserStats::default());
+
+        // Simulate some parsing activity
+        stats.processed_lines.fetch_add(10, Ordering::Relaxed);
+        stats.skipped_lines.fetch_add(3, Ordering::Relaxed);
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.processed_lines, 10);
+        assert_eq!(snapshot.skipped_lines, 3);
+
+        // Verify snapshot doesn't reset (unlike IOPS counters)
+        let snapshot2 = stats.snapshot();
+        assert_eq!(snapshot2.processed_lines, 10);
+        assert_eq!(snapshot2.skipped_lines, 3);
     }
 }

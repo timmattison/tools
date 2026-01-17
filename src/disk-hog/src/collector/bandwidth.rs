@@ -46,15 +46,18 @@ impl BandwidthCollector {
 
     /// Looks up a process name by PID.
     ///
-    /// Returns the process name if found, or a fallback string like "pid:1234"
-    /// if the process has exited or is otherwise unavailable. This fallback
-    /// can occur when a short-lived process exits between when it was observed
-    /// (e.g., by fs_usage) and when we look up its name.
+    /// Returns the process name if found, or a fallback string like `<exited:1234>`
+    /// if the process has exited or is otherwise unavailable. The angle brackets
+    /// and "exited:" prefix make it immediately obvious this is a placeholder for
+    /// a process that is no longer running, not an actual process name.
+    ///
+    /// This fallback can occur when a short-lived process exits between when it
+    /// was observed (e.g., by fs_usage) and when we look up its name.
     pub fn lookup_process_name(&self, pid: u32) -> String {
         self.system
             .process(sysinfo::Pid::from_u32(pid))
             .map(|p| p.name().to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("pid:{pid}"))
+            .unwrap_or_else(|| format!("<exited:{pid}>"))
     }
 
     /// Collects current bandwidth stats for all processes.
@@ -88,8 +91,15 @@ impl BandwidthCollector {
                     written_bytes: usage.total_written_bytes,
                 });
 
-            // Calculate bytes delta since last reading
-            // Note: total_read_bytes and total_written_bytes are cumulative
+            // Calculate bytes delta since last reading.
+            // Note: total_read_bytes and total_written_bytes are cumulative.
+            //
+            // Edge case: If a process exits and its PID is quickly reused by a new
+            // process, the cumulative values may be lower (new process starts fresh)
+            // or higher (new process has different I/O patterns) than our previous
+            // reading. Using saturating_sub ensures we return 0 rather than panic
+            // on underflow. This may produce one incorrect reading, but it self-corrects
+            // on the next collection cycle. This is inherent to PID-based tracking.
             let read_delta = usage.total_read_bytes.saturating_sub(previous.read_bytes);
             let write_delta = usage.total_written_bytes.saturating_sub(previous.written_bytes);
 

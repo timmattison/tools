@@ -1,6 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,6 +11,45 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+
+/// RAII guard that restores terminal state on drop.
+///
+/// This ensures the terminal is properly restored even if a panic occurs,
+/// preventing the user from being left with a broken terminal (raw mode,
+/// alternate screen, etc.).
+struct TerminalGuard {
+    /// Whether the terminal has been initialized (raw mode enabled, alternate screen entered).
+    initialized: bool,
+}
+
+impl TerminalGuard {
+    /// Creates a new guard, marking the terminal as initialized.
+    fn new() -> Self {
+        Self { initialized: true }
+    }
+
+    /// Marks the terminal as successfully cleaned up, preventing double-cleanup on drop.
+    fn disarm(&mut self) {
+        self.initialized = false;
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if self.initialized {
+            // Best-effort cleanup on panic - ignore errors since we're already in trouble
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            );
+            // Try to show the cursor
+            let _ = io::stdout().write_all(b"\x1B[?25h");
+            let _ = io::stdout().flush();
+        }
+    }
+}
 
 mod collector;
 mod model;
@@ -96,8 +135,14 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
+    // Create guard AFTER terminal is set up - it will restore on panic
+    let mut guard = TerminalGuard::new();
+
     // Run the app
     let result = run_app(&mut terminal, args, is_root).await;
+
+    // Normal cleanup path - disarm the guard since we'll clean up explicitly
+    guard.disarm();
 
     // Restore terminal
     disable_raw_mode()?;
@@ -138,14 +183,16 @@ async fn run_app(
     // results since they represent cumulative totals, not per-interval rates.
     let _ = bandwidth_collector.collect(tick_rate);
 
+    // Track actual elapsed time for accurate rate calculation.
+    // Initialize this BEFORE the sleep so the first iteration correctly measures
+    // the full interval (sleep time + any overhead). This prevents inflated rates
+    // that would occur if we only measured from after the sleep completes.
+    let mut last_collection = Instant::now();
+
     // Wait for the first tick interval before starting the main loop.
     // This ensures the first displayed rates are based on a full interval,
     // not the tiny amount of time between priming and the first loop iteration.
     tokio::time::sleep(tick_rate).await;
-
-    // Track actual elapsed time for accurate rate calculation.
-    // Initialize this after the sleep so the first iteration measures from now.
-    let mut last_collection = Instant::now();
 
     loop {
         // Calculate actual elapsed time since last collection
