@@ -975,28 +975,67 @@ mod tests {
     fn test_extension_truncation_preserves_dot() {
         // When truncating extension, the leading dot should be preserved
 
-        // This has a 19-char extension which exceeds MAX_EXTENSION_LEN (10),
-        // so it's treated as no extension - should truncate with "..." at end
-        let result = truncate_filename("a.verylongextension", 8);
+        // Test with an extension that exceeds MAX_EXTENSION_LEN (10).
+        // The extension is treated as part of the basename, so we get simple truncation.
+        let test_filename = "a.verylongextension";
+        let ext_part = "verylongextension";
+        // Self-documenting assertion: verify our understanding of the test data
+        assert_eq!(
+            ext_part.chars().count(),
+            17,
+            "Test invariant: extension must be 17 chars (> MAX_EXTENSION_LEN)"
+        );
+        assert!(
+            ext_part.chars().count() > MAX_EXTENSION_LEN,
+            "Test invariant: extension must exceed MAX_EXTENSION_LEN to test this code path"
+        );
+
+        let result = truncate_filename(test_filename, 8);
         assert_eq!(
             result, "a.ver...",
             "Very long extension treated as no extension"
         );
 
-        // Try with a valid long extension
-        let result2 = truncate_filename("basename.extension", 10);
-        // extension = "extension" (9 chars, <= 10, valid)
-        // dot_ext = ".extension" (10 chars)
-        // Need 1 + 2 + 10 = 13 for full, but only have 10
-        // So we truncate: remaining = 10 - 2 = 8
-        // basename_budget = 8/3 = 2, ext_budget = 6
-        // truncated_basename from "basename" = "ba"
-        // truncated_ext from ".extension" = ".exten"
+        // Test with a valid long extension that requires the 1/3-2/3 split code path.
+        let ext_part = "extension";
+        let test_filename2 = "basename.extension";
+        let max_width: u16 = 10;
+
+        // Self-documenting assertions: verify our understanding of the test data
+        assert_eq!(ext_part.chars().count(), 9, "Test invariant: extension is 9 chars");
+        assert!(
+            ext_part.chars().count() <= MAX_EXTENSION_LEN,
+            "Test invariant: extension must be <= MAX_EXTENSION_LEN to be recognized"
+        );
+
+        // Verify the truncation algorithm manually:
+        // - dot_ext = ".extension" (10 chars)
+        // - min_with_ext = MIN_BASENAME_CHARS(1) + ELLIPSIS_WITH_EXT_WIDTH(2) + 10 = 13
+        // - max_width(10) < min_with_ext(13), so we enter the 1/3-2/3 split branch
+        // - remaining = max_width - ELLIPSIS_WITH_EXT_WIDTH = 10 - 2 = 8
+        // - basename_budget = remaining / 3 = 8 / 3 = 2
+        // - ext_budget = remaining - basename_budget = 8 - 2 = 6
+        // - truncated_basename = take_chars_by_width("basename", 2) = "ba"
+        // - truncated_ext = take_chars_by_width(".extension", 6) = ".exten"
+        // - Result: "ba" + ".." + ".exten" = "ba...exten" (10 chars)
+        let dot_ext_width = 1 + ext_part.chars().count(); // +1 for the dot
+        let min_with_ext = MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width;
+        assert!(
+            usize::from(max_width) < min_with_ext,
+            "Test invariant: max_width must be < min_with_ext to trigger 1/3-2/3 split"
+        );
+
+        let result2 = truncate_filename(test_filename2, max_width);
         assert_eq!(
             result2, "ba...exten",
-            "Should truncate both basename and extension"
+            "Should truncate both basename and extension using 1/3-2/3 split"
         );
-        assert_eq!(str_display_width_as_u16(&result2), 10);
+        assert_eq!(str_display_width_as_u16(&result2), max_width);
+
+        // Verify the expected parts are preserved
+        assert!(result2.starts_with("ba"), "Should preserve start of basename");
+        assert!(result2.contains("..."), "Should have ellipsis");
+        // Note: truncated extension is ".exten" which appears as "exten" after the ellipsis dots
     }
 
     // ========================================================================
@@ -1005,9 +1044,16 @@ mod tests {
 
     #[test]
     fn test_unicode_extension_char_count() {
-        // Test that extension length uses char count, not byte count
-        // "日本語" is 3 characters but 9 bytes
-        // As an extension, it should be accepted (3 <= MAX_EXTENSION_LEN)
+        // Test that extension length uses char count, not byte count.
+        // CJK characters are multi-byte but count as single characters.
+        let ext_part = "日本語";
+        // Self-documenting assertions: verify our understanding of the test data
+        assert_eq!(ext_part.chars().count(), 3, "Test invariant: 3 CJK characters");
+        assert_eq!(ext_part.len(), 9, "Test invariant: 9 bytes (3 chars × 3 bytes each)");
+        assert!(
+            ext_part.chars().count() <= MAX_EXTENSION_LEN,
+            "Test invariant: extension must be <= MAX_EXTENSION_LEN to be recognized"
+        );
 
         let (basename, ext) = split_filename_extension("file.日本語");
         assert_eq!(basename, "file");
@@ -1016,28 +1062,42 @@ mod tests {
 
     #[test]
     fn test_unicode_extension_too_long_by_chars() {
-        // Extension with 11 unicode characters (> MAX_EXTENSION_LEN)
-        // Even though it might have fewer bytes than a long ASCII extension,
-        // we count characters
-        let long_ext = "あいうえおかきくけこさ"; // 11 hiragana chars
-        let filename = format!("file.{}", long_ext);
+        // Extension exceeding MAX_EXTENSION_LEN by character count (not bytes).
+        // Hiragana characters are multi-byte but count as single characters.
+        let long_ext = "あいうえおかきくけこさ";
+        // Self-documenting assertion: verify our understanding of the test data
+        assert_eq!(
+            long_ext.chars().count(),
+            11,
+            "Test invariant: extension must be 11 chars (> MAX_EXTENSION_LEN)"
+        );
+        assert!(
+            long_ext.chars().count() > MAX_EXTENSION_LEN,
+            "Test invariant: extension must exceed MAX_EXTENSION_LEN to test this code path"
+        );
 
+        let filename = format!("file.{}", long_ext);
         let (basename, ext) = split_filename_extension(&filename);
-        // 11 chars > 10, so treated as no extension
+        // Exceeds MAX_EXTENSION_LEN, so treated as no extension
         assert_eq!(basename, filename.as_str());
         assert_eq!(ext, None);
     }
 
     #[test]
     fn test_unicode_extension_at_max_length() {
-        // Extension with exactly MAX_EXTENSION_LEN (10) unicode characters
-        let exactly_ten = "あいうえおかきくけこ"; // 10 hiragana chars
-        assert_eq!(exactly_ten.chars().count(), 10);
+        // Extension with exactly MAX_EXTENSION_LEN unicode characters (boundary test).
+        let exactly_max = "あいうえおかきくけこ";
+        // Self-documenting assertion: verify our understanding of the test data
+        assert_eq!(
+            exactly_max.chars().count(),
+            MAX_EXTENSION_LEN,
+            "Test invariant: extension must be exactly MAX_EXTENSION_LEN chars"
+        );
 
-        let filename = format!("file.{}", exactly_ten);
+        let filename = format!("file.{}", exactly_max);
         let (basename, ext) = split_filename_extension(&filename);
 
         assert_eq!(basename, "file");
-        assert_eq!(ext, Some(exactly_ten));
+        assert_eq!(ext, Some(exactly_max));
     }
 }
