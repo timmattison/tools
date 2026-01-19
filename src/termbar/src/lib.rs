@@ -474,6 +474,12 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
         //    seeing more of the basename
         // 2. For long extensions, we want to preserve enough to be recognizable
         //    (e.g., ".javas" from ".javascript" is more useful than ".jav")
+        //
+        // NOTE: The resulting format like "ba...exten" has a visual ambiguity where
+        // the ellipsis could be mistaken as part of the extension. This is an
+        // acceptable tradeoff for this rare edge case (only reached with extensions
+        // longer than ~6 characters that still need truncation). Short extensions
+        // like .mkv, .txt, .rs are always preserved fully via the branch above.
         let remaining = max_width_usize.saturating_sub(ELLIPSIS_WITH_EXT_WIDTH);
         let basename_budget = remaining / 3;
 

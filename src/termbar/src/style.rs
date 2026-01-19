@@ -27,6 +27,11 @@ const BATCH_PROGRESS_STATS_FORMAT: &str =
 // format strings in `create_template()`. If you modify a template format,
 // recalculate and update the corresponding overhead constant.
 //
+// **SOURCE OF TRUTH**: The tests `test_*_style_overhead_constant_is_accurate`
+// are the authoritative verification for these values. If you change a template
+// or overhead constant, run these tests to verify correctness. The tests check
+// that a filename at the calculated maximum width produces exactly MIN_BAR_WIDTH.
+//
 // To recalculate: count the maximum expected width of each template component:
 // - {spinner}: 2 columns (emoji spinner)
 // - {prefix}: varies (for batch: "Batch" = 5)
