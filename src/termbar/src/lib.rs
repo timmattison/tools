@@ -159,10 +159,13 @@ const _: () = assert!(
 /// The compile-time assertion below enforces this invariant.
 const MIN_TRUNCATION_WIDTH: usize = MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH;
 
-// Compile-time assertion to verify MIN_TRUNCATION_WIDTH is derived correctly.
+// Compile-time assertion: This is a CHANGE DETECTOR, not a value to blindly update.
+// If this fails, it means MIN_BASENAME_CHARS or ELLIPSIS_NO_EXT_WIDTH changed.
+// Review those constants and verify the new derived value is intentional before
+// updating the expected value here.
 const _: () = assert!(
     MIN_TRUNCATION_WIDTH == 4,
-    "MIN_TRUNCATION_WIDTH must equal MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH (currently 4)"
+    "MIN_TRUNCATION_WIDTH changed! Review MIN_BASENAME_CHARS and ELLIPSIS_NO_EXT_WIDTH - was this intentional?"
 );
 
 /// Escape braces in a string for use in indicatif templates.
