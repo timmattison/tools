@@ -5,6 +5,24 @@ use colored::Colorize;
 use serde::Deserialize;
 use std::process::Command;
 
+/// The core rate limit resource name. Used in tests for consistency with other
+/// resource name constants.
+#[cfg(test)]
+const CORE_RESOURCE: &str = "core";
+
+/// The GraphQL rate limit resource name. This is the most commonly monitored
+/// rate limit, so it's sorted to appear last in output tables for visibility.
+const GRAPHQL_RESOURCE: &str = "graphql";
+
+/// Sorts rate limits so graphql appears last for visibility (most commonly monitored).
+///
+/// Uses sort_by_key with a boolean predicate: false < true in Rust's Ord implementation,
+/// so graphql (where predicate is true) sorts to the end while preserving relative order
+/// of other elements (stable sort).
+fn sort_graphql_last(rate_limits: &mut [NamedRateLimit]) {
+    rate_limits.sort_by_key(|n| n.name == GRAPHQL_RESOURCE);
+}
+
 /// Represents a single rate limit resource with its limits and usage statistics
 #[derive(Debug, Deserialize)]
 struct RateLimit {
@@ -240,9 +258,13 @@ fn main() -> Result<()> {
 
     // Collect and partition rate limits into available (remaining > 0) and exhausted (remaining == 0)
     let all_limits = collect_rate_limits(&response.resources);
-    let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
+    let (mut available, mut exhausted): (Vec<_>, Vec<_>) = all_limits
         .into_iter()
         .partition(|named| named.rate_limit.remaining > 0);
+
+    // Sort each list so graphql appears last for visibility (most commonly monitored)
+    sort_graphql_last(&mut available);
+    sort_graphql_last(&mut exhausted);
 
     // Print available rate limits first (easier to scroll past)
     print_rate_limit_table("Available Rate Limits", &available);
@@ -306,13 +328,13 @@ mod tests {
 
         // Core should be in exhausted
         assert!(
-            exhausted.iter().any(|n| n.name == "core"),
+            exhausted.iter().any(|n| n.name == CORE_RESOURCE),
             "Core (remaining=0) should be in exhausted list"
         );
 
         // Graphql should be in available
         assert!(
-            available.iter().any(|n| n.name == "graphql"),
+            available.iter().any(|n| n.name == GRAPHQL_RESOURCE),
             "Graphql (remaining=100) should be in available list"
         );
 
@@ -403,5 +425,43 @@ mod tests {
     fn test_format_time_until_reset_exact_minute() {
         let future_epoch = Utc::now().timestamp() + 60; // 1m 0s
         assert_eq!(format_time_until_reset(future_epoch), Some("1m 0s".to_string()));
+    }
+
+    #[test]
+    fn test_graphql_sorted_last_in_available() {
+        // All resources available
+        let resources = make_all_resources_with_remaining(100);
+        let all_limits = collect_rate_limits(&resources);
+        let (mut available, _): (Vec<_>, Vec<_>) = all_limits
+            .into_iter()
+            .partition(|named| named.rate_limit.remaining > 0);
+
+        // Use the same function as main() to ensure consistency
+        sort_graphql_last(&mut available);
+
+        assert_eq!(
+            available.last().map(|n| n.name),
+            Some(GRAPHQL_RESOURCE),
+            "{GRAPHQL_RESOURCE} should be last in available list"
+        );
+    }
+
+    #[test]
+    fn test_graphql_sorted_last_in_exhausted() {
+        // All resources exhausted
+        let resources = make_all_resources_with_remaining(0);
+        let all_limits = collect_rate_limits(&resources);
+        let (_, mut exhausted): (Vec<_>, Vec<_>) = all_limits
+            .into_iter()
+            .partition(|named| named.rate_limit.remaining > 0);
+
+        // Use the same function as main() to ensure consistency
+        sort_graphql_last(&mut exhausted);
+
+        assert_eq!(
+            exhausted.last().map(|n| n.name),
+            Some(GRAPHQL_RESOURCE),
+            "{GRAPHQL_RESOURCE} should be last in exhausted list"
+        );
     }
 }
