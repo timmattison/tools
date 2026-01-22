@@ -88,7 +88,7 @@ pub type IOPSData = Arc<parking_lot::RwLock<HashMap<u32, Arc<AtomicIOPSCounter>>
 /// currently displayed in the UI, it can be accessed via `IOPSCollector::parser_stats()`
 /// to diagnose issues with fs_usage parsing.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
+#[allow(dead_code, reason = "Diagnostic API - used in tests and available for debugging")]
 pub struct ParserStats {
     /// Number of lines that were not disk I/O operations.
     ///
@@ -111,7 +111,7 @@ struct AtomicParserStats {
 
 impl AtomicParserStats {
     /// Returns a snapshot of the current statistics.
-    #[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
+    #[allow(dead_code, reason = "Diagnostic API - used in tests and available for debugging")]
     fn snapshot(&self) -> ParserStats {
         ParserStats {
             non_io_lines: self.non_io_lines.load(Ordering::Relaxed),
@@ -165,7 +165,7 @@ impl IOPSCollector {
     /// This can be useful for debugging or monitoring the health of the parser.
     /// A high skip rate relative to processed lines might indicate issues with
     /// the fs_usage output format or parser logic.
-    #[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
+    #[allow(dead_code, reason = "Diagnostic API - used in tests and available for debugging")]
     pub fn parser_stats(&self) -> ParserStats {
         self.parser_stats.snapshot()
     }
@@ -204,10 +204,10 @@ impl IOPSCollector {
 
         // Spawn async task to parse fs_usage output, storing handle for cleanup
         let handle = tokio::spawn(async move {
-            if let Err(e) = parse_fs_usage(stdout, data, parser_stats).await {
-                // Signal error to main loop and log
+            if let Err(_e) = parse_fs_usage(stdout, data, parser_stats).await {
+                // Signal error to main loop - the UI will show an error state.
+                // We don't log here because the terminal may be in raw mode.
                 parser_error.store(true, Ordering::Relaxed);
-                eprintln!("fs_usage parser error: {e}");
             }
         });
         self.parser_handle = Some(handle);
@@ -260,8 +260,9 @@ impl IOPSCollector {
 
     /// Stops the fs_usage process and waits for the parser task to complete.
     ///
-    /// This ensures clean shutdown and logs any parser task panics.
-    pub async fn stop(&mut self) {
+    /// Returns an error message if the parser task panicked or failed, which
+    /// should be logged after the terminal is restored to normal mode.
+    pub async fn stop(&mut self) -> Option<String> {
         // Kill the fs_usage process first - this will cause the parser to exit
         if let Some(mut child) = self.child.take() {
             let _ = child.kill().await;
@@ -270,14 +271,12 @@ impl IOPSCollector {
         // Wait for the parser task to complete and check for panics
         if let Some(handle) = self.parser_handle.take() {
             match handle.await {
-                Ok(()) => {}
-                Err(e) if e.is_panic() => {
-                    eprintln!("fs_usage parser task panicked: {e}");
-                }
-                Err(e) => {
-                    eprintln!("fs_usage parser task error: {e}");
-                }
+                Ok(()) => None,
+                Err(e) if e.is_panic() => Some(format!("fs_usage parser task panicked: {e}")),
+                Err(e) => Some(format!("fs_usage parser task error: {e}")),
             }
+        } else {
+            None
         }
     }
 }

@@ -155,14 +155,24 @@ async fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    result
+    // Now that terminal is restored, log any shutdown errors
+    let shutdown_error = result?;
+    if let Some(error_msg) = shutdown_error {
+        eprintln!("{error_msg}");
+    }
+
+    Ok(())
 }
 
+/// Runs the main application loop.
+///
+/// Returns `Ok(Some(error_message))` if a shutdown error occurred that should be logged
+/// after the terminal is restored. Returns `Ok(None)` on clean shutdown.
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: Args,
     is_root: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let tick_rate = Duration::from_secs_f64(args.refresh);
 
     // Initialize collectors
@@ -239,12 +249,14 @@ async fn run_app(
         }
     }
 
-    // Stop IOPS collector
-    if let Some(mut collector) = iops_collector {
-        collector.stop().await;
-    }
+    // Stop IOPS collector and collect any shutdown errors
+    let shutdown_error = if let Some(mut collector) = iops_collector {
+        collector.stop().await
+    } else {
+        None
+    };
 
-    Ok(())
+    Ok(shutdown_error)
 }
 
 /// Converts IOPS counter data to `ProcessIOStats`.

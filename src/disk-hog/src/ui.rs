@@ -136,7 +136,7 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
         let message = Paragraph::new(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "⚠ IOPS collection stopped due to an error (fs_usage parser failed)",
+                "[ERROR] IOPS collection stopped (fs_usage parser failed)",
                 Style::default()
                     .fg(Color::Red)
                     .add_modifier(Modifier::BOLD),
