@@ -460,7 +460,7 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
         let min_with_ext = MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width;
         if max_width_usize >= min_with_ext {
             let basename_budget = max_width_usize - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width;
-            // SAFETY: This assertion is guaranteed by the `if` condition above.
+            // INVARIANT: This assertion is guaranteed by the `if` condition above.
             // Given: max_width_usize >= MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width
             // Then:  max_width_usize - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width >= MIN_BASENAME_CHARS
             // Therefore: basename_budget >= MIN_BASENAME_CHARS
