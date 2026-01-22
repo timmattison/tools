@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Local;
 use clap::Parser;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -129,7 +129,7 @@ async fn main() -> Result<()> {
         let progress = Arc::clone(&progress);
         let scanning_cancelled = Arc::clone(&scanning_cancelled);
         thread::spawn(move || {
-            if atty::is(atty::Stream::Stdout) {
+            if io::stdout().is_terminal() {
                 // Run interactive UI
                 if let Err(e) = progress.run_interactive() {
                     eprintln!("UI error: {}", e);

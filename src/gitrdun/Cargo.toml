@@ -7,7 +7,6 @@ description = "Find and summarize recent git commits across multiple repositorie
 
 [dependencies]
 anyhow.workspace = true
-atty.workspace = true
 buildinfo.workspace = true
 chrono.workspace = true
 chrono-english.workspace = true
