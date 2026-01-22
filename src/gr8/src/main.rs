@@ -5,6 +5,11 @@ use colored::Colorize;
 use serde::Deserialize;
 use std::process::Command;
 
+/// The core rate limit resource name. Used in tests for consistency with other
+/// resource name constants.
+#[cfg(test)]
+const CORE_RESOURCE: &str = "core";
+
 /// The GraphQL rate limit resource name. This is the most commonly monitored
 /// rate limit, so it's sorted to appear last in output tables for visibility.
 const GRAPHQL_RESOURCE: &str = "graphql";
@@ -315,7 +320,7 @@ mod tests {
 
         // Core should be in exhausted
         assert!(
-            exhausted.iter().any(|n| n.name == "core"),
+            exhausted.iter().any(|n| n.name == CORE_RESOURCE),
             "Core (remaining=0) should be in exhausted list"
         );
 
