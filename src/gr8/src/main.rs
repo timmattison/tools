@@ -245,15 +245,9 @@ fn main() -> Result<()> {
         .partition(|named| named.rate_limit.remaining > 0);
 
     // Sort each list so graphql appears last (it's the one users care about most)
-    let graphql_last = |a: &NamedRateLimit, b: &NamedRateLimit| {
-        match (a.name == "graphql", b.name == "graphql") {
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            _ => std::cmp::Ordering::Equal,
-        }
-    };
-    available.sort_by(graphql_last);
-    exhausted.sort_by(graphql_last);
+    // Uses sort_by_key: false < true in Rust, so graphql (where predicate is true) sorts last
+    available.sort_by_key(|n| n.name == "graphql");
+    exhausted.sort_by_key(|n| n.name == "graphql");
 
     // Print available rate limits first (easier to scroll past)
     print_rate_limit_table("Available Rate Limits", &available);
@@ -425,15 +419,8 @@ mod tests {
             .into_iter()
             .partition(|named| named.rate_limit.remaining > 0);
 
-        // Apply the same sort used in main
-        let graphql_last = |a: &NamedRateLimit, b: &NamedRateLimit| {
-            match (a.name == "graphql", b.name == "graphql") {
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Less,
-                _ => std::cmp::Ordering::Equal,
-            }
-        };
-        available.sort_by(graphql_last);
+        // Apply the same sort used in main: false < true, so graphql sorts last
+        available.sort_by_key(|n| n.name == "graphql");
 
         assert_eq!(
             available.last().map(|n| n.name),
@@ -451,15 +438,8 @@ mod tests {
             .into_iter()
             .partition(|named| named.rate_limit.remaining > 0);
 
-        // Apply the same sort used in main
-        let graphql_last = |a: &NamedRateLimit, b: &NamedRateLimit| {
-            match (a.name == "graphql", b.name == "graphql") {
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Less,
-                _ => std::cmp::Ordering::Equal,
-            }
-        };
-        exhausted.sort_by(graphql_last);
+        // Apply the same sort used in main: false < true, so graphql sorts last
+        exhausted.sort_by_key(|n| n.name == "graphql");
 
         assert_eq!(
             exhausted.last().map(|n| n.name),
