@@ -25,66 +25,67 @@ const BATCH_PROGRESS_STATS_FORMAT: &str =
 //
 // IMPORTANT: These overhead values must be kept in sync with the template
 // format strings in `create_template()`. If you modify a template format,
-// recalculate and update the corresponding overhead constant.
+// you must update the corresponding overhead constant.
 //
 // **SOURCE OF TRUTH**: The tests `test_*_style_overhead_constant_is_accurate`
 // are the authoritative verification for these values. If you change a template
 // or overhead constant, run these tests to verify correctness. The tests check
 // that a filename at the calculated maximum width produces exactly MIN_BAR_WIDTH.
 //
-// To recalculate: count the maximum expected width of each template component:
-// - {spinner}: 2 columns (emoji spinner)
-// - {prefix}: varies (for batch: "Batch" = 5)
-// - brackets []: 2 columns
-// - space padding: count actual spaces in format
-// - {bytes}/{total_bytes}: ~25 columns (e.g., "999.99 GiB/999.99 GiB")
-// - ({percent}%): ~6 columns (e.g., "(100%)")
-// - ({bytes_per_sec}, {eta}): ~25 columns (e.g., "(999.99 MiB/s, 99:99:99)")
-// - static text like " verifying": count characters
+// **How to find the correct overhead value after changing a template:**
+// 1. Make an educated guess or use the current value
+// 2. Run the corresponding `test_*_style_overhead_constant_is_accurate` test
+// 3. If the test fails, adjust the constant based on the test output
+// 4. Repeat until the test passes
 //
-// The bar width is terminal_width - overhead - filename_width (where applicable).
+// The bar width formula is:
+//   bar_width = terminal_width - overhead - filename_width (where applicable)
 // =============================================================================
 
-/// Base overhead for copy style progress bars.
+/// Base overhead for copy style progress bars (excludes filename width).
 ///
-/// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60
-/// The filename width is added to this to get total overhead.
+/// This value is empirically derived and verified by tests. The filename width
+/// is added to this to get total overhead.
+///
+/// **Authoritative verification:** `test_copy_style_overhead_constant_is_accurate`
 ///
 /// **Cross-reference:** This constant must match the template in
 /// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Copy` match arm.
-/// When modifying the template format, update this constant and run
-/// `test_copy_style_overhead_constant_is_accurate` to verify correctness.
+/// When modifying the template format, run the test to find the correct value.
 const COPY_STYLE_BASE_OVERHEAD: u16 = 60;
 
-/// Base overhead for verify style progress bars.
+/// Base overhead for verify style progress bars (excludes filename width).
 ///
-/// Components: spinner(2) + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70
-/// The filename width is added to this to get total overhead.
+/// This value is empirically derived and verified by tests. The filename width
+/// is added to this to get total overhead.
+///
+/// **Authoritative verification:** `test_verify_style_overhead_constant_is_accurate`
 ///
 /// **Cross-reference:** This constant must match the template in
 /// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Verify` match arm.
-/// When modifying the template format, update this constant and run
-/// `test_verify_style_overhead_constant_is_accurate` to verify correctness.
+/// When modifying the template format, run the test to find the correct value.
 const VERIFY_STYLE_BASE_OVERHEAD: u16 = 70;
 
 /// Base overhead for batch style progress bars.
 ///
-/// Components: "Batch" prefix + brackets + stats format = ~85
+/// This value is empirically derived and verified by tests.
+///
+/// **Authoritative verification:** `test_batch_style_overhead_constant_is_accurate`
 ///
 /// **Cross-reference:** This constant must match the template in
 /// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Batch` match arm.
-/// When modifying the template format, update this constant and run
-/// `test_batch_style_overhead_constant_is_accurate` to verify correctness.
+/// When modifying the template format, run the test to find the correct value.
 const BATCH_STYLE_OVERHEAD: u16 = 85;
 
 /// Base overhead for hash style progress bars.
 ///
-/// Components: spinner(2) + brackets(4) + bytes/total(25) + speed/eta(35) + msg(variable) + spaces(4) = ~70
+/// This value is empirically derived and verified by tests.
+///
+/// **Authoritative verification:** `test_hash_style_overhead_constant_is_accurate`
 ///
 /// **Cross-reference:** This constant must match the template in
 /// [`ProgressStyleBuilder::create_template()`] under the `StyleType::Hash` match arm.
-/// When modifying the template format, update this constant and run
-/// `test_hash_style_overhead_constant_is_accurate` to verify correctness.
+/// When modifying the template format, run the test to find the correct value.
 const HASH_STYLE_OVERHEAD: u16 = 70;
 
 /// Builder for progress bar styles with automatic width calculation.
