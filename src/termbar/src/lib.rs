@@ -163,9 +163,12 @@ const MIN_TRUNCATION_WIDTH: usize = MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH;
 // If this fails, it means MIN_BASENAME_CHARS or ELLIPSIS_NO_EXT_WIDTH changed.
 // Review those constants and verify the new derived value is intentional before
 // updating the expected value here.
+//
+// The assertion message includes the derivation so future maintainers can verify
+// the expected value without needing to read surrounding comments.
 const _: () = assert!(
     MIN_TRUNCATION_WIDTH == 4,
-    "MIN_TRUNCATION_WIDTH changed! Review MIN_BASENAME_CHARS and ELLIPSIS_NO_EXT_WIDTH - was this intentional?"
+    "MIN_TRUNCATION_WIDTH changed! Expected MIN_BASENAME_CHARS(1) + ELLIPSIS_NO_EXT_WIDTH(3) = 4. Review those constants - was this intentional?"
 );
 
 /// Escape braces in a string for use in indicatif templates.
@@ -857,15 +860,32 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_min_truncation_width_constant() {
-        // Verify the constant is used correctly
-        assert_eq!(MIN_TRUNCATION_WIDTH, 4);
+    fn test_min_truncation_width_algebraic_relationship() {
+        // Verify MIN_TRUNCATION_WIDTH equals MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH.
+        // This tests the relationship, not a magic number, so it remains valid if
+        // the underlying constants change intentionally.
+        assert_eq!(
+            MIN_TRUNCATION_WIDTH,
+            MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH,
+            "MIN_TRUNCATION_WIDTH must equal MIN_BASENAME_CHARS + ELLIPSIS_NO_EXT_WIDTH"
+        );
+
+        // Also verify the expected value as a change detector (mirrors compile-time assertion)
+        assert_eq!(
+            MIN_TRUNCATION_WIDTH, 4,
+            "MIN_TRUNCATION_WIDTH changed from expected value 4. \
+             If this is intentional, update this test and the compile-time assertion."
+        );
     }
 
     #[test]
-    fn test_min_basename_chars_constant() {
-        // Verify MIN_BASENAME_CHARS is used correctly
-        assert_eq!(MIN_BASENAME_CHARS, 1);
+    fn test_min_basename_chars_minimum_bound() {
+        // Verify MIN_BASENAME_CHARS is at least 1 (mirrors compile-time assertion).
+        // A value of 0 would produce truncated filenames with no visible content.
+        assert!(
+            MIN_BASENAME_CHARS >= 1,
+            "MIN_BASENAME_CHARS must be at least 1 to ensure visible content"
+        );
     }
 
     #[test]
