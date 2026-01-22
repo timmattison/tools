@@ -300,14 +300,10 @@ fn convert_iops_to_stats(
         .collect();
 
     // Sort by total IOPS, descending.
-    // Safety: total_iops() always returns Some because we set both read_ops_per_sec
-    // and write_ops_per_sec to Some above.
-    stats.sort_by_key(|s| {
-        Reverse(
-            s.total_iops()
-                .expect("IOPS stats always have both read and write ops set"),
-        )
-    });
+    // Note: total_iops() should always return Some because we set both read_ops_per_sec
+    // and write_ops_per_sec to Some above. Using unwrap_or(0) as defensive fallback
+    // ensures we never panic in the sort, even if the invariant were violated.
+    stats.sort_by_key(|s| Reverse(s.total_iops().unwrap_or(OpsPerSec(0))));
 
     stats
 }

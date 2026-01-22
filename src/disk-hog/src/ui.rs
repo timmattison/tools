@@ -285,6 +285,13 @@ fn format_ops(rate: Option<OpsPerSec>) -> String {
     rate.map_or("-".to_string(), |r| r.as_u64().to_string())
 }
 
+/// Minimum width required for truncation to work correctly.
+///
+/// The ellipsis "..." is 3 characters wide, so we need at least 4 columns
+/// to show one character plus the ellipsis. Below this, the function will
+/// return just the ellipsis (which may exceed the requested width).
+const MIN_TRUNCATION_WIDTH: usize = 4;
+
 /// Truncates a string to fit within a maximum display width.
 ///
 /// This function uses Unicode display width (from the `unicode-width` crate)
@@ -294,7 +301,17 @@ fn format_ops(rate: Option<OpsPerSec>) -> String {
 /// - Most emoji: 2 columns
 ///
 /// If truncation is needed, appends "..." and ensures the result fits within `max_width`.
+///
+/// # Panics (debug builds only)
+///
+/// Debug-asserts that `max_width >= MIN_TRUNCATION_WIDTH` (4). In release builds,
+/// very small widths will produce results that may exceed the requested width.
 fn truncate_to_width(name: &str, max_width: usize) -> String {
+    debug_assert!(
+        max_width >= MIN_TRUNCATION_WIDTH,
+        "truncate_to_width requires max_width >= {MIN_TRUNCATION_WIDTH}, got {max_width}"
+    );
+
     let current_width = name.width();
     if current_width <= max_width {
         return name.to_string();
@@ -425,5 +442,32 @@ mod tests {
         assert!(IopsMode::Enabled.is_enabled());
         assert!(!IopsMode::DisabledNoRoot.is_enabled());
         assert!(!IopsMode::DisabledByFlag.is_enabled());
+    }
+
+    #[test]
+    fn test_min_truncation_width_constant() {
+        // Verify the constant is at least ellipsis width + 1
+        // (need room for at least one character plus "...")
+        assert!(
+            MIN_TRUNCATION_WIDTH >= 4,
+            "MIN_TRUNCATION_WIDTH should be at least 4 (ellipsis + 1 char)"
+        );
+    }
+
+    #[test]
+    fn test_truncate_to_width_at_minimum() {
+        // With width 4, we can fit 1 char + "..." = 4 columns
+        let result = truncate_to_width("abcdef", 4);
+        assert!(result.width() <= 4);
+        assert!(result.ends_with("..."));
+        assert_eq!(result, "a...");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "truncate_to_width requires max_width")]
+    fn test_truncate_to_width_panics_on_too_small_width() {
+        // This should panic in debug builds due to the debug_assert
+        let _ = truncate_to_width("test", 3);
     }
 }
