@@ -47,6 +47,15 @@ const BATCH_PROGRESS_STATS_FORMAT: &str =
 /// This value is empirically derived and verified by tests. The filename width
 /// is added to this to get total overhead.
 ///
+/// **Formula breakdown** (approximate, for reference only):
+/// - spinner: 1
+/// - space after spinner: 1
+/// - space before brackets: 1
+/// - brackets `[]`: 2
+/// - space after brackets: 1
+/// - stats (bytes/total, percent, speed, eta): ~54
+/// - Total: ~60
+///
 /// **Authoritative verification:** `test_copy_style_overhead_constant_is_accurate`
 ///
 /// **Cross-reference:** This constant must match the template in
@@ -59,6 +68,11 @@ const COPY_STYLE_BASE_OVERHEAD: u16 = 60;
 /// This value is empirically derived and verified by tests. The filename width
 /// is added to this to get total overhead.
 ///
+/// **Formula breakdown** (approximate, for reference only):
+/// - Same as copy style: ~60
+/// - " verifying" suffix: 10
+/// - Total: ~70
+///
 /// **Authoritative verification:** `test_verify_style_overhead_constant_is_accurate`
 ///
 /// **Cross-reference:** This constant must match the template in
@@ -70,6 +84,12 @@ const VERIFY_STYLE_BASE_OVERHEAD: u16 = 70;
 ///
 /// This value is empirically derived and verified by tests.
 ///
+/// **Formula breakdown** (approximate, for reference only):
+/// - prefix (e.g., "Batch"): ~10
+/// - space and brackets `[]`: 4
+/// - stats (msg, bytes/total, speed, eta, " remaining"): ~71
+/// - Total: ~85
+///
 /// **Authoritative verification:** `test_batch_style_overhead_constant_is_accurate`
 ///
 /// **Cross-reference:** This constant must match the template in
@@ -80,6 +100,14 @@ const BATCH_STYLE_OVERHEAD: u16 = 85;
 /// Base overhead for hash style progress bars.
 ///
 /// This value is empirically derived and verified by tests.
+///
+/// **Formula breakdown** (approximate, for reference only):
+/// - spinner: 1
+/// - space and brackets `[]`: 4
+/// - stats (bytes/total, percent, speed, eta): ~54
+/// - space before msg: 1
+/// - msg placeholder: ~10
+/// - Total: ~70
 ///
 /// **Authoritative verification:** `test_hash_style_overhead_constant_is_accurate`
 ///

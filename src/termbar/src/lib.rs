@@ -375,7 +375,11 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
         let actual_pos = search_start + dot_pos;
         let ext = &filename[actual_pos + 1..];
         // Only treat as extension if it's non-empty and reasonable length.
-        // Use chars().count() for proper unicode handling (not byte length).
+        // We use chars().count() (character count) rather than display width because:
+        // 1. Extension length limits are about recognizing file types, not display fitting
+        // 2. Display width varies by character (CJK = 2 columns, ASCII = 1), making
+        //    limits inconsistent (e.g., ".日本語" would be "3 chars but 6 columns")
+        // 3. Character count provides predictable behavior across all scripts
         if !ext.is_empty() && ext.chars().count() <= MAX_EXTENSION_LEN {
             return (&filename[..actual_pos], Some(ext));
         }
@@ -1083,7 +1087,9 @@ mod tests {
         // Verify the expected parts are preserved
         assert!(result2.starts_with("ba"), "Should preserve start of basename");
         assert!(result2.contains("..."), "Should have ellipsis");
-        // Note: truncated extension is ".exten" which appears as "exten" after the ellipsis dots
+        // Note: The result "ba...exten" is constructed as:
+        //   "ba" (truncated basename) + ".." (ellipsis) + ".exten" (truncated extension with dot)
+        // The three visible dots come from the ellipsis ".." plus the dot in ".exten".
     }
 
     // ========================================================================
