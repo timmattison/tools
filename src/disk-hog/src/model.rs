@@ -15,6 +15,12 @@ impl BytesPerSec {
     /// but correctly rounds to 1 or 0 with this approach).
     ///
     /// If the interval is zero, returns 0 to avoid division by zero.
+    ///
+    /// # Precision Note
+    ///
+    /// The `u64 as f64` cast can lose precision for values exceeding 2^53
+    /// (~9 petabytes). This is acceptable for disk I/O rates which are
+    /// unlikely to reach such magnitudes in practice.
     pub fn from_bytes_and_duration(bytes: u64, interval: Duration) -> Self {
         let secs = interval.as_secs_f64();
         if secs == 0.0 {
@@ -22,11 +28,16 @@ impl BytesPerSec {
         } else {
             // Use f64 for precise division, then round to nearest integer
             #[expect(
+                clippy::cast_precision_loss,
+                reason = "Precision loss only occurs above 2^53 (~9 PB), far beyond realistic disk I/O rates"
+            )]
+            let bytes_f64 = bytes as f64;
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "bytes/sec rate will always fit in u64 and be positive"
             )]
-            let rate = (bytes as f64 / secs).round() as u64;
+            let rate = (bytes_f64 / secs).round() as u64;
             Self(rate)
         }
     }
@@ -69,6 +80,12 @@ impl OpsPerSec {
     /// but correctly rounds to 1 or 0 with this approach).
     ///
     /// If the interval is zero, returns 0 to avoid division by zero.
+    ///
+    /// # Precision Note
+    ///
+    /// The `u64 as f64` cast can lose precision for values exceeding 2^53
+    /// (~9 quadrillion ops). This is acceptable for IOPS rates which are
+    /// unlikely to reach such magnitudes in practice.
     pub fn from_ops_and_duration(ops: u64, interval: Duration) -> Self {
         let secs = interval.as_secs_f64();
         if secs == 0.0 {
@@ -76,11 +93,16 @@ impl OpsPerSec {
         } else {
             // Use f64 for precise division, then round to nearest integer
             #[expect(
+                clippy::cast_precision_loss,
+                reason = "Precision loss only occurs above 2^53 (~9 quadrillion ops), far beyond realistic IOPS rates"
+            )]
+            let ops_f64 = ops as f64;
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "ops/sec rate will always fit in u64 and be positive"
             )]
-            let rate = (ops as f64 / secs).round() as u64;
+            let rate = (ops_f64 / secs).round() as u64;
             Self(rate)
         }
     }
