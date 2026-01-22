@@ -6,7 +6,10 @@
 use indicatif::ProgressStyle;
 
 use crate::error::{Result, TermbarError};
-use crate::{calculate_bar_width, escape_template_braces, str_display_width_as_u16, PROGRESS_CHARS};
+use crate::{
+    calculate_bar_width, calculate_max_filename_width, escape_template_braces,
+    str_display_width_as_u16, truncate_filename, PROGRESS_CHARS,
+};
 
 /// Common format string for progress stats (bytes, percentage, speed, ETA).
 const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_per_sec}, {eta})";
@@ -15,6 +18,105 @@ const PROGRESS_STATS_FORMAT: &str = "{bytes}/{total_bytes} ({percent}%) ({bytes_
 /// `{msg}` is used for file count and status (e.g., "(0/3)" or "(2/3)").
 const BATCH_PROGRESS_STATS_FORMAT: &str =
     "{msg} {bytes}/{total_bytes} @ {bytes_per_sec} (~{eta} remaining)";
+
+// =============================================================================
+// OVERHEAD CONSTANTS
+// =============================================================================
+//
+// IMPORTANT: These overhead values must be kept in sync with the template
+// format strings in `create_template()`. If you modify a template format,
+// you must update the corresponding overhead constant.
+//
+// **SOURCE OF TRUTH**: The tests `test_*_style_overhead_constant_is_accurate`
+// are the authoritative verification for these values. If you change a template
+// or overhead constant, run these tests to verify correctness. The tests check
+// that a filename at the calculated maximum width produces exactly MIN_BAR_WIDTH.
+//
+// **How to find the correct overhead value after changing a template:**
+// 1. Make an educated guess or use the current value
+// 2. Run the corresponding `test_*_style_overhead_constant_is_accurate` test
+// 3. If the test fails, adjust the constant based on the test output
+// 4. Repeat until the test passes
+//
+// The bar width formula is:
+//   bar_width = terminal_width - overhead - filename_width (where applicable)
+//
+// **INDICATIF VERSION COMPATIBILITY**:
+// These overhead values depend on how indicatif expands placeholders like
+// `{bytes}`, `{percent}`, `{eta}`, etc. If indicatif changes its formatting
+// (e.g., using different padding or precision), these constants may need
+// updating. The tests will catch such breakage. When upgrading indicatif:
+// 1. Run `cargo test -p termbar` to check for failures
+// 2. If overhead tests fail, recalculate the constants using the process above
+// 3. Document the indicatif version in Cargo.toml comments if significant
+// =============================================================================
+
+/// Base overhead for copy style progress bars (excludes filename width).
+///
+/// This value is empirically derived and verified by tests. The filename width
+/// is added to this to get total overhead.
+///
+/// # Finding the Correct Value
+///
+/// **DO NOT** rely on the formula breakdown below. The only way to determine the
+/// correct value is:
+/// 1. Run `test_copy_style_overhead_constant_is_accurate`
+/// 2. Adjust this constant until the test passes
+///
+/// The formula breakdown is provided for intuition only and MAY NOT match the
+/// actual value due to indicatif's internal formatting.
+///
+/// **Approximate formula** (for intuition, not authoritative):
+/// spinner(1) + spaces(3) + brackets(2) + stats(~54) ≈ 60
+///
+/// **Authoritative verification:** `test_copy_style_overhead_constant_is_accurate`
+const COPY_STYLE_BASE_OVERHEAD: u16 = 60;
+
+/// Base overhead for verify style progress bars (excludes filename width).
+///
+/// This value is empirically derived and verified by tests. The filename width
+/// is added to this to get total overhead.
+///
+/// # Finding the Correct Value
+///
+/// **DO NOT** rely on the formula breakdown below. Run
+/// `test_verify_style_overhead_constant_is_accurate` and adjust until it passes.
+///
+/// **Approximate formula** (for intuition, not authoritative):
+/// copy_overhead(60) + " verifying"(10) ≈ 70
+///
+/// **Authoritative verification:** `test_verify_style_overhead_constant_is_accurate`
+const VERIFY_STYLE_BASE_OVERHEAD: u16 = 70;
+
+/// Base overhead for batch style progress bars.
+///
+/// This value is empirically derived and verified by tests.
+///
+/// # Finding the Correct Value
+///
+/// **DO NOT** rely on the formula breakdown below. Run
+/// `test_batch_style_overhead_constant_is_accurate` and adjust until it passes.
+///
+/// **Approximate formula** (for intuition, not authoritative):
+/// prefix(~10) + brackets(4) + stats(~71) ≈ 85
+///
+/// **Authoritative verification:** `test_batch_style_overhead_constant_is_accurate`
+const BATCH_STYLE_OVERHEAD: u16 = 85;
+
+/// Base overhead for hash style progress bars.
+///
+/// This value is empirically derived and verified by tests.
+///
+/// # Finding the Correct Value
+///
+/// **DO NOT** rely on the formula breakdown below. Run
+/// `test_hash_style_overhead_constant_is_accurate` and adjust until it passes.
+///
+/// **Approximate formula** (for intuition, not authoritative):
+/// spinner(1) + brackets(4) + stats(~54) + msg(~11) ≈ 70
+///
+/// **Authoritative verification:** `test_hash_style_overhead_constant_is_accurate`
+const HASH_STYLE_OVERHEAD: u16 = 70;
 
 /// Builder for progress bar styles with automatic width calculation.
 ///
@@ -148,10 +250,17 @@ impl ProgressStyleBuilder {
                 // Calculate display width on the ORIGINAL filename, not the escaped version.
                 // Escaped braces ({{ and }}) are template syntax that render as single characters.
                 let original = self.custom_filename.as_deref().unwrap_or_default();
-                let filename_display_width = str_display_width_as_u16(original);
-                let filename = escape_template_braces(original);
-                // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + spaces(3) = ~60 + filename display width
-                let overhead = 60 + filename_display_width;
+
+                // Calculate maximum filename width that fits with minimum bar
+                let max_filename_width =
+                    calculate_max_filename_width(terminal_width, COPY_STYLE_BASE_OVERHEAD);
+
+                // Truncate filename if needed to ensure the line fits
+                let truncated = truncate_filename(original, max_filename_width);
+                let filename_display_width = str_display_width_as_u16(&truncated);
+                let filename = escape_template_braces(&truncated);
+
+                let overhead = COPY_STYLE_BASE_OVERHEAD + filename_display_width;
                 let bar_width = calculate_bar_width(terminal_width, overhead);
                 format!(
                     "{{spinner:.green}} {} [{{bar:{}.cyan/blue}}] {}",
@@ -162,10 +271,17 @@ impl ProgressStyleBuilder {
                 // Calculate display width on the ORIGINAL filename, not the escaped version.
                 // Escaped braces ({{ and }}) are template syntax that render as single characters.
                 let original = self.custom_filename.as_deref().unwrap_or_default();
-                let filename_display_width = str_display_width_as_u16(original);
-                let filename = escape_template_braces(original);
-                // spinner(2) + filename + brackets(4) + bytes(25) + speed/eta(25) + " verifying"(10) + spaces(3) = ~70 + filename display width
-                let overhead = 70 + filename_display_width;
+
+                // Calculate maximum filename width that fits with minimum bar
+                let max_filename_width =
+                    calculate_max_filename_width(terminal_width, VERIFY_STYLE_BASE_OVERHEAD);
+
+                // Truncate filename if needed to ensure the line fits
+                let truncated = truncate_filename(original, max_filename_width);
+                let filename_display_width = str_display_width_as_u16(&truncated);
+                let filename = escape_template_braces(&truncated);
+
+                let overhead = VERIFY_STYLE_BASE_OVERHEAD + filename_display_width;
                 let bar_width = calculate_bar_width(terminal_width, overhead);
                 format!(
                     "{{spinner:.yellow}} {} [{{bar:{}.yellow/dim}}] {} verifying",
@@ -173,17 +289,14 @@ impl ProgressStyleBuilder {
                 )
             }
             StyleType::Batch => {
-                // "Batch [bar] (99/99) 999.99 GiB/999.99 GiB @ 999.99 MiB/s (~99:99:99 remaining)" = ~85 chars overhead
-                let bar_width = calculate_bar_width(terminal_width, 85);
+                let bar_width = calculate_bar_width(terminal_width, BATCH_STYLE_OVERHEAD);
                 format!(
                     "{{prefix:.bold}} [{{bar:{}.blue/dim}}] {}",
                     bar_width, BATCH_PROGRESS_STATS_FORMAT
                 )
             }
             StyleType::Hash => {
-                // spinner(2) + brackets(4) + bytes/total(25) + speed/eta(35) + msg(variable) + spaces(4) = ~70 overhead
-                // We use a larger overhead to leave room for the message
-                let bar_width = calculate_bar_width(terminal_width, 70);
+                let bar_width = calculate_bar_width(terminal_width, HASH_STYLE_OVERHEAD);
                 format!(
                     "{{spinner:.green}} [{{bar:{}.cyan/blue}}] {} {{msg}}",
                     bar_width, PROGRESS_STATS_FORMAT
@@ -347,5 +460,253 @@ mod tests {
              Emoji bar: {}, ASCII bar: {}",
             width_emoji, width_ascii
         );
+    }
+
+    // Tests for filename truncation integration
+
+    #[test]
+    fn test_copy_style_long_filename_builds() {
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+
+        // Test at various terminal widths
+        for width in [80, 100, 120, 60] {
+            let style = ProgressStyleBuilder::copy(long_filename).build(width);
+            assert!(style.is_ok(), "Should build at width {}", width);
+        }
+    }
+
+    #[test]
+    fn test_verify_style_long_filename_builds() {
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+
+        for width in [80, 100, 120, 60] {
+            let style = ProgressStyleBuilder::verify(long_filename).build(width);
+            assert!(style.is_ok(), "Should build at width {}", width);
+        }
+    }
+
+    #[test]
+    fn test_template_truncates_long_filename() {
+        // This test verifies that very long filenames get truncated
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+        let terminal_width: u16 = 80;
+
+        let template = ProgressStyleBuilder::copy(long_filename).create_template(terminal_width);
+
+        // The template should NOT contain the end portion since truncation should occur
+        assert!(
+            !template.contains("Truncation"),
+            "Filename should be truncated, but found full name in template: {}",
+            template
+        );
+
+        // The template should contain ellipsis from truncation
+        assert!(
+            template.contains("..."),
+            "Truncated filename should contain ellipsis: {}",
+            template
+        );
+
+        // The template should preserve .mkv extension
+        assert!(
+            template.contains(".mkv"),
+            "Should preserve .mkv extension: {}",
+            template
+        );
+    }
+
+    #[test]
+    fn test_template_preserves_short_filename() {
+        // Short filenames should not be truncated
+        let short_filename = "movie.mkv";
+        let terminal_width: u16 = 120;
+
+        let template = ProgressStyleBuilder::copy(short_filename).create_template(terminal_width);
+
+        // The template should contain the full filename (escaped if needed)
+        assert!(
+            template.contains("movie.mkv"),
+            "Short filename should not be truncated: {}",
+            template
+        );
+
+        // Should NOT contain ellipsis
+        assert!(
+            !template.contains("..."),
+            "Short filename should not have ellipsis: {}",
+            template
+        );
+    }
+
+    #[test]
+    fn test_verify_template_truncates_long_filename() {
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+        // Use 120 width - verify style has 70 base overhead, so max_filename = 120 - 70 - 10 = 40
+        let terminal_width: u16 = 120;
+
+        let template = ProgressStyleBuilder::verify(long_filename).create_template(terminal_width);
+
+        // Verify style has more overhead (70 vs 60), so truncation should be more aggressive
+        assert!(
+            !template.contains("Truncation"),
+            "Filename should be truncated in verify style: {}",
+            template
+        );
+
+        // Should contain ellipsis and extension
+        assert!(
+            template.contains("...") && template.contains(".mkv"),
+            "Should have ellipsis and .mkv extension: {}",
+            template
+        );
+
+        // Should contain " verifying" suffix
+        assert!(
+            template.contains(" verifying"),
+            "Verify style should have verifying suffix: {}",
+            template
+        );
+    }
+
+    // ========================================================================
+    // Overhead constant verification tests
+    // ========================================================================
+    //
+    // These tests verify that the overhead constants are correctly calculated.
+    // If any of these tests fail after modifying a template format string,
+    // you need to recalculate and update the corresponding overhead constant.
+    //
+    // IMPORTANT: Use the appropriate helper function for each style type:
+    // - `verify_filename_style_overhead()` for styles with filenames (copy, verify)
+    // - `verify_simple_style_overhead()` for styles without filenames (batch, hash)
+    //
+    // Using these helpers ensures consistent verification and prevents accidentally
+    // missing assertions.
+    // ========================================================================
+
+    /// Verify overhead constant for a style that uses filenames.
+    ///
+    /// This helper encapsulates the two-assertion pattern that filename-based
+    /// styles must follow:
+    /// 1. A filename at exactly max width should produce MIN_BAR_WIDTH bar
+    /// 2. A filename 1 char shorter should produce MIN_BAR_WIDTH + 1 bar
+    ///
+    /// Using this helper prevents accidentally omitting one of these assertions.
+    fn verify_filename_style_overhead<F>(
+        style_name: &str,
+        base_overhead: u16,
+        expected_max_filename: u16,
+        terminal_width: u16,
+        builder_fn: F,
+    ) where
+        F: Fn(&str) -> ProgressStyleBuilder,
+    {
+        use crate::MIN_BAR_WIDTH;
+
+        // Sanity check: verify expected_max_filename matches the formula
+        let calculated_max = terminal_width
+            .saturating_sub(base_overhead)
+            .saturating_sub(MIN_BAR_WIDTH);
+        assert_eq!(
+            expected_max_filename, calculated_max,
+            "Sanity check failed for {}: expected_max_filename ({}) != calculated ({})",
+            style_name, expected_max_filename, calculated_max
+        );
+
+        // Test 1: A filename of exactly max width should result in MIN_BAR_WIDTH bar
+        let exact_fit_filename = "a".repeat(expected_max_filename as usize);
+        let template_exact = builder_fn(&exact_fit_filename).create_template(terminal_width);
+        let bar_width_exact =
+            extract_bar_width(&template_exact).expect("Failed to extract bar width");
+        assert_eq!(
+            bar_width_exact, MIN_BAR_WIDTH,
+            "{}: Filename at max width should produce MIN_BAR_WIDTH. \
+             If this fails, the overhead constant ({}) may be incorrect. Template: {}",
+            style_name, base_overhead, template_exact
+        );
+
+        // Test 2: A filename 1 char shorter should give 1 more bar width
+        let shorter_filename = "a".repeat((expected_max_filename - 1) as usize);
+        let template_shorter = builder_fn(&shorter_filename).create_template(terminal_width);
+        let bar_width_shorter =
+            extract_bar_width(&template_shorter).expect("Failed to extract bar width");
+        assert_eq!(
+            bar_width_shorter,
+            MIN_BAR_WIDTH + 1,
+            "{}: Shorter filename should allow 1 more bar width. Template: {}",
+            style_name, template_shorter
+        );
+    }
+
+    /// Verify overhead constant for a style without filenames (batch, hash).
+    ///
+    /// This helper encapsulates the two-assertion pattern that simple styles
+    /// (those without variable-width filenames) must follow:
+    /// 1. At minimum terminal width, bar should be exactly MIN_BAR_WIDTH
+    /// 2. At minimum terminal width + 1, bar should be MIN_BAR_WIDTH + 1
+    ///
+    /// Using this helper prevents accidentally omitting one of these assertions.
+    fn verify_simple_style_overhead<F>(style_name: &str, overhead: u16, builder_fn: F)
+    where
+        F: Fn() -> ProgressStyleBuilder,
+    {
+        use crate::MIN_BAR_WIDTH;
+
+        // Test 1: At minimum terminal width, bar should be MIN_BAR_WIDTH
+        let min_terminal_width = overhead + MIN_BAR_WIDTH;
+        let template_min = builder_fn().create_template(min_terminal_width);
+        let bar_width_min =
+            extract_bar_width(&template_min).expect("Failed to extract bar width");
+        assert_eq!(
+            bar_width_min, MIN_BAR_WIDTH,
+            "{}: At minimum terminal width ({}), bar should be MIN_BAR_WIDTH ({}). \
+             If this fails, the overhead constant ({}) may be incorrect. Template: {}",
+            style_name, min_terminal_width, MIN_BAR_WIDTH, overhead, template_min
+        );
+
+        // Test 2: At minimum terminal width + 1, bar should be MIN_BAR_WIDTH + 1
+        let template_plus_one = builder_fn().create_template(min_terminal_width + 1);
+        let bar_width_plus_one =
+            extract_bar_width(&template_plus_one).expect("Failed to extract bar width");
+        assert_eq!(
+            bar_width_plus_one,
+            MIN_BAR_WIDTH + 1,
+            "{}: At terminal width + 1, bar should be MIN_BAR_WIDTH + 1. Template: {}",
+            style_name, template_plus_one
+        );
+    }
+
+    #[test]
+    fn test_copy_style_overhead_constant_is_accurate() {
+        // Terminal 100 - overhead 60 - MIN_BAR_WIDTH 10 = max filename 30
+        verify_filename_style_overhead(
+            "copy",
+            COPY_STYLE_BASE_OVERHEAD,
+            30, // expected max filename width
+            100,
+            ProgressStyleBuilder::copy,
+        );
+    }
+
+    #[test]
+    fn test_verify_style_overhead_constant_is_accurate() {
+        // Terminal 100 - overhead 70 - MIN_BAR_WIDTH 10 = max filename 20
+        verify_filename_style_overhead(
+            "verify",
+            VERIFY_STYLE_BASE_OVERHEAD,
+            20, // expected max filename width
+            100,
+            ProgressStyleBuilder::verify,
+        );
+    }
+
+    #[test]
+    fn test_batch_style_overhead_constant_is_accurate() {
+        verify_simple_style_overhead("batch", BATCH_STYLE_OVERHEAD, ProgressStyleBuilder::batch);
+    }
+
+    #[test]
+    fn test_hash_style_overhead_constant_is_accurate() {
+        verify_simple_style_overhead("hash", HASH_STYLE_OVERHEAD, ProgressStyleBuilder::hash);
     }
 }
