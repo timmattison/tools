@@ -65,6 +65,18 @@ pub const MAX_BAR_WIDTH: u16 = 100;
 /// - 2 space characters for the empty/background portion of the bar
 pub const PROGRESS_CHARS: &str = "█▉▊▋▌▍▎▏  ";
 
+// Compile-time assertions for constant relationships.
+// These ensure the public constants maintain valid relationships regardless of
+// whether tests are run. Moving these out of tests ensures they're always checked.
+const _: () = assert!(
+    MIN_BAR_WIDTH < MAX_BAR_WIDTH,
+    "MIN_BAR_WIDTH must be less than MAX_BAR_WIDTH"
+);
+const _: () = assert!(
+    DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH,
+    "DEFAULT_TERMINAL_WIDTH must be greater than MIN_BAR_WIDTH"
+);
+
 /// Maximum length for a file extension to be recognized as such.
 ///
 /// Extensions longer than this are treated as part of the basename.
@@ -551,11 +563,18 @@ mod tests {
     }
 
     #[test]
-    fn test_constants() {
-        // Use const blocks for compile-time constant validation
-        const _: () = assert!(MIN_BAR_WIDTH < MAX_BAR_WIDTH);
-        const _: () = assert!(DEFAULT_TERMINAL_WIDTH > MIN_BAR_WIDTH);
-        assert!(!PROGRESS_CHARS.is_empty());
+    fn test_constants_runtime_properties() {
+        // Compile-time constant relationships are verified at module level.
+        // This test verifies runtime properties that can't be checked at compile time.
+        assert!(!PROGRESS_CHARS.is_empty(), "PROGRESS_CHARS must not be empty");
+
+        // Verify PROGRESS_CHARS has the expected structure for indicatif:
+        // 8 partial block characters + 2 spaces = 10 characters
+        assert_eq!(
+            PROGRESS_CHARS.chars().count(),
+            10,
+            "PROGRESS_CHARS should have 10 characters (8 blocks + 2 spaces)"
+        );
     }
 
     #[test]
