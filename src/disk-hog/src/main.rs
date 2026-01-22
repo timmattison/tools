@@ -293,8 +293,15 @@ fn convert_iops_to_stats(
         })
         .collect();
 
-    // Sort by total IOPS, descending
-    stats.sort_by_key(|s| Reverse(s.total_iops().unwrap_or(OpsPerSec(0))));
+    // Sort by total IOPS, descending.
+    // Safety: total_iops() always returns Some because we set both read_ops_per_sec
+    // and write_ops_per_sec to Some above.
+    stats.sort_by_key(|s| {
+        Reverse(
+            s.total_iops()
+                .expect("IOPS stats always have both read and write ops set"),
+        )
+    });
 
     stats
 }
@@ -405,5 +412,144 @@ mod tests {
             version.contains("clean") || version.contains("dirty"),
             "Version string should contain clean/dirty status: {version}"
         );
+    }
+
+    #[test]
+    fn test_convert_iops_to_stats_always_has_total_iops() {
+        // This test verifies the invariant that convert_iops_to_stats always produces
+        // ProcessIOStats with both read_ops_per_sec and write_ops_per_sec set to Some,
+        // ensuring total_iops() will never return None.
+        //
+        // This invariant is relied upon by the sorting code which uses .expect().
+
+        use model::IOPSCounter;
+
+        let bandwidth_collector = BandwidthCollector::new();
+        let elapsed = Duration::from_secs(1);
+
+        // Create test IOPS data with various values
+        let mut iops_data = HashMap::new();
+        iops_data.insert(
+            1001,
+            IOPSCounter {
+                read_ops: 100,
+                write_ops: 50,
+            },
+        );
+        iops_data.insert(
+            1002,
+            IOPSCounter {
+                read_ops: 0,
+                write_ops: 200,
+            },
+        );
+        iops_data.insert(
+            1003,
+            IOPSCounter {
+                read_ops: 300,
+                write_ops: 0,
+            },
+        );
+
+        let stats = convert_iops_to_stats(&iops_data, &bandwidth_collector, elapsed);
+
+        // Verify all stats have total_iops() returning Some
+        for stat in &stats {
+            assert!(
+                stat.total_iops().is_some(),
+                "ProcessIOStats from convert_iops_to_stats must always have total_iops() == Some, \
+                 but PID {} has None",
+                stat.pid
+            );
+            // Also verify the individual fields are Some
+            assert!(
+                stat.read_ops_per_sec.is_some(),
+                "read_ops_per_sec must be Some for PID {}",
+                stat.pid
+            );
+            assert!(
+                stat.write_ops_per_sec.is_some(),
+                "write_ops_per_sec must be Some for PID {}",
+                stat.pid
+            );
+        }
+
+        // Verify we got all 3 entries (none filtered out due to zero total)
+        assert_eq!(stats.len(), 3);
+    }
+
+    #[test]
+    fn test_convert_iops_to_stats_filters_zero_total() {
+        // Verify that entries with zero total IOPS are filtered out
+        use model::IOPSCounter;
+
+        let bandwidth_collector = BandwidthCollector::new();
+        let elapsed = Duration::from_secs(1);
+
+        let mut iops_data = HashMap::new();
+        iops_data.insert(
+            1001,
+            IOPSCounter {
+                read_ops: 100,
+                write_ops: 50,
+            },
+        );
+        // This entry has zero total and should be filtered
+        iops_data.insert(
+            1002,
+            IOPSCounter {
+                read_ops: 0,
+                write_ops: 0,
+            },
+        );
+
+        let stats = convert_iops_to_stats(&iops_data, &bandwidth_collector, elapsed);
+
+        // Should only have one entry (the non-zero one)
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].pid, 1001);
+    }
+
+    #[test]
+    fn test_convert_iops_to_stats_sorted_by_total_descending() {
+        // Verify that stats are sorted by total IOPS in descending order
+        use model::IOPSCounter;
+
+        let bandwidth_collector = BandwidthCollector::new();
+        let elapsed = Duration::from_secs(1);
+
+        let mut iops_data = HashMap::new();
+        // Total: 50
+        iops_data.insert(
+            1001,
+            IOPSCounter {
+                read_ops: 30,
+                write_ops: 20,
+            },
+        );
+        // Total: 300 (should be first)
+        iops_data.insert(
+            1002,
+            IOPSCounter {
+                read_ops: 200,
+                write_ops: 100,
+            },
+        );
+        // Total: 100 (should be second)
+        iops_data.insert(
+            1003,
+            IOPSCounter {
+                read_ops: 60,
+                write_ops: 40,
+            },
+        );
+
+        let stats = convert_iops_to_stats(&iops_data, &bandwidth_collector, elapsed);
+
+        assert_eq!(stats.len(), 3);
+        // Verify descending order by total IOPS
+        assert_eq!(stats[0].pid, 1002); // 300 total
+        assert_eq!(stats[1].pid, 1003); // 100 total
+        assert_eq!(stats[2].pid, 1001); // 50 total
     }
 }

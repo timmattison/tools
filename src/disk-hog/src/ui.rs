@@ -98,10 +98,7 @@ fn render_bandwidth_pane(frame: &mut Frame, area: Rect, state: &AppState) {
         Constraint::Length(12), // Total/s
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block)
-        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let table = Table::new(rows, widths).header(header).block(block);
 
     frame.render_widget(table, area);
 }
@@ -183,10 +180,7 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
         Constraint::Length(12), // Total IOPS
     ];
 
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(block)
-        .row_highlight_style(Style::default().add_modifier(Modifier::BOLD));
+    let table = Table::new(rows, widths).header(header).block(block);
 
     frame.render_widget(table, area);
 }

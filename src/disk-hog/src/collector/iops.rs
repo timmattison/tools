@@ -55,9 +55,19 @@ impl AtomicIOPSCounter {
         self.write_ops.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Takes a snapshot and resets the counters atomically.
+    /// Takes a snapshot and resets the counters.
     ///
     /// Returns the values that were present before the reset.
+    ///
+    /// # Note on Atomicity
+    ///
+    /// Each counter (read/write) is individually atomic, but the two are not
+    /// captured together atomically. There's a tiny window where an increment
+    /// could occur between reading `read_ops` and `write_ops`. For IOPS rate
+    /// display purposes this is acceptable since:
+    /// - The window is extremely small (nanoseconds)
+    /// - We're displaying approximate rates, not exact counts
+    /// - Any "lost" operation will be captured in the next snapshot
     pub fn snapshot_and_reset(&self) -> IOPSCounter {
         IOPSCounter {
             read_ops: self.read_ops.swap(0, Ordering::Relaxed),
