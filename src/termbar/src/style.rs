@@ -40,6 +40,15 @@ const BATCH_PROGRESS_STATS_FORMAT: &str =
 //
 // The bar width formula is:
 //   bar_width = terminal_width - overhead - filename_width (where applicable)
+//
+// **INDICATIF VERSION COMPATIBILITY**:
+// These overhead values depend on how indicatif expands placeholders like
+// `{bytes}`, `{percent}`, `{eta}`, etc. If indicatif changes its formatting
+// (e.g., using different padding or precision), these constants may need
+// updating. The tests will catch such breakage. When upgrading indicatif:
+// 1. Run `cargo test -p termbar` to check for failures
+// 2. If overhead tests fail, recalculate the constants using the process above
+// 3. Document the indicatif version in Cargo.toml comments if significant
 // =============================================================================
 
 /// Base overhead for copy style progress bars (excludes filename width).

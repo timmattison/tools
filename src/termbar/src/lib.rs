@@ -146,6 +146,29 @@ const _: () = assert!(
 /// this minimum plus the ellipsis and extension, we fall back to simple
 /// truncation without extension preservation.
 ///
+/// # Design Rationale
+///
+/// The value 1 was chosen deliberately to maximize truncation flexibility:
+///
+/// - **Narrow terminal support**: A value of 1 allows truncation to work in
+///   terminals as narrow as 70 columns (with typical progress bar overhead).
+///   Higher values would require wider terminals.
+///
+/// - **Graceful degradation**: With value 1, the minimum truncated result is
+///   `"X...ext"` (e.g., `"l...txt"`). While this shows minimal basename content,
+///   the preserved extension still conveys file type information, which is often
+///   the most important detail for progress bars.
+///
+/// - **Tradeoff accepted**: A value of 2-3 would produce more readable results
+///   like `"lo...txt"` or `"lon...txt"`, but would fail in narrower terminals.
+///   Since progress bars are primarily about showing *that* a file is being
+///   processed (not identifying *which* file in detail), the extension alone
+///   provides sufficient context in constrained situations.
+///
+/// - **Fallback behavior**: When even 1 character + ellipsis + extension doesn't
+///   fit, the code falls back to simple truncation without extension preservation,
+///   ensuring something always displays.
+///
 /// # Invariant
 ///
 /// Must be at least 1 to ensure visible content in truncated output.
