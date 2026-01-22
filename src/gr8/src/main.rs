@@ -321,7 +321,7 @@ mod tests {
 
         // Graphql should be in available
         assert!(
-            available.iter().any(|n| n.name == "graphql"),
+            available.iter().any(|n| n.name == GRAPHQL_RESOURCE),
             "Graphql (remaining=100) should be in available list"
         );
 
