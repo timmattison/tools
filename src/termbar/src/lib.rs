@@ -1192,10 +1192,21 @@ mod tests {
         // Verify the actual truncation produces the expected result
         // min_with_ext = 1 + 2 + 4 = 7 for .txt
         let result = truncate_filename("longfilename.txt", min_with_ext as u16);
+
+        // At min_with_ext, the result should be "l...txt" (1 basename char + ".." + ".txt")
+        // Verify the structure directly rather than using a filter that could be misleading
         assert_eq!(
-            result.chars().filter(|c| *c != '.').take(1).count(),
+            result, "l...txt",
+            "At min_with_ext width, should get exactly MIN_BASENAME_CHARS basename + ellipsis + extension"
+        );
+
+        // Also verify the basename portion has exactly MIN_BASENAME_CHARS characters
+        // by checking that the result starts with exactly that many chars before the ellipsis
+        let basename_portion: String = result.chars().take_while(|c| *c != '.').collect();
+        assert_eq!(
+            basename_portion.chars().count(),
             MIN_BASENAME_CHARS,
-            "Truncated filename should have exactly MIN_BASENAME_CHARS basename characters"
+            "Basename portion before ellipsis should have exactly MIN_BASENAME_CHARS characters"
         );
     }
 }
