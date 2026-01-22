@@ -197,10 +197,9 @@ async fn run_app(
     // App state
     let mut state = AppState::new(args.count, iops_mode);
 
-    // Do an initial collection to prime the previous readings.
-    // This establishes the baseline for calculating deltas. We discard these
-    // results since they represent cumulative totals, not per-interval rates.
-    let _ = bandwidth_collector.collect(tick_rate);
+    // Establish baseline readings for bandwidth calculation.
+    // Without priming, the first collect() would report cumulative totals as rates.
+    bandwidth_collector.prime();
 
     // Track actual elapsed time for accurate rate calculation.
     // Initialize this BEFORE the sleep so the first iteration correctly measures

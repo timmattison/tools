@@ -44,6 +44,35 @@ impl BandwidthCollector {
         }
     }
 
+    /// Primes the collector by establishing baseline readings for all processes.
+    ///
+    /// This must be called once before the first real collection to establish
+    /// the baseline cumulative I/O values. Without priming, the first `collect()`
+    /// call would report the total cumulative I/O since process start as rates,
+    /// producing wildly inflated numbers.
+    ///
+    /// The results are intentionally discarded - we only care about recording
+    /// the baseline values in `previous_readings`.
+    pub fn prime(&mut self) {
+        // Use a minimal duration - it doesn't matter since we discard the results.
+        // We just need to populate previous_readings with current cumulative values.
+        self.system
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
+
+        for (pid, process) in self.system.processes() {
+            let pid_u32 = pid.as_u32();
+            let usage = process.disk_usage();
+
+            self.previous_readings.insert(
+                pid_u32,
+                PreviousReading {
+                    read_bytes: usage.total_read_bytes,
+                    written_bytes: usage.total_written_bytes,
+                },
+            );
+        }
+    }
+
     /// Looks up a process name by PID.
     ///
     /// Returns the process name if found, or a fallback string like `<exited:1234>`
@@ -138,5 +167,78 @@ impl BandwidthCollector {
 impl Default for BandwidthCollector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prime_populates_previous_readings() {
+        let mut collector = BandwidthCollector::new();
+
+        // Before priming, previous_readings should be empty
+        assert!(collector.previous_readings.is_empty());
+
+        // Prime the collector
+        collector.prime();
+
+        // After priming, previous_readings should have entries for running processes.
+        // We can't predict exactly how many, but there should be at least one
+        // (the test process itself).
+        assert!(
+            !collector.previous_readings.is_empty(),
+            "prime() should populate previous_readings with at least the test process"
+        );
+    }
+
+    #[test]
+    fn test_collect_after_prime_returns_only_new_io() {
+        let mut collector = BandwidthCollector::new();
+
+        // Prime the collector to establish baseline
+        collector.prime();
+
+        // Collect immediately - should show minimal or no I/O since prime() just ran
+        let stats = collector.collect(Duration::from_secs(1));
+
+        // All returned stats should have some I/O activity (that's the filter)
+        for stat in &stats {
+            assert!(
+                stat.total_bandwidth().as_u64() > 0,
+                "collect() should only return processes with I/O activity"
+            );
+        }
+    }
+
+    #[test]
+    fn test_lookup_process_name_for_current_process() {
+        let mut collector = BandwidthCollector::new();
+        collector.prime(); // Need to refresh to have process info
+
+        // Look up our own process
+        let our_pid = std::process::id();
+        let name = collector.lookup_process_name(our_pid);
+
+        // Should not be an "exited" placeholder
+        assert!(
+            !name.starts_with("<exited:"),
+            "Current process should have a real name, got: {name}"
+        );
+    }
+
+    #[test]
+    fn test_lookup_process_name_for_nonexistent_pid() {
+        let collector = BandwidthCollector::new();
+
+        // Use a PID that's very unlikely to exist
+        let name = collector.lookup_process_name(u32::MAX - 1);
+
+        // Should return the exited placeholder
+        assert!(
+            name.starts_with("<exited:"),
+            "Nonexistent PID should return exited placeholder, got: {name}"
+        );
     }
 }

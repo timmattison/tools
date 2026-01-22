@@ -102,14 +102,18 @@ pub type IOPSData = Arc<parking_lot::RwLock<HashMap<u32, Arc<AtomicIOPSCounter>>
 pub struct ParserStats {
     /// Number of lines that were not disk I/O operations.
     ///
-    /// This includes metadata operations, informational lines, and any lines
-    /// that couldn't be parsed. A non-zero value here is expected and normal -
+    /// This includes metadata operations, informational lines, and lines with
+    /// too few fields to parse. A non-zero value here is expected and normal -
     /// fs_usage outputs various line types beyond read/write operations.
-    /// However, a very high ratio relative to processed lines might indicate
-    /// unexpected fs_usage output format changes.
     pub non_io_lines: u64,
     /// Number of lines successfully processed as disk I/O operations.
     pub processed_lines: u64,
+    /// Number of I/O lines where PID extraction failed.
+    ///
+    /// These are lines that were identified as read/write operations but the
+    /// PID could not be extracted (e.g., unexpected format). A non-zero value
+    /// here might indicate fs_usage output format changes between macOS versions.
+    pub parse_failures: u64,
 }
 
 /// Atomic counters for parser statistics.
@@ -117,6 +121,7 @@ pub struct ParserStats {
 struct AtomicParserStats {
     non_io_lines: AtomicU64,
     processed_lines: AtomicU64,
+    parse_failures: AtomicU64,
 }
 
 impl AtomicParserStats {
@@ -126,6 +131,7 @@ impl AtomicParserStats {
         ParserStats {
             non_io_lines: self.non_io_lines.load(Ordering::Relaxed),
             processed_lines: self.processed_lines.load(Ordering::Relaxed),
+            parse_failures: self.parse_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -336,7 +342,8 @@ async fn parse_fs_usage(
             let pid: u32 = match caps.get(2).and_then(|m| m.as_str().parse().ok()) {
                 Some(pid) => pid,
                 None => {
-                    stats.non_io_lines.fetch_add(1, Ordering::Relaxed);
+                    // I/O line but PID extraction failed - track separately
+                    stats.parse_failures.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
             };
@@ -361,18 +368,19 @@ async fn parse_fs_usage(
                 }
             };
 
-            // Update counter (lock-free)
+            // Update counter (lock-free).
+            // At this point we know it's either a read or write (we returned early if neither).
             if is_read {
                 counter.increment_read();
-            } else if is_write {
+            } else {
                 counter.increment_write();
             }
 
             // Successfully processed this line
             stats.processed_lines.fetch_add(1, Ordering::Relaxed);
         } else {
-            // Read/write operation but couldn't extract PID - unexpected format
-            stats.non_io_lines.fetch_add(1, Ordering::Relaxed);
+            // Read/write operation but couldn't extract process.PID pattern
+            stats.parse_failures.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -530,9 +538,10 @@ mod tests {
         let collector = IOPSCollector::new();
         let stats = collector.parser_stats();
 
-        // Initially, no lines should be processed or counted as non-I/O
+        // Initially, all counters should be zero
         assert_eq!(stats.processed_lines, 0);
         assert_eq!(stats.non_io_lines, 0);
+        assert_eq!(stats.parse_failures, 0);
     }
 
     #[test]
@@ -542,14 +551,17 @@ mod tests {
         // Simulate some parsing activity
         stats.processed_lines.fetch_add(10, Ordering::Relaxed);
         stats.non_io_lines.fetch_add(3, Ordering::Relaxed);
+        stats.parse_failures.fetch_add(2, Ordering::Relaxed);
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.processed_lines, 10);
         assert_eq!(snapshot.non_io_lines, 3);
+        assert_eq!(snapshot.parse_failures, 2);
 
         // Verify snapshot doesn't reset (unlike IOPS counters)
         let snapshot2 = stats.snapshot();
         assert_eq!(snapshot2.processed_lines, 10);
         assert_eq!(snapshot2.non_io_lines, 3);
+        assert_eq!(snapshot2.parse_failures, 2);
     }
 }
