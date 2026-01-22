@@ -414,7 +414,7 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 /// Truncate a filename to fit within a maximum display width while preserving the extension.
 ///
 /// When truncation is needed, the function produces output in one of two formats:
-/// - With extension: `beginning...ext` (e.g., `"American.Psycho.2000.UNCUT...mkv"`)
+/// - With extension: `beginning...ext` (e.g., `"Very.Long.Filename.With...mkv"`)
 /// - Without extension: `beginning...` (e.g., `"Makefile_with_very_long..."`)
 ///
 /// The `..` ellipsis is used when an extension is present so that combined with
@@ -456,7 +456,7 @@ fn split_filename_extension(filename: &str) -> (&str, Option<&str>) {
 ///
 /// // Long filename gets truncated (3 dots total: ".." + "." from extension)
 /// let truncated = truncate_filename(
-///     "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv",
+///     "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv",
 ///     30
 /// );
 /// assert!(truncated.ends_with(".mkv"));
@@ -759,7 +759,7 @@ mod tests {
 
     #[test]
     fn test_truncate_filename_long_with_extension() {
-        let long = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let long = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
         let result = truncate_filename(long, 30);
 
         // Should end with .mkv
@@ -778,7 +778,7 @@ mod tests {
         );
         // Should start with beginning of original
         assert!(
-            result.starts_with("American"),
+            result.starts_with("Very"),
             "Should start with beginning: {}",
             result
         );
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn test_progress_bar_fits_with_truncation() {
         // Simulate the actual use case: very long filename at terminal width 80
-        let long_filename = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
         let terminal_width: u16 = 80;
         let base_overhead: u16 = 60;
 

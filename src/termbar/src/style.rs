@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_copy_style_long_filename_builds() {
-        let long_filename = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
 
         // Test at various terminal widths
         for width in [80, 100, 120, 60] {
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_verify_style_long_filename_builds() {
-        let long_filename = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
 
         for width in [80, 100, 120, 60] {
             let style = ProgressStyleBuilder::verify(long_filename).build(width);
@@ -488,14 +488,14 @@ mod tests {
     #[test]
     fn test_template_truncates_long_filename() {
         // This test verifies that very long filenames get truncated
-        let long_filename = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
         let terminal_width: u16 = 80;
 
         let template = ProgressStyleBuilder::copy(long_filename).create_template(terminal_width);
 
-        // The template should NOT contain the full "Atmos-FGT" part since truncation should occur
+        // The template should NOT contain the end portion since truncation should occur
         assert!(
-            !template.contains("Atmos-FGT"),
+            !template.contains("Truncation"),
             "Filename should be truncated, but found full name in template: {}",
             template
         );
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_verify_template_truncates_long_filename() {
-        let long_filename = "American.Psycho.2000.UNCUT.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv";
+        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
         // Use 120 width - verify style has 70 base overhead, so max_filename = 120 - 70 - 10 = 40
         let terminal_width: u16 = 120;
 
@@ -548,7 +548,7 @@ mod tests {
 
         // Verify style has more overhead (70 vs 60), so truncation should be more aggressive
         assert!(
-            !template.contains("Atmos-FGT"),
+            !template.contains("Truncation"),
             "Filename should be truncated in verify style: {}",
             template
         );
