@@ -240,9 +240,20 @@ fn main() -> Result<()> {
 
     // Collect and partition rate limits into available (remaining > 0) and exhausted (remaining == 0)
     let all_limits = collect_rate_limits(&response.resources);
-    let (available, exhausted): (Vec<_>, Vec<_>) = all_limits
+    let (mut available, mut exhausted): (Vec<_>, Vec<_>) = all_limits
         .into_iter()
         .partition(|named| named.rate_limit.remaining > 0);
+
+    // Sort each list so graphql appears last (it's the one users care about most)
+    let graphql_last = |a: &NamedRateLimit, b: &NamedRateLimit| {
+        match (a.name == "graphql", b.name == "graphql") {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => std::cmp::Ordering::Equal,
+        }
+    };
+    available.sort_by(graphql_last);
+    exhausted.sort_by(graphql_last);
 
     // Print available rate limits first (easier to scroll past)
     print_rate_limit_table("Available Rate Limits", &available);
@@ -403,5 +414,57 @@ mod tests {
     fn test_format_time_until_reset_exact_minute() {
         let future_epoch = Utc::now().timestamp() + 60; // 1m 0s
         assert_eq!(format_time_until_reset(future_epoch), Some("1m 0s".to_string()));
+    }
+
+    #[test]
+    fn test_graphql_sorted_last_in_available() {
+        // All resources available
+        let resources = make_all_resources_with_remaining(100);
+        let all_limits = collect_rate_limits(&resources);
+        let (mut available, _): (Vec<_>, Vec<_>) = all_limits
+            .into_iter()
+            .partition(|named| named.rate_limit.remaining > 0);
+
+        // Apply the same sort used in main
+        let graphql_last = |a: &NamedRateLimit, b: &NamedRateLimit| {
+            match (a.name == "graphql", b.name == "graphql") {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => std::cmp::Ordering::Equal,
+            }
+        };
+        available.sort_by(graphql_last);
+
+        assert_eq!(
+            available.last().map(|n| n.name),
+            Some("graphql"),
+            "graphql should be last in available list"
+        );
+    }
+
+    #[test]
+    fn test_graphql_sorted_last_in_exhausted() {
+        // All resources exhausted
+        let resources = make_all_resources_with_remaining(0);
+        let all_limits = collect_rate_limits(&resources);
+        let (_, mut exhausted): (Vec<_>, Vec<_>) = all_limits
+            .into_iter()
+            .partition(|named| named.rate_limit.remaining > 0);
+
+        // Apply the same sort used in main
+        let graphql_last = |a: &NamedRateLimit, b: &NamedRateLimit| {
+            match (a.name == "graphql", b.name == "graphql") {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => std::cmp::Ordering::Equal,
+            }
+        };
+        exhausted.sort_by(graphql_last);
+
+        assert_eq!(
+            exhausted.last().map(|n| n.name),
+            Some("graphql"),
+            "graphql should be last in exhausted list"
+        );
     }
 }
