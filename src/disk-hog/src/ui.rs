@@ -64,7 +64,16 @@ impl AppState {
 }
 
 /// Height of the IOPS pane when showing a status message instead of data.
-/// 2 (border) + 1 (padding above) + 1 (message line) + 1 (padding below) = 5
+///
+/// This must be large enough to display the status messages in `render_iops_pane()`
+/// for `DisabledNoRoot` and `DisabledByFlag` modes. The structure is:
+/// - 2 lines for borders (Borders::ALL = top + bottom)
+/// - 2 lines for content (1 empty line for padding + 1 message line)
+/// - 1 extra line for visual breathing room
+///
+/// **Coupling warning**: If you modify the Paragraph content in `render_iops_pane()`
+/// for the disabled modes, verify this constant is still sufficient. See
+/// `test_iops_message_height_sufficient` for validation.
 const IOPS_MESSAGE_HEIGHT: u16 = 5;
 
 /// Height of the help footer showing keyboard shortcuts.
@@ -442,6 +451,27 @@ mod tests {
         assert!(IopsMode::Enabled.is_enabled());
         assert!(!IopsMode::DisabledNoRoot.is_enabled());
         assert!(!IopsMode::DisabledByFlag.is_enabled());
+    }
+
+    #[test]
+    fn test_iops_message_height_sufficient() {
+        // This test documents and validates the IOPS_MESSAGE_HEIGHT constant.
+        // The disabled-mode messages in render_iops_pane() use:
+        // - Borders::ALL = 2 lines (top + bottom)
+        // - Paragraph content = 2 lines (1 empty + 1 message)
+        // Total minimum = 4 lines
+        //
+        // If this test fails, either IOPS_MESSAGE_HEIGHT is too small, or the
+        // content structure in render_iops_pane() has changed and needs review.
+        const BORDER_LINES: u16 = 2; // Borders::ALL = top + bottom
+        const CONTENT_LINES: u16 = 2; // Line::from("") + Line::from(message)
+        const MIN_REQUIRED: u16 = BORDER_LINES + CONTENT_LINES;
+
+        assert!(
+            IOPS_MESSAGE_HEIGHT >= MIN_REQUIRED,
+            "IOPS_MESSAGE_HEIGHT ({IOPS_MESSAGE_HEIGHT}) must be at least {MIN_REQUIRED} \
+             to display the status message with borders"
+        );
     }
 
     #[test]

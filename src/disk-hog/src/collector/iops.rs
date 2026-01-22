@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use regex::Regex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -140,8 +141,12 @@ impl AtomicParserStats {
 pub struct IOPSCollector {
     child: Option<Child>,
     data: IOPSData,
-    /// Flag indicating if the parser encountered an error.
-    parser_error: Arc<AtomicBool>,
+    /// Error message from the parser, if any occurred.
+    ///
+    /// Using `Mutex<Option<String>>` instead of `AtomicBool` allows us to preserve
+    /// the actual error message for reporting after the terminal is restored.
+    /// This provides better diagnostics than just knowing "an error occurred".
+    parser_error: Arc<Mutex<Option<String>>>,
     /// Handle to the parser task for cleanup and error checking.
     parser_handle: Option<JoinHandle<()>>,
     /// Parser statistics for diagnostics.
@@ -156,7 +161,7 @@ impl IOPSCollector {
         Self {
             child: None,
             data: Arc::new(parking_lot::RwLock::new(HashMap::new())),
-            parser_error: Arc::new(AtomicBool::new(false)),
+            parser_error: Arc::new(Mutex::new(None)),
             parser_handle: None,
             parser_stats: Arc::new(AtomicParserStats::default()),
         }
@@ -173,7 +178,15 @@ impl IOPSCollector {
     ///
     /// Check this periodically to detect if IOPS collection has stopped working.
     pub fn has_parser_error(&self) -> bool {
-        self.parser_error.load(Ordering::Relaxed)
+        self.parser_error.lock().is_some()
+    }
+
+    /// Returns the parser error message, if any.
+    ///
+    /// This provides the actual error details for display after the terminal
+    /// has been restored to normal mode.
+    pub fn parser_error_message(&self) -> Option<String> {
+        self.parser_error.lock().clone()
     }
 
     /// Returns current parser statistics for diagnostics.
@@ -220,10 +233,11 @@ impl IOPSCollector {
 
         // Spawn async task to parse fs_usage output, storing handle for cleanup
         let handle = tokio::spawn(async move {
-            if let Err(_e) = parse_fs_usage(stdout, data, parser_stats).await {
-                // Signal error to main loop - the UI will show an error state.
-                // We don't log here because the terminal may be in raw mode.
-                parser_error.store(true, Ordering::Relaxed);
+            if let Err(e) = parse_fs_usage(stdout, data, parser_stats).await {
+                // Store error message for later display - the UI will show an error state.
+                // We store the message rather than logging because the terminal may be
+                // in raw mode. The message will be displayed after terminal restoration.
+                *parser_error.lock() = Some(format!("fs_usage parser error: {e}"));
             }
         });
         self.parser_handle = Some(handle);
@@ -427,9 +441,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parser_error_flag() {
+    fn test_parser_error_initially_none() {
         let collector = IOPSCollector::new();
         assert!(!collector.has_parser_error());
+        assert!(collector.parser_error_message().is_none());
+    }
+
+    #[test]
+    fn test_parser_error_can_be_set_and_retrieved() {
+        let collector = IOPSCollector::new();
+
+        // Simulate setting an error (as the parser task would)
+        *collector.parser_error.lock() = Some("test error message".to_string());
+
+        assert!(collector.has_parser_error());
+        assert_eq!(
+            collector.parser_error_message(),
+            Some("test error message".to_string())
+        );
     }
 
     #[test]

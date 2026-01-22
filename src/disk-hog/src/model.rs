@@ -140,6 +140,14 @@ impl ProcessIOStats {
     }
 
     /// Total IOPS (read + write) per second, if available.
+    ///
+    /// Returns `Some` if at least one of read or write ops is available, treating
+    /// the missing component as zero. This graceful handling of partial data allows
+    /// the UI to display something meaningful even if only reads or only writes
+    /// were captured for a process.
+    ///
+    /// Returns `None` only when neither read nor write IOPS are available (i.e.,
+    /// when running without sudo and IOPS collection is disabled).
     pub fn total_iops(&self) -> Option<OpsPerSec> {
         match (self.read_ops_per_sec, self.write_ops_per_sec) {
             (Some(r), Some(w)) => Some(r + w),

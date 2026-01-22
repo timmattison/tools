@@ -255,9 +255,19 @@ async fn run_app(
         }
     }
 
-    // Stop IOPS collector and collect any shutdown errors
+    // Stop IOPS collector and collect any shutdown errors.
+    // Combine parser errors (if any) with shutdown errors for complete diagnostics.
     let shutdown_error = if let Some(mut collector) = iops_collector {
-        collector.stop().await
+        let parser_error = collector.parser_error_message();
+        let stop_error = collector.stop().await;
+
+        // Combine errors if both exist, otherwise return whichever is present
+        match (parser_error, stop_error) {
+            (Some(p), Some(s)) => Some(format!("{p}\n{s}")),
+            (Some(p), None) => Some(p),
+            (None, Some(s)) => Some(s),
+            (None, None) => None,
+        }
     } else {
         None
     };
@@ -288,6 +298,11 @@ fn convert_iops_to_stats(
             let read_ops_rate = OpsPerSec::from_ops_and_duration(counter.read_ops, elapsed);
             let write_ops_rate = OpsPerSec::from_ops_and_duration(counter.write_ops, elapsed);
 
+            // Note: Bandwidth fields are set to zero because fs_usage only provides
+            // operation counts, not byte counts. The IOPS pane displays read_ops_per_sec
+            // and write_ops_per_sec, ignoring the bandwidth fields. This is a deliberate
+            // design choice to reuse ProcessIOStats for both bandwidth-only and IOPS-only
+            // display, rather than creating separate types.
             ProcessIOStats {
                 pid: *pid,
                 name,
