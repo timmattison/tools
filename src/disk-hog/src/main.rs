@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use buildinfo::version_string;
 use clap::Parser;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
@@ -98,6 +99,7 @@ fn parse_refresh_rate(s: &str) -> Result<f64, String> {
 #[derive(Parser)]
 #[command(
     name = "disk-hog",
+    version = version_string!(),
     about = "Show per-process disk I/O usage on macOS",
     long_about = "disk-hog displays per-process disk bandwidth and IOPS in a continuously updating terminal UI.\n\nBandwidth monitoring works without root. IOPS monitoring requires running with sudo."
 )]
@@ -365,5 +367,31 @@ mod tests {
         assert!(parse_refresh_rate("0.09").is_err());
         // Just above maximum should fail
         assert!(parse_refresh_rate("60.1").is_err());
+    }
+
+    #[test]
+    fn test_version_string_format() {
+        // Verify version string follows the expected format: "X.Y.Z (hash, status)"
+        // This test ensures buildinfo is properly configured and the version
+        // macro produces the expected output format.
+        let version = version_string!();
+
+        // Should contain a version number (e.g., "0.1.0")
+        assert!(
+            version.contains('.'),
+            "Version string should contain version number with dots: {version}"
+        );
+
+        // Should contain parentheses with git info
+        assert!(
+            version.contains('(') && version.contains(')'),
+            "Version string should contain git info in parentheses: {version}"
+        );
+
+        // Should contain either "clean" or "dirty" status
+        assert!(
+            version.contains("clean") || version.contains("dirty"),
+            "Version string should contain clean/dirty status: {version}"
+        );
     }
 }

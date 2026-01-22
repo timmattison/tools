@@ -90,21 +90,22 @@ pub type IOPSData = Arc<parking_lot::RwLock<HashMap<u32, Arc<AtomicIOPSCounter>>
 #[derive(Debug, Default, Clone)]
 #[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
 pub struct ParserStats {
-    /// Number of lines skipped because they couldn't be parsed.
+    /// Number of lines that were not disk I/O operations.
     ///
-    /// A non-zero value here isn't necessarily a problem - fs_usage outputs
-    /// various informational lines that aren't I/O operations. However, a
-    /// very high skip rate relative to processed lines might indicate an
-    /// issue with the parser or unexpected fs_usage output format.
-    pub skipped_lines: u64,
-    /// Number of lines successfully processed.
+    /// This includes metadata operations, informational lines, and any lines
+    /// that couldn't be parsed. A non-zero value here is expected and normal -
+    /// fs_usage outputs various line types beyond read/write operations.
+    /// However, a very high ratio relative to processed lines might indicate
+    /// unexpected fs_usage output format changes.
+    pub non_io_lines: u64,
+    /// Number of lines successfully processed as disk I/O operations.
     pub processed_lines: u64,
 }
 
 /// Atomic counters for parser statistics.
 #[derive(Default)]
 struct AtomicParserStats {
-    skipped_lines: AtomicU64,
+    non_io_lines: AtomicU64,
     processed_lines: AtomicU64,
 }
 
@@ -113,7 +114,7 @@ impl AtomicParserStats {
     #[allow(dead_code)] // Diagnostic infrastructure - used in tests and available for debugging
     fn snapshot(&self) -> ParserStats {
         ParserStats {
-            skipped_lines: self.skipped_lines.load(Ordering::Relaxed),
+            non_io_lines: self.non_io_lines.load(Ordering::Relaxed),
             processed_lines: self.processed_lines.load(Ordering::Relaxed),
         }
     }
@@ -304,7 +305,7 @@ async fn parse_fs_usage(
         // Parse the operation type and process info
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 2 {
-            stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
+            stats.non_io_lines.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
@@ -316,8 +317,8 @@ async fn parse_fs_usage(
 
         if !is_read && !is_write {
             // Not a read or write operation - this is expected for other fs_usage
-            // output lines (metadata, etc.), so we just skip without counting as error
-            stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
+            // output lines (metadata operations, informational lines, etc.)
+            stats.non_io_lines.fetch_add(1, Ordering::Relaxed);
             continue;
         }
 
@@ -326,7 +327,7 @@ async fn parse_fs_usage(
             let pid: u32 = match caps.get(2).and_then(|m| m.as_str().parse().ok()) {
                 Some(pid) => pid,
                 None => {
-                    stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
+                    stats.non_io_lines.fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
             };
@@ -362,7 +363,7 @@ async fn parse_fs_usage(
             stats.processed_lines.fetch_add(1, Ordering::Relaxed);
         } else {
             // Read/write operation but couldn't extract PID - unexpected format
-            stats.skipped_lines.fetch_add(1, Ordering::Relaxed);
+            stats.non_io_lines.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -520,9 +521,9 @@ mod tests {
         let collector = IOPSCollector::new();
         let stats = collector.parser_stats();
 
-        // Initially, no lines should be processed or skipped
+        // Initially, no lines should be processed or counted as non-I/O
         assert_eq!(stats.processed_lines, 0);
-        assert_eq!(stats.skipped_lines, 0);
+        assert_eq!(stats.non_io_lines, 0);
     }
 
     #[test]
@@ -531,15 +532,15 @@ mod tests {
 
         // Simulate some parsing activity
         stats.processed_lines.fetch_add(10, Ordering::Relaxed);
-        stats.skipped_lines.fetch_add(3, Ordering::Relaxed);
+        stats.non_io_lines.fetch_add(3, Ordering::Relaxed);
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.processed_lines, 10);
-        assert_eq!(snapshot.skipped_lines, 3);
+        assert_eq!(snapshot.non_io_lines, 3);
 
         // Verify snapshot doesn't reset (unlike IOPS counters)
         let snapshot2 = stats.snapshot();
         assert_eq!(snapshot2.processed_lines, 10);
-        assert_eq!(snapshot2.skipped_lines, 3);
+        assert_eq!(snapshot2.non_io_lines, 3);
     }
 }
