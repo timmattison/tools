@@ -10,54 +10,104 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::model::{BytesPerSec, OpsPerSec, ProcessIOStats};
 
+/// Represents the IOPS monitoring mode.
+///
+/// Using an enum instead of booleans makes the state explicit and ensures
+/// all cases are handled in match expressions. This prevents bugs like
+/// showing "run with sudo" when the user explicitly disabled IOPS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IopsMode {
+    /// IOPS monitoring is enabled and running (root + not --bandwidth-only).
+    Enabled,
+    /// IOPS monitoring is disabled because we're not running as root.
+    DisabledNoRoot,
+    /// IOPS monitoring is disabled by user choice (--bandwidth-only flag).
+    DisabledByFlag,
+}
+
+impl IopsMode {
+    /// Returns true if IOPS monitoring is enabled.
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 /// Application state for rendering.
 pub struct AppState {
     /// Bandwidth stats (always available).
     pub bandwidth_stats: Vec<ProcessIOStats>,
-    /// IOPS stats (only available when running as root).
+    /// IOPS stats (only available when IOPS mode is enabled).
     pub iops_stats: Option<Vec<ProcessIOStats>>,
     /// Maximum number of processes to show per pane.
     pub max_processes: usize,
-    /// Whether running as root.
-    pub is_root: bool,
+    /// Current IOPS monitoring mode.
+    pub iops_mode: IopsMode,
     /// Whether the IOPS parser encountered an error.
     pub iops_error: bool,
 }
 
 impl AppState {
     /// Creates a new app state.
-    pub fn new(max_processes: usize, is_root: bool) -> Self {
+    pub fn new(max_processes: usize, iops_mode: IopsMode) -> Self {
         Self {
             bandwidth_stats: Vec::new(),
-            iops_stats: if is_root { Some(Vec::new()) } else { None },
+            iops_stats: if iops_mode.is_enabled() {
+                Some(Vec::new())
+            } else {
+                None
+            },
             max_processes,
-            is_root,
+            iops_mode,
             iops_error: false,
         }
     }
 }
 
-/// Height of the IOPS pane when showing the "not root" message.
+/// Height of the IOPS pane when showing a status message instead of data.
 /// 2 (border) + 1 (padding above) + 1 (message line) + 1 (padding below) = 5
 const IOPS_MESSAGE_HEIGHT: u16 = 5;
 
+/// Height of the help footer showing keyboard shortcuts.
+const HELP_FOOTER_HEIGHT: u16 = 1;
+
 /// Renders the UI.
 pub fn render(frame: &mut Frame, state: &AppState) {
-    // Split into two panes - IOPS pane is smaller when not showing data
-    let constraints = if state.is_root {
+    // Reserve space for help footer at the bottom
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(HELP_FOOTER_HEIGHT)])
+        .split(frame.area());
+
+    // Split main area into two panes - IOPS pane is smaller when not showing data
+    let pane_constraints = if state.iops_mode.is_enabled() {
         vec![Constraint::Percentage(50), Constraint::Percentage(50)]
     } else {
         // Give most space to bandwidth, minimal space for IOPS message
         vec![Constraint::Min(0), Constraint::Length(IOPS_MESSAGE_HEIGHT)]
     };
 
-    let chunks = Layout::default()
+    let pane_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(frame.area());
+        .constraints(pane_constraints)
+        .split(main_chunks[0]);
 
-    render_bandwidth_pane(frame, chunks[0], state);
-    render_iops_pane(frame, chunks[1], state);
+    render_bandwidth_pane(frame, pane_chunks[0], state);
+    render_iops_pane(frame, pane_chunks[1], state);
+    render_help_footer(frame, main_chunks[1]);
+}
+
+/// Renders the help footer showing keyboard shortcuts.
+fn render_help_footer(frame: &mut Frame, area: Rect) {
+    let help_text = Line::from(vec![
+        Span::styled(" Press ", Style::default().fg(Color::DarkGray)),
+        Span::styled("q", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(" or ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Esc", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(" to quit ", Style::default().fg(Color::DarkGray)),
+    ]);
+
+    let paragraph = Paragraph::new(help_text);
+    frame.render_widget(paragraph, area);
 }
 
 /// Renders the bandwidth pane (top).
@@ -110,22 +160,43 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow));
 
-    if !state.is_root {
-        // Show compact message when not running as root
-        let message = Paragraph::new(vec![
-            Line::from(""),
-            Line::from(Span::styled(
-                "Run with sudo to enable IOPS monitoring (e.g., sudo disk-hog)",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            )),
-        ])
-        .block(block)
-        .alignment(ratatui::layout::Alignment::Center);
+    // Handle disabled modes with appropriate messages
+    match state.iops_mode {
+        IopsMode::DisabledNoRoot => {
+            let message = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "Run with sudo to enable IOPS monitoring (e.g., sudo disk-hog)",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
+                )),
+            ])
+            .block(block)
+            .alignment(ratatui::layout::Alignment::Center);
 
-        frame.render_widget(message, area);
-        return;
+            frame.render_widget(message, area);
+            return;
+        }
+        IopsMode::DisabledByFlag => {
+            let message = Paragraph::new(vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "IOPS monitoring disabled (--bandwidth-only)",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )),
+            ])
+            .block(block)
+            .alignment(ratatui::layout::Alignment::Center);
+
+            frame.render_widget(message, area);
+            return;
+        }
+        IopsMode::Enabled => {
+            // Continue to render IOPS data below
+        }
     }
 
     // Show error message if parser failed
@@ -326,18 +397,33 @@ mod tests {
     }
 
     #[test]
-    fn test_app_state_new_with_root() {
-        let state = AppState::new(10, true);
-        assert!(state.is_root);
+    fn test_app_state_new_with_iops_enabled() {
+        let state = AppState::new(10, IopsMode::Enabled);
+        assert_eq!(state.iops_mode, IopsMode::Enabled);
         assert!(state.iops_stats.is_some());
         assert!(!state.iops_error);
     }
 
     #[test]
-    fn test_app_state_new_without_root() {
-        let state = AppState::new(10, false);
-        assert!(!state.is_root);
+    fn test_app_state_new_disabled_no_root() {
+        let state = AppState::new(10, IopsMode::DisabledNoRoot);
+        assert_eq!(state.iops_mode, IopsMode::DisabledNoRoot);
         assert!(state.iops_stats.is_none());
         assert!(!state.iops_error);
+    }
+
+    #[test]
+    fn test_app_state_new_disabled_by_flag() {
+        let state = AppState::new(10, IopsMode::DisabledByFlag);
+        assert_eq!(state.iops_mode, IopsMode::DisabledByFlag);
+        assert!(state.iops_stats.is_none());
+        assert!(!state.iops_error);
+    }
+
+    #[test]
+    fn test_iops_mode_is_enabled() {
+        assert!(IopsMode::Enabled.is_enabled());
+        assert!(!IopsMode::DisabledNoRoot.is_enabled());
+        assert!(!IopsMode::DisabledByFlag.is_enabled());
     }
 }

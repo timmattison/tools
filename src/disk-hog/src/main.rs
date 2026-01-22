@@ -59,7 +59,7 @@ mod ui;
 use collector::bandwidth::BandwidthCollector;
 use collector::iops::IOPSCollector;
 use model::{BytesPerSec, OpsPerSec, ProcessIOStats};
-use ui::AppState;
+use ui::{AppState, IopsMode};
 
 /// Minimum allowed refresh rate in seconds.
 const MIN_REFRESH_SECS: f64 = 0.1;
@@ -121,10 +121,17 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Check if running as root
+    // Determine IOPS mode based on root status and flags
     let is_root = IOPSCollector::is_root();
+    let iops_mode = if args.bandwidth_only {
+        IopsMode::DisabledByFlag
+    } else if is_root {
+        IopsMode::Enabled
+    } else {
+        IopsMode::DisabledNoRoot
+    };
 
-    if !is_root {
+    if iops_mode == IopsMode::DisabledNoRoot {
         eprintln!("Note: Running without sudo - only bandwidth data will be shown.");
         eprintln!("Run with sudo to enable IOPS monitoring.\n");
     }
@@ -141,7 +148,7 @@ async fn main() -> Result<()> {
     let mut guard = TerminalGuard::new();
 
     // Run the app
-    let result = run_app(&mut terminal, args, is_root).await;
+    let result = run_app(&mut terminal, args, iops_mode).await;
 
     // Normal cleanup path - disarm the guard since we'll clean up explicitly
     guard.disarm();
@@ -171,15 +178,15 @@ async fn main() -> Result<()> {
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: Args,
-    is_root: bool,
+    iops_mode: IopsMode,
 ) -> Result<Option<String>> {
     let tick_rate = Duration::from_secs_f64(args.refresh);
 
     // Initialize collectors
     let mut bandwidth_collector = BandwidthCollector::new();
 
-    // IOPS collector (only if root and not bandwidth_only mode)
-    let iops_collector = if is_root && !args.bandwidth_only {
+    // IOPS collector (only if enabled)
+    let iops_collector = if iops_mode.is_enabled() {
         let mut collector = IOPSCollector::new();
         collector.start().await?;
         Some(collector)
@@ -188,7 +195,7 @@ async fn run_app(
     };
 
     // App state
-    let mut state = AppState::new(args.count, is_root && !args.bandwidth_only);
+    let mut state = AppState::new(args.count, iops_mode);
 
     // Do an initial collection to prime the previous readings.
     // This establishes the baseline for calculating deltas. We discard these
