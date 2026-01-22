@@ -14,6 +14,15 @@ const CORE_RESOURCE: &str = "core";
 /// rate limit, so it's sorted to appear last in output tables for visibility.
 const GRAPHQL_RESOURCE: &str = "graphql";
 
+/// Sorts rate limits so graphql appears last for visibility (most commonly monitored).
+///
+/// Uses sort_by_key with a boolean predicate: false < true in Rust's Ord implementation,
+/// so graphql (where predicate is true) sorts to the end while preserving relative order
+/// of other elements (stable sort).
+fn sort_graphql_last(rate_limits: &mut [NamedRateLimit]) {
+    rate_limits.sort_by_key(|n| n.name == GRAPHQL_RESOURCE);
+}
+
 /// Represents a single rate limit resource with its limits and usage statistics
 #[derive(Debug, Deserialize)]
 struct RateLimit {
@@ -254,9 +263,8 @@ fn main() -> Result<()> {
         .partition(|named| named.rate_limit.remaining > 0);
 
     // Sort each list so graphql appears last for visibility (most commonly monitored)
-    // Uses sort_by_key: false < true in Rust, so graphql (where predicate is true) sorts last
-    available.sort_by_key(|n| n.name == GRAPHQL_RESOURCE);
-    exhausted.sort_by_key(|n| n.name == GRAPHQL_RESOURCE);
+    sort_graphql_last(&mut available);
+    sort_graphql_last(&mut exhausted);
 
     // Print available rate limits first (easier to scroll past)
     print_rate_limit_table("Available Rate Limits", &available);
@@ -428,8 +436,8 @@ mod tests {
             .into_iter()
             .partition(|named| named.rate_limit.remaining > 0);
 
-        // Apply the same sort used in main: false < true, so graphql sorts last
-        available.sort_by_key(|n| n.name == GRAPHQL_RESOURCE);
+        // Use the same function as main() to ensure consistency
+        sort_graphql_last(&mut available);
 
         assert_eq!(
             available.last().map(|n| n.name),
@@ -447,8 +455,8 @@ mod tests {
             .into_iter()
             .partition(|named| named.rate_limit.remaining > 0);
 
-        // Apply the same sort used in main: false < true, so graphql sorts last
-        exhausted.sort_by_key(|n| n.name == GRAPHQL_RESOURCE);
+        // Use the same function as main() to ensure consistency
+        sort_graphql_last(&mut exhausted);
 
         assert_eq!(
             exhausted.last().map(|n| n.name),
