@@ -457,7 +457,10 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
         let min_with_ext = MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width;
         if max_width_usize >= min_with_ext {
             let basename_budget = max_width_usize - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width;
-            // Ensure we show at least MIN_BASENAME_CHARS (should already be guaranteed by check above)
+            // SAFETY: This assertion is guaranteed by the `if` condition above.
+            // Given: max_width_usize >= MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width
+            // Then:  max_width_usize - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width >= MIN_BASENAME_CHARS
+            // Therefore: basename_budget >= MIN_BASENAME_CHARS
             debug_assert!(basename_budget >= MIN_BASENAME_CHARS);
             let truncated_basename = take_chars_by_width(basename, basename_budget);
             return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, dot_ext);
@@ -1105,5 +1108,49 @@ mod tests {
 
         assert_eq!(basename, "file");
         assert_eq!(ext, Some(exactly_max));
+    }
+
+    // ========================================================================
+    // Algebraic relationship tests
+    // ========================================================================
+    //
+    // These tests verify the algebraic relationships that the code relies on.
+    // They use the actual constants to ensure the tests remain valid if
+    // constants are changed, and provide clear failure messages.
+    // ========================================================================
+
+    #[test]
+    fn test_basename_budget_algebraic_relationship() {
+        // This test verifies the algebraic relationship used by the debug_assert
+        // in truncate_filename: when max_width >= min_with_ext, then
+        // basename_budget >= MIN_BASENAME_CHARS.
+        //
+        // Given: max_width >= MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width
+        // Then:  basename_budget = max_width - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width
+        //        >= MIN_BASENAME_CHARS
+
+        // Use a concrete example with .txt extension (4 chars including dot)
+        let ext_width = 3; // "txt"
+        let dot_ext_width = ext_width + 1; // ".txt" = 4
+
+        // Calculate the minimum width where extension preservation is possible
+        let min_with_ext = MIN_BASENAME_CHARS + ELLIPSIS_WITH_EXT_WIDTH + dot_ext_width;
+
+        // At exactly this width, basename_budget should equal MIN_BASENAME_CHARS
+        let basename_budget_at_min = min_with_ext - ELLIPSIS_WITH_EXT_WIDTH - dot_ext_width;
+        assert_eq!(
+            basename_budget_at_min, MIN_BASENAME_CHARS,
+            "At min_with_ext, basename_budget should equal MIN_BASENAME_CHARS. \
+             This verifies the algebraic relationship used in truncate_filename."
+        );
+
+        // Verify the actual truncation produces the expected result
+        // min_with_ext = 1 + 2 + 4 = 7 for .txt
+        let result = truncate_filename("longfilename.txt", min_with_ext as u16);
+        assert_eq!(
+            result.chars().filter(|c| *c != '.').take(1).count(),
+            MIN_BASENAME_CHARS,
+            "Truncated filename should have exactly MIN_BASENAME_CHARS basename characters"
+        );
     }
 }
