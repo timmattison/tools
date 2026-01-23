@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -11,6 +12,37 @@ use names::Generator;
 use repowalker::find_main_repo;
 use serde::Deserialize;
 use shellsetup::ShellIntegration;
+use walkdir::WalkDir;
+
+/// Directories to skip when copying .env files.
+///
+/// These are common directories that either:
+/// - Should never contain user .env files (.git)
+/// - Are large dependency/build directories that shouldn't be traversed for performance
+///
+/// This list is used by `copy_untracked_env_files` to avoid walking large directory trees.
+///
+/// # Performance Note
+///
+/// Currently uses linear search via `slice::contains()` which is O(n) per lookup.
+/// This is acceptable for the current list size (~12 items) and typical repository
+/// structures (hundreds to low thousands of directories). If this list grows
+/// significantly (>50 items) or performance profiling shows this as a bottleneck,
+/// consider converting to a `std::sync::LazyLock<HashSet<&'static str>>` for O(1) lookups.
+const SKIP_DIRECTORIES: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".output",
+    "vendor",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
 
 /// Shell code to be installed by --shell-setup.
 ///
@@ -41,11 +73,16 @@ function nwt() {
 }
 "#;
 
+/// Returns the default value for copy_env (true).
+fn default_copy_env() -> bool {
+    true
+}
+
 /// Configuration file schema for nwt.
 ///
 /// All fields are optional - only set what you need to override defaults.
 /// The config file is loaded from `~/.nwt.toml`.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct NwtConfig {
     /// Default branch name (conflicts with checkout if both set).
@@ -53,6 +90,11 @@ struct NwtConfig {
 
     /// Default checkout ref (conflicts with branch if both set).
     checkout: Option<String>,
+
+    /// Copy untracked .env files from main worktree to new worktree.
+    /// Defaults to true if not specified.
+    #[serde(default = "default_copy_env")]
+    copy_env: bool,
 
     /// Enable quiet mode by default.
     #[serde(default)]
@@ -64,6 +106,26 @@ struct NwtConfig {
     /// Open worktree in tmux by default.
     #[serde(default)]
     tmux: bool,
+}
+
+impl Default for NwtConfig {
+    /// Creates the default configuration.
+    ///
+    /// IMPORTANT: These defaults must stay in sync with the serde `#[serde(default)]`
+    /// attributes on each field in `NwtConfig`. This impl is used when no config file
+    /// exists, while serde defaults are used when a config file exists but omits fields.
+    ///
+    /// The test `test_default_impl_matches_serde_defaults` verifies this invariant.
+    fn default() -> Self {
+        Self {
+            branch: None,
+            checkout: None,
+            copy_env: true, // Must match default_copy_env()
+            quiet: false,   // Must match #[serde(default)] (false)
+            run: None,
+            tmux: false, // Must match #[serde(default)] (false)
+        }
+    }
 }
 
 /// Errors that can occur when loading or validating the config file.
@@ -106,6 +168,7 @@ impl From<toml::de::Error> for ConfigError {
 struct MergedConfig {
     branch: Option<String>,
     checkout: Option<String>,
+    copy_env: bool,
     quiet: bool,
     run: Option<String>,
     tmux: bool,
@@ -177,6 +240,9 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // CLI options override config file values
         branch: cli.branch.clone().or(config.branch),
         checkout: cli.checkout.clone().or(config.checkout),
+        // copy_env: config default is true, CLI --no-copy-env disables it.
+        // If CLI specifies --no-copy-env, we disable. Otherwise use config value.
+        copy_env: !cli.no_copy_env && config.copy_env,
         // Boolean flags use OR: CLI can enable but not disable config defaults.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
@@ -385,16 +451,35 @@ const MAX_ATTEMPTS: u32 = 10;
 #[command(about = "Create a new git worktree with a Docker-style random name")]
 #[command(long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
-and branch unless overridden.
+and branch unless overridden. Automatically copies untracked .env files from the main \
+worktree to preserve development settings.
 
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
 
     Example config file:
         branch = \"feature/default\"
+        copy_env = false  # disable .env file copying
         quiet = false
         tmux = true
         run = \"pnpm install\"
+
+ENV FILE COPYING:
+    By default, nwt copies untracked .env files from the main worktree to the new worktree,
+    preserving their relative paths. This is useful for development settings that shouldn't
+    be committed to git.
+
+    Files matching these patterns are copied:
+        .env           - exact match
+        .env.*         - any file starting with '.env.' (e.g., .env.local, .env.development)
+
+    Files NOT copied:
+        .envrc         - direnv configuration (doesn't start with '.env.')
+        .environment   - doesn't match the pattern
+        Tracked files  - files already in git are never copied
+
+    Use --no-copy-env to disable this for a single invocation, or set copy_env = false
+    in ~/.nwt.toml to disable it by default.
 
 EXAMPLES:
     nwt                              # Random name for both directory and branch
@@ -404,6 +489,7 @@ EXAMPLES:
     nwt --run \"npm install\"          # Run a command after creation
     nwt --tmux                       # Open worktree in a new tmux window
     nwt --tmux --run \"npm install\"   # Run command in a new tmux window
+    nwt --no-copy-env                # Skip copying .env files
     nwt --shell-setup                # Install shell integration for auto-cd
 
 SHELL INTEGRATION:
@@ -472,6 +558,18 @@ struct Cli {
     #[arg(long)]
     tmux: bool,
 
+    /// Disable copying untracked .env files to the new worktree.
+    ///
+    /// By default, nwt copies untracked .env files (e.g., .env, .env.local,
+    /// .env.development) from the main worktree to the new worktree, preserving
+    /// their relative paths. This is useful for development settings that shouldn't
+    /// be committed to git.
+    ///
+    /// Use this flag to disable this behavior for a single invocation, or set
+    /// `copy_env = false` in ~/.nwt.toml to disable it by default.
+    #[arg(long)]
+    no_copy_env: bool,
+
     /// Install shell integration to automatically cd into new worktrees.
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
@@ -482,7 +580,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env"])]
     shell_setup: bool,
 }
 
@@ -663,6 +761,131 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
         .with_command("nwt", "Create a new worktree and cd into it");
 
     integration.setup()
+}
+
+/// Gets the set of all files tracked by git in the repository.
+///
+/// Returns a HashSet of absolute paths for efficient membership checking.
+///
+/// # Error Handling (Intentional Fail-Open Behavior)
+///
+/// Returns an empty set on any error (git not found, not a git repo, corrupted repo, etc.).
+/// This is intentional fail-open behavior: if we can't determine which files are tracked,
+/// we treat all `.env` files as untracked and copy them.
+///
+/// **Rationale:** Copying a few extra files (that might already be identical in the new
+/// worktree) is better than silently skipping the env-copy feature entirely when the user
+/// expects it to work. The worst case is redundant copies; the alternative would be
+/// missing critical development configuration.
+fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
+    let output = Command::new("git")
+        .args(["ls-files"])
+        .current_dir(repo_root)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|line| repo_root.join(line))
+            .collect(),
+        _ => HashSet::new(),
+    }
+}
+
+/// Copies untracked .env files from the main worktree to the new worktree.
+///
+/// This function:
+/// 1. Gets all tracked files from git in a single call (for performance)
+/// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
+/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`
+/// 4. Copies untracked .env files to the same relative path in the new worktree
+/// 5. Creates parent directories as needed
+/// 6. Reports copied files unless quiet mode is enabled
+///
+/// Errors copying individual files are reported but don't stop the process.
+fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
+    // Get all tracked files in a single git call for performance
+    let tracked_files = get_tracked_files(main_repo);
+    let mut copied_count = 0;
+
+    for entry in WalkDir::new(main_repo)
+        .follow_links(false) // Don't follow symlinks
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip directories listed in SKIP_DIRECTORIES for performance.
+            // See the constant definition for rationale.
+            let name = e.file_name().to_string_lossy();
+            !SKIP_DIRECTORIES.contains(&name.as_ref())
+        })
+        .filter_map(|e| e.ok())
+    {
+        // Only process files (not directories)
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        // Check if the filename is .env or starts with .env. (e.g., .env.local, .env.development)
+        // This intentionally excludes files like .envrc (direnv) or .environment
+        let file_name = entry.file_name().to_string_lossy();
+        if file_name != ".env" && !file_name.starts_with(".env.") {
+            continue;
+        }
+
+        let file_path = entry.path();
+
+        // Skip if tracked by git (use the pre-fetched set for O(1) lookup)
+        if tracked_files.contains(file_path) {
+            continue;
+        }
+
+        // Calculate relative path and destination
+        let relative_path = match file_path.strip_prefix(main_repo) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+        let dest_path = worktree.join(relative_path);
+
+        // Create parent directories if needed (create_dir_all is idempotent)
+        if let Some(parent) = dest_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                if !quiet {
+                    eprintln!(
+                        "Warning: Failed to create directory '{}': {}",
+                        parent.display(),
+                        e
+                    );
+                }
+                continue;
+            }
+        }
+
+        // Copy the file
+        match fs::copy(file_path, &dest_path) {
+            Ok(_) => {
+                copied_count += 1;
+                if !quiet {
+                    eprintln!("Copied: {}", relative_path.display());
+                }
+            }
+            Err(e) => {
+                if !quiet {
+                    eprintln!(
+                        "Warning: Failed to copy '{}': {}",
+                        relative_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    if copied_count > 0 && !quiet {
+        eprintln!(
+            "Copied {} untracked .env file{} to new worktree",
+            copied_count,
+            if copied_count == 1 { "" } else { "s" }
+        );
+    }
 }
 
 fn main() {
@@ -853,6 +1076,11 @@ fn main() {
                 }
 
                 println!("{}", worktree_path.display());
+
+                // Copy untracked .env files from main worktree to new worktree
+                if config.copy_env {
+                    copy_untracked_env_files(&repo_root, &worktree_path, config.quiet);
+                }
 
                 // Execute tmux and/or run commands
                 if config.tmux {
@@ -1151,6 +1379,7 @@ mod tests {
         let config = MergedConfig {
             branch: Some("feature/test".to_string()),
             checkout: None,
+            copy_env: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -1163,6 +1392,7 @@ mod tests {
         let config = MergedConfig {
             branch: None,
             checkout: None,
+            copy_env: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -1385,6 +1615,46 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_no_copy_env_parses() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // Parsing with --no-copy-env should succeed
+        let result = cmd.try_get_matches_from(["nwt", "--no-copy-env"]);
+        assert!(result.is_ok(), "Should accept --no-copy-env option");
+
+        let matches = result.unwrap();
+        assert!(
+            matches.get_flag("no_copy_env"),
+            "Should set no_copy_env flag"
+        );
+    }
+
+    #[test]
+    fn test_cli_no_copy_env_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --no-copy-env can be combined with --branch
+        let result =
+            cmd.try_get_matches_from(["nwt", "--no-copy-env", "--branch", "feature/test"]);
+        assert!(result.is_ok(), "Should accept --no-copy-env with --branch");
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_no_copy_env() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup conflicts with --no-copy-env
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-copy-env"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --no-copy-env are provided"
+        );
+    }
+
+    #[test]
     fn test_cli_shell_setup_parses() {
         use clap::CommandFactory;
         let cmd = Cli::command();
@@ -1551,9 +1821,52 @@ mod tests {
             let config: NwtConfig = toml::from_str(toml).expect("Should parse empty config");
             assert!(config.branch.is_none());
             assert!(config.checkout.is_none());
+            assert!(config.copy_env); // defaults to true
             assert!(!config.quiet);
             assert!(config.run.is_none());
             assert!(!config.tmux);
+        }
+
+        /// Verifies that `NwtConfig::default()` produces the same values as serde defaults.
+        ///
+        /// This test exists to catch bugs where someone adds a new field to `NwtConfig`
+        /// but forgets to update the `impl Default` block (or vice versa). The manual
+        /// Default impl is needed because serde defaults only apply when parsing TOML,
+        /// not when no config file exists at all.
+        ///
+        /// If this test fails, ensure the `impl Default for NwtConfig` block matches
+        /// the `#[serde(default)]` attributes on each field.
+        #[test]
+        fn test_default_impl_matches_serde_defaults() {
+            let serde_defaults: NwtConfig =
+                toml::from_str("").expect("Should parse empty config");
+            let manual_defaults = NwtConfig::default();
+
+            // Compare each field explicitly for clear error messages
+            assert_eq!(
+                serde_defaults.branch, manual_defaults.branch,
+                "branch default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.checkout, manual_defaults.checkout,
+                "checkout default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.copy_env, manual_defaults.copy_env,
+                "copy_env default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.quiet, manual_defaults.quiet,
+                "quiet default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.run, manual_defaults.run,
+                "run default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.tmux, manual_defaults.tmux,
+                "tmux default mismatch between impl Default and serde"
+            );
         }
 
         #[test]
@@ -1569,6 +1882,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("feat".to_string()),
                 checkout: Some("main".to_string()),
+                copy_env: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1582,6 +1896,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("feat".to_string()),
                 checkout: None,
+                copy_env: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1595,6 +1910,7 @@ mod tests {
             let config = NwtConfig {
                 branch: None,
                 checkout: Some("main".to_string()),
+                copy_env: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1608,6 +1924,7 @@ mod tests {
             let cli = Cli {
                 branch: Some("cli-branch".to_string()),
                 checkout: None,
+                no_copy_env: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -1616,6 +1933,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
+                copy_env: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
                 tmux: true,
@@ -1625,6 +1943,7 @@ mod tests {
             // CLI values should override config for Option<String> fields
             assert_eq!(merged.branch, Some("cli-branch".to_string()));
             assert!(merged.quiet); // CLI --quiet flag was set, so quiet=true
+            assert!(merged.copy_env); // config has true, CLI didn't disable
 
             // Boolean flags use OR logic: cli.tmux || config.tmux
             // Since CLI didn't specify --tmux (so cli.tmux=false, the default),
@@ -1641,6 +1960,7 @@ mod tests {
             let cli = Cli {
                 branch: None,
                 checkout: None,
+                no_copy_env: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1649,6 +1969,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
+                copy_env: true,
                 quiet: true,
                 run: Some("make build".to_string()),
                 tmux: true,
@@ -1657,6 +1978,7 @@ mod tests {
 
             // Config values should be used when CLI doesn't specify
             assert_eq!(merged.branch, Some("config-branch".to_string()));
+            assert!(merged.copy_env);
             assert!(merged.quiet);
             assert!(merged.tmux);
             assert_eq!(merged.run, Some("make build".to_string()));
@@ -1667,6 +1989,7 @@ mod tests {
             let cli = Cli {
                 branch: Some("my-branch".to_string()),
                 checkout: None,
+                no_copy_env: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -1676,9 +1999,60 @@ mod tests {
 
             // Should use CLI values with defaults for missing
             assert_eq!(merged.branch, Some("my-branch".to_string()));
+            assert!(merged.copy_env); // default is true
             assert!(merged.quiet);
             assert!(!merged.tmux);
             assert!(merged.run.is_none());
+        }
+
+        #[test]
+        fn test_merge_no_copy_env_disables() {
+            let cli = Cli {
+                branch: None,
+                checkout: None,
+                no_copy_env: true, // CLI disables
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true, // config enables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+
+            // CLI --no-copy-env should override config copy_env = true
+            assert!(!merged.copy_env);
+        }
+
+        #[test]
+        fn test_merge_config_copy_env_false() {
+            let cli = Cli {
+                branch: None,
+                checkout: None,
+                no_copy_env: false,
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: false, // config disables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+
+            // Config copy_env = false should be respected
+            assert!(!merged.copy_env);
         }
 
         #[test]
@@ -1708,6 +2082,337 @@ mod tests {
                 sorted.len(),
                 codes.len(),
                 "All exit codes including CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR should be unique"
+            );
+        }
+    }
+
+    /// Tests for the env file copying functionality.
+    mod env_copy_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        /// Helper to check if a file exists and has expected content.
+        fn file_has_content(dir: &Path, name: &str, expected: &str) -> bool {
+            let path = dir.join(name);
+            match fs::read_to_string(&path) {
+                Ok(content) => content == expected,
+                Err(_) => false,
+            }
+        }
+
+        #[test]
+        fn test_copy_env_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create a .env file in source
+            create_file(source.path(), ".env", "SECRET=value");
+
+            // Copy env files (no git, so all .env files are "untracked")
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            // Verify the file was copied
+            assert!(
+                file_has_content(dest.path(), ".env", "SECRET=value"),
+                ".env file should be copied with correct content"
+            );
+        }
+
+        #[test]
+        fn test_copy_env_local_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env.local file
+            create_file(source.path(), ".env.local", "LOCAL_SECRET=local");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.local", "LOCAL_SECRET=local"),
+                ".env.local file should be copied"
+            );
+        }
+
+        #[test]
+        fn test_copy_env_development_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env.development file
+            create_file(source.path(), ".env.development", "DEV=true");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.development", "DEV=true"),
+                ".env.development file should be copied"
+            );
+        }
+
+        #[test]
+        fn test_does_not_copy_envrc() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .envrc (direnv file) - should NOT be copied
+            create_file(source.path(), ".envrc", "export FOO=bar");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            // Verify .envrc was NOT copied
+            assert!(
+                !dest.path().join(".envrc").exists(),
+                ".envrc should NOT be copied (direnv file)"
+            );
+        }
+
+        #[test]
+        fn test_does_not_copy_environment() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .environment file - should NOT be copied
+            create_file(source.path(), ".environment", "some config");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                !dest.path().join(".environment").exists(),
+                ".environment should NOT be copied"
+            );
+        }
+
+        #[test]
+        fn test_copy_nested_env_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create nested .env file
+            create_file(source.path(), "packages/api/.env", "API_KEY=secret");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "API_KEY=secret"),
+                "Nested .env file should be copied preserving path"
+            );
+        }
+
+        #[test]
+        fn test_copy_multiple_env_files() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create multiple .env files
+            create_file(source.path(), ".env", "ROOT=1");
+            create_file(source.path(), ".env.local", "LOCAL=2");
+            create_file(source.path(), "app/.env", "APP=3");
+            create_file(source.path(), "app/.env.production", "PROD=4");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(file_has_content(dest.path(), ".env", "ROOT=1"));
+            assert!(file_has_content(dest.path(), ".env.local", "LOCAL=2"));
+            assert!(file_has_content(dest.path(), "app/.env", "APP=3"));
+            assert!(file_has_content(dest.path(), "app/.env.production", "PROD=4"));
+        }
+
+        #[test]
+        fn test_skips_git_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env inside .git (should be skipped)
+            create_file(source.path(), ".git/hooks/.env", "HOOK_SECRET=x");
+            // Create normal .env (should be copied)
+            create_file(source.path(), ".env", "NORMAL=y");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "NORMAL=y"),
+                "Normal .env should be copied"
+            );
+            assert!(
+                !dest.path().join(".git/hooks/.env").exists(),
+                ".git directory contents should be skipped"
+            );
+        }
+
+        #[test]
+        fn test_get_tracked_files_empty_for_non_git() {
+            let temp = TempDir::new().expect("Failed to create temp dir");
+
+            // Non-git directory should return empty set
+            let tracked = get_tracked_files(temp.path());
+            assert!(
+                tracked.is_empty(),
+                "Non-git directory should have no tracked files"
+            );
+        }
+
+        #[test]
+        fn test_skips_node_modules_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env inside node_modules (should be skipped for performance)
+            create_file(source.path(), "node_modules/some-pkg/.env", "PKG_SECRET=x");
+            // Create normal .env (should be copied)
+            create_file(source.path(), ".env", "NORMAL=y");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "NORMAL=y"),
+                "Normal .env should be copied"
+            );
+            assert!(
+                !dest.path().join("node_modules/some-pkg/.env").exists(),
+                "node_modules directory contents should be skipped"
+            );
+        }
+
+        #[test]
+        fn test_skips_target_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env inside target (Rust build dir, should be skipped)
+            create_file(source.path(), "target/debug/.env", "BUILD_SECRET=x");
+            // Create normal .env (should be copied)
+            create_file(source.path(), ".env", "NORMAL=y");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "NORMAL=y"),
+                "Normal .env should be copied"
+            );
+            assert!(
+                !dest.path().join("target/debug/.env").exists(),
+                "target directory contents should be skipped"
+            );
+        }
+
+        /// Helper to run a git command in a directory.
+        fn run_git(dir: &Path, args: &[&str]) -> bool {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+
+        #[test]
+        fn test_tracked_env_file_not_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Initialize a real git repository
+            if !run_git(source.path(), &["init"]) {
+                // Skip test if git is not available
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // Configure git user for the commit (required in some environments)
+            run_git(
+                source.path(),
+                &["config", "user.email", "test@example.com"],
+            );
+            run_git(source.path(), &["config", "user.name", "Test User"]);
+
+            // Create a .env file that will be tracked
+            create_file(source.path(), ".env.example", "TRACKED_SECRET=tracked");
+
+            // Track the file with git
+            if !run_git(source.path(), &["add", ".env.example"]) {
+                eprintln!("Skipping test: git add failed");
+                return;
+            }
+            if !run_git(source.path(), &["commit", "-m", "Add tracked env file"]) {
+                eprintln!("Skipping test: git commit failed");
+                return;
+            }
+
+            // Create an untracked .env file
+            create_file(source.path(), ".env.local", "UNTRACKED_SECRET=untracked");
+
+            // Copy env files
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            // Verify: tracked file should NOT be copied
+            assert!(
+                !dest.path().join(".env.example").exists(),
+                "Tracked .env.example should NOT be copied"
+            );
+
+            // Verify: untracked file SHOULD be copied
+            assert!(
+                file_has_content(dest.path(), ".env.local", "UNTRACKED_SECRET=untracked"),
+                "Untracked .env.local should be copied"
+            );
+        }
+
+        #[test]
+        fn test_get_tracked_files_with_real_git() {
+            let temp = TempDir::new().expect("Failed to create temp dir");
+
+            // Initialize a real git repository
+            if !run_git(temp.path(), &["init"]) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // Configure git user
+            run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+            run_git(temp.path(), &["config", "user.name", "Test User"]);
+
+            // Create and track some files
+            create_file(temp.path(), "file1.txt", "content1");
+            create_file(temp.path(), "subdir/file2.txt", "content2");
+
+            run_git(temp.path(), &["add", "."]);
+            run_git(temp.path(), &["commit", "-m", "Initial commit"]);
+
+            // Get tracked files
+            let tracked = get_tracked_files(temp.path());
+
+            // Should contain our tracked files
+            assert!(
+                tracked.contains(&temp.path().join("file1.txt")),
+                "Should contain file1.txt"
+            );
+            assert!(
+                tracked.contains(&temp.path().join("subdir/file2.txt")),
+                "Should contain subdir/file2.txt"
+            );
+
+            // Create an untracked file
+            create_file(temp.path(), "untracked.txt", "untracked");
+
+            // Get tracked files again
+            let tracked = get_tracked_files(temp.path());
+
+            // Should NOT contain the untracked file
+            assert!(
+                !tracked.contains(&temp.path().join("untracked.txt")),
+                "Should NOT contain untracked.txt"
             );
         }
     }
