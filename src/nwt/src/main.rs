@@ -21,6 +21,14 @@ use walkdir::WalkDir;
 /// - Are large dependency/build directories that shouldn't be traversed for performance
 ///
 /// This list is used by `copy_untracked_env_files` to avoid walking large directory trees.
+///
+/// # Performance Note
+///
+/// Currently uses linear search via `slice::contains()` which is O(n) per lookup.
+/// This is acceptable for the current list size (~12 items) and typical repository
+/// structures (hundreds to low thousands of directories). If this list grows
+/// significantly (>50 items) or performance profiling shows this as a bottleneck,
+/// consider converting to a `std::sync::LazyLock<HashSet<&'static str>>` for O(1) lookups.
 const SKIP_DIRECTORIES: &[&str] = &[
     ".git",
     "node_modules",
@@ -758,7 +766,17 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 /// Gets the set of all files tracked by git in the repository.
 ///
 /// Returns a HashSet of absolute paths for efficient membership checking.
-/// Returns an empty set on any error (treats errors as "no tracked files found").
+///
+/// # Error Handling (Intentional Fail-Open Behavior)
+///
+/// Returns an empty set on any error (git not found, not a git repo, corrupted repo, etc.).
+/// This is intentional fail-open behavior: if we can't determine which files are tracked,
+/// we treat all `.env` files as untracked and copy them.
+///
+/// **Rationale:** Copying a few extra files (that might already be identical in the new
+/// worktree) is better than silently skipping the env-copy feature entirely when the user
+/// expects it to work. The worst case is redundant copies; the alternative would be
+/// missing critical development configuration.
 fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
     let output = Command::new("git")
         .args(["ls-files"])
