@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io::Read;
@@ -720,7 +721,7 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 ///
 /// Returns a HashSet of absolute paths for efficient membership checking.
 /// Returns an empty set on any error (treats errors as "no tracked files found").
-fn get_tracked_files(repo_root: &Path) -> std::collections::HashSet<PathBuf> {
+fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
     let output = Command::new("git")
         .args(["ls-files"])
         .current_dir(repo_root)
@@ -731,7 +732,7 @@ fn get_tracked_files(repo_root: &Path) -> std::collections::HashSet<PathBuf> {
             .lines()
             .map(|line| repo_root.join(line))
             .collect(),
-        _ => std::collections::HashSet::new(),
+        _ => HashSet::new(),
     }
 }
 
@@ -739,8 +740,8 @@ fn get_tracked_files(repo_root: &Path) -> std::collections::HashSet<PathBuf> {
 ///
 /// This function:
 /// 1. Gets all tracked files from git in a single call (for performance)
-/// 2. Walks the main repo looking for files starting with `.env`
-/// 3. Skips the `.git` directory and any already-tracked files
+/// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
+/// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`
 /// 4. Copies untracked .env files to the same relative path in the new worktree
 /// 5. Creates parent directories as needed
 /// 6. Reports copied files unless quiet mode is enabled
@@ -765,9 +766,10 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
             continue;
         }
 
-        // Check if the filename starts with .env
+        // Check if the filename is .env or starts with .env. (e.g., .env.local, .env.development)
+        // This intentionally excludes files like .envrc (direnv) or .environment
         let file_name = entry.file_name().to_string_lossy();
-        if !file_name.starts_with(".env") {
+        if file_name != ".env" && !file_name.starts_with(".env.") {
             continue;
         }
 
@@ -1981,6 +1983,180 @@ mod tests {
                 codes.len(),
                 "All exit codes including CONFIG_ERROR, TMUX_NOT_RUNNING, and SHELL_SETUP_ERROR should be unique"
             );
+        }
+    }
+
+    /// Tests for the env file copying functionality.
+    mod env_copy_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        /// Helper to check if a file exists and has expected content.
+        fn file_has_content(dir: &Path, name: &str, expected: &str) -> bool {
+            let path = dir.join(name);
+            match fs::read_to_string(&path) {
+                Ok(content) => content == expected,
+                Err(_) => false,
+            }
+        }
+
+        #[test]
+        fn test_copy_env_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create a .env file in source
+            create_file(source.path(), ".env", "SECRET=value");
+
+            // Copy env files (no git, so all .env files are "untracked")
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            // Verify the file was copied
+            assert!(
+                file_has_content(dest.path(), ".env", "SECRET=value"),
+                ".env file should be copied with correct content"
+            );
+        }
+
+        #[test]
+        fn test_copy_env_local_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env.local file
+            create_file(source.path(), ".env.local", "LOCAL_SECRET=local");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.local", "LOCAL_SECRET=local"),
+                ".env.local file should be copied"
+            );
+        }
+
+        #[test]
+        fn test_copy_env_development_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env.development file
+            create_file(source.path(), ".env.development", "DEV=true");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.development", "DEV=true"),
+                ".env.development file should be copied"
+            );
+        }
+
+        #[test]
+        fn test_does_not_copy_envrc() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .envrc (direnv file) - should NOT be copied
+            create_file(source.path(), ".envrc", "export FOO=bar");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            // Verify .envrc was NOT copied
+            assert!(
+                !dest.path().join(".envrc").exists(),
+                ".envrc should NOT be copied (direnv file)"
+            );
+        }
+
+        #[test]
+        fn test_does_not_copy_environment() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .environment file - should NOT be copied
+            create_file(source.path(), ".environment", "some config");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                !dest.path().join(".environment").exists(),
+                ".environment should NOT be copied"
+            );
+        }
+
+        #[test]
+        fn test_copy_nested_env_file() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create nested .env file
+            create_file(source.path(), "packages/api/.env", "API_KEY=secret");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "API_KEY=secret"),
+                "Nested .env file should be copied preserving path"
+            );
+        }
+
+        #[test]
+        fn test_copy_multiple_env_files() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create multiple .env files
+            create_file(source.path(), ".env", "ROOT=1");
+            create_file(source.path(), ".env.local", "LOCAL=2");
+            create_file(source.path(), "app/.env", "APP=3");
+            create_file(source.path(), "app/.env.production", "PROD=4");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(file_has_content(dest.path(), ".env", "ROOT=1"));
+            assert!(file_has_content(dest.path(), ".env.local", "LOCAL=2"));
+            assert!(file_has_content(dest.path(), "app/.env", "APP=3"));
+            assert!(file_has_content(dest.path(), "app/.env.production", "PROD=4"));
+        }
+
+        #[test]
+        fn test_skips_git_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env inside .git (should be skipped)
+            create_file(source.path(), ".git/hooks/.env", "HOOK_SECRET=x");
+            // Create normal .env (should be copied)
+            create_file(source.path(), ".env", "NORMAL=y");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "NORMAL=y"),
+                "Normal .env should be copied"
+            );
+            assert!(
+                !dest.path().join(".git/hooks/.env").exists(),
+                ".git directory contents should be skipped"
+            );
+        }
+
+        #[test]
+        fn test_get_tracked_files_empty_for_non_git() {
+            let temp = TempDir::new().expect("Failed to create temp dir");
+
+            // Non-git directory should return empty set
+            let tracked = get_tracked_files(temp.path());
+            assert!(tracked.is_empty(), "Non-git directory should have no tracked files");
         }
     }
 }
