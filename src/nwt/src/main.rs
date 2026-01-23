@@ -11,6 +11,7 @@ use names::Generator;
 use repowalker::find_main_repo;
 use serde::Deserialize;
 use shellsetup::ShellIntegration;
+use walkdir::WalkDir;
 
 /// Shell code to be installed by --shell-setup.
 ///
@@ -41,11 +42,16 @@ function nwt() {
 }
 "#;
 
+/// Returns the default value for copy_env (true).
+fn default_copy_env() -> bool {
+    true
+}
+
 /// Configuration file schema for nwt.
 ///
 /// All fields are optional - only set what you need to override defaults.
 /// The config file is loaded from `~/.nwt.toml`.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NwtConfig {
     /// Default branch name (conflicts with checkout if both set).
@@ -53,6 +59,11 @@ struct NwtConfig {
 
     /// Default checkout ref (conflicts with branch if both set).
     checkout: Option<String>,
+
+    /// Copy untracked .env files from main worktree to new worktree.
+    /// Defaults to true if not specified.
+    #[serde(default = "default_copy_env")]
+    copy_env: bool,
 
     /// Enable quiet mode by default.
     #[serde(default)]
@@ -64,6 +75,19 @@ struct NwtConfig {
     /// Open worktree in tmux by default.
     #[serde(default)]
     tmux: bool,
+}
+
+impl Default for NwtConfig {
+    fn default() -> Self {
+        Self {
+            branch: None,
+            checkout: None,
+            copy_env: true, // Copy .env files by default
+            quiet: false,
+            run: None,
+            tmux: false,
+        }
+    }
 }
 
 /// Errors that can occur when loading or validating the config file.
@@ -106,6 +130,7 @@ impl From<toml::de::Error> for ConfigError {
 struct MergedConfig {
     branch: Option<String>,
     checkout: Option<String>,
+    copy_env: bool,
     quiet: bool,
     run: Option<String>,
     tmux: bool,
@@ -177,6 +202,9 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // CLI options override config file values
         branch: cli.branch.clone().or(config.branch),
         checkout: cli.checkout.clone().or(config.checkout),
+        // copy_env: config default is true, CLI --no-copy-env disables it.
+        // If CLI specifies --no-copy-env, we disable. Otherwise use config value.
+        copy_env: !cli.no_copy_env && config.copy_env,
         // Boolean flags use OR: CLI can enable but not disable config defaults.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
@@ -385,16 +413,26 @@ const MAX_ATTEMPTS: u32 = 10;
 #[command(about = "Create a new git worktree with a Docker-style random name")]
 #[command(long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
-and branch unless overridden.
+and branch unless overridden. Automatically copies untracked .env files from the main \
+worktree to preserve development settings.
 
 CONFIGURATION:
     Default values can be set in ~/.nwt.toml. CLI arguments override config values.
 
     Example config file:
         branch = \"feature/default\"
+        copy_env = false  # disable .env file copying
         quiet = false
         tmux = true
         run = \"pnpm install\"
+
+ENV FILE COPYING:
+    By default, nwt copies untracked .env files (e.g., .env, .env.local, .env.development)
+    from the main worktree to the new worktree, preserving their relative paths. This is
+    useful for development settings that shouldn't be committed to git.
+
+    Use --no-copy-env to disable this for a single invocation, or set copy_env = false
+    in ~/.nwt.toml to disable it by default.
 
 EXAMPLES:
     nwt                              # Random name for both directory and branch
@@ -404,6 +442,7 @@ EXAMPLES:
     nwt --run \"npm install\"          # Run a command after creation
     nwt --tmux                       # Open worktree in a new tmux window
     nwt --tmux --run \"npm install\"   # Run command in a new tmux window
+    nwt --no-copy-env                # Skip copying .env files
     nwt --shell-setup                # Install shell integration for auto-cd
 
 SHELL INTEGRATION:
@@ -472,6 +511,18 @@ struct Cli {
     #[arg(long)]
     tmux: bool,
 
+    /// Disable copying untracked .env files to the new worktree.
+    ///
+    /// By default, nwt copies untracked .env files (e.g., .env, .env.local,
+    /// .env.development) from the main worktree to the new worktree, preserving
+    /// their relative paths. This is useful for development settings that shouldn't
+    /// be committed to git.
+    ///
+    /// Use this flag to disable this behavior for a single invocation, or set
+    /// `copy_env = false` in ~/.nwt.toml to disable it by default.
+    #[arg(long)]
+    no_copy_env: bool,
+
     /// Install shell integration to automatically cd into new worktrees.
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
@@ -482,7 +533,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env"])]
     shell_setup: bool,
 }
 
@@ -663,6 +714,118 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
         .with_command("nwt", "Create a new worktree and cd into it");
 
     integration.setup()
+}
+
+/// Gets the set of all files tracked by git in the repository.
+///
+/// Returns a HashSet of absolute paths for efficient membership checking.
+/// Returns an empty set on any error (treats errors as "no tracked files found").
+fn get_tracked_files(repo_root: &Path) -> std::collections::HashSet<PathBuf> {
+    let output = Command::new("git")
+        .args(["ls-files"])
+        .current_dir(repo_root)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|line| repo_root.join(line))
+            .collect(),
+        _ => std::collections::HashSet::new(),
+    }
+}
+
+/// Copies untracked .env files from the main worktree to the new worktree.
+///
+/// This function:
+/// 1. Gets all tracked files from git in a single call (for performance)
+/// 2. Walks the main repo looking for files starting with `.env`
+/// 3. Skips the `.git` directory and any already-tracked files
+/// 4. Copies untracked .env files to the same relative path in the new worktree
+/// 5. Creates parent directories as needed
+/// 6. Reports copied files unless quiet mode is enabled
+///
+/// Errors copying individual files are reported but don't stop the process.
+fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
+    // Get all tracked files in a single git call for performance
+    let tracked_files = get_tracked_files(main_repo);
+    let mut copied_count = 0;
+
+    for entry in WalkDir::new(main_repo)
+        .follow_links(false) // Don't follow symlinks
+        .into_iter()
+        .filter_entry(|e| {
+            // Skip .git directory
+            e.file_name() != ".git"
+        })
+        .filter_map(|e| e.ok())
+    {
+        // Only process files (not directories)
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        // Check if the filename starts with .env
+        let file_name = entry.file_name().to_string_lossy();
+        if !file_name.starts_with(".env") {
+            continue;
+        }
+
+        let file_path = entry.path();
+
+        // Skip if tracked by git (use the pre-fetched set for O(1) lookup)
+        if tracked_files.contains(file_path) {
+            continue;
+        }
+
+        // Calculate relative path and destination
+        let relative_path = match file_path.strip_prefix(main_repo) {
+            Ok(rel) => rel,
+            Err(_) => continue,
+        };
+        let dest_path = worktree.join(relative_path);
+
+        // Create parent directories if needed (create_dir_all is idempotent)
+        if let Some(parent) = dest_path.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                if !quiet {
+                    eprintln!(
+                        "Warning: Failed to create directory '{}': {}",
+                        parent.display(),
+                        e
+                    );
+                }
+                continue;
+            }
+        }
+
+        // Copy the file
+        match fs::copy(file_path, &dest_path) {
+            Ok(_) => {
+                copied_count += 1;
+                if !quiet {
+                    eprintln!("Copied: {}", relative_path.display());
+                }
+            }
+            Err(e) => {
+                if !quiet {
+                    eprintln!(
+                        "Warning: Failed to copy '{}': {}",
+                        relative_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    if copied_count > 0 && !quiet {
+        eprintln!(
+            "Copied {} untracked .env file{} to new worktree",
+            copied_count,
+            if copied_count == 1 { "" } else { "s" }
+        );
+    }
 }
 
 fn main() {
@@ -853,6 +1016,11 @@ fn main() {
                 }
 
                 println!("{}", worktree_path.display());
+
+                // Copy untracked .env files from main worktree to new worktree
+                if config.copy_env {
+                    copy_untracked_env_files(&repo_root, &worktree_path, config.quiet);
+                }
 
                 // Execute tmux and/or run commands
                 if config.tmux {
@@ -1151,6 +1319,7 @@ mod tests {
         let config = MergedConfig {
             branch: Some("feature/test".to_string()),
             checkout: None,
+            copy_env: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -1163,6 +1332,7 @@ mod tests {
         let config = MergedConfig {
             branch: None,
             checkout: None,
+            copy_env: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -1385,6 +1555,46 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_no_copy_env_parses() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // Parsing with --no-copy-env should succeed
+        let result = cmd.try_get_matches_from(["nwt", "--no-copy-env"]);
+        assert!(result.is_ok(), "Should accept --no-copy-env option");
+
+        let matches = result.unwrap();
+        assert!(
+            matches.get_flag("no_copy_env"),
+            "Should set no_copy_env flag"
+        );
+    }
+
+    #[test]
+    fn test_cli_no_copy_env_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --no-copy-env can be combined with --branch
+        let result =
+            cmd.try_get_matches_from(["nwt", "--no-copy-env", "--branch", "feature/test"]);
+        assert!(result.is_ok(), "Should accept --no-copy-env with --branch");
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_no_copy_env() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup conflicts with --no-copy-env
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-copy-env"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --no-copy-env are provided"
+        );
+    }
+
+    #[test]
     fn test_cli_shell_setup_parses() {
         use clap::CommandFactory;
         let cmd = Cli::command();
@@ -1551,6 +1761,7 @@ mod tests {
             let config: NwtConfig = toml::from_str(toml).expect("Should parse empty config");
             assert!(config.branch.is_none());
             assert!(config.checkout.is_none());
+            assert!(config.copy_env); // defaults to true
             assert!(!config.quiet);
             assert!(config.run.is_none());
             assert!(!config.tmux);
@@ -1569,6 +1780,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("feat".to_string()),
                 checkout: Some("main".to_string()),
+                copy_env: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1582,6 +1794,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("feat".to_string()),
                 checkout: None,
+                copy_env: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1595,6 +1808,7 @@ mod tests {
             let config = NwtConfig {
                 branch: None,
                 checkout: Some("main".to_string()),
+                copy_env: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1608,6 +1822,7 @@ mod tests {
             let cli = Cli {
                 branch: Some("cli-branch".to_string()),
                 checkout: None,
+                no_copy_env: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -1616,6 +1831,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
+                copy_env: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
                 tmux: true,
@@ -1625,6 +1841,7 @@ mod tests {
             // CLI values should override config for Option<String> fields
             assert_eq!(merged.branch, Some("cli-branch".to_string()));
             assert!(merged.quiet); // CLI --quiet flag was set, so quiet=true
+            assert!(merged.copy_env); // config has true, CLI didn't disable
 
             // Boolean flags use OR logic: cli.tmux || config.tmux
             // Since CLI didn't specify --tmux (so cli.tmux=false, the default),
@@ -1641,6 +1858,7 @@ mod tests {
             let cli = Cli {
                 branch: None,
                 checkout: None,
+                no_copy_env: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -1649,6 +1867,7 @@ mod tests {
             let config = NwtConfig {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
+                copy_env: true,
                 quiet: true,
                 run: Some("make build".to_string()),
                 tmux: true,
@@ -1657,6 +1876,7 @@ mod tests {
 
             // Config values should be used when CLI doesn't specify
             assert_eq!(merged.branch, Some("config-branch".to_string()));
+            assert!(merged.copy_env);
             assert!(merged.quiet);
             assert!(merged.tmux);
             assert_eq!(merged.run, Some("make build".to_string()));
@@ -1667,6 +1887,7 @@ mod tests {
             let cli = Cli {
                 branch: Some("my-branch".to_string()),
                 checkout: None,
+                no_copy_env: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -1676,9 +1897,60 @@ mod tests {
 
             // Should use CLI values with defaults for missing
             assert_eq!(merged.branch, Some("my-branch".to_string()));
+            assert!(merged.copy_env); // default is true
             assert!(merged.quiet);
             assert!(!merged.tmux);
             assert!(merged.run.is_none());
+        }
+
+        #[test]
+        fn test_merge_no_copy_env_disables() {
+            let cli = Cli {
+                branch: None,
+                checkout: None,
+                no_copy_env: true, // CLI disables
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true, // config enables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+
+            // CLI --no-copy-env should override config copy_env = true
+            assert!(!merged.copy_env);
+        }
+
+        #[test]
+        fn test_merge_config_copy_env_false() {
+            let cli = Cli {
+                branch: None,
+                checkout: None,
+                no_copy_env: false,
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: false, // config disables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+
+            // Config copy_env = false should be respected
+            assert!(!merged.copy_env);
         }
 
         #[test]

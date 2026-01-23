@@ -16,6 +16,7 @@ repowalker.workspace = true
 serde.workspace = true
 shellsetup.workspace = true
 toml.workspace = true
+walkdir.workspace = true
 
 [lints]
 workspace = true
