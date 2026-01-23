@@ -14,6 +14,28 @@ use serde::Deserialize;
 use shellsetup::ShellIntegration;
 use walkdir::WalkDir;
 
+/// Directories to skip when copying .env files.
+///
+/// These are common directories that either:
+/// - Should never contain user .env files (.git)
+/// - Are large dependency/build directories that shouldn't be traversed for performance
+///
+/// This list is used by `copy_untracked_env_files` to avoid walking large directory trees.
+const SKIP_DIRECTORIES: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".output",
+    "vendor",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
 /// Shell code to be installed by --shell-setup.
 ///
 /// This function wraps the nwt binary and automatically changes to the new worktree
@@ -52,7 +74,7 @@ fn default_copy_env() -> bool {
 ///
 /// All fields are optional - only set what you need to override defaults.
 /// The config file is loaded from `~/.nwt.toml`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct NwtConfig {
     /// Default branch name (conflicts with checkout if both set).
@@ -84,6 +106,8 @@ impl Default for NwtConfig {
     /// IMPORTANT: These defaults must stay in sync with the serde `#[serde(default)]`
     /// attributes on each field in `NwtConfig`. This impl is used when no config file
     /// exists, while serde defaults are used when a config file exists but omits fields.
+    ///
+    /// The test `test_default_impl_matches_serde_defaults` verifies this invariant.
     fn default() -> Self {
         Self {
             branch: None,
@@ -433,9 +457,18 @@ CONFIGURATION:
         run = \"pnpm install\"
 
 ENV FILE COPYING:
-    By default, nwt copies untracked .env files (e.g., .env, .env.local, .env.development)
-    from the main worktree to the new worktree, preserving their relative paths. This is
-    useful for development settings that shouldn't be committed to git.
+    By default, nwt copies untracked .env files from the main worktree to the new worktree,
+    preserving their relative paths. This is useful for development settings that shouldn't
+    be committed to git.
+
+    Files matching these patterns are copied:
+        .env           - exact match
+        .env.*         - any file starting with '.env.' (e.g., .env.local, .env.development)
+
+    Files NOT copied:
+        .envrc         - direnv configuration (doesn't start with '.env.')
+        .environment   - doesn't match the pattern
+        Tracked files  - files already in git are never copied
 
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
@@ -761,21 +794,10 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
         .follow_links(false) // Don't follow symlinks
         .into_iter()
         .filter_entry(|e| {
-            // Skip directories that won't contain .env files we care about.
-            // This is a performance optimization to avoid traversing large directories.
-            let name = e.file_name();
-            name != ".git"
-                && name != "node_modules"
-                && name != "target"
-                && name != "dist"
-                && name != "build"
-                && name != ".next"
-                && name != ".nuxt"
-                && name != ".output"
-                && name != "vendor"
-                && name != "__pycache__"
-                && name != ".venv"
-                && name != "venv"
+            // Skip directories listed in SKIP_DIRECTORIES for performance.
+            // See the constant definition for rationale.
+            let name = e.file_name().to_string_lossy();
+            !SKIP_DIRECTORIES.contains(&name.as_ref())
         })
         .filter_map(|e| e.ok())
     {
@@ -1785,6 +1807,48 @@ mod tests {
             assert!(!config.quiet);
             assert!(config.run.is_none());
             assert!(!config.tmux);
+        }
+
+        /// Verifies that `NwtConfig::default()` produces the same values as serde defaults.
+        ///
+        /// This test exists to catch bugs where someone adds a new field to `NwtConfig`
+        /// but forgets to update the `impl Default` block (or vice versa). The manual
+        /// Default impl is needed because serde defaults only apply when parsing TOML,
+        /// not when no config file exists at all.
+        ///
+        /// If this test fails, ensure the `impl Default for NwtConfig` block matches
+        /// the `#[serde(default)]` attributes on each field.
+        #[test]
+        fn test_default_impl_matches_serde_defaults() {
+            let serde_defaults: NwtConfig =
+                toml::from_str("").expect("Should parse empty config");
+            let manual_defaults = NwtConfig::default();
+
+            // Compare each field explicitly for clear error messages
+            assert_eq!(
+                serde_defaults.branch, manual_defaults.branch,
+                "branch default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.checkout, manual_defaults.checkout,
+                "checkout default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.copy_env, manual_defaults.copy_env,
+                "copy_env default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.quiet, manual_defaults.quiet,
+                "quiet default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.run, manual_defaults.run,
+                "run default mismatch between impl Default and serde"
+            );
+            assert_eq!(
+                serde_defaults.tmux, manual_defaults.tmux,
+                "tmux default mismatch between impl Default and serde"
+            );
         }
 
         #[test]
