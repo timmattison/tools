@@ -164,6 +164,11 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       a prefix from broken symlink targets to attempt to fix them. Useful for fixing broken symlinks after moving
       directories or restructuring projects.
     - To install: `go install github.com/timmattison/tools/cmd/symfix@latest`
+- diskhog
+    - Shows per-process disk I/O usage on macOS in a continuously updating terminal UI. Displays disk bandwidth
+      (read/write bytes per second) for all processes. When run with sudo, also shows IOPS (operations per second)
+      using fs_usage. Features include configurable refresh rate, process count limits, and keyboard controls (q/Esc to quit).
+    - To install: `cargo install --git https://github.com/timmattison/tools diskhog`
 - dirc
     - A versatile directory path tool that can both:
         - Copy the current working directory to the clipboard

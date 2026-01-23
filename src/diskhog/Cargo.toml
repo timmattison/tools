@@ -1,11 +1,11 @@
 [package]
-name = "disk-hog"
+name = "diskhog"
 version = "0.1.0"
 edition.workspace = true
 description = "Show per-process disk I/O usage on macOS"
 
 [[bin]]
-name = "disk-hog"
+name = "diskhog"
 path = "src/main.rs"
 
 [dependencies]
