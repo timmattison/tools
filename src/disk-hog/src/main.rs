@@ -7,7 +7,7 @@ use anyhow::Result;
 use buildinfo::version_string;
 use clap::Parser;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -40,11 +40,7 @@ impl Drop for TerminalGuard {
         if self.initialized {
             // Best-effort cleanup on panic - ignore errors since we're already in trouble
             let _ = disable_raw_mode();
-            let _ = execute!(
-                io::stdout(),
-                LeaveAlternateScreen,
-                DisableMouseCapture
-            );
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
             // Try to show the cursor
             let _ = io::stdout().write_all(b"\x1B[?25h");
             let _ = io::stdout().flush();
@@ -139,7 +135,7 @@ async fn main() -> Result<()> {
     // Set up terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -155,11 +151,7 @@ async fn main() -> Result<()> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     // Now that terminal is restored, log any shutdown errors
