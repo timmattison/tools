@@ -79,14 +79,19 @@ struct NwtConfig {
 }
 
 impl Default for NwtConfig {
+    /// Creates the default configuration.
+    ///
+    /// IMPORTANT: These defaults must stay in sync with the serde `#[serde(default)]`
+    /// attributes on each field in `NwtConfig`. This impl is used when no config file
+    /// exists, while serde defaults are used when a config file exists but omits fields.
     fn default() -> Self {
         Self {
             branch: None,
             checkout: None,
-            copy_env: true, // Copy .env files by default
-            quiet: false,
+            copy_env: true, // Must match default_copy_env()
+            quiet: false,   // Must match #[serde(default)] (false)
             run: None,
-            tmux: false,
+            tmux: false, // Must match #[serde(default)] (false)
         }
     }
 }
@@ -756,8 +761,21 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
         .follow_links(false) // Don't follow symlinks
         .into_iter()
         .filter_entry(|e| {
-            // Skip .git directory
-            e.file_name() != ".git"
+            // Skip directories that won't contain .env files we care about.
+            // This is a performance optimization to avoid traversing large directories.
+            let name = e.file_name();
+            name != ".git"
+                && name != "node_modules"
+                && name != "target"
+                && name != "dist"
+                && name != "build"
+                && name != ".next"
+                && name != ".nuxt"
+                && name != ".output"
+                && name != "vendor"
+                && name != "__pycache__"
+                && name != ".venv"
+                && name != "venv"
         })
         .filter_map(|e| e.ok())
     {
@@ -2156,7 +2174,164 @@ mod tests {
 
             // Non-git directory should return empty set
             let tracked = get_tracked_files(temp.path());
-            assert!(tracked.is_empty(), "Non-git directory should have no tracked files");
+            assert!(
+                tracked.is_empty(),
+                "Non-git directory should have no tracked files"
+            );
+        }
+
+        #[test]
+        fn test_skips_node_modules_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env inside node_modules (should be skipped for performance)
+            create_file(source.path(), "node_modules/some-pkg/.env", "PKG_SECRET=x");
+            // Create normal .env (should be copied)
+            create_file(source.path(), ".env", "NORMAL=y");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "NORMAL=y"),
+                "Normal .env should be copied"
+            );
+            assert!(
+                !dest.path().join("node_modules/some-pkg/.env").exists(),
+                "node_modules directory contents should be skipped"
+            );
+        }
+
+        #[test]
+        fn test_skips_target_directory() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Create .env inside target (Rust build dir, should be skipped)
+            create_file(source.path(), "target/debug/.env", "BUILD_SECRET=x");
+            // Create normal .env (should be copied)
+            create_file(source.path(), ".env", "NORMAL=y");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "NORMAL=y"),
+                "Normal .env should be copied"
+            );
+            assert!(
+                !dest.path().join("target/debug/.env").exists(),
+                "target directory contents should be skipped"
+            );
+        }
+
+        /// Helper to run a git command in a directory.
+        fn run_git(dir: &Path, args: &[&str]) -> bool {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+
+        #[test]
+        fn test_tracked_env_file_not_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Initialize a real git repository
+            if !run_git(source.path(), &["init"]) {
+                // Skip test if git is not available
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // Configure git user for the commit (required in some environments)
+            run_git(
+                source.path(),
+                &["config", "user.email", "test@example.com"],
+            );
+            run_git(source.path(), &["config", "user.name", "Test User"]);
+
+            // Create a .env file that will be tracked
+            create_file(source.path(), ".env.example", "TRACKED_SECRET=tracked");
+
+            // Track the file with git
+            if !run_git(source.path(), &["add", ".env.example"]) {
+                eprintln!("Skipping test: git add failed");
+                return;
+            }
+            if !run_git(source.path(), &["commit", "-m", "Add tracked env file"]) {
+                eprintln!("Skipping test: git commit failed");
+                return;
+            }
+
+            // Create an untracked .env file
+            create_file(source.path(), ".env.local", "UNTRACKED_SECRET=untracked");
+
+            // Copy env files
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            // Verify: tracked file should NOT be copied
+            assert!(
+                !dest.path().join(".env.example").exists(),
+                "Tracked .env.example should NOT be copied"
+            );
+
+            // Verify: untracked file SHOULD be copied
+            assert!(
+                file_has_content(dest.path(), ".env.local", "UNTRACKED_SECRET=untracked"),
+                "Untracked .env.local should be copied"
+            );
+        }
+
+        #[test]
+        fn test_get_tracked_files_with_real_git() {
+            let temp = TempDir::new().expect("Failed to create temp dir");
+
+            // Initialize a real git repository
+            if !run_git(temp.path(), &["init"]) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // Configure git user
+            run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+            run_git(temp.path(), &["config", "user.name", "Test User"]);
+
+            // Create and track some files
+            create_file(temp.path(), "file1.txt", "content1");
+            create_file(temp.path(), "subdir/file2.txt", "content2");
+
+            run_git(temp.path(), &["add", "."]);
+            run_git(temp.path(), &["commit", "-m", "Initial commit"]);
+
+            // Get tracked files
+            let tracked = get_tracked_files(temp.path());
+
+            // Should contain our tracked files
+            assert!(
+                tracked.contains(&temp.path().join("file1.txt")),
+                "Should contain file1.txt"
+            );
+            assert!(
+                tracked.contains(&temp.path().join("subdir/file2.txt")),
+                "Should contain subdir/file2.txt"
+            );
+
+            // Create an untracked file
+            create_file(temp.path(), "untracked.txt", "untracked");
+
+            // Get tracked files again
+            let tracked = get_tracked_files(temp.path());
+
+            // Should NOT contain the untracked file
+            assert!(
+                !tracked.contains(&temp.path().join("untracked.txt")),
+                "Should NOT contain untracked.txt"
+            );
         }
     }
 }
