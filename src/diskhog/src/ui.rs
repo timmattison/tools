@@ -175,7 +175,7 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
             let message = Paragraph::new(vec![
                 Line::from(""),
                 Line::from(Span::styled(
-                    "Run with sudo to enable IOPS monitoring (e.g., sudo disk-hog)",
+                    "Run with sudo to enable IOPS monitoring (e.g., sudo diskhog)",
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::ITALIC),

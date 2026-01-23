@@ -19,7 +19,7 @@ pub struct BandwidthCollector {
     previous_readings: HashMap<u32, PreviousReading>,
 }
 
-/// Returns the standard `ProcessRefreshKind` configuration for disk-hog.
+/// Returns the standard `ProcessRefreshKind` configuration for diskhog.
 ///
 /// This ensures consistent refresh behavior across the codebase and prevents
 /// accidentally forgetting to request process names (cmd). Always includes:

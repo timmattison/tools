@@ -209,7 +209,7 @@ impl IOPSCollector {
     pub async fn start(&mut self) -> Result<IOPSData> {
         if !Self::is_root() {
             anyhow::bail!(
-                "IOPS collection requires root privileges. Run with: sudo disk-hog"
+                "IOPS collection requires root privileges. Run with: sudo diskhog"
             );
         }
 

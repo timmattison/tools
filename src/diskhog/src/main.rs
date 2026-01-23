@@ -94,10 +94,10 @@ fn parse_refresh_rate(s: &str) -> Result<f64, String> {
 
 #[derive(Parser)]
 #[command(
-    name = "disk-hog",
+    name = "diskhog",
     version = version_string!(),
     about = "Show per-process disk I/O usage on macOS",
-    long_about = "disk-hog displays per-process disk bandwidth and IOPS in a continuously updating terminal UI.\n\nBandwidth monitoring works without root. IOPS monitoring requires running with sudo."
+    long_about = "diskhog displays per-process disk bandwidth and IOPS in a continuously updating terminal UI.\n\nBandwidth monitoring works without root. IOPS monitoring requires running with sudo."
 )]
 struct Args {
     /// Refresh interval in seconds (supports decimals, e.g., 0.5). Range: 0.1-60.
