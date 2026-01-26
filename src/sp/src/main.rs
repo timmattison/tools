@@ -225,7 +225,11 @@ fn collect_processes(
                     // Platform-specific handling is inline because sysinfo's Uid type
                     // differs across platforms. On Unix, Uid implements Deref<Target = uid_t>,
                     // allowing us to call get_username(**uid). On non-Unix platforms,
-                    // we fall back to displaying the UID directly.
+                    // we fall back to displaying the UID directly via sysinfo's Display impl.
+                    //
+                    // NOTE: The non-Unix path relies on sysinfo::Uid implementing Display,
+                    // which it does per the sysinfo API. This has not been tested on Windows
+                    // but should work correctly.
                     #[cfg(unix)]
                     {
                         get_username(**uid)
@@ -307,7 +311,16 @@ const LSOF_MIN_FIELDS: usize = 9;
 ///
 /// # Returns
 ///
-/// A vector of open files, or None if lsof is unavailable or the command fails.
+/// A vector of open files, or `None` if lsof is unavailable or the command fails.
+///
+/// # Design Note
+///
+/// This function intentionally returns `Option` rather than `Result` because both
+/// failure cases (lsof not installed, lsof failed for specific PID) should result
+/// in silently skipping the open files display. The `is_lsof_available()` function
+/// already warns users once when lsof is not found. Per-PID failures (e.g., process
+/// exited between listing and lsof call, or permission denied) are expected in
+/// normal operation and don't warrant additional error messages.
 fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
     if !is_lsof_available() {
         return None;
