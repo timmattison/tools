@@ -5,6 +5,7 @@
 
 use std::ffi::CStr;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use buildinfo::version_string;
@@ -13,6 +14,11 @@ use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use human_bytes::human_bytes;
 use regex::Regex;
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+
+/// Cached result of lsof availability check.
+///
+/// This prevents repeated warnings when lsof is not found.
+static LSOF_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 /// Smart process viewer with enhanced filtering and display.
 ///
@@ -136,6 +142,11 @@ fn get_username(uid: u32) -> String {
     // SAFETY: getpwuid is a standard POSIX function that returns a pointer to
     // a passwd struct. The returned pointer is to static storage and should not
     // be freed. We immediately copy the data we need.
+    //
+    // NOTE: getpwuid is NOT thread-safe as it returns a pointer to static storage
+    // that can be overwritten by subsequent calls. This is acceptable for this
+    // single-threaded CLI tool, but this function should not be used in
+    // multi-threaded contexts without synchronization.
     unsafe {
         let passwd = libc::getpwuid(uid);
         if passwd.is_null() {
@@ -206,21 +217,16 @@ fn collect_processes(
             let user = process
                 .user_id()
                 .map(|uid| {
-                    // uid.to_string() returns "Uid(123)" format, we need the raw number
-                    let uid_str = uid.to_string();
-                    // Parse out the number from "Uid(123)" or just use it as uid
-                    if let Some(start) = uid_str.find('(') {
-                        if let Some(end) = uid_str.find(')') {
-                            if let Ok(n) = uid_str[start + 1..end].parse::<u32>() {
-                                return get_username(n);
-                            }
-                        }
+                    // On Unix, sysinfo's Uid implements Deref<Target = uid_t>,
+                    // allowing direct access to the raw user ID value.
+                    #[cfg(unix)]
+                    {
+                        get_username(**uid)
                     }
-                    // Try direct parse as number
-                    if let Ok(n) = uid_str.parse::<u32>() {
-                        return get_username(n);
+                    #[cfg(not(unix))]
+                    {
+                        uid.to_string()
                     }
-                    uid_str
                 })
                 .unwrap_or_else(|| "unknown".to_string());
 
@@ -257,6 +263,35 @@ fn collect_processes(
     Ok(processes)
 }
 
+/// Checks if lsof is available on the system (cached).
+///
+/// This function caches the result to avoid repeated filesystem lookups
+/// and to ensure the warning message is only printed once.
+///
+/// # Returns
+///
+/// `true` if lsof is available, `false` otherwise.
+fn is_lsof_available() -> bool {
+    *LSOF_AVAILABLE.get_or_init(|| {
+        let available = which::which("lsof").is_ok();
+        if !available {
+            eprintln!("Warning: lsof not found, skipping open files display");
+        }
+        available
+    })
+}
+
+// lsof output field indices (0-indexed).
+// Standard lsof -p output format:
+// COMMAND  PID  USER  FD  TYPE  DEVICE  SIZE/OFF  NODE  NAME
+// 0        1    2     3   4     5       6         7     8+
+//
+// Note: NAME (index 8+) may contain spaces, so we join all remaining fields.
+const LSOF_FIELD_FD: usize = 3;
+const LSOF_FIELD_TYPE: usize = 4;
+const LSOF_FIELD_NAME_START: usize = 8;
+const LSOF_MIN_FIELDS: usize = 9;
+
 /// Gets open files for a process using lsof.
 ///
 /// # Arguments
@@ -265,11 +300,9 @@ fn collect_processes(
 ///
 /// # Returns
 ///
-/// A vector of open files, or None if lsof is unavailable.
+/// A vector of open files, or None if lsof is unavailable or the command fails.
 fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
-    // Check if lsof is available
-    if which::which("lsof").is_err() {
-        eprintln!("Warning: lsof not found, skipping open files display");
+    if !is_lsof_available() {
         return None;
     }
 
@@ -285,14 +318,15 @@ fn get_open_files(pid: u32) -> Option<Vec<OpenFile>> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut files = Vec::new();
 
+    // Skip the header line and parse each subsequent line
     for line in stdout.lines().skip(1) {
-        // Skip header
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 9 {
+        if fields.len() >= LSOF_MIN_FIELDS {
             files.push(OpenFile {
-                fd: fields[3].to_string(),
-                file_type: fields[4].to_string(),
-                name: fields[8..].join(" "), // File path may contain spaces
+                fd: fields[LSOF_FIELD_FD].to_string(),
+                file_type: fields[LSOF_FIELD_TYPE].to_string(),
+                // NAME field may contain spaces, so join all remaining fields
+                name: fields[LSOF_FIELD_NAME_START..].join(" "),
             });
         }
     }
@@ -552,5 +586,59 @@ mod tests {
     #[test]
     fn test_truncate_command_empty() {
         assert_eq!(truncate_command("", 10), "-");
+    }
+
+    /// Parses a single line of lsof output into an OpenFile struct.
+    ///
+    /// This is extracted for testing purposes to verify the field indices are correct.
+    fn parse_lsof_line(line: &str) -> Option<OpenFile> {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() >= LSOF_MIN_FIELDS {
+            Some(OpenFile {
+                fd: fields[LSOF_FIELD_FD].to_string(),
+                file_type: fields[LSOF_FIELD_TYPE].to_string(),
+                name: fields[LSOF_FIELD_NAME_START..].join(" "),
+            })
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn test_lsof_parsing_standard_line() {
+        // Example lsof output line (simplified for testing)
+        // COMMAND  PID  USER  FD   TYPE   DEVICE  SIZE/OFF  NODE  NAME
+        let line = "bash     1234 user  cwd  DIR    1,5     4096      2  /home/user";
+        let file = parse_lsof_line(line).expect("Should parse valid lsof line");
+        assert_eq!(file.fd, "cwd");
+        assert_eq!(file.file_type, "DIR");
+        assert_eq!(file.name, "/home/user");
+    }
+
+    #[test]
+    fn test_lsof_parsing_name_with_spaces() {
+        // File path containing spaces should be handled correctly
+        let line = "bash     1234 user  3r   REG    1,5     1024      3  /home/user/my file.txt";
+        let file = parse_lsof_line(line).expect("Should parse line with spaces in name");
+        assert_eq!(file.fd, "3r");
+        assert_eq!(file.file_type, "REG");
+        assert_eq!(file.name, "/home/user/my file.txt");
+    }
+
+    #[test]
+    fn test_lsof_parsing_insufficient_fields() {
+        // Lines with fewer than LSOF_MIN_FIELDS should be skipped
+        let line = "bash 1234 user cwd DIR";
+        assert!(parse_lsof_line(line).is_none());
+    }
+
+    #[test]
+    fn test_lsof_field_constants_consistency() {
+        // Verify that field constants are consistent with expected lsof format
+        // This test documents the expected format and catches accidental changes
+        assert_eq!(LSOF_FIELD_FD, 3, "FD should be at index 3");
+        assert_eq!(LSOF_FIELD_TYPE, 4, "TYPE should be at index 4");
+        assert_eq!(LSOF_FIELD_NAME_START, 8, "NAME should start at index 8");
+        assert_eq!(LSOF_MIN_FIELDS, 9, "Minimum fields should be 9");
     }
 }
