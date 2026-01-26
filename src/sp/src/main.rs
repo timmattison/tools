@@ -365,7 +365,7 @@ fn print_table(processes: &[ProcessInfo], include_cwd: bool) {
             proc.name.clone(),
             proc.user.clone(),
             format!("{:.1}", proc.cpu_usage),
-            human_bytes(proc.memory as f64),
+            format_memory(proc.memory),
             proc.status.clone(),
             truncate_command(&proc.command, 60),
         ];
@@ -406,7 +406,7 @@ fn print_raw(processes: &[ProcessInfo], include_cwd: bool) {
                 truncate_str(&proc.name, 20),
                 truncate_str(&proc.user, 10),
                 proc.cpu_usage,
-                human_bytes(proc.memory as f64),
+                format_memory(proc.memory),
                 truncate_str(&proc.status, 10),
                 truncate_command(&proc.command, 40),
                 proc.cwd.as_deref().unwrap_or("")
@@ -418,7 +418,7 @@ fn print_raw(processes: &[ProcessInfo], include_cwd: bool) {
                 truncate_str(&proc.name, 20),
                 truncate_str(&proc.user, 10),
                 proc.cpu_usage,
-                human_bytes(proc.memory as f64),
+                format_memory(proc.memory),
                 truncate_str(&proc.status, 10),
                 truncate_command(&proc.command, 60)
             );
@@ -499,6 +499,26 @@ fn truncate_command(cmd: &str, max_len: usize) -> String {
         return "-".to_string();
     }
     truncate_str(cmd, max_len)
+}
+
+/// Formats a memory value in bytes as a human-readable string.
+///
+/// # Arguments
+///
+/// * `bytes` - Memory size in bytes (from `sysinfo::Process::memory()`)
+///
+/// # Returns
+///
+/// A human-readable string like "1.5 GiB" or "256 MiB".
+///
+/// # Precision Note
+///
+/// This function converts `u64` to `f64` for the `human_bytes` crate. The `f64` type
+/// can exactly represent integers up to 2^53 (~9 PiB). Since no real-world system
+/// has 9+ petabytes of RAM, this conversion is lossless for all practical memory values.
+/// This is intentionally not a clippy allow since the reasoning should be documented.
+fn format_memory(bytes: u64) -> String {
+    human_bytes(bytes as f64)
 }
 
 fn main() -> Result<()> {
@@ -662,6 +682,19 @@ mod tests {
     #[test]
     fn test_truncate_command_empty() {
         assert_eq!(truncate_command("", 10), "-");
+    }
+
+    #[test]
+    fn test_format_memory() {
+        // Basic formatting tests (human_bytes uses IEC units: KiB, MiB, GiB, TiB)
+        assert_eq!(format_memory(0), "0 B");
+        assert_eq!(format_memory(1024), "1 KiB");
+        assert_eq!(format_memory(1024 * 1024), "1 MiB");
+        assert_eq!(format_memory(1024 * 1024 * 1024), "1 GiB");
+
+        // Verify large values don't panic (precision is documented in the function)
+        let one_tib = 1024u64 * 1024 * 1024 * 1024;
+        assert_eq!(format_memory(one_tib), "1 TiB");
     }
 
     /// Parses a single line of lsof output into an OpenFile struct.
