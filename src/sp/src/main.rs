@@ -83,6 +83,15 @@ enum PatternType {
 }
 
 /// Information about a single process.
+///
+/// # CPU Usage Note
+///
+/// The `cpu_usage` field represents a point-in-time snapshot. The sysinfo crate
+/// typically requires two refresh calls with a delay between them for accurate
+/// CPU percentage calculations. Since this tool performs a single snapshot for
+/// responsiveness, the CPU value may be 0% or less accurate than tools that
+/// continuously monitor processes. This is an intentional tradeoff - users who
+/// need precise CPU tracking should use tools like `top` or `htop` instead.
 struct ProcessInfo {
     pid: u32,
     name: String,
@@ -456,6 +465,17 @@ fn print_open_files(processes: &[ProcessInfo]) {
 /// # Returns
 ///
 /// The truncated string.
+///
+/// # Behavior Notes
+///
+/// When truncation occurs, the output format is `{truncated_content}...` where
+/// `truncated_content` has `max_len - 3` characters. This means:
+///
+/// - If `max_len >= 4`, the output will be at most `max_len` characters
+/// - If `max_len < 4` and truncation is needed, the output will be `"..."` (3 characters),
+///   which may exceed the requested `max_len`. This is intentional - we always show
+///   the ellipsis to indicate truncation occurred, rather than silently truncating
+///   to an even shorter/empty string.
 fn truncate_str(s: &str, max_len: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max_len {
@@ -610,10 +630,36 @@ mod tests {
         // Edge case: exactly at limit
         assert_eq!(truncate_str("hello", 5), "hello");
 
-        // Edge case: very small max_len
+        // Edge case: very small max_len (see test below for detailed documentation)
         assert_eq!(truncate_str("hello world", 3), "...");
         assert_eq!(truncate_str("日本語", 3), "日本語"); // Exactly at limit (3 chars)
         assert_eq!(truncate_str("日本語テ", 3), "..."); // Truncated (4 chars > 3)
+    }
+
+    /// Documents the intentional behavior when max_len < 4.
+    ///
+    /// When truncation is needed but max_len is very small (< 4), the function
+    /// will still output "..." to indicate truncation occurred. This means the
+    /// output may exceed the requested max_len. This is intentional - we prioritize
+    /// indicating that truncation happened over strictly adhering to max_len.
+    ///
+    /// Users of this function should ensure max_len >= 4 if they need strict
+    /// length guarantees when truncation might occur.
+    #[test]
+    fn test_truncate_str_small_max_len_intentional_behavior() {
+        // When max_len < 4 and truncation is needed, output is "..." (3 chars)
+        // which exceeds the requested max_len. This is intentional.
+        assert_eq!(truncate_str("hello", 2), "..."); // 5 chars > 2, output "..." (3 chars)
+        assert_eq!(truncate_str("hello", 1), "..."); // 5 chars > 1, output "..." (3 chars)
+        assert_eq!(truncate_str("hello", 0), "..."); // 5 chars > 0, output "..." (3 chars)
+
+        // When no truncation needed, string is returned as-is
+        assert_eq!(truncate_str("hi", 2), "hi"); // 2 chars <= 2, no truncation
+        assert_eq!(truncate_str("a", 1), "a"); // 1 char <= 1, no truncation
+
+        // max_len = 3 is the minimum where output length equals max_len when truncating
+        assert_eq!(truncate_str("hello", 3), "..."); // Exactly 3 chars output
+        assert_eq!(truncate_str("hello", 4), "h..."); // 4 chars output (1 char + "...")
     }
 
     #[test]

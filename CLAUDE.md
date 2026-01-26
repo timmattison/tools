@@ -257,18 +257,22 @@ fn truncate(s: &str, max: usize) -> String {
 
 ### Testing UTF-8 Safety
 
-Always include tests with multi-byte characters:
+Always include tests with multi-byte characters. The example below shows the pattern;
+see actual tool implementations (e.g., `src/sp/src/main.rs`) for comprehensive test coverage.
 
 ```rust
 #[test]
 fn test_truncate_utf8_safety() {
-    // Japanese characters (3 bytes each)
-    assert_eq!(truncate("日本語テスト", 6), "日本語...");
+    // Japanese characters (3 bytes each in UTF-8, but 1 char each)
+    // "日本語テスト" is 6 characters; with max=5, truncate to 2 chars + "..."
+    assert_eq!(truncate("日本語テスト", 5), "日本...");
 
-    // Emoji (4 bytes each)
-    assert_eq!(truncate("🎉🎊🎁🎈🎂", 5), "🎉🎊...");
+    // Emoji (4 bytes each in UTF-8, but 1 char each)
+    // "🎉🎊🎁🎈🎂" is 5 characters; with max=4, truncate to 1 char + "..."
+    assert_eq!(truncate("🎉🎊🎁🎈🎂", 4), "🎉...");
 
     // Mixed ASCII and multi-byte
+    // "café au lait" is 12 characters; with max=8, truncate to 5 chars + "..."
     assert_eq!(truncate("café au lait", 8), "café ...");
 }
 ```
