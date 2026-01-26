@@ -172,11 +172,6 @@ fn get_username(uid: u32) -> String {
     }
 }
 
-#[cfg(not(unix))]
-fn get_username(uid: u32) -> String {
-    uid.to_string()
-}
-
 /// Collects process information based on the pattern.
 ///
 /// # Arguments
@@ -227,8 +222,10 @@ fn collect_processes(
             let user = process
                 .user_id()
                 .map(|uid| {
-                    // On Unix, sysinfo's Uid implements Deref<Target = uid_t>,
-                    // allowing direct access to the raw user ID value.
+                    // Platform-specific handling is inline because sysinfo's Uid type
+                    // differs across platforms. On Unix, Uid implements Deref<Target = uid_t>,
+                    // allowing us to call get_username(**uid). On non-Unix platforms,
+                    // we fall back to displaying the UID directly.
                     #[cfg(unix)]
                     {
                         get_username(**uid)

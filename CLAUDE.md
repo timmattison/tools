@@ -277,6 +277,74 @@ fn test_truncate_utf8_safety() {
 }
 ```
 
+## Platform-Specific Code
+
+When writing code that differs across platforms (Unix vs Windows), follow these guidelines to avoid dead code and ensure maintainability.
+
+### Why
+
+Rust's `#[cfg()]` attributes exclude code from compilation on non-matching platforms. This means:
+- Clippy and the compiler won't warn about unused `#[cfg(not(unix))]` code on Unix
+- It's easy to accidentally write duplicate implementations that diverge
+- Dead code can accumulate unnoticed across platforms
+
+### Pattern: Prefer Inline Conditionals for Simple Cases
+
+When platform-specific logic is simple (a few lines), use inline `#[cfg()]` blocks:
+
+```rust
+// GOOD: Simple inline handling
+let value = {
+    #[cfg(unix)]
+    {
+        unix_specific_call()
+    }
+    #[cfg(not(unix))]
+    {
+        fallback_value()
+    }
+};
+```
+
+### Pattern: Use Functions for Complex Logic
+
+When platform logic is complex, define functions for BOTH platforms and call them consistently:
+
+```rust
+// GOOD: Both platforms have functions, both are called
+#[cfg(unix)]
+fn get_system_info() -> Info {
+    // Complex Unix implementation
+}
+
+#[cfg(not(unix))]
+fn get_system_info() -> Info {
+    // Complex Windows implementation
+}
+
+// Single call site that works on both platforms
+let info = get_system_info();
+```
+
+### Anti-Pattern: Mixed Function and Inline
+
+Never define a function for one platform while handling the other inline:
+
+```rust
+// BAD: Function defined but inline code bypasses it
+#[cfg(unix)]
+fn helper(x: u32) -> String { /* ... */ }
+
+#[cfg(not(unix))]  // This function is never called!
+fn helper(x: u32) -> String { x.to_string() }
+
+// Later in code:
+#[cfg(unix)]
+{ helper(value) }
+#[cfg(not(unix))]
+{ value.to_string() }  // Duplicate logic, helper ignored
+```
+
 ## Shell Scripts
 
 Shell scripts in this repository **must** pass [ShellCheck](https://www.shellcheck.net/) validation.
