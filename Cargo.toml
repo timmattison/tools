@@ -105,6 +105,7 @@ tiktoken-rs = "0.5"
 num-format = "0.4"
 human_bytes = "0.4"
 unicode-width = "0.2"
+regex = "1.10"
 
 # Dev dependencies
 tempfile = "3"

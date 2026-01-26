@@ -219,6 +219,132 @@ All Go tools use internal/version:
 - `subito` - AWS IoT Subscriber
 - `symfix` - Symlink Fix
 
+## UTF-8 String Safety
+
+All tools in this repository **must** handle UTF-8 strings safely. Never use byte-level indexing that could panic on multi-byte characters.
+
+### Why
+
+Rust strings are UTF-8 encoded, meaning characters can be 1-4 bytes. Byte-level indexing (`&s[..n]`) will panic if `n` falls in the middle of a multi-byte character. Process names, filenames, and user input can all contain multi-byte characters.
+
+### Common Pitfalls
+
+```rust
+// BAD: Will panic on "日本語" or "café"
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max { s.to_string() }
+    else { format!("{}...", &s[..max - 3]) }  // PANIC!
+}
+
+// GOOD: Use chars() for character-level operations
+fn truncate(s: &str, max: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max { s.to_string() }
+    else {
+        let truncated: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
+}
+```
+
+### Rules
+
+- **Never use `&s[..n]`** unless you've verified `n` is at a valid UTF-8 boundary
+- Use `.chars()` or `.char_indices()` when iterating or truncating strings
+- `s.len()` returns bytes, not characters - use `s.chars().count()` for character count
+- For display width (terminal columns), use the `unicode-width` crate
+- Always add tests with multi-byte characters (Japanese: 日本語, emoji: 🎉, accented: café)
+
+### Testing UTF-8 Safety
+
+Always include tests with multi-byte characters. The example below shows the pattern;
+see actual tool implementations (e.g., `src/sp/src/main.rs`) for comprehensive test coverage.
+
+```rust
+#[test]
+fn test_truncate_utf8_safety() {
+    // Japanese characters (3 bytes each in UTF-8, but 1 char each)
+    // "日本語テスト" is 6 characters; with max=5, truncate to 2 chars + "..."
+    assert_eq!(truncate("日本語テスト", 5), "日本...");
+
+    // Emoji (4 bytes each in UTF-8, but 1 char each)
+    // "🎉🎊🎁🎈🎂" is 5 characters; with max=4, truncate to 1 char + "..."
+    assert_eq!(truncate("🎉🎊🎁🎈🎂", 4), "🎉...");
+
+    // Mixed ASCII and multi-byte
+    // "café au lait" is 12 characters; with max=8, truncate to 5 chars + "..."
+    assert_eq!(truncate("café au lait", 8), "café ...");
+}
+```
+
+## Platform-Specific Code
+
+When writing code that differs across platforms (Unix vs Windows), follow these guidelines to avoid dead code and ensure maintainability.
+
+### Why
+
+Rust's `#[cfg()]` attributes exclude code from compilation on non-matching platforms. This means:
+- Clippy and the compiler won't warn about unused `#[cfg(not(unix))]` code on Unix
+- It's easy to accidentally write duplicate implementations that diverge
+- Dead code can accumulate unnoticed across platforms
+
+### Pattern: Prefer Inline Conditionals for Simple Cases
+
+When platform-specific logic is simple (a few lines), use inline `#[cfg()]` blocks:
+
+```rust
+// GOOD: Simple inline handling
+let value = {
+    #[cfg(unix)]
+    {
+        unix_specific_call()
+    }
+    #[cfg(not(unix))]
+    {
+        fallback_value()
+    }
+};
+```
+
+### Pattern: Use Functions for Complex Logic
+
+When platform logic is complex, define functions for BOTH platforms and call them consistently:
+
+```rust
+// GOOD: Both platforms have functions, both are called
+#[cfg(unix)]
+fn get_system_info() -> Info {
+    // Complex Unix implementation
+}
+
+#[cfg(not(unix))]
+fn get_system_info() -> Info {
+    // Complex Windows implementation
+}
+
+// Single call site that works on both platforms
+let info = get_system_info();
+```
+
+### Anti-Pattern: Mixed Function and Inline
+
+Never define a function for one platform while handling the other inline:
+
+```rust
+// BAD: Function defined but inline code bypasses it
+#[cfg(unix)]
+fn helper(x: u32) -> String { /* ... */ }
+
+#[cfg(not(unix))]  // This function is never called!
+fn helper(x: u32) -> String { x.to_string() }
+
+// Later in code:
+#[cfg(unix)]
+{ helper(value) }
+#[cfg(not(unix))]
+{ value.to_string() }  // Duplicate logic, helper ignored
+```
+
 ## Shell Scripts
 
 Shell scripts in this repository **must** pass [ShellCheck](https://www.shellcheck.net/) validation.
