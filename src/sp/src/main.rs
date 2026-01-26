@@ -49,6 +49,7 @@ struct Args {
     /// Use regex matching instead of substring.
     ///
     /// When enabled, the pattern is treated as a regular expression.
+    /// Note: Without this flag, name matching is case-insensitive.
     #[arg(long)]
     regex: bool,
 
@@ -442,21 +443,27 @@ fn print_open_files(processes: &[ProcessInfo]) {
     }
 }
 
-/// Truncates a string to a maximum length, adding "..." if truncated.
+/// Truncates a string to a maximum length (in characters), adding "..." if truncated.
+///
+/// This function is UTF-8 safe and will never panic on multi-byte characters.
+/// The max_len refers to the number of Unicode characters, not bytes.
 ///
 /// # Arguments
 ///
 /// * `s` - The string to truncate
-/// * `max_len` - Maximum length
+/// * `max_len` - Maximum length in characters (not bytes)
 ///
 /// # Returns
 ///
 /// The truncated string.
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let truncate_at = max_len.saturating_sub(3);
+        let truncated: String = s.chars().take(truncate_at).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -581,6 +588,32 @@ mod tests {
         assert_eq!(truncate_str("hello", 10), "hello");
         assert_eq!(truncate_str("hello world", 8), "hello...");
         assert_eq!(truncate_str("hi", 2), "hi");
+    }
+
+    #[test]
+    fn test_truncate_str_utf8_safety() {
+        // Multi-byte UTF-8 characters should not cause panics
+        // Japanese characters (3 bytes each in UTF-8)
+        assert_eq!(truncate_str("日本語", 10), "日本語"); // Under limit (3 chars)
+        assert_eq!(truncate_str("日本語テスト", 6), "日本語テスト"); // Exactly at limit (6 chars)
+        assert_eq!(truncate_str("日本語テスト", 5), "日本..."); // Truncated (6 chars > 5)
+
+        // Emoji (4 bytes each in UTF-8)
+        assert_eq!(truncate_str("🎉🎊🎁", 10), "🎉🎊🎁"); // Under limit (3 chars)
+        assert_eq!(truncate_str("🎉🎊🎁🎈🎂", 5), "🎉🎊🎁🎈🎂"); // Exactly at limit (5 chars)
+        assert_eq!(truncate_str("🎉🎊🎁🎈🎂", 4), "🎉..."); // Truncated (5 chars > 4)
+
+        // Mixed ASCII and multi-byte
+        assert_eq!(truncate_str("café", 10), "café"); // Under limit (4 chars)
+        assert_eq!(truncate_str("café au lait", 8), "café ..."); // Truncated (12 chars > 8)
+
+        // Edge case: exactly at limit
+        assert_eq!(truncate_str("hello", 5), "hello");
+
+        // Edge case: very small max_len
+        assert_eq!(truncate_str("hello world", 3), "...");
+        assert_eq!(truncate_str("日本語", 3), "日本語"); // Exactly at limit (3 chars)
+        assert_eq!(truncate_str("日本語テ", 3), "..."); // Truncated (4 chars > 3)
     }
 
     #[test]

@@ -219,6 +219,60 @@ All Go tools use internal/version:
 - `subito` - AWS IoT Subscriber
 - `symfix` - Symlink Fix
 
+## UTF-8 String Safety
+
+All tools in this repository **must** handle UTF-8 strings safely. Never use byte-level indexing that could panic on multi-byte characters.
+
+### Why
+
+Rust strings are UTF-8 encoded, meaning characters can be 1-4 bytes. Byte-level indexing (`&s[..n]`) will panic if `n` falls in the middle of a multi-byte character. Process names, filenames, and user input can all contain multi-byte characters.
+
+### Common Pitfalls
+
+```rust
+// BAD: Will panic on "日本語" or "café"
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max { s.to_string() }
+    else { format!("{}...", &s[..max - 3]) }  // PANIC!
+}
+
+// GOOD: Use chars() for character-level operations
+fn truncate(s: &str, max: usize) -> String {
+    let char_count = s.chars().count();
+    if char_count <= max { s.to_string() }
+    else {
+        let truncated: String = s.chars().take(max.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
+}
+```
+
+### Rules
+
+- **Never use `&s[..n]`** unless you've verified `n` is at a valid UTF-8 boundary
+- Use `.chars()` or `.char_indices()` when iterating or truncating strings
+- `s.len()` returns bytes, not characters - use `s.chars().count()` for character count
+- For display width (terminal columns), use the `unicode-width` crate
+- Always add tests with multi-byte characters (Japanese: 日本語, emoji: 🎉, accented: café)
+
+### Testing UTF-8 Safety
+
+Always include tests with multi-byte characters:
+
+```rust
+#[test]
+fn test_truncate_utf8_safety() {
+    // Japanese characters (3 bytes each)
+    assert_eq!(truncate("日本語テスト", 6), "日本語...");
+
+    // Emoji (4 bytes each)
+    assert_eq!(truncate("🎉🎊🎁🎈🎂", 5), "🎉🎊...");
+
+    // Mixed ASCII and multi-byte
+    assert_eq!(truncate("café au lait", 8), "café ...");
+}
+```
+
 ## Shell Scripts
 
 Shell scripts in this repository **must** pass [ShellCheck](https://www.shellcheck.net/) validation.
