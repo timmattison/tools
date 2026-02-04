@@ -1,0 +1,21 @@
+[package]
+name = "pk"
+version = "0.1.0"
+edition.workspace = true
+description = "Process killer with dry-run mode and detailed feedback"
+
+[[bin]]
+name = "pk"
+path = "src/main.rs"
+
+[dependencies]
+sysinfo.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+colored.workspace = true
+buildinfo.workspace = true
+regex.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true
