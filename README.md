@@ -127,6 +127,13 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       Optionally shows working directories (`--cwd`) and open files (`--lsof`). Examples: `sp 77763`, `sp node`,
       `sp --regex 'node.*'`, `sp --cwd --lsof zsh`.
     - To install: `cargo install --git https://github.com/timmattison/tools sp`
+- pk (process killer)
+    - Process killer with dry-run mode and detailed feedback. Uses macOS's libproc API (same as Activity Monitor)
+      to find processes that `ps` and `pkill` cannot see (like version-named XPC services). Shows what was killed,
+      what failed with error messages, and warns if nothing matched. Supports dry-run (`-n`), regex matching (`-r`),
+      exact name matching (`-e`), and signal selection (`-s` or `-9` for SIGKILL). Examples: `pk --dry-run 2.1.29`,
+      `pk -9 zombie`, `pk --regex '2\.1\.\d+'`.
+    - To install: `cargo install --git https://github.com/timmattison/tools pk`
 - hexfind
     - Searches for a hex string in a binary file and displays a hex dump with surrounding bytes. Shows the offset in
       both

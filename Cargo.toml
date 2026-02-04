@@ -39,7 +39,7 @@ notify = "8.1"
 
 # Git
 git2 = "0.20"
-gix = "0.72"
+gix = "0.78"
 
 # Hashing
 blake3 = "1.8"
@@ -50,7 +50,7 @@ hex = "0.4"
 
 # Terminal UI
 crossterm = "0.29"
-ratatui = "0.29"
+ratatui = "0.30"
 colored = "3.0"
 comfy-table = "7.1"
 indicatif = "0.18"
@@ -110,7 +110,6 @@ regex = "1.10"
 
 # Dev dependencies
 tempfile = "3"
-tempdir = "0.3"
 mockito = "1.7"
 
 # Platform-specific
