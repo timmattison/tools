@@ -147,7 +147,7 @@ impl ProgressDisplay {
         result
     }
 
-    fn run_ui_loop<B: ratatui::backend::Backend>(&self, terminal: &mut Terminal<B>) -> Result<()> {
+    fn run_ui_loop(&self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         let mut completion_shown = false;
         let mut completion_time: Option<Instant> = None;
         
