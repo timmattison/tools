@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::prelude::*;
 use buildinfo::version_string;
 use clap::Parser;
-use icy_sixel::{sixel_string, MethodForLargest, MethodForRep, PixelFormat, Quality};
+use icy_sixel::{sixel_encode, EncodeOptions};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
@@ -1246,12 +1246,15 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
 
     // Choose optimal display method based on terminal capabilities
     // Check Sixel first (for Zellij), then Kitty/Ghostty, then iTerm2
-    if is_sixel_terminal() {
-        display_image_sixel(&img, scaled_width, scaled_height, args)
-    } else if is_kitty_graphics_terminal() {
-        display_image_kitty(&img, scaled_width, scaled_height, args)
-    } else {
-        display_image_iterm2(&img, scaled_width, scaled_height, args)
+    // Use already-detected terminal_caps to avoid redundant env var lookups
+    match terminal_caps.terminal_type {
+        TerminalType::Zellij => {
+            display_image_sixel(&img, scaled_width, scaled_height, args)
+        }
+        TerminalType::Kitty | TerminalType::Ghostty => {
+            display_image_kitty(&img, scaled_width, scaled_height, args)
+        }
+        _ => display_image_iterm2(&img, scaled_width, scaled_height, args),
     }
 }
 
@@ -1326,7 +1329,10 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
     )
 }
 
-/// Get terminal pixel dimensions using ioctl if available
+/// Get terminal pixel dimensions using ioctl if available.
+///
+/// Uses the TIOCGWINSZ ioctl to query the terminal's pixel dimensions.
+/// Returns None if the ioctl fails or reports zero dimensions.
 fn get_terminal_pixel_size() -> Option<(u32, u32)> {
     use std::os::unix::io::AsRawFd;
 
@@ -1346,8 +1352,9 @@ fn get_terminal_pixel_size() -> Option<(u32, u32)> {
     };
 
     let fd = io::stdout().as_raw_fd();
-    // SAFETY: TIOCGWINSZ is a standard ioctl that reads terminal window size
-    #[allow(clippy::undocumented_unsafe_blocks, reason = "TIOCGWINSZ is a standard safe ioctl")]
+    // SAFETY: TIOCGWINSZ is a standard ioctl that only reads the terminal window size
+    // into the provided Winsize struct. It does not modify any other state and the
+    // Winsize struct is properly initialized.
     let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
 
     if result == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
@@ -1357,46 +1364,86 @@ fn get_terminal_pixel_size() -> Option<(u32, u32)> {
     }
 }
 
-/// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough)
+/// Calculate pixel dimensions for Sixel output, preserving aspect ratio.
+///
+/// Unlike `calculate_aspect_preserving_size` which works in terminal character cells,
+/// this function works directly in pixels for Sixel output. The aspect ratio calculation
+/// is intentionally different because Sixel doesn't need to account for cell aspect ratio.
+///
+/// The casts from f64 to u32 are intentional - pixel dimensions are always positive
+/// and will never exceed u32::MAX for any reasonable display.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "pixel dimensions are always positive and fit in u32"
+)]
+fn calculate_sixel_dimensions(
+    img_width: u32,
+    img_height: u32,
+    target_pixel_width: u32,
+    target_pixel_height: u32,
+    preserve_aspect: bool,
+) -> (u32, u32) {
+    if !preserve_aspect {
+        return (target_pixel_width, target_pixel_height);
+    }
+
+    let img_aspect = img_width as f64 / img_height as f64;
+    let target_aspect = target_pixel_width as f64 / target_pixel_height as f64;
+
+    if img_aspect > target_aspect {
+        // Image is wider - constrain by width
+        let w = target_pixel_width;
+        let h = (target_pixel_width as f64 / img_aspect) as u32;
+        (w, h.max(1))
+    } else {
+        // Image is taller - constrain by height
+        let h = target_pixel_height;
+        let w = (target_pixel_height as f64 * img_aspect) as u32;
+        (w.max(1), h)
+    }
+}
+
+/// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough).
+///
+/// # Arguments
+/// * `img` - The image to display
+/// * `fallback_cols` - Fallback terminal width in character cells (used if pixel size unavailable)
+/// * `fallback_rows` - Fallback terminal height in character cells (used if pixel size unavailable)
+/// * `args` - Command line arguments
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "pixel dimensions are always positive and fit in u32"
+)]
 fn display_image_sixel(
     img: &DynamicImage,
-    width: Option<u32>,
-    height: Option<u32>,
+    fallback_cols: Option<u32>,
+    fallback_rows: Option<u32>,
     args: &Args,
 ) -> Result<()> {
-    // Try to get actual terminal pixel dimensions
+    // Try to get actual terminal pixel dimensions, with fallbacks
     let (target_pixel_width, target_pixel_height) =
         if let Some((px_w, px_h)) = get_terminal_pixel_size() {
-            // Leave some margin (95% of available space)
+            // Leave some margin (95% width, 90% height) to avoid overflow
             ((px_w as f64 * 0.95) as u32, (px_h as f64 * 0.90) as u32)
-        } else if let (Some(cols), Some(rows)) = (width, height) {
+        } else if let (Some(cols), Some(rows)) = (fallback_cols, fallback_rows) {
             // Fall back to character cell estimates
             // Use larger estimates for modern terminals (~10px width, ~20px height per cell)
             (cols * 10, rows * 20)
         } else {
-            // Default to reasonable size
+            // Default to reasonable size when no size info available
             (800, 600)
         };
 
     // Calculate dimensions that preserve aspect ratio
-    let (final_width, final_height) = if args.preserve_aspect {
-        let img_aspect = img.width() as f64 / img.height() as f64;
-        let target_aspect = target_pixel_width as f64 / target_pixel_height as f64;
-
-        if img_aspect > target_aspect {
-            // Image is wider - constrain by width
-            let w = target_pixel_width;
-            let h = (target_pixel_width as f64 / img_aspect) as u32;
-            (w, h.max(1))
-        } else {
-            // Image is taller - constrain by height
-            let h = target_pixel_height;
-            let w = (target_pixel_height as f64 * img_aspect) as u32;
-            (w.max(1), h)
-        }
-    } else {
-        (target_pixel_width, target_pixel_height)
-    };
+    let (final_width, final_height) = calculate_sixel_dimensions(
+        img.width(),
+        img.height(),
+        target_pixel_width,
+        target_pixel_height,
+        args.preserve_aspect,
+    );
 
     // Resize image to fit (scale up or down as needed)
     let resized_img = img.resize_exact(
@@ -1409,18 +1456,14 @@ fn display_image_sixel(
     let rgba_img = resized_img.to_rgba8();
     let rgba_data = rgba_img.as_raw();
 
-    // Encode to Sixel format
-    let sixel_output = sixel_string(
+    // Encode to Sixel format using high-quality settings
+    let sixel_output = sixel_encode(
         rgba_data,
-        resized_img.width() as i32,
-        resized_img.height() as i32,
-        PixelFormat::RGBA8888,
-        icy_sixel::DiffusionMethod::Stucki,
-        MethodForLargest::Auto,
-        MethodForRep::Auto,
-        Quality::HIGH,
+        resized_img.width() as usize,
+        resized_img.height() as usize,
+        &EncodeOptions::default(),
     )
-    .map_err(|e| anyhow::anyhow!("Sixel encoding failed: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("Sixel encoding failed: {e}"))?;
 
     // Output the sixel data
     let mut stdout = io::stdout().lock();
@@ -1513,20 +1556,6 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
         supports_graphics,
         supports_raw_mode,
     }
-}
-
-fn is_kitty_graphics_terminal() -> bool {
-    matches!(
-        detect_terminal_capabilities().terminal_type,
-        TerminalType::Kitty | TerminalType::Ghostty
-    )
-}
-
-fn is_sixel_terminal() -> bool {
-    matches!(
-        detect_terminal_capabilities().terminal_type,
-        TerminalType::Zellij
-    )
 }
 
 fn print_kitty_image(

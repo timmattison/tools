@@ -78,7 +78,7 @@ parking_lot = "0.12"
 image = "0.25"
 qrcode = "0.14"
 base64 = "0.22"
-icy_sixel = "0.1"
+icy_sixel = "0.5"
 
 # Random
 rand = "0.9"
