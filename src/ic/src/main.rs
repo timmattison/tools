@@ -38,6 +38,7 @@ enum VideoControl {
 /// Terminal Compatibility:
 /// - iTerm2: Uses iTerm2 inline image protocol
 /// - Kitty: Uses Kitty graphics protocol (better performance for video)
+/// - Ghostty: Uses Kitty graphics protocol (better performance for video)
 /// - WezTerm: Uses iTerm2 inline image protocol
 /// - Alacritty: NOT SUPPORTED (text-only terminal, no graphics protocols)
 /// - Other terminals: Limited or no image support
@@ -1242,10 +1243,56 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
     };
 
     // Choose optimal display method based on terminal capabilities
-    if is_kitty_terminal() {
+    // Kitty and Ghostty both support the Kitty graphics protocol
+    if is_kitty_graphics_terminal() {
         display_image_kitty(&img, scaled_width, scaled_height, args)
     } else {
         display_image_iterm2(&img, scaled_width, scaled_height, args)
+    }
+}
+
+/// Calculate display dimensions that preserve aspect ratio within the given bounds
+/// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
+fn calculate_aspect_preserving_size(
+    img_width: u32,
+    img_height: u32,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    preserve_aspect: bool,
+) -> (Option<u32>, Option<u32>) {
+    if !preserve_aspect {
+        return (max_width, max_height);
+    }
+
+    match (max_width, max_height) {
+        (Some(max_w), Some(max_h)) => {
+            // Terminal cells are roughly 2:1 (height:width in pixels)
+            // So 1 row ≈ 2 columns worth of pixels
+            // Adjust the max_height to account for cell aspect ratio
+            let cell_aspect_ratio = 2.0;
+            let effective_max_h_pixels = max_h as f64 * cell_aspect_ratio;
+            let effective_max_w_pixels = max_w as f64;
+
+            let img_aspect = img_width as f64 / img_height as f64;
+            let box_aspect = effective_max_w_pixels / effective_max_h_pixels;
+
+            if img_aspect > box_aspect {
+                // Image is wider than box - constrain by width
+                let display_width = max_w;
+                let display_height =
+                    ((max_w as f64 / img_aspect) / cell_aspect_ratio).round() as u32;
+                (Some(display_width), Some(display_height.max(1)))
+            } else {
+                // Image is taller than box - constrain by height
+                let display_height = max_h;
+                let display_width =
+                    (max_h as f64 * cell_aspect_ratio * img_aspect).round() as u32;
+                (Some(display_width.max(1)), Some(display_height))
+            }
+        }
+        (Some(w), None) => (Some(w), None),
+        (None, Some(h)) => (None, Some(h)),
+        (None, None) => (None, None),
     }
 }
 
@@ -1254,13 +1301,23 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
     // Use RGB data directly for better performance (no base64 encoding overhead)
     let rgb_data = img.to_rgb8();
 
+    // Calculate display dimensions that preserve aspect ratio
+    // Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
+    let (display_width, display_height) = calculate_aspect_preserving_size(
+        img.width(),
+        img.height(),
+        width,
+        height,
+        args.preserve_aspect,
+    );
+
     // Use Kitty's more efficient graphics protocol with optimizations
     print_kitty_image(
         rgb_data.as_raw(),
         img.width(),
         img.height(),
-        width,
-        height,
+        display_width,
+        display_height,
         args.no_newline,
     )
 }
@@ -1288,6 +1345,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
 #[derive(Debug, Clone)]
 enum TerminalType {
     Kitty,
+    Ghostty,
     ITerm2,
     WezTerm,
     Alacritty,
@@ -1307,6 +1365,11 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
 
     let terminal_type = if std::env::var("KITTY_WINDOW_ID").is_ok() || term.contains("kitty") {
         TerminalType::Kitty
+    } else if term_program == "ghostty"
+        || std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
+        || term.contains("ghostty")
+    {
+        TerminalType::Ghostty
     } else if term_program.contains("iTerm") || std::env::var("ITERM_SESSION_ID").is_ok() {
         TerminalType::ITerm2
     } else if term_program.contains("WezTerm") {
@@ -1336,8 +1399,11 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
     }
 }
 
-fn is_kitty_terminal() -> bool {
-    matches!(detect_terminal_capabilities().terminal_type, TerminalType::Kitty)
+fn is_kitty_graphics_terminal() -> bool {
+    matches!(
+        detect_terminal_capabilities().terminal_type,
+        TerminalType::Kitty | TerminalType::Ghostty
+    )
 }
 
 fn print_kitty_image(
