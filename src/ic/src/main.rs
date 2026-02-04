@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use base64::prelude::*;
 use buildinfo::version_string;
 use clap::Parser;
-use image::{DynamicImage};
+use icy_sixel::{sixel_string, MethodForLargest, MethodForRep, PixelFormat, Quality};
+use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::fs;
@@ -40,6 +41,7 @@ enum VideoControl {
 /// - Kitty: Uses Kitty graphics protocol (better performance for video)
 /// - Ghostty: Uses Kitty graphics protocol (better performance for video)
 /// - WezTerm: Uses iTerm2 inline image protocol
+/// - Zellij: Uses Sixel protocol (works in Zellij running inside WezTerm or other Sixel-capable terminals)
 /// - Alacritty: NOT SUPPORTED (text-only terminal, no graphics protocols)
 /// - Other terminals: Limited or no image support
 ///
@@ -1243,8 +1245,10 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
     };
 
     // Choose optimal display method based on terminal capabilities
-    // Kitty and Ghostty both support the Kitty graphics protocol
-    if is_kitty_graphics_terminal() {
+    // Check Sixel first (for Zellij), then Kitty/Ghostty, then iTerm2
+    if is_sixel_terminal() {
+        display_image_sixel(&img, scaled_width, scaled_height, args)
+    } else if is_kitty_graphics_terminal() {
         display_image_kitty(&img, scaled_width, scaled_height, args)
     } else {
         display_image_iterm2(&img, scaled_width, scaled_height, args)
@@ -1322,6 +1326,113 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
     )
 }
 
+/// Get terminal pixel dimensions using ioctl if available
+fn get_terminal_pixel_size() -> Option<(u32, u32)> {
+    use std::os::unix::io::AsRawFd;
+
+    #[repr(C)]
+    struct Winsize {
+        ws_row: libc::c_ushort,
+        ws_col: libc::c_ushort,
+        ws_xpixel: libc::c_ushort,
+        ws_ypixel: libc::c_ushort,
+    }
+
+    let mut ws = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    let fd = io::stdout().as_raw_fd();
+    // SAFETY: TIOCGWINSZ is a standard ioctl that reads terminal window size
+    #[allow(clippy::undocumented_unsafe_blocks, reason = "TIOCGWINSZ is a standard safe ioctl")]
+    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+
+    if result == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
+        Some((ws.ws_xpixel as u32, ws.ws_ypixel as u32))
+    } else {
+        None
+    }
+}
+
+/// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough)
+fn display_image_sixel(
+    img: &DynamicImage,
+    width: Option<u32>,
+    height: Option<u32>,
+    args: &Args,
+) -> Result<()> {
+    // Try to get actual terminal pixel dimensions
+    let (target_pixel_width, target_pixel_height) =
+        if let Some((px_w, px_h)) = get_terminal_pixel_size() {
+            // Leave some margin (95% of available space)
+            ((px_w as f64 * 0.95) as u32, (px_h as f64 * 0.90) as u32)
+        } else if let (Some(cols), Some(rows)) = (width, height) {
+            // Fall back to character cell estimates
+            // Use larger estimates for modern terminals (~10px width, ~20px height per cell)
+            (cols * 10, rows * 20)
+        } else {
+            // Default to reasonable size
+            (800, 600)
+        };
+
+    // Calculate dimensions that preserve aspect ratio
+    let (final_width, final_height) = if args.preserve_aspect {
+        let img_aspect = img.width() as f64 / img.height() as f64;
+        let target_aspect = target_pixel_width as f64 / target_pixel_height as f64;
+
+        if img_aspect > target_aspect {
+            // Image is wider - constrain by width
+            let w = target_pixel_width;
+            let h = (target_pixel_width as f64 / img_aspect) as u32;
+            (w, h.max(1))
+        } else {
+            // Image is taller - constrain by height
+            let h = target_pixel_height;
+            let w = (target_pixel_height as f64 * img_aspect) as u32;
+            (w.max(1), h)
+        }
+    } else {
+        (target_pixel_width, target_pixel_height)
+    };
+
+    // Resize image to fit (scale up or down as needed)
+    let resized_img = img.resize_exact(
+        final_width,
+        final_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Convert to RGBA for sixel encoding
+    let rgba_img = resized_img.to_rgba8();
+    let rgba_data = rgba_img.as_raw();
+
+    // Encode to Sixel format
+    let sixel_output = sixel_string(
+        rgba_data,
+        resized_img.width() as i32,
+        resized_img.height() as i32,
+        PixelFormat::RGBA8888,
+        icy_sixel::DiffusionMethod::Stucki,
+        MethodForLargest::Auto,
+        MethodForRep::Auto,
+        Quality::HIGH,
+    )
+    .map_err(|e| anyhow::anyhow!("Sixel encoding failed: {:?}", e))?;
+
+    // Output the sixel data
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{}", sixel_output)?;
+    if !args.no_newline {
+        writeln!(stdout)?;
+    }
+    stdout.flush().context("Failed to flush output")?;
+
+    Ok(())
+}
+
 /// Optimized iTerm2 display with reduced overhead
 fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
     // Use more efficient encoding for iTerm2
@@ -1349,6 +1460,7 @@ enum TerminalType {
     ITerm2,
     WezTerm,
     Alacritty,
+    Zellij,
     Unknown,
 }
 
@@ -1363,7 +1475,11 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
     let term = std::env::var("TERM").unwrap_or_default();
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
 
-    let terminal_type = if std::env::var("KITTY_WINDOW_ID").is_ok() || term.contains("kitty") {
+    // Check for Zellij first since it runs inside other terminals
+    // Zellij supports Sixel passthrough
+    let terminal_type = if std::env::var("ZELLIJ").is_ok() {
+        TerminalType::Zellij
+    } else if std::env::var("KITTY_WINDOW_ID").is_ok() || term.contains("kitty") {
         TerminalType::Kitty
     } else if term_program == "ghostty"
         || std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
@@ -1403,6 +1519,13 @@ fn is_kitty_graphics_terminal() -> bool {
     matches!(
         detect_terminal_capabilities().terminal_type,
         TerminalType::Kitty | TerminalType::Ghostty
+    )
+}
+
+fn is_sixel_terminal() -> bool {
+    matches!(
+        detect_terminal_capabilities().terminal_type,
+        TerminalType::Zellij
     )
 }
 
