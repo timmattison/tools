@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use base64::prelude::*;
 use buildinfo::version_string;
 use clap::Parser;
-use image::{DynamicImage};
+use icy_sixel::{sixel_encode, EncodeOptions};
+use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::fs;
@@ -16,6 +17,42 @@ use terminal_size::{terminal_size, Height, Width};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
+
+// ============================================================================
+// Constants for Sixel and terminal display calculations
+// ============================================================================
+
+/// Estimated cell aspect ratio (height:width in pixels) for terminal cells.
+/// Most terminals use fonts where cells are roughly twice as tall as they are wide.
+/// This is a reasonable default that works across most modern terminals (iTerm2,
+/// Kitty, Ghostty, WezTerm, etc.) with typical font configurations.
+const TERMINAL_CELL_ASPECT_RATIO: f64 = 2.0;
+
+/// Estimated pixel width per terminal character cell.
+/// Used as fallback when actual pixel dimensions cannot be queried via ioctl.
+/// Value of 10px is typical for modern terminals with default fonts.
+const ESTIMATED_CELL_WIDTH_PX: u32 = 10;
+
+/// Estimated pixel height per terminal character cell.
+/// Used as fallback when actual pixel dimensions cannot be queried via ioctl.
+/// Value of 20px is typical for modern terminals with default fonts (roughly 2:1 aspect).
+const ESTIMATED_CELL_HEIGHT_PX: u32 = 20;
+
+/// Default Sixel output width in pixels when no size information is available.
+/// Used as final fallback when both ioctl and character cell estimates fail.
+const DEFAULT_SIXEL_WIDTH_PX: u32 = 800;
+
+/// Default Sixel output height in pixels when no size information is available.
+/// Used as final fallback when both ioctl and character cell estimates fail.
+const DEFAULT_SIXEL_HEIGHT_PX: u32 = 600;
+
+/// Horizontal margin factor for Sixel output (95% of terminal width).
+/// Leaves some margin to avoid horizontal overflow.
+const SIXEL_HORIZONTAL_MARGIN: f64 = 0.95;
+
+/// Vertical margin factor for Sixel output (90% of terminal height).
+/// Leaves more vertical margin as some terminals have status bars or prompts.
+const SIXEL_VERTICAL_MARGIN: f64 = 0.90;
 
 #[derive(Debug, Clone)]
 enum VideoControl {
@@ -38,7 +75,9 @@ enum VideoControl {
 /// Terminal Compatibility:
 /// - iTerm2: Uses iTerm2 inline image protocol
 /// - Kitty: Uses Kitty graphics protocol (better performance for video)
+/// - Ghostty: Uses Kitty graphics protocol (better performance for video)
 /// - WezTerm: Uses iTerm2 inline image protocol
+/// - Zellij: Uses Sixel protocol (works in Zellij running inside WezTerm or other Sixel-capable terminals)
 /// - Alacritty: NOT SUPPORTED (text-only terminal, no graphics protocols)
 /// - Other terminals: Limited or no image support
 ///
@@ -1242,10 +1281,77 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
     };
 
     // Choose optimal display method based on terminal capabilities
-    if is_kitty_terminal() {
-        display_image_kitty(&img, scaled_width, scaled_height, args)
-    } else {
-        display_image_iterm2(&img, scaled_width, scaled_height, args)
+    // Check Sixel first (for Zellij), then Kitty/Ghostty, then iTerm2
+    // Use already-detected terminal_caps to avoid redundant env var lookups
+    match terminal_caps.terminal_type {
+        TerminalType::Zellij => {
+            display_image_sixel(&img, scaled_width, scaled_height, args)
+        }
+        TerminalType::Kitty | TerminalType::Ghostty => {
+            display_image_kitty(&img, scaled_width, scaled_height, args)
+        }
+        _ => display_image_iterm2(&img, scaled_width, scaled_height, args),
+    }
+}
+
+/// Calculate display dimensions that preserve aspect ratio within the given bounds.
+///
+/// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
+/// using `TERMINAL_CELL_ASPECT_RATIO`. This function works in terminal character cells,
+/// not pixels.
+///
+/// The casts from f64 to u32 are intentional - display dimensions are always positive
+/// and will never exceed u32::MAX for any reasonable terminal size.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "display dimensions are always positive and fit in u32"
+)]
+fn calculate_aspect_preserving_size(
+    img_width: u32,
+    img_height: u32,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    preserve_aspect: bool,
+) -> (Option<u32>, Option<u32>) {
+    if !preserve_aspect {
+        return (max_width, max_height);
+    }
+
+    // Guard against division by zero. Valid images always have height > 0,
+    // but we handle this defensively to avoid panics on malformed input.
+    if img_height == 0 {
+        return (max_width, max_height);
+    }
+
+    match (max_width, max_height) {
+        (Some(max_w), Some(max_h)) => {
+            // Terminal cells are roughly 2:1 (height:width in pixels)
+            // So 1 row ≈ 2 columns worth of pixels
+            // Adjust the max_height to account for cell aspect ratio
+            let effective_max_h_pixels = max_h as f64 * TERMINAL_CELL_ASPECT_RATIO;
+            let effective_max_w_pixels = max_w as f64;
+
+            let img_aspect = img_width as f64 / img_height as f64;
+            let box_aspect = effective_max_w_pixels / effective_max_h_pixels;
+
+            if img_aspect > box_aspect {
+                // Image is wider than box - constrain by width
+                let display_width = max_w;
+                let display_height =
+                    ((max_w as f64 / img_aspect) / TERMINAL_CELL_ASPECT_RATIO).round() as u32;
+                (Some(display_width), Some(display_height.max(1)))
+            } else {
+                // Image is taller than box - constrain by height
+                let display_height = max_h;
+                let display_width =
+                    (max_h as f64 * TERMINAL_CELL_ASPECT_RATIO * img_aspect).round() as u32;
+                (Some(display_width.max(1)), Some(display_height))
+            }
+        }
+        (Some(w), None) => (Some(w), None),
+        (None, Some(h)) => (None, Some(h)),
+        (None, None) => (None, None),
     }
 }
 
@@ -1254,15 +1360,177 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
     // Use RGB data directly for better performance (no base64 encoding overhead)
     let rgb_data = img.to_rgb8();
 
+    // Calculate display dimensions that preserve aspect ratio
+    // Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
+    let (display_width, display_height) = calculate_aspect_preserving_size(
+        img.width(),
+        img.height(),
+        width,
+        height,
+        args.preserve_aspect,
+    );
+
     // Use Kitty's more efficient graphics protocol with optimizations
     print_kitty_image(
         rgb_data.as_raw(),
         img.width(),
         img.height(),
-        width,
-        height,
+        display_width,
+        display_height,
         args.no_newline,
     )
+}
+
+/// Get terminal pixel dimensions using ioctl if available.
+///
+/// Uses the TIOCGWINSZ ioctl to query the terminal's pixel dimensions.
+/// Returns None if the ioctl fails or reports zero dimensions.
+fn get_terminal_pixel_size() -> Option<(u32, u32)> {
+    use std::os::unix::io::AsRawFd;
+
+    #[repr(C)]
+    struct Winsize {
+        ws_row: libc::c_ushort,
+        ws_col: libc::c_ushort,
+        ws_xpixel: libc::c_ushort,
+        ws_ypixel: libc::c_ushort,
+    }
+
+    let mut ws = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+
+    let fd = io::stdout().as_raw_fd();
+    // SAFETY: TIOCGWINSZ is a standard ioctl that only reads the terminal window size
+    // into the provided Winsize struct. It does not modify any other state and the
+    // Winsize struct is properly initialized.
+    let result = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) };
+
+    if result == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 {
+        Some((ws.ws_xpixel as u32, ws.ws_ypixel as u32))
+    } else {
+        None
+    }
+}
+
+/// Calculate pixel dimensions for Sixel output, preserving aspect ratio.
+///
+/// Unlike `calculate_aspect_preserving_size` which works in terminal character cells,
+/// this function works directly in pixels for Sixel output. The aspect ratio calculation
+/// is intentionally different because Sixel doesn't need to account for cell aspect ratio.
+///
+/// The casts from f64 to u32 are intentional - pixel dimensions are always positive
+/// and will never exceed u32::MAX for any reasonable display.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "pixel dimensions are always positive and fit in u32"
+)]
+fn calculate_sixel_dimensions(
+    img_width: u32,
+    img_height: u32,
+    target_pixel_width: u32,
+    target_pixel_height: u32,
+    preserve_aspect: bool,
+) -> (u32, u32) {
+    if !preserve_aspect {
+        return (target_pixel_width, target_pixel_height);
+    }
+
+    let img_aspect = img_width as f64 / img_height as f64;
+    let target_aspect = target_pixel_width as f64 / target_pixel_height as f64;
+
+    if img_aspect > target_aspect {
+        // Image is wider - constrain by width
+        let w = target_pixel_width;
+        let h = (target_pixel_width as f64 / img_aspect) as u32;
+        (w, h.max(1))
+    } else {
+        // Image is taller - constrain by height
+        let h = target_pixel_height;
+        let w = (target_pixel_height as f64 * img_aspect) as u32;
+        (w.max(1), h)
+    }
+}
+
+/// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough).
+///
+/// # Arguments
+/// * `img` - The image to display
+/// * `fallback_cols` - Fallback terminal width in character cells (used if pixel size unavailable)
+/// * `fallback_rows` - Fallback terminal height in character cells (used if pixel size unavailable)
+/// * `args` - Command line arguments
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "pixel dimensions are always positive and fit in u32"
+)]
+fn display_image_sixel(
+    img: &DynamicImage,
+    fallback_cols: Option<u32>,
+    fallback_rows: Option<u32>,
+    args: &Args,
+) -> Result<()> {
+    // Try to get actual terminal pixel dimensions, with fallbacks
+    let (target_pixel_width, target_pixel_height) =
+        if let Some((px_w, px_h)) = get_terminal_pixel_size() {
+            // Leave some margin to avoid overflow
+            (
+                (px_w as f64 * SIXEL_HORIZONTAL_MARGIN) as u32,
+                (px_h as f64 * SIXEL_VERTICAL_MARGIN) as u32,
+            )
+        } else if let (Some(cols), Some(rows)) = (fallback_cols, fallback_rows) {
+            // Fall back to character cell estimates using typical cell dimensions
+            (
+                cols * ESTIMATED_CELL_WIDTH_PX,
+                rows * ESTIMATED_CELL_HEIGHT_PX,
+            )
+        } else {
+            // Default to reasonable size when no size info available
+            (DEFAULT_SIXEL_WIDTH_PX, DEFAULT_SIXEL_HEIGHT_PX)
+        };
+
+    // Calculate dimensions that preserve aspect ratio
+    let (final_width, final_height) = calculate_sixel_dimensions(
+        img.width(),
+        img.height(),
+        target_pixel_width,
+        target_pixel_height,
+        args.preserve_aspect,
+    );
+
+    // Resize image to fit (scale up or down as needed)
+    let resized_img = img.resize_exact(
+        final_width,
+        final_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Convert to RGBA for sixel encoding
+    let rgba_img = resized_img.to_rgba8();
+    let rgba_data = rgba_img.as_raw();
+
+    // Encode to Sixel format using high-quality settings
+    let sixel_output = sixel_encode(
+        rgba_data,
+        resized_img.width() as usize,
+        resized_img.height() as usize,
+        &EncodeOptions::default(),
+    )
+    .map_err(|e| anyhow::anyhow!("Sixel encoding failed: {e}"))?;
+
+    // Output the sixel data
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "{}", sixel_output)?;
+    if !args.no_newline {
+        writeln!(stdout)?;
+    }
+    stdout.flush().context("Failed to flush output")?;
+
+    Ok(())
 }
 
 /// Optimized iTerm2 display with reduced overhead
@@ -1288,9 +1556,11 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
 #[derive(Debug, Clone)]
 enum TerminalType {
     Kitty,
+    Ghostty,
     ITerm2,
     WezTerm,
     Alacritty,
+    Zellij,
     Unknown,
 }
 
@@ -1305,8 +1575,17 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
     let term = std::env::var("TERM").unwrap_or_default();
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
 
-    let terminal_type = if std::env::var("KITTY_WINDOW_ID").is_ok() || term.contains("kitty") {
+    // Check for Zellij first since it runs inside other terminals
+    // Zellij supports Sixel passthrough
+    let terminal_type = if std::env::var("ZELLIJ").is_ok() {
+        TerminalType::Zellij
+    } else if std::env::var("KITTY_WINDOW_ID").is_ok() || term.contains("kitty") {
         TerminalType::Kitty
+    } else if term_program == "ghostty"
+        || std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
+        || term.contains("ghostty")
+    {
+        TerminalType::Ghostty
     } else if term_program.contains("iTerm") || std::env::var("ITERM_SESSION_ID").is_ok() {
         TerminalType::ITerm2
     } else if term_program.contains("WezTerm") {
@@ -1324,9 +1603,10 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
 
     let supports_raw_mode = {
         use std::os::unix::io::AsRawFd;
-        unsafe {
-            libc::isatty(io::stdout().as_raw_fd()) == 1
-        }
+        // SAFETY: isatty() is a read-only check that only examines whether the file
+        // descriptor refers to a terminal. It has no side effects and cannot cause
+        // memory unsafety. The file descriptor from stdout is always valid.
+        unsafe { libc::isatty(io::stdout().as_raw_fd()) == 1 }
     };
 
     TerminalCapabilities {
@@ -1334,10 +1614,6 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
         supports_graphics,
         supports_raw_mode,
     }
-}
-
-fn is_kitty_terminal() -> bool {
-    matches!(detect_terminal_capabilities().terminal_type, TerminalType::Kitty)
 }
 
 fn print_kitty_image(
@@ -1447,3 +1723,189 @@ fn print_iterm2_image(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Tests for calculate_aspect_preserving_size
+    // =========================================================================
+
+    #[test]
+    fn aspect_preserving_returns_original_when_disabled() {
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false);
+        assert_eq!(result, (Some(50), Some(50)));
+    }
+
+    #[test]
+    fn aspect_preserving_handles_zero_height_defensively() {
+        // Zero height should not panic (division by zero), returns original dimensions
+        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true);
+        assert_eq!(result, (Some(50), Some(50)));
+    }
+
+    #[test]
+    fn aspect_preserving_square_image_in_square_box() {
+        // Square image (100x100) in square box (50x50)
+        // With cell aspect ratio of 2:1, effective box is 50x100 pixels
+        // Image aspect = 1.0, box aspect = 50/100 = 0.5
+        // Image is wider than box, constrain by width
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true);
+        // display_width = 50, display_height = (50/1.0)/2.0 = 25
+        assert_eq!(result, (Some(50), Some(25)));
+    }
+
+    #[test]
+    fn aspect_preserving_wide_image() {
+        // Wide image (200x100) in square box (50x50)
+        // Image aspect = 2.0
+        // Constrain by width
+        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true);
+        // display_width = 50, display_height = (50/2.0)/2.0 = 12.5 -> 13 (rounded)
+        assert_eq!(result, (Some(50), Some(13)));
+    }
+
+    #[test]
+    fn aspect_preserving_tall_image() {
+        // Tall image (100x400) in square box (50x50)
+        // Image aspect = 0.25
+        // Constrain by height
+        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true);
+        // display_height = 50, display_width = 50 * 2.0 * 0.25 = 25
+        assert_eq!(result, (Some(25), Some(50)));
+    }
+
+    #[test]
+    fn aspect_preserving_only_width_specified() {
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true);
+        assert_eq!(result, (Some(50), None));
+    }
+
+    #[test]
+    fn aspect_preserving_only_height_specified() {
+        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true);
+        assert_eq!(result, (None, Some(50)));
+    }
+
+    #[test]
+    fn aspect_preserving_no_dimensions_specified() {
+        let result = calculate_aspect_preserving_size(100, 100, None, None, true);
+        assert_eq!(result, (None, None));
+    }
+
+    #[test]
+    fn aspect_preserving_minimum_dimension_is_one() {
+        // Very wide image that would result in height < 1
+        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true);
+        // Should clamp height to at least 1
+        assert!(result.1.unwrap() >= 1);
+
+        // Very tall image that would result in width < 1
+        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true);
+        // Should clamp width to at least 1
+        assert!(result.0.unwrap() >= 1);
+    }
+
+    // =========================================================================
+    // Tests for calculate_sixel_dimensions
+    // =========================================================================
+
+    #[test]
+    fn sixel_returns_target_when_aspect_disabled() {
+        let result = calculate_sixel_dimensions(100, 100, 800, 600, false);
+        assert_eq!(result, (800, 600));
+    }
+
+    #[test]
+    fn sixel_square_image_in_landscape_target() {
+        // Square image (100x100) in landscape target (800x600)
+        // Image aspect = 1.0, target aspect = 800/600 = 1.33
+        // Image is taller than target, constrain by height
+        let result = calculate_sixel_dimensions(100, 100, 800, 600, true);
+        // h = 600, w = 600 * 1.0 = 600
+        assert_eq!(result, (600, 600));
+    }
+
+    #[test]
+    fn sixel_wide_image_in_landscape_target() {
+        // Wide image (1600x900, 16:9) in landscape target (800x600)
+        // Image aspect = 1.78, target aspect = 1.33
+        // Image is wider, constrain by width
+        let result = calculate_sixel_dimensions(1600, 900, 800, 600, true);
+        // w = 800, h = 800 / 1.78 = 450
+        assert_eq!(result, (800, 450));
+    }
+
+    #[test]
+    fn sixel_tall_image_in_landscape_target() {
+        // Tall image (100x400) in landscape target (800x600)
+        // Image aspect = 0.25, target aspect = 1.33
+        // Image is taller, constrain by height
+        let result = calculate_sixel_dimensions(100, 400, 800, 600, true);
+        // h = 600, w = 600 * 0.25 = 150
+        assert_eq!(result, (150, 600));
+    }
+
+    #[test]
+    fn sixel_minimum_dimension_is_one() {
+        // Very wide image
+        let result = calculate_sixel_dimensions(10000, 1, 100, 100, true);
+        assert!(result.1 >= 1);
+
+        // Very tall image
+        let result = calculate_sixel_dimensions(1, 10000, 100, 100, true);
+        assert!(result.0 >= 1);
+    }
+
+    #[test]
+    fn sixel_handles_zero_height_defensively() {
+        // Zero height should produce infinity aspect, which comparing > target_aspect
+        // will be true, so we'll constrain by width
+        // w = 100, h = 100 / infinity = 0, clamped to 1
+        let result = calculate_sixel_dimensions(100, 0, 100, 100, true);
+        assert_eq!(result.1, 1); // Height should be clamped to 1
+    }
+
+    // =========================================================================
+    // Tests for terminal type detection (basic sanity checks)
+    // =========================================================================
+
+    #[test]
+    fn terminal_type_enum_is_exhaustive() {
+        // Ensure we can construct all terminal types (compile-time check)
+        let _kitty = TerminalType::Kitty;
+        let _ghostty = TerminalType::Ghostty;
+        let _iterm2 = TerminalType::ITerm2;
+        let _wezterm = TerminalType::WezTerm;
+        let _alacritty = TerminalType::Alacritty;
+        let _zellij = TerminalType::Zellij;
+        let _unknown = TerminalType::Unknown;
+    }
+
+    // =========================================================================
+    // Tests verifying constants are reasonable
+    // =========================================================================
+
+    #[test]
+    fn constants_have_reasonable_values() {
+        // Cell aspect ratio should be positive and reasonable (1.5 to 3.0)
+        assert!(TERMINAL_CELL_ASPECT_RATIO > 1.0);
+        assert!(TERMINAL_CELL_ASPECT_RATIO < 4.0);
+
+        // Cell pixel estimates should be positive and reasonable
+        assert!(ESTIMATED_CELL_WIDTH_PX >= 6);
+        assert!(ESTIMATED_CELL_WIDTH_PX <= 20);
+        assert!(ESTIMATED_CELL_HEIGHT_PX >= 12);
+        assert!(ESTIMATED_CELL_HEIGHT_PX <= 40);
+
+        // Default sixel dimensions should be reasonable screen sizes
+        assert!(DEFAULT_SIXEL_WIDTH_PX >= 640);
+        assert!(DEFAULT_SIXEL_HEIGHT_PX >= 480);
+
+        // Margins should be between 0.5 and 1.0
+        assert!(SIXEL_HORIZONTAL_MARGIN > 0.5);
+        assert!(SIXEL_HORIZONTAL_MARGIN <= 1.0);
+        assert!(SIXEL_VERTICAL_MARGIN > 0.5);
+        assert!(SIXEL_VERTICAL_MARGIN <= 1.0);
+    }
+}
