@@ -10,7 +10,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 use regex::Regex;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System, UpdateKind};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 
 /// Process killer with dry-run mode and detailed feedback.
 ///
@@ -53,16 +53,17 @@ struct Args {
     #[arg(long, short = 'r')]
     regex: bool,
 
-    /// Use exact name matching.
+    /// Use exact name matching (case-insensitive).
     ///
-    /// Only matches processes whose name exactly equals the pattern.
+    /// Only matches processes whose name exactly equals the pattern,
+    /// ignoring case differences.
     #[arg(long, short = 'e')]
     exact: bool,
 
     /// Signal to send (default: 15/SIGTERM).
     ///
-    /// Common signals: 9 (SIGKILL), 15 (SIGTERM), 1 (SIGHUP), 2 (SIGINT)
-    #[arg(long, short = 's', default_value = "15")]
+    /// Common signals: 9 (SIGKILL), 15 (SIGTERM), 3 (SIGQUIT), 2 (SIGINT), 1 (SIGHUP)
+    #[arg(long, short = 's', default_value_t = 15)]
     signal: i32,
 
     /// Shorthand for -s 9 (SIGKILL).
@@ -121,7 +122,8 @@ fn find_matching_processes(
         let name = process.name().to_string_lossy().to_string();
 
         let is_match = if use_exact {
-            name == pattern
+            // Case-insensitive exact match for consistency with substring matching
+            name.to_lowercase() == pattern_lower
         } else if let Some(ref re) = regex {
             re.is_match(&name)
         } else {
@@ -172,9 +174,25 @@ fn kill_process(pid: u32, signal: i32) -> std::result::Result<(), String> {
 }
 
 /// Attempts to kill a process (non-Unix stub).
+///
+/// On non-Unix platforms, process killing is not supported and this function
+/// always returns an error. The tool can still list matching processes in
+/// dry-run mode.
 #[cfg(not(unix))]
 fn kill_process(_pid: u32, _signal: i32) -> std::result::Result<(), String> {
-    Err("Process killing not implemented on this platform".to_string())
+    Err("Process killing is not supported on this platform (Unix only)".to_string())
+}
+
+/// Returns true if the current platform supports process killing.
+#[cfg(unix)]
+const fn platform_supports_kill() -> bool {
+    true
+}
+
+/// Returns true if the current platform supports process killing.
+#[cfg(not(unix))]
+const fn platform_supports_kill() -> bool {
+    false
 }
 
 /// Returns the name of a signal number.
@@ -294,11 +312,21 @@ fn print_results(results: &[KillResult], signal: i32, dry_run: bool) {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Warn early if platform doesn't support killing and user isn't in dry-run mode
+    if !platform_supports_kill() && !args.dry_run {
+        eprintln!(
+            "{}: Process killing is not supported on this platform. Use --dry-run to list matching processes.",
+            "Warning".yellow().bold()
+        );
+        std::process::exit(1);
+    }
+
     // Determine signal (allow -9 shorthand)
     let signal = if args.sigkill { 9 } else { args.signal };
 
     // Create system and refresh processes
-    let refresh_kind = ProcessRefreshKind::nothing().with_user(UpdateKind::Always);
+    // We only need process names and PIDs, so use minimal refresh
+    let refresh_kind = ProcessRefreshKind::nothing();
     let mut system = System::new_with_specifics(RefreshKind::nothing());
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh_kind);
 
@@ -370,6 +398,7 @@ mod tests {
     fn test_signal_name_known() {
         assert_eq!(signal_name(1), "SIGHUP");
         assert_eq!(signal_name(2), "SIGINT");
+        assert_eq!(signal_name(3), "SIGQUIT");
         assert_eq!(signal_name(9), "SIGKILL");
         assert_eq!(signal_name(15), "SIGTERM");
     }
@@ -380,27 +409,46 @@ mod tests {
         assert_eq!(signal_name(0), "signal 0");
     }
 
+    /// Helper to simulate exact matching logic (case-insensitive)
+    fn matches_exact(name: &str, pattern: &str) -> bool {
+        name.to_lowercase() == pattern.to_lowercase()
+    }
+
+    /// Helper to simulate substring matching logic (case-insensitive)
+    fn matches_substring(name: &str, pattern: &str) -> bool {
+        name.to_lowercase().contains(&pattern.to_lowercase())
+    }
+
     #[test]
     fn test_find_matching_processes_exact() {
-        // This test verifies the matching logic works correctly
-        // We can't easily test with actual processes, so we test the algorithm
+        // Exact match is case-insensitive but requires full name match
+        assert!(matches_exact("test", "test"));
+        assert!(matches_exact("TEST", "test")); // Case-insensitive
+        assert!(matches_exact("Test", "TEST")); // Case-insensitive
+        assert!(!matches_exact("testing", "test")); // Not exact
+        assert!(!matches_exact("my-test", "test")); // Not exact
+    }
+
+    #[test]
+    fn test_exact_vs_substring_matching() {
+        // Verify the difference between exact and substring matching
+        let name = "my-test-app";
         let pattern = "test";
 
-        // Exact match should require exact equality
-        assert!("test" == pattern); // Would match with exact
-        assert!("testing" != pattern); // Would not match with exact
+        // Substring should match
+        assert!(matches_substring(name, pattern));
+        // Exact should NOT match
+        assert!(!matches_exact(name, pattern));
     }
 
     #[test]
     fn test_find_matching_processes_substring() {
         // Substring matching is case-insensitive
-        let pattern = "test";
-        let pattern_lower = pattern.to_lowercase();
-
-        assert!("testing".to_lowercase().contains(&pattern_lower));
-        assert!("TEST".to_lowercase().contains(&pattern_lower));
-        assert!("my-test-app".to_lowercase().contains(&pattern_lower));
-        assert!(!"foo".to_lowercase().contains(&pattern_lower));
+        assert!(matches_substring("testing", "test"));
+        assert!(matches_substring("TEST", "test"));
+        assert!(matches_substring("my-test-app", "test"));
+        assert!(matches_substring("MyTestApp", "TEST")); // Case-insensitive both ways
+        assert!(!matches_substring("foo", "test"));
     }
 
     #[test]
