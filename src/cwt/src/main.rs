@@ -266,13 +266,19 @@ enum WorktreeMatch {
 ///
 /// Search priority:
 /// 1. Exact directory name match
-/// 2. Exact branch name match
+/// 2. Exact branch name match (supports branch names with `/` like `feature/login`)
 /// 3. Case-insensitive substring match on branch names
 ///
-/// Rejects names containing path separators to prevent path traversal.
+/// Rejects names containing `..` or `\` to prevent path traversal. Forward slashes
+/// are allowed since they're common in branch names (e.g., `feature/login`) and
+/// directory names cannot contain `/` on Unix filesystems.
 fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
-    // Reject path traversal attempts
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
+    // Reject path traversal attempts.
+    // Note: `/` is intentionally allowed because:
+    // - Branch names commonly contain `/` (e.g., `feature/login`, `bugfix/issue-42`)
+    // - Directory names cannot contain `/` on Unix, so no security risk for dir matching
+    // - Worktree paths come from `git worktree list`, not user input
+    if name.contains('\\') || name.contains("..") {
         return WorktreeMatch::None;
     }
 
@@ -290,6 +296,7 @@ fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
     }
 
     // Third: try case-insensitive substring match on branch names
+    // Optimization: collect at most 2 matches to detect "multiple" without full scan
     let name_lower = name.to_lowercase();
     let matches: Vec<usize> = worktrees
         .iter()
@@ -567,13 +574,9 @@ mod tests {
             head: "abc".to_string(),
             branch: Some("main".to_string()),
         }];
-        // Should reject path traversal attempts
+        // Should reject path traversal attempts (backslash and ..)
         assert!(matches!(
             find_worktree_by_name(&worktrees, "../etc/passwd"),
-            WorktreeMatch::None
-        ));
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "foo/bar"),
             WorktreeMatch::None
         ));
         assert!(matches!(
@@ -583,6 +586,52 @@ mod tests {
         assert!(matches!(
             find_worktree_by_name(&worktrees, ".."),
             WorktreeMatch::None
+        ));
+        // Note: Forward slash `/` is intentionally allowed - see test below
+    }
+
+    #[test]
+    fn test_find_worktree_allows_forward_slash_in_branch_names() {
+        // Forward slashes are common in branch names (feature/*, bugfix/*, etc.)
+        // and should work for both exact and substring matching
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt1"),
+                head: "def".to_string(),
+                branch: Some("feature/user-auth".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt2"),
+                head: "ghi".to_string(),
+                branch: Some("feature/login-page".to_string()),
+            },
+        ];
+
+        // Exact branch match with forward slash
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "feature/user-auth"),
+            WorktreeMatch::Single(1)
+        ));
+
+        // Substring match with forward slash (matches both feature/* branches)
+        match find_worktree_by_name(&worktrees, "feature/") {
+            WorktreeMatch::Multiple(indices) => {
+                assert_eq!(indices.len(), 2);
+                assert!(indices.contains(&1));
+                assert!(indices.contains(&2));
+            }
+            other => panic!("Expected Multiple, got {:?}", other),
+        }
+
+        // Partial path within branch name
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "ure/user"),
+            WorktreeMatch::Single(1)
         ));
     }
 
