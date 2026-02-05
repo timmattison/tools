@@ -528,6 +528,9 @@ struct Cli {
     /// By default, when --branch is specified, the branch name is used as the
     /// worktree directory name (after sanitization). Use this flag to generate
     /// a random adjective-noun directory name instead.
+    ///
+    /// Note: This flag only has an effect when used with --branch. Without --branch,
+    /// random directory names are already the default behavior.
     #[arg(long)]
     random_directory: bool,
 
@@ -605,6 +608,20 @@ macro_rules! error {
             eprintln!($($arg)*);
         }
     };
+}
+
+/// Prints an error message about directory already existing and exits.
+///
+/// This is used when branch-based directory naming results in a collision.
+/// Extracted to a helper to ensure consistent error messages between the
+/// pre-existence check and the PathCollision handler (TOCTOU race handling).
+fn exit_directory_exists(quiet: bool, path: &Path) -> ! {
+    error!(quiet, "Error: Directory '{}' already exists", path.display());
+    error!(
+        quiet,
+        "Use --random-directory to generate a different directory name."
+    );
+    exit(exit_codes::NAME_COLLISION);
 }
 
 /// Generates a Docker-style random name in the format "adjective-noun".
@@ -1063,7 +1080,10 @@ fn main() {
     let mut attempts = 0;
 
     loop {
-        // Get directory name: either fixed (from branch) or randomly generated
+        // Get directory name: either fixed (from branch) or randomly generated.
+        // Note: For fixed naming, the clone only happens once since the loop exits
+        // immediately on first iteration (either success or collision). The loop
+        // structure is retained for random naming's retry-on-collision logic.
         let dir_name = if let Some(ref name) = fixed_dir_name {
             name.clone()
         } else {
@@ -1083,17 +1103,7 @@ fn main() {
         // Quick check to avoid unnecessary git calls (optimization only, not relied upon)
         if worktree_path.exists() {
             if fixed_dir_name.is_some() {
-                // Branch-based naming: don't retry, fail with helpful message
-                error!(
-                    config.quiet,
-                    "Error: Directory '{}' already exists",
-                    worktree_path.display()
-                );
-                error!(
-                    config.quiet,
-                    "Use --random-directory to generate a different directory name."
-                );
-                exit(exit_codes::NAME_COLLISION);
+                exit_directory_exists(config.quiet, &worktree_path);
             }
             // Random naming: retry with a new name
             attempts += 1;
@@ -1270,17 +1280,7 @@ fn main() {
             }
             WorktreeResult::PathCollision => {
                 if fixed_dir_name.is_some() {
-                    // Branch-based naming: don't retry, fail with helpful message
-                    error!(
-                        config.quiet,
-                        "Error: Directory '{}' already exists",
-                        worktree_path.display()
-                    );
-                    error!(
-                        config.quiet,
-                        "Use --random-directory to generate a different directory name."
-                    );
-                    exit(exit_codes::NAME_COLLISION);
+                    exit_directory_exists(config.quiet, &worktree_path);
                 }
                 // Random naming: TOCTOU race or unexpected collision - retry with a new name
                 attempts += 1;
