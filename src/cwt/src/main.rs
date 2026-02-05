@@ -273,12 +273,13 @@ enum WorktreeMatch {
 /// are allowed since they're common in branch names (e.g., `feature/login`) and
 /// directory names cannot contain `/` on Unix filesystems.
 fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
-    // Reject path traversal attempts.
+    // Reject empty search terms (would match all branches via substring)
+    // and path traversal attempts.
     // Note: `/` is intentionally allowed because:
     // - Branch names commonly contain `/` (e.g., `feature/login`, `bugfix/issue-42`)
     // - Directory names cannot contain `/` on Unix, so no security risk for dir matching
     // - Worktree paths come from `git worktree list`, not user input
-    if name.contains('\\') || name.contains("..") {
+    if name.is_empty() || name.contains('\\') || name.contains("..") {
         return WorktreeMatch::None;
     }
 
@@ -296,7 +297,7 @@ fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
     }
 
     // Third: try case-insensitive substring match on branch names
-    // Optimization: collect at most 2 matches to detect "multiple" without full scan
+    // Note: We collect all matches because we need to display them in the Multiple case
     let name_lower = name.to_lowercase();
     let matches: Vec<usize> = worktrees
         .iter()
@@ -563,6 +564,27 @@ mod tests {
         }];
         assert!(matches!(
             find_worktree_by_name(&worktrees, "nonexistent"),
+            WorktreeMatch::None
+        ));
+    }
+
+    #[test]
+    fn test_find_worktree_rejects_empty_string() {
+        // Empty string would match all branches via substring, which is unexpected
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt1"),
+                head: "def".to_string(),
+                branch: Some("feature".to_string()),
+            },
+        ];
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, ""),
             WorktreeMatch::None
         ));
     }
