@@ -483,7 +483,9 @@ ENV FILE COPYING:
 
 EXAMPLES:
     nwt                              # Random name for both directory and branch
-    nwt -b feature/login             # Custom branch name, random directory
+    nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
+    nwt -b feature/login             # Branch 'feature/login', directory 'feature_login'
+    nwt -b fix --random-directory    # Branch 'fix', random directory name
     nwt -c main                      # Checkout existing 'main' branch
     nwt -c v1.0.0                    # Checkout a tag
     nwt --run \"npm install\"          # Run a command after creation
@@ -514,8 +516,20 @@ EXIT CODES:
     14 Shell setup failed")]
 struct Cli {
     /// Specify branch name instead of generating a random one.
+    ///
+    /// When this option is used, the branch name is also used as the directory
+    /// name (after sanitization to remove invalid characters like slashes).
+    /// Use --random-directory to generate a random directory name instead.
     #[arg(short, long, conflicts_with = "checkout")]
     branch: Option<String>,
+
+    /// Use a random directory name even when branch name is specified.
+    ///
+    /// By default, when --branch is specified, the branch name is used as the
+    /// worktree directory name (after sanitization). Use this flag to generate
+    /// a random adjective-noun directory name instead.
+    #[arg(long)]
+    random_directory: bool,
 
     /// Checkout a specific ref/commit instead of creating a new branch.
     #[arg(short, long, conflicts_with = "branch")]
@@ -580,7 +594,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "random_directory"])]
     shell_setup: bool,
 }
 
@@ -601,10 +615,12 @@ fn generate_docker_name(generator: &mut Generator) -> Option<String> {
     generator.next()
 }
 
-/// Sanitizes a repository name to only allow safe characters.
+/// Sanitizes a string to only allow safe filesystem characters.
 /// Uses an allowlist approach: only alphanumeric, hyphen, underscore, and dot are permitted.
 /// All other characters are replaced with underscores.
-fn sanitize_repo_name(name: &str) -> Option<String> {
+///
+/// Returns `None` if the result would be invalid (empty, all dots, or hidden path attempts).
+fn sanitize_for_filesystem(name: &str) -> Option<String> {
     if name.is_empty() {
         return None;
     }
@@ -632,6 +648,19 @@ fn sanitize_repo_name(name: &str) -> Option<String> {
     }
 
     Some(sanitized)
+}
+
+/// Sanitizes a repository name to only allow safe characters.
+fn sanitize_repo_name(name: &str) -> Option<String> {
+    sanitize_for_filesystem(name)
+}
+
+/// Sanitizes a branch name for use as a directory name.
+///
+/// Branch names commonly contain slashes (e.g., `feature/login`, `bugfix/auth-fix`)
+/// which are converted to underscores for filesystem safety.
+fn sanitize_branch_for_directory(branch: &str) -> Option<String> {
+    sanitize_for_filesystem(branch)
 }
 
 /// Determines the branch name to use based on merged config and generated directory name.
@@ -1001,27 +1030,72 @@ fn main() {
         exit(exit_codes::DIR_CREATE_FAILED);
     }
 
-    // Generate random Docker-style name and create worktree with retry on collision.
-    // This handles TOCTOU race conditions by retrying with a new name if another
-    // process creates a directory between our existence check and git's creation.
+    // Determine directory naming strategy:
+    // - If branch is specified and --random-directory is not used, use the branch name
+    //   as the directory name (sanitized for filesystem safety).
+    // - Otherwise, generate random Docker-style names (adjective-noun) with retry on collision.
+    let use_branch_as_dir = config.branch.is_some() && !cli.random_directory;
+
+    // For branch-based naming, compute the directory name upfront and don't retry on collision.
+    // For random naming, we'll generate names in the loop and retry on collision.
+    let fixed_dir_name: Option<String> = if use_branch_as_dir {
+        let branch = config.branch.as_ref().unwrap();
+        match sanitize_branch_for_directory(branch) {
+            Some(name) => Some(name),
+            None => {
+                error!(
+                    config.quiet,
+                    "Error: Branch name '{}' cannot be used as a directory name",
+                    branch
+                );
+                error!(
+                    config.quiet,
+                    "Use --random-directory to generate a random directory name instead."
+                );
+                exit(exit_codes::INVALID_REPO_NAME);
+            }
+        }
+    } else {
+        None
+    };
+
     let mut generator = Generator::default();
     let mut attempts = 0;
 
     loop {
-        let dir_name = match generate_docker_name(&mut generator) {
-            Some(n) => n,
-            None => {
-                error!(
-                    config.quiet,
-                    "Error: Name generator failed to produce a name"
-                );
-                exit(exit_codes::NAME_COLLISION);
+        // Get directory name: either fixed (from branch) or randomly generated
+        let dir_name = if let Some(ref name) = fixed_dir_name {
+            name.clone()
+        } else {
+            match generate_docker_name(&mut generator) {
+                Some(n) => n,
+                None => {
+                    error!(
+                        config.quiet,
+                        "Error: Name generator failed to produce a name"
+                    );
+                    exit(exit_codes::NAME_COLLISION);
+                }
             }
         };
         let worktree_path = worktrees_dir.join(&dir_name);
 
         // Quick check to avoid unnecessary git calls (optimization only, not relied upon)
         if worktree_path.exists() {
+            if fixed_dir_name.is_some() {
+                // Branch-based naming: don't retry, fail with helpful message
+                error!(
+                    config.quiet,
+                    "Error: Directory '{}' already exists",
+                    worktree_path.display()
+                );
+                error!(
+                    config.quiet,
+                    "Use --random-directory to generate a different directory name."
+                );
+                exit(exit_codes::NAME_COLLISION);
+            }
+            // Random naming: retry with a new name
             attempts += 1;
             if attempts >= MAX_ATTEMPTS {
                 error!(
@@ -1065,12 +1139,14 @@ fn main() {
             WorktreeResult::Success => {
                 // Handle tmux and/or run options
                 if config.tmux {
-                    // The names crate generates only lowercase ASCII letters and hyphens,
-                    // so control characters cannot appear. This is a debug assertion to
-                    // catch any future regression, not a runtime check.
+                    // Directory names are safe for tmux window names because:
+                    // - Random names (from names crate): only lowercase ASCII letters and hyphens
+                    // - Branch-based names: sanitized to only allow alphanumeric, hyphen, underscore, dot
+                    // Control characters cannot appear in either case. This is a debug assertion
+                    // to catch any future regression, not a runtime check.
                     debug_assert!(
                         !contains_control_chars(&dir_name),
-                        "Generated directory name contains control characters: {:?}",
+                        "Directory name contains control characters: {:?}",
                         dir_name
                     );
                 }
@@ -1089,8 +1165,8 @@ fn main() {
                         // Create a new tmux window.
                         // Note: dir_name is passed directly to tmux as an argument (not through
                         // a shell), so it doesn't need shell escaping. Control characters are
-                        // already validated above. The names crate generates simple adjective-noun
-                        // combinations with only lowercase letters and hyphens.
+                        // validated above via debug_assert. Directory names are safe because they're
+                        // either random (adjective-noun from names crate) or sanitized branch names.
                         //
                         // We move dir_name here (no .clone()) since it's not used after this point
                         // in the success path - we either run tmux and break, or exit on error.
@@ -1193,7 +1269,20 @@ fn main() {
                 break;
             }
             WorktreeResult::PathCollision => {
-                // TOCTOU race or unexpected collision - retry with a new name
+                if fixed_dir_name.is_some() {
+                    // Branch-based naming: don't retry, fail with helpful message
+                    error!(
+                        config.quiet,
+                        "Error: Directory '{}' already exists",
+                        worktree_path.display()
+                    );
+                    error!(
+                        config.quiet,
+                        "Use --random-directory to generate a different directory name."
+                    );
+                    exit(exit_codes::NAME_COLLISION);
+                }
+                // Random naming: TOCTOU race or unexpected collision - retry with a new name
                 attempts += 1;
                 if attempts >= MAX_ATTEMPTS {
                     error!(
@@ -1372,6 +1461,49 @@ mod tests {
             sanitize_repo_name(".hidden-repo"),
             Some(".hidden-repo".to_string())
         );
+    }
+
+    #[test]
+    fn test_sanitize_branch_for_directory_simple() {
+        // Simple branch names pass through unchanged
+        assert_eq!(
+            sanitize_branch_for_directory("issue-42"),
+            Some("issue-42".to_string())
+        );
+        assert_eq!(
+            sanitize_branch_for_directory("my_branch"),
+            Some("my_branch".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sanitize_branch_for_directory_with_slashes() {
+        // Slashes in branch names (common for feature/bugfix branches) become underscores
+        assert_eq!(
+            sanitize_branch_for_directory("feature/login"),
+            Some("feature_login".to_string())
+        );
+        assert_eq!(
+            sanitize_branch_for_directory("bugfix/auth-fix"),
+            Some("bugfix_auth-fix".to_string())
+        );
+        assert_eq!(
+            sanitize_branch_for_directory("user/tim/issue-123"),
+            Some("user_tim_issue-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sanitize_branch_for_directory_empty() {
+        // Empty branch names are rejected
+        assert_eq!(sanitize_branch_for_directory(""), None);
+    }
+
+    #[test]
+    fn test_sanitize_branch_for_directory_dots_only() {
+        // Branch names that sanitize to only dots are rejected
+        assert_eq!(sanitize_branch_for_directory(".."), None);
+        assert_eq!(sanitize_branch_for_directory("."), None);
     }
 
     #[test]
@@ -1639,6 +1771,49 @@ mod tests {
         let result =
             cmd.try_get_matches_from(["nwt", "--no-copy-env", "--branch", "feature/test"]);
         assert!(result.is_ok(), "Should accept --no-copy-env with --branch");
+    }
+
+    #[test]
+    fn test_cli_random_directory_parses() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // Parsing with --random-directory should succeed
+        let result = cmd.try_get_matches_from(["nwt", "--random-directory"]);
+        assert!(result.is_ok(), "Should accept --random-directory option");
+
+        let matches = result.unwrap();
+        assert!(
+            matches.get_flag("random_directory"),
+            "Should set random_directory flag"
+        );
+    }
+
+    #[test]
+    fn test_cli_random_directory_with_branch() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --random-directory can be combined with --branch (that's its main use case)
+        let result =
+            cmd.try_get_matches_from(["nwt", "--branch", "issue-42", "--random-directory"]);
+        assert!(
+            result.is_ok(),
+            "Should accept --random-directory with --branch"
+        );
+    }
+
+    #[test]
+    fn test_cli_shell_setup_conflicts_with_random_directory() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // --shell-setup conflicts with --random-directory
+        let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--random-directory"]);
+        assert!(
+            result.is_err(),
+            "Should fail when both --shell-setup and --random-directory are provided"
+        );
     }
 
     #[test]
@@ -1923,6 +2098,7 @@ mod tests {
         fn test_merge_cli_overrides_config() {
             let cli = Cli {
                 branch: Some("cli-branch".to_string()),
+                random_directory: false,
                 checkout: None,
                 no_copy_env: false,
                 quiet: true,
@@ -1959,6 +2135,7 @@ mod tests {
         fn test_merge_config_provides_defaults() {
             let cli = Cli {
                 branch: None,
+                random_directory: false,
                 checkout: None,
                 no_copy_env: false,
                 quiet: false,
@@ -1988,6 +2165,7 @@ mod tests {
         fn test_merge_no_config() {
             let cli = Cli {
                 branch: Some("my-branch".to_string()),
+                random_directory: false,
                 checkout: None,
                 no_copy_env: false,
                 quiet: true,
@@ -2009,6 +2187,7 @@ mod tests {
         fn test_merge_no_copy_env_disables() {
             let cli = Cli {
                 branch: None,
+                random_directory: false,
                 checkout: None,
                 no_copy_env: true, // CLI disables
                 quiet: false,
@@ -2034,6 +2213,7 @@ mod tests {
         fn test_merge_config_copy_env_false() {
             let cli = Cli {
                 branch: None,
+                random_directory: false,
                 checkout: None,
                 no_copy_env: false,
                 quiet: false,
