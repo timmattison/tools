@@ -145,6 +145,11 @@ fn find_matching_processes(
 
 /// Attempts to kill a process with the given signal.
 ///
+/// Uses `libc::kill` directly. On macOS, if this fails with EPERM (which can
+/// happen due to code-signing restrictions when an ad-hoc-signed binary tries
+/// to signal a properly signed process), falls back to `/bin/kill` which is
+/// Apple-signed and has broader permissions.
+///
 /// # Arguments
 ///
 /// * `pid` - The process ID to kill
@@ -165,11 +170,47 @@ fn kill_process(pid: u32, signal: i32) -> std::result::Result<(), String> {
     let result = unsafe { libc::kill(pid_i32, signal) };
 
     if result == 0 {
+        return Ok(());
+    }
+
+    let errno = std::io::Error::last_os_error();
+
+    // On macOS, EPERM can occur due to code-signing restrictions even when the
+    // user owns the target process. Fall back to /bin/kill which is Apple-signed.
+    if errno.raw_os_error() == Some(libc::EPERM) {
+        return kill_process_via_bin_kill(pid, signal);
+    }
+
+    Err(errno.to_string())
+}
+
+/// Falls back to `/bin/kill` for sending signals.
+///
+/// This is used when `libc::kill` returns EPERM, which on macOS can happen
+/// due to code-signing restrictions between an ad-hoc-signed binary and a
+/// properly signed target process. `/bin/kill` is Apple-signed and typically
+/// has the necessary permissions.
+#[cfg(unix)]
+fn kill_process_via_bin_kill(pid: u32, signal: i32) -> std::result::Result<(), String> {
+    let output = std::process::Command::new("/bin/kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .output()
+        .map_err(|e| format!("failed to run /bin/kill: {e}"))?;
+
+    if output.status.success() {
         Ok(())
     } else {
-        // Get the errno
-        let errno = std::io::Error::last_os_error();
-        Err(errno.to_string())
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = stderr.trim();
+        if msg.is_empty() {
+            Err(format!(
+                "/bin/kill exited with status {}",
+                output.status.code().unwrap_or(-1)
+            ))
+        } else {
+            Err(msg.to_string())
+        }
     }
 }
 
