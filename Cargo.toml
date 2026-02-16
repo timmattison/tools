@@ -84,6 +84,9 @@ icy_sixel = "0.5"
 rand = "0.9"
 names = { version = "0.14", default-features = false }
 
+# Signal handling
+ctrlc = "3.4"
+
 # System info
 sysinfo = "0.36"
 libc = "0.2"
@@ -155,3 +158,5 @@ unseparated_literal_suffix = "warn"
 await_holding_lock = "warn"
 # Prevent suppressing warnings without explanation
 allow_attributes_without_reason = "warn"
+# Catch silent ignoring of Results with `let _ = ...` (forces explicit .ok() or error handling)
+let_underscore_must_use = "warn"
