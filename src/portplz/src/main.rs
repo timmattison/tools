@@ -7,34 +7,27 @@ use std::path::Path;
 #[derive(Parser)]
 #[command(name = "portplz")]
 #[command(version = version_string!())]
-#[command(about = "Generate a port number from the current directory name and git branch", long_about = None)]
+#[command(about = "Generate a port number from the current git branch name", long_about = None)]
 struct Cli {
     #[arg(help = "Directory path (defaults to current directory)")]
     path: Option<String>,
-    
+
     #[arg(short, long, help = "Print verbose output with directory name and branch")]
     verbose: bool,
-    
+
     #[arg(long, help = "Disable git branch detection")]
     no_git: bool,
+
+    #[arg(long, help = "Include directory name in the hash (dirname@branch)")]
+    with_root: bool,
 }
 
 fn get_git_branch(path: &Path) -> Option<String> {
     match gix::discover(path) {
-        Ok(repo) => {
-            match repo.head() {
-                Ok(head) => {
-                    match head.referent_name() {
-                        Some(name) => {
-                            let branch_name = name.shorten();
-                            Some(branch_name.to_string())
-                        }
-                        None => None,
-                    }
-                }
-                Err(_) => None,
-            }
-        }
+        Ok(repo) => match repo.head() {
+            Ok(head) => head.referent_name().map(|n| n.shorten().to_string()),
+            Err(_) => None,
+        },
         Err(_) => None,
     }
 }
@@ -57,41 +50,43 @@ fn unprivileged_port_from_string(input: &str) -> u16 {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    
-    let path = match cli.path {
-        Some(p) => p,
+
+    let path_str = match cli.path {
+        Some(ref p) => p.clone(),
         None => env::current_dir()?.to_string_lossy().into_owned(),
     };
-    
-    let path = Path::new(&path);
+
+    let path = Path::new(&path_str);
     let basename = path.file_name()
         .ok_or("Invalid path: no basename")?
         .to_string_lossy();
-    
-    let input_string = if cli.no_git {
-        basename.to_string()
+
+    let (input_string, verbose_desc) = if cli.no_git {
+        (basename.to_string(), format!("directory '{}'", basename))
     } else {
-        match get_git_branch(&path) {
-            Some(branch) => format!("{}@{}", basename, branch),
-            None => basename.to_string(),
+        match get_git_branch(path) {
+            Some(branch) => {
+                if cli.with_root {
+                    (
+                        format!("{}@{}", basename, branch),
+                        format!("directory '{}' on branch '{}'", basename, branch),
+                    )
+                } else {
+                    (branch.clone(), format!("branch '{}'", branch))
+                }
+            }
+            None => (basename.to_string(), format!("directory '{}' (no git repo)", basename)),
         }
     };
-    
+
     let port = unprivileged_port_from_string(&input_string);
-    
+
     if cli.verbose {
-        if cli.no_git {
-            println!("Port {} for directory '{}'", port, basename);
-        } else {
-            match get_git_branch(&path) {
-                Some(branch) => println!("Port {} for directory '{}' on branch '{}'", port, basename, branch),
-                None => println!("Port {} for directory '{}' (no git repo)", port, basename),
-            }
-        }
+        println!("Port {} for {}", port, verbose_desc);
     } else {
         println!("{}", port);
     }
-    
+
     Ok(())
 }
 
@@ -105,47 +100,49 @@ mod tests {
         assert!(port >= 1024);
         assert!(port < 65535);
     }
-    
+
     #[test]
     fn test_consistent_port() {
         let port1 = unprivileged_port_from_string("example");
         let port2 = unprivileged_port_from_string("example");
         assert_eq!(port1, port2);
     }
-    
+
     #[test]
     fn test_different_inputs() {
-        let port1 = unprivileged_port_from_string("dir1");
-        let port2 = unprivileged_port_from_string("dir2");
+        let port1 = unprivileged_port_from_string("branch-a");
+        let port2 = unprivileged_port_from_string("branch-b");
         assert_ne!(port1, port2);
     }
-    
+
     #[test]
-    fn test_combined_directory_and_branch() {
-        let port1 = unprivileged_port_from_string("myproject@main");
-        let port2 = unprivileged_port_from_string("myproject@feature");
-        let port3 = unprivileged_port_from_string("myproject");
-        
-        assert_ne!(port1, port2);
-        assert_ne!(port1, port3);
-        assert_ne!(port2, port3);
-    }
-    
-    #[test]
-    fn test_branch_formatting() {
-        let port1 = unprivileged_port_from_string("test@main");
-        let port2 = unprivileged_port_from_string("test@main");
+    fn test_branch_only_default() {
+        // Default: hash is just the branch name
+        let port1 = unprivileged_port_from_string("main");
+        let port2 = unprivileged_port_from_string("main");
         assert_eq!(port1, port2);
     }
-    
+
     #[test]
-    fn test_same_directory_different_branches() {
-        let dir_only = unprivileged_port_from_string("project");
-        let with_main = unprivileged_port_from_string("project@main");
-        let with_dev = unprivileged_port_from_string("project@dev");
-        
-        assert_ne!(dir_only, with_main);
-        assert_ne!(dir_only, with_dev);
-        assert_ne!(with_main, with_dev);
+    fn test_with_root_format() {
+        // --with-root uses dirname@branch (old behavior)
+        let branch_only = unprivileged_port_from_string("main");
+        let with_root = unprivileged_port_from_string("myproject@main");
+        assert_ne!(branch_only, with_root);
+    }
+
+    #[test]
+    fn test_same_branch_different_dirs() {
+        // Same branch but different directory names produce different ports with --with-root
+        let dir_a = unprivileged_port_from_string("repo-a@main");
+        let dir_b = unprivileged_port_from_string("repo-b@main");
+        assert_ne!(dir_a, dir_b);
+    }
+
+    #[test]
+    fn test_different_branches() {
+        let main_port = unprivileged_port_from_string("main");
+        let dev_port = unprivileged_port_from_string("dev");
+        assert_ne!(main_port, dev_port);
     }
 }
