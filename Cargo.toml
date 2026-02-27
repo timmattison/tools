@@ -155,3 +155,5 @@ unseparated_literal_suffix = "warn"
 await_holding_lock = "warn"
 # Prevent suppressing warnings without explanation
 allow_attributes_without_reason = "warn"
+# Catch clones that can be replaced by moves (nursery lint, may have false positives)
+redundant_clone = "warn"
