@@ -9,6 +9,7 @@
 #
 # Prerequisites:
 #   - cargo-edit: cargo install cargo-edit (for `cargo upgrade`)
+#   - llvm (macOS): brew install llvm (for bindgen compatibility with latest SDK)
 
 set -e
 
@@ -53,11 +54,16 @@ done
 if [[ "$UPDATE_RUST" == true ]]; then
     echo "=== Updating Rust dependencies ==="
 
-    # Ensure macOS SDK path is set for crates that use bindgen (e.g. coreaudio-sys)
-    if [[ "$(uname)" == "Darwin" ]] && [[ -z "$COREAUDIO_SDK_PATH" ]]; then
-        COREAUDIO_SDK_PATH="$(xcrun --show-sdk-path 2>/dev/null || true)"
-        if [[ -n "$COREAUDIO_SDK_PATH" ]]; then
-            export COREAUDIO_SDK_PATH
+    # On macOS, bindgen's bundled libclang may be too old for the latest SDK.
+    # Use Homebrew's llvm if available, and set the SDK sysroot for bindgen.
+    if [[ "$(uname)" == "Darwin" ]]; then
+        LLVM_PREFIX="$(brew --prefix llvm 2>/dev/null || true)"
+        if [[ -n "$LLVM_PREFIX" ]] && [[ -d "$LLVM_PREFIX/lib" ]]; then
+            export LIBCLANG_PATH="$LLVM_PREFIX/lib"
+        fi
+        SDK_PATH="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+        if [[ -n "$SDK_PATH" ]]; then
+            export BINDGEN_EXTRA_CLANG_ARGS="-isysroot $SDK_PATH"
         fi
     fi
 
