@@ -65,7 +65,7 @@ if [[ "$UPDATE_RUST" == true ]]; then
         fi
 
         echo "Upgrading workspace dependency constraints in Cargo.toml..."
-        cargo upgrade --workspace
+        cargo upgrade
 
         echo "Updating Cargo.lock..."
         cargo update
