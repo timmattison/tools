@@ -53,6 +53,14 @@ done
 if [[ "$UPDATE_RUST" == true ]]; then
     echo "=== Updating Rust dependencies ==="
 
+    # Ensure macOS SDK path is set for crates that use bindgen (e.g. coreaudio-sys)
+    if [[ "$(uname)" == "Darwin" ]] && [[ -z "$COREAUDIO_SDK_PATH" ]]; then
+        COREAUDIO_SDK_PATH="$(xcrun --show-sdk-path 2>/dev/null || true)"
+        if [[ -n "$COREAUDIO_SDK_PATH" ]]; then
+            export COREAUDIO_SDK_PATH
+        fi
+    fi
+
     if [[ "$LOCK_ONLY" == true ]]; then
         echo "Updating Cargo.lock (within existing semver bounds)..."
         cargo update
