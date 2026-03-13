@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(theme.background, (39, 40, 34));
         
         let theme = TerminalTheme::from_name("unknown");
-        assert_eq!(theme.background, (0, 43, 54)); // defaults to solarized_dark
+        assert_eq!(theme.background, (0, 0, 0)); // defaults to black
     }
     
     #[test]
@@ -84,6 +84,6 @@ mod tests {
         // We can test the dimensions and theme access
         assert_eq!(state.get_width(), 80);
         assert_eq!(state.get_height(), 24);
-        assert_eq!(state.get_theme().foreground, (131, 148, 150)); // solarized dark
+        assert_eq!(state.get_theme().foreground, (255, 255, 255)); // black
     }
 }
