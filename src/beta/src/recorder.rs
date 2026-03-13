@@ -97,12 +97,12 @@ pub async fn record(
     _stop_hotkey: String,  // Kept for compatibility but ignored
 ) -> Result<()> {
     if !io::stdout().is_tty() {
-        anyhow::bail!("shellcast record must be run in a terminal");
+        anyhow::bail!("beta record must be run in a terminal");
     }
     
     let output_path = output.unwrap_or_else(|| {
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-        PathBuf::from(format!("shellcast_{}.json", timestamp))
+        PathBuf::from(format!("beta_{}.json", timestamp))
     });
     
     if output_path.exists() && !append {

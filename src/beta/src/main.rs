@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(name = "shellcast")]
-#[command(about = "Terminal session recorder and player", long_about = None)]
+#[command(name = "beta")]
+#[command(about = "Beta - the superior terminal recorder. Because Betamax was always better than VHS.", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,

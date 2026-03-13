@@ -3,6 +3,7 @@ use minijinja::{Environment, context};
 use std::fs::File;
 use std::io::{BufReader, Write};
 use std::path::PathBuf;
+use base64::{Engine as _, engine::general_purpose};
 use crate::Recording;
 
 const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
@@ -11,13 +12,19 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ title }}</title>
+    <!-- xterm.js -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <!-- pako for decompression if needed -->
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
     <style>
         body {
             margin: 0;
             padding: 20px;
             background-color: #1e1e1e;
             color: #ffffff;
-            font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
         }
         .container {
             max-width: 1200px;
@@ -34,16 +41,9 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
             position: relative;
         }
-        .terminal {
-            font-family: "Monaco", "Menlo", "Ubuntu Mono", monospace;
-            font-size: 14px;
-            line-height: 1.2;
-            color: {{ theme.foreground }};
-            background-color: {{ theme.background }};
-            white-space: pre;
-            overflow-x: auto;
-            min-height: 400px;
-            position: relative;
+        #terminal {
+            width: 100%;
+            height: 600px;
         }
         .controls {
             margin-top: 20px;
@@ -108,7 +108,7 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         </div>
         
         <div class="terminal-container">
-            <div class="terminal" id="terminal"></div>
+            <div id="terminal"></div>
             
             <div class="progress-bar">
                 <div class="progress-fill" id="progress"></div>
@@ -150,7 +150,48 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 this.startTime = null;
                 this.pausedAt = 0;
                 
-                this.terminal = document.getElementById('terminal');
+                // Initialize xterm.js
+                this.terminal = new Terminal({
+                    cols: recording.width,
+                    rows: recording.height,
+                    theme: {
+                        background: '{{ theme.background }}',
+                        foreground: '{{ theme.foreground }}',
+                        cursor: '{{ theme.foreground }}',
+                        black: '{{ theme.black }}',
+                        red: '{{ theme.red }}',
+                        green: '{{ theme.green }}',
+                        yellow: '{{ theme.yellow }}',
+                        blue: '{{ theme.blue }}',
+                        magenta: '{{ theme.magenta }}',
+                        cyan: '{{ theme.cyan }}',
+                        white: '{{ theme.white }}',
+                        brightBlack: '{{ theme.bright_black }}',
+                        brightRed: '{{ theme.bright_red }}',
+                        brightGreen: '{{ theme.bright_green }}',
+                        brightYellow: '{{ theme.bright_yellow }}',
+                        brightBlue: '{{ theme.bright_blue }}',
+                        brightMagenta: '{{ theme.bright_magenta }}',
+                        brightCyan: '{{ theme.bright_cyan }}',
+                        brightWhite: '{{ theme.bright_white }}'
+                    },
+                    fontFamily: '"JetBrains Mono", "Monaco", "Menlo", "Ubuntu Mono", monospace',
+                    fontSize: 14,
+                    lineHeight: 1.2,
+                    cursorBlink: false,
+                    disableStdin: true,
+                    allowProposedApi: true
+                });
+                
+                // Initialize fit addon
+                this.fitAddon = new FitAddon.FitAddon();
+                this.terminal.loadAddon(this.fitAddon);
+                
+                // Open terminal in the DOM
+                this.terminal.open(document.getElementById('terminal'));
+                this.fitAddon.fit();
+                
+                // Get DOM elements
                 this.playPauseBtn = document.getElementById('play-pause');
                 this.progressBar = document.getElementById('progress');
                 this.currentTimeDisplay = document.getElementById('current-time');
@@ -181,6 +222,11 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                         this.stepForward();
                     }
                 });
+                
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    this.fitAddon.fit();
+                });
             }
             
             togglePlayPause() {
@@ -201,17 +247,20 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             pause() {
                 this.isPlaying = false;
                 this.playPauseBtn.textContent = '▶️ Play';
-                if (this.currentEventIndex < this.events.length) {
-                    this.pausedAt = this.events[this.currentEventIndex].time;
-                }
+                this.pausedAt = this.getCurrentTime();
             }
             
             restart() {
+                const wasPlaying = this.isPlaying;
                 this.pause();
                 this.currentEventIndex = 0;
                 this.pausedAt = 0;
-                this.terminal.textContent = '';
+                this.terminal.reset();
+                this.terminal.clear();
                 this.updateDisplay();
+                if (wasPlaying) {
+                    this.play();
+                }
             }
             
             stepBack() {
@@ -229,12 +278,18 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 this.pause();
                 
                 this.currentEventIndex = 0;
-                this.terminal.textContent = '';
+                this.terminal.reset();
+                this.terminal.clear();
                 
+                // Replay all events up to the target time
                 for (let i = 0; i < this.events.length; i++) {
-                    if (this.events[i].time <= time && this.events[i].type === 'o') {
-                        this.terminal.textContent += this.events[i].data;
+                    if (this.events[i].time <= time) {
+                        if (this.events[i].type === 'o') {
+                            this.terminal.write(this.events[i].data);
+                        }
                         this.currentEventIndex = i + 1;
+                    } else {
+                        break;
                     }
                 }
                 
@@ -262,7 +317,7 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                        this.events[this.currentEventIndex].time <= currentTime) {
                     const event = this.events[this.currentEventIndex];
                     if (event.type === 'o') {
-                        this.terminal.textContent += event.data;
+                        this.terminal.write(event.data);
                     }
                     this.currentEventIndex++;
                 }
@@ -285,12 +340,6 @@ const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 const minutes = Math.floor(currentTime / 60);
                 const seconds = Math.floor(currentTime % 60);
                 this.currentTimeDisplay.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-            }
-            
-            formatTime(seconds) {
-                const minutes = Math.floor(seconds / 60);
-                const secs = Math.floor(seconds % 60);
-                return `${minutes}:${secs.toString().padStart(2, '0')}`;
             }
         }
         
@@ -330,61 +379,201 @@ pub async fn export_web(
         path
     });
     
-    let theme_colors = get_theme_colors(&theme);
-    let recording_data = if compress {
-        {
-            let mut encoder = flate2::write::GzEncoder::new(
-                Vec::new(),
-                flate2::Compression::default()
-            );
-            encoder.write_all(&serde_json::to_vec(&recording)?)?;
-            base64::encode(&encoder.finish()?)
-        }
-    } else {
-        serde_json::to_string(&recording)?
+    // Get theme colors
+    let theme_colors = match theme.as_str() {
+        "dracula" => Theme::dracula(),
+        "monokai" => Theme::monokai(),
+        "solarized-dark" => Theme::solarized_dark(),
+        "solarized-light" => Theme::solarized_light(),
+        _ => Theme::auto(),
     };
     
-    let duration_formatted = format_duration(recording.duration);
+    // Prepare recording data
+    let recording_data = if compress {
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        serde_json::to_writer(&mut encoder, &recording)
+            .context("Failed to compress recording data")?;
+        let compressed = encoder.finish()
+            .context("Failed to finish compression")?;
+        format!(
+            "JSON.parse(pako.inflate(Uint8Array.from(atob('{}'), c => c.charCodeAt(0)), {{ to: 'string' }}))",
+            general_purpose::STANDARD.encode(&compressed)
+        )
+    } else {
+        serde_json::to_string(&recording)
+            .context("Failed to serialize recording")?
+    };
     
+    // Format duration
+    let duration_minutes = recording.duration as u64 / 60;
+    let duration_seconds = recording.duration as u64 % 60;
+    let duration_formatted = format!("{}:{:02}", duration_minutes, duration_seconds);
+    
+    // Create template environment
     let mut env = Environment::new();
-    env.add_template("player", HTML_TEMPLATE)?;
-    let tmpl = env.get_template("player")?;
+    env.add_template("main", HTML_TEMPLATE)?;
+    let template = env.get_template("main")?;
     
-    let html = tmpl.render(context! {
+    // Render HTML
+    let html = template.render(context! {
         title => recording.title,
         duration => recording.duration,
         duration_formatted => duration_formatted,
         events_count => recording.events.len(),
-        theme => theme_colors,
         recording_data => recording_data,
+        theme => theme_colors,
     })?;
     
+    // Write output file
     let mut output_file = File::create(&output_path)
         .context("Failed to create output file")?;
-    
     output_file.write_all(html.as_bytes())
         .context("Failed to write HTML file")?;
     
     println!("Web export saved to: {}", output_path.display());
-    println!("Duration: {:.1}s", recording.duration);
-    println!("Events: {}", recording.events.len());
-    println!("Theme: {}", theme);
     
     Ok(())
 }
 
-fn get_theme_colors(theme: &str) -> serde_json::Value {
-    let terminal_theme = super::terminal_renderer::TerminalTheme::from_name(theme);
-    
-    serde_json::json!({
-        "background": format!("rgb({}, {}, {})", terminal_theme.background.0, terminal_theme.background.1, terminal_theme.background.2),
-        "foreground": format!("rgb({}, {}, {})", terminal_theme.foreground.0, terminal_theme.foreground.1, terminal_theme.foreground.2),
-    })
+#[derive(Debug, serde::Serialize)]
+struct Theme {
+    background: String,
+    foreground: String,
+    black: String,
+    red: String,
+    green: String,
+    yellow: String,
+    blue: String,
+    magenta: String,
+    cyan: String,
+    white: String,
+    bright_black: String,
+    bright_red: String,
+    bright_green: String,
+    bright_yellow: String,
+    bright_blue: String,
+    bright_magenta: String,
+    bright_cyan: String,
+    bright_white: String,
 }
 
-fn format_duration(seconds: f64) -> String {
-    let total_seconds = seconds as u64;
-    let minutes = total_seconds / 60;
-    let seconds = total_seconds % 60;
-    format!("{}:{:02}", minutes, seconds)
+impl Theme {
+    fn auto() -> Self {
+        Self::black()
+    }
+    
+    fn black() -> Self {
+        Self {
+            background: String::from("#000000"),
+            foreground: String::from("#ffffff"),
+            black: String::from("#000000"),
+            red: String::from("#ff5555"),
+            green: String::from("#55ff55"),
+            yellow: String::from("#ffff55"),
+            blue: String::from("#5555ff"),
+            magenta: String::from("#ff55ff"),
+            cyan: String::from("#55ffff"),
+            white: String::from("#ffffff"),
+            bright_black: String::from("#555555"),
+            bright_red: String::from("#ff5555"),
+            bright_green: String::from("#55ff55"),
+            bright_yellow: String::from("#ffff55"),
+            bright_blue: String::from("#5555ff"),
+            bright_magenta: String::from("#ff55ff"),
+            bright_cyan: String::from("#55ffff"),
+            bright_white: String::from("#ffffff"),
+        }
+    }
+    
+    fn dracula() -> Self {
+        Self {
+            background: String::from("#282a36"),
+            foreground: String::from("#f8f8f2"),
+            black: String::from("#282a36"),
+            red: String::from("#ff5555"),
+            green: String::from("#50fa7b"),
+            yellow: String::from("#f1fa8c"),
+            blue: String::from("#6272a4"),
+            magenta: String::from("#ff79c6"),
+            cyan: String::from("#8be9fd"),
+            white: String::from("#f8f8f2"),
+            bright_black: String::from("#6272a4"),
+            bright_red: String::from("#ff5555"),
+            bright_green: String::from("#50fa7b"),
+            bright_yellow: String::from("#f1fa8c"),
+            bright_blue: String::from("#6272a4"),
+            bright_magenta: String::from("#ff79c6"),
+            bright_cyan: String::from("#8be9fd"),
+            bright_white: String::from("#ffffff"),
+        }
+    }
+    
+    fn monokai() -> Self {
+        Self {
+            background: String::from("#272822"),
+            foreground: String::from("#f8f8f2"),
+            black: String::from("#272822"),
+            red: String::from("#f92672"),
+            green: String::from("#a6e22e"),
+            yellow: String::from("#f4bf75"),
+            blue: String::from("#66d9ef"),
+            magenta: String::from("#ae81ff"),
+            cyan: String::from("#a1efe4"),
+            white: String::from("#f8f8f2"),
+            bright_black: String::from("#75715e"),
+            bright_red: String::from("#f92672"),
+            bright_green: String::from("#a6e22e"),
+            bright_yellow: String::from("#f4bf75"),
+            bright_blue: String::from("#66d9ef"),
+            bright_magenta: String::from("#ae81ff"),
+            bright_cyan: String::from("#a1efe4"),
+            bright_white: String::from("#f8f8f2"),
+        }
+    }
+    
+    fn solarized_dark() -> Self {
+        Self {
+            background: String::from("#002b36"),
+            foreground: String::from("#839496"),
+            black: String::from("#073642"),
+            red: String::from("#dc322f"),
+            green: String::from("#859900"),
+            yellow: String::from("#b58900"),
+            blue: String::from("#268bd2"),
+            magenta: String::from("#d33682"),
+            cyan: String::from("#2aa198"),
+            white: String::from("#eee8d5"),
+            bright_black: String::from("#002b36"),
+            bright_red: String::from("#cb4b16"),
+            bright_green: String::from("#586e75"),
+            bright_yellow: String::from("#657b83"),
+            bright_blue: String::from("#839496"),
+            bright_magenta: String::from("#6c71c4"),
+            bright_cyan: String::from("#93a1a1"),
+            bright_white: String::from("#fdf6e3"),
+        }
+    }
+    
+    fn solarized_light() -> Self {
+        Self {
+            background: String::from("#fdf6e3"),
+            foreground: String::from("#657b83"),
+            black: String::from("#073642"),
+            red: String::from("#dc322f"),
+            green: String::from("#859900"),
+            yellow: String::from("#b58900"),
+            blue: String::from("#268bd2"),
+            magenta: String::from("#d33682"),
+            cyan: String::from("#2aa198"),
+            white: String::from("#eee8d5"),
+            bright_black: String::from("#002b36"),
+            bright_red: String::from("#cb4b16"),
+            bright_green: String::from("#586e75"),
+            bright_yellow: String::from("#657b83"),
+            bright_blue: String::from("#839496"),
+            bright_magenta: String::from("#6c71c4"),
+            bright_cyan: String::from("#93a1a1"),
+            bright_white: String::from("#fdf6e3"),
+        }
+    }
 }

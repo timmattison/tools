@@ -1,6 +1,6 @@
-# shellcast - Terminal Session Recorder and Player
+# beta - Terminal Session Recorder and Player
 
-`shellcast` is a terminal session recorder and player that captures all terminal output with high-resolution timestamps, allowing you to record and replay terminal sessions exactly as they happened.
+`beta` is a terminal session recorder and player that captures all terminal output with high-resolution timestamps, allowing you to record and replay terminal sessions exactly as they happened. Because Betamax was always better than VHS.
 
 ## Features
 
@@ -31,7 +31,7 @@ cargo install --path .
 Or from the tools repository:
 
 ```bash
-cargo install --git https://github.com/timmattison/tools shellcast
+cargo install --git https://github.com/timmattison/tools beta
 ```
 
 ## Usage
@@ -40,22 +40,22 @@ cargo install --git https://github.com/timmattison/tools shellcast
 
 Basic recording:
 ```bash
-shellcast record
+beta record
 ```
 
 Record with custom output file:
 ```bash
-shellcast record -o session.json
+beta record -o session.json
 ```
 
 Record a specific command:
 ```bash
-shellcast record -c "npm test"
+beta record -c "npm test"
 ```
 
 Record with compression:
 ```bash
-shellcast record --compress -o session.json.gz
+beta record --compress -o session.json.gz
 ```
 
 Record with custom stop hotkey:
@@ -75,34 +75,34 @@ To stop recording, use:
 
 Basic playback:
 ```bash
-shellcast play session.json
+beta play session.json
 ```
 
 Play at double speed:
 ```bash
-shellcast play session.json -s 2.0
+beta play session.json -s 2.0
 ```
 
 Start playback paused:
 ```bash
-shellcast play session.json --paused
+beta play session.json --paused
 ```
 
 ### Exporting Recordings
 
 Export to self-contained HTML:
 ```bash
-shellcast export web session.json -o session.html
+beta export web session.json -o session.html
 ```
 
 Export to video with custom theme:
 ```bash
-shellcast export video session.json -o session.mp4 --theme dracula --fps 30
+beta export video session.json -o session.mp4 --theme dracula --fps 30
 ```
 
 Export to optimized GIF:
 ```bash
-shellcast export video session.json -o session.gif --fps 15 --optimize-web
+beta export video session.json -o session.gif --fps 15 --optimize-web
 ```
 
 ### Playback Controls
@@ -148,31 +148,31 @@ Event types:
 
 #### Record a build process
 ```bash
-shellcast record -o build.json -c "cargo build --release"
+beta record -o build.json -c "cargo build --release"
 ```
 
 #### Record an interactive session
 ```bash
-shellcast record -o demo.json
+beta record -o demo.json
 # ... do your work ...
 # Press Ctrl-D or type 'exit' to finish
 ```
 
 #### Create a compressed recording
 ```bash
-shellcast record --compress -o session.json.gz
+beta record --compress -o session.json.gz
 ```
 
 ### Playback Examples
 
 #### Play back at half speed
 ```bash
-shellcast play demo.json -s 0.5
+beta play demo.json -s 0.5
 ```
 
 #### Start playback paused
 ```bash
-shellcast play demo.json --paused
+beta play demo.json --paused
 ```
 
 ### Export Examples
@@ -180,28 +180,28 @@ shellcast play demo.json --paused
 #### Export to Web (HTML)
 ```bash
 # Basic web export
-shellcast export web demo.json -o demo.html
+beta export web demo.json -o demo.html
 
 # With Dracula theme
-shellcast export web demo.json -o demo.html --theme dracula
+beta export web demo.json -o demo.html --theme dracula
 
 # With compressed data embedding
-shellcast export web demo.json -o demo.html --compress
+beta export web demo.json -o demo.html --compress
 ```
 
 #### Export to Video
 ```bash
 # Basic MP4 export
-shellcast export video demo.json -o demo.mp4
+beta export video demo.json -o demo.mp4
 
 # Create an optimized GIF
-shellcast export video demo.json -o demo.gif --fps 15 --optimize-web
+beta export video demo.json -o demo.gif --fps 15 --optimize-web
 
 # High-quality video with custom settings
-shellcast export video demo.json -o demo.mp4 --fps 60 --resolution 1920x1080 --theme monokai
+beta export video demo.json -o demo.mp4 --fps 60 --resolution 1920x1080 --theme monokai
 
 # Web-optimized MP4
-shellcast export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
+beta export video demo.json -o demo.mp4 --optimize-web --theme solarized-dark
 ```
 
 **Font Requirements for Video Export:**
