@@ -7,3 +7,4 @@ go.sum
 target
 Cargo.lock
 .DS_Store
+.claude/
