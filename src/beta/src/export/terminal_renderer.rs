@@ -230,6 +230,7 @@ pub struct Cell {
     pub fg_color: (u8, u8, u8),
     pub bg_color: (u8, u8, u8),
     pub bold: bool,
+    #[allow(dead_code)] // Tracked by SGR processing; rendering support planned
     pub italic: bool,
     pub underline: bool,
 }
@@ -270,9 +271,6 @@ pub struct TerminalState {
     use_acs: bool,
     // Cursor visibility
     cursor_visible: bool,
-    // Track if we're in a DCS/OSC sequence
-    in_dcs_sequence: bool,
-    in_osc_sequence: bool,
     // Dynamic color palette for OSC sequences
     dynamic_palette: Vec<(u8, u8, u8)>,
     // Selection colors
@@ -281,10 +279,7 @@ pub struct TerminalState {
     // Override colors from OSC 10/11
     override_fg: Option<(u8, u8, u8)>,
     override_bg: Option<(u8, u8, u8)>,
-    // Terminal modes
-    alternate_screen: bool,
-    bracketed_paste: bool,
-    mouse_reporting: u16, // 0=none, 1000=basic, 1002=button, 1006=sgr
+    // Terminal modes (tracked for correctness but not used in rendering currently)
 }
 
 impl TerminalState {
@@ -327,17 +322,12 @@ impl TerminalState {
             scroll_top: 0,
             scroll_bottom: height - 1,
             use_acs: false,
-            cursor_visible: true,  // Cursor is visible by default
-            in_dcs_sequence: false,
-            in_osc_sequence: false,
+            cursor_visible: true,
             dynamic_palette,
             selection_fg: Some((0, 0, 0)),    // Default selection: black on yellow
             selection_bg: Some((255, 255, 0)),
             override_fg: None,
             override_bg: None,
-            alternate_screen: false,
-            bracketed_paste: false,
-            mouse_reporting: 0,
         }
     }
     
@@ -362,10 +352,12 @@ impl TerminalState {
         &self.theme
     }
     
+    #[cfg(test)]
     pub fn get_width(&self) -> usize {
         self.width
     }
-    
+
+    #[cfg(test)]
     pub fn get_height(&self) -> usize {
         self.height
     }
@@ -378,40 +370,21 @@ impl TerminalState {
         self.cursor_visible
     }
     
-    pub fn get_effective_foreground(&self) -> (u8, u8, u8) {
-        self.override_fg.unwrap_or(self.theme.foreground)
-    }
-    
-    pub fn get_effective_background(&self) -> (u8, u8, u8) {
-        self.override_bg.unwrap_or(self.theme.background)
-    }
-    
-    pub fn get_selection_colors(&self) -> ((u8, u8, u8), (u8, u8, u8)) {
-        (
-            self.selection_fg.unwrap_or((0, 0, 0)),
-            self.selection_bg.unwrap_or((255, 255, 0))
-        )
-    }
     
     pub fn resolve_cell_colors(&self, cell: &Cell) -> ((u8, u8, u8), (u8, u8, u8)) {
         let mut fg = cell.fg_color;
         let mut bg = cell.bg_color;
-        
-        // Handle palette color mapping for 256-color mode
-        // Check if the color matches any standard palette entry and use dynamic version
-        for i in 0..=255u8 {
-            let standard_color = TerminalTheme::get_256_color(i);
-            let dynamic_color = if (i as usize) < self.dynamic_palette.len() {
-                self.dynamic_palette[i as usize]
-            } else {
-                standard_color
-            };
-            
-            // Only replace if the dynamic color is different (has been modified)
-            if fg == standard_color && dynamic_color != standard_color {
+
+        // Only check palette entries that have been modified (not all 256)
+        for (i, &dynamic_color) in self.dynamic_palette.iter().enumerate() {
+            let standard_color = TerminalTheme::get_256_color(i as u8);
+            if dynamic_color == standard_color {
+                continue; // Skip unmodified entries
+            }
+            if fg == standard_color {
                 fg = dynamic_color;
             }
-            if bg == standard_color && dynamic_color != standard_color {
+            if bg == standard_color {
                 bg = dynamic_color;
             }
         }
@@ -495,26 +468,24 @@ impl TerminalState {
         if last_row > 0 {
             let status_row = &grid[last_row];
             
-            // Check if this row has characteristics of a tmux status bar
-            let has_status_colors = status_row.iter().any(|cell| {
-                // Look for green backgrounds (tmux default status color)
-                cell.bg_color == (0, 255, 0) || 
-                cell.bg_color == (85, 255, 85) ||
-                cell.bg_color == (0, 128, 0) ||
-                cell.bg_color == (80, 250, 123) ||  // dracula green
-                // Or inverted colors typical of status bars
-                (cell.bg_color != (0, 0, 0) && cell.fg_color != (255, 255, 255)) ||
-                // Common tmux status color combinations
-                (cell.bg_color == (255, 255, 255) && cell.fg_color == (0, 0, 0)) ||
-                // Look for characters that commonly appear in tmux status bars
-                matches!(cell.ch, '[' | ']' | '-' | '|' | ':')
+            // Check if this row has characteristics of a tmux status bar.
+            // Only match on specific known tmux status bar colors, not any non-default color.
+            let has_tmux_green_bg = status_row.iter().any(|cell| {
+                matches!(cell.bg_color,
+                    (0, 255, 0) | (85, 255, 85) | (0, 128, 0) | (80, 250, 123)
+                )
             });
-            
-            // Check if the row is mostly filled (status bars are usually full width)
-            let filled_cells = status_row.iter().filter(|cell| cell.ch != ' ').count();
-            let fill_ratio = filled_cells as f32 / status_row.len() as f32;
-            
-            if has_status_colors || fill_ratio > 0.3 {
+
+            // Also check for full-width inverted row (white bg / black fg) with bracket chars
+            let has_inverted_status = {
+                let inverted_count = status_row.iter().filter(|cell| {
+                    cell.bg_color == (255, 255, 255) && cell.fg_color == (0, 0, 0)
+                }).count();
+                let has_brackets = status_row.iter().any(|cell| matches!(cell.ch, '[' | ']'));
+                inverted_count > status_row.len() / 2 && has_brackets
+            };
+
+            if has_tmux_green_bg || has_inverted_status {
                 return Some(TmuxLayout {
                     status_bar_row: last_row,
                     content_height: last_row,
@@ -551,14 +522,6 @@ impl TerminalState {
         }
     }
     
-    pub fn get_effective_terminal_height(&self) -> usize {
-        // Return the height that applications should use, accounting for tmux status bar
-        if let Some(layout) = self.detect_tmux_layout() {
-            layout.content_height
-        } else {
-            self.height
-        }
-    }
     
     pub fn protect_status_bar_area(&mut self) {
         // Ensure status bar area is protected from application content
@@ -621,8 +584,7 @@ pub struct TmuxLayout {
 
 // Helper function for color analysis in terminal renderer
 fn is_light_color_terminal(color: (u8, u8, u8)) -> bool {
-    // Use luminance formula to determine if color is light
-    let luminance = (0.299 * color.0 as f32 + 0.587 * color.1 as f32 + 0.114 * color.2 as f32);
+    let luminance = 0.299 * color.0 as f32 + 0.587 * color.1 as f32 + 0.114 * color.2 as f32;
     luminance > 127.0
 }
 
@@ -823,10 +785,18 @@ impl TerminalState {
         }
     }
     
+    /// Public wrapper for testing parse_color_spec.
+    #[cfg(test)]
+    pub fn parse_color_spec_pub(&self, color_spec: &str) -> Option<(u8, u8, u8)> {
+        self.parse_color_spec(color_spec)
+    }
+
+    // All byte-level indexing below is safe because we reject non-ASCII input
+    // via `is_ascii()` checks before any indexing occurs.
+    #[allow(clippy::string_slice)]
     fn parse_color_spec(&self, color_spec: &str) -> Option<(u8, u8, u8)> {
         let spec = color_spec.trim();
-        
-        if spec.starts_with('#') && spec.len() == 7 {
+        if spec.starts_with('#') && spec.len() == 7 && spec.is_ascii() {
             // Hex format: #RRGGBB
             if let (Ok(r), Ok(g), Ok(b)) = (
                 u8::from_str_radix(&spec[1..3], 16),
@@ -835,7 +805,7 @@ impl TerminalState {
             ) {
                 return Some((r, g, b));
             }
-        } else if spec.starts_with("rgb:") {
+        } else if spec.starts_with("rgb:") && spec.is_ascii() {
             // X11 RGB format: rgb:RRRR/GGGG/BBBB or rgb:RR/GG/BB
             let rgb_part = &spec[4..];
             let parts: Vec<&str> = rgb_part.split('/').collect();
@@ -843,11 +813,11 @@ impl TerminalState {
                 let parse_component = |s: &str| -> Option<u8> {
                     match s.len() {
                         2 => u8::from_str_radix(s, 16).ok(),
-                        4 => u8::from_str_radix(&s[0..2], 16).ok(), // Take first two hex digits
+                        4 => u8::from_str_radix(&s[..2], 16).ok(),
                         _ => None,
                     }
                 };
-                
+
                 if let (Some(r), Some(g), Some(b)) = (
                     parse_component(parts[0]),
                     parse_component(parts[1]),
@@ -910,19 +880,15 @@ impl Perform for TerminalState {
     }
     
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
-        // Start of DCS sequence
-        self.in_dcs_sequence = true;
+        // DCS sequence start — consumed without action
     }
-    
+
     fn put(&mut self, _byte: u8) {
-        // This is called for bytes within DCS/OSC sequences
-        // We consume them without displaying to prevent junk text
-        // The actual sequence handling happens in hook/unhook/osc_dispatch
+        // Bytes within DCS/OSC sequences — consumed without displaying
     }
-    
+
     fn unhook(&mut self) {
-        // End of DCS sequence
-        self.in_dcs_sequence = false;
+        // DCS sequence end — consumed without action
     }
     
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
@@ -1038,38 +1004,25 @@ impl Perform for TerminalState {
                     // DECSET - Set Mode
                     for param in params.iter().flatten() {
                         match *param {
-                            25 => self.cursor_visible = true,  // Show cursor
-                            47 => self.alternate_screen = true, // Use alternate screen buffer
-                            1047 => self.alternate_screen = true, // Use alternate screen buffer
+                            25 => self.cursor_visible = true,
                             1049 => {
-                                // Save cursor and use alternate screen buffer
                                 self.saved_cursor_x = self.cursor_x;
                                 self.saved_cursor_y = self.cursor_y;
-                                self.alternate_screen = true;
                             }
-                            1000 => self.mouse_reporting = 1000, // Send mouse X & Y on button press
-                            1002 => self.mouse_reporting = 1002, // Use cell motion mouse tracking
-                            1006 => self.mouse_reporting = 1006, // SGR mouse mode
-                            2004 => self.bracketed_paste = true, // Bracketed paste mode
+                            // 47, 1047, 1000, 1002, 1006, 2004: acknowledged but not rendered
                             _ => {}
                         }
                     }
                 }
                 'l' => {
-                    // DECRST - Reset Mode  
+                    // DECRST - Reset Mode
                     for param in params.iter().flatten() {
                         match *param {
-                            25 => self.cursor_visible = false, // Hide cursor
-                            47 => self.alternate_screen = false, // Use normal screen buffer
-                            1047 => self.alternate_screen = false, // Use normal screen buffer
+                            25 => self.cursor_visible = false,
                             1049 => {
-                                // Use normal screen buffer and restore cursor
-                                self.alternate_screen = false;
                                 self.cursor_x = self.saved_cursor_x;
                                 self.cursor_y = self.saved_cursor_y;
                             }
-                            1000 | 1002 | 1006 => self.mouse_reporting = 0, // Disable mouse reporting
-                            2004 => self.bracketed_paste = false, // Disable bracketed paste mode
                             _ => {}
                         }
                     }
@@ -1221,16 +1174,15 @@ impl Perform for TerminalState {
                 }
             }
             'T' => {
-                // Scroll down
+                // Scroll down: shift content DOWN within scroll region, clear top
                 let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
                 for _ in 0..count {
-                    // Scroll down by moving content up and clearing the top line
-                    for y in 0..(self.height - 1) {
+                    for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
                         for x in 0..self.width {
-                            self.grid[y][x] = self.grid[y + 1][x].clone();
+                            self.grid[y][x] = self.grid[y - 1][x].clone();
                         }
                     }
-                    self.clear_line(self.height - 1);
+                    self.clear_line(self.scroll_top);
                 }
             }
             'L' => {
@@ -1262,16 +1214,14 @@ impl Perform for TerminalState {
                 }
             }
             'P' => {
-                // Delete characters
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                // Delete characters (clamped to avoid usize underflow)
+                let raw_count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
-                for x in start_x..(self.width - count) {
-                    if x + count < self.width {
-                        self.grid[self.cursor_y][x] = self.grid[self.cursor_y][x + count].clone();
-                    }
+                for x in start_x..self.width.saturating_sub(count) {
+                    self.grid[self.cursor_y][x] = self.grid[self.cursor_y][x + count].clone();
                 }
-                // Clear the rightmost characters
-                for x in (self.width - count)..self.width {
+                for x in self.width.saturating_sub(count)..self.width {
                     self.grid[self.cursor_y][x] = Cell {
                         ch: ' ',
                         fg_color: self.theme.foreground,
@@ -1281,16 +1231,13 @@ impl Perform for TerminalState {
                 }
             }
             '@' => {
-                // Insert characters
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                // Insert characters (clamped to avoid usize underflow)
+                let raw_count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
-                // Shift existing characters to the right
-                for x in (start_x..(self.width - count)).rev() {
-                    if x + count < self.width {
-                        self.grid[self.cursor_y][x + count] = self.grid[self.cursor_y][x].clone();
-                    }
+                for x in (start_x..self.width.saturating_sub(count)).rev() {
+                    self.grid[self.cursor_y][x + count] = self.grid[self.cursor_y][x].clone();
                 }
-                // Clear the inserted space
                 for x in start_x..(start_x + count).min(self.width) {
                     self.grid[self.cursor_y][x] = Cell {
                         ch: ' ',
@@ -1383,9 +1330,6 @@ impl Perform for TerminalState {
                 self.underline = false;
                 self.cursor_visible = true;
                 self.use_acs = false;
-                self.alternate_screen = false;
-                self.bracketed_paste = false;
-                self.mouse_reporting = 0;
             }
             _ => {
                 // Ignore unhandled escape sequences

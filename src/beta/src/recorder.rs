@@ -3,7 +3,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::fs::File;
 use std::io::{self, BufWriter, Write, Read};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering::Release, Ordering::Acquire}};
 use std::time::Instant;
 use std::thread;
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -59,13 +59,13 @@ impl RecordingSession {
             data,
         };
         
-        let mut recording = self.recording.lock().unwrap();
+        let mut recording = self.recording.lock().unwrap_or_else(|e| e.into_inner());
         recording.events.push(event);
         recording.duration = elapsed;
     }
-    
+
     fn save(&self) -> Result<()> {
-        let recording = self.recording.lock().unwrap();
+        let recording = self.recording.lock().unwrap_or_else(|e| e.into_inner());
         
         if self.compress {
             let file = File::create(&self.output_path)?;
@@ -81,32 +81,30 @@ impl RecordingSession {
     }
     
     fn stop(&self) {
-        self.should_stop.store(true, Ordering::Relaxed);
+        self.should_stop.store(true, Release);
     }
-    
+
     fn should_continue(&self) -> bool {
-        !self.should_stop.load(Ordering::Relaxed)
+        !self.should_stop.load(Acquire)
     }
 }
 
 pub async fn record(
     output: Option<PathBuf>,
     command: Option<String>,
-    append: bool,
     compress: bool,
-    _stop_hotkey: String,  // Kept for compatibility but ignored
 ) -> Result<()> {
     if !io::stdout().is_tty() {
         anyhow::bail!("beta record must be run in a terminal");
     }
-    
+
     let output_path = output.unwrap_or_else(|| {
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
         PathBuf::from(format!("beta_{}.json", timestamp))
     });
-    
-    if output_path.exists() && !append {
-        anyhow::bail!("Output file already exists. Use --append to append to it.");
+
+    if output_path.exists() {
+        anyhow::bail!("Output file already exists: {}", output_path.display());
     }
     
     let (term_width, term_height) = terminal::size()
@@ -168,7 +166,7 @@ pub async fn record(
     // Set up signal handling for graceful shutdown
     let session_for_signal = session.clone();
     let _signal_handle = thread::spawn(move || {
-        if let Ok(mut signals) = Signals::new(&[SIGINT]) {
+        if let Ok(mut signals) = Signals::new([SIGINT]) {
             for sig in signals.forever() {
                 if sig == SIGINT {
                     // Disable raw mode before printing to fix terminal output

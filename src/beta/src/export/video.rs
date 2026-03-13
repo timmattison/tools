@@ -1,34 +1,31 @@
 use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgb, RgbImage};
-use std::fs::File;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::io::Write;
 use imageproc::drawing::{draw_filled_rect_mut, draw_text_mut};
 use imageproc::rect::Rect;
-use ab_glyph::{FontRef, PxScale, Font};
+use ab_glyph::{FontVec, PxScale, Font};
 use std::collections::HashMap;
 use crate::{Recording, EventType};
 use super::terminal_renderer::{TerminalTheme, TerminalState};
 
 // Helper functions for color analysis
 fn color_similarity(color1: (u8, u8, u8), color2: (u8, u8, u8)) -> u32 {
-    // Calculate Euclidean distance between colors
-    let dr = (color1.0 as i32 - color2.0 as i32).abs() as u32;
-    let dg = (color1.1 as i32 - color2.1 as i32).abs() as u32;
-    let db = (color1.2 as i32 - color2.2 as i32).abs() as u32;
+    // Calculate Manhattan distance between colors
+    let dr = (color1.0 as i32 - color2.0 as i32).unsigned_abs();
+    let dg = (color1.1 as i32 - color2.1 as i32).unsigned_abs();
+    let db = (color1.2 as i32 - color2.2 as i32).unsigned_abs();
     dr + dg + db
 }
 
 fn is_light_color(color: (u8, u8, u8)) -> bool {
-    // Use luminance formula to determine if color is light
-    let luminance = (0.299 * color.0 as f32 + 0.587 * color.1 as f32 + 0.114 * color.2 as f32);
+    let luminance = 0.299 * color.0 as f32 + 0.587 * color.1 as f32 + 0.114 * color.2 as f32;
     luminance > 127.0
 }
 
 struct FontManager {
-    fonts: Vec<FontRef<'static>>,
+    fonts: Vec<FontVec>,
     glyph_cache: HashMap<char, usize>, // Character -> font index
 }
 
@@ -36,41 +33,41 @@ impl FontManager {
     fn new() -> Result<Self> {
         let mut fonts = Vec::new();
         let font_paths = get_font_paths();
-        
+
         for font_path in &font_paths {
             if let Ok(font) = load_font_from_path(font_path) {
                 fonts.push(font);
-                if fonts.len() >= 5 { // Limit to reasonable number of fonts
+                if fonts.len() >= 5 {
                     break;
                 }
             }
         }
-        
+
         if fonts.is_empty() {
             return Err(anyhow::anyhow!("No fonts could be loaded"));
         }
-        
+
         Ok(FontManager {
             fonts,
             glyph_cache: HashMap::new(),
         })
     }
-    
-    fn get_best_font_for_char(&mut self, ch: char) -> &FontRef<'static> {
+
+    fn get_best_font_for_char(&mut self, ch: char) -> &FontVec {
         // Check cache first
         if let Some(&font_index) = self.glyph_cache.get(&ch) {
             return &self.fonts[font_index];
         }
-        
+
         // Find font that contains this character
         for (i, font) in self.fonts.iter().enumerate() {
-            if font.glyph_id(ch).0 != 0 { // 0 means missing glyph
+            if font.glyph_id(ch).0 != 0 {
                 self.glyph_cache.insert(ch, i);
                 return &self.fonts[i];
             }
         }
-        
-        // Fallback to first font if no font contains the character
+
+        // Fallback to first font
         &self.fonts[0]
     }
 }
@@ -126,8 +123,7 @@ fn get_font_paths() -> Vec<&'static str> {
     ]
 }
 
-fn load_font_from_path(font_path: &str) -> Result<FontRef<'static>> {
-    // Expand home directory if path starts with ~
+fn load_font_from_path(font_path: &str) -> Result<FontVec> {
     let expanded_path = if font_path.starts_with("~/") {
         if let Some(home_dir) = std::env::var_os("HOME") {
             let home_str = home_dir.to_string_lossy();
@@ -138,35 +134,10 @@ fn load_font_from_path(font_path: &str) -> Result<FontRef<'static>> {
     } else {
         font_path.to_string()
     };
-    
-    let font_data = std::fs::read(&expanded_path)?;
-    // Need to leak the data to get a 'static lifetime
-    let static_data: &'static [u8] = Box::leak(font_data.into_boxed_slice());
-    FontRef::try_from_slice(static_data)
-        .map_err(|_| anyhow::anyhow!("Failed to parse font"))
-}
 
-fn get_font() -> Result<FontRef<'static>> {
-    // Try to load fonts in order of preference, starting with user's preferred font
-    let font_paths = get_font_paths();
-    
-    for font_path in &font_paths {
-        if let Ok(font) = load_font_from_path(font_path) {
-            println!("Using font: {}", font_path);
-            return Ok(font);
-        }
-    }
-    
-    Err(anyhow::anyhow!(
-        "No suitable monospace font found. For best results, install JetBrains Mono Nerd Font Medium:\n\
-         - Download JetBrainsMonoNerdFontMono-Medium.ttf from: https://github.com/ryanoasis/nerd-fonts/releases\n\
-         - Or use Homebrew: brew tap homebrew/cask-fonts && brew install font-jetbrains-mono-nerd-font\n\
-         - Install to ~/Library/Fonts/ (macOS) or ~/.local/share/fonts/ (Linux)\n\
-         \n\
-         Fallback options:\n\
-         - macOS: Monaco (should be pre-installed)\n\
-         - Linux: sudo apt install fonts-dejavu fonts-liberation"
-    ))
+    let font_data = std::fs::read(&expanded_path)?;
+    FontVec::try_from_vec(font_data)
+        .map_err(|_| anyhow::anyhow!("Failed to parse font"))
 }
 
 pub async fn export_video(
@@ -177,23 +148,7 @@ pub async fn export_video(
     theme: String,
     optimize_web: bool,
 ) -> Result<()> {
-    let file = File::open(&input)
-        .context("Failed to open recording file")?;
-    
-    let recording: Recording = if input.file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.ends_with(".gz"))
-        .unwrap_or(false)
-    {
-        let reader = BufReader::new(file);
-        let decoder = flate2::read::GzDecoder::new(reader);
-        serde_json::from_reader(decoder)
-            .context("Failed to parse compressed recording")?
-    } else {
-        let reader = BufReader::new(file);
-        serde_json::from_reader(reader)
-            .context("Failed to parse recording")?
-    };
+    let recording = Recording::load(&input)?;
     
     let output_path = output.unwrap_or_else(|| {
         let mut path = input.clone();
@@ -332,34 +287,16 @@ fn generate_and_encode_video(
     Ok(total_frames)
 }
 
-fn calculate_font_baseline(font: &FontRef, font_size: f32) -> f32 {
+fn calculate_font_baseline(font: &impl Font, font_size: f32) -> f32 {
     let scale = PxScale::from(font_size);
-    
-    // Get font metrics using ab_glyph unscaled API and apply scaling
+
     let units_per_em = font.units_per_em().unwrap_or(1000.0);
     let scale_factor = scale.y / units_per_em;
-    
+
     let ascent = font.ascent_unscaled() * scale_factor;
-    
-    // Round to nearest integer for pixel-perfect rendering
+
     // Cap baseline to leave room for descenders (scaled for 4x)
     ascent.min(48.0).round()
-}
-
-fn calculate_text_height(font: &FontRef, font_size: f32) -> (f32, f32) {
-    let scale = PxScale::from(font_size);
-    
-    // Get font metrics using ab_glyph unscaled API and apply scaling
-    let units_per_em = font.units_per_em().unwrap_or(1000.0);
-    let scale_factor = scale.y / units_per_em;
-    
-    let ascent = font.ascent_unscaled() * scale_factor;
-    let descent = font.descent_unscaled() * scale_factor; // descent is typically negative
-    
-    let text_ascent = ascent.min(48.0);
-    let text_descent = (-descent).min(12.0); // Make descent positive and cap it
-    
-    (text_ascent, text_descent)
 }
 
 fn render_terminal_to_image(

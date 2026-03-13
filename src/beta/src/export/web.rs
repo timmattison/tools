@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use minijinja::{Environment, context};
 use std::fs::File;
-use std::io::{BufReader, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use base64::{Engine as _, engine::general_purpose};
 use crate::Recording;
@@ -355,23 +355,7 @@ pub async fn export_web(
     theme: String,
     compress: bool,
 ) -> Result<()> {
-    let file = File::open(&input)
-        .context("Failed to open recording file")?;
-    
-    let recording: Recording = if input.file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.ends_with(".gz"))
-        .unwrap_or(false)
-    {
-        let reader = BufReader::new(file);
-        let decoder = flate2::read::GzDecoder::new(reader);
-        serde_json::from_reader(decoder)
-            .context("Failed to parse compressed recording")?
-    } else {
-        let reader = BufReader::new(file);
-        serde_json::from_reader(reader)
-            .context("Failed to parse recording")?
-    };
+    let recording = Recording::load(&input)?;
     
     let output_path = output.unwrap_or_else(|| {
         let mut path = input.clone();
@@ -400,8 +384,10 @@ pub async fn export_web(
             general_purpose::STANDARD.encode(&compressed)
         )
     } else {
+        // Escape </ to <\/ to prevent </script> injection when embedding in HTML
         serde_json::to_string(&recording)
             .context("Failed to serialize recording")?
+            .replace("</", r"<\/")
     };
     
     // Format duration

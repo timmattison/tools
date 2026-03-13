@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
@@ -17,18 +18,12 @@ enum Commands {
     Record {
         #[arg(short, long, help = "Output file for the recording")]
         output: Option<PathBuf>,
-        
+
         #[arg(short, long, help = "Command to record (default: shell)")]
         command: Option<String>,
-        
-        #[arg(long, help = "Append to existing recording")]
-        append: bool,
-        
+
         #[arg(long, help = "Compress the recording with gzip")]
         compress: bool,
-        
-        #[arg(long, default_value = "ctrl-end", help = "Hotkey to stop recording (ctrl-end, f12, ctrl-], ctrl-\\\\)")]
-        stop_hotkey: String,
     },
     Play {
         #[arg(help = "Recording file to play")]
@@ -115,8 +110,37 @@ pub enum EventType {
 pub fn get_timestamp() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs_f64()
+}
+
+impl Recording {
+    /// Load a recording from a file, auto-detecting gzip compression via magic bytes.
+    pub fn load(path: &Path) -> Result<Self> {
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("Failed to open recording file: {}", path.display()))?;
+
+        if file.metadata()?.len() == 0 {
+            anyhow::bail!("Recording file is empty");
+        }
+
+        // Check for gzip magic bytes (0x1f 0x8b) instead of relying on extension
+        let mut magic = [0u8; 2];
+        let is_gzip = file.read_exact(&mut magic).is_ok() && magic == [0x1f, 0x8b];
+
+        // Seek back to the beginning for the actual read
+        file.seek(SeekFrom::Start(0))?;
+        let reader = std::io::BufReader::new(file);
+
+        if is_gzip {
+            let decoder = flate2::read::GzDecoder::new(reader);
+            serde_json::from_reader(decoder)
+                .context("Failed to parse compressed recording")
+        } else {
+            serde_json::from_reader(reader)
+                .context("Failed to parse recording")
+        }
+    }
 }
 
 mod recorder;
@@ -131,8 +155,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     
     match cli.command {
-        Commands::Record { output, command, append, compress, stop_hotkey } => {
-            recorder::record(output, command, append, compress, stop_hotkey).await
+        Commands::Record { output, command, compress } => {
+            recorder::record(output, command, compress).await
         }
         Commands::Play { file, speed, paused } => {
             player::play(file, speed, paused).await
