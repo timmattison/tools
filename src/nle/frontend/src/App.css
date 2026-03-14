@@ -38,6 +38,29 @@ body,
   border-bottom: 1px solid #313244;
 }
 
+.error-banner {
+  grid-column: 1 / -1;
+  background: #f38ba8;
+  color: #1e1e2e;
+  padding: 8px 12px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.error-dismiss {
+  background: transparent;
+  border: 1px solid #1e1e2e;
+  color: #1e1e2e;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.error-dismiss:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
 .preview-pane {
   grid-area: preview;
   background: #1e1e2e;

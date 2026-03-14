@@ -21,15 +21,11 @@ pub async fn load_recording(path: String) -> Result<LoadedRecording, NleError> {
 }
 
 /// Save a recording to a file path.
+/// Automatically uses gzip compression if the path ends in `.gz`.
 #[tauri::command]
 pub async fn save_recording(path: String, recording: Recording) -> Result<(), NleError> {
-    let json = serde_json::to_string_pretty(&recording)
-        .map_err(|e| NleError::SaveError(format!("Failed to serialize recording: {e}")))?;
-
-    std::fs::write(&path, json)
-        .map_err(|e| NleError::SaveError(format!("Failed to write file {path}: {e}")))?;
-
-    Ok(())
+    let file_path = PathBuf::from(&path);
+    recording.save(&file_path)
 }
 
 /// List recordings in a directory, returning metadata for each.
