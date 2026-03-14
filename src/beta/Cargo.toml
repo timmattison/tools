@@ -1,0 +1,30 @@
+[package]
+name = "beta"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+portable-pty = "0.9.0"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tokio-stream = "0.1"
+chrono = "0.4"
+flate2 = "1.0"
+terminal_size = "0.4.2"
+
+# Export functionality dependencies
+minijinja = "2.0"          # Template engine for web export
+base64 = "0.22"            # Data embedding for web export
+image = "0.25"             # Image generation for video export
+imageproc = "0.25.0"         # Image processing for video export
+ab_glyph = "0.2"           # Font rendering for video export (replaces rusttype)
+vte = "0.15.0"               # VT100/ANSI terminal emulator
+signal-hook = "0.3"        # Signal handling for graceful termination
+
+[lints.clippy]
+string_slice = "warn"

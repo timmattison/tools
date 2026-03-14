@@ -7,3 +7,4 @@ cmd/sizeof/sizeof
 go.sum
 target
 .DS_Store
+.claude/
