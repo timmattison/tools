@@ -1,0 +1,31 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/dev/crates/tauri-config-schema/schema.json",
+  "productName": "NLE",
+  "version": "0.1.0",
+  "identifier": "com.timmattison.nle",
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "frontend/dist",
+    "beforeDevCommand": { "script": "pnpm dev", "cwd": "frontend" },
+    "beforeBuildCommand": { "script": "pnpm build", "cwd": "frontend" }
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "NLE - Terminal Recording Editor",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": []
+  }
+}
