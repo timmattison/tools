@@ -2,6 +2,7 @@ mod commands;
 mod error;
 mod types;
 
+use buildinfo::version_string;
 use commands::{export_video, export_web, list_recordings, load_recording, save_recording};
 
 /// Run the Tauri application.
@@ -10,6 +11,8 @@ use commands::{export_video, export_web, list_recordings, load_recording, save_r
 /// Panics if the Tauri application fails to initialize.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    eprintln!("nle {}", version_string!());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())

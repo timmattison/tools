@@ -48,7 +48,7 @@ export function PropertiesPanel({ metadata }: PropertiesPanelProps) {
       <div className="metadata-item">
         <span className="metadata-label">File</span>
         <span className="metadata-value" title={metadata.file_path}>
-          {metadata.file_path.split("/").pop()}
+          {metadata.file_path.split(/[/\\]/).pop()}
         </span>
       </div>
     </div>
