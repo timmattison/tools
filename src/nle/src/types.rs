@@ -125,17 +125,12 @@ impl Recording {
         }
     }
 
-    /// Save a recording to a file, using gzip compression if the path ends in `.gz`.
-    pub fn save(&self, path: &Path) -> Result<(), NleError> {
+    /// Save a recording to a file, optionally using gzip compression.
+    pub fn save(&self, path: &Path, compress: bool) -> Result<(), NleError> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| NleError::SaveError(format!("Failed to serialize recording: {e}")))?;
 
-        let is_gzip = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|ext| ext == "gz");
-
-        if is_gzip {
+        if compress {
             let file = std::fs::File::create(path).map_err(|e| {
                 NleError::SaveError(format!("Failed to create file {}: {e}", path.display()))
             })?;
@@ -299,7 +294,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.json");
 
-        recording.save(&path).unwrap();
+        recording.save(&path, false).unwrap();
 
         let loaded = Recording::load(&path).unwrap();
         assert_eq!(loaded.version, recording.version);
@@ -312,7 +307,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.json.gz");
 
-        recording.save(&path).unwrap();
+        recording.save(&path, true).unwrap();
 
         // Verify the file is actually gzip by checking magic bytes
         let bytes = std::fs::read(&path).unwrap();
@@ -332,7 +327,7 @@ mod tests {
 
         // Test plain JSON roundtrip
         let json_path = dir.path().join("roundtrip.json");
-        original.save(&json_path).unwrap();
+        original.save(&json_path, false).unwrap();
         let loaded_json = Recording::load(&json_path).unwrap();
         assert_eq!(loaded_json.title, original.title);
         assert_eq!(loaded_json.command, original.command);
@@ -341,7 +336,7 @@ mod tests {
 
         // Test gzip roundtrip
         let gz_path = dir.path().join("roundtrip.json.gz");
-        original.save(&gz_path).unwrap();
+        original.save(&gz_path, true).unwrap();
         let loaded_gz = Recording::load(&gz_path).unwrap();
         assert_eq!(loaded_gz.title, original.title);
         assert_eq!(loaded_gz.command, original.command);
@@ -392,6 +387,33 @@ mod tests {
     }
 
     #[test]
+    fn test_save_compress_flag_overrides_extension() {
+        let recording = Recording::test_fixture();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Save with compress=true to a .json path (no .gz extension)
+        let path = dir.path().join("compressed.json");
+        recording.save(&path, true).unwrap();
+
+        // File should be gzip despite the .json extension
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes[0], 0x1f, "Expected gzip magic byte 1");
+        assert_eq!(bytes[1], 0x8b, "Expected gzip magic byte 2");
+
+        // Should still load correctly via magic-byte detection
+        let loaded = Recording::load(&path).unwrap();
+        assert_eq!(loaded.version, recording.version);
+
+        // Save with compress=false to a .gz path
+        let path_gz = dir.path().join("uncompressed.json.gz");
+        recording.save(&path_gz, false).unwrap();
+
+        // File should be plain JSON despite the .gz extension
+        let bytes = std::fs::read(&path_gz).unwrap();
+        assert_ne!(bytes[0], 0x1f, "Should NOT be gzip");
+    }
+
+    #[test]
     fn test_utf8_safety_in_recording_data() {
         let mut recording = Recording::test_fixture();
         recording.title = "日本語テスト".to_string();
@@ -400,7 +422,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("utf8.json");
-        recording.save(&path).unwrap();
+        recording.save(&path, false).unwrap();
 
         let loaded = Recording::load(&path).unwrap();
         assert_eq!(loaded.title, "日本語テスト");

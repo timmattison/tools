@@ -3,16 +3,14 @@ import { MenuBar } from "./components/menu-bar";
 import { PreviewPane } from "./components/preview-pane";
 import { Timeline } from "./components/timeline";
 import { PropertiesPanel } from "./components/properties-panel";
-import type { Recording, RecordingMetadata } from "./bindings";
+import type { LoadedRecording } from "./bindings";
 
 export function App() {
-  const [recording, setRecording] = useState<Recording | null>(null);
-  const [metadata, setMetadata] = useState<RecordingMetadata | null>(null);
+  const [loaded, setLoaded] = useState<LoadedRecording | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  function handleRecordingLoaded(rec: Recording, meta: RecordingMetadata) {
-    setRecording(rec);
-    setMetadata(meta);
+  function handleRecordingLoaded(result: LoadedRecording) {
+    setLoaded(result);
     setError(null);
   }
 
@@ -31,9 +29,9 @@ export function App() {
           </button>
         </div>
       )}
-      <PreviewPane recording={recording} />
-      <Timeline recording={recording} />
-      <PropertiesPanel metadata={metadata} />
+      <PreviewPane recording={loaded?.recording ?? null} />
+      <Timeline recording={loaded?.recording ?? null} />
+      <PropertiesPanel metadata={loaded?.metadata ?? null} />
     </div>
   );
 }
