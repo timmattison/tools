@@ -26,7 +26,7 @@ export function App() {
       {error && (
         <div className="error-banner" role="alert">
           {error}
-          <button onClick={() => setError(null)} className="error-dismiss">
+          <button onClick={() => { setError(null); }} className="error-dismiss">
             Dismiss
           </button>
         </div>
