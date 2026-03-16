@@ -1,9 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { LoadedRecording, Recording, RecordingMetadata } from "../bindings";
+import type { LoadedRecording } from "../bindings";
 
 interface MenuBarProps {
-  onRecordingLoaded: (recording: Recording, metadata: RecordingMetadata) => void;
+  onRecordingLoaded: (result: LoadedRecording) => void;
   onError: (message: string) => void;
 }
 
@@ -22,7 +22,7 @@ export function MenuBar({ onRecordingLoaded, onError }: MenuBarProps) {
         const result = await invoke<LoadedRecording>("load_recording", {
           path: selected,
         });
-        onRecordingLoaded(result.recording, result.metadata);
+        onRecordingLoaded(result);
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
