@@ -2,26 +2,35 @@ use std::sync::Mutex;
 
 use tauri::State;
 
+use crate::cache::TextCache;
 use crate::db::MessageDb;
 use crate::error::MsgsError;
-use crate::types::{Conversation, DbStatus, Message};
+use crate::types::{Conversation, DbStatus, Message, SearchResult};
+
+pub struct AppStateInner {
+    pub db: Option<MessageDb>,
+    pub cache: Option<TextCache>,
+}
 
 pub struct AppState {
-    pub db: Mutex<Option<MessageDb>>,
+    pub inner: Mutex<AppStateInner>,
 }
 
 #[tauri::command]
 #[specta::specta]
 pub fn check_db_access(state: State<'_, AppState>) -> Result<DbStatus, MsgsError> {
-    let mut db_lock = state
-        .db
+    let mut lock = state
+        .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    if db_lock.is_none() {
+    if lock.db.is_none() {
         match MessageDb::open() {
             Ok(db) => {
                 let status = db.check_access()?;
-                *db_lock = Some(db);
+                *lock = AppStateInner {
+                    db: Some(db),
+                    cache: None,
+                };
                 Ok(status)
             }
             Err(e) => Ok(DbStatus {
@@ -31,7 +40,7 @@ pub fn check_db_access(state: State<'_, AppState>) -> Result<DbStatus, MsgsError
             }),
         }
     } else {
-        db_lock.as_ref().unwrap().check_access()
+        lock.db.as_ref().unwrap().check_access()
     }
 }
 
@@ -42,11 +51,12 @@ pub fn list_conversations(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<Conversation>, MsgsError> {
-    let db_lock = state
-        .db
+    let lock = state
+        .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = db_lock
+    let db = lock
+        .db
         .as_ref()
         .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
     db.list_conversations(offset, limit)
@@ -60,11 +70,12 @@ pub fn get_messages(
     offset: i64,
     limit: i64,
 ) -> Result<Vec<Message>, MsgsError> {
-    let db_lock = state
-        .db
+    let lock = state
+        .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = db_lock
+    let db = lock
+        .db
         .as_ref()
         .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
     db.get_messages(chat_id, offset, limit)
@@ -74,4 +85,57 @@ pub fn get_messages(
 #[specta::specta]
 pub fn get_version() -> String {
     buildinfo::version_string!().to_string()
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn search_messages(
+    state: State<'_, AppState>,
+    query: String,
+    chat_id: Option<i64>,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<SearchResult>, MsgsError> {
+    let lock = state
+        .inner
+        .lock()
+        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
+    let cache = lock
+        .cache
+        .as_ref()
+        .ok_or(MsgsError::CacheError("Text cache not initialized".to_string()))?;
+    let db = lock
+        .db
+        .as_ref()
+        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+
+    let hits = cache.search(&query, chat_id, limit, offset)?;
+
+    let mut results = Vec::new();
+    for (message_id, hit_chat_id) in hits {
+        if let Ok(context) = db.get_message_with_context(message_id, hit_chat_id) {
+            results.push(context);
+        }
+    }
+
+    Ok(results)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn rebuild_text_cache(state: State<'_, AppState>) -> Result<(), MsgsError> {
+    let mut lock = state
+        .inner
+        .lock()
+        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
+    let db = lock
+        .db
+        .as_ref()
+        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+
+    let cache = TextCache::open()?;
+    cache.rebuild(db.connection())?;
+    lock.cache = Some(cache);
+
+    Ok(())
 }

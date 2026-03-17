@@ -1,12 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cache;
 mod commands;
 mod db;
 mod error;
 mod parser;
 mod types;
 
-use commands::AppState;
+use commands::{AppState, AppStateInner};
 use std::sync::Mutex;
 
 fn main() {
@@ -16,13 +17,18 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .manage(AppState {
-            db: Mutex::new(None),
+            inner: Mutex::new(AppStateInner {
+                db: None,
+                cache: None,
+            }),
         })
         .invoke_handler(tauri::generate_handler![
             commands::check_db_access,
             commands::list_conversations,
             commands::get_messages,
             commands::get_version,
+            commands::search_messages,
+            commands::rebuild_text_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

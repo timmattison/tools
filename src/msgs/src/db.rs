@@ -4,6 +4,7 @@ use crate::error::MsgsError;
 use crate::parser::extract_text_from_attributed_body;
 use crate::types::{
     apple_timestamp_to_datetime, truncate_preview, AttachmentInfo, Conversation, DbStatus, Message,
+    SearchResult,
 };
 
 const CHAT_DB_PATH: &str = "Library/Messages/chat.db";
@@ -566,5 +567,51 @@ impl MessageDb {
         }
 
         Ok(messages)
+    }
+
+    /// Get a message with surrounding context for search results.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MsgsError::DatabaseError` on query failure.
+    pub fn get_message_with_context(
+        &self,
+        message_id: i64,
+        chat_id: i64,
+    ) -> Result<SearchResult, MsgsError> {
+        // Get the target message's date
+        let msg_date: i64 = self.conn.query_row(
+            "SELECT cmj.message_date FROM chat_message_join cmj
+             WHERE cmj.message_id = ?1 AND cmj.chat_id = ?2",
+            [message_id, chat_id],
+            |row| row.get(0),
+        )?;
+
+        // Get the target message with surrounding context
+        let messages = self.get_messages_around(chat_id, msg_date, 3, 3)?;
+
+        // Find the target in results
+        let target_idx = messages
+            .iter()
+            .position(|m| m.message_id == message_id)
+            .unwrap_or(0);
+
+        let context_before = messages[..target_idx].to_vec();
+        let target = messages[target_idx].clone();
+        let context_after = if target_idx + 1 < messages.len() {
+            messages[target_idx + 1..].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        // Get conversation info
+        let conversation = self.get_conversation(chat_id)?;
+
+        Ok(SearchResult {
+            message: target,
+            conversation,
+            context_before,
+            context_after,
+        })
     }
 }

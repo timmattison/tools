@@ -5,6 +5,7 @@ import {
   getConversationById,
 } from "./conversations";
 import { loadConversation } from "./messages";
+import { initSearch } from "./search";
 
 interface DbStatus {
   accessible: boolean;
@@ -20,7 +21,12 @@ async function init(): Promise<void> {
   }
 
   onConversationSelect(handleConversationSelect);
+  initSearch(handleSearchNavigate);
   await initConversations();
+}
+
+async function handleSearchNavigate(chatId: number, _messageId: number): Promise<void> {
+  await handleConversationSelect(chatId);
 }
 
 async function handleConversationSelect(chatId: number): Promise<void> {
