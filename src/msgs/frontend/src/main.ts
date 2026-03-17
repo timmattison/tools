@@ -1,5 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { initConversations } from "./conversations";
+import {
+  initConversations,
+  onConversationSelect,
+  getConversationById,
+} from "./conversations";
 
 interface DbStatus {
   accessible: boolean;
@@ -13,7 +17,16 @@ async function init(): Promise<void> {
     showError(status.error ?? "Cannot access message database");
     return;
   }
+
+  onConversationSelect(handleConversationSelect);
   await initConversations();
+}
+
+async function handleConversationSelect(chatId: number): Promise<void> {
+  const conv = getConversationById(chatId);
+  if (!conv) return;
+  // Message loading will be wired up in Task 7
+  console.log("Selected conversation:", conv.chat_identifier);
 }
 
 function showError(message: string): void {
