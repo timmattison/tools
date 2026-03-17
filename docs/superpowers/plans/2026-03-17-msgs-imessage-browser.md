@@ -78,8 +78,8 @@ tauri-build = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 
-# SQLite (multi-thread feature needed for Tauri's thread pool)
-rusqlite = { version = "0.32", features = ["bundled"] }
+# SQLite (bundled + multi-thread: Connection must be Send for Tauri's thread pool)
+rusqlite = { version = "0.32", features = ["bundled", "multi-thread"] }
 
 # Type generation
 specta = { version = "2", features = ["derive", "chrono"] }
@@ -2424,7 +2424,7 @@ impl TextCache {
              CREATE VIRTUAL TABLE IF NOT EXISTS message_text USING fts5(
                  message_id UNINDEXED,
                  chat_id UNINDEXED,
-                 sender,
+                 sender UNINDEXED,
                  text,
                  content=''
              );",
@@ -3081,11 +3081,13 @@ pub fn export_messages(
     include_attachments: bool,
     export_path: String,
 ) -> Result<ExportResult, MsgsError> {
-    let db_lock = state
-        .db
+    // Note: by Stage 4, AppState uses inner: Mutex<AppStateInner>
+    let lock = state
+        .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    let db = db_lock
+    let db = lock
+        .db
         .as_ref()
         .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
 
@@ -3144,8 +3146,12 @@ let startDate: string | null = null;
 let endDate: string | null = null;
 let currentExportChatId: number | null = null;
 
+let initialized = false;
+
 export function initExport(chatId: number): void {
   currentExportChatId = chatId;
+  if (initialized) return;
+  initialized = true;
 
   const exportBtn = document.getElementById("btn-export")!;
   exportBtn.addEventListener("click", toggleSelectionMode);
