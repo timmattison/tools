@@ -5,7 +5,8 @@ use tauri::State;
 use crate::cache::TextCache;
 use crate::db::MessageDb;
 use crate::error::MsgsError;
-use crate::types::{Conversation, DbStatus, Message, SearchResult};
+use crate::export::export_conversation_range;
+use crate::types::{Conversation, DbStatus, ExportResult, Message, SearchResult};
 
 pub struct AppStateInner {
     pub db: Option<MessageDb>,
@@ -138,4 +139,34 @@ pub fn rebuild_text_cache(state: State<'_, AppState>) -> Result<(), MsgsError> {
     lock.cache = Some(cache);
 
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn export_messages(
+    state: State<'_, AppState>,
+    chat_id: i64,
+    start_message_date: i64,
+    end_message_date: i64,
+    include_attachments: bool,
+    export_path: String,
+) -> Result<ExportResult, MsgsError> {
+    let lock = state
+        .inner
+        .lock()
+        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
+    let db = lock
+        .db
+        .as_ref()
+        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+
+    let export_dir = std::path::Path::new(&export_path);
+    export_conversation_range(
+        db,
+        chat_id,
+        start_message_date,
+        end_message_date,
+        include_attachments,
+        export_dir,
+    )
 }

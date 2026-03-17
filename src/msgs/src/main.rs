@@ -4,6 +4,7 @@ mod cache;
 mod commands;
 mod db;
 mod error;
+mod export;
 mod parser;
 mod types;
 
@@ -29,6 +30,7 @@ fn main() {
             commands::get_version,
             commands::search_messages,
             commands::rebuild_text_cache,
+            commands::export_messages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

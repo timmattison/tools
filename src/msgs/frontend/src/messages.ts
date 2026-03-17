@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { handleMessageClick, initExport } from "./export";
 
 interface Message {
   message_id: number;
@@ -60,6 +61,9 @@ export async function loadConversation(
 
   // Set up scroll handler for loading older messages
   area.addEventListener("scroll", handleMessageScroll);
+
+  // Initialize export selection mode
+  initExport(chatId);
 }
 
 async function loadMoreMessages(): Promise<void> {
@@ -160,6 +164,7 @@ function createMessageElement(msg: Message): HTMLElement {
   }
 
   wrapper.appendChild(bubble);
+  wrapper.addEventListener("click", () => handleMessageClick(wrapper));
   return wrapper;
 }
 
