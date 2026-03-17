@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>msgs — iMessage Browser</title>
+    <link rel="stylesheet" href="/src/styles/main.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div id="search-bar">
+          <input type="text" id="global-search" placeholder="Search messages..." />
+        </div>
+        <div id="conversation-list"></div>
+      </aside>
+      <main id="content">
+        <div id="empty-state">Select a conversation to view messages</div>
+      </main>
+    </div>
+    <div id="error-overlay" class="hidden"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
