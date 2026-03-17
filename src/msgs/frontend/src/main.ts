@@ -4,6 +4,7 @@ import {
   onConversationSelect,
   getConversationById,
 } from "./conversations";
+import { loadConversation } from "./messages";
 
 interface DbStatus {
   accessible: boolean;
@@ -25,8 +26,9 @@ async function init(): Promise<void> {
 async function handleConversationSelect(chatId: number): Promise<void> {
   const conv = getConversationById(chatId);
   if (!conv) return;
-  // Message loading will be wired up in Task 7
-  console.log("Selected conversation:", conv.chat_identifier);
+
+  const displayName = conv.display_name ?? conv.participants[0] ?? conv.chat_identifier;
+  await loadConversation(chatId, displayName, conv.chat_identifier, conv.is_group);
 }
 
 function showError(message: string): void {
@@ -34,5 +36,18 @@ function showError(message: string): void {
   overlay.textContent = message;
   overlay.classList.remove("hidden");
 }
+
+document.addEventListener("keydown", (e: KeyboardEvent) => {
+  // Cmd+F — focus global search
+  if (e.metaKey && !e.shiftKey && e.key === "f") {
+    e.preventDefault();
+    document.getElementById("global-search")?.focus();
+  }
+  // Cmd+Shift+F — focus in-chat search (Stage 3)
+  if (e.metaKey && e.shiftKey && e.key === "f") {
+    e.preventDefault();
+    document.getElementById("btn-search-in-chat")?.click();
+  }
+});
 
 document.addEventListener("DOMContentLoaded", init);

@@ -16,6 +16,19 @@
       </aside>
       <main id="content">
         <div id="empty-state">Select a conversation to view messages</div>
+        <div id="message-view" class="hidden">
+          <div id="chat-header">
+            <div id="chat-info">
+              <span id="chat-name"></span>
+              <span id="chat-identifier"></span>
+            </div>
+            <div id="chat-actions">
+              <button id="btn-search-in-chat" class="btn-secondary">Search in chat</button>
+              <button id="btn-export" class="btn-accent">Export Selection</button>
+            </div>
+          </div>
+          <div id="message-area"></div>
+        </div>
       </main>
     </div>
     <div id="error-overlay" class="hidden"></div>
