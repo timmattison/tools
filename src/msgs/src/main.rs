@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 pub mod error;
+pub mod parser;
 pub mod types;
 
 fn main() {
