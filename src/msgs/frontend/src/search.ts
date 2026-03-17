@@ -69,14 +69,32 @@ async function performSearch(query: string): Promise<void> {
     return;
   }
 
-  const results = await invoke<SearchResult[]>("search_messages", {
-    query,
-    chatId: null,
-    offset: 0,
-    limit: 50,
-  });
+  showSearchLoading(query);
 
-  showSearchResults(results);
+  try {
+    const results = await invoke<SearchResult[]>("search_messages", {
+      query,
+      chatId: null,
+      offset: 0,
+      limit: 50,
+    });
+
+    showSearchResults(results);
+  } catch (e) {
+    showSearchError(String(e));
+  }
+}
+
+function showSearchLoading(query: string): void {
+  const list = document.getElementById("conversation-list")!;
+  list.dataset.mode = "search";
+  list.innerHTML = `<div class="search-loading"><div class="search-spinner"></div>Searching for "${escapeHtml(query)}"...</div>`;
+}
+
+function showSearchError(message: string): void {
+  const list = document.getElementById("conversation-list")!;
+  list.dataset.mode = "search";
+  list.innerHTML = `<div class="search-empty">Search failed: ${escapeHtml(message)}</div>`;
 }
 
 function showSearchResults(results: SearchResult[]): void {
