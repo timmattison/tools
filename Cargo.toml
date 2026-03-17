@@ -127,7 +127,10 @@ tauri-build = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 
-# SQLite (bundled + multi-thread: Connection must be Send for Tauri's thread pool)
+# SQLite: The "bundled" feature compiles SQLite from source with SQLITE_THREADSAFE=1,
+# which enables multi-thread/serialized mode by default. There is no separate
+# "multi-thread" feature in rusqlite 0.32 -- bundled already guarantees that
+# Connection is Send, which is required for Tauri's thread pool.
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Type generation

@@ -30,6 +30,7 @@ fn main() {
             commands::get_version,
             commands::search_messages,
             commands::rebuild_text_cache,
+            commands::get_attachment,
             commands::export_messages,
         ])
         .run(tauri::generate_context!())

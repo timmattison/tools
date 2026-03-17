@@ -24,14 +24,20 @@ pub fn check_db_access(state: State<'_, AppState>) -> Result<DbStatus, MsgsError
         .inner
         .lock()
         .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
-    if lock.db.is_none() {
-        match MessageDb::open() {
+    match lock.db.as_ref() {
+        Some(db) => db.check_access(),
+        None => match MessageDb::open() {
             Ok(db) => {
                 let status = db.check_access()?;
-                *lock = AppStateInner {
-                    db: Some(db),
-                    cache: None,
-                };
+
+                // Auto-initialize the text cache so search works immediately
+                let cache = TextCache::open()?;
+                if cache.needs_rebuild(status.message_count.unwrap_or(0))? {
+                    cache.rebuild(db.connection())?;
+                }
+
+                lock.cache = Some(cache);
+                lock.db = Some(db);
                 Ok(status)
             }
             Err(e) => Ok(DbStatus {
@@ -39,9 +45,7 @@ pub fn check_db_access(state: State<'_, AppState>) -> Result<DbStatus, MsgsError
                 message_count: None,
                 error: Some(e.to_string()),
             }),
-        }
-    } else {
-        lock.db.as_ref().unwrap().check_access()
+        },
     }
 }
 
@@ -139,6 +143,23 @@ pub fn rebuild_text_cache(state: State<'_, AppState>) -> Result<(), MsgsError> {
     lock.cache = Some(cache);
 
     Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_attachment(
+    state: State<'_, AppState>,
+    attachment_id: i64,
+) -> Result<Option<String>, MsgsError> {
+    let lock = state
+        .inner
+        .lock()
+        .map_err(|e| MsgsError::DatabaseError(e.to_string()))?;
+    let db = lock
+        .db
+        .as_ref()
+        .ok_or(MsgsError::DatabaseError("Database not initialized".to_string()))?;
+    db.get_attachment_path(attachment_id)
 }
 
 #[tauri::command]

@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error, Serialize, specta::Type)]
+#[allow(dead_code, reason = "variants reserved for future use in parser and attachment flows")]
 pub enum MsgsError {
     #[error("Full Disk Access not granted. Open System Settings > Privacy & Security > Full Disk Access and add this app.")]
     NoFullDiskAccess,

@@ -63,8 +63,8 @@ export function handleMessageClick(el: HTMLElement): void {
     endMessageEl = el;
     endDate = date;
 
-    // Ensure start is before end
-    if (startDate! > endDate!) {
+    // Ensure start is before end (compare as epoch timestamps, not strings)
+    if (new Date(startDate!).getTime() > new Date(endDate!).getTime()) {
       [startMessageEl, endMessageEl] = [endMessageEl, startMessageEl];
       [startDate, endDate] = [endDate, startDate];
     }
