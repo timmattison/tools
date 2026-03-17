@@ -121,6 +121,20 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Threading"
 ] }
 
+# Tauri
+tauri = "2"
+tauri-build = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+# SQLite (bundled + multi-thread: Connection must be Send for Tauri's thread pool)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Type generation
+specta = { version = "=2.0.0-rc.22", features = ["derive", "chrono"] }
+specta-typescript = "0.0.10"
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
 clipboardmon = { path = "src/clipboardmon" }
