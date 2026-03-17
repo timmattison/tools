@@ -6,7 +6,7 @@
   "build": {
     "frontendDist": "./frontend/dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "cd src/msgs/frontend && pnpm dev",
+    "beforeDevCommand": "",
     "beforeBuildCommand": "cd src/msgs/frontend && pnpm build"
   },
   "app": {
