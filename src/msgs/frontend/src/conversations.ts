@@ -32,6 +32,39 @@ export async function initConversations(): Promise<void> {
   const list = document.getElementById("conversation-list")!;
   list.addEventListener("scroll", handleScroll);
   await loadMore();
+
+  document.addEventListener("keydown", (e: KeyboardEvent) => {
+    const items = document.querySelectorAll<HTMLElement>(".conversation-item");
+    if (items.length === 0) return;
+
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const activeEl = document.querySelector<HTMLElement>(".conversation-item.active");
+      const activeIndex = activeEl
+        ? Array.from(items).indexOf(activeEl)
+        : -1;
+
+      let newIndex: number;
+      if (e.key === "ArrowDown") {
+        newIndex = activeIndex < items.length - 1 ? activeIndex + 1 : activeIndex;
+      } else {
+        newIndex = activeIndex > 0 ? activeIndex - 1 : 0;
+      }
+
+      const newEl = items[newIndex];
+      const chatId = Number(newEl.dataset.chatId);
+      selectConversation(chatId, newEl);
+      newEl.scrollIntoView({ block: "nearest" });
+    }
+
+    if (e.key === "Enter") {
+      const activeEl = document.querySelector<HTMLElement>(".conversation-item.active");
+      if (activeEl) {
+        const chatId = Number(activeEl.dataset.chatId);
+        onSelectCallback?.(chatId);
+      }
+    }
+  });
 }
 
 async function loadMore(): Promise<void> {
