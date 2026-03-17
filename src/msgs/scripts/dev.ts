@@ -42,7 +42,6 @@ function startVite(port: number): ChildProcess {
   return spawn("pnpm", ["dev"], {
     cwd: FRONTEND_DIR,
     stdio: "inherit",
-    shell: true,
     env: {
       ...process.env,
       VITE_PORT: String(port),
@@ -53,7 +52,7 @@ function startVite(port: number): ChildProcess {
 
 function startTauri(): ChildProcess {
   const extraArgs = process.argv.slice(2);
-  const args = ["tauri", "dev", "-p", "msgs"];
+  const args = ["tauri", "dev"];
   if (extraArgs.length > 0) {
     args.push("--", ...extraArgs);
     console.log(`Starting Tauri with extra args: ${extraArgs.join(" ")}`);
@@ -61,10 +60,10 @@ function startTauri(): ChildProcess {
     console.log("Starting Tauri...");
   }
 
+  // Run from the package directory so cargo tauri finds tauri.conf.json
   return spawn("cargo", args, {
-    cwd: WORKSPACE_ROOT,
+    cwd: PACKAGE_DIR,
     stdio: "inherit",
-    shell: true,
   });
 }
 
