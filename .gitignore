@@ -5,6 +5,7 @@ target
 .env.bak
 .env.local
 .claude/
+.superpowers/
 .op-cache.json
 node_modules
 .wrangler/
