@@ -1,7 +1,7 @@
 //! portcul - A pretty TUI for viewing and killing processes listening on ports.
 //!
 //! Displays an interactive table of all processes with open listening sockets.
-//! Navigate with arrow keys, kill with 'k' or Enter, refresh with 'r'.
+//! Navigate with arrow keys, kill with 'd' or Enter, refresh with 'r'.
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -53,7 +53,7 @@ impl Drop for TerminalGuard {
 
 /// A pretty TUI for viewing and killing processes listening on ports.
 ///
-/// Navigate with arrow keys, kill selected process with 'k' or Enter,
+/// Navigate with arrow keys, kill selected process with 'd' or Enter,
 /// refresh with 'r', quit with 'q' or Esc.
 #[derive(Parser)]
 #[command(
@@ -142,6 +142,12 @@ fn run_app(
                                 }
                             }
                         }
+                        // Ctrl+C exits the app even during confirmation
+                        KeyCode::Char('c')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            break
+                        }
                         _ => {
                             state.kill_confirm = KillConfirm::None;
                         }
@@ -149,9 +155,11 @@ fn run_app(
                     continue;
                 }
 
-                // Clear result messages on any keypress
+                // Clear result messages on any keypress without acting on the key,
+                // so the user gets a chance to see the result before the next action.
                 if matches!(state.kill_confirm, KillConfirm::Result { .. }) {
                     state.kill_confirm = KillConfirm::None;
+                    continue;
                 }
 
                 match key.code {
