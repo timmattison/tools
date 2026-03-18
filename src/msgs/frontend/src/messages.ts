@@ -1,27 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Message } from "./types";
 import { handleMessageClick, initExport } from "./export";
-
-interface Message {
-  message_id: number;
-  text: string | null;
-  sender: string;
-  is_from_me: boolean;
-  date: string;
-  date_read: string | null;
-  is_audio: boolean;
-  attachments: AttachmentInfo[];
-  reply_to_guid: string | null;
-  associated_emoji: string | null;
-}
-
-interface AttachmentInfo {
-  attachment_id: number;
-  filename: string | null;
-  mime_type: string | null;
-  total_bytes: number;
-  transfer_name: string | null;
-  is_sticker: boolean;
-}
 
 const PAGE_SIZE = 50;
 let currentChatId: number | null = null;
@@ -29,6 +8,8 @@ let currentOffset = 0;
 let loading = false;
 let allLoaded = false;
 let isGroupChat = false;
+
+let messageScrollController: AbortController | null = null;
 
 export async function loadConversation(
   chatId: number,
@@ -59,8 +40,12 @@ export async function loadConversation(
   // Scroll to bottom (most recent)
   area.scrollTop = area.scrollHeight;
 
+  // Clean up previous scroll listener
+  messageScrollController?.abort();
+  messageScrollController = new AbortController();
+
   // Set up scroll handler for loading older messages
-  area.addEventListener("scroll", handleMessageScroll);
+  area.addEventListener("scroll", handleMessageScroll, { signal: messageScrollController.signal });
 
   // Initialize export selection mode
   initExport(chatId);
@@ -179,7 +164,7 @@ function handleMessageScroll(e: Event): void {
   const target = e.target as HTMLElement;
   // Load more when scrolling near the top
   if (target.scrollTop < 200) {
-    loadMoreMessages();
+    loadMoreMessages().catch(console.error);
   }
 }
 
@@ -201,9 +186,9 @@ function formatTime(isoDate: string): string {
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
+  if (bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   const size = bytes / Math.pow(1024, i);
   return `${size.toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
 }

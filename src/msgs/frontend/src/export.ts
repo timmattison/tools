@@ -1,11 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
-
-interface ExportResult {
-  export_path: string;
-  message_count: number;
-  attachment_count: number;
-}
+import type { ExportResult } from "./types";
 
 let selectionMode = false;
 let startMessageEl: HTMLElement | null = null;

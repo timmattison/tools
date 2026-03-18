@@ -1,15 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-
-interface Conversation {
-  chat_id: number;
-  chat_identifier: string;
-  display_name: string | null;
-  is_group: boolean;
-  participants: string[];
-  last_message_date: string;
-  last_message_preview: string;
-  message_count: number;
-}
+import type { Conversation } from "./types";
+import { escapeHtml } from "./utils";
 
 const PAGE_SIZE = 50;
 let currentOffset = 0;
@@ -19,6 +10,8 @@ let onSelectCallback: ((chatId: number) => void) | null = null;
 
 // Cache conversation data for use by other modules
 const conversationCache = new Map<number, Conversation>();
+
+let conversationsInitialized = false;
 
 export function getConversationById(chatId: number): Conversation | undefined {
   return conversationCache.get(chatId);
@@ -30,41 +23,56 @@ export function onConversationSelect(callback: (chatId: number) => void): void {
 
 export async function initConversations(): Promise<void> {
   const list = document.getElementById("conversation-list")!;
-  list.addEventListener("scroll", handleScroll);
+
+  if (!conversationsInitialized) {
+    conversationsInitialized = true;
+    list.addEventListener("scroll", handleScroll);
+
+    document.addEventListener("keydown", (e: KeyboardEvent) => {
+      // Don't capture keys when an input is focused
+      if (document.activeElement instanceof HTMLInputElement ||
+          document.activeElement instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      const items = document.querySelectorAll<HTMLElement>(".conversation-item");
+      if (items.length === 0) return;
+
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const activeEl = document.querySelector<HTMLElement>(".conversation-item.active");
+        const activeIndex = activeEl
+          ? Array.from(items).indexOf(activeEl)
+          : -1;
+
+        let newIndex: number;
+        if (e.key === "ArrowDown") {
+          newIndex = activeIndex < items.length - 1 ? activeIndex + 1 : activeIndex;
+        } else {
+          newIndex = activeIndex > 0 ? activeIndex - 1 : 0;
+        }
+
+        const newEl = items[newIndex];
+        const chatId = Number(newEl.dataset.chatId);
+        highlightConversation(chatId, newEl);
+        newEl.scrollIntoView({ block: "nearest" });
+      }
+
+      if (e.key === "Enter") {
+        const activeEl = document.querySelector<HTMLElement>(".conversation-item.active");
+        if (activeEl) {
+          const chatId = Number(activeEl.dataset.chatId);
+          onSelectCallback?.(chatId);
+        }
+      }
+    });
+  }
+
+  // Always reload conversations
+  currentOffset = 0;
+  list.innerHTML = "";
+  conversationCache.clear();
   await loadMore();
-
-  document.addEventListener("keydown", (e: KeyboardEvent) => {
-    const items = document.querySelectorAll<HTMLElement>(".conversation-item");
-    if (items.length === 0) return;
-
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      e.preventDefault();
-      const activeEl = document.querySelector<HTMLElement>(".conversation-item.active");
-      const activeIndex = activeEl
-        ? Array.from(items).indexOf(activeEl)
-        : -1;
-
-      let newIndex: number;
-      if (e.key === "ArrowDown") {
-        newIndex = activeIndex < items.length - 1 ? activeIndex + 1 : activeIndex;
-      } else {
-        newIndex = activeIndex > 0 ? activeIndex - 1 : 0;
-      }
-
-      const newEl = items[newIndex];
-      const chatId = Number(newEl.dataset.chatId);
-      selectConversation(chatId, newEl);
-      newEl.scrollIntoView({ block: "nearest" });
-    }
-
-    if (e.key === "Enter") {
-      const activeEl = document.querySelector<HTMLElement>(".conversation-item.active");
-      if (activeEl) {
-        const chatId = Number(activeEl.dataset.chatId);
-        onSelectCallback?.(chatId);
-      }
-    }
-  });
 }
 
 async function loadMore(): Promise<void> {
@@ -106,19 +114,23 @@ function createConversationElement(conv: Conversation): HTMLElement {
   return el;
 }
 
-export function selectConversation(chatId: number, el: HTMLElement): void {
+function highlightConversation(chatId: number, el: HTMLElement): void {
   document.querySelectorAll(".conversation-item.active").forEach((item) => {
     item.classList.remove("active");
   });
   el.classList.add("active");
   selectedChatId = chatId;
+}
+
+export function selectConversation(chatId: number, el: HTMLElement): void {
+  highlightConversation(chatId, el);
   onSelectCallback?.(chatId);
 }
 
 function handleScroll(e: Event): void {
   const target = e.target as HTMLElement;
   if (target.scrollTop + target.clientHeight >= target.scrollHeight - 100) {
-    loadMore();
+    loadMore().catch(console.error);
   }
 }
 
@@ -131,12 +143,6 @@ function formatRelativeDate(isoDate: string): string {
   if (diffDays === 1) return "Yesterday";
   if (diffDays < 7) return date.toLocaleDateString([], { weekday: "short" });
   return date.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
-function escapeHtml(text: string): string {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
 }
 
 export function getSelectedChatId(): number | null {
