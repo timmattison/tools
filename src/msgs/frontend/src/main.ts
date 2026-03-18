@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { DbStatus } from "./types";
 import {
   initConversations,
   onConversationSelect,
@@ -6,12 +7,6 @@ import {
 } from "./conversations";
 import { loadConversation } from "./messages";
 import { initSearch } from "./search";
-
-interface DbStatus {
-  accessible: boolean;
-  message_count: number | null;
-  error: string | null;
-}
 
 async function init(): Promise<void> {
   const status = await invoke<DbStatus>("check_db_access");
@@ -25,8 +20,18 @@ async function init(): Promise<void> {
   await initConversations();
 }
 
-async function handleSearchNavigate(chatId: number, _messageId: number): Promise<void> {
+async function handleSearchNavigate(chatId: number, messageId: number): Promise<void> {
   await handleConversationSelect(chatId);
+
+  // Scroll to and highlight the matched message
+  requestAnimationFrame(() => {
+    const msgEl = document.querySelector(`[data-message-id="${messageId}"]`);
+    if (msgEl) {
+      msgEl.scrollIntoView({ block: "center", behavior: "smooth" });
+      msgEl.classList.add("search-highlight");
+      setTimeout(() => msgEl.classList.remove("search-highlight"), 2000);
+    }
+  });
 }
 
 async function handleConversationSelect(chatId: number): Promise<void> {

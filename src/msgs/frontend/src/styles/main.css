@@ -409,3 +409,15 @@ body {
   outline: 1px dashed var(--amber);
   outline-offset: 2px;
 }
+
+/* Search navigate highlight */
+.message.search-highlight .bubble {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  animation: highlight-fade 2s ease-out;
+}
+
+@keyframes highlight-fade {
+  0% { outline-color: var(--accent); }
+  100% { outline-color: transparent; }
+}

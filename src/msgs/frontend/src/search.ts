@@ -1,44 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-
-interface Message {
-  message_id: number;
-  text: string | null;
-  sender: string;
-  is_from_me: boolean;
-  date: string;
-  date_read: string | null;
-  is_audio: boolean;
-  attachments: AttachmentInfo[];
-  reply_to_guid: string | null;
-  associated_emoji: string | null;
-}
-
-interface AttachmentInfo {
-  attachment_id: number;
-  filename: string | null;
-  mime_type: string | null;
-  total_bytes: number;
-  transfer_name: string | null;
-  is_sticker: boolean;
-}
-
-interface Conversation {
-  chat_id: number;
-  chat_identifier: string;
-  display_name: string | null;
-  is_group: boolean;
-  participants: string[];
-  last_message_date: string;
-  last_message_preview: string;
-  message_count: number;
-}
-
-interface SearchResult {
-  message: Message;
-  conversation: Conversation;
-  context_before: Message[];
-  context_after: Message[];
-}
+import type { SearchResult } from "./types";
+import { escapeHtml } from "./utils";
 
 let searchTimeout: number | null = null;
 let onNavigateCallback: ((chatId: number, messageId: number) => void) | null =
@@ -144,10 +106,4 @@ function hideSearchResults(): void {
     // Dynamic import to avoid circular deps
     import("./conversations").then((mod) => mod.initConversations());
   }
-}
-
-function escapeHtml(text: string): string {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
 }

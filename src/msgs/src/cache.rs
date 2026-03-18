@@ -77,11 +77,34 @@ impl TextCache {
     pub fn rebuild(&self, chat_db: &Connection) -> Result<(), MsgsError> {
         log::info!("Rebuilding text cache...");
 
-        // Clear existing data and start transaction for bulk insert performance
+        // Start transaction first so DELETE is inside it (rollback restores data on failure)
         self.conn
-            .execute_batch("DELETE FROM message_text; BEGIN;")
-            .map_err(|e| MsgsError::CacheError(format!("Cannot clear cache: {e}")))?;
+            .execute_batch("BEGIN; DELETE FROM message_text;")
+            .map_err(|e| MsgsError::CacheError(format!("Cannot begin rebuild: {e}")))?;
 
+        match self.rebuild_inner(chat_db) {
+            Ok(count) => {
+                // Store the count for staleness check (after commit, separate concern)
+                self.conn
+                    .execute(
+                        "INSERT OR REPLACE INTO metadata (key, value) VALUES ('message_count', ?1)",
+                        [count.to_string()],
+                    )
+                    .map_err(|e| MsgsError::CacheError(format!("Cannot update metadata: {e}")))?;
+
+                log::info!("Text cache rebuilt with {count} messages");
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// Inner rebuild logic that runs inside a transaction.
+    /// Returns the total message count on success (after committing).
+    fn rebuild_inner(&self, chat_db: &Connection) -> Result<i64, MsgsError> {
         // Query all messages with their chat_id
         let mut stmt = chat_db
             .prepare(
@@ -143,16 +166,7 @@ impl TextCache {
             .execute_batch("COMMIT;")
             .map_err(|e| MsgsError::CacheError(format!("Cannot commit cache: {e}")))?;
 
-        // Store the count for staleness check
-        self.conn
-            .execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES ('message_count', ?1)",
-                [count.to_string()],
-            )
-            .map_err(|e| MsgsError::CacheError(format!("Cannot update metadata: {e}")))?;
-
-        log::info!("Text cache rebuilt with {count} messages");
-        Ok(())
+        Ok(count)
     }
 
     /// Search messages by text query, optionally filtered to a chat.

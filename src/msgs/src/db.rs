@@ -10,6 +10,21 @@ use crate::types::{
 const CHAT_DB_PATH: &str = "Library/Messages/chat.db";
 const PREVIEW_MAX_CHARS: usize = 100;
 
+/// Row tuple returned by message queries.
+type MessageRow = (
+    i64,
+    Option<String>,
+    Option<Vec<u8>>,
+    bool,
+    String,
+    i64,
+    Option<i64>,
+    bool,
+    Option<String>,
+    Option<String>,
+    bool,
+);
+
 pub struct MessageDb {
     conn: Connection,
 }
@@ -181,6 +196,53 @@ impl MessageDb {
         Ok(truncate_preview(&text, PREVIEW_MAX_CHARS))
     }
 
+    /// Build a `Message` from raw query row fields.
+    fn build_message(&self, row: MessageRow) -> Result<Message, MsgsError> {
+        let (
+            message_id,
+            text,
+            attributed_body,
+            is_from_me,
+            sender_id,
+            date,
+            date_read,
+            is_audio,
+            reply_to_guid,
+            associated_emoji,
+            has_attachments,
+        ) = row;
+
+        let extracted_text = text.or_else(|| {
+            attributed_body
+                .as_deref()
+                .and_then(extract_text_from_attributed_body)
+        });
+
+        let attachments = if has_attachments {
+            self.get_attachments_for_message(message_id)?
+        } else {
+            Vec::new()
+        };
+
+        Ok(Message {
+            message_id,
+            text: extracted_text,
+            sender: if is_from_me {
+                "Me".to_string()
+            } else {
+                sender_id
+            },
+            is_from_me,
+            date: apple_timestamp_to_datetime(date)
+                .unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
+            date_read: date_read.and_then(apple_timestamp_to_datetime),
+            is_audio,
+            attachments,
+            reply_to_guid,
+            associated_emoji,
+        })
+    }
+
     /// Get paginated messages for a conversation.
     ///
     /// # Errors
@@ -231,49 +293,7 @@ impl MessageDb {
 
         let mut messages = Vec::new();
         for row in rows {
-            let (
-                message_id,
-                text,
-                attributed_body,
-                is_from_me,
-                sender_id,
-                date,
-                date_read,
-                is_audio,
-                reply_to_guid,
-                associated_emoji,
-                has_attachments,
-            ) = row?;
-
-            let extracted_text = text.or_else(|| {
-                attributed_body
-                    .as_deref()
-                    .and_then(extract_text_from_attributed_body)
-            });
-
-            let attachments = if has_attachments {
-                self.get_attachments_for_message(message_id)?
-            } else {
-                Vec::new()
-            };
-
-            messages.push(Message {
-                message_id,
-                text: extracted_text,
-                sender: if is_from_me {
-                    "Me".to_string()
-                } else {
-                    sender_id
-                },
-                is_from_me,
-                date: apple_timestamp_to_datetime(date)
-                    .unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
-                date_read: date_read.and_then(apple_timestamp_to_datetime),
-                is_audio,
-                attachments,
-                reply_to_guid,
-                associated_emoji,
-            });
+            messages.push(self.build_message(row?)?);
         }
 
         Ok(messages)
@@ -331,7 +351,7 @@ impl MessageDb {
 
         // Validate path is within Messages/Attachments
         if let Some(ref p) = path {
-            let expanded = expand_tilde(p);
+            let expanded = crate::util::expand_tilde(p);
             let allowed = dirs::home_dir()
                 .map(|h| h.join("Library/Messages/Attachments"))
                 .unwrap_or_default();
@@ -463,49 +483,7 @@ impl MessageDb {
 
         let mut messages = Vec::new();
         for row in rows {
-            let (
-                message_id,
-                text,
-                attributed_body,
-                is_from_me,
-                sender_id,
-                date,
-                date_read,
-                is_audio,
-                reply_to_guid,
-                associated_emoji,
-                has_attachments,
-            ) = row?;
-
-            let extracted_text = text.or_else(|| {
-                attributed_body
-                    .as_deref()
-                    .and_then(extract_text_from_attributed_body)
-            });
-
-            let attachments = if has_attachments {
-                self.get_attachments_for_message(message_id)?
-            } else {
-                Vec::new()
-            };
-
-            messages.push(Message {
-                message_id,
-                text: extracted_text,
-                sender: if is_from_me {
-                    "Me".to_string()
-                } else {
-                    sender_id
-                },
-                is_from_me,
-                date: apple_timestamp_to_datetime(date)
-                    .unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
-                date_read: date_read.and_then(apple_timestamp_to_datetime),
-                is_audio,
-                attachments,
-                reply_to_guid,
-                associated_emoji,
-            });
+            messages.push(self.build_message(row?)?);
         }
 
         Ok(messages)
@@ -550,49 +528,7 @@ impl MessageDb {
 
         let mut messages = Vec::new();
         for row in rows {
-            let (
-                message_id,
-                text,
-                attributed_body,
-                is_from_me,
-                sender_id,
-                date,
-                date_read,
-                is_audio,
-                reply_to_guid,
-                associated_emoji,
-                has_attachments,
-            ) = row?;
-
-            let extracted_text = text.or_else(|| {
-                attributed_body
-                    .as_deref()
-                    .and_then(extract_text_from_attributed_body)
-            });
-
-            let attachments = if has_attachments {
-                self.get_attachments_for_message(message_id)?
-            } else {
-                Vec::new()
-            };
-
-            messages.push(Message {
-                message_id,
-                text: extracted_text,
-                sender: if is_from_me {
-                    "Me".to_string()
-                } else {
-                    sender_id
-                },
-                is_from_me,
-                date: apple_timestamp_to_datetime(date)
-                    .unwrap_or_else(|| chrono::Utc::now().fixed_offset()),
-                date_read: date_read.and_then(apple_timestamp_to_datetime),
-                is_audio,
-                attachments,
-                reply_to_guid,
-                associated_emoji,
-            });
+            messages.push(self.build_message(row?)?);
         }
 
         Ok(messages)
@@ -643,14 +579,4 @@ impl MessageDb {
             context_after,
         })
     }
-}
-
-/// Expand a leading `~/` in a path to the user's home directory.
-fn expand_tilde(path: &str) -> std::path::PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
-    }
-    std::path::PathBuf::from(path)
 }

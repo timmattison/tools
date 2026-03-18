@@ -1,8 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::db::MessageDb;
 use crate::error::MsgsError;
 use crate::types::ExportResult;
+use crate::util::expand_tilde;
 
 /// Export a range of messages from a conversation to JSON + attachments.
 ///
@@ -103,13 +104,4 @@ pub fn export_conversation_range(
         message_count: messages.len() as i64,
         attachment_count,
     })
-}
-
-fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(stripped);
-        }
-    }
-    PathBuf::from(path)
 }

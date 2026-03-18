@@ -7,6 +7,7 @@ mod error;
 mod export;
 mod parser;
 mod types;
+mod util;
 
 use commands::{AppState, AppStateInner};
 use std::sync::Mutex;
