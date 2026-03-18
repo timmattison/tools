@@ -8,3 +8,7 @@ go.sum
 target
 .DS_Store
 .claude/
+.superpowers/
+node_modules/
+!src/msgs/icons/
+!pnpm-lock.yaml

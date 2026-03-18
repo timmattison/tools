@@ -121,6 +121,23 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Threading"
 ] }
 
+# Tauri
+tauri = "2"
+tauri-build = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
+# SQLite: The "bundled" feature compiles SQLite from source with SQLITE_THREADSAFE=1,
+# which enables multi-thread/serialized mode by default. There is no separate
+# "multi-thread" feature in rusqlite 0.32 -- bundled already guarantees that
+# Connection is Send, which is required for Tauri's thread pool.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Type generation
+specta = { version = "=2.0.0-rc.22", features = ["derive", "chrono"] }
+specta-typescript = "0.0.10"
+tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
+
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
 clipboardmon = { path = "src/clipboardmon" }

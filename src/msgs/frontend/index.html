@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>msgs — iMessage Browser</title>
+    <link rel="stylesheet" href="/src/styles/main.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div id="search-bar">
+          <input type="text" id="global-search" placeholder="Search messages..." />
+        </div>
+        <div id="conversation-list"></div>
+      </aside>
+      <main id="content">
+        <div id="empty-state">Select a conversation to view messages</div>
+        <div id="message-view" class="hidden">
+          <div id="chat-header">
+            <div id="chat-info">
+              <span id="chat-name"></span>
+              <span id="chat-identifier"></span>
+            </div>
+            <div id="chat-actions">
+              <button id="btn-search-in-chat" class="btn-secondary">Search in chat</button>
+              <button id="btn-export" class="btn-accent">Export Selection</button>
+            </div>
+          </div>
+          <div id="message-area"></div>
+          <div id="export-bar" class="hidden">
+            <span id="export-status"></span>
+            <div id="export-actions">
+              <button id="btn-export-cancel" class="btn-secondary">Cancel</button>
+              <button id="btn-export-confirm" class="btn-amber" disabled>Export JSON</button>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <div id="error-overlay" class="hidden"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
