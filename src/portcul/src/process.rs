@@ -1,10 +1,36 @@
-use std::net::SocketAddr;
+use std::fmt;
+
+/// A process ID, wrapping the raw `u32` from the `listeners` crate.
+///
+/// Prevents accidentally mixing up PIDs with other `u32` values (port numbers,
+/// array indices, etc.) at the type level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Pid(u32);
+
+impl Pid {
+    /// Returns the raw `u32` value.
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<u32> for Pid {
+    fn from(value: u32) -> Self {
+        Self(value)
+    }
+}
+
+impl fmt::Display for Pid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// A process listening on a port.
 #[derive(Debug, Clone)]
 pub struct ListeningProcess {
     /// Process ID.
-    pub pid: u32,
+    pub pid: Pid,
     /// Process name.
     pub name: String,
     /// Port number.
@@ -25,31 +51,15 @@ pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
     let raw_listeners = listeners::get_all()
         .map_err(|e| anyhow::anyhow!("failed to enumerate listeners: {e}"))?;
 
-    let mut result = Vec::new();
-
-    for listener in &raw_listeners {
-        let socket_str = format!("{}", listener.socket);
-
-        let (port, address) = if let Ok(addr) = socket_str.parse::<SocketAddr>() {
-            (addr.port(), addr.ip().to_string())
-        } else {
-            // Fallback: try to extract port from "addr:port" format
-            match socket_str.rsplit_once(':') {
-                Some((addr, port_str)) => match port_str.parse::<u16>() {
-                    Ok(port) => (port, addr.to_string()),
-                    Err(_) => continue,
-                },
-                None => continue,
-            }
-        };
-
-        result.push(ListeningProcess {
-            pid: listener.process.pid,
+    let mut result: Vec<ListeningProcess> = raw_listeners
+        .iter()
+        .map(|listener| ListeningProcess {
+            pid: Pid(listener.process.pid),
             name: listener.process.name.clone(),
-            port,
-            address,
-        });
-    }
+            port: listener.socket.port(),
+            address: listener.socket.ip().to_string(),
+        })
+        .collect();
 
     // Sort by port number, then by PID for stable ordering
     result.sort_by(|a, b| a.port.cmp(&b.port).then(a.pid.cmp(&b.pid)));
@@ -63,7 +73,9 @@ pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
 /// # Errors
 ///
 /// Returns an error if the kill syscall fails (e.g., insufficient permissions).
-pub fn kill_process(pid: u32) -> anyhow::Result<()> {
+pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
+    let raw = pid.as_u32();
+
     #[cfg(unix)]
     {
         #[expect(
@@ -71,8 +83,9 @@ pub fn kill_process(pid: u32) -> anyhow::Result<()> {
             reason = "PID values from the OS fit in i32 on all supported platforms"
         )]
         // SAFETY: libc::kill is a standard POSIX call. We pass a valid signal number
-        // (SIGTERM = 15). The PID cast is safe for any u32 value on 64-bit systems.
-        let ret = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        // (SIGTERM = 15). PID values from the OS are always well within i32 range
+        // on supported platforms (macOS and Linux cap PIDs far below i32::MAX).
+        let ret = unsafe { libc::kill(raw as i32, libc::SIGTERM) };
         if ret != 0 {
             // Fall back to /bin/kill when libc::kill returns EPERM
             // (some macOS processes require the external kill binary)
@@ -80,7 +93,7 @@ pub fn kill_process(pid: u32) -> anyhow::Result<()> {
             if errno.raw_os_error() == Some(libc::EPERM) {
                 let status = std::process::Command::new("/bin/kill")
                     .arg("-TERM")
-                    .arg(pid.to_string())
+                    .arg(raw.to_string())
                     .status()?;
                 if !status.success() {
                     return Err(anyhow::anyhow!(
@@ -124,7 +137,18 @@ mod tests {
     fn test_kill_nonexistent_process() {
         // Use a very high PID that almost certainly doesn't exist.
         // PID 0 must NOT be used because kill(0, sig) sends to the entire process group.
-        let result = kill_process(4_000_000);
+        let result = kill_process(Pid::from(4_000_000));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pid_display() {
+        assert_eq!(Pid(1234).to_string(), "1234");
+    }
+
+    #[test]
+    fn test_pid_ordering() {
+        assert!(Pid(1) < Pid(2));
+        assert_eq!(Pid(42), Pid(42));
     }
 }

@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthChar;
 
-use crate::process::ListeningProcess;
+use crate::process::{ListeningProcess, Pid};
 
 /// Whether a kill confirmation dialog is active.
 #[derive(Debug, Clone)]
@@ -16,7 +16,7 @@ pub enum KillConfirm {
     None,
     /// Asking user to confirm killing a process.
     Pending {
-        pid: u32,
+        pid: Pid,
         name: String,
         port: u16,
     },
@@ -175,7 +175,7 @@ fn render_table(frame: &mut Frame, area: Rect, state: &mut AppState) {
         .map(|listener| {
             Row::new(vec![
                 listener.port.to_string(),
-                listener.pid.to_string(),
+                listener.pid.as_u32().to_string(),
                 truncate_to_width(&listener.name, 30),
                 listener.address.clone(),
             ])
@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_app_state_new_with_items() {
         let listeners = vec![ListeningProcess {
-            pid: 1234,
+            pid: Pid::from(1234),
             name: "test".to_string(),
             port: 8080,
             address: "0.0.0.0".to_string(),
@@ -387,13 +387,13 @@ mod tests {
     fn test_select_next_wraps() {
         let listeners = vec![
             ListeningProcess {
-                pid: 1,
+                pid: Pid::from(1),
                 name: "a".to_string(),
                 port: 80,
                 address: "0.0.0.0".to_string(),
             },
             ListeningProcess {
-                pid: 2,
+                pid: Pid::from(2),
                 name: "b".to_string(),
                 port: 443,
                 address: "0.0.0.0".to_string(),
@@ -411,13 +411,13 @@ mod tests {
     fn test_select_previous_wraps() {
         let listeners = vec![
             ListeningProcess {
-                pid: 1,
+                pid: Pid::from(1),
                 name: "a".to_string(),
                 port: 80,
                 address: "0.0.0.0".to_string(),
             },
             ListeningProcess {
-                pid: 2,
+                pid: Pid::from(2),
                 name: "b".to_string(),
                 port: 443,
                 address: "0.0.0.0".to_string(),
@@ -442,13 +442,13 @@ mod tests {
     fn test_refresh_preserves_selection_by_pid() {
         let listeners = vec![
             ListeningProcess {
-                pid: 100,
+                pid: Pid::from(100),
                 name: "nginx".to_string(),
                 port: 80,
                 address: "0.0.0.0".to_string(),
             },
             ListeningProcess {
-                pid: 200,
+                pid: Pid::from(200),
                 name: "node".to_string(),
                 port: 3000,
                 address: "127.0.0.1".to_string(),
@@ -456,25 +456,25 @@ mod tests {
         ];
         let mut state = AppState::new(listeners);
         state.select_next(); // select PID 200
-        assert_eq!(state.selected_listener().unwrap().pid, 200);
+        assert_eq!(state.selected_listener().unwrap().pid, Pid::from(200));
 
         // Refresh with new list where PID 200 is now first (new process added before it)
         let new_listeners = vec![
             ListeningProcess {
-                pid: 50,
+                pid: Pid::from(50),
                 name: "redis".to_string(),
                 port: 6379,
                 address: "127.0.0.1".to_string(),
             },
             ListeningProcess {
-                pid: 200,
+                pid: Pid::from(200),
                 name: "node".to_string(),
                 port: 3000,
                 address: "127.0.0.1".to_string(),
             },
         ];
         state.refresh(new_listeners);
-        assert_eq!(state.selected_listener().unwrap().pid, 200);
+        assert_eq!(state.selected_listener().unwrap().pid, Pid::from(200));
         assert_eq!(state.table_state.selected(), Some(1));
     }
 }
