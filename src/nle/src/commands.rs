@@ -5,15 +5,24 @@ use tauri_plugin_shell::ShellExt;
 use crate::error::NleError;
 use crate::types::{ExportFormat, ExportOptions, LoadedRecording, Recording, RecordingMetadata};
 
+/// Canonicalize a path and verify it exists, returning the resolved path.
+fn validate_path(path: &str) -> Result<PathBuf, NleError> {
+    let file_path = PathBuf::from(path);
+    if !file_path.exists() {
+        return Err(NleError::FileNotFound(path.to_string()));
+    }
+    file_path
+        .canonicalize()
+        .map_err(|e| NleError::LoadError(format!("Failed to resolve path {path}: {e}")))
+}
+
 /// Load a recording from a file path, returning both the recording and its metadata.
 #[tauri::command]
 pub async fn load_recording(path: String) -> Result<LoadedRecording, NleError> {
-    let file_path = PathBuf::from(&path);
-    if !file_path.exists() {
-        return Err(NleError::FileNotFound(path));
-    }
+    let file_path = validate_path(&path)?;
     let recording = Recording::load(&file_path)?;
-    let metadata = recording.metadata(&path);
+    let display_path = file_path.to_string_lossy();
+    let metadata = recording.metadata(&display_path);
     Ok(LoadedRecording {
         recording,
         metadata,
@@ -30,8 +39,28 @@ pub async fn save_recording(
     compress: Option<bool>,
 ) -> Result<(), NleError> {
     let file_path = PathBuf::from(&path);
+    // Canonicalize the parent directory to prevent path traversal
+    let parent = file_path
+        .parent()
+        .ok_or_else(|| NleError::SaveError(format!("Invalid path (no parent directory): {path}")))?;
+    if !parent.exists() {
+        return Err(NleError::SaveError(format!(
+            "Parent directory does not exist: {}",
+            parent.display()
+        )));
+    }
+    let canonical_parent = parent.canonicalize().map_err(|e| {
+        NleError::SaveError(format!(
+            "Failed to resolve parent directory {}: {e}",
+            parent.display()
+        ))
+    })?;
+    let file_name = file_path
+        .file_name()
+        .ok_or_else(|| NleError::SaveError(format!("Invalid path (no filename): {path}")))?;
+    let canonical_path = canonical_parent.join(file_name);
     let should_compress = compress.unwrap_or_else(|| path.ends_with(".gz"));
-    recording.save(&file_path, should_compress)
+    recording.save(&canonical_path, should_compress)
 }
 
 /// List recordings in a directory, returning metadata for each.
@@ -78,14 +107,12 @@ pub async fn list_recordings(directory: String) -> Result<Vec<RecordingMetadata>
 
 /// Validate that an export input path exists and return a canonicalized version.
 fn validate_export_input(input_path: &str) -> Result<PathBuf, NleError> {
-    let path = PathBuf::from(input_path);
-    if !path.exists() {
-        return Err(NleError::FileNotFound(format!(
-            "Export input file not found: {input_path}"
-        )));
-    }
-    path.canonicalize().map_err(|e| {
-        NleError::ExportError(format!("Failed to resolve input path {input_path}: {e}"))
+    validate_path(input_path).map_err(|e| match e {
+        NleError::FileNotFound(_) => {
+            NleError::FileNotFound(format!("Export input file not found: {input_path}"))
+        }
+        NleError::LoadError(msg) => NleError::ExportError(msg),
+        other => other,
     })
 }
 
