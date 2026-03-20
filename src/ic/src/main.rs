@@ -5,6 +5,7 @@ use clap::Parser;
 use icy_sixel::{sixel_encode, EncodeOptions};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
@@ -1285,7 +1286,7 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
     };
 
     // Choose optimal display method based on terminal capabilities
-    // Check Sixel first (for Zellij), then Kitty/Ghostty, then iTerm2
+    // Check Sixel first (for Zellij), then Kitty/Ghostty/WezTerm, then iTerm2
     // Use already-detected terminal_caps to avoid redundant env var lookups
     match terminal_caps.terminal_type {
         TerminalType::Zellij => {
@@ -1359,6 +1360,29 @@ fn calculate_aspect_preserving_size(
     }
 }
 
+/// Calculate the pixel dimensions of a single terminal character cell.
+///
+/// Tries to determine actual cell dimensions via ioctl (TIOCGWINSZ). Falls back to
+/// estimated constants if the ioctl fails or the terminal reports zero dimensions.
+fn get_cell_pixel_dimensions() -> (u32, u32) {
+    if let Some((total_px_w, total_px_h)) = get_terminal_pixel_size() {
+        let (term_cols, term_rows) = get_terminal_size().unwrap_or((80, 24));
+        if term_cols > 0 && term_rows > 0 {
+            return (total_px_w / term_cols, total_px_h / term_rows);
+        }
+    }
+    (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+}
+
+/// Convert character cell display dimensions to target pixel dimensions.
+///
+/// Returns `None` if either dimension is missing (meaning no downscale target can
+/// be computed). Uses actual terminal cell pixel dimensions when available, falling
+/// back to estimated constants.
+fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32) {
+    (cols * cell_w, rows * cell_h)
+}
+
 /// Downscale an image to fit the display pixel dimensions if it exceeds them.
 ///
 /// Converts character cell display dimensions to pixel dimensions using either the
@@ -1366,47 +1390,41 @@ fn calculate_aspect_preserving_size(
 /// the image if it's larger than the target. This prevents sending hundreds of megabytes
 /// of pixel data to the terminal for very large images (e.g., panoramas).
 ///
-/// Returns the original image unchanged if it already fits within the target dimensions.
-fn downscale_to_display_pixels(
-    img: &DynamicImage,
+/// Returns a borrowed reference to the original image when no downscaling is needed
+/// (dimensions unspecified or image already fits), avoiding an unnecessary clone.
+/// Returns an owned downscaled image when the original exceeds the target pixel dimensions.
+fn downscale_to_display_pixels<'a>(
+    img: &'a DynamicImage,
     display_width: Option<u32>,
     display_height: Option<u32>,
-) -> DynamicImage {
+) -> Cow<'a, DynamicImage> {
     let (target_pixel_w, target_pixel_h) = match (display_width, display_height) {
         (Some(cols), Some(rows)) => {
-            // Try to get actual pixel dimensions per cell from the terminal
-            let (cell_w, cell_h) = if let Some((total_px_w, total_px_h)) = get_terminal_pixel_size()
-            {
-                let (term_cols, term_rows) =
-                    get_terminal_size().unwrap_or((80, 24));
-                if term_cols > 0 && term_rows > 0 {
-                    (total_px_w / term_cols, total_px_h / term_rows)
-                } else {
-                    (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
-                }
-            } else {
-                (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
-            };
-            (cols * cell_w, rows * cell_h)
+            let (cell_w, cell_h) = get_cell_pixel_dimensions();
+            cells_to_pixels(cols, rows, cell_w, cell_h)
         }
-        _ => return img.clone(),
+        _ => return Cow::Borrowed(img),
     };
 
     if img.width() <= target_pixel_w && img.height() <= target_pixel_h {
-        return img.clone();
+        return Cow::Borrowed(img);
     }
 
-    img.resize(
+    Cow::Owned(img.resize(
         target_pixel_w,
         target_pixel_h,
         image::imageops::FilterType::Lanczos3,
-    )
+    ))
 }
 
-/// Kitty terminal display with better performance for video
+/// Kitty terminal display with better performance for video.
+///
+/// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
 fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
-    // Calculate display dimensions that preserve aspect ratio
-    // Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
+    // display_width/display_height are in terminal cells (character columns/rows).
+    // They serve two roles: (1) the Kitty protocol `c=`/`r=` display hints that tell
+    // the terminal how many cells the image should span, and (2) the downscale target
+    // converted to pixels via cell dimensions to cap the raw data we send.
     let (display_width, display_height) = calculate_aspect_preserving_size(
         img.width(),
         img.height(),
@@ -1586,9 +1604,14 @@ fn display_image_sixel(
     Ok(())
 }
 
-/// Optimized iTerm2 display with reduced overhead
+/// Optimized iTerm2 display with reduced overhead.
+///
+/// Computes aspect-preserving display dimensions and downscales the image to the
+/// target pixel size before encoding. This matches the Kitty path's behavior and
+/// prevents sending oversized payloads for very large images.
 fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
-    // Calculate display dimensions for aspect ratio
+    // Calculate aspect-corrected display dimensions in terminal cells, then use them
+    // both as the iTerm2 width/height hints and the downscale target.
     let (display_width, display_height) = calculate_aspect_preserving_size(
         img.width(),
         img.height(),
@@ -1973,5 +1996,107 @@ mod tests {
         assert!(SIXEL_HORIZONTAL_MARGIN <= 1.0);
         assert!(SIXEL_VERTICAL_MARGIN > 0.5);
         assert!(SIXEL_VERTICAL_MARGIN <= 1.0);
+    }
+
+    // =========================================================================
+    // Tests for cells_to_pixels
+    // =========================================================================
+
+    #[test]
+    fn cells_to_pixels_basic() {
+        assert_eq!(cells_to_pixels(80, 24, 10, 20), (800, 480));
+    }
+
+    #[test]
+    fn cells_to_pixels_single_cell() {
+        assert_eq!(cells_to_pixels(1, 1, 10, 20), (10, 20));
+    }
+
+    #[test]
+    fn cells_to_pixels_custom_cell_dimensions() {
+        assert_eq!(cells_to_pixels(40, 12, 16, 32), (640, 384));
+    }
+
+    // =========================================================================
+    // Tests for downscale_to_display_pixels
+    // =========================================================================
+
+    /// Helper to create a test image of the given dimensions.
+    fn make_test_image(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_no_dimensions() {
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, None, None);
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_only_width() {
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, Some(50), None);
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_only_height() {
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, None, Some(50));
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_image_fits() {
+        // With estimated cell dimensions (10x20), 80 cols x 24 rows = 800x480 pixels.
+        // A 100x100 image fits within that, so no downscale needed.
+        // Note: in CI/test environments, get_terminal_pixel_size() returns None,
+        // so estimated constants are used.
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result.width(), 100);
+        assert_eq!(result.height(), 100);
+    }
+
+    #[test]
+    fn downscale_shrinks_oversized_image() {
+        // With estimated cell dimensions (10x20), 10 cols x 5 rows = 100x100 pixels.
+        // A 500x500 image exceeds that, so it should be downscaled.
+        let img = make_test_image(500, 500);
+        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
+        assert!(matches!(result, Cow::Owned(_)));
+        assert!(result.width() <= 100);
+        assert!(result.height() <= 100);
+    }
+
+    #[test]
+    fn downscale_preserves_aspect_ratio() {
+        // Wide image: 1000x200 pixels
+        // Target: 10 cols x 5 rows = 100x100 pixels (with estimated cell dims)
+        // Should downscale to fit within 100x100 while preserving 5:1 aspect ratio
+        let img = make_test_image(1000, 200);
+        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
+        assert!(matches!(result, Cow::Owned(_)));
+        assert!(result.width() <= 100);
+        assert!(result.height() <= 100);
+        // Aspect ratio should be roughly maintained (5:1)
+        let aspect = result.width() as f64 / result.height() as f64;
+        assert!(
+            (aspect - 5.0).abs() < 0.5,
+            "aspect ratio {aspect} should be close to 5.0"
+        );
+    }
+
+    #[test]
+    fn downscale_handles_panoramic_image() {
+        // Very large panorama: 16384x4096 pixels
+        // Target: 80 cols x 24 rows = 800x480 pixels
+        let img = make_test_image(16384, 4096);
+        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
+        assert!(matches!(result, Cow::Owned(_)));
+        assert!(result.width() <= 800);
+        assert!(result.height() <= 480);
     }
 }
