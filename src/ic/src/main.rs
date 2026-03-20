@@ -76,7 +76,7 @@ enum VideoControl {
 /// - iTerm2: Uses iTerm2 inline image protocol
 /// - Kitty: Uses Kitty graphics protocol (better performance for video)
 /// - Ghostty: Uses Kitty graphics protocol (better performance for video)
-/// - WezTerm: Uses iTerm2 inline image protocol
+/// - WezTerm: Uses Kitty graphics protocol
 /// - Zellij: Uses Sixel protocol (works in Zellij running inside WezTerm or other Sixel-capable terminals)
 /// - Alacritty: NOT SUPPORTED (text-only terminal, no graphics protocols)
 /// - Other terminals: Limited or no image support
@@ -413,7 +413,7 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
                 For {} display, please use one of these terminals:\n\
                 • iTerm2 (macOS) - supports inline images\n\
                 • Kitty - supports graphics protocol\n\
-                • WezTerm - supports iTerm2 image protocol\n\
+                • WezTerm - supports Kitty graphics protocol\n\
                 \n\
                 Alternatively, you can:\n\
                 • Extract frames using ffmpeg and view them in an image viewer\n\
@@ -427,7 +427,7 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
                 For {} display, please use one of these terminals:\n\
                 • iTerm2 (macOS) - supports inline images\n\
                 • Kitty - supports graphics protocol\n\
-                • WezTerm - supports iTerm2 image protocol\n\
+                • WezTerm - supports Kitty graphics protocol\n\
                 \n\
                 Current terminal: {}\n\
                 \n\
@@ -1291,7 +1291,7 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
         TerminalType::Zellij => {
             display_image_sixel(&img, scaled_width, scaled_height, args)
         }
-        TerminalType::Kitty | TerminalType::Ghostty => {
+        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
             display_image_kitty(&img, scaled_width, scaled_height, args)
         }
         _ => display_image_iterm2(&img, scaled_width, scaled_height, args),
