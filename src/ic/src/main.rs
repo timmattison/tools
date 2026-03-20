@@ -393,7 +393,19 @@ fn ensure_ffprobe_available() -> Result<()> {
 }
 
 fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature: &str) -> Result<()> {
-    // Check for tmux first, since graphics don't work in tmux
+    // Check for Mosh first, since it strips escape sequences needed by all graphics protocols
+    if is_running_under_mosh() {
+        anyhow::bail!(
+            "Mosh detected. {} display does not work over Mosh.\n\
+            Mosh strips the escape sequences needed for image display (Sixel, Kitty, iTerm2).\n\
+            \n\
+            To display images, please use SSH directly:\n\
+            • ssh user@host (instead of mosh user@host)",
+            feature
+        );
+    }
+
+    // Check for tmux, since graphics don't work in tmux
     if std::env::var("TMUX").is_ok() {
         anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
     }
@@ -1614,6 +1626,53 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
         supports_graphics,
         supports_raw_mode,
     }
+}
+
+/// Walk the process tree to check if mosh-server is an ancestor process.
+/// This is more reliable than checking environment variables, which Mosh
+/// does not consistently set.
+fn is_running_under_mosh() -> bool {
+    let mut pid = std::process::id();
+    // Walk up to 64 levels to avoid infinite loops on broken process trees
+    for _ in 0..64 {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        let output = match output {
+            Ok(o) => o,
+            Err(_) => return false,
+        };
+        let line = String::from_utf8_lossy(&output.stdout);
+        let line = line.trim();
+        if line.is_empty() {
+            return false;
+        }
+        // Format: "  <ppid> <comm>"
+        let mut parts = line.splitn(2, |c: char| c.is_whitespace());
+        let ppid_str = match parts.next() {
+            Some(s) => s.trim(),
+            None => return false,
+        };
+        let comm = match parts.next() {
+            Some(s) => s.trim(),
+            None => return false,
+        };
+        if comm.contains("mosh-server") {
+            return true;
+        }
+        let ppid: u32 = match ppid_str.parse() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        // Reached init/launchd
+        if ppid == 0 || ppid == pid {
+            return false;
+        }
+        pid = ppid;
+    }
+    false
 }
 
 fn print_kitty_image(
