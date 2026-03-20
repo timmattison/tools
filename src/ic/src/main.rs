@@ -2349,25 +2349,27 @@ not_a_number  1 /bin/bash
 
     #[test]
     fn downscale_shrinks_oversized_image() {
-        // With estimated cell dimensions (10x20), 10 cols x 5 rows = 100x100 pixels.
-        // A 500x500 image exceeds that, so it should be downscaled.
-        let img = make_test_image(500, 500);
+        // 10 cols x 5 rows, pixel target depends on actual cell dimensions
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
+        // Image must be larger than the target to trigger downscaling
+        let img = make_test_image(max_w * 5, max_h * 5);
         let result = downscale_to_display_pixels(&img, Some(10), Some(5));
         assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= 100);
-        assert!(result.height() <= 100);
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
     }
 
     #[test]
     fn downscale_preserves_aspect_ratio() {
-        // Wide image: 1000x200 pixels
-        // Target: 10 cols x 5 rows = 100x100 pixels (with estimated cell dims)
-        // Should downscale to fit within 100x100 while preserving 5:1 aspect ratio
-        let img = make_test_image(1000, 200);
+        // Wide image with 5:1 aspect ratio, larger than any reasonable target
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
+        let img = make_test_image(max_w * 10, max_h * 2);
         let result = downscale_to_display_pixels(&img, Some(10), Some(5));
         assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= 100);
-        assert!(result.height() <= 100);
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
         // Aspect ratio should be roughly maintained (5:1)
         let aspect = result.width() as f64 / result.height() as f64;
         assert!(
@@ -2378,12 +2380,13 @@ not_a_number  1 /bin/bash
 
     #[test]
     fn downscale_handles_panoramic_image() {
-        // Very large panorama: 16384x4096 pixels
-        // Target: 80 cols x 24 rows = 800x480 pixels
+        // Very large panorama, target depends on actual cell dimensions
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(80, 24, cell_w, cell_h);
         let img = make_test_image(16384, 4096);
         let result = downscale_to_display_pixels(&img, Some(80), Some(24));
         assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= 800);
-        assert!(result.height() <= 480);
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
     }
 }
