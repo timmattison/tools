@@ -6,10 +6,10 @@ use icy_sixel::{sixel_encode, EncodeOptions};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
@@ -398,7 +398,19 @@ fn ensure_ffprobe_available() -> Result<()> {
 }
 
 fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature: &str) -> Result<()> {
-    // Check for tmux first, since graphics don't work in tmux
+    // Check for Mosh first, since it strips escape sequences needed by all graphics protocols
+    if is_running_under_mosh() {
+        anyhow::bail!(
+            "Mosh detected. {} display does not work over Mosh.\n\
+            Mosh strips the escape sequences needed for image display (Sixel, Kitty, iTerm2).\n\
+            \n\
+            To display images, please use SSH directly:\n\
+            • ssh user@host (instead of mosh user@host)",
+            feature
+        );
+    }
+
+    // Check for tmux, since graphics don't work in tmux
     if std::env::var("TMUX").is_ok() {
         anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
     }
@@ -1705,6 +1717,131 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
     }
 }
 
+/// Process ID newtype for type safety in process tree walking.
+///
+/// Prevents accidentally mixing up pid/ppid values or confusing
+/// process IDs with other u32 values (e.g., loop counters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Pid(u32);
+
+/// Maximum depth to walk up the process tree when searching for ancestors.
+/// 64 levels is generous; real-world process trees rarely exceed 20 levels.
+const MAX_ANCESTOR_DEPTH: usize = 64;
+
+/// Extracts the basename (filename) from a process comm string.
+///
+/// On macOS, `ps -eo comm=` returns the full executable path (e.g.,
+/// `/usr/local/bin/mosh-server`). This function extracts just the
+/// filename component for exact matching.
+fn comm_basename(comm: &str) -> &str {
+    Path::new(comm)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(comm)
+}
+
+/// Check if we're running under Mosh by examining the process tree.
+///
+/// Delegates to [`has_mosh_in_process_tree`] after collecting `ps` output
+/// and environment state.
+fn is_running_under_mosh() -> bool {
+    let output = match std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,comm="])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+
+    let table = String::from_utf8_lossy(&output.stdout);
+    let current_pid = Pid(std::process::id());
+    let in_zellij = std::env::var("ZELLIJ").is_ok();
+    has_mosh_in_process_tree(&table, current_pid, in_zellij)
+}
+
+/// Determines whether the current process is running under Mosh by analyzing
+/// parsed `ps` output.
+///
+/// This handles two cases:
+/// 1. **Bare Mosh**: `mosh-server` is a direct ancestor of `current_pid`.
+/// 2. **Mosh + Zellij**: Zellij daemonizes (reparents to PID 1), breaking the
+///    direct ancestry. In this case, we check if any process whose basename is
+///    exactly `zellij` (the CLI, not `zellij-server`) is a descendant of a
+///    `mosh-server` process.
+fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
+    let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
+    let mut comm_of: HashMap<Pid, String> = HashMap::new();
+
+    for line in ps_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => Pid(p),
+            None => continue,
+        };
+        let ppid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => Pid(p),
+            None => continue,
+        };
+        // Rejoin remaining tokens to reconstruct paths that contain spaces
+        // (e.g., "/Users/user/my apps/mosh-server"). On macOS, `ps -eo comm=`
+        // returns the full executable path. The kernel's p_comm field is limited
+        // to MAXCOMLEN (16 chars), but `ps` resolves the full path via libproc,
+        // so truncation is not expected. Edge cases (zombie processes, kernel
+        // threads) may show truncated names; "mosh-server" (11 chars) fits.
+        let comm: String = parts.collect::<Vec<&str>>().join(" ");
+        parent_of.insert(pid, ppid);
+        comm_of.insert(pid, comm);
+    }
+
+    // Case 1: Walk up from current PID looking for mosh-server (bare Mosh)
+    let mut ancestor = current_pid;
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        if let Some(comm) = comm_of.get(&ancestor) {
+            if comm_basename(comm) == "mosh-server" {
+                return true;
+            }
+        }
+        match parent_of.get(&ancestor) {
+            Some(&ppid) if ppid != Pid(0) && ppid != ancestor => ancestor = ppid,
+            _ => break,
+        }
+    }
+
+    // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
+    // Find any process whose basename is exactly "zellij" (the CLI binary,
+    // not "zellij-server" or other variants) and check if its ancestors
+    // include mosh-server.
+    if in_zellij {
+        for (&zellij_pid, comm) in &comm_of {
+            if comm_basename(comm) != "zellij" {
+                continue;
+            }
+            let mut ancestor = zellij_pid;
+            for _ in 0..MAX_ANCESTOR_DEPTH {
+                match parent_of.get(&ancestor) {
+                    Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
+                        if let Some(pcomm) = comm_of.get(&ppid) {
+                            if comm_basename(pcomm) == "mosh-server" {
+                                return true;
+                            }
+                        }
+                        ancestor = ppid;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    false
+}
+
 fn print_kitty_image(
     rgb_data: &[u8],
     img_width: u32,
@@ -1999,6 +2136,156 @@ mod tests {
     }
 
     // =========================================================================
+    // Tests for comm_basename
+    // =========================================================================
+
+    #[test]
+    fn comm_basename_full_path() {
+        assert_eq!(comm_basename("/usr/local/bin/mosh-server"), "mosh-server");
+    }
+
+    #[test]
+    fn comm_basename_bare_name() {
+        assert_eq!(comm_basename("mosh-server"), "mosh-server");
+    }
+
+    #[test]
+    fn comm_basename_path_with_spaces() {
+        // Paths with spaces are reconstructed by the join(" ") in parsing
+        assert_eq!(
+            comm_basename("/Users/user/my apps/mosh-server"),
+            "mosh-server"
+        );
+    }
+
+    #[test]
+    fn comm_basename_empty_string() {
+        assert_eq!(comm_basename(""), "");
+    }
+
+    // =========================================================================
+    // Tests for has_mosh_in_process_tree
+    // =========================================================================
+
+    #[test]
+    fn mosh_detected_bare_session() {
+        // Process tree: mosh-server(100) -> bash(200) -> ic(300)
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn mosh_detected_bare_name() {
+        // comm is just the bare name, no path
+        let ps_output = "\
+  100     1 mosh-server
+  200   100 bash
+  300   200 ic";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn mosh_detected_in_zellij() {
+        // mosh-server(100) -> zellij CLI(200), but current process(400)
+        // is child of zellij-server(300) which reparented to PID 1
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /usr/bin/zellij
+  300     1 /usr/bin/zellij-server
+  400   300 /bin/bash";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(400), true));
+    }
+
+    #[test]
+    fn no_mosh_in_normal_session() {
+        let ps_output = "\
+    1     0 /sbin/launchd
+  500     1 /usr/sbin/sshd
+  600   500 /bin/bash
+  700   600 /usr/local/bin/ic";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(700), false));
+    }
+
+    #[test]
+    fn mosh_empty_ps_output() {
+        assert!(!has_mosh_in_process_tree("", Pid(1), false));
+    }
+
+    #[test]
+    fn mosh_malformed_lines_skipped() {
+        let ps_output = "\
+not_a_number  1 /bin/bash
+  100     1 /usr/bin/mosh-server
+  abc   def /foo/bar
+  200   100 /bin/bash";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
+    }
+
+    #[test]
+    fn mosh_zellij_exact_match_no_false_positive() {
+        // "my-zellij-wrapper" and "zellij-server" must NOT match as zellij CLI
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /usr/local/bin/my-zellij-wrapper
+  300     1 /usr/local/bin/zellij-server
+  400   300 /bin/bash";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), true));
+    }
+
+    #[test]
+    fn mosh_server_exact_match_no_false_positive() {
+        // "mosh-server-wrapper" must NOT match as mosh-server
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server-wrapper
+  200   100 /bin/bash";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(200), false));
+    }
+
+    #[test]
+    fn mosh_comm_path_with_spaces() {
+        // Paths with spaces are reconstructed by join(" "),
+        // and comm_basename extracts the correct filename
+        let ps_output = "\
+  100     1 /Users/user/my apps/mosh-server
+  200   100 /bin/bash";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
+    }
+
+    #[test]
+    fn mosh_current_pid_not_in_table() {
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /bin/bash";
+        // PID 999 is not in the table
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(999), false));
+    }
+
+    #[test]
+    fn mosh_cycle_does_not_loop_forever() {
+        // A process whose parent is itself should not cause infinite loop
+        let ps_output = "\
+  100   100 /bin/bash";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(100), false));
+    }
+
+    #[test]
+    fn mosh_not_detected_when_zellij_env_unset() {
+        // Even though a zellij process exists under mosh-server,
+        // Case 2 should not trigger when in_zellij is false
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /usr/bin/zellij
+  300     1 /usr/bin/zellij-server
+  400   300 /bin/bash";
+        // current PID 400 is not an ancestor of mosh-server via Case 1,
+        // and in_zellij=false disables Case 2
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
+    }
+
+    // =========================================================================
     // Tests for cells_to_pixels
     // =========================================================================
 
@@ -2062,25 +2349,27 @@ mod tests {
 
     #[test]
     fn downscale_shrinks_oversized_image() {
-        // With estimated cell dimensions (10x20), 10 cols x 5 rows = 100x100 pixels.
-        // A 500x500 image exceeds that, so it should be downscaled.
-        let img = make_test_image(500, 500);
+        // 10 cols x 5 rows, pixel target depends on actual cell dimensions
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
+        // Image must be larger than the target to trigger downscaling
+        let img = make_test_image(max_w * 5, max_h * 5);
         let result = downscale_to_display_pixels(&img, Some(10), Some(5));
         assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= 100);
-        assert!(result.height() <= 100);
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
     }
 
     #[test]
     fn downscale_preserves_aspect_ratio() {
-        // Wide image: 1000x200 pixels
-        // Target: 10 cols x 5 rows = 100x100 pixels (with estimated cell dims)
-        // Should downscale to fit within 100x100 while preserving 5:1 aspect ratio
-        let img = make_test_image(1000, 200);
+        // Wide image with 5:1 aspect ratio, larger than any reasonable target
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
+        let img = make_test_image(max_w * 10, max_h * 2);
         let result = downscale_to_display_pixels(&img, Some(10), Some(5));
         assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= 100);
-        assert!(result.height() <= 100);
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
         // Aspect ratio should be roughly maintained (5:1)
         let aspect = result.width() as f64 / result.height() as f64;
         assert!(
@@ -2091,12 +2380,13 @@ mod tests {
 
     #[test]
     fn downscale_handles_panoramic_image() {
-        // Very large panorama: 16384x4096 pixels
-        // Target: 80 cols x 24 rows = 800x480 pixels
+        // Very large panorama, target depends on actual cell dimensions
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(80, 24, cell_w, cell_h);
         let img = make_test_image(16384, 4096);
         let result = downscale_to_display_pixels(&img, Some(80), Some(24));
         assert!(matches!(result, Cow::Owned(_)));
-        assert!(result.width() <= 800);
-        assert!(result.height() <= 480);
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
     }
 }
