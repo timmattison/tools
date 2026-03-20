@@ -5,7 +5,7 @@ use clap::Parser;
 use icy_sixel::{sixel_encode, EncodeOptions};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -1628,50 +1628,86 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
     }
 }
 
-/// Walk the process tree to check if mosh-server is an ancestor process.
-/// This is more reliable than checking environment variables, which Mosh
-/// does not consistently set.
+/// Check if we're running under Mosh by examining the process tree.
+///
+/// This handles two cases:
+/// 1. Bare Mosh: mosh-server is a direct ancestor of the current process.
+/// 2. Mosh + Zellij: Zellij daemonizes (reparents to PID 1), breaking the
+///    direct ancestry. In this case, we check if any `zellij` CLI process
+///    is a descendant of a mosh-server process.
 fn is_running_under_mosh() -> bool {
-    let mut pid = std::process::id();
-    // Walk up to 64 levels to avoid infinite loops on broken process trees
-    for _ in 0..64 {
-        let output = std::process::Command::new("ps")
-            .args(["-o", "ppid=,comm=", "-p", &pid.to_string()])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output();
-        let output = match output {
-            Ok(o) => o,
-            Err(_) => return false,
-        };
-        let line = String::from_utf8_lossy(&output.stdout);
+    let output = match std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,comm="])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+
+    let table = String::from_utf8_lossy(&output.stdout);
+
+    let mut parent_of: HashMap<u32, u32> = HashMap::new();
+    let mut comm_of: HashMap<u32, String> = HashMap::new();
+
+    for line in table.lines() {
         let line = line.trim();
         if line.is_empty() {
-            return false;
+            continue;
         }
-        // Format: "  <ppid> <comm>"
-        let mut parts = line.splitn(2, |c: char| c.is_whitespace());
-        let ppid_str = match parts.next() {
-            Some(s) => s.trim(),
-            None => return false,
+        let mut parts = line.split_whitespace();
+        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => p,
+            None => continue,
         };
-        let comm = match parts.next() {
-            Some(s) => s.trim(),
-            None => return false,
+        let ppid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => p,
+            None => continue,
         };
-        if comm.contains("mosh-server") {
-            return true;
-        }
-        let ppid: u32 = match ppid_str.parse() {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        // Reached init/launchd
-        if ppid == 0 || ppid == pid {
-            return false;
-        }
-        pid = ppid;
+        let comm: String = parts.collect::<Vec<&str>>().join(" ");
+        parent_of.insert(pid, ppid);
+        comm_of.insert(pid, comm);
     }
+
+    // Case 1: Walk up from current PID looking for mosh-server (bare Mosh)
+    let mut pid = std::process::id();
+    for _ in 0..64 {
+        if let Some(comm) = comm_of.get(&pid) {
+            if comm.contains("mosh-server") {
+                return true;
+            }
+        }
+        match parent_of.get(&pid) {
+            Some(&ppid) if ppid != 0 && ppid != pid => pid = ppid,
+            _ => break,
+        }
+    }
+
+    // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
+    // Find any `zellij` CLI process whose ancestors include mosh-server.
+    if std::env::var("ZELLIJ").is_ok() {
+        for (&zellij_pid, comm) in &comm_of {
+            if !comm.contains("zellij") {
+                continue;
+            }
+            let mut ancestor = zellij_pid;
+            for _ in 0..64 {
+                match parent_of.get(&ancestor) {
+                    Some(&ppid) if ppid != 0 && ppid != ancestor => {
+                        if let Some(pcomm) = comm_of.get(&ppid) {
+                            if pcomm.contains("mosh-server") {
+                                return true;
+                            }
+                        }
+                        ancestor = ppid;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
     false
 }
 
