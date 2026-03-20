@@ -1359,11 +1359,52 @@ fn calculate_aspect_preserving_size(
     }
 }
 
+/// Downscale an image to fit the display pixel dimensions if it exceeds them.
+///
+/// Converts character cell display dimensions to pixel dimensions using either the
+/// actual terminal pixel size (via ioctl) or estimated cell dimensions, then resizes
+/// the image if it's larger than the target. This prevents sending hundreds of megabytes
+/// of pixel data to the terminal for very large images (e.g., panoramas).
+///
+/// Returns the original image unchanged if it already fits within the target dimensions.
+fn downscale_to_display_pixels(
+    img: &DynamicImage,
+    display_width: Option<u32>,
+    display_height: Option<u32>,
+) -> DynamicImage {
+    let (target_pixel_w, target_pixel_h) = match (display_width, display_height) {
+        (Some(cols), Some(rows)) => {
+            // Try to get actual pixel dimensions per cell from the terminal
+            let (cell_w, cell_h) = if let Some((total_px_w, total_px_h)) = get_terminal_pixel_size()
+            {
+                let (term_cols, term_rows) =
+                    get_terminal_size().unwrap_or((80, 24));
+                if term_cols > 0 && term_rows > 0 {
+                    (total_px_w / term_cols, total_px_h / term_rows)
+                } else {
+                    (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+                }
+            } else {
+                (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+            };
+            (cols * cell_w, rows * cell_h)
+        }
+        _ => return img.clone(),
+    };
+
+    if img.width() <= target_pixel_w && img.height() <= target_pixel_h {
+        return img.clone();
+    }
+
+    img.resize(
+        target_pixel_w,
+        target_pixel_h,
+        image::imageops::FilterType::Lanczos3,
+    )
+}
+
 /// Kitty terminal display with better performance for video
 fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
-    // Use RGB data directly for better performance (no base64 encoding overhead)
-    let rgb_data = img.to_rgb8();
-
     // Calculate display dimensions that preserve aspect ratio
     // Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
     let (display_width, display_height) = calculate_aspect_preserving_size(
@@ -1373,6 +1414,14 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
         height,
         args.preserve_aspect,
     );
+
+    // Downscale the image to the target pixel size before sending to avoid
+    // overwhelming the terminal with huge payloads (e.g., a 16384x8192 panorama
+    // would produce ~384MB of RGB data before base64 encoding).
+    let img = downscale_to_display_pixels(img, display_width, display_height);
+
+    // Use RGB data directly for better performance (no base64 encoding overhead)
+    let rgb_data = img.to_rgb8();
 
     // Use Kitty's more efficient graphics protocol with optimizations
     print_kitty_image(
@@ -1539,6 +1588,19 @@ fn display_image_sixel(
 
 /// Optimized iTerm2 display with reduced overhead
 fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+    // Calculate display dimensions for aspect ratio
+    let (display_width, display_height) = calculate_aspect_preserving_size(
+        img.width(),
+        img.height(),
+        width,
+        height,
+        args.preserve_aspect,
+    );
+
+    // Downscale the image to the target pixel size before encoding to avoid
+    // overwhelming the terminal with huge payloads
+    let img = downscale_to_display_pixels(img, display_width, display_height);
+
     // Use more efficient encoding for iTerm2
     // Convert to RGB first for consistency and smaller data size than RGBA
     let rgb_img = img.to_rgb8();
@@ -1553,7 +1615,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
     // Use base64 encoding
     let encoded = BASE64_STANDARD.encode(&pnm_data);
 
-    print_iterm2_image(&encoded, width, height, args.no_newline)
+    print_iterm2_image(&encoded, display_width, display_height, args.no_newline)
 }
 
 /// Optimized Kitty image printing with reduced protocol overhead
