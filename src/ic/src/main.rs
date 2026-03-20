@@ -93,9 +93,9 @@ enum VideoControl {
 #[derive(Parser, Debug)]
 #[clap(version = version_string!(), about, long_about = None)]
 struct Args {
-    /// Image or video file to display
+    /// Image or video file(s) to display
     #[clap(value_name = "FILE")]
-    file: Option<PathBuf>,
+    files: Vec<PathBuf>,
 
     /// Width in characters (defaults to auto-sizing)
     #[clap(short, long)]
@@ -157,14 +157,18 @@ fn main() -> Result<()> {
 
     if args.stdin {
         display_image_from_stdin(&args)?;
-    } else if let Some(ref file_path) = args.file {
-        if is_video_file(file_path) {
-            display_video_from_file(file_path, &args)?;
-        } else if is_image_file(file_path) {
-            display_image_from_file(file_path, &args)?;
-        } else {
-            // Treat as text file
-            display_text_file(file_path)?;
+    } else if !args.files.is_empty() {
+        for file_path in &args.files {
+            if is_video_file(file_path) {
+                display_video_from_file(file_path, &args)?;
+            } else if is_image_file(file_path) {
+                println!("{}", file_path.display());
+                display_image_from_file(file_path, &args)?;
+            } else {
+                // Treat as text file
+                println!("{}", file_path.display());
+                display_text_file(file_path)?;
+            }
         }
     } else if !args.monitor.is_empty() {
         monitor_directories(&args.monitor, &args)?;
@@ -183,13 +187,13 @@ fn validate_arguments(args: &Args) -> Result<()> {
 }
 
 fn validate_input_modes(args: &Args) -> Result<()> {
-    let input_modes = [args.stdin, args.file.is_some(), !args.monitor.is_empty()];
+    let input_modes = [args.stdin, !args.files.is_empty(), !args.monitor.is_empty()];
     let input_count = input_modes.iter().filter(|&&x| x).count();
-    
+
     if input_count == 0 {
         anyhow::bail!("Must specify a file, use --stdin, or use --monitor");
     }
-    
+
     if input_count > 1 {
         anyhow::bail!("Cannot specify multiple input modes (--stdin, file, --monitor)");
     }

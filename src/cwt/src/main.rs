@@ -19,6 +19,8 @@ mod exit_codes {
     pub const CURRENT_UNKNOWN: i32 = 4;
     /// Shell setup failed.
     pub const SHELL_SETUP_ERROR: i32 = 5;
+    /// Multiple worktrees matched the search term.
+    pub const MULTIPLE_MATCHES: i32 = 6;
 }
 
 /// Length of short commit hash for display (git uses 7 by default).
@@ -44,6 +46,7 @@ macro_rules! error {
 /// cwt -f        # Go to next worktree (wraps around)
 /// cwt -p        # Go to previous worktree (wraps around)
 /// cwt NAME      # Go to worktree by directory name or branch name
+/// cwt TEXT      # Go to worktree by case-insensitive substring match on branch
 /// ```
 ///
 /// # Shell Integration
@@ -74,6 +77,7 @@ macro_rules! error {
 /// - 3: Worktree not found
 /// - 4: Could not determine current worktree (for -f/-p)
 /// - 5: Shell setup failed
+/// - 6: Multiple worktrees matched (need more specific search term)
 #[derive(Parser)]
 #[command(name = "cwt")]
 #[command(about = "Change to a different git worktree")]
@@ -88,8 +92,11 @@ struct Cli {
     #[arg(short = 'p', long, conflicts_with_all = ["forward", "target", "shell_setup"])]
     prev: bool,
 
-    /// Worktree to switch to (directory name or branch name).
-    #[arg(conflicts_with_all = ["forward", "prev", "shell_setup"])]
+    /// Worktree to switch to (directory name, branch name, or branch substring).
+    ///
+    /// Matches in order: exact directory name, exact branch name, then case-insensitive
+    /// substring on branch names. If multiple branches match, lists them and exits.
+    #[arg(conflicts_with_all = ["forward", "prev", "shell_setup"], verbatim_doc_comment)]
     target: Option<String>,
 
     /// Add shell integration to your shell config. Adds these commands:
@@ -244,24 +251,70 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Finds a worktree by name (directory name or branch name).
+/// Result of searching for a worktree by name.
+#[derive(Debug)]
+enum WorktreeMatch {
+    /// Found exactly one matching worktree.
+    Single(usize),
+    /// Found multiple matching worktrees (indices into the worktree list).
+    Multiple(Vec<usize>),
+    /// No matching worktree found.
+    None,
+}
+
+/// Finds a worktree by name (directory name, branch name, or branch substring).
 ///
-/// Rejects names containing path separators to prevent path traversal.
-fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> Option<usize> {
-    // Reject path traversal attempts
-    if name.contains('/') || name.contains('\\') || name.contains("..") {
-        return None;
+/// Search priority:
+/// 1. Exact directory name match
+/// 2. Exact branch name match (supports branch names with `/` like `feature/login`)
+/// 3. Case-insensitive substring match on branch names
+///
+/// Rejects names containing `..` or `\` to prevent path traversal. Forward slashes
+/// are allowed since they're common in branch names (e.g., `feature/login`) and
+/// directory names cannot contain `/` on Unix filesystems.
+fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
+    // Reject empty search terms (would match all branches via substring)
+    // and path traversal attempts.
+    // Note: `/` is intentionally allowed because:
+    // - Branch names commonly contain `/` (e.g., `feature/login`, `bugfix/issue-42`)
+    // - Directory names cannot contain `/` on Unix, so no security risk for dir matching
+    // - Worktree paths come from `git worktree list`, not user input
+    if name.is_empty() || name.contains('\\') || name.contains("..") {
+        return WorktreeMatch::None;
     }
 
     // First: try exact directory name match
     if let Some(idx) = worktrees.iter().position(|wt| wt.dir_name() == Some(name)) {
-        return Some(idx);
+        return WorktreeMatch::Single(idx);
     }
 
     // Second: try exact branch name match
-    worktrees
+    if let Some(idx) = worktrees
         .iter()
         .position(|wt| wt.branch.as_deref() == Some(name))
+    {
+        return WorktreeMatch::Single(idx);
+    }
+
+    // Third: try case-insensitive substring match on branch names
+    // Note: We collect all matches because we need to display them in the Multiple case
+    let name_lower = name.to_lowercase();
+    let matches: Vec<usize> = worktrees
+        .iter()
+        .enumerate()
+        .filter(|(_, wt)| {
+            wt.branch
+                .as_ref()
+                .is_some_and(|b| b.to_lowercase().contains(&name_lower))
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+
+    match matches.len() {
+        0 => WorktreeMatch::None,
+        1 => WorktreeMatch::Single(matches[0]),
+        _ => WorktreeMatch::Multiple(matches),
+    }
 }
 
 /// Displays the list of worktrees with the current one highlighted.
@@ -383,17 +436,33 @@ fn main() {
         println!("{}", worktrees[target_idx].path.display());
     } else if let Some(name) = &cli.target {
         // Find by name
-        if let Some(idx) = find_worktree_by_name(&worktrees, name) {
-            println!("{}", worktrees[idx].path.display());
-        } else {
-            error!(cli.quiet, "Error: Worktree '{}' not found", name);
-            error!(cli.quiet, "Available worktrees:");
-            for wt in &worktrees {
-                let dir = wt.dir_name().unwrap_or("<unknown>");
-                let branch = wt.display_branch();
-                error!(cli.quiet, "  {} [{}]", dir, branch);
+        match find_worktree_by_name(&worktrees, name) {
+            WorktreeMatch::Single(idx) => {
+                println!("{}", worktrees[idx].path.display());
             }
-            exit(exit_codes::WORKTREE_NOT_FOUND);
+            WorktreeMatch::Multiple(indices) => {
+                error!(
+                    cli.quiet,
+                    "Error: Multiple worktrees match '{}'. Be more specific:", name
+                );
+                for idx in indices {
+                    let wt = &worktrees[idx];
+                    let dir = wt.dir_name().unwrap_or("<unknown>");
+                    let branch = wt.display_branch();
+                    error!(cli.quiet, "  {} [{}]", dir, branch);
+                }
+                exit(exit_codes::MULTIPLE_MATCHES);
+            }
+            WorktreeMatch::None => {
+                error!(cli.quiet, "Error: Worktree '{}' not found", name);
+                error!(cli.quiet, "Available worktrees:");
+                for wt in &worktrees {
+                    let dir = wt.dir_name().unwrap_or("<unknown>");
+                    let branch = wt.display_branch();
+                    error!(cli.quiet, "  {} [{}]", dir, branch);
+                }
+                exit(exit_codes::WORKTREE_NOT_FOUND);
+            }
         }
     } else {
         // No args: display list
@@ -456,7 +525,10 @@ mod tests {
                 branch: Some("feature".to_string()),
             },
         ];
-        assert_eq!(find_worktree_by_name(&worktrees, "absurd-rock"), Some(1));
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "absurd-rock"),
+            WorktreeMatch::Single(1)
+        ));
     }
 
     #[test]
@@ -473,8 +545,14 @@ mod tests {
                 branch: Some("feature".to_string()),
             },
         ];
-        assert_eq!(find_worktree_by_name(&worktrees, "feature"), Some(1));
-        assert_eq!(find_worktree_by_name(&worktrees, "main"), Some(0));
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "feature"),
+            WorktreeMatch::Single(1)
+        ));
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "main"),
+            WorktreeMatch::Single(0)
+        ));
     }
 
     #[test]
@@ -484,7 +562,31 @@ mod tests {
             head: "abc".to_string(),
             branch: Some("main".to_string()),
         }];
-        assert_eq!(find_worktree_by_name(&worktrees, "nonexistent"), None);
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "nonexistent"),
+            WorktreeMatch::None
+        ));
+    }
+
+    #[test]
+    fn test_find_worktree_rejects_empty_string() {
+        // Empty string would match all branches via substring, which is unexpected
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt1"),
+                head: "def".to_string(),
+                branch: Some("feature".to_string()),
+            },
+        ];
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, ""),
+            WorktreeMatch::None
+        ));
     }
 
     #[test]
@@ -494,11 +596,183 @@ mod tests {
             head: "abc".to_string(),
             branch: Some("main".to_string()),
         }];
-        // Should reject path traversal attempts
-        assert_eq!(find_worktree_by_name(&worktrees, "../etc/passwd"), None);
-        assert_eq!(find_worktree_by_name(&worktrees, "foo/bar"), None);
-        assert_eq!(find_worktree_by_name(&worktrees, "foo\\bar"), None);
-        assert_eq!(find_worktree_by_name(&worktrees, ".."), None);
+        // Should reject path traversal attempts (backslash and ..)
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "../etc/passwd"),
+            WorktreeMatch::None
+        ));
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "foo\\bar"),
+            WorktreeMatch::None
+        ));
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, ".."),
+            WorktreeMatch::None
+        ));
+        // Note: Forward slash `/` is intentionally allowed - see test below
+    }
+
+    #[test]
+    fn test_find_worktree_allows_forward_slash_in_branch_names() {
+        // Forward slashes are common in branch names (feature/*, bugfix/*, etc.)
+        // and should work for both exact and substring matching
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt1"),
+                head: "def".to_string(),
+                branch: Some("feature/user-auth".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt2"),
+                head: "ghi".to_string(),
+                branch: Some("feature/login-page".to_string()),
+            },
+        ];
+
+        // Exact branch match with forward slash
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "feature/user-auth"),
+            WorktreeMatch::Single(1)
+        ));
+
+        // Substring match with forward slash (matches both feature/* branches)
+        match find_worktree_by_name(&worktrees, "feature/") {
+            WorktreeMatch::Multiple(indices) => {
+                assert_eq!(indices.len(), 2);
+                assert!(indices.contains(&1));
+                assert!(indices.contains(&2));
+            }
+            other => panic!("Expected Multiple, got {:?}", other),
+        }
+
+        // Partial path within branch name
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "ure/user"),
+            WorktreeMatch::Single(1)
+        ));
+    }
+
+    #[test]
+    fn test_find_worktree_substring_match_single() {
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt1"),
+                head: "def".to_string(),
+                branch: Some("feature/login-page".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt2"),
+                head: "ghi".to_string(),
+                branch: Some("bugfix/header".to_string()),
+            },
+        ];
+        // "login" matches only "feature/login-page"
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "login"),
+            WorktreeMatch::Single(1)
+        ));
+        // Case-insensitive: "LOGIN" should also match
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "LOGIN"),
+            WorktreeMatch::Single(1)
+        ));
+        // "header" matches only "bugfix/header"
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "header"),
+            WorktreeMatch::Single(2)
+        ));
+    }
+
+    #[test]
+    fn test_find_worktree_substring_match_multiple() {
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt1"),
+                head: "def".to_string(),
+                branch: Some("feature/login-page".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt2"),
+                head: "ghi".to_string(),
+                branch: Some("feature/logout-page".to_string()),
+            },
+        ];
+        // "feature" matches both feature branches
+        match find_worktree_by_name(&worktrees, "feature") {
+            WorktreeMatch::Multiple(indices) => {
+                assert_eq!(indices.len(), 2);
+                assert!(indices.contains(&1));
+                assert!(indices.contains(&2));
+            }
+            other => panic!("Expected Multiple, got {:?}", other),
+        }
+        // "page" also matches both
+        match find_worktree_by_name(&worktrees, "page") {
+            WorktreeMatch::Multiple(indices) => {
+                assert_eq!(indices.len(), 2);
+            }
+            other => panic!("Expected Multiple, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_find_worktree_exact_match_takes_priority() {
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("main".to_string()),
+            },
+            Worktree {
+                path: PathBuf::from("/repo-wt/wt1"),
+                head: "def".to_string(),
+                branch: Some("main-feature".to_string()),
+            },
+        ];
+        // "main" should exact-match the first worktree, not substring-match both
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "main"),
+            WorktreeMatch::Single(0)
+        ));
+    }
+
+    #[test]
+    fn test_find_worktree_substring_case_insensitive() {
+        let worktrees = vec![
+            Worktree {
+                path: PathBuf::from("/repo"),
+                head: "abc".to_string(),
+                branch: Some("Feature/UserAuth".to_string()),
+            },
+        ];
+        // Various case combinations should all match
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "userauth"),
+            WorktreeMatch::Single(0)
+        ));
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "USERAUTH"),
+            WorktreeMatch::Single(0)
+        ));
+        assert!(matches!(
+            find_worktree_by_name(&worktrees, "UserAuth"),
+            WorktreeMatch::Single(0)
+        ));
     }
 
     #[test]
