@@ -12,6 +12,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use terminal_size::{terminal_size, Height, Width};
@@ -1302,9 +1303,13 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
         (target_width, target_height)
     };
 
-    // Choose optimal display method based on terminal capabilities
-    // Check Sixel first (for Zellij), then Kitty/Ghostty/WezTerm, then iTerm2
-    // Use already-detected terminal_caps to avoid redundant env var lookups
+    // Choose optimal display method based on terminal capabilities.
+    // Check Sixel first (for Zellij), then Kitty/Ghostty/WezTerm, then iTerm2.
+    // Use already-detected terminal_caps to avoid redundant env var lookups.
+    //
+    // Sixel (Zellij) does not need proxy cursor-sync because Zellij's server
+    // manages its own rendering and cursor tracking — the image protocol
+    // never reaches the remote transport's virtual terminal.
     match terminal_caps.terminal_type {
         TerminalType::Zellij => {
             display_image_sixel(&img, scaled_width, scaled_height, args)
@@ -1764,6 +1769,16 @@ enum RemoteTransport {
     EternalTerminal,
 }
 
+/// Return the cached remote transport, detecting it on first call.
+///
+/// The result is cached in a `OnceLock` because the transport cannot change
+/// during a process's lifetime and detection spawns a `ps` subprocess — too
+/// expensive to repeat per video frame.
+fn detect_remote_transport() -> RemoteTransport {
+    static TRANSPORT: OnceLock<RemoteTransport> = OnceLock::new();
+    *TRANSPORT.get_or_init(detect_remote_transport_inner)
+}
+
 /// Detect the remote transport by checking environment variables and process tree.
 ///
 /// Priority logic:
@@ -1774,7 +1789,7 @@ enum RemoteTransport {
 ///    ignore the escape sequences.
 /// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
 /// 4. **Neither** → None
-fn detect_remote_transport() -> RemoteTransport {
+fn detect_remote_transport_inner() -> RemoteTransport {
     let output = match std::process::Command::new("ps")
         .args(["-eo", "pid=,ppid=,comm="])
         .stdout(Stdio::piped())
@@ -2014,6 +2029,9 @@ fn print_kitty_image(
     if under_remote_proxy {
         // Move cursor down past the image area using CUD (Cursor Down).
         // Both the proxy and local terminal process this identically.
+        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
+        // terminal needs explicit cursor advancement to stay in sync with the
+        // real terminal — without it, subsequent output overwrites the image.
         write!(stdout, "\x1b[{}B", proxy_rows)?;
         writeln!(stdout)?;
     } else if !no_newline {
@@ -2076,6 +2094,9 @@ fn print_iterm2_image(
     if under_remote_proxy {
         // Move cursor down past the image area using CUD (Cursor Down).
         // Both the proxy and local terminal process this identically.
+        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
+        // terminal needs explicit cursor advancement to stay in sync with the
+        // real terminal — without it, subsequent output overwrites the image.
         write!(stdout, "\x1b[{}B", proxy_rows)?;
         writeln!(stdout)?;
     } else if !no_newline {
