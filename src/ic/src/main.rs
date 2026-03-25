@@ -1766,18 +1766,15 @@ enum RemoteTransport {
 
 /// Detect the remote transport by checking environment variables and process tree.
 ///
-/// ET is detected via the `ET_VERSION` environment variable (fastest, most reliable)
-/// or by finding `etterminal` in the process tree. The `etterminal` process is the
-/// per-session worker spawned by `etserver`; it reparents to PID 1, so we also
-/// check for it as a direct ancestor.
-///
-/// Mosh is detected by finding `mosh-server` in the process tree.
+/// Priority logic:
+/// 1. **Mosh as direct ancestor** → always Mosh (the shell is definitely under Mosh)
+/// 2. **ET detected** (env var or process tree) → EternalTerminal, even if Mosh is
+///    also attached to the same Zellij session. In multiplexed sessions, output goes
+///    to all clients — ET viewers can handle images while Mosh viewers silently
+///    ignore the escape sequences.
+/// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
+/// 4. **Neither** → None
 fn detect_remote_transport() -> RemoteTransport {
-    // ET sets ET_VERSION in every session — fast check, no ps needed
-    if std::env::var("ET_VERSION").is_ok() {
-        return RemoteTransport::EternalTerminal;
-    }
-
     let output = match std::process::Command::new("ps")
         .args(["-eo", "pid=,ppid=,comm="])
         .stdout(Stdio::piped())
@@ -1785,20 +1782,41 @@ fn detect_remote_transport() -> RemoteTransport {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return RemoteTransport::None,
+        Err(_) => {
+            // Can't check process tree; fall back to env var for ET
+            if std::env::var("ET_VERSION").is_ok() {
+                return RemoteTransport::EternalTerminal;
+            }
+            return RemoteTransport::None;
+        }
     };
 
     let table = String::from_utf8_lossy(&output.stdout);
     let current_pid = Pid(std::process::id());
     let in_zellij = std::env::var("ZELLIJ").is_ok();
 
-    if find_ancestor_process(&table, current_pid, in_zellij, "mosh-server") {
-        RemoteTransport::Mosh
-    } else if find_ancestor_process(&table, current_pid, in_zellij, "etterminal") {
-        RemoteTransport::EternalTerminal
-    } else {
-        RemoteTransport::None
+    // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
+    // shell is definitely under Mosh, so images cannot work.
+    if find_ancestor_process(&table, current_pid, false, "mosh-server") {
+        return RemoteTransport::Mosh;
     }
+
+    // ET detected via env var or process tree (including Zellij heuristic).
+    // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
+    // session, Mosh and ET may both be attached — ET viewers can display images
+    // while Mosh viewers silently strip the escape sequences.
+    if std::env::var("ET_VERSION").is_ok()
+        || find_ancestor_process(&table, current_pid, in_zellij, "etterminal")
+    {
+        return RemoteTransport::EternalTerminal;
+    }
+
+    // Mosh via Zellij heuristic (Case 2) — only reached when ET is not present.
+    if find_ancestor_process(&table, current_pid, in_zellij, "mosh-server") {
+        return RemoteTransport::Mosh;
+    }
+
+    RemoteTransport::None
 }
 
 /// Determines whether a target process (identified by basename) is an ancestor
