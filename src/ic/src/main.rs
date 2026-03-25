@@ -12,6 +12,7 @@ use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use terminal_size::{terminal_size, Height, Width};
@@ -397,15 +398,16 @@ fn ensure_ffprobe_available() -> Result<()> {
     Ok(())
 }
 
-fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature: &str) -> Result<()> {
+fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, transport: &RemoteTransport, feature: &str) -> Result<()> {
     // Check for Mosh first, since it strips escape sequences needed by all graphics protocols
-    if is_running_under_mosh() {
+    if *transport == RemoteTransport::Mosh {
         anyhow::bail!(
             "Mosh detected. {} display does not work over Mosh.\n\
             Mosh strips the escape sequences needed for image display (Sixel, Kitty, iTerm2).\n\
             \n\
-            To display images, please use SSH directly:\n\
-            • ssh user@host (instead of mosh user@host)",
+            To display images, please use one of:\n\
+            • ssh user@host (instead of mosh user@host)\n\
+            • Eternal Terminal (et user@host) - persistent sessions with image support",
             feature
         );
     }
@@ -458,8 +460,9 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
 
 fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
-    
-    validate_terminal_for_graphics(&terminal_caps, "Video")?;
+    let transport = detect_remote_transport();
+
+    validate_terminal_for_graphics(&terminal_caps, &transport, "Video")?;
     ensure_ffmpeg_available()?;
 
     // Clear screen initially with function
@@ -1263,8 +1266,11 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
 fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
-    
-    validate_terminal_for_graphics(&terminal_caps, "Image")?;
+    let transport = detect_remote_transport();
+
+    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
+
+    let under_remote_proxy = transport == RemoteTransport::EternalTerminal;
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
         // Use user-specified dimensions but still use character-based sizing
@@ -1297,17 +1303,21 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
         (target_width, target_height)
     };
 
-    // Choose optimal display method based on terminal capabilities
-    // Check Sixel first (for Zellij), then Kitty/Ghostty/WezTerm, then iTerm2
-    // Use already-detected terminal_caps to avoid redundant env var lookups
+    // Choose optimal display method based on terminal capabilities.
+    // Check Sixel first (for Zellij), then Kitty/Ghostty/WezTerm, then iTerm2.
+    // Use already-detected terminal_caps to avoid redundant env var lookups.
+    //
+    // Sixel (Zellij) does not need proxy cursor-sync because Zellij's server
+    // manages its own rendering and cursor tracking — the image protocol
+    // never reaches the remote transport's virtual terminal.
     match terminal_caps.terminal_type {
         TerminalType::Zellij => {
             display_image_sixel(&img, scaled_width, scaled_height, args)
         }
         TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
-            display_image_kitty(&img, scaled_width, scaled_height, args)
+            display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy)
         }
-        _ => display_image_iterm2(&img, scaled_width, scaled_height, args),
+        _ => display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy),
     }
 }
 
@@ -1432,7 +1442,7 @@ fn downscale_to_display_pixels<'a>(
 /// Kitty terminal display with better performance for video.
 ///
 /// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
-fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool) -> Result<()> {
     // display_width/display_height are in terminal cells (character columns/rows).
     // They serve two roles: (1) the Kitty protocol `c=`/`r=` display hints that tell
     // the terminal how many cells the image should span, and (2) the downscale target
@@ -1461,6 +1471,7 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
         display_width,
         display_height,
         args.no_newline,
+        under_remote_proxy,
     )
 }
 
@@ -1621,7 +1632,7 @@ fn display_image_sixel(
 /// Computes aspect-preserving display dimensions and downscales the image to the
 /// target pixel size before encoding. This matches the Kitty path's behavior and
 /// prevents sending oversized payloads for very large images.
-fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool) -> Result<()> {
     // Calculate aspect-corrected display dimensions in terminal cells, then use them
     // both as the iTerm2 width/height hints and the downscale target.
     let (display_width, display_height) = calculate_aspect_preserving_size(
@@ -1650,7 +1661,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
     // Use base64 encoding
     let encoded = BASE64_STANDARD.encode(&pnm_data);
 
-    print_iterm2_image(&encoded, display_width, display_height, args.no_newline)
+    print_iterm2_image(&encoded, display_width, display_height, args.no_newline, under_remote_proxy)
 }
 
 /// Optimized Kitty image printing with reduced protocol overhead
@@ -1740,11 +1751,45 @@ fn comm_basename(comm: &str) -> &str {
         .unwrap_or(comm)
 }
 
-/// Check if we're running under Mosh by examining the process tree.
+/// The type of remote transport detected in the process tree.
 ///
-/// Delegates to [`has_mosh_in_process_tree`] after collecting `ps` output
-/// and environment state.
-fn is_running_under_mosh() -> bool {
+/// Used to adapt image display behavior for proxies that don't understand
+/// terminal graphics protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteTransport {
+    /// No remote transport detected (direct terminal or plain SSH).
+    None,
+    /// Running under Mosh (mosh-server in process tree).
+    /// Mosh strips escape sequences, so graphics protocols cannot work.
+    Mosh,
+    /// Running under Eternal Terminal (ET_VERSION env var or etterminal in process tree).
+    /// ET passes escape sequences through but its virtual terminal doesn't
+    /// track cursor movement from image protocols, requiring explicit
+    /// cursor advancement.
+    EternalTerminal,
+}
+
+/// Return the cached remote transport, detecting it on first call.
+///
+/// The result is cached in a `OnceLock` because the transport cannot change
+/// during a process's lifetime and detection spawns a `ps` subprocess — too
+/// expensive to repeat per video frame.
+fn detect_remote_transport() -> RemoteTransport {
+    static TRANSPORT: OnceLock<RemoteTransport> = OnceLock::new();
+    *TRANSPORT.get_or_init(detect_remote_transport_inner)
+}
+
+/// Detect the remote transport by checking environment variables and process tree.
+///
+/// Priority logic:
+/// 1. **Mosh as direct ancestor** → always Mosh (the shell is definitely under Mosh)
+/// 2. **ET detected** (env var or process tree) → EternalTerminal, even if Mosh is
+///    also attached to the same Zellij session. In multiplexed sessions, output goes
+///    to all clients — ET viewers can handle images while Mosh viewers silently
+///    ignore the escape sequences.
+/// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
+/// 4. **Neither** → None
+fn detect_remote_transport_inner() -> RemoteTransport {
     let output = match std::process::Command::new("ps")
         .args(["-eo", "pid=,ppid=,comm="])
         .stdout(Stdio::piped())
@@ -1752,25 +1797,58 @@ fn is_running_under_mosh() -> bool {
         .output()
     {
         Ok(o) => o,
-        Err(_) => return false,
+        Err(_) => {
+            // Can't check process tree; fall back to env var for ET
+            if std::env::var("ET_VERSION").is_ok() {
+                return RemoteTransport::EternalTerminal;
+            }
+            return RemoteTransport::None;
+        }
     };
 
     let table = String::from_utf8_lossy(&output.stdout);
     let current_pid = Pid(std::process::id());
     let in_zellij = std::env::var("ZELLIJ").is_ok();
-    has_mosh_in_process_tree(&table, current_pid, in_zellij)
+
+    // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
+    // shell is definitely under Mosh, so images cannot work.
+    if find_ancestor_process(&table, current_pid, false, "mosh-server") {
+        return RemoteTransport::Mosh;
+    }
+
+    // ET detected via env var or process tree (including Zellij heuristic).
+    // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
+    // session, Mosh and ET may both be attached — ET viewers can display images
+    // while Mosh viewers silently strip the escape sequences.
+    if std::env::var("ET_VERSION").is_ok()
+        || find_ancestor_process(&table, current_pid, in_zellij, "etterminal")
+    {
+        return RemoteTransport::EternalTerminal;
+    }
+
+    // Mosh via Zellij heuristic (Case 2) — only reached when ET is not present.
+    if find_ancestor_process(&table, current_pid, in_zellij, "mosh-server") {
+        return RemoteTransport::Mosh;
+    }
+
+    RemoteTransport::None
 }
 
-/// Determines whether the current process is running under Mosh by analyzing
-/// parsed `ps` output.
+/// Determines whether a target process (identified by basename) is an ancestor
+/// of the current process by analyzing parsed `ps` output.
 ///
 /// This handles two cases:
-/// 1. **Bare Mosh**: `mosh-server` is a direct ancestor of `current_pid`.
-/// 2. **Mosh + Zellij**: Zellij daemonizes (reparents to PID 1), breaking the
+/// 1. **Direct ancestry**: The target process is a direct ancestor of `current_pid`.
+/// 2. **Zellij workaround**: Zellij daemonizes (reparents to PID 1), breaking the
 ///    direct ancestry. In this case, we check if any process whose basename is
-///    exactly `zellij` (the CLI, not `zellij-server`) is a descendant of a
-///    `mosh-server` process.
-fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
+///    exactly `zellij` (the CLI, not `zellij-server` or other variants) has the
+///    target process as an ancestor.
+fn find_ancestor_process(
+    ps_output: &str,
+    current_pid: Pid,
+    in_zellij: bool,
+    target_name: &str,
+) -> bool {
     let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
     let mut comm_of: HashMap<Pid, String> = HashMap::new();
 
@@ -1799,11 +1877,11 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
         comm_of.insert(pid, comm);
     }
 
-    // Case 1: Walk up from current PID looking for mosh-server (bare Mosh)
+    // Case 1: Walk up from current PID looking for target (direct ancestry)
     let mut ancestor = current_pid;
     for _ in 0..MAX_ANCESTOR_DEPTH {
         if let Some(comm) = comm_of.get(&ancestor) {
-            if comm_basename(comm) == "mosh-server" {
+            if comm_basename(comm) == target_name {
                 return true;
             }
         }
@@ -1816,7 +1894,7 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
     // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
     // Find any process whose basename is exactly "zellij" (the CLI binary,
     // not "zellij-server" or other variants) and check if its ancestors
-    // include mosh-server.
+    // include the target process.
     if in_zellij {
         for (&zellij_pid, comm) in &comm_of {
             if comm_basename(comm) != "zellij" {
@@ -1827,7 +1905,7 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
                 match parent_of.get(&ancestor) {
                     Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
                         if let Some(pcomm) = comm_of.get(&ppid) {
-                            if comm_basename(pcomm) == "mosh-server" {
+                            if comm_basename(pcomm) == target_name {
                                 return true;
                             }
                         }
@@ -1842,6 +1920,20 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
     false
 }
 
+/// Check if Mosh is in the process tree. Delegates to [`find_ancestor_process`].
+#[cfg(test)]
+fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
+    find_ancestor_process(ps_output, current_pid, in_zellij, "mosh-server")
+}
+
+/// Check if Eternal Terminal is in the process tree. Delegates to [`find_ancestor_process`].
+/// Looks for `etterminal` (the per-session worker), not `etserver` (the daemon),
+/// because `etterminal` is the direct ancestor of the user's shell.
+#[cfg(test)]
+fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
+    find_ancestor_process(ps_output, current_pid, in_zellij, "etterminal")
+}
+
 fn print_kitty_image(
     rgb_data: &[u8],
     img_width: u32,
@@ -1849,6 +1941,7 @@ fn print_kitty_image(
     display_width: Option<u32>,
     display_height: Option<u32>,
     no_newline: bool,
+    under_remote_proxy: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
 
@@ -1858,6 +1951,27 @@ fn print_kitty_image(
 
     let base64_data = BASE64_STANDARD.encode(rgb_data);
     let chunk_size = 4096; // Kitty recommended chunk size
+
+    // Under a remote proxy (e.g. Eternal Terminal), the proxy's virtual terminal
+    // doesn't understand the Kitty graphics protocol, so it can't track cursor
+    // movement caused by image rendering. We synchronize by:
+    //   1. Pre-filling blank lines so the proxy allocates screen space
+    //   2. Moving the cursor back up (both proxy and client process this)
+    //   3. Rendering the image with C=1 (don't move cursor)
+    //   4. Moving the cursor back down with CUD (both process this)
+    // This keeps both terminals' cursor positions in sync.
+    let proxy_rows = if under_remote_proxy {
+        let rows = display_height.unwrap_or(1);
+        // Pre-fill: emit newlines to create space in the proxy's screen buffer
+        for _ in 0..rows {
+            writeln!(stdout)?;
+        }
+        // Move cursor back up to where the image should be rendered
+        write!(stdout, "\x1b[{}A", rows)?;
+        rows
+    } else {
+        0
+    };
 
     if base64_data.len() <= chunk_size {
         // Small image, send in one chunk
@@ -1869,6 +1983,10 @@ fn print_kitty_image(
         }
         if let Some(h) = display_height {
             write!(stdout, ",r={}", h)?;
+        }
+
+        if under_remote_proxy {
+            write!(stdout, ",C=1")?;
         }
 
         write!(stdout, ";{}\x1b\\", base64_data)?;
@@ -1893,6 +2011,10 @@ fn print_kitty_image(
                     write!(stdout, ",r={}", h)?;
                 }
 
+                if under_remote_proxy {
+                    write!(stdout, ",C=1")?;
+                }
+
                 write!(stdout, ",m=1;{}\x1b\\", chunk)?;
             } else if i == chunks.len() - 1 {
                 // Last chunk
@@ -1904,7 +2026,15 @@ fn print_kitty_image(
         }
     }
 
-    if !no_newline {
+    if under_remote_proxy {
+        // Move cursor down past the image area using CUD (Cursor Down).
+        // Both the proxy and local terminal process this identically.
+        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
+        // terminal needs explicit cursor advancement to stay in sync with the
+        // real terminal — without it, subsequent output overwrites the image.
+        write!(stdout, "\x1b[{}B", proxy_rows)?;
+        writeln!(stdout)?;
+    } else if !no_newline {
         writeln!(stdout)?;
     }
 
@@ -1918,8 +2048,28 @@ fn print_iterm2_image(
     width: Option<u32>,
     height: Option<u32>,
     no_newline: bool,
+    under_remote_proxy: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
+
+    // Under a remote proxy (e.g. Eternal Terminal), the proxy's virtual terminal
+    // doesn't understand the iTerm2 image protocol, so it can't track cursor
+    // movement caused by image rendering. We synchronize by:
+    //   1. Pre-filling blank lines so the proxy allocates screen space
+    //   2. Moving the cursor back up (both proxy and client process this)
+    //   3. Rendering the image with doNotMoveCursor=1
+    //   4. Moving the cursor back down with CUD (both process this)
+    // This keeps both terminals' cursor positions in sync.
+    let proxy_rows = if under_remote_proxy {
+        let rows = height.unwrap_or(1);
+        for _ in 0..rows {
+            writeln!(stdout)?;
+        }
+        write!(stdout, "\x1b[{}A", rows)?;
+        rows
+    } else {
+        0
+    };
 
     // iTerm2 inline image protocol
     // ESC ] 1337 ; File = [arguments] : base64_data BEL
@@ -1939,10 +2089,18 @@ fn print_iterm2_image(
     // Don't move cursor after image to prevent scrollback accumulation
     write!(stdout, ";doNotMoveCursor=1")?;
 
-    if no_newline {
-        write!(stdout, ":{}\x07", base64_data)?;
-    } else {
-        write!(stdout, ":{}\x07\n", base64_data)?;
+    write!(stdout, ":{}\x07", base64_data)?;
+
+    if under_remote_proxy {
+        // Move cursor down past the image area using CUD (Cursor Down).
+        // Both the proxy and local terminal process this identically.
+        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
+        // terminal needs explicit cursor advancement to stay in sync with the
+        // real terminal — without it, subsequent output overwrites the image.
+        write!(stdout, "\x1b[{}B", proxy_rows)?;
+        writeln!(stdout)?;
+    } else if !no_newline {
+        writeln!(stdout)?;
     }
 
     stdout.flush().context("Failed to flush output")?;
@@ -2283,6 +2441,81 @@ not_a_number  1 /bin/bash
         // current PID 400 is not an ancestor of mosh-server via Case 1,
         // and in_zellij=false disables Case 2
         assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
+    }
+
+    // =========================================================================
+    // Tests for has_et_in_process_tree (Eternal Terminal detection)
+    // =========================================================================
+
+    #[test]
+    fn et_detected_bare_session() {
+        // Process tree: etterminal(100) -> bash(200) -> ic(300)
+        let ps_output = "\
+  100     1 /usr/bin/etterminal
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn et_detected_bare_name() {
+        // comm is just the bare name, no path
+        let ps_output = "\
+  100     1 etterminal
+  200   100 bash
+  300   200 ic";
+        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn et_detected_in_zellij() {
+        // etterminal(100) -> zellij CLI(200), but current process(400)
+        // is child of zellij-server(300) which reparented to PID 1
+        let ps_output = "\
+  100     1 /usr/bin/etterminal
+  200   100 /usr/bin/zellij
+  300     1 /usr/bin/zellij-server
+  400   300 /bin/bash";
+        assert!(has_et_in_process_tree(ps_output, Pid(400), true));
+    }
+
+    #[test]
+    fn no_et_in_normal_session() {
+        let ps_output = "\
+    1     0 /sbin/launchd
+  500     1 /usr/sbin/sshd
+  600   500 /bin/bash
+  700   600 /usr/local/bin/ic";
+        assert!(!has_et_in_process_tree(ps_output, Pid(700), false));
+    }
+
+    #[test]
+    fn et_not_confused_with_mosh() {
+        // mosh-server present but no etterminal
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(!has_et_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn mosh_not_confused_with_et() {
+        // etterminal present but no mosh-server
+        let ps_output = "\
+  100     1 /usr/bin/etterminal
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn et_exact_match_no_false_positive() {
+        // "etterminal-wrapper" must NOT match as etterminal
+        let ps_output = "\
+  100     1 /usr/bin/etterminal-wrapper
+  200   100 /bin/bash";
+        assert!(!has_et_in_process_tree(ps_output, Pid(200), false));
     }
 
     // =========================================================================
