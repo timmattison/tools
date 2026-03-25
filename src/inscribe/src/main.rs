@@ -48,7 +48,7 @@ fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
     };
 
     Repository::discover(&start)
-        .with_context(|| format!("No git repository found starting from {:?}", start))
+        .with_context(|| format!("Not a git repository (or any parent up to root). inscribe must be run inside a git repository."))
 }
 
 fn check_claude_cli() -> Result<()> {
