@@ -24,12 +24,6 @@ use termion::raw::IntoRawMode;
 // Constants for Sixel and terminal display calculations
 // ============================================================================
 
-/// Estimated cell aspect ratio (height:width in pixels) for terminal cells.
-/// Most terminals use fonts where cells are roughly twice as tall as they are wide.
-/// This is a reasonable default that works across most modern terminals (iTerm2,
-/// Kitty, Ghostty, WezTerm, etc.) with typical font configurations.
-const TERMINAL_CELL_ASPECT_RATIO: f64 = 2.0;
-
 /// Estimated pixel width per terminal character cell.
 /// Used as fallback when actual pixel dimensions cannot be queried via ioctl.
 /// Value of 10px is typical for modern terminals with default fonts.
@@ -1344,7 +1338,8 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
 /// Calculate display dimensions that preserve aspect ratio within the given bounds.
 ///
 /// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
-/// using `TERMINAL_CELL_ASPECT_RATIO`. This function works in terminal character cells,
+/// using the actual cell pixel dimensions when available, falling back to
+/// `TERMINAL_CELL_ASPECT_RATIO`. This function works in terminal character cells,
 /// not pixels.
 ///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
@@ -1373,10 +1368,12 @@ fn calculate_aspect_preserving_size(
 
     match (max_width, max_height) {
         (Some(max_w), Some(max_h)) => {
-            // Terminal cells are roughly 2:1 (height:width in pixels)
-            // So 1 row ≈ 2 columns worth of pixels
-            // Adjust the max_height to account for cell aspect ratio
-            let effective_max_h_pixels = max_h as f64 * TERMINAL_CELL_ASPECT_RATIO;
+            // Use actual cell pixel dimensions for accurate aspect ratio calculation,
+            // falling back to the hardcoded constant if ioctl is unavailable.
+            let (cell_w, cell_h) = get_cell_pixel_dimensions();
+            let cell_aspect = cell_h as f64 / cell_w as f64;
+
+            let effective_max_h_pixels = max_h as f64 * cell_aspect;
             let effective_max_w_pixels = max_w as f64;
 
             let img_aspect = img_width as f64 / img_height as f64;
@@ -1386,13 +1383,13 @@ fn calculate_aspect_preserving_size(
                 // Image is wider than box - constrain by width
                 let display_width = max_w;
                 let display_height =
-                    ((max_w as f64 / img_aspect) / TERMINAL_CELL_ASPECT_RATIO).round() as u32;
+                    ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
                 (Some(display_width), Some(display_height.max(1)))
             } else {
                 // Image is taller than box - constrain by height
                 let display_height = max_h;
                 let display_width =
-                    (max_h as f64 * TERMINAL_CELL_ASPECT_RATIO * img_aspect).round() as u32;
+                    (max_h as f64 * cell_aspect * img_aspect).round() as u32;
                 (Some(display_width.max(1)), Some(display_height))
             }
         }
