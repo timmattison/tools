@@ -1334,12 +1334,6 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
         TerminalType::Zellij => {
             display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
         }
-        // WezTerm in video mode: use iTerm2 protocol instead of Kitty.
-        // WezTerm doesn't properly re-render Kitty image placements on the
-        // alternate screen buffer, but handles iTerm2 inline images correctly.
-        TerminalType::WezTerm if no_newline => {
-            display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline)
-        }
         TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
             display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline)
         }
@@ -2007,16 +2001,21 @@ fn print_kitty_image(
         // Small image, send in one chunk
         write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
 
+        // In video mode, use fixed image and placement IDs so each frame replaces
+        // the previous one in-place (zero memory accumulation), and C=1 to prevent
+        // cursor movement that could trigger terminal scrolling.
+        if no_newline {
+            write!(stdout, ",i=1,p=1,C=1")?;
+        } else if under_remote_proxy {
+            write!(stdout, ",C=1")?;
+        }
+
         // Add display size if specified (in character cells)
         if let Some(w) = display_width {
             write!(stdout, ",c={}", w)?;
         }
         if let Some(h) = display_height {
             write!(stdout, ",r={}", h)?;
-        }
-
-        if under_remote_proxy {
-            write!(stdout, ",C=1")?;
         }
 
         write!(stdout, ";{}\x1b\\", base64_data)?;
@@ -2033,16 +2032,18 @@ fn print_kitty_image(
                 // First chunk
                 write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
 
+                if no_newline {
+                    write!(stdout, ",i=1,p=1,C=1")?;
+                } else if under_remote_proxy {
+                    write!(stdout, ",C=1")?;
+                }
+
                 // Add display size if specified (in character cells)
                 if let Some(w) = display_width {
                     write!(stdout, ",c={}", w)?;
                 }
                 if let Some(h) = display_height {
                     write!(stdout, ",r={}", h)?;
-                }
-
-                if under_remote_proxy {
-                    write!(stdout, ",C=1")?;
                 }
 
                 write!(stdout, ",m=1;{}\x1b\\", chunk)?;
