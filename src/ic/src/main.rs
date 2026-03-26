@@ -658,7 +658,7 @@ fn process_frame_display(
         move_cursor_home()?;
     }
 
-    display_image(img, args)?;
+    display_image(img, args, true)?;
 
     // Draw progress bar
     if let Some((term_width, term_height)) = current_terminal_size {
@@ -722,10 +722,33 @@ fn play_video_simple(
     _frame_duration: Duration,
     args: &Args,
     duration: f64,
-    mut fps: f64,
+    fps: f64,
 ) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
+
+    // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
+    // The alternate screen buffer prevents scrollback accumulation and eliminates
+    // ghost progress bars caused by terminal scrolling during image display.
+    print!("\x1b[?1049h\x1b[?25l");
+    io::stdout().flush()?;
+
+    let result = play_video_inner(file_path, args, duration, fps, &input_rx);
+
+    // Always restore main screen buffer and show cursor, even on error
+    print!("\x1b[?25h\x1b[?1049l");
+    io::stdout().flush()?;
+
+    result
+}
+
+fn play_video_inner(
+    file_path: &PathBuf,
+    args: &Args,
+    duration: f64,
+    mut fps: f64,
+    input_rx: &std::sync::mpsc::Receiver<VideoControl>,
+) -> Result<()> {
     let mut current_time = 0.0; // Current position in the video (in seconds)
     let mut is_paused = false;
     let mut previous_terminal_size: Option<(u32, u32)> = None;
@@ -1006,9 +1029,6 @@ fn play_video_simple(
         let _ = ffmpeg_child.wait();
     }
 
-    // Clean up the input thread
-    drop(_input_handle);
-
     Ok(())
 }
 
@@ -1236,7 +1256,7 @@ fn display_image_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     let img = image::open(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    display_image(img, args)
+    display_image(img, args, args.no_newline)
 }
 
 fn display_text_file(file_path: &PathBuf) -> Result<()> {
@@ -1261,10 +1281,10 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
-    display_image(img, args)
+    display_image(img, args, args.no_newline)
 }
 
-fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
+fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
 
@@ -1312,12 +1332,18 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
     // never reaches the remote transport's virtual terminal.
     match terminal_caps.terminal_type {
         TerminalType::Zellij => {
-            display_image_sixel(&img, scaled_width, scaled_height, args)
+            display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
+        }
+        // WezTerm in video mode: use iTerm2 protocol instead of Kitty.
+        // WezTerm doesn't properly re-render Kitty image placements on the
+        // alternate screen buffer, but handles iTerm2 inline images correctly.
+        TerminalType::WezTerm if no_newline => {
+            display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline)
         }
         TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
-            display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy)
+            display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline)
         }
-        _ => display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy),
+        _ => display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline),
     }
 }
 
@@ -1442,7 +1468,7 @@ fn downscale_to_display_pixels<'a>(
 /// Kitty terminal display with better performance for video.
 ///
 /// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
-fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool) -> Result<()> {
+fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
     // display_width/display_height are in terminal cells (character columns/rows).
     // They serve two roles: (1) the Kitty protocol `c=`/`r=` display hints that tell
     // the terminal how many cells the image should span, and (2) the downscale target
@@ -1470,7 +1496,7 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
         img.height(),
         display_width,
         display_height,
-        args.no_newline,
+        no_newline,
         under_remote_proxy,
     )
 }
@@ -1567,6 +1593,7 @@ fn display_image_sixel(
     fallback_cols: Option<u32>,
     fallback_rows: Option<u32>,
     args: &Args,
+    no_newline: bool,
 ) -> Result<()> {
     // Try to get actual terminal pixel dimensions, with fallbacks
     let (target_pixel_width, target_pixel_height) =
@@ -1619,7 +1646,7 @@ fn display_image_sixel(
     // Output the sixel data
     let mut stdout = io::stdout().lock();
     write!(stdout, "{}", sixel_output)?;
-    if !args.no_newline {
+    if !no_newline {
         writeln!(stdout)?;
     }
     stdout.flush().context("Failed to flush output")?;
@@ -1632,7 +1659,7 @@ fn display_image_sixel(
 /// Computes aspect-preserving display dimensions and downscales the image to the
 /// target pixel size before encoding. This matches the Kitty path's behavior and
 /// prevents sending oversized payloads for very large images.
-fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool) -> Result<()> {
+fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
     // Calculate aspect-corrected display dimensions in terminal cells, then use them
     // both as the iTerm2 width/height hints and the downscale target.
     let (display_width, display_height) = calculate_aspect_preserving_size(
@@ -1661,7 +1688,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
     // Use base64 encoding
     let encoded = BASE64_STANDARD.encode(&pnm_data);
 
-    print_iterm2_image(&encoded, display_width, display_height, args.no_newline, under_remote_proxy)
+    print_iterm2_image(&encoded, display_width, display_height, no_newline, under_remote_proxy)
 }
 
 /// Optimized Kitty image printing with reduced protocol overhead
@@ -1960,7 +1987,10 @@ fn print_kitty_image(
     //   3. Rendering the image with C=1 (don't move cursor)
     //   4. Moving the cursor back down with CUD (both process this)
     // This keeps both terminals' cursor positions in sync.
-    let proxy_rows = if under_remote_proxy {
+    // In video mode (no_newline), skip proxy cursor sync — the caller handles
+    // cursor positioning explicitly with \x1b[row;colH and \x1b[J. The pre-fill
+    // newlines would cause scrolling every frame.
+    let proxy_rows = if under_remote_proxy && !no_newline {
         let rows = display_height.unwrap_or(1);
         // Pre-fill: emit newlines to create space in the proxy's screen buffer
         for _ in 0..rows {
@@ -2026,7 +2056,7 @@ fn print_kitty_image(
         }
     }
 
-    if under_remote_proxy {
+    if under_remote_proxy && !no_newline {
         // Move cursor down past the image area using CUD (Cursor Down).
         // Both the proxy and local terminal process this identically.
         // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
@@ -2060,7 +2090,9 @@ fn print_iterm2_image(
     //   3. Rendering the image with doNotMoveCursor=1
     //   4. Moving the cursor back down with CUD (both process this)
     // This keeps both terminals' cursor positions in sync.
-    let proxy_rows = if under_remote_proxy {
+    // In video mode (no_newline), skip proxy cursor sync — the caller handles
+    // cursor positioning explicitly with \x1b[row;colH and \x1b[J.
+    let proxy_rows = if under_remote_proxy && !no_newline {
         let rows = height.unwrap_or(1);
         for _ in 0..rows {
             writeln!(stdout)?;
@@ -2091,7 +2123,7 @@ fn print_iterm2_image(
 
     write!(stdout, ":{}\x07", base64_data)?;
 
-    if under_remote_proxy {
+    if under_remote_proxy && !no_newline {
         // Move cursor down past the image area using CUD (Cursor Down).
         // Both the proxy and local terminal process this identically.
         // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
