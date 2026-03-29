@@ -247,6 +247,61 @@ impl OpCache {
         Ok(resolved)
     }
 
+    /// Lists fields from a 1Password item that match a given prefix.
+    ///
+    /// Resolution order:
+    /// 1. If the item fields are in the cache, return cached values
+    /// 2. Fetch from 1Password with `op item get --format json`, parse, cache, return
+    ///
+    /// A field matches if its label equals `field_prefix` exactly or starts with
+    /// `field_prefix-`. Results are sorted alphabetically by label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `op` CLI is not found, 1Password read fails,
+    /// no fields match the prefix, or there's a cache IO error.
+    pub fn read_item_fields(
+        &self,
+        op_path: &OpPath,
+        field_prefix: &str,
+    ) -> Result<Vec<ItemField>> {
+        // Cache key: item path + sentinel + prefix
+        let cache_key = format!("{}/__item_fields__/{}", op_path.as_ref(), field_prefix);
+
+        // Check cache first
+        let mut cache = self.read_cache();
+        if let Some(entry) = cache.get(&cache_key) {
+            let pairs: Vec<(String, String)> = serde_json::from_str(&entry.value)
+                .map_err(|e| Error::ItemJsonParse(format!("cached item fields corrupted: {e}")))?;
+            return Ok(pairs
+                .into_iter()
+                .map(|(label, value)| ItemField { label, value })
+                .collect());
+        }
+
+        // Fetch from 1Password
+        let item_json = fetch_item_from_1password(op_path)?;
+        let fields = parse_item_fields(&item_json, field_prefix)?;
+
+        // Cache the result
+        let pairs: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|f| (f.label.as_str(), f.value.as_str()))
+            .collect();
+        let serialized = serde_json::to_string(&pairs)
+            .map_err(|e| Error::ItemJsonParse(format!("failed to serialize fields: {e}")))?;
+        cache.insert(
+            cache_key,
+            CacheEntry {
+                value: serialized,
+                fetched_at: Utc::now().to_rfc3339(),
+            },
+        );
+        self.write_cache(&cache)?;
+
+        Ok(fields)
+    }
+
     /// Removes a credential from the cache file.
     ///
     /// The next `read()` call for this path will re-fetch from 1Password.
@@ -404,6 +459,45 @@ fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<(
         if attempt < OP_MAX_RETRIES {
             eprintln!(
                 "Failed to read binary from 1Password (attempt {attempt}/{OP_MAX_RETRIES}), retrying..."
+            );
+            std::thread::sleep(std::time::Duration::from_millis(
+                RETRY_DELAY_MS * u64::from(attempt),
+            ));
+        }
+    }
+
+    Err(Error::OpReadFailed(op_path.to_string()))
+}
+
+fn fetch_item_from_1password(op_path: &OpPath) -> Result<serde_json::Value> {
+    ensure_op_available()?;
+
+    // Extract the item reference (everything in the op:// path)
+    // op_path is like "op://vault/item" — pass it directly to `op item get`
+    let item_ref = op_path.as_ref();
+
+    for attempt in 1..=OP_MAX_RETRIES {
+        match Command::new("op")
+            .args(["item", "get", item_ref, "--format", "json"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let json_str = String::from_utf8_lossy(&output.stdout);
+                match serde_json::from_str(json_str.trim()) {
+                    Ok(value) => return Ok(value),
+                    Err(e) => {
+                        return Err(Error::ItemJsonParse(format!(
+                            "invalid JSON from `op item get`: {e}"
+                        )));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        if attempt < OP_MAX_RETRIES {
+            eprintln!(
+                "Failed to get item from 1Password (attempt {attempt}/{OP_MAX_RETRIES}), retrying..."
             );
             std::thread::sleep(std::time::Duration::from_millis(
                 RETRY_DELAY_MS * u64::from(attempt),
@@ -669,6 +763,38 @@ mod tests {
             }
             other => panic!("expected NoMatchingFields, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn item_fields_cache_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
+
+        let fields = vec![
+            ItemField { label: "credential".to_string(), value: "key-1".to_string() },
+            ItemField { label: "credential-2".to_string(), value: "key-2".to_string() },
+        ];
+
+        // Write to cache
+        let cache_key = "op://Private/TestItem/__item_fields__/credential";
+        let serialized = serde_json::to_string(&fields.iter().map(|f| (&f.label, &f.value)).collect::<Vec<_>>()).unwrap();
+        let mut file: CacheFile = HashMap::new();
+        file.insert(
+            cache_key.to_string(),
+            CacheEntry {
+                value: serialized.clone(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+        cache.write_cache(&file).unwrap();
+
+        // Read back and deserialize
+        let raw_cache = cache.read_cache();
+        let entry = raw_cache.get(cache_key).unwrap();
+        let deserialized: Vec<(String, String)> = serde_json::from_str(&entry.value).unwrap();
+        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized[0].0, "credential");
+        assert_eq!(deserialized[0].1, "key-1");
     }
 
     #[test]
