@@ -258,7 +258,7 @@ fn truncate(s: &str, max: usize) -> String {
 ### Testing UTF-8 Safety
 
 Always include tests with multi-byte characters. The example below shows the pattern;
-see actual tool implementations (e.g., `src/sp/src/main.rs`) for comprehensive test coverage.
+see actual tool implementations (e.g., `src/spv/src/main.rs`) for comprehensive test coverage.
 
 ```rust
 #[test]

@@ -1,11 +1,11 @@
 [package]
-name = "sp"
+name = "spv"
 version = "0.1.0"
 edition.workspace = true
 description = "Smart process viewer with enhanced filtering and display"
 
 [[bin]]
-name = "sp"
+name = "spv"
 path = "src/main.rs"
 
 [dependencies]
