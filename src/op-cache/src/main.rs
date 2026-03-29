@@ -35,6 +35,14 @@ enum Commands {
         /// 1Password path to invalidate
         op_path: String,
     },
+    /// List fields matching a prefix from a 1Password item
+    ListFields {
+        /// 1Password item path (e.g., "op://Private/ProtonVPN WireGuard key")
+        op_path: String,
+        /// Field name prefix to filter by (e.g., "credential")
+        #[arg(long, default_value = "credential")]
+        prefix: String,
+    },
     /// Remove the entire cache file
     Clear,
     /// Show cached entries (values are redacted)
@@ -66,6 +74,17 @@ fn run(cli: Cli) -> op_cache::Result<()> {
             let path = OpPath::new(&op_path)?;
             let resolved = cache.read_binary(&path, output_path.as_ref())?;
             print!("{}", resolved.display());
+        }
+        Commands::ListFields { op_path, prefix } => {
+            let cache = OpCache::new()?;
+            let path = OpPath::new(&op_path)?;
+            let fields = cache.read_item_fields(&path, &prefix)?;
+            eprintln!("Fields matching \"{}\" ({}):", prefix, fields.len());
+            for field in &fields {
+                let preview_len = 8.min(field.value.len());
+                let preview: String = field.value.chars().take(preview_len).collect();
+                println!("  {} = {}...", field.label, preview);
+            }
         }
         Commands::Invalidate { op_path } => {
             let path = OpPath::new(&op_path)?;
