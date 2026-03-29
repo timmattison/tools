@@ -158,3 +158,5 @@ await_holding_lock = "warn"
 allow_attributes_without_reason = "warn"
 # Catch clones that can be replaced by moves (nursery lint, may have false positives)
 redundant_clone = "warn"
+# Warn on byte-level string indexing (&s[..n]) which can panic on multi-byte UTF-8
+string_slice = "warn"

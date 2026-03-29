@@ -6,6 +6,50 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::env;
 use std::path::PathBuf;
 
+/// Maximum prompt size in bytes before truncating the diff.
+const MAX_PROMPT_BYTES: usize = 10_000;
+/// Target diff size in bytes when truncating (leaves room for the prompt template).
+const TRUNCATED_DIFF_BYTES: usize = 8_000;
+
+/// Truncate a string to at most `max_bytes` bytes, landing on a valid UTF-8
+/// char boundary. Returns the full string if it fits.
+fn truncate_to_byte_limit(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    #[allow(clippy::string_slice, reason = "safe: end is verified to be a char boundary")]
+    &s[..end]
+}
+
+/// Return the first 8 characters of a string (e.g. for short commit hashes).
+fn short_hash(hash: &str) -> String {
+    hash.chars().take(8).collect()
+}
+
+/// Strip markdown code block fences (```) from a string.
+/// Handles opening fences with optional language identifiers and closing fences.
+fn strip_markdown_code_block(s: &str) -> String {
+    let mut result = s.to_string();
+
+    if let Some(stripped) = result.strip_prefix("```") {
+        // Remove opening backticks and optional language identifier
+        result = match stripped.split_once('\n') {
+            Some((_, rest)) => rest.to_string(),
+            None => stripped.to_string(),
+        };
+    }
+
+    if let Some(stripped) = result.strip_suffix("```") {
+        result = stripped.trim().to_string();
+    }
+
+    result
+}
+
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -48,7 +92,7 @@ fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
     };
 
     Repository::discover(&start)
-        .with_context(|| format!("Not a git repository (or any parent up to root). inscribe must be run inside a git repository."))
+        .with_context(|| "Not a git repository (or any parent up to root). inscribe must be run inside a git repository.".to_string())
 }
 
 fn check_claude_cli() -> Result<String> {
@@ -166,7 +210,7 @@ fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
             .unwrap()
             .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
     );
-    spinner.set_message(format!("Analyzing commit {}...", &commit_hash[..commit_hash.len().min(8)]));
+    spinner.set_message(format!("Analyzing commit {}...", short_hash(commit_hash)));
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
     
     let oid = Oid::from_str(commit_hash).context("Invalid commit hash")?;
@@ -239,9 +283,12 @@ async fn generate_commit_message(diff: &str, long_format: bool, claude_path: &st
         )
     };
 
-    // If diff is very large, truncate it to avoid issues
-    let truncated_prompt = if prompt.len() > 10000 {
-        let truncated_diff: String = diff.chars().take(8000).collect();
+    // If diff is very large, truncate it to avoid overwhelming the CLI.
+    // Both the threshold and truncation use bytes for consistency — the concern
+    // is data size, not character count. truncate_to_byte_limit ensures we land
+    // on a valid UTF-8 char boundary.
+    let truncated_prompt = if prompt.len() > MAX_PROMPT_BYTES {
+        let truncated_diff = truncate_to_byte_limit(diff, TRUNCATED_DIFF_BYTES);
         if long_format {
             format!(
                 "Based on the following git diff, generate a detailed commit message with: \
@@ -312,19 +359,7 @@ async fn generate_commit_message(diff: &str, long_format: bool, claude_path: &st
     
     // Strip markdown code block formatting if present
     // Claude sometimes wraps responses in ```
-    if message.starts_with("```") {
-        // Remove opening backticks (and optional language identifier)
-        if let Some(idx) = message.find('\n') {
-            message = message[idx + 1..].to_string();
-        } else {
-            message = message[3..].to_string();
-        }
-    }
-    
-    // Remove closing backticks if present
-    if message.ends_with("```") {
-        message = message[..message.len() - 3].trim().to_string();
-    }
+    message = strip_markdown_code_block(&message);
 
     if message.is_empty() {
         spinner.finish_and_clear();
@@ -436,10 +471,10 @@ fn reword_commit_with_rebase(
             anyhow::bail!(
                 "Rewording a root commit that is not HEAD requires rebasing the entire history. \
                 Please checkout the root commit first with 'git checkout {}' then use --reword",
-                &commit_hash[..commit_hash.len().min(8)]
+                short_hash(commit_hash)
             );
         }
-        
+
         println!("Root commit successfully reworded!");
         return Ok(());
     }
@@ -486,7 +521,7 @@ fn reword_commit_with_rebase(
     println!("Commit message successfully updated!");
     println!(
         "\nWARNING: All commit hashes after {} have changed.",
-        &commit_hash[..commit_hash.len().min(8)]
+        short_hash(commit_hash)
     );
     println!("If you've already pushed, you'll need to force push.");
 
@@ -510,7 +545,7 @@ async fn main() -> Result<()> {
 
         println!(
             "\nRewording the most recent commit: {}",
-            &head_hash[..head_hash.len().min(8)]
+            short_hash(&head_hash)
         );
         println!("Original message: {}", head.message().unwrap_or(""));
 
@@ -546,7 +581,7 @@ async fn main() -> Result<()> {
         // Handle fixup mode
         println!(
             "\nRewording commit {}...",
-            &commit_hash[..commit_hash.len().min(8)]
+            short_hash(&commit_hash)
         );
         println!("This will:");
         println!("- Generate a new commit message using Claude");
@@ -635,4 +670,134 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- truncate_to_byte_limit ---
+
+    #[test]
+    fn truncate_ascii_within_limit() {
+        assert_eq!(truncate_to_byte_limit("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_at_exact_limit() {
+        assert_eq!(truncate_to_byte_limit("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_ascii_over_limit() {
+        assert_eq!(truncate_to_byte_limit("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_empty_string() {
+        assert_eq!(truncate_to_byte_limit("", 10), "");
+    }
+
+    #[test]
+    fn truncate_japanese_chars() {
+        // Each Japanese char is 3 bytes in UTF-8.
+        // "日本語" = 9 bytes. Limit 7 should produce "日本" (6 bytes).
+        assert_eq!(truncate_to_byte_limit("日本語", 7), "日本");
+    }
+
+    #[test]
+    fn truncate_emoji() {
+        // Each emoji is 4 bytes in UTF-8.
+        // "🎉🎊🎁" = 12 bytes. Limit 5 should produce "🎉" (4 bytes).
+        assert_eq!(truncate_to_byte_limit("🎉🎊🎁", 5), "🎉");
+    }
+
+    #[test]
+    fn truncate_mixed_ascii_and_multibyte() {
+        // "café" = 5 bytes (c=1, a=1, f=1, é=2). Limit 4 should produce "caf" (3 bytes).
+        assert_eq!(truncate_to_byte_limit("café", 4), "caf");
+    }
+
+    #[test]
+    fn truncate_zero_limit() {
+        assert_eq!(truncate_to_byte_limit("hello", 0), "");
+    }
+
+    #[test]
+    fn truncate_limit_one_with_multibyte() {
+        // "é" is 2 bytes; limit 1 can't fit it, so result is empty.
+        assert_eq!(truncate_to_byte_limit("é", 1), "");
+    }
+
+    // --- short_hash ---
+
+    #[test]
+    fn short_hash_full_sha() {
+        assert_eq!(short_hash("55bad6c1234567890abcdef"), "55bad6c1");
+    }
+
+    #[test]
+    fn short_hash_already_short() {
+        assert_eq!(short_hash("abc"), "abc");
+    }
+
+    #[test]
+    fn short_hash_exactly_8() {
+        assert_eq!(short_hash("12345678"), "12345678");
+    }
+
+    #[test]
+    fn short_hash_empty() {
+        assert_eq!(short_hash(""), "");
+    }
+
+    // --- strip_markdown_code_block ---
+
+    #[test]
+    fn strip_no_fences() {
+        assert_eq!(strip_markdown_code_block("fix: update deps"), "fix: update deps");
+    }
+
+    #[test]
+    fn strip_opening_and_closing_fences() {
+        let input = "```\nfix: update deps\n```";
+        assert_eq!(strip_markdown_code_block(input), "fix: update deps");
+    }
+
+    #[test]
+    fn strip_fences_with_language_identifier() {
+        let input = "```text\nfix: update deps\n\nSome body.\n```";
+        assert_eq!(strip_markdown_code_block(input), "fix: update deps\n\nSome body.");
+    }
+
+    #[test]
+    fn strip_only_opening_fence() {
+        let input = "```\nfix: update deps";
+        assert_eq!(strip_markdown_code_block(input), "fix: update deps");
+    }
+
+    #[test]
+    fn strip_only_closing_fence() {
+        let input = "fix: update deps\n```";
+        assert_eq!(strip_markdown_code_block(input), "fix: update deps");
+    }
+
+    #[test]
+    fn strip_fences_with_multibyte_content() {
+        let input = "```\nfix: 日本語の修正\n```";
+        assert_eq!(strip_markdown_code_block(input), "fix: 日本語の修正");
+    }
+
+    #[test]
+    fn strip_empty_code_block() {
+        let input = "```\n```";
+        assert_eq!(strip_markdown_code_block(input), "");
+    }
+
+    #[test]
+    fn strip_backticks_only_no_newline() {
+        // "``````" — opening ``` stripped, then closing ``` stripped
+        let input = "``````";
+        assert_eq!(strip_markdown_code_block(input), "");
+    }
 }
