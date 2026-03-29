@@ -51,9 +51,9 @@ fn find_git_repository(start_path: Option<&str>) -> Result<Repository> {
         .with_context(|| format!("Not a git repository (or any parent up to root). inscribe must be run inside a git repository."))
 }
 
-fn check_claude_cli() -> Result<()> {
+fn check_claude_cli() -> Result<String> {
     use std::process::Command;
-    
+
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -67,6 +67,7 @@ fn check_claude_cli() -> Result<()> {
     let home = env::var("HOME").unwrap_or_default();
     let claude_paths = vec![
         "claude".to_string(),
+        format!("{}/.local/bin/claude", home),
         format!("{}/.claude/local/claude", home),
         "/usr/local/bin/claude".to_string(),
     ];
@@ -88,7 +89,7 @@ fn check_claude_cli() -> Result<()> {
         Some(Ok(output)) => {
             if output.status.success() {
                 spinner.finish_with_message("✓ Claude CLI found");
-                return Ok(());
+                Ok(used_path)
             } else {
                 spinner.finish_and_clear();
                 let error_msg = String::from_utf8_lossy(&output.stderr);
@@ -109,6 +110,7 @@ fn check_claude_cli() -> Result<()> {
                 "Claude Code is not installed or not in expected locations.\n\n\
                 Checked locations:\n\
                 - claude (in PATH)\n\
+                - ~/.local/bin/claude\n\
                 - ~/.claude/local/claude\n\
                 - /usr/local/bin/claude\n\n\
                 To use inscribe with your Claude.ai subscription:\n\
@@ -198,7 +200,7 @@ fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
     Ok(diff_text)
 }
 
-async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String> {
+async fn generate_commit_message(diff: &str, long_format: bool, claude_path: &str) -> Result<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     use tokio::time::{timeout, Duration};
@@ -239,7 +241,7 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
 
     // If diff is very large, truncate it to avoid issues
     let truncated_prompt = if prompt.len() > 10000 {
-        let truncated_diff = &diff[..8000];
+        let truncated_diff: String = diff.chars().take(8000).collect();
         if long_format {
             format!(
                 "Based on the following git diff, generate a detailed commit message with: \
@@ -266,25 +268,6 @@ async fn generate_commit_message(diff: &str, long_format: bool) -> Result<String
     } else {
         prompt
     };
-
-    let home = env::var("HOME").unwrap_or_default();
-    let claude_paths = vec![
-        "claude".to_string(),
-        format!("{}/.claude/local/claude", home),
-        "/usr/local/bin/claude".to_string(),
-    ];
-
-    let mut claude_path = None;
-    for path in &claude_paths {
-        if std::fs::metadata(path).is_ok() {
-            claude_path = Some(path);
-            break;
-        }
-    }
-
-    let claude_path = claude_path.ok_or_else(|| {
-        anyhow::anyhow!("Claude CLI not found. Make sure Claude Code is installed.")
-    })?;
 
     // Use stdin for the prompt to handle large diffs better
     let mut child = Command::new(claude_path)
@@ -514,8 +497,8 @@ fn reword_commit_with_rebase(
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Check if Claude CLI is available
-    check_claude_cli()?;
+    // Check if Claude CLI is available and get its path
+    let claude_path = check_claude_cli()?;
 
     let repo = find_git_repository(args.path.as_deref())?;
 
@@ -534,7 +517,7 @@ async fn main() -> Result<()> {
         // Get the diff of the HEAD commit
         let commit_diff = get_commit_diff(&repo, &head_hash)?;
 
-        let new_message = generate_commit_message(&commit_diff, !args.short).await?;
+        let new_message = generate_commit_message(&commit_diff, !args.short, &claude_path).await?;
 
         println!("\nGenerated commit message:");
         println!("{}", new_message);
@@ -573,7 +556,7 @@ async fn main() -> Result<()> {
         // Get the diff of the commit to reword
         let commit_diff = get_commit_diff(&repo, &commit_hash)?;
 
-        let new_message = generate_commit_message(&commit_diff, !args.short).await?;
+        let new_message = generate_commit_message(&commit_diff, !args.short, &claude_path).await?;
 
         println!("\nGenerated commit message:");
         println!("{}", new_message);
@@ -617,7 +600,7 @@ async fn main() -> Result<()> {
             anyhow::bail!("No staged changes found. Use -a to stage all changes.");
         }
 
-        let commit_message = generate_commit_message(&staged_diff, !args.short).await?;
+        let commit_message = generate_commit_message(&staged_diff, !args.short, &claude_path).await?;
 
         println!("\nGenerated commit message:");
         println!("{}", commit_message);
