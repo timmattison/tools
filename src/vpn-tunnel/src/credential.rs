@@ -8,7 +8,7 @@ pub struct RunningTunnel {
 }
 
 /// The result of credential selection.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SelectedCredential {
     /// The field label (e.g., "credential-2")
     pub field_label: String,
@@ -20,11 +20,17 @@ pub struct SelectedCredential {
     pub in_use: usize,
 }
 
+/// A credential that is currently in use by a running container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialInUse {
+    pub field_label: String,
+    pub container_name: String,
+}
+
 /// Error when all credentials are in use.
 #[derive(Debug)]
 pub struct AllCredentialsInUse {
-    /// Each entry: (field_label, container_name)
-    pub usage: Vec<(String, String)>,
+    pub usage: Vec<CredentialInUse>,
 }
 
 /// Selects the first unused credential from available fields.
@@ -39,24 +45,28 @@ pub fn select_credential(
     available: &[ItemField],
     running: &[RunningTunnel],
 ) -> Result<SelectedCredential, AllCredentialsInUse> {
-    let in_use_count = available
-        .iter()
-        .filter(|f| running.iter().any(|r| r.wireguard_key == f.value))
-        .count();
+    let mut first_free: Option<&ItemField> = None;
+    let mut in_use_count = 0usize;
 
     for field in available {
-        if !running.iter().any(|r| r.wireguard_key == field.value) {
-            return Ok(SelectedCredential {
-                field_label: field.label.clone(),
-                key: field.value.clone(),
-                total: available.len(),
-                in_use: in_use_count,
-            });
+        if running.iter().any(|r| r.wireguard_key == field.value) {
+            in_use_count += 1;
+        } else if first_free.is_none() {
+            first_free = Some(field);
         }
     }
 
+    if let Some(field) = first_free {
+        return Ok(SelectedCredential {
+            field_label: field.label.clone(),
+            key: field.value.clone(),
+            total: available.len(),
+            in_use: in_use_count,
+        });
+    }
+
     // All in use — build the usage list
-    let usage: Vec<(String, String)> = available
+    let usage: Vec<CredentialInUse> = available
         .iter()
         .map(|field| {
             let container = running
@@ -64,7 +74,10 @@ pub fn select_credential(
                 .find(|r| r.wireguard_key == field.value)
                 .map(|r| r.container_name.clone())
                 .unwrap_or_else(|| "unknown".to_string());
-            (field.label.clone(), container)
+            CredentialInUse {
+                field_label: field.label.clone(),
+                container_name: container,
+            }
         })
         .collect();
 
@@ -142,11 +155,17 @@ mod tests {
         assert_eq!(err.usage.len(), 2);
         assert_eq!(
             err.usage[0],
-            ("credential".to_string(), "scraper-gluetun".to_string())
+            CredentialInUse {
+                field_label: "credential".to_string(),
+                container_name: "scraper-gluetun".to_string(),
+            }
         );
         assert_eq!(
             err.usage[1],
-            ("credential-2".to_string(), "vpn-gluetun".to_string())
+            CredentialInUse {
+                field_label: "credential-2".to_string(),
+                container_name: "vpn-gluetun".to_string(),
+            }
         );
     }
 
