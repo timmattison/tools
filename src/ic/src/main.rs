@@ -1352,7 +1352,9 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
 /// Calculate display dimensions that preserve aspect ratio within the given bounds.
 ///
 /// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
-/// using actual cell pixel dimensions from ioctl when available, falling back to
+/// via the `cell_aspect` parameter (cell height / cell width in pixels). Callers
+/// obtain this from `get_cell_pixel_dimensions()`, which uses actual terminal
+/// dimensions when available and falls back to
 /// `ESTIMATED_CELL_HEIGHT_PX / ESTIMATED_CELL_WIDTH_PX`. This function works in
 /// terminal character cells, not pixels.
 ///
@@ -1369,6 +1371,7 @@ fn calculate_aspect_preserving_size(
     max_width: Option<u32>,
     max_height: Option<u32>,
     preserve_aspect: bool,
+    cell_aspect: f64,
 ) -> (Option<u32>, Option<u32>) {
     if !preserve_aspect {
         return (max_width, max_height);
@@ -1382,11 +1385,6 @@ fn calculate_aspect_preserving_size(
 
     match (max_width, max_height) {
         (Some(max_w), Some(max_h)) => {
-            // Use actual cell pixel dimensions for accurate aspect ratio calculation,
-            // falling back to the hardcoded constant if ioctl is unavailable.
-            let (cell_w, cell_h) = get_cell_pixel_dimensions();
-            let cell_aspect = cell_h as f64 / cell_w as f64;
-
             let effective_max_h_pixels = max_h as f64 * cell_aspect;
             let effective_max_w_pixels = max_w as f64;
 
@@ -1425,6 +1423,13 @@ fn get_cell_pixel_dimensions() -> (u32, u32) {
         }
     }
     (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+}
+
+/// Returns the cell aspect ratio (height / width in pixels).
+/// Uses actual terminal cell dimensions when available, falling back to estimates.
+fn get_cell_aspect_ratio() -> f64 {
+    let (cell_w, cell_h) = get_cell_pixel_dimensions();
+    cell_h as f64 / cell_w as f64
 }
 
 /// Convert character cell display dimensions to target pixel dimensions.
@@ -1484,6 +1489,7 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
         width,
         height,
         args.preserve_aspect,
+        get_cell_aspect_ratio(),
     );
 
     // Downscale the image to the target pixel size before sending to avoid
@@ -1673,6 +1679,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
         width,
         height,
         args.preserve_aspect,
+        get_cell_aspect_ratio(),
     );
 
     // Downscale the image to the target pixel size before encoding to avoid
@@ -2159,16 +2166,19 @@ mod tests {
     // Tests for calculate_aspect_preserving_size
     // =========================================================================
 
+    /// Standard cell aspect ratio used in tests (typical terminal: cells ~2x tall as wide).
+    const TEST_CELL_ASPECT: f64 = 2.0;
+
     #[test]
     fn aspect_preserving_returns_original_when_disabled() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_handles_zero_height_defensively() {
         // Zero height should not panic (division by zero), returns original dimensions
-        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
@@ -2178,7 +2188,7 @@ mod tests {
         // With cell aspect ratio of 2:1, effective box is 50x100 pixels
         // Image aspect = 1.0, box aspect = 50/100 = 0.5
         // Image is wider than box, constrain by width
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/1.0)/2.0 = 25
         assert_eq!(result, (Some(50), Some(25)));
     }
@@ -2188,7 +2198,7 @@ mod tests {
         // Wide image (200x100) in square box (50x50)
         // Image aspect = 2.0
         // Constrain by width
-        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/2.0)/2.0 = 12.5 -> 13 (rounded)
         assert_eq!(result, (Some(50), Some(13)));
     }
@@ -2198,38 +2208,38 @@ mod tests {
         // Tall image (100x400) in square box (50x50)
         // Image aspect = 0.25
         // Constrain by height
-        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_height = 50, display_width = 50 * 2.0 * 0.25 = 25
         assert_eq!(result, (Some(25), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_only_width_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), None));
     }
 
     #[test]
     fn aspect_preserving_only_height_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (None, Some(50)));
     }
 
     #[test]
     fn aspect_preserving_no_dimensions_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, None, true);
+        let result = calculate_aspect_preserving_size(100, 100, None, None, true, TEST_CELL_ASPECT);
         assert_eq!(result, (None, None));
     }
 
     #[test]
     fn aspect_preserving_minimum_dimension_is_one() {
         // Very wide image that would result in height < 1
-        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true);
+        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp height to at least 1
         assert!(result.1.unwrap() >= 1);
 
         // Very tall image that would result in width < 1
-        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true);
+        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp width to at least 1
         assert!(result.0.unwrap() >= 1);
     }
