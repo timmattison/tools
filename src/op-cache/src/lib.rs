@@ -637,6 +637,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_item_fields_missing_fields_array() {
+        let json = serde_json::json!({"id": "abc123", "title": "Bad item"});
+        let result = parse_item_fields(&json, "credential");
+        assert!(matches!(result.unwrap_err(), Error::ItemJsonParse(_)));
+    }
+
+    #[test]
+    fn parse_item_fields_fields_not_array() {
+        let json = serde_json::json!({"id": "abc123", "title": "Bad item", "fields": "not-an-array"});
+        let result = parse_item_fields(&json, "credential");
+        assert!(matches!(result.unwrap_err(), Error::ItemJsonParse(_)));
+    }
+
+    #[test]
     fn parse_item_fields_no_matching_fields() {
         let json = serde_json::json!({
             "id": "abc123",
@@ -648,8 +662,13 @@ mod tests {
         });
         let result = parse_item_fields(&json, "credential");
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, Error::NoMatchingFields { .. }));
+        match result.unwrap_err() {
+            Error::NoMatchingFields { prefix, item } => {
+                assert_eq!(prefix, "credential");
+                assert_eq!(item, "ProtonVPN WireGuard key");
+            }
+            other => panic!("expected NoMatchingFields, got {other:?}"),
+        }
     }
 
     #[test]
