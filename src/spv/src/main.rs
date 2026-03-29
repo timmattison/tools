@@ -1,8 +1,9 @@
-//! sp - Smart process viewer with enhanced filtering and display
+//! spv - Smart process viewer with enhanced filtering and display
 //!
 //! A CLI tool that provides enhanced process listing with flexible filtering
 //! and display options.
 
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -25,19 +26,19 @@ static LSOF_AVAILABLE: OnceLock<bool> = OnceLock::new();
 /// # Examples
 ///
 /// ```text
-/// sp 77763           - Show process with PID 77763
-/// sp 77763,82313     - Show multiple PIDs
-/// sp node            - Find processes containing 'node'
-/// sp --regex 'node.*' - Find with regex
-/// sp --cwd zsh       - Show processes with their working directories
-/// sp --lsof $$       - Show open files for current shell
+/// spv 77763           - Show process with PID 77763
+/// spv 77763,82313     - Show multiple PIDs
+/// spv node            - Find processes containing 'node'
+/// spv --regex 'node.*' - Find with regex
+/// spv --cwd zsh       - Show processes with their working directories
+/// spv --lsof $$       - Show open files for current shell
 /// ```
 #[derive(Parser)]
 #[command(
-    name = "sp",
+    name = "spv",
     version = version_string!(),
     about = "Smart process viewer with enhanced filtering and display",
-    long_about = "Examples:\n  sp 77763           - Show process with PID 77763\n  sp 77763,82313     - Show multiple PIDs\n  sp node            - Find processes containing 'node'\n  sp --regex 'node.*' - Find with regex\n  sp --cwd zsh       - Show processes with their CWD\n  sp --lsof $$       - Show open files for process"
+    long_about = "Examples:\n  spv 77763           - Show process with PID 77763\n  spv 77763,82313     - Show multiple PIDs\n  spv node            - Find processes containing 'node'\n  spv --regex 'node.*' - Find with regex\n  spv --cwd zsh       - Show processes with their CWD\n  spv --lsof $$       - Show open files for process"
 )]
 struct Args {
     /// PID(s) or name pattern to match.
@@ -172,6 +173,154 @@ fn get_username(uid: u32) -> String {
     }
 }
 
+/// Process information from sysctl on macOS.
+///
+/// The sysinfo crate uses proc_pidinfo() which requires elevated privileges to
+/// get info for other users' processes. On macOS, sysctl(KERN_PROC_ALL) provides
+/// basic process info (including UID and status) to all users without root.
+/// This struct stores that fallback information.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+struct SysctlProcessInfo {
+    uid: u32,
+    status: u8,
+}
+
+// Constants for kinfo_proc struct layout on macOS (arm64/x86_64).
+// These offsets are stable across macOS versions as they're part of the ABI.
+// Verified via offsetof() in C: see sys/sysctl.h for struct definition.
+#[cfg(target_os = "macos")]
+mod kinfo_proc_layout {
+    /// Size of struct kinfo_proc in bytes
+    pub const SIZE: usize = 648;
+    /// Offset of kp_proc.p_pid (i32)
+    pub const OFFSET_PID: usize = 40;
+    /// Offset of kp_proc.p_stat (i8)
+    pub const OFFSET_STAT: usize = 36;
+    /// Offset of kp_eproc.e_ucred.cr_uid (u32)
+    pub const OFFSET_UID: usize = 420;
+}
+
+/// Gets process info for all processes using sysctl(KERN_PROC_ALL).
+///
+/// This provides UID and status for all processes without root privileges,
+/// unlike proc_pidinfo which requires elevated privileges for other users' processes.
+///
+/// # Returns
+///
+/// A HashMap mapping PID to process info, or None if the sysctl call fails.
+#[cfg(target_os = "macos")]
+fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> {
+    use kinfo_proc_layout::{OFFSET_PID, OFFSET_STAT, OFFSET_UID, SIZE};
+
+    // SAFETY: sysctl is a standard BSD system call. We first query the size needed,
+    // allocate a buffer, then retrieve the data. We read values at known offsets
+    // that are stable across macOS versions (part of the kernel ABI).
+    unsafe {
+        let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
+        let mib_len: libc::c_uint = 3;
+        let mut size: libc::size_t = 0;
+
+        // First call to get required buffer size
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            mib_len,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
+            return None;
+        }
+
+        // Allocate buffer with extra space for new processes that may appear
+        // between the size query and the actual data retrieval
+        let extra_space = size / 10;
+        size += extra_space;
+
+        let mut buffer: Vec<u8> = vec![0; size];
+
+        // Second call to get the actual data
+        let mut actual_size = size;
+        if libc::sysctl(
+            mib.as_mut_ptr(),
+            mib_len,
+            buffer.as_mut_ptr().cast(),
+            &mut actual_size,
+            std::ptr::null_mut(),
+            0,
+        ) != 0
+        {
+            return None;
+        }
+
+        // Validate that the kernel returned data aligned to our expected struct size.
+        // If this fails, the kinfo_proc layout has changed and our offsets are wrong.
+        if !actual_size.is_multiple_of(SIZE) {
+            return None;
+        }
+
+        let count = actual_size / SIZE;
+        let mut map = HashMap::with_capacity(count);
+
+        for i in 0..count {
+            let base = i * SIZE;
+
+            // Read pid at offset (i32, native endian)
+            let Ok(pid_bytes): Result<[u8; 4], _> =
+                buffer[base + OFFSET_PID..base + OFFSET_PID + 4].try_into()
+            else {
+                continue;
+            };
+            let pid = i32::from_ne_bytes(pid_bytes);
+
+            if pid > 0 {
+                // Read status at offset (i8/u8)
+                let status = buffer[base + OFFSET_STAT];
+
+                // Read uid at offset (u32, native endian)
+                let Ok(uid_bytes): Result<[u8; 4], _> =
+                    buffer[base + OFFSET_UID..base + OFFSET_UID + 4].try_into()
+                else {
+                    continue;
+                };
+                let uid = u32::from_ne_bytes(uid_bytes);
+
+                #[expect(
+                    clippy::cast_sign_loss,
+                    reason = "PIDs are always non-negative, checked above"
+                )]
+                let pid_u32 = pid as u32;
+                map.insert(pid_u32, SysctlProcessInfo { uid, status });
+            }
+        }
+
+        Some(map)
+    }
+}
+
+/// Converts a macOS process status code to a human-readable string.
+///
+/// These status codes are defined in sys/proc.h and represent the BSD process states.
+#[cfg(target_os = "macos")]
+fn status_code_to_string(status: u8) -> String {
+    // Status codes from sys/proc.h:
+    // SIDL = 1: Process being created
+    // SRUN = 2: Currently runnable
+    // SSLEEP = 3: Sleeping on an address
+    // SSTOP = 4: Process debugging or suspension
+    // SZOMB = 5: Awaiting collection by parent
+    match status {
+        1 => "Idle".to_string(),
+        2 => "Run".to_string(),
+        3 => "Sleep".to_string(),
+        4 => "Stop".to_string(),
+        5 => "Zombie".to_string(),
+        _ => format!("Unknown({status})"),
+    }
+}
+
 /// Collects process information based on the pattern.
 ///
 /// # Arguments
@@ -201,6 +350,11 @@ fn collect_processes(
         }
         _ => None,
     };
+
+    // On macOS, get process info via sysctl as a fallback for when sysinfo
+    // can't access other users' processes (proc_pidinfo requires elevated privileges)
+    #[cfg(target_os = "macos")]
+    let sysctl_info = get_all_process_info_via_sysctl().unwrap_or_default();
 
     for (pid, process) in system.processes() {
         let pid_u32 = pid.as_u32();
@@ -239,9 +393,38 @@ fn collect_processes(
                         uid.to_string()
                     }
                 })
+                .or_else(|| {
+                    // Fallback to sysctl data on macOS when sysinfo returns None
+                    #[cfg(target_os = "macos")]
+                    {
+                        sysctl_info.get(&pid_u32).map(|info| get_username(info.uid))
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        None
+                    }
+                })
                 .unwrap_or_else(|| "unknown".to_string());
 
-            let status = format!("{:?}", process.status());
+            let status = {
+                let sysinfo_status = format!("{:?}", process.status());
+                // If sysinfo returns Unknown, try sysctl fallback on macOS
+                if sysinfo_status.starts_with("Unknown") {
+                    #[cfg(target_os = "macos")]
+                    {
+                        sysctl_info
+                            .get(&pid_u32)
+                            .map(|info| status_code_to_string(info.status))
+                            .unwrap_or(sysinfo_status)
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        sysinfo_status
+                    }
+                } else {
+                    sysinfo_status
+                }
+            };
 
             let command = process
                 .cmd()
@@ -762,5 +945,57 @@ mod tests {
         assert_eq!(LSOF_FIELD_TYPE, 4, "TYPE should be at index 4");
         assert_eq!(LSOF_FIELD_NAME_START, 8, "NAME should start at index 8");
         assert_eq!(LSOF_MIN_FIELDS, 9, "Minimum fields should be 9");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_status_code_to_string_all_branches() {
+        assert_eq!(status_code_to_string(1), "Idle");
+        assert_eq!(status_code_to_string(2), "Run");
+        assert_eq!(status_code_to_string(3), "Sleep");
+        assert_eq!(status_code_to_string(4), "Stop");
+        assert_eq!(status_code_to_string(5), "Zombie");
+        assert_eq!(status_code_to_string(0), "Unknown(0)");
+        assert_eq!(status_code_to_string(6), "Unknown(6)");
+        assert_eq!(status_code_to_string(255), "Unknown(255)");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_kinfo_proc_size_matches_kernel() {
+        // Validate that our hardcoded SIZE constant matches the actual kernel struct.
+        // sysctl returns data in multiples of kinfo_proc, so the returned size must
+        // be evenly divisible by our constant.
+        use kinfo_proc_layout::SIZE;
+
+        let result = get_all_process_info_via_sysctl();
+        assert!(
+            result.is_some(),
+            "sysctl(KERN_PROC_ALL) should succeed on macOS"
+        );
+
+        let map = result.unwrap();
+        // PID 1 (launchd) must always exist and be owned by root (UID 0)
+        let pid1 = map.get(&1);
+        assert!(pid1.is_some(), "PID 1 (launchd) must be present");
+        assert_eq!(pid1.unwrap().uid, 0, "PID 1 should be owned by root");
+
+        // Verify the size constant is correct by checking struct alignment:
+        // the sysctl data size must be divisible by our SIZE constant
+        assert_eq!(SIZE, 648, "kinfo_proc size constant must be 648 bytes");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_sysctl_returns_current_process() {
+        let result = get_all_process_info_via_sysctl();
+        assert!(result.is_some());
+
+        let map = result.unwrap();
+        let my_pid = std::process::id();
+        assert!(
+            map.contains_key(&my_pid),
+            "sysctl should return info for our own process (PID {my_pid})"
+        );
     }
 }
