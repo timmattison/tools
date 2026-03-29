@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const DEFAULT_OP_PATH: &str = "op://Private/ProtonVPN WireGuard key/credential";
+const DEFAULT_OP_PATH: &str = "op://Private/ProtonVPN WireGuard key";
 const DEFAULT_GLUETUN_VERSION: &str = "v3.40";
 const DEFAULT_CONTAINER_PREFIX: &str = "vpn";
 
@@ -140,13 +140,36 @@ fn run(cli: Cli) -> Result<()> {
             which::which("docker")
                 .context("docker not found in PATH — install Docker Desktop")?;
 
-            // Fetch WireGuard key via op-cache
+            // Fetch available WireGuard credentials via op-cache
             let op_path_validated =
                 op_cache::OpPath::new(&op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
             let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let wg_key = cache
-                .read(&op_path_validated, Some("WIREGUARD_PRIVATE_KEY"))
+
+            let available_fields = cache
+                .read_item_fields(&op_path_validated, "credential")
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            // Check which credentials are already in use by running gluetun containers
+            let running_tunnels = find_running_tunnels();
+
+            let selected = credential::select_credential(&available_fields, &running_tunnels)
+                .map_err(|err| {
+                    let mut msg = "all WireGuard credentials are in use\n".to_string();
+                    for usage in &err.usage {
+                        msg.push_str(&format!(
+                            "\n  {:<20} -> used by {}",
+                            usage.field_label, usage.container_name
+                        ));
+                    }
+                    msg.push_str("\n\nAdd another credential in 1Password,");
+                    msg.push_str(
+                        "\nor stop an existing tunnel with: vpn-tunnel down --dir <path>",
+                    );
+                    anyhow::anyhow!("{msg}")
+                })?;
+
+            let wg_key = &selected.key;
+            let credential_field = &selected.field_label;
 
             let extra_port_list: Vec<String> = extra_ports
                 .map(|p| p.split(',').map(|s| s.trim().to_string()).collect())
@@ -157,7 +180,8 @@ fn run(cli: Cli) -> Result<()> {
                 city.as_deref(),
                 &container_prefix,
                 &gluetun_version,
-                &wg_key,
+                wg_key,
+                credential_field,
                 &extra_port_list,
             )?;
 
@@ -165,6 +189,13 @@ fn run(cli: Cli) -> Result<()> {
                 "\n{} Generated VPN tunnel in {}",
                 "done:".green().bold(),
                 output_dir.display()
+            );
+            println!(
+                "Using credential: {} ({} of {} available, {} in use)",
+                credential_field.cyan(),
+                selected.in_use + 1,
+                selected.total,
+                selected.in_use
             );
             println!("\nNext steps:");
             println!("  cd {} && ./start.sh", output_dir.display());
@@ -311,4 +342,57 @@ fn show_vpn_ip(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn find_running_tunnels() -> Vec<credential::RunningTunnel> {
+    // List running gluetun containers
+    let output = match Command::new("docker")
+        .args([
+            "ps",
+            "--filter",
+            "ancestor=qmcgaw/gluetun",
+            "--format",
+            "{{.Names}}",
+        ])
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return vec![],
+    };
+
+    let container_names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+
+    let mut tunnels = Vec::new();
+    for name in container_names {
+        // Extract WIREGUARD_PRIVATE_KEY from container environment
+        let inspect = match Command::new("docker")
+            .args([
+                "inspect",
+                "--format",
+                "{{range .Config.Env}}{{println .}}{{end}}",
+                &name,
+            ])
+            .output()
+        {
+            Ok(out) if out.status.success() => out,
+            _ => continue,
+        };
+
+        let env_vars = String::from_utf8_lossy(&inspect.stdout);
+        for line in env_vars.lines() {
+            if let Some(key) = line.strip_prefix("WIREGUARD_PRIVATE_KEY=") {
+                tunnels.push(credential::RunningTunnel {
+                    container_name: name.clone(),
+                    wireguard_key: key.to_string(),
+                });
+                break;
+            }
+        }
+    }
+
+    tunnels
 }

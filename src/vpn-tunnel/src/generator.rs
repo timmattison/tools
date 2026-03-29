@@ -15,6 +15,7 @@ pub fn generate(
     container_prefix: &str,
     gluetun_version: &str,
     wireguard_key: &str,
+    credential_field: &str,
     extra_ports: &[String],
 ) -> Result<()> {
     fs::create_dir_all(output_dir)?;
@@ -32,7 +33,7 @@ pub fn generate(
     )?;
 
     // .env file with WireGuard key (mode 600)
-    write_env(output_dir, wireguard_key)?;
+    write_env(output_dir, wireguard_key, credential_field)?;
 
     // Helper scripts
     write_script(output_dir, "start.sh", &start_script(&gluetun_name))?;
@@ -131,9 +132,12 @@ volumes:
     Ok(())
 }
 
-fn write_env(output_dir: &Path, wireguard_key: &str) -> Result<()> {
+fn write_env(output_dir: &Path, wireguard_key: &str, credential_field: &str) -> Result<()> {
     let env_path = output_dir.join(".env");
-    fs::write(&env_path, format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\n"))?;
+    fs::write(
+        &env_path,
+        format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\nCREDENTIAL_FIELD={credential_field}\n"),
+    )?;
     fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
