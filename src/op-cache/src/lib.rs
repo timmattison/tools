@@ -54,6 +54,14 @@ pub enum Error {
     #[error("failed to read \"{0}\" from 1Password after {OP_MAX_RETRIES} attempts")]
     OpReadFailed(String),
 
+    /// No fields matching the given prefix were found in the 1Password item.
+    #[error("no fields matching prefix \"{prefix}\" found in 1Password item \"{item}\"")]
+    NoMatchingFields { prefix: String, item: String },
+
+    /// Failed to parse 1Password item JSON.
+    #[error("failed to parse 1Password item JSON: {0}")]
+    ItemJsonParse(String),
+
     /// Not inside a git repository.
     #[error("not inside a git repository — op-cache requires a git repo to locate the cache file")]
     GitRootNotFound,
@@ -105,6 +113,15 @@ impl fmt::Display for OpPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// A single field from a 1Password item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemField {
+    /// The field label (e.g., "credential", "credential-2")
+    pub label: String,
+    /// The field value
+    pub value: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -397,6 +414,58 @@ fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<(
     Err(Error::OpReadFailed(op_path.to_string()))
 }
 
+/// Parses `op item get --format json` output and returns fields matching a prefix.
+///
+/// A field matches if its label equals `prefix` exactly or starts with `prefix-`.
+/// Results are sorted alphabetically by label.
+///
+/// # Errors
+///
+/// Returns [`Error::NoMatchingFields`] if no fields match the prefix.
+/// Returns [`Error::ItemJsonParse`] if the JSON structure is unexpected.
+pub fn parse_item_fields(
+    item_json: &serde_json::Value,
+    field_prefix: &str,
+) -> Result<Vec<ItemField>> {
+    let fields = item_json
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .ok_or_else(|| Error::ItemJsonParse("missing or invalid 'fields' array".to_string()))?;
+
+    let title = item_json
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown");
+
+    let dash_prefix = format!("{field_prefix}-");
+
+    let mut matched: Vec<ItemField> = fields
+        .iter()
+        .filter_map(|f| {
+            let label = f.get("label")?.as_str()?;
+            let value = f.get("value")?.as_str()?;
+            if label == field_prefix || label.starts_with(&dash_prefix) {
+                Some(ItemField {
+                    label: label.to_string(),
+                    value: value.to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if matched.is_empty() {
+        return Err(Error::NoMatchingFields {
+            prefix: field_prefix.to_string(),
+            item: title.to_string(),
+        });
+    }
+
+    matched.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(matched)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +595,76 @@ mod tests {
 
         cache.clear().unwrap();
         assert!(!cache_path.exists());
+    }
+
+    #[test]
+    fn parse_item_fields_single_credential() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "ProtonVPN WireGuard key",
+            "fields": [
+                {"id": "username", "label": "username", "value": "user@example.com", "type": "STRING"},
+                {"id": "credential", "label": "credential", "value": "key-1-secret", "type": "CONCEALED"}
+            ]
+        });
+        let fields = parse_item_fields(&json, "credential").unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].label, "credential");
+        assert_eq!(fields[0].value, "key-1-secret");
+    }
+
+    #[test]
+    fn parse_item_fields_multiple_credentials() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "ProtonVPN WireGuard key",
+            "fields": [
+                {"id": "credential", "label": "credential", "value": "key-1-secret", "type": "CONCEALED"},
+                {"id": "cred2", "label": "credential-2", "value": "key-2-secret", "type": "CONCEALED"},
+                {"id": "username", "label": "username", "value": "user@example.com", "type": "STRING"},
+                {"id": "credback", "label": "credential-backup", "value": "key-3-secret", "type": "CONCEALED"}
+            ]
+        });
+        let fields = parse_item_fields(&json, "credential").unwrap();
+        assert_eq!(fields.len(), 3);
+        // Should be sorted alphabetically by label
+        assert_eq!(fields[0].label, "credential");
+        assert_eq!(fields[0].value, "key-1-secret");
+        assert_eq!(fields[1].label, "credential-2");
+        assert_eq!(fields[1].value, "key-2-secret");
+        assert_eq!(fields[2].label, "credential-backup");
+        assert_eq!(fields[2].value, "key-3-secret");
+    }
+
+    #[test]
+    fn parse_item_fields_no_matching_fields() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "ProtonVPN WireGuard key",
+            "fields": [
+                {"id": "username", "label": "username", "value": "user@example.com", "type": "STRING"},
+                {"id": "password", "label": "password", "value": "pass123", "type": "CONCEALED"}
+            ]
+        });
+        let result = parse_item_fields(&json, "credential");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::NoMatchingFields { .. }));
+    }
+
+    #[test]
+    fn parse_item_fields_excludes_partial_prefix_matches() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "Test item",
+            "fields": [
+                {"id": "cred", "label": "credential", "value": "key-1", "type": "CONCEALED"},
+                {"id": "creds", "label": "credentials", "value": "key-2", "type": "CONCEALED"}
+            ]
+        });
+        // "credentials" should NOT match — only "credential" (exact) or "credential-*" (with dash)
+        let fields = parse_item_fields(&json, "credential").unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].label, "credential");
     }
 }
