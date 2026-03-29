@@ -81,8 +81,7 @@ fn run(cli: Cli) -> op_cache::Result<()> {
             let fields = cache.read_item_fields(&path, &prefix)?;
             eprintln!("Fields matching \"{}\" ({}):", prefix, fields.len());
             for field in &fields {
-                let preview: String = field.value.chars().take(8).collect();
-                println!("  {} = {}...", field.label, preview);
+                println!("  {}", field.label);
             }
         }
         Commands::Invalidate { op_path } => {
