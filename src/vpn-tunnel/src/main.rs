@@ -13,6 +13,7 @@ use std::process::Command;
 const DEFAULT_OP_PATH: &str = "op://Private/ProtonVPN WireGuard key";
 const DEFAULT_GLUETUN_VERSION: &str = "v3.40";
 const DEFAULT_CONTAINER_PREFIX: &str = "vpn";
+const CREDENTIAL_FIELD_PREFIX: &str = "credential";
 
 #[derive(Parser)]
 #[command(
@@ -146,7 +147,7 @@ fn run(cli: Cli) -> Result<()> {
             let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
 
             let available_fields = cache
-                .read_item_fields(&op_path_validated, "credential")
+                .read_item_fields(&op_path_validated, CREDENTIAL_FIELD_PREFIX)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             // Check which credentials are already in use by running gluetun containers
@@ -191,9 +192,8 @@ fn run(cli: Cli) -> Result<()> {
                 output_dir.display()
             );
             println!(
-                "Using credential: {} ({} of {} available, {} in use)",
+                "Using credential: {} ({} available, {} in use)",
                 credential_field.cyan(),
-                selected.in_use + 1,
                 selected.total,
                 selected.in_use
             );
