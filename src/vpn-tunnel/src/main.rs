@@ -5,7 +5,8 @@ use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEFAULT_OP_PATH: &str = "op://Private/ProtonVPN WireGuard key/credential";
@@ -139,10 +140,9 @@ fn run(cli: Cli) -> Result<()> {
                 .context("docker not found in PATH — install Docker Desktop")?;
 
             // Fetch WireGuard key via op-cache
-            let op_path_validated = op_cache::OpPath::new(&op_path)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let cache = op_cache::OpCache::new()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let op_path_validated =
+                op_cache::OpPath::new(&op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
             let wg_key = cache
                 .read(&op_path_validated, Some("WIREGUARD_PRIVATE_KEY"))
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -213,7 +213,7 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn ensure_compose_exists(dir: &PathBuf) -> Result<()> {
+fn ensure_compose_exists(dir: &Path) -> Result<()> {
     let compose_file = dir.join("docker-compose.yml");
     if !compose_file.exists() {
         bail!(
@@ -224,7 +224,7 @@ fn ensure_compose_exists(dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn docker_compose(dir: &PathBuf, args: &[&str]) -> Result<()> {
+fn docker_compose(dir: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("docker")
         .arg("compose")
         .args(args)
@@ -238,7 +238,7 @@ fn docker_compose(dir: &PathBuf, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn wait_for_healthy(dir: &PathBuf) -> Result<()> {
+fn wait_for_healthy(dir: &Path) -> Result<()> {
     // Find the gluetun container name from running containers
     let output = Command::new("docker")
         .args(["compose", "ps", "--format", "{{.Name}}"])
@@ -254,12 +254,18 @@ fn wait_for_healthy(dir: &PathBuf) -> Result<()> {
 
     for i in 0..30 {
         let health = Command::new("docker")
-            .args(["inspect", "--format", "{{.State.Health.Status}}", gluetun_name])
+            .args([
+                "inspect",
+                "--format",
+                "{{.State.Health.Status}}",
+                gluetun_name,
+            ])
             .output();
 
         if let Ok(out) = health {
             let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if status == "healthy" {
+                eprintln!();
                 println!("{}", "VPN is healthy!".green().bold());
                 return Ok(());
             }
@@ -267,6 +273,7 @@ fn wait_for_healthy(dir: &PathBuf) -> Result<()> {
 
         if i < 29 {
             eprint!(".");
+            std::io::stderr().flush().ok();
             std::thread::sleep(std::time::Duration::from_secs(3));
         }
     }
@@ -274,7 +281,7 @@ fn wait_for_healthy(dir: &PathBuf) -> Result<()> {
     bail!("VPN failed to become healthy within 90s — check logs with 'vpn-tunnel logs'");
 }
 
-fn show_vpn_ip(dir: &PathBuf) -> Result<()> {
+fn show_vpn_ip(dir: &Path) -> Result<()> {
     let output = Command::new("docker")
         .args(["compose", "ps", "--format", "{{.Name}}"])
         .current_dir(dir)
@@ -296,7 +303,10 @@ fn show_vpn_ip(dir: &PathBuf) -> Result<()> {
             println!("VPN IP: {}", ip.cyan().bold());
         }
         _ => {
-            eprintln!("{}", "Could not determine VPN IP (container may not be running)".yellow());
+            eprintln!(
+                "{}",
+                "Could not determine VPN IP (container may not be running)".yellow()
+            );
         }
     }
     Ok(())

@@ -21,6 +21,6 @@ fi
 
 # Copy cache from main worktree if it exists
 if [ -f "$MAIN_WORKTREE/$CACHE_FILE" ]; then
-    cp "$MAIN_WORKTREE/$CACHE_FILE" "$CURRENT_ROOT/$CACHE_FILE"
-    echo "  Copied: $CACHE_FILE (1Password credential cache)"
+    install -m 600 "$MAIN_WORKTREE/$CACHE_FILE" "$CURRENT_ROOT/$CACHE_FILE"
+    echo "  Copied: $CACHE_FILE (1Password credential cache, mode 600)"
 fi
