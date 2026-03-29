@@ -1,0 +1,23 @@
+[package]
+name = "vpn-tunnel"
+version = "0.1.0"
+edition.workspace = true
+description = "Docker-based VPN tunnel generator using gluetun + ProtonVPN + WireGuard"
+license.workspace = true
+
+[[bin]]
+name = "vpn-tunnel"
+path = "src/main.rs"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+colored.workspace = true
+which.workspace = true
+op-cache.workspace = true
+
+[lints]
+workspace = true
