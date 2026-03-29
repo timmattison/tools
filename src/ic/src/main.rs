@@ -711,6 +711,30 @@ fn update_adaptive_fps(
     *last_display_time = Instant::now();
 }
 
+/// RAII guard that restores the main screen buffer and shows the cursor on drop.
+/// This ensures terminal state is restored even if video playback panics.
+struct AlternateScreenGuard;
+
+impl AlternateScreenGuard {
+    fn enter() -> Result<Self> {
+        // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
+        // The alternate screen buffer prevents scrollback accumulation and eliminates
+        // ghost progress bars caused by terminal scrolling during image display.
+        print!("\x1b[?1049h\x1b[?25l");
+        io::stdout().flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for AlternateScreenGuard {
+    fn drop(&mut self) {
+        // Restore main screen buffer and show cursor.
+        // Ignore flush errors — best effort during cleanup.
+        print!("\x1b[?25h\x1b[?1049l");
+        let _ = io::stdout().flush();
+    }
+}
+
 fn play_video_simple(
     file_path: &PathBuf,
     _frame_duration: Duration,
@@ -721,19 +745,9 @@ fn play_video_simple(
     let terminal_caps = detect_terminal_capabilities();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
 
-    // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
-    // The alternate screen buffer prevents scrollback accumulation and eliminates
-    // ghost progress bars caused by terminal scrolling during image display.
-    print!("\x1b[?1049h\x1b[?25l");
-    io::stdout().flush()?;
+    let _screen_guard = AlternateScreenGuard::enter()?;
 
-    let result = play_video_inner(file_path, args, duration, fps, &input_rx);
-
-    // Always restore main screen buffer and show cursor, even on error
-    print!("\x1b[?25h\x1b[?1049l");
-    io::stdout().flush()?;
-
-    result
+    play_video_inner(file_path, args, duration, fps, &input_rx)
 }
 
 fn play_video_inner(
@@ -1338,9 +1352,9 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
 /// Calculate display dimensions that preserve aspect ratio within the given bounds.
 ///
 /// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
-/// using the actual cell pixel dimensions when available, falling back to
-/// `TERMINAL_CELL_ASPECT_RATIO`. This function works in terminal character cells,
-/// not pixels.
+/// using actual cell pixel dimensions from ioctl when available, falling back to
+/// `ESTIMATED_CELL_HEIGHT_PX / ESTIMATED_CELL_WIDTH_PX`. This function works in
+/// terminal character cells, not pixels.
 ///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
@@ -2302,9 +2316,10 @@ mod tests {
 
     #[test]
     fn constants_have_reasonable_values() {
-        // Cell aspect ratio should be positive and reasonable (1.5 to 3.0)
-        assert!(TERMINAL_CELL_ASPECT_RATIO > 1.0);
-        assert!(TERMINAL_CELL_ASPECT_RATIO < 4.0);
+        // Derived cell aspect ratio (from fallback constants) should be reasonable (1.5 to 3.0)
+        let fallback_aspect = ESTIMATED_CELL_HEIGHT_PX as f64 / ESTIMATED_CELL_WIDTH_PX as f64;
+        assert!(fallback_aspect > 1.0);
+        assert!(fallback_aspect < 4.0);
 
         // Cell pixel estimates should be positive and reasonable
         assert!(ESTIMATED_CELL_WIDTH_PX >= 6);
