@@ -136,7 +136,7 @@ fn write_env(output_dir: &Path, wireguard_key: &str, credential_field: &str) -> 
     let env_path = output_dir.join(".env");
     fs::write(
         &env_path,
-        format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\nCREDENTIAL_FIELD={credential_field}\n"),
+        format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\n# Used by vpn-tunnel status (not a Docker variable)\nCREDENTIAL_FIELD={credential_field}\n"),
     )?;
     fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
