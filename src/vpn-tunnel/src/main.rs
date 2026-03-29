@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -230,6 +231,9 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Status { dir } => {
             ensure_compose_exists(&dir)?;
             docker_compose(&dir, &["ps"])?;
+            if let Some(field) = read_credential_field(&dir) {
+                println!("Credential: {}", field.cyan());
+            }
             show_vpn_ip(&dir)?;
         }
         Commands::Restart { dir } => {
@@ -395,4 +399,15 @@ fn find_running_tunnels() -> Vec<credential::RunningTunnel> {
     }
 
     tunnels
+}
+
+fn read_credential_field(dir: &Path) -> Option<String> {
+    let env_path = dir.join(".env");
+    let content = fs::read_to_string(env_path).ok()?;
+    for line in content.lines() {
+        if let Some(value) = line.strip_prefix("CREDENTIAL_FIELD=") {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
