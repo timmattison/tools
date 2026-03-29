@@ -123,6 +123,7 @@ windows-sys = { version = "0.60", features = [
 
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
+op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 repowalker = { path = "src/repowalker" }
