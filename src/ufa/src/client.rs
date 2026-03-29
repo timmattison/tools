@@ -10,6 +10,14 @@ pub struct UnifiClient {
 
 impl UnifiClient {
     pub async fn new(base_url: &str, api_key: &str, insecure: bool) -> Result<Self> {
+        // Check if this is a cloud console URL
+        if crate::site_manager::is_cloud_console_url(base_url) {
+            anyhow::bail!(
+                "Cloud console URLs are not yet supported for direct API access.\n\
+                To work with cloud-hosted consoles, use the 'ufa cloud' commands to discover console IDs.\n\
+                For direct API access, use the local IP address of your UniFi controller."
+            );
+        }
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::HeaderName::from_static("x-api-key"),
