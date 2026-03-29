@@ -27,7 +27,6 @@ tokio-util.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
-tempdir.workspace = true
 mockito.workspace = true
 
 [lints]

@@ -7,7 +7,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
+    backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Paragraph},
@@ -120,7 +120,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>, mut app: App) -> io::Result<Option<Vec<String>>> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<Option<Vec<String>>> {
     let mut last_tick = Instant::now();
     let tick_rate = Duration::from_millis(1000);
     
@@ -173,7 +173,7 @@ fn ui(f: &mut Frame, app: &App) {
             Constraint::Length(3),
             Constraint::Min(0),
         ])
-        .split(f.size());
+        .split(f.area());
     
     let now = Local::now();
     let remaining = app.target_time.signed_duration_since(now);
