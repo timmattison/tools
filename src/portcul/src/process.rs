@@ -4,19 +4,50 @@ use std::fmt;
 ///
 /// Prevents accidentally mixing up PIDs with other `u32` values (port numbers,
 /// array indices, etc.) at the type level.
+///
+/// Construction validates that the value fits in `i32` (the POSIX `pid_t` type),
+/// preventing `kill(-1, sig)` which would signal every process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Pid(u32);
+
+/// Error returned when a PID value exceeds the valid range for POSIX `pid_t`.
+#[derive(Debug, Clone)]
+pub struct PidRangeError(u32);
+
+impl fmt::Display for PidRangeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "PID {} exceeds maximum valid value {} (would wrap to negative in POSIX kill())",
+            self.0,
+            i32::MAX
+        )
+    }
+}
+
+impl std::error::Error for PidRangeError {}
 
 impl Pid {
     /// Returns the raw `u32` value.
     pub fn as_u32(self) -> u32 {
         self.0
     }
+
+    /// Returns the value as `i32`, safe because construction validated the range.
+    pub fn as_i32(self) -> i32 {
+        // Construction guarantees self.0 <= i32::MAX, so this never wraps.
+        self.0.cast_signed()
+    }
 }
 
-impl From<u32> for Pid {
-    fn from(value: u32) -> Self {
-        Self(value)
+impl TryFrom<u32> for Pid {
+    type Error = PidRangeError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        if value > i32::MAX as u32 {
+            return Err(PidRangeError(value));
+        }
+        Ok(Self(value))
     }
 }
 
@@ -53,13 +84,16 @@ pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
 
     let mut result: Vec<ListeningProcess> = raw_listeners
         .iter()
-        .map(|listener| ListeningProcess {
-            pid: Pid(listener.process.pid),
-            name: listener.process.name.clone(),
-            port: listener.socket.port(),
-            address: listener.socket.ip().to_string(),
+        .map(|listener| {
+            Ok(ListeningProcess {
+                pid: Pid::try_from(listener.process.pid)?,
+                name: listener.process.name.clone(),
+                port: listener.socket.port(),
+                address: listener.socket.ip().to_string(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, PidRangeError>>()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Sort by port number, then by PID for stable ordering
     result.sort_by(|a, b| a.port.cmp(&b.port).then(a.pid.cmp(&b.pid)));
@@ -74,18 +108,12 @@ pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
 ///
 /// Returns an error if the kill syscall fails (e.g., insufficient permissions).
 pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
-    let raw = pid.as_u32();
-
     #[cfg(unix)]
     {
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "PID values from the OS fit in i32 on all supported platforms"
-        )]
         // SAFETY: libc::kill is a standard POSIX call. We pass a valid signal number
-        // (SIGTERM = 15). PID values from the OS are always well within i32 range
-        // on supported platforms (macOS and Linux cap PIDs far below i32::MAX).
-        let ret = unsafe { libc::kill(raw as i32, libc::SIGTERM) };
+        // (SIGTERM = 15). Pid::as_i32() is safe because the Pid type validates at
+        // construction that the value fits in i32, preventing kill(-1, sig).
+        let ret = unsafe { libc::kill(pid.as_i32(), libc::SIGTERM) };
         if ret != 0 {
             // Fall back to /bin/kill when libc::kill returns EPERM
             // (some macOS processes require the external kill binary)
@@ -93,7 +121,7 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
             if errno.raw_os_error() == Some(libc::EPERM) {
                 let status = std::process::Command::new("/bin/kill")
                     .arg("-TERM")
-                    .arg(raw.to_string())
+                    .arg(pid.as_u32().to_string())
                     .status()?;
                 if !status.success() {
                     return Err(anyhow::anyhow!(
@@ -137,18 +165,44 @@ mod tests {
     fn test_kill_nonexistent_process() {
         // Use a very high PID that almost certainly doesn't exist.
         // PID 0 must NOT be used because kill(0, sig) sends to the entire process group.
-        let result = kill_process(Pid::from(4_000_000));
+        let result = kill_process(Pid::try_from(4_000_000).unwrap());
         assert!(result.is_err());
     }
 
     #[test]
     fn test_pid_display() {
-        assert_eq!(Pid(1234).to_string(), "1234");
+        assert_eq!(Pid::try_from(1234_u32).unwrap().to_string(), "1234");
     }
 
     #[test]
     fn test_pid_ordering() {
-        assert!(Pid(1) < Pid(2));
-        assert_eq!(Pid(42), Pid(42));
+        let pid1 = Pid::try_from(1_u32).unwrap();
+        let pid2 = Pid::try_from(2_u32).unwrap();
+        assert!(pid1 < pid2);
+        assert_eq!(
+            Pid::try_from(42_u32).unwrap(),
+            Pid::try_from(42_u32).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_pid_rejects_values_above_i32_max() {
+        // u32::MAX would wrap to -1 as i32, causing kill(-1, sig) to signal all processes
+        assert!(Pid::try_from(u32::MAX).is_err());
+        assert!(Pid::try_from(i32::MAX as u32 + 1).is_err());
+    }
+
+    #[test]
+    fn test_pid_accepts_i32_max() {
+        let pid = Pid::try_from(i32::MAX as u32).unwrap();
+        assert_eq!(pid.as_i32(), i32::MAX);
+        assert_eq!(pid.as_u32(), i32::MAX as u32);
+    }
+
+    #[test]
+    fn test_pid_as_i32_matches_as_u32() {
+        let pid = Pid::try_from(1234_u32).unwrap();
+        assert_eq!(pid.as_i32(), 1234);
+        assert_eq!(pid.as_u32(), 1234);
     }
 }
