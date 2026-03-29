@@ -7,6 +7,8 @@
 //!
 //! Environment variables always take priority over the cache and 1Password.
 //!
+//! **Important:** Add `.op-cache.json` to your project's `.gitignore`.
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -22,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
@@ -29,14 +33,17 @@ use tempfile::NamedTempFile;
 /// Maximum number of retries for 1Password CLI operations.
 const OP_MAX_RETRIES: u32 = 3;
 
-/// Cache file name (should be gitignored).
+/// Delay between retries in milliseconds.
+const RETRY_DELAY_MS: u64 = 1000;
+
+/// Cache file name (must be gitignored by consuming projects).
 const CACHE_FILENAME: &str = ".op-cache.json";
 
 /// Errors that can occur during 1Password caching operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The provided path does not start with `op://`.
-    #[error("invalid 1Password path: \"{0}\" (must start with \"op://\")")]
+    /// The provided path is not a valid 1Password reference.
+    #[error("invalid 1Password path: \"{0}\" (must start with \"op://\" and contain no shell metacharacters)")]
     InvalidOpPath(String),
 
     /// The `op` CLI binary was not found in PATH.
@@ -64,18 +71,24 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// A validated 1Password secret reference path.
 ///
-/// Guarantees the path starts with `op://`, preventing injection attacks.
+/// Guarantees the path starts with `op://` and contains no shell metacharacters,
+/// preventing injection attacks.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OpPath(String);
 
 impl OpPath {
-    /// Creates an `OpPath` from a string, validating the `op://` prefix.
+    /// Creates an `OpPath` from a string, validating the format.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidOpPath`] if the path doesn't start with `op://`.
+    /// Returns [`Error::InvalidOpPath`] if the path doesn't start with `op://`
+    /// or contains shell metacharacters.
     pub fn new(path: &str) -> Result<Self> {
         if !path.starts_with("op://") {
+            return Err(Error::InvalidOpPath(path.to_string()));
+        }
+        // Block shell metacharacters as defense-in-depth
+        if path.chars().any(|c| c.is_control() || ";|&$`\\".contains(c)) {
             return Err(Error::InvalidOpPath(path.to_string()));
         }
         Ok(Self(path.to_string()))
@@ -106,6 +119,7 @@ type CacheFile = HashMap<String, CacheEntry>;
 /// 1Password credential cache manager.
 ///
 /// Reads and writes a JSON cache file at the root of the current git repository.
+/// The cache file is created with mode 600 on Unix systems.
 pub struct OpCache {
     cache_path: PathBuf,
 }
@@ -181,6 +195,13 @@ impl OpCache {
     /// Returns an error if the `op` CLI is not found, 1Password read fails
     /// after retries, or there's an IO error.
     pub fn read_binary(&self, op_path: &OpPath, output_path: &Path) -> Result<PathBuf> {
+        // Ensure parent directory exists before canonicalizing
+        if let Some(parent) = output_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
         let resolved = fs::canonicalize(output_path.parent().unwrap_or(Path::new(".")))
             .unwrap_or_else(|_| output_path.parent().unwrap_or(Path::new(".")).to_path_buf())
             .join(output_path.file_name().unwrap_or_default());
@@ -191,11 +212,6 @@ impl OpCache {
             if entry.value == resolved.to_string_lossy() && resolved.exists() {
                 return Ok(resolved);
             }
-        }
-
-        // Ensure output directory exists
-        if let Some(parent) = resolved.parent() {
-            fs::create_dir_all(parent)?;
         }
 
         // Fetch from 1Password with retry
@@ -261,10 +277,19 @@ impl OpCache {
     }
 
     fn read_cache(&self) -> CacheFile {
-        fs::read_to_string(&self.cache_path)
-            .ok()
-            .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+        match fs::read_to_string(&self.cache_path) {
+            Ok(raw) => match serde_json::from_str(&raw) {
+                Ok(cache) => cache,
+                Err(e) => {
+                    eprintln!(
+                        "warning: op-cache file is corrupted ({}), re-fetching credentials",
+                        e
+                    );
+                    CacheFile::new()
+                }
+            },
+            Err(_) => CacheFile::new(),
+        }
     }
 
     fn write_cache(&self, cache: &CacheFile) -> Result<()> {
@@ -279,6 +304,11 @@ impl OpCache {
         serde_json::to_writer_pretty(&tmp, cache)?;
         tmp.persist(&self.cache_path)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        // Restrict permissions to owner-only since file contains secrets
+        #[cfg(unix)]
+        fs::set_permissions(&self.cache_path, fs::Permissions::from_mode(0o600))?;
+
         Ok(())
     }
 }
@@ -313,7 +343,7 @@ fn fetch_from_1password(op_path: &OpPath) -> Result<String> {
         {
             Ok(output) if output.status.success() => {
                 let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !value.is_empty() && !value.contains("[ERROR]") {
+                if !value.is_empty() {
                     return Ok(value);
                 }
             }
@@ -324,6 +354,9 @@ fn fetch_from_1password(op_path: &OpPath) -> Result<String> {
             eprintln!(
                 "Failed to read from 1Password (attempt {attempt}/{OP_MAX_RETRIES}), retrying..."
             );
+            std::thread::sleep(std::time::Duration::from_millis(
+                RETRY_DELAY_MS * u64::from(attempt),
+            ));
         }
     }
 
@@ -355,6 +388,9 @@ fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<(
             eprintln!(
                 "Failed to read binary from 1Password (attempt {attempt}/{OP_MAX_RETRIES}), retrying..."
             );
+            std::thread::sleep(std::time::Duration::from_millis(
+                RETRY_DELAY_MS * u64::from(attempt),
+            ));
         }
     }
 
@@ -368,6 +404,7 @@ mod tests {
     #[test]
     fn valid_op_path() {
         assert!(OpPath::new("op://Private/Item/field").is_ok());
+        assert!(OpPath::new("op://Private/Item With Spaces/field name").is_ok());
     }
 
     #[test]
@@ -375,6 +412,15 @@ mod tests {
         assert!(OpPath::new("not-an-op-path").is_err());
         assert!(OpPath::new("").is_err());
         assert!(OpPath::new("op:/missing-slash").is_err());
+    }
+
+    #[test]
+    fn rejects_shell_metacharacters() {
+        assert!(OpPath::new("op://vault/item; rm -rf /").is_err());
+        assert!(OpPath::new("op://vault/item|cat /etc/passwd").is_err());
+        assert!(OpPath::new("op://vault/item&background").is_err());
+        assert!(OpPath::new("op://vault/item$var").is_err());
+        assert!(OpPath::new("op://vault/item`cmd`").is_err());
     }
 
     #[test]
@@ -402,16 +448,42 @@ mod tests {
         assert_eq!(entries[0].0, "op://Private/Test/field");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cache_file_has_restricted_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join(CACHE_FILENAME);
+        let cache = OpCache::with_path(cache_path.clone());
+
+        let mut file: CacheFile = HashMap::new();
+        file.insert(
+            "op://Private/Test/field".to_string(),
+            CacheEntry {
+                value: "secret".to_string(),
+                fetched_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+        cache.write_cache(&file).unwrap();
+
+        let perms = fs::metadata(&cache_path).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
     #[test]
     fn env_var_override() {
         let dir = tempfile::tempdir().unwrap();
         let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
         let path = OpPath::new("op://Private/Test/field").unwrap();
 
-        std::env::set_var("OP_CACHE_TEST_VAR", "from-env");
+        // SAFETY: test runs single-threaded for this env var
+        unsafe {
+            std::env::set_var("OP_CACHE_TEST_VAR", "from-env");
+        }
         let result = cache.read(&path, Some("OP_CACHE_TEST_VAR")).unwrap();
         assert_eq!(result, "from-env");
-        std::env::remove_var("OP_CACHE_TEST_VAR");
+        unsafe {
+            std::env::remove_var("OP_CACHE_TEST_VAR");
+        }
     }
 
     #[test]

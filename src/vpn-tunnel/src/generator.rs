@@ -35,7 +35,7 @@ pub fn generate(
     write_env(output_dir, wireguard_key)?;
 
     // Helper scripts
-    write_script(output_dir, "start.sh", &start_script())?;
+    write_script(output_dir, "start.sh", &start_script(&gluetun_name))?;
     write_script(output_dir, "stop.sh", &stop_script())?;
     write_script(output_dir, "restart.sh", &restart_script())?;
     write_script(output_dir, "logs.sh", &logs_script())?;
@@ -145,8 +145,9 @@ fn write_script(output_dir: &Path, name: &str, content: &str) -> Result<()> {
     Ok(())
 }
 
-fn start_script() -> String {
-    r#"#!/usr/bin/env bash
+fn start_script(gluetun_name: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -155,10 +156,10 @@ docker compose up -d
 
 echo "Waiting for VPN to become healthy..."
 for i in $(seq 1 30); do
-    status=$(docker compose ps --format '{{.Health}}' 2>/dev/null | head -1)
+    status=$(docker inspect --format '{{{{.State.Health.Status}}}}' {gluetun_name} 2>/dev/null || echo "starting")
     if [ "$status" = "healthy" ]; then
         echo "VPN is healthy!"
-        VPN_IP=$(docker compose exec gluetun wget -qO- icanhazip.com 2>/dev/null || echo "unknown")
+        VPN_IP=$(docker exec {gluetun_name} wget -qO- icanhazip.com 2>/dev/null || echo "unknown")
         echo "VPN IP: $VPN_IP"
         exit 0
     fi
@@ -170,7 +171,7 @@ echo "ERROR: VPN failed to become healthy within 90s"
 echo "Check logs with: ./logs.sh"
 exit 1
 "#
-    .to_string()
+    )
 }
 
 fn stop_script() -> String {
