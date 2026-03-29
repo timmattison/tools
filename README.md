@@ -121,12 +121,12 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       command line, open files, network connections, and optionally environment variables. Useful for debugging and
       investigating running applications.
     - To install: `go install github.com/timmattison/tools/cmd/procinfo@latest`
-- sp (status of process)
+- spv (smart process viewer)
     - Smart process viewer with enhanced filtering and display. Find processes by PID (single or comma-separated),
       name pattern (case-insensitive substring), or regex. Displays process info in a formatted table or raw output.
-      Optionally shows working directories (`--cwd`) and open files (`--lsof`). Examples: `sp 77763`, `sp node`,
-      `sp --regex 'node.*'`, `sp --cwd --lsof zsh`.
-    - To install: `cargo install --git https://github.com/timmattison/tools sp`
+      Optionally shows working directories (`--cwd`) and open files (`--lsof`). Examples: `spv 77763`, `spv node`,
+      `spv --regex 'node.*'`, `spv --cwd --lsof zsh`.
+    - To install: `cargo install --git https://github.com/timmattison/tools spv`
 - pk (process killer)
     - Process killer with dry-run mode and detailed feedback. Uses macOS's libproc API (same as Activity Monitor)
       to find processes that `ps` and `pkill` cannot see (like version-named XPC services). Shows what was killed,

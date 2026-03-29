@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Husky pre-commit hook: block direct 1Password CLI usage
+#
+# Copy this snippet into your .husky/pre-commit hook.
+# Ensures all 1Password access goes through op-cache instead of
+# calling `op read` directly, which bypasses caching and worktree support.
+
+# Check staged .ts, .tsx, .js files for direct op CLI calls
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=d -- '*.ts' '*.tsx' '*.js' | grep -v 'op-cache' || true)
+if [ -n "$STAGED_FILES" ]; then
+    OP_VIOLATIONS=$(echo "$STAGED_FILES" | xargs grep -l -E '(execSync|spawnSync|spawn)\s*\(.*["\x27]op["\x27 ]' 2>/dev/null || true)
+    if [ -n "$OP_VIOLATIONS" ]; then
+        echo ""
+        echo "ERROR: Direct 1Password CLI usage found in staged files."
+        echo "Use op-cache instead of calling 'op read' directly."
+        echo ""
+        echo "Violations:"
+        echo "$OP_VIOLATIONS" | sed 's/^/  /'
+        echo ""
+        exit 1
+    fi
+fi
+
+# Check staged .sh files for direct op read/inject calls
+STAGED_SH=$(git diff --cached --name-only --diff-filter=d -- '*.sh' | grep -v 'op-cache' || true)
+if [ -n "$STAGED_SH" ]; then
+    SH_VIOLATIONS=$(echo "$STAGED_SH" | xargs grep -l 'op read\|op inject' 2>/dev/null || true)
+    if [ -n "$SH_VIOLATIONS" ]; then
+        echo ""
+        echo "ERROR: Direct 'op read/inject' found in staged shell scripts."
+        echo "Use 'op-cache read' instead."
+        echo ""
+        echo "Violations:"
+        echo "$SH_VIOLATIONS" | sed 's/^/  /'
+        echo ""
+        exit 1
+    fi
+fi

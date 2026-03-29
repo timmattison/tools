@@ -123,6 +123,7 @@ windows-sys = { version = "0.60", features = [
 
 # Internal crates
 buildinfo = { path = "src/buildinfo" }
+op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
 repowalker = { path = "src/repowalker" }
@@ -157,3 +158,5 @@ await_holding_lock = "warn"
 allow_attributes_without_reason = "warn"
 # Catch clones that can be replaced by moves (nursery lint, may have false positives)
 redundant_clone = "warn"
+# Warn on byte-level string indexing (&s[..n]) which can panic on multi-byte UTF-8
+string_slice = "warn"

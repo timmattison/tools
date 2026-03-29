@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Husky post-checkout hook: sync .op-cache.json to worktrees
+#
+# Copy this file to .husky/post-checkout in your project.
+# Ensures new worktrees inherit cached 1Password credentials
+# so you don't need to re-authenticate in every worktree.
+
+# Only run on branch checkout, not file checkout ($3 == 1)
+if [ "$3" != "1" ]; then
+    exit 0
+fi
+
+CURRENT_ROOT="$(git rev-parse --show-toplevel)"
+MAIN_WORKTREE="$(git worktree list | head -1 | awk '{print $1}')"
+CACHE_FILE=".op-cache.json"
+
+# Skip if we're already in the main worktree
+if [ "$CURRENT_ROOT" = "$MAIN_WORKTREE" ]; then
+    exit 0
+fi
+
+# Copy cache from main worktree if it exists
+if [ -f "$MAIN_WORKTREE/$CACHE_FILE" ]; then
+    install -m 600 "$MAIN_WORKTREE/$CACHE_FILE" "$CURRENT_ROOT/$CACHE_FILE"
+    echo "  Copied: $CACHE_FILE (1Password credential cache, mode 600)"
+fi

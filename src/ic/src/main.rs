@@ -5,12 +5,14 @@ use clap::Parser;
 use icy_sixel::{sixel_encode, EncodeOptions};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use std::collections::HashSet;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use terminal_size::{terminal_size, Height, Width};
@@ -21,12 +23,6 @@ use termion::raw::IntoRawMode;
 // ============================================================================
 // Constants for Sixel and terminal display calculations
 // ============================================================================
-
-/// Estimated cell aspect ratio (height:width in pixels) for terminal cells.
-/// Most terminals use fonts where cells are roughly twice as tall as they are wide.
-/// This is a reasonable default that works across most modern terminals (iTerm2,
-/// Kitty, Ghostty, WezTerm, etc.) with typical font configurations.
-const TERMINAL_CELL_ASPECT_RATIO: f64 = 2.0;
 
 /// Estimated pixel width per terminal character cell.
 /// Used as fallback when actual pixel dimensions cannot be queried via ioctl.
@@ -76,7 +72,7 @@ enum VideoControl {
 /// - iTerm2: Uses iTerm2 inline image protocol
 /// - Kitty: Uses Kitty graphics protocol (better performance for video)
 /// - Ghostty: Uses Kitty graphics protocol (better performance for video)
-/// - WezTerm: Uses iTerm2 inline image protocol
+/// - WezTerm: Uses Kitty graphics protocol
 /// - Zellij: Uses Sixel protocol (works in Zellij running inside WezTerm or other Sixel-capable terminals)
 /// - Alacritty: NOT SUPPORTED (text-only terminal, no graphics protocols)
 /// - Other terminals: Limited or no image support
@@ -396,8 +392,21 @@ fn ensure_ffprobe_available() -> Result<()> {
     Ok(())
 }
 
-fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature: &str) -> Result<()> {
-    // Check for tmux first, since graphics don't work in tmux
+fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, transport: &RemoteTransport, feature: &str) -> Result<()> {
+    // Check for Mosh first, since it strips escape sequences needed by all graphics protocols
+    if *transport == RemoteTransport::Mosh {
+        anyhow::bail!(
+            "Mosh detected. {} display does not work over Mosh.\n\
+            Mosh strips the escape sequences needed for image display (Sixel, Kitty, iTerm2).\n\
+            \n\
+            To display images, please use one of:\n\
+            • ssh user@host (instead of mosh user@host)\n\
+            • Eternal Terminal (et user@host) - persistent sessions with image support",
+            feature
+        );
+    }
+
+    // Check for tmux, since graphics don't work in tmux
     if std::env::var("TMUX").is_ok() {
         anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
     }
@@ -413,7 +422,7 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
                 For {} display, please use one of these terminals:\n\
                 • iTerm2 (macOS) - supports inline images\n\
                 • Kitty - supports graphics protocol\n\
-                • WezTerm - supports iTerm2 image protocol\n\
+                • WezTerm - supports Kitty graphics protocol\n\
                 \n\
                 Alternatively, you can:\n\
                 • Extract frames using ffmpeg and view them in an image viewer\n\
@@ -427,7 +436,7 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
                 For {} display, please use one of these terminals:\n\
                 • iTerm2 (macOS) - supports inline images\n\
                 • Kitty - supports graphics protocol\n\
-                • WezTerm - supports iTerm2 image protocol\n\
+                • WezTerm - supports Kitty graphics protocol\n\
                 \n\
                 Current terminal: {}\n\
                 \n\
@@ -445,8 +454,9 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, feature:
 
 fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
-    
-    validate_terminal_for_graphics(&terminal_caps, "Video")?;
+    let transport = detect_remote_transport();
+
+    validate_terminal_for_graphics(&terminal_caps, &transport, "Video")?;
     ensure_ffmpeg_available()?;
 
     // Clear screen initially with function
@@ -642,7 +652,7 @@ fn process_frame_display(
         move_cursor_home()?;
     }
 
-    display_image(img, args)?;
+    display_image(img, args, true)?;
 
     // Draw progress bar
     if let Some((term_width, term_height)) = current_terminal_size {
@@ -701,15 +711,52 @@ fn update_adaptive_fps(
     *last_display_time = Instant::now();
 }
 
+/// RAII guard that restores the main screen buffer and shows the cursor on drop.
+/// This ensures terminal state is restored even if video playback panics.
+struct AlternateScreenGuard;
+
+impl AlternateScreenGuard {
+    fn enter() -> Result<Self> {
+        // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
+        // The alternate screen buffer prevents scrollback accumulation and eliminates
+        // ghost progress bars caused by terminal scrolling during image display.
+        print!("\x1b[?1049h\x1b[?25l");
+        io::stdout().flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for AlternateScreenGuard {
+    fn drop(&mut self) {
+        // Restore main screen buffer and show cursor.
+        // Ignore flush errors — best effort during cleanup.
+        print!("\x1b[?25h\x1b[?1049l");
+        let _ = io::stdout().flush();
+    }
+}
+
 fn play_video_simple(
     file_path: &PathBuf,
     _frame_duration: Duration,
     args: &Args,
     duration: f64,
-    mut fps: f64,
+    fps: f64,
 ) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
+
+    let _screen_guard = AlternateScreenGuard::enter()?;
+
+    play_video_inner(file_path, args, duration, fps, &input_rx)
+}
+
+fn play_video_inner(
+    file_path: &PathBuf,
+    args: &Args,
+    duration: f64,
+    mut fps: f64,
+    input_rx: &std::sync::mpsc::Receiver<VideoControl>,
+) -> Result<()> {
     let mut current_time = 0.0; // Current position in the video (in seconds)
     let mut is_paused = false;
     let mut previous_terminal_size: Option<(u32, u32)> = None;
@@ -990,9 +1037,6 @@ fn play_video_simple(
         let _ = ffmpeg_child.wait();
     }
 
-    // Clean up the input thread
-    drop(_input_handle);
-
     Ok(())
 }
 
@@ -1220,7 +1264,7 @@ fn display_image_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     let img = image::open(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    display_image(img, args)
+    display_image(img, args, args.no_newline)
 }
 
 fn display_text_file(file_path: &PathBuf) -> Result<()> {
@@ -1245,13 +1289,16 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
-    display_image(img, args)
+    display_image(img, args, args.no_newline)
 }
 
-fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
+fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
-    
-    validate_terminal_for_graphics(&terminal_caps, "Image")?;
+    let transport = detect_remote_transport();
+
+    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
+
+    let under_remote_proxy = transport == RemoteTransport::EternalTerminal;
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
         // Use user-specified dimensions but still use character-based sizing
@@ -1284,25 +1331,32 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
         (target_width, target_height)
     };
 
-    // Choose optimal display method based on terminal capabilities
-    // Check Sixel first (for Zellij), then Kitty/Ghostty, then iTerm2
-    // Use already-detected terminal_caps to avoid redundant env var lookups
+    // Choose optimal display method based on terminal capabilities.
+    // Check Sixel first (for Zellij), then Kitty/Ghostty/WezTerm, then iTerm2.
+    // Use already-detected terminal_caps to avoid redundant env var lookups.
+    //
+    // Sixel (Zellij) does not need proxy cursor-sync because Zellij's server
+    // manages its own rendering and cursor tracking — the image protocol
+    // never reaches the remote transport's virtual terminal.
     match terminal_caps.terminal_type {
         TerminalType::Zellij => {
-            display_image_sixel(&img, scaled_width, scaled_height, args)
+            display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
         }
-        TerminalType::Kitty | TerminalType::Ghostty => {
-            display_image_kitty(&img, scaled_width, scaled_height, args)
+        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
+            display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline)
         }
-        _ => display_image_iterm2(&img, scaled_width, scaled_height, args),
+        _ => display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline),
     }
 }
 
 /// Calculate display dimensions that preserve aspect ratio within the given bounds.
 ///
 /// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
-/// using `TERMINAL_CELL_ASPECT_RATIO`. This function works in terminal character cells,
-/// not pixels.
+/// via the `cell_aspect` parameter (cell height / cell width in pixels). Callers
+/// obtain this from `get_cell_pixel_dimensions()`, which uses actual terminal
+/// dimensions when available and falls back to
+/// `ESTIMATED_CELL_HEIGHT_PX / ESTIMATED_CELL_WIDTH_PX`. This function works in
+/// terminal character cells, not pixels.
 ///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
@@ -1317,6 +1371,7 @@ fn calculate_aspect_preserving_size(
     max_width: Option<u32>,
     max_height: Option<u32>,
     preserve_aspect: bool,
+    cell_aspect: f64,
 ) -> (Option<u32>, Option<u32>) {
     if !preserve_aspect {
         return (max_width, max_height);
@@ -1330,10 +1385,7 @@ fn calculate_aspect_preserving_size(
 
     match (max_width, max_height) {
         (Some(max_w), Some(max_h)) => {
-            // Terminal cells are roughly 2:1 (height:width in pixels)
-            // So 1 row ≈ 2 columns worth of pixels
-            // Adjust the max_height to account for cell aspect ratio
-            let effective_max_h_pixels = max_h as f64 * TERMINAL_CELL_ASPECT_RATIO;
+            let effective_max_h_pixels = max_h as f64 * cell_aspect;
             let effective_max_w_pixels = max_w as f64;
 
             let img_aspect = img_width as f64 / img_height as f64;
@@ -1343,13 +1395,13 @@ fn calculate_aspect_preserving_size(
                 // Image is wider than box - constrain by width
                 let display_width = max_w;
                 let display_height =
-                    ((max_w as f64 / img_aspect) / TERMINAL_CELL_ASPECT_RATIO).round() as u32;
+                    ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
                 (Some(display_width), Some(display_height.max(1)))
             } else {
                 // Image is taller than box - constrain by height
                 let display_height = max_h;
                 let display_width =
-                    (max_h as f64 * TERMINAL_CELL_ASPECT_RATIO * img_aspect).round() as u32;
+                    (max_h as f64 * cell_aspect * img_aspect).round() as u32;
                 (Some(display_width.max(1)), Some(display_height))
             }
         }
@@ -1359,20 +1411,94 @@ fn calculate_aspect_preserving_size(
     }
 }
 
-/// Kitty terminal display with better performance for video
-fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
-    // Use RGB data directly for better performance (no base64 encoding overhead)
-    let rgb_data = img.to_rgb8();
+/// Calculate the pixel dimensions of a single terminal character cell.
+///
+/// Tries to determine actual cell dimensions via ioctl (TIOCGWINSZ). Falls back to
+/// estimated constants if the ioctl fails or the terminal reports zero dimensions.
+fn get_cell_pixel_dimensions() -> (u32, u32) {
+    if let Some((total_px_w, total_px_h)) = get_terminal_pixel_size() {
+        let (term_cols, term_rows) = get_terminal_size().unwrap_or((80, 24));
+        if term_cols > 0 && term_rows > 0 {
+            return (total_px_w / term_cols, total_px_h / term_rows);
+        }
+    }
+    (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+}
 
-    // Calculate display dimensions that preserve aspect ratio
-    // Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
+/// Returns the cell aspect ratio (height / width in pixels).
+/// Uses actual terminal cell dimensions when available, falling back to estimates.
+fn get_cell_aspect_ratio() -> f64 {
+    let (cell_w, cell_h) = get_cell_pixel_dimensions();
+    cell_h as f64 / cell_w as f64
+}
+
+/// Convert character cell display dimensions to target pixel dimensions.
+///
+/// Returns `None` if either dimension is missing (meaning no downscale target can
+/// be computed). Uses actual terminal cell pixel dimensions when available, falling
+/// back to estimated constants.
+fn cells_to_pixels(cols: u32, rows: u32, cell_w: u32, cell_h: u32) -> (u32, u32) {
+    (cols * cell_w, rows * cell_h)
+}
+
+/// Downscale an image to fit the display pixel dimensions if it exceeds them.
+///
+/// Converts character cell display dimensions to pixel dimensions using either the
+/// actual terminal pixel size (via ioctl) or estimated cell dimensions, then resizes
+/// the image if it's larger than the target. This prevents sending hundreds of megabytes
+/// of pixel data to the terminal for very large images (e.g., panoramas).
+///
+/// Returns a borrowed reference to the original image when no downscaling is needed
+/// (dimensions unspecified or image already fits), avoiding an unnecessary clone.
+/// Returns an owned downscaled image when the original exceeds the target pixel dimensions.
+fn downscale_to_display_pixels<'a>(
+    img: &'a DynamicImage,
+    display_width: Option<u32>,
+    display_height: Option<u32>,
+) -> Cow<'a, DynamicImage> {
+    let (target_pixel_w, target_pixel_h) = match (display_width, display_height) {
+        (Some(cols), Some(rows)) => {
+            let (cell_w, cell_h) = get_cell_pixel_dimensions();
+            cells_to_pixels(cols, rows, cell_w, cell_h)
+        }
+        _ => return Cow::Borrowed(img),
+    };
+
+    if img.width() <= target_pixel_w && img.height() <= target_pixel_h {
+        return Cow::Borrowed(img);
+    }
+
+    Cow::Owned(img.resize(
+        target_pixel_w,
+        target_pixel_h,
+        image::imageops::FilterType::Lanczos3,
+    ))
+}
+
+/// Kitty terminal display with better performance for video.
+///
+/// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
+fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
+    // display_width/display_height are in terminal cells (character columns/rows).
+    // They serve two roles: (1) the Kitty protocol `c=`/`r=` display hints that tell
+    // the terminal how many cells the image should span, and (2) the downscale target
+    // converted to pixels via cell dimensions to cap the raw data we send.
     let (display_width, display_height) = calculate_aspect_preserving_size(
         img.width(),
         img.height(),
         width,
         height,
         args.preserve_aspect,
+        get_cell_aspect_ratio(),
     );
+
+    // Downscale the image to the target pixel size before sending to avoid
+    // overwhelming the terminal with huge payloads (e.g., a 16384x8192 panorama
+    // would produce ~384MB of RGB data before base64 encoding).
+    let img = downscale_to_display_pixels(img, display_width, display_height);
+
+    // Use RGB data directly for better performance (no base64 encoding overhead)
+    let rgb_data = img.to_rgb8();
 
     // Use Kitty's more efficient graphics protocol with optimizations
     print_kitty_image(
@@ -1381,7 +1507,8 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
         img.height(),
         display_width,
         display_height,
-        args.no_newline,
+        no_newline,
+        under_remote_proxy,
     )
 }
 
@@ -1477,6 +1604,7 @@ fn display_image_sixel(
     fallback_cols: Option<u32>,
     fallback_rows: Option<u32>,
     args: &Args,
+    no_newline: bool,
 ) -> Result<()> {
     // Try to get actual terminal pixel dimensions, with fallbacks
     let (target_pixel_width, target_pixel_height) =
@@ -1529,7 +1657,7 @@ fn display_image_sixel(
     // Output the sixel data
     let mut stdout = io::stdout().lock();
     write!(stdout, "{}", sixel_output)?;
-    if !args.no_newline {
+    if !no_newline {
         writeln!(stdout)?;
     }
     stdout.flush().context("Failed to flush output")?;
@@ -1537,8 +1665,27 @@ fn display_image_sixel(
     Ok(())
 }
 
-/// Optimized iTerm2 display with reduced overhead
-fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args) -> Result<()> {
+/// Optimized iTerm2 display with reduced overhead.
+///
+/// Computes aspect-preserving display dimensions and downscales the image to the
+/// target pixel size before encoding. This matches the Kitty path's behavior and
+/// prevents sending oversized payloads for very large images.
+fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
+    // Calculate aspect-corrected display dimensions in terminal cells, then use them
+    // both as the iTerm2 width/height hints and the downscale target.
+    let (display_width, display_height) = calculate_aspect_preserving_size(
+        img.width(),
+        img.height(),
+        width,
+        height,
+        args.preserve_aspect,
+        get_cell_aspect_ratio(),
+    );
+
+    // Downscale the image to the target pixel size before encoding to avoid
+    // overwhelming the terminal with huge payloads
+    let img = downscale_to_display_pixels(img, display_width, display_height);
+
     // Use more efficient encoding for iTerm2
     // Convert to RGB first for consistency and smaller data size than RGBA
     let rgb_img = img.to_rgb8();
@@ -1553,7 +1700,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
     // Use base64 encoding
     let encoded = BASE64_STANDARD.encode(&pnm_data);
 
-    print_iterm2_image(&encoded, width, height, args.no_newline)
+    print_iterm2_image(&encoded, display_width, display_height, no_newline, under_remote_proxy)
 }
 
 /// Optimized Kitty image printing with reduced protocol overhead
@@ -1620,6 +1767,212 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
     }
 }
 
+/// Process ID newtype for type safety in process tree walking.
+///
+/// Prevents accidentally mixing up pid/ppid values or confusing
+/// process IDs with other u32 values (e.g., loop counters).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Pid(u32);
+
+/// Maximum depth to walk up the process tree when searching for ancestors.
+/// 64 levels is generous; real-world process trees rarely exceed 20 levels.
+const MAX_ANCESTOR_DEPTH: usize = 64;
+
+/// Extracts the basename (filename) from a process comm string.
+///
+/// On macOS, `ps -eo comm=` returns the full executable path (e.g.,
+/// `/usr/local/bin/mosh-server`). This function extracts just the
+/// filename component for exact matching.
+fn comm_basename(comm: &str) -> &str {
+    Path::new(comm)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(comm)
+}
+
+/// The type of remote transport detected in the process tree.
+///
+/// Used to adapt image display behavior for proxies that don't understand
+/// terminal graphics protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteTransport {
+    /// No remote transport detected (direct terminal or plain SSH).
+    None,
+    /// Running under Mosh (mosh-server in process tree).
+    /// Mosh strips escape sequences, so graphics protocols cannot work.
+    Mosh,
+    /// Running under Eternal Terminal (ET_VERSION env var or etterminal in process tree).
+    /// ET passes escape sequences through but its virtual terminal doesn't
+    /// track cursor movement from image protocols, requiring explicit
+    /// cursor advancement.
+    EternalTerminal,
+}
+
+/// Return the cached remote transport, detecting it on first call.
+///
+/// The result is cached in a `OnceLock` because the transport cannot change
+/// during a process's lifetime and detection spawns a `ps` subprocess — too
+/// expensive to repeat per video frame.
+fn detect_remote_transport() -> RemoteTransport {
+    static TRANSPORT: OnceLock<RemoteTransport> = OnceLock::new();
+    *TRANSPORT.get_or_init(detect_remote_transport_inner)
+}
+
+/// Detect the remote transport by checking environment variables and process tree.
+///
+/// Priority logic:
+/// 1. **Mosh as direct ancestor** → always Mosh (the shell is definitely under Mosh)
+/// 2. **ET detected** (env var or process tree) → EternalTerminal, even if Mosh is
+///    also attached to the same Zellij session. In multiplexed sessions, output goes
+///    to all clients — ET viewers can handle images while Mosh viewers silently
+///    ignore the escape sequences.
+/// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
+/// 4. **Neither** → None
+fn detect_remote_transport_inner() -> RemoteTransport {
+    let output = match std::process::Command::new("ps")
+        .args(["-eo", "pid=,ppid=,comm="])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => {
+            // Can't check process tree; fall back to env var for ET
+            if std::env::var("ET_VERSION").is_ok() {
+                return RemoteTransport::EternalTerminal;
+            }
+            return RemoteTransport::None;
+        }
+    };
+
+    let table = String::from_utf8_lossy(&output.stdout);
+    let current_pid = Pid(std::process::id());
+    let in_zellij = std::env::var("ZELLIJ").is_ok();
+
+    // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
+    // shell is definitely under Mosh, so images cannot work.
+    if find_ancestor_process(&table, current_pid, false, "mosh-server") {
+        return RemoteTransport::Mosh;
+    }
+
+    // ET detected via env var or process tree (including Zellij heuristic).
+    // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
+    // session, Mosh and ET may both be attached — ET viewers can display images
+    // while Mosh viewers silently strip the escape sequences.
+    if std::env::var("ET_VERSION").is_ok()
+        || find_ancestor_process(&table, current_pid, in_zellij, "etterminal")
+    {
+        return RemoteTransport::EternalTerminal;
+    }
+
+    // Mosh via Zellij heuristic (Case 2) — only reached when ET is not present.
+    if find_ancestor_process(&table, current_pid, in_zellij, "mosh-server") {
+        return RemoteTransport::Mosh;
+    }
+
+    RemoteTransport::None
+}
+
+/// Determines whether a target process (identified by basename) is an ancestor
+/// of the current process by analyzing parsed `ps` output.
+///
+/// This handles two cases:
+/// 1. **Direct ancestry**: The target process is a direct ancestor of `current_pid`.
+/// 2. **Zellij workaround**: Zellij daemonizes (reparents to PID 1), breaking the
+///    direct ancestry. In this case, we check if any process whose basename is
+///    exactly `zellij` (the CLI, not `zellij-server` or other variants) has the
+///    target process as an ancestor.
+fn find_ancestor_process(
+    ps_output: &str,
+    current_pid: Pid,
+    in_zellij: bool,
+    target_name: &str,
+) -> bool {
+    let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
+    let mut comm_of: HashMap<Pid, String> = HashMap::new();
+
+    for line in ps_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => Pid(p),
+            None => continue,
+        };
+        let ppid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => Pid(p),
+            None => continue,
+        };
+        // Rejoin remaining tokens to reconstruct paths that contain spaces
+        // (e.g., "/Users/user/my apps/mosh-server"). On macOS, `ps -eo comm=`
+        // returns the full executable path. The kernel's p_comm field is limited
+        // to MAXCOMLEN (16 chars), but `ps` resolves the full path via libproc,
+        // so truncation is not expected. Edge cases (zombie processes, kernel
+        // threads) may show truncated names; "mosh-server" (11 chars) fits.
+        let comm: String = parts.collect::<Vec<&str>>().join(" ");
+        parent_of.insert(pid, ppid);
+        comm_of.insert(pid, comm);
+    }
+
+    // Case 1: Walk up from current PID looking for target (direct ancestry)
+    let mut ancestor = current_pid;
+    for _ in 0..MAX_ANCESTOR_DEPTH {
+        if let Some(comm) = comm_of.get(&ancestor) {
+            if comm_basename(comm) == target_name {
+                return true;
+            }
+        }
+        match parent_of.get(&ancestor) {
+            Some(&ppid) if ppid != Pid(0) && ppid != ancestor => ancestor = ppid,
+            _ => break,
+        }
+    }
+
+    // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
+    // Find any process whose basename is exactly "zellij" (the CLI binary,
+    // not "zellij-server" or other variants) and check if its ancestors
+    // include the target process.
+    if in_zellij {
+        for (&zellij_pid, comm) in &comm_of {
+            if comm_basename(comm) != "zellij" {
+                continue;
+            }
+            let mut ancestor = zellij_pid;
+            for _ in 0..MAX_ANCESTOR_DEPTH {
+                match parent_of.get(&ancestor) {
+                    Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
+                        if let Some(pcomm) = comm_of.get(&ppid) {
+                            if comm_basename(pcomm) == target_name {
+                                return true;
+                            }
+                        }
+                        ancestor = ppid;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if Mosh is in the process tree. Delegates to [`find_ancestor_process`].
+#[cfg(test)]
+fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
+    find_ancestor_process(ps_output, current_pid, in_zellij, "mosh-server")
+}
+
+/// Check if Eternal Terminal is in the process tree. Delegates to [`find_ancestor_process`].
+/// Looks for `etterminal` (the per-session worker), not `etserver` (the daemon),
+/// because `etterminal` is the direct ancestor of the user's shell.
+#[cfg(test)]
+fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
+    find_ancestor_process(ps_output, current_pid, in_zellij, "etterminal")
+}
+
 fn print_kitty_image(
     rgb_data: &[u8],
     img_width: u32,
@@ -1627,6 +1980,7 @@ fn print_kitty_image(
     display_width: Option<u32>,
     display_height: Option<u32>,
     no_newline: bool,
+    under_remote_proxy: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
 
@@ -1637,9 +1991,42 @@ fn print_kitty_image(
     let base64_data = BASE64_STANDARD.encode(rgb_data);
     let chunk_size = 4096; // Kitty recommended chunk size
 
+    // Under a remote proxy (e.g. Eternal Terminal), the proxy's virtual terminal
+    // doesn't understand the Kitty graphics protocol, so it can't track cursor
+    // movement caused by image rendering. We synchronize by:
+    //   1. Pre-filling blank lines so the proxy allocates screen space
+    //   2. Moving the cursor back up (both proxy and client process this)
+    //   3. Rendering the image with C=1 (don't move cursor)
+    //   4. Moving the cursor back down with CUD (both process this)
+    // This keeps both terminals' cursor positions in sync.
+    // In video mode (no_newline), skip proxy cursor sync — the caller handles
+    // cursor positioning explicitly with \x1b[row;colH and \x1b[J. The pre-fill
+    // newlines would cause scrolling every frame.
+    let proxy_rows = if under_remote_proxy && !no_newline {
+        let rows = display_height.unwrap_or(1);
+        // Pre-fill: emit newlines to create space in the proxy's screen buffer
+        for _ in 0..rows {
+            writeln!(stdout)?;
+        }
+        // Move cursor back up to where the image should be rendered
+        write!(stdout, "\x1b[{}A", rows)?;
+        rows
+    } else {
+        0
+    };
+
     if base64_data.len() <= chunk_size {
         // Small image, send in one chunk
         write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
+
+        // In video mode, use fixed image and placement IDs so each frame replaces
+        // the previous one in-place (zero memory accumulation), and C=1 to prevent
+        // cursor movement that could trigger terminal scrolling.
+        if no_newline {
+            write!(stdout, ",i=1,p=1,C=1")?;
+        } else if under_remote_proxy {
+            write!(stdout, ",C=1")?;
+        }
 
         // Add display size if specified (in character cells)
         if let Some(w) = display_width {
@@ -1663,6 +2050,12 @@ fn print_kitty_image(
                 // First chunk
                 write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
 
+                if no_newline {
+                    write!(stdout, ",i=1,p=1,C=1")?;
+                } else if under_remote_proxy {
+                    write!(stdout, ",C=1")?;
+                }
+
                 // Add display size if specified (in character cells)
                 if let Some(w) = display_width {
                     write!(stdout, ",c={}", w)?;
@@ -1682,7 +2075,15 @@ fn print_kitty_image(
         }
     }
 
-    if !no_newline {
+    if under_remote_proxy && !no_newline {
+        // Move cursor down past the image area using CUD (Cursor Down).
+        // Both the proxy and local terminal process this identically.
+        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
+        // terminal needs explicit cursor advancement to stay in sync with the
+        // real terminal — without it, subsequent output overwrites the image.
+        write!(stdout, "\x1b[{}B", proxy_rows)?;
+        writeln!(stdout)?;
+    } else if !no_newline {
         writeln!(stdout)?;
     }
 
@@ -1696,8 +2097,30 @@ fn print_iterm2_image(
     width: Option<u32>,
     height: Option<u32>,
     no_newline: bool,
+    under_remote_proxy: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
+
+    // Under a remote proxy (e.g. Eternal Terminal), the proxy's virtual terminal
+    // doesn't understand the iTerm2 image protocol, so it can't track cursor
+    // movement caused by image rendering. We synchronize by:
+    //   1. Pre-filling blank lines so the proxy allocates screen space
+    //   2. Moving the cursor back up (both proxy and client process this)
+    //   3. Rendering the image with doNotMoveCursor=1
+    //   4. Moving the cursor back down with CUD (both process this)
+    // This keeps both terminals' cursor positions in sync.
+    // In video mode (no_newline), skip proxy cursor sync — the caller handles
+    // cursor positioning explicitly with \x1b[row;colH and \x1b[J.
+    let proxy_rows = if under_remote_proxy && !no_newline {
+        let rows = height.unwrap_or(1);
+        for _ in 0..rows {
+            writeln!(stdout)?;
+        }
+        write!(stdout, "\x1b[{}A", rows)?;
+        rows
+    } else {
+        0
+    };
 
     // iTerm2 inline image protocol
     // ESC ] 1337 ; File = [arguments] : base64_data BEL
@@ -1717,10 +2140,18 @@ fn print_iterm2_image(
     // Don't move cursor after image to prevent scrollback accumulation
     write!(stdout, ";doNotMoveCursor=1")?;
 
-    if no_newline {
-        write!(stdout, ":{}\x07", base64_data)?;
-    } else {
-        write!(stdout, ":{}\x07\n", base64_data)?;
+    write!(stdout, ":{}\x07", base64_data)?;
+
+    if under_remote_proxy && !no_newline {
+        // Move cursor down past the image area using CUD (Cursor Down).
+        // Both the proxy and local terminal process this identically.
+        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
+        // terminal needs explicit cursor advancement to stay in sync with the
+        // real terminal — without it, subsequent output overwrites the image.
+        write!(stdout, "\x1b[{}B", proxy_rows)?;
+        writeln!(stdout)?;
+    } else if !no_newline {
+        writeln!(stdout)?;
     }
 
     stdout.flush().context("Failed to flush output")?;
@@ -1735,16 +2166,19 @@ mod tests {
     // Tests for calculate_aspect_preserving_size
     // =========================================================================
 
+    /// Standard cell aspect ratio used in tests (typical terminal: cells ~2x tall as wide).
+    const TEST_CELL_ASPECT: f64 = 2.0;
+
     #[test]
     fn aspect_preserving_returns_original_when_disabled() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_handles_zero_height_defensively() {
         // Zero height should not panic (division by zero), returns original dimensions
-        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
@@ -1754,7 +2188,7 @@ mod tests {
         // With cell aspect ratio of 2:1, effective box is 50x100 pixels
         // Image aspect = 1.0, box aspect = 50/100 = 0.5
         // Image is wider than box, constrain by width
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/1.0)/2.0 = 25
         assert_eq!(result, (Some(50), Some(25)));
     }
@@ -1764,7 +2198,7 @@ mod tests {
         // Wide image (200x100) in square box (50x50)
         // Image aspect = 2.0
         // Constrain by width
-        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/2.0)/2.0 = 12.5 -> 13 (rounded)
         assert_eq!(result, (Some(50), Some(13)));
     }
@@ -1774,38 +2208,38 @@ mod tests {
         // Tall image (100x400) in square box (50x50)
         // Image aspect = 0.25
         // Constrain by height
-        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_height = 50, display_width = 50 * 2.0 * 0.25 = 25
         assert_eq!(result, (Some(25), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_only_width_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), None));
     }
 
     #[test]
     fn aspect_preserving_only_height_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (None, Some(50)));
     }
 
     #[test]
     fn aspect_preserving_no_dimensions_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, None, true);
+        let result = calculate_aspect_preserving_size(100, 100, None, None, true, TEST_CELL_ASPECT);
         assert_eq!(result, (None, None));
     }
 
     #[test]
     fn aspect_preserving_minimum_dimension_is_one() {
         // Very wide image that would result in height < 1
-        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true);
+        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp height to at least 1
         assert!(result.1.unwrap() >= 1);
 
         // Very tall image that would result in width < 1
-        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true);
+        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp width to at least 1
         assert!(result.0.unwrap() >= 1);
     }
@@ -1892,9 +2326,10 @@ mod tests {
 
     #[test]
     fn constants_have_reasonable_values() {
-        // Cell aspect ratio should be positive and reasonable (1.5 to 3.0)
-        assert!(TERMINAL_CELL_ASPECT_RATIO > 1.0);
-        assert!(TERMINAL_CELL_ASPECT_RATIO < 4.0);
+        // Derived cell aspect ratio (from fallback constants) should be reasonable (1.5 to 3.0)
+        let fallback_aspect = ESTIMATED_CELL_HEIGHT_PX as f64 / ESTIMATED_CELL_WIDTH_PX as f64;
+        assert!(fallback_aspect > 1.0);
+        assert!(fallback_aspect < 4.0);
 
         // Cell pixel estimates should be positive and reasonable
         assert!(ESTIMATED_CELL_WIDTH_PX >= 6);
@@ -1911,5 +2346,335 @@ mod tests {
         assert!(SIXEL_HORIZONTAL_MARGIN <= 1.0);
         assert!(SIXEL_VERTICAL_MARGIN > 0.5);
         assert!(SIXEL_VERTICAL_MARGIN <= 1.0);
+    }
+
+    // =========================================================================
+    // Tests for comm_basename
+    // =========================================================================
+
+    #[test]
+    fn comm_basename_full_path() {
+        assert_eq!(comm_basename("/usr/local/bin/mosh-server"), "mosh-server");
+    }
+
+    #[test]
+    fn comm_basename_bare_name() {
+        assert_eq!(comm_basename("mosh-server"), "mosh-server");
+    }
+
+    #[test]
+    fn comm_basename_path_with_spaces() {
+        // Paths with spaces are reconstructed by the join(" ") in parsing
+        assert_eq!(
+            comm_basename("/Users/user/my apps/mosh-server"),
+            "mosh-server"
+        );
+    }
+
+    #[test]
+    fn comm_basename_empty_string() {
+        assert_eq!(comm_basename(""), "");
+    }
+
+    // =========================================================================
+    // Tests for has_mosh_in_process_tree
+    // =========================================================================
+
+    #[test]
+    fn mosh_detected_bare_session() {
+        // Process tree: mosh-server(100) -> bash(200) -> ic(300)
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn mosh_detected_bare_name() {
+        // comm is just the bare name, no path
+        let ps_output = "\
+  100     1 mosh-server
+  200   100 bash
+  300   200 ic";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn mosh_detected_in_zellij() {
+        // mosh-server(100) -> zellij CLI(200), but current process(400)
+        // is child of zellij-server(300) which reparented to PID 1
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /usr/bin/zellij
+  300     1 /usr/bin/zellij-server
+  400   300 /bin/bash";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(400), true));
+    }
+
+    #[test]
+    fn no_mosh_in_normal_session() {
+        let ps_output = "\
+    1     0 /sbin/launchd
+  500     1 /usr/sbin/sshd
+  600   500 /bin/bash
+  700   600 /usr/local/bin/ic";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(700), false));
+    }
+
+    #[test]
+    fn mosh_empty_ps_output() {
+        assert!(!has_mosh_in_process_tree("", Pid(1), false));
+    }
+
+    #[test]
+    fn mosh_malformed_lines_skipped() {
+        let ps_output = "\
+not_a_number  1 /bin/bash
+  100     1 /usr/bin/mosh-server
+  abc   def /foo/bar
+  200   100 /bin/bash";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
+    }
+
+    #[test]
+    fn mosh_zellij_exact_match_no_false_positive() {
+        // "my-zellij-wrapper" and "zellij-server" must NOT match as zellij CLI
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /usr/local/bin/my-zellij-wrapper
+  300     1 /usr/local/bin/zellij-server
+  400   300 /bin/bash";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), true));
+    }
+
+    #[test]
+    fn mosh_server_exact_match_no_false_positive() {
+        // "mosh-server-wrapper" must NOT match as mosh-server
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server-wrapper
+  200   100 /bin/bash";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(200), false));
+    }
+
+    #[test]
+    fn mosh_comm_path_with_spaces() {
+        // Paths with spaces are reconstructed by join(" "),
+        // and comm_basename extracts the correct filename
+        let ps_output = "\
+  100     1 /Users/user/my apps/mosh-server
+  200   100 /bin/bash";
+        assert!(has_mosh_in_process_tree(ps_output, Pid(200), false));
+    }
+
+    #[test]
+    fn mosh_current_pid_not_in_table() {
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /bin/bash";
+        // PID 999 is not in the table
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(999), false));
+    }
+
+    #[test]
+    fn mosh_cycle_does_not_loop_forever() {
+        // A process whose parent is itself should not cause infinite loop
+        let ps_output = "\
+  100   100 /bin/bash";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(100), false));
+    }
+
+    #[test]
+    fn mosh_not_detected_when_zellij_env_unset() {
+        // Even though a zellij process exists under mosh-server,
+        // Case 2 should not trigger when in_zellij is false
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /usr/bin/zellij
+  300     1 /usr/bin/zellij-server
+  400   300 /bin/bash";
+        // current PID 400 is not an ancestor of mosh-server via Case 1,
+        // and in_zellij=false disables Case 2
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
+    }
+
+    // =========================================================================
+    // Tests for has_et_in_process_tree (Eternal Terminal detection)
+    // =========================================================================
+
+    #[test]
+    fn et_detected_bare_session() {
+        // Process tree: etterminal(100) -> bash(200) -> ic(300)
+        let ps_output = "\
+  100     1 /usr/bin/etterminal
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn et_detected_bare_name() {
+        // comm is just the bare name, no path
+        let ps_output = "\
+  100     1 etterminal
+  200   100 bash
+  300   200 ic";
+        assert!(has_et_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn et_detected_in_zellij() {
+        // etterminal(100) -> zellij CLI(200), but current process(400)
+        // is child of zellij-server(300) which reparented to PID 1
+        let ps_output = "\
+  100     1 /usr/bin/etterminal
+  200   100 /usr/bin/zellij
+  300     1 /usr/bin/zellij-server
+  400   300 /bin/bash";
+        assert!(has_et_in_process_tree(ps_output, Pid(400), true));
+    }
+
+    #[test]
+    fn no_et_in_normal_session() {
+        let ps_output = "\
+    1     0 /sbin/launchd
+  500     1 /usr/sbin/sshd
+  600   500 /bin/bash
+  700   600 /usr/local/bin/ic";
+        assert!(!has_et_in_process_tree(ps_output, Pid(700), false));
+    }
+
+    #[test]
+    fn et_not_confused_with_mosh() {
+        // mosh-server present but no etterminal
+        let ps_output = "\
+  100     1 /usr/bin/mosh-server
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(!has_et_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn mosh_not_confused_with_et() {
+        // etterminal present but no mosh-server
+        let ps_output = "\
+  100     1 /usr/bin/etterminal
+  200   100 /bin/bash
+  300   200 /usr/local/bin/ic";
+        assert!(!has_mosh_in_process_tree(ps_output, Pid(300), false));
+    }
+
+    #[test]
+    fn et_exact_match_no_false_positive() {
+        // "etterminal-wrapper" must NOT match as etterminal
+        let ps_output = "\
+  100     1 /usr/bin/etterminal-wrapper
+  200   100 /bin/bash";
+        assert!(!has_et_in_process_tree(ps_output, Pid(200), false));
+    }
+
+    // =========================================================================
+    // Tests for cells_to_pixels
+    // =========================================================================
+
+    #[test]
+    fn cells_to_pixels_basic() {
+        assert_eq!(cells_to_pixels(80, 24, 10, 20), (800, 480));
+    }
+
+    #[test]
+    fn cells_to_pixels_single_cell() {
+        assert_eq!(cells_to_pixels(1, 1, 10, 20), (10, 20));
+    }
+
+    #[test]
+    fn cells_to_pixels_custom_cell_dimensions() {
+        assert_eq!(cells_to_pixels(40, 12, 16, 32), (640, 384));
+    }
+
+    // =========================================================================
+    // Tests for downscale_to_display_pixels
+    // =========================================================================
+
+    /// Helper to create a test image of the given dimensions.
+    fn make_test_image(width: u32, height: u32) -> DynamicImage {
+        DynamicImage::ImageRgb8(image::RgbImage::new(width, height))
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_no_dimensions() {
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, None, None);
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_only_width() {
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, Some(50), None);
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_only_height() {
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, None, Some(50));
+        assert!(matches!(result, Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn downscale_returns_borrowed_when_image_fits() {
+        // With estimated cell dimensions (10x20), 80 cols x 24 rows = 800x480 pixels.
+        // A 100x100 image fits within that, so no downscale needed.
+        // Note: in CI/test environments, get_terminal_pixel_size() returns None,
+        // so estimated constants are used.
+        let img = make_test_image(100, 100);
+        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
+        assert!(matches!(result, Cow::Borrowed(_)));
+        assert_eq!(result.width(), 100);
+        assert_eq!(result.height(), 100);
+    }
+
+    #[test]
+    fn downscale_shrinks_oversized_image() {
+        // 10 cols x 5 rows, pixel target depends on actual cell dimensions
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
+        // Image must be larger than the target to trigger downscaling
+        let img = make_test_image(max_w * 5, max_h * 5);
+        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
+        assert!(matches!(result, Cow::Owned(_)));
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
+    }
+
+    #[test]
+    fn downscale_preserves_aspect_ratio() {
+        // Wide image with 5:1 aspect ratio, larger than any reasonable target
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(10, 5, cell_w, cell_h);
+        let img = make_test_image(max_w * 10, max_h * 2);
+        let result = downscale_to_display_pixels(&img, Some(10), Some(5));
+        assert!(matches!(result, Cow::Owned(_)));
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
+        // Aspect ratio should be roughly maintained (5:1)
+        let aspect = result.width() as f64 / result.height() as f64;
+        assert!(
+            (aspect - 5.0).abs() < 0.5,
+            "aspect ratio {aspect} should be close to 5.0"
+        );
+    }
+
+    #[test]
+    fn downscale_handles_panoramic_image() {
+        // Very large panorama, target depends on actual cell dimensions
+        let (cell_w, cell_h) = get_cell_pixel_dimensions();
+        let (max_w, max_h) = cells_to_pixels(80, 24, cell_w, cell_h);
+        let img = make_test_image(16384, 4096);
+        let result = downscale_to_display_pixels(&img, Some(80), Some(24));
+        assert!(matches!(result, Cow::Owned(_)));
+        assert!(result.width() <= max_w);
+        assert!(result.height() <= max_h);
     }
 }
