@@ -1,4 +1,5 @@
 mod cities;
+mod credential;
 mod generator;
 
 use anyhow::{bail, Context, Result};
