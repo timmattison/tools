@@ -3,7 +3,7 @@ use clap::ValueEnum;
 use serde::Serialize;
 use tabled::{Table, Tabled, settings::Style};
 
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum OutputFormat {
     Json,
     Table,

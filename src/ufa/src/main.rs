@@ -5,6 +5,8 @@ mod output;
 mod site_helper;
 mod device_helper;
 mod config;
+mod discovery;
+mod site_manager;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -100,6 +102,16 @@ enum Commands {
         #[clap(subcommand)]
         command: ConfigCommand,
     },
+    
+    /// Manage cloud-hosted UniFi consoles
+    Cloud {
+        /// Site Manager API key (generate at unifi.ui.com API section)
+        #[clap(long, env = "UNIFI_SITE_MANAGER_API_KEY")]
+        site_manager_api_key: Option<String>,
+        
+        #[clap(subcommand)]
+        command: site_manager::CloudCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -108,6 +120,8 @@ enum ConfigCommand {
     Setup,
     /// Show current configuration file path
     Path,
+    /// Setup cloud/Site Manager API credentials
+    Cloud,
 }
 
 #[tokio::main]
@@ -121,7 +135,7 @@ async fn main() -> Result<()> {
     if let Commands::Config { command } = &args.command {
         match command {
             ConfigCommand::Setup => {
-                Config::setup()?;
+                Config::setup().await?;
                 return Ok(());
             }
             ConfigCommand::Path => {
@@ -129,7 +143,26 @@ async fn main() -> Result<()> {
                 println!("Configuration file path: {}", path.display());
                 return Ok(());
             }
+            ConfigCommand::Cloud => {
+                println!("Setting up UniFi Site Manager (Cloud) API credentials...");
+                Config::setup().await?;  // Reuse the setup function which now includes cloud config
+                return Ok(());
+            }
         }
+    }
+
+    // Handle cloud commands (they need Site Manager API key, not controller connection)
+    if let Commands::Cloud { site_manager_api_key, command } = &args.command {
+        let file_config = Config::load()?;
+        
+        let sm_api_key = site_manager_api_key
+            .clone()
+            .or_else(|| std::env::var("UNIFI_SITE_MANAGER_API_KEY").ok())
+            .or_else(|| file_config.as_ref().and_then(|c| c.site_manager_api_key.clone()))
+            .context("Site Manager API key not provided. Set it via --site-manager-api-key, UNIFI_SITE_MANAGER_API_KEY environment variable, or run 'ufa config cloud' to set it up.")?;
+        
+        let sm_client = site_manager::SiteManagerClient::new(&sm_api_key).await?;
+        return site_manager::handle_cloud_command(command.clone(), &sm_client, args.output).await;
     }
 
     // Load configuration from file
@@ -167,5 +200,6 @@ async fn main() -> Result<()> {
         Commands::Vouchers { site_id, command } => vouchers::handle_vouchers_command(command, site_id, &client, args.output).await,
         Commands::Info => info::handle_info_command(&client, args.output).await,
         Commands::Config { .. } => unreachable!("Config commands handled above"),
+        Commands::Cloud { .. } => unreachable!("Cloud commands handled above"),
     }
 }
