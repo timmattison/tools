@@ -374,7 +374,7 @@ mod tests {
     #[test]
     fn test_app_state_new_with_items() {
         let listeners = vec![ListeningProcess {
-            pid: Pid::from(1234),
+            pid: Pid::try_from(1234_u32).unwrap(),
             name: "test".to_string(),
             port: 8080,
             address: "0.0.0.0".to_string(),
@@ -387,13 +387,13 @@ mod tests {
     fn test_select_next_wraps() {
         let listeners = vec![
             ListeningProcess {
-                pid: Pid::from(1),
+                pid: Pid::try_from(1_u32).unwrap(),
                 name: "a".to_string(),
                 port: 80,
                 address: "0.0.0.0".to_string(),
             },
             ListeningProcess {
-                pid: Pid::from(2),
+                pid: Pid::try_from(2_u32).unwrap(),
                 name: "b".to_string(),
                 port: 443,
                 address: "0.0.0.0".to_string(),
@@ -411,13 +411,13 @@ mod tests {
     fn test_select_previous_wraps() {
         let listeners = vec![
             ListeningProcess {
-                pid: Pid::from(1),
+                pid: Pid::try_from(1_u32).unwrap(),
                 name: "a".to_string(),
                 port: 80,
                 address: "0.0.0.0".to_string(),
             },
             ListeningProcess {
-                pid: Pid::from(2),
+                pid: Pid::try_from(2_u32).unwrap(),
                 name: "b".to_string(),
                 port: 443,
                 address: "0.0.0.0".to_string(),
@@ -442,13 +442,13 @@ mod tests {
     fn test_refresh_preserves_selection_by_pid() {
         let listeners = vec![
             ListeningProcess {
-                pid: Pid::from(100),
+                pid: Pid::try_from(100_u32).unwrap(),
                 name: "nginx".to_string(),
                 port: 80,
                 address: "0.0.0.0".to_string(),
             },
             ListeningProcess {
-                pid: Pid::from(200),
+                pid: Pid::try_from(200_u32).unwrap(),
                 name: "node".to_string(),
                 port: 3000,
                 address: "127.0.0.1".to_string(),
@@ -456,25 +456,31 @@ mod tests {
         ];
         let mut state = AppState::new(listeners);
         state.select_next(); // select PID 200
-        assert_eq!(state.selected_listener().unwrap().pid, Pid::from(200));
+        assert_eq!(
+            state.selected_listener().unwrap().pid,
+            Pid::try_from(200_u32).unwrap()
+        );
 
         // Refresh with new list where PID 200 is now first (new process added before it)
         let new_listeners = vec![
             ListeningProcess {
-                pid: Pid::from(50),
+                pid: Pid::try_from(50_u32).unwrap(),
                 name: "redis".to_string(),
                 port: 6379,
                 address: "127.0.0.1".to_string(),
             },
             ListeningProcess {
-                pid: Pid::from(200),
+                pid: Pid::try_from(200_u32).unwrap(),
                 name: "node".to_string(),
                 port: 3000,
                 address: "127.0.0.1".to_string(),
             },
         ];
         state.refresh(new_listeners);
-        assert_eq!(state.selected_listener().unwrap().pid, Pid::from(200));
+        assert_eq!(
+            state.selected_listener().unwrap().pid,
+            Pid::try_from(200_u32).unwrap()
+        );
         assert_eq!(state.table_state.selected(), Some(1));
     }
 }

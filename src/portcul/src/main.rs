@@ -45,6 +45,7 @@ impl Drop for TerminalGuard {
         if self.initialized {
             let _ = disable_raw_mode();
             let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            // No access to Terminal here, so use raw ANSI to show cursor
             let _ = io::stdout().write_all(b"\x1B[?25h");
             let _ = io::stdout().flush();
         }
@@ -69,6 +70,12 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    anyhow::ensure!(
+        args.refresh > 0.0 && args.refresh.is_finite(),
+        "refresh interval must be a positive finite number, got {}",
+        args.refresh
+    );
 
     // Collect initial data before entering TUI
     let listeners = match collect_listeners() {
@@ -148,6 +155,9 @@ fn run_app(
                         {
                             break
                         }
+                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                            state.kill_confirm = KillConfirm::None;
+                        }
                         _ => {
                             state.kill_confirm = KillConfirm::None;
                         }
@@ -155,11 +165,9 @@ fn run_app(
                     continue;
                 }
 
-                // Clear result messages on any keypress without acting on the key,
-                // so the user gets a chance to see the result before the next action.
+                // Clear result messages, then fall through to process the key normally
                 if matches!(state.kill_confirm, KillConfirm::Result { .. }) {
                     state.kill_confirm = KillConfirm::None;
-                    continue;
                 }
 
                 match key.code {
