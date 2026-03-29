@@ -217,13 +217,14 @@ fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> 
     // allocate a buffer, then retrieve the data. We read values at known offsets
     // that are stable across macOS versions (part of the kernel ABI).
     unsafe {
-        let mut mib: [libc::c_int; 4] = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL, 0];
+        let mut mib: [libc::c_int; 3] = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_ALL];
+        let mib_len: libc::c_uint = 3;
         let mut size: libc::size_t = 0;
 
         // First call to get required buffer size
         if libc::sysctl(
             mib.as_mut_ptr(),
-            4,
+            mib_len,
             std::ptr::null_mut(),
             &mut size,
             std::ptr::null_mut(),
@@ -244,13 +245,19 @@ fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> 
         let mut actual_size = size;
         if libc::sysctl(
             mib.as_mut_ptr(),
-            4,
+            mib_len,
             buffer.as_mut_ptr().cast(),
             &mut actual_size,
             std::ptr::null_mut(),
             0,
         ) != 0
         {
+            return None;
+        }
+
+        // Validate that the kernel returned data aligned to our expected struct size.
+        // If this fails, the kinfo_proc layout has changed and our offsets are wrong.
+        if !actual_size.is_multiple_of(SIZE) {
             return None;
         }
 
@@ -261,9 +268,11 @@ fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> 
             let base = i * SIZE;
 
             // Read pid at offset (i32, native endian)
-            let pid_bytes: [u8; 4] = buffer[base + OFFSET_PID..base + OFFSET_PID + 4]
-                .try_into()
-                .ok()?;
+            let Ok(pid_bytes): Result<[u8; 4], _> =
+                buffer[base + OFFSET_PID..base + OFFSET_PID + 4].try_into()
+            else {
+                continue;
+            };
             let pid = i32::from_ne_bytes(pid_bytes);
 
             if pid > 0 {
@@ -271,9 +280,11 @@ fn get_all_process_info_via_sysctl() -> Option<HashMap<u32, SysctlProcessInfo>> 
                 let status = buffer[base + OFFSET_STAT];
 
                 // Read uid at offset (u32, native endian)
-                let uid_bytes: [u8; 4] = buffer[base + OFFSET_UID..base + OFFSET_UID + 4]
-                    .try_into()
-                    .ok()?;
+                let Ok(uid_bytes): Result<[u8; 4], _> =
+                    buffer[base + OFFSET_UID..base + OFFSET_UID + 4].try_into()
+                else {
+                    continue;
+                };
                 let uid = u32::from_ne_bytes(uid_bytes);
 
                 #[expect(
@@ -934,5 +945,57 @@ mod tests {
         assert_eq!(LSOF_FIELD_TYPE, 4, "TYPE should be at index 4");
         assert_eq!(LSOF_FIELD_NAME_START, 8, "NAME should start at index 8");
         assert_eq!(LSOF_MIN_FIELDS, 9, "Minimum fields should be 9");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_status_code_to_string_all_branches() {
+        assert_eq!(status_code_to_string(1), "Idle");
+        assert_eq!(status_code_to_string(2), "Run");
+        assert_eq!(status_code_to_string(3), "Sleep");
+        assert_eq!(status_code_to_string(4), "Stop");
+        assert_eq!(status_code_to_string(5), "Zombie");
+        assert_eq!(status_code_to_string(0), "Unknown(0)");
+        assert_eq!(status_code_to_string(6), "Unknown(6)");
+        assert_eq!(status_code_to_string(255), "Unknown(255)");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_kinfo_proc_size_matches_kernel() {
+        // Validate that our hardcoded SIZE constant matches the actual kernel struct.
+        // sysctl returns data in multiples of kinfo_proc, so the returned size must
+        // be evenly divisible by our constant.
+        use kinfo_proc_layout::SIZE;
+
+        let result = get_all_process_info_via_sysctl();
+        assert!(
+            result.is_some(),
+            "sysctl(KERN_PROC_ALL) should succeed on macOS"
+        );
+
+        let map = result.unwrap();
+        // PID 1 (launchd) must always exist and be owned by root (UID 0)
+        let pid1 = map.get(&1);
+        assert!(pid1.is_some(), "PID 1 (launchd) must be present");
+        assert_eq!(pid1.unwrap().uid, 0, "PID 1 should be owned by root");
+
+        // Verify the size constant is correct by checking struct alignment:
+        // the sysctl data size must be divisible by our SIZE constant
+        assert_eq!(SIZE, 648, "kinfo_proc size constant must be 648 bytes");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_sysctl_returns_current_process() {
+        let result = get_all_process_info_via_sysctl();
+        assert!(result.is_some());
+
+        let map = result.unwrap();
+        let my_pid = std::process::id();
+        assert!(
+            map.contains_key(&my_pid),
+            "sysctl should return info for our own process (PID {my_pid})"
+        );
     }
 }
