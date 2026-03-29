@@ -24,12 +24,6 @@ use termion::raw::IntoRawMode;
 // Constants for Sixel and terminal display calculations
 // ============================================================================
 
-/// Estimated cell aspect ratio (height:width in pixels) for terminal cells.
-/// Most terminals use fonts where cells are roughly twice as tall as they are wide.
-/// This is a reasonable default that works across most modern terminals (iTerm2,
-/// Kitty, Ghostty, WezTerm, etc.) with typical font configurations.
-const TERMINAL_CELL_ASPECT_RATIO: f64 = 2.0;
-
 /// Estimated pixel width per terminal character cell.
 /// Used as fallback when actual pixel dimensions cannot be queried via ioctl.
 /// Value of 10px is typical for modern terminals with default fonts.
@@ -658,7 +652,7 @@ fn process_frame_display(
         move_cursor_home()?;
     }
 
-    display_image(img, args)?;
+    display_image(img, args, true)?;
 
     // Draw progress bar
     if let Some((term_width, term_height)) = current_terminal_size {
@@ -717,15 +711,52 @@ fn update_adaptive_fps(
     *last_display_time = Instant::now();
 }
 
+/// RAII guard that restores the main screen buffer and shows the cursor on drop.
+/// This ensures terminal state is restored even if video playback panics.
+struct AlternateScreenGuard;
+
+impl AlternateScreenGuard {
+    fn enter() -> Result<Self> {
+        // Switch to alternate screen buffer and hide cursor for clean full-screen rendering.
+        // The alternate screen buffer prevents scrollback accumulation and eliminates
+        // ghost progress bars caused by terminal scrolling during image display.
+        print!("\x1b[?1049h\x1b[?25l");
+        io::stdout().flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for AlternateScreenGuard {
+    fn drop(&mut self) {
+        // Restore main screen buffer and show cursor.
+        // Ignore flush errors — best effort during cleanup.
+        print!("\x1b[?25h\x1b[?1049l");
+        let _ = io::stdout().flush();
+    }
+}
+
 fn play_video_simple(
     file_path: &PathBuf,
     _frame_duration: Duration,
     args: &Args,
     duration: f64,
-    mut fps: f64,
+    fps: f64,
 ) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let (_raw_mode, input_rx, _input_handle) = setup_video_controls(&terminal_caps)?;
+
+    let _screen_guard = AlternateScreenGuard::enter()?;
+
+    play_video_inner(file_path, args, duration, fps, &input_rx)
+}
+
+fn play_video_inner(
+    file_path: &PathBuf,
+    args: &Args,
+    duration: f64,
+    mut fps: f64,
+    input_rx: &std::sync::mpsc::Receiver<VideoControl>,
+) -> Result<()> {
     let mut current_time = 0.0; // Current position in the video (in seconds)
     let mut is_paused = false;
     let mut previous_terminal_size: Option<(u32, u32)> = None;
@@ -1006,9 +1037,6 @@ fn play_video_simple(
         let _ = ffmpeg_child.wait();
     }
 
-    // Clean up the input thread
-    drop(_input_handle);
-
     Ok(())
 }
 
@@ -1236,7 +1264,7 @@ fn display_image_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     let img = image::open(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    display_image(img, args)
+    display_image(img, args, args.no_newline)
 }
 
 fn display_text_file(file_path: &PathBuf) -> Result<()> {
@@ -1261,10 +1289,10 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
-    display_image(img, args)
+    display_image(img, args, args.no_newline)
 }
 
-fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
+fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
 
@@ -1312,20 +1340,23 @@ fn display_image(img: DynamicImage, args: &Args) -> Result<()> {
     // never reaches the remote transport's virtual terminal.
     match terminal_caps.terminal_type {
         TerminalType::Zellij => {
-            display_image_sixel(&img, scaled_width, scaled_height, args)
+            display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
         }
         TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
-            display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy)
+            display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline)
         }
-        _ => display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy),
+        _ => display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline),
     }
 }
 
 /// Calculate display dimensions that preserve aspect ratio within the given bounds.
 ///
 /// Terminal cells are typically ~2:1 (height:width in pixels), so we account for that
-/// using `TERMINAL_CELL_ASPECT_RATIO`. This function works in terminal character cells,
-/// not pixels.
+/// via the `cell_aspect` parameter (cell height / cell width in pixels). Callers
+/// obtain this from `get_cell_pixel_dimensions()`, which uses actual terminal
+/// dimensions when available and falls back to
+/// `ESTIMATED_CELL_HEIGHT_PX / ESTIMATED_CELL_WIDTH_PX`. This function works in
+/// terminal character cells, not pixels.
 ///
 /// The casts from f64 to u32 are intentional - display dimensions are always positive
 /// and will never exceed u32::MAX for any reasonable terminal size.
@@ -1340,6 +1371,7 @@ fn calculate_aspect_preserving_size(
     max_width: Option<u32>,
     max_height: Option<u32>,
     preserve_aspect: bool,
+    cell_aspect: f64,
 ) -> (Option<u32>, Option<u32>) {
     if !preserve_aspect {
         return (max_width, max_height);
@@ -1353,10 +1385,7 @@ fn calculate_aspect_preserving_size(
 
     match (max_width, max_height) {
         (Some(max_w), Some(max_h)) => {
-            // Terminal cells are roughly 2:1 (height:width in pixels)
-            // So 1 row ≈ 2 columns worth of pixels
-            // Adjust the max_height to account for cell aspect ratio
-            let effective_max_h_pixels = max_h as f64 * TERMINAL_CELL_ASPECT_RATIO;
+            let effective_max_h_pixels = max_h as f64 * cell_aspect;
             let effective_max_w_pixels = max_w as f64;
 
             let img_aspect = img_width as f64 / img_height as f64;
@@ -1366,13 +1395,13 @@ fn calculate_aspect_preserving_size(
                 // Image is wider than box - constrain by width
                 let display_width = max_w;
                 let display_height =
-                    ((max_w as f64 / img_aspect) / TERMINAL_CELL_ASPECT_RATIO).round() as u32;
+                    ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
                 (Some(display_width), Some(display_height.max(1)))
             } else {
                 // Image is taller than box - constrain by height
                 let display_height = max_h;
                 let display_width =
-                    (max_h as f64 * TERMINAL_CELL_ASPECT_RATIO * img_aspect).round() as u32;
+                    (max_h as f64 * cell_aspect * img_aspect).round() as u32;
                 (Some(display_width.max(1)), Some(display_height))
             }
         }
@@ -1394,6 +1423,13 @@ fn get_cell_pixel_dimensions() -> (u32, u32) {
         }
     }
     (ESTIMATED_CELL_WIDTH_PX, ESTIMATED_CELL_HEIGHT_PX)
+}
+
+/// Returns the cell aspect ratio (height / width in pixels).
+/// Uses actual terminal cell dimensions when available, falling back to estimates.
+fn get_cell_aspect_ratio() -> f64 {
+    let (cell_w, cell_h) = get_cell_pixel_dimensions();
+    cell_h as f64 / cell_w as f64
 }
 
 /// Convert character cell display dimensions to target pixel dimensions.
@@ -1442,7 +1478,7 @@ fn downscale_to_display_pixels<'a>(
 /// Kitty terminal display with better performance for video.
 ///
 /// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
-fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool) -> Result<()> {
+fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
     // display_width/display_height are in terminal cells (character columns/rows).
     // They serve two roles: (1) the Kitty protocol `c=`/`r=` display hints that tell
     // the terminal how many cells the image should span, and (2) the downscale target
@@ -1453,6 +1489,7 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
         width,
         height,
         args.preserve_aspect,
+        get_cell_aspect_ratio(),
     );
 
     // Downscale the image to the target pixel size before sending to avoid
@@ -1470,7 +1507,7 @@ fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u3
         img.height(),
         display_width,
         display_height,
-        args.no_newline,
+        no_newline,
         under_remote_proxy,
     )
 }
@@ -1567,6 +1604,7 @@ fn display_image_sixel(
     fallback_cols: Option<u32>,
     fallback_rows: Option<u32>,
     args: &Args,
+    no_newline: bool,
 ) -> Result<()> {
     // Try to get actual terminal pixel dimensions, with fallbacks
     let (target_pixel_width, target_pixel_height) =
@@ -1619,7 +1657,7 @@ fn display_image_sixel(
     // Output the sixel data
     let mut stdout = io::stdout().lock();
     write!(stdout, "{}", sixel_output)?;
-    if !args.no_newline {
+    if !no_newline {
         writeln!(stdout)?;
     }
     stdout.flush().context("Failed to flush output")?;
@@ -1632,7 +1670,7 @@ fn display_image_sixel(
 /// Computes aspect-preserving display dimensions and downscales the image to the
 /// target pixel size before encoding. This matches the Kitty path's behavior and
 /// prevents sending oversized payloads for very large images.
-fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool) -> Result<()> {
+fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
     // Calculate aspect-corrected display dimensions in terminal cells, then use them
     // both as the iTerm2 width/height hints and the downscale target.
     let (display_width, display_height) = calculate_aspect_preserving_size(
@@ -1641,6 +1679,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
         width,
         height,
         args.preserve_aspect,
+        get_cell_aspect_ratio(),
     );
 
     // Downscale the image to the target pixel size before encoding to avoid
@@ -1661,7 +1700,7 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
     // Use base64 encoding
     let encoded = BASE64_STANDARD.encode(&pnm_data);
 
-    print_iterm2_image(&encoded, display_width, display_height, args.no_newline, under_remote_proxy)
+    print_iterm2_image(&encoded, display_width, display_height, no_newline, under_remote_proxy)
 }
 
 /// Optimized Kitty image printing with reduced protocol overhead
@@ -1960,7 +1999,10 @@ fn print_kitty_image(
     //   3. Rendering the image with C=1 (don't move cursor)
     //   4. Moving the cursor back down with CUD (both process this)
     // This keeps both terminals' cursor positions in sync.
-    let proxy_rows = if under_remote_proxy {
+    // In video mode (no_newline), skip proxy cursor sync — the caller handles
+    // cursor positioning explicitly with \x1b[row;colH and \x1b[J. The pre-fill
+    // newlines would cause scrolling every frame.
+    let proxy_rows = if under_remote_proxy && !no_newline {
         let rows = display_height.unwrap_or(1);
         // Pre-fill: emit newlines to create space in the proxy's screen buffer
         for _ in 0..rows {
@@ -1977,16 +2019,21 @@ fn print_kitty_image(
         // Small image, send in one chunk
         write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
 
+        // In video mode, use fixed image and placement IDs so each frame replaces
+        // the previous one in-place (zero memory accumulation), and C=1 to prevent
+        // cursor movement that could trigger terminal scrolling.
+        if no_newline {
+            write!(stdout, ",i=1,p=1,C=1")?;
+        } else if under_remote_proxy {
+            write!(stdout, ",C=1")?;
+        }
+
         // Add display size if specified (in character cells)
         if let Some(w) = display_width {
             write!(stdout, ",c={}", w)?;
         }
         if let Some(h) = display_height {
             write!(stdout, ",r={}", h)?;
-        }
-
-        if under_remote_proxy {
-            write!(stdout, ",C=1")?;
         }
 
         write!(stdout, ";{}\x1b\\", base64_data)?;
@@ -2003,16 +2050,18 @@ fn print_kitty_image(
                 // First chunk
                 write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
 
+                if no_newline {
+                    write!(stdout, ",i=1,p=1,C=1")?;
+                } else if under_remote_proxy {
+                    write!(stdout, ",C=1")?;
+                }
+
                 // Add display size if specified (in character cells)
                 if let Some(w) = display_width {
                     write!(stdout, ",c={}", w)?;
                 }
                 if let Some(h) = display_height {
                     write!(stdout, ",r={}", h)?;
-                }
-
-                if under_remote_proxy {
-                    write!(stdout, ",C=1")?;
                 }
 
                 write!(stdout, ",m=1;{}\x1b\\", chunk)?;
@@ -2026,7 +2075,7 @@ fn print_kitty_image(
         }
     }
 
-    if under_remote_proxy {
+    if under_remote_proxy && !no_newline {
         // Move cursor down past the image area using CUD (Cursor Down).
         // Both the proxy and local terminal process this identically.
         // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
@@ -2060,7 +2109,9 @@ fn print_iterm2_image(
     //   3. Rendering the image with doNotMoveCursor=1
     //   4. Moving the cursor back down with CUD (both process this)
     // This keeps both terminals' cursor positions in sync.
-    let proxy_rows = if under_remote_proxy {
+    // In video mode (no_newline), skip proxy cursor sync — the caller handles
+    // cursor positioning explicitly with \x1b[row;colH and \x1b[J.
+    let proxy_rows = if under_remote_proxy && !no_newline {
         let rows = height.unwrap_or(1);
         for _ in 0..rows {
             writeln!(stdout)?;
@@ -2091,7 +2142,7 @@ fn print_iterm2_image(
 
     write!(stdout, ":{}\x07", base64_data)?;
 
-    if under_remote_proxy {
+    if under_remote_proxy && !no_newline {
         // Move cursor down past the image area using CUD (Cursor Down).
         // Both the proxy and local terminal process this identically.
         // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
@@ -2115,16 +2166,19 @@ mod tests {
     // Tests for calculate_aspect_preserving_size
     // =========================================================================
 
+    /// Standard cell aspect ratio used in tests (typical terminal: cells ~2x tall as wide).
+    const TEST_CELL_ASPECT: f64 = 2.0;
+
     #[test]
     fn aspect_preserving_returns_original_when_disabled() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_handles_zero_height_defensively() {
         // Zero height should not panic (division by zero), returns original dimensions
-        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
@@ -2134,7 +2188,7 @@ mod tests {
         // With cell aspect ratio of 2:1, effective box is 50x100 pixels
         // Image aspect = 1.0, box aspect = 50/100 = 0.5
         // Image is wider than box, constrain by width
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/1.0)/2.0 = 25
         assert_eq!(result, (Some(50), Some(25)));
     }
@@ -2144,7 +2198,7 @@ mod tests {
         // Wide image (200x100) in square box (50x50)
         // Image aspect = 2.0
         // Constrain by width
-        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/2.0)/2.0 = 12.5 -> 13 (rounded)
         assert_eq!(result, (Some(50), Some(13)));
     }
@@ -2154,38 +2208,38 @@ mod tests {
         // Tall image (100x400) in square box (50x50)
         // Image aspect = 0.25
         // Constrain by height
-        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_height = 50, display_width = 50 * 2.0 * 0.25 = 25
         assert_eq!(result, (Some(25), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_only_width_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true);
+        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), None));
     }
 
     #[test]
     fn aspect_preserving_only_height_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true);
+        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (None, Some(50)));
     }
 
     #[test]
     fn aspect_preserving_no_dimensions_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, None, true);
+        let result = calculate_aspect_preserving_size(100, 100, None, None, true, TEST_CELL_ASPECT);
         assert_eq!(result, (None, None));
     }
 
     #[test]
     fn aspect_preserving_minimum_dimension_is_one() {
         // Very wide image that would result in height < 1
-        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true);
+        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp height to at least 1
         assert!(result.1.unwrap() >= 1);
 
         // Very tall image that would result in width < 1
-        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true);
+        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp width to at least 1
         assert!(result.0.unwrap() >= 1);
     }
@@ -2272,9 +2326,10 @@ mod tests {
 
     #[test]
     fn constants_have_reasonable_values() {
-        // Cell aspect ratio should be positive and reasonable (1.5 to 3.0)
-        assert!(TERMINAL_CELL_ASPECT_RATIO > 1.0);
-        assert!(TERMINAL_CELL_ASPECT_RATIO < 4.0);
+        // Derived cell aspect ratio (from fallback constants) should be reasonable (1.5 to 3.0)
+        let fallback_aspect = ESTIMATED_CELL_HEIGHT_PX as f64 / ESTIMATED_CELL_WIDTH_PX as f64;
+        assert!(fallback_aspect > 1.0);
+        assert!(fallback_aspect < 4.0);
 
         // Cell pixel estimates should be positive and reasonable
         assert!(ESTIMATED_CELL_WIDTH_PX >= 6);
