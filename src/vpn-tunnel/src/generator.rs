@@ -206,6 +206,26 @@ docker compose logs -f
     .to_string()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn env_file_contains_credential_field() {
+        let dir = tempfile::tempdir().unwrap();
+        write_env(dir.path(), "test-wg-key", "credential-2").unwrap();
+
+        let env_path = dir.path().join(".env");
+        let content = fs::read_to_string(&env_path).unwrap();
+        assert!(content.contains("WIREGUARD_PRIVATE_KEY=test-wg-key"));
+        assert!(content.contains("CREDENTIAL_FIELD=credential-2"));
+
+        let perms = fs::metadata(&env_path).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+}
+
 fn status_script(gluetun_name: &str) -> String {
     format!(
         r#"#!/usr/bin/env bash

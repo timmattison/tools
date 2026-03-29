@@ -46,7 +46,7 @@ pub fn select_credential(
     running: &[RunningTunnel],
 ) -> Result<SelectedCredential, AllCredentialsInUse> {
     let mut first_free: Option<&ItemField> = None;
-    let mut in_use_count = 0usize;
+    let mut in_use_count = 0_usize;
 
     for field in available {
         if running.iter().any(|r| r.wireguard_key == field.value) {
