@@ -1,0 +1,27 @@
+[package]
+name = "op-cache"
+version = "0.1.0"
+edition.workspace = true
+description = "1Password credential caching with retry logic, atomic writes, and worktree support"
+license.workspace = true
+
+[lib]
+name = "op_cache"
+path = "src/lib.rs"
+
+[[bin]]
+name = "op-cache"
+path = "src/main.rs"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+which.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true
