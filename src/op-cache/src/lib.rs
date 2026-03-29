@@ -101,6 +101,20 @@ impl OpPath {
         }
         Ok(Self(path.to_string()))
     }
+
+    /// Extracts vault and item segments from an item-level path.
+    ///
+    /// For a path like `op://vault/item`, returns `("vault", "item")`.
+    /// Returns `None` if the path has too few or too many segments.
+    pub fn vault_and_item(&self) -> Option<(&str, &str)> {
+        let without_prefix = self.0.strip_prefix("op://")?;
+        let parts: Vec<&str> = without_prefix.splitn(3, '/').collect();
+        if parts.len() == 2 {
+            Some((parts[0], parts[1]))
+        } else {
+            None
+        }
+    }
 }
 
 impl AsRef<str> for OpPath {
@@ -375,7 +389,7 @@ impl OpCache {
         )?;
         serde_json::to_writer_pretty(&tmp, cache)?;
         tmp.persist(&self.cache_path)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         // Restrict permissions to owner-only since file contains secrets
         #[cfg(unix)]
@@ -449,7 +463,7 @@ fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<(
             .output()
         {
             Ok(output) if output.status.success() => {
-                if output_path.exists() && output_path.metadata().map_or(false, |m| m.len() > 0) {
+                if output_path.exists() && output_path.metadata().is_ok_and(|m| m.len() > 0) {
                     return Ok(());
                 }
             }
@@ -472,13 +486,16 @@ fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<(
 fn fetch_item_from_1password(op_path: &OpPath) -> Result<serde_json::Value> {
     ensure_op_available()?;
 
-    // Extract the item reference (everything in the op:// path)
-    // op_path is like "op://vault/item" — pass it directly to `op item get`
-    let item_ref = op_path.as_ref();
+    let (vault, item) = op_path.vault_and_item().ok_or_else(|| {
+        Error::InvalidOpPath(format!(
+            "{} (expected item-level path like op://vault/item)",
+            op_path
+        ))
+    })?;
 
     for attempt in 1..=OP_MAX_RETRIES {
         match Command::new("op")
-            .args(["item", "get", item_ref, "--format", "json"])
+            .args(["item", "get", item, "--vault", vault, "--format", "json"])
             .output()
         {
             Ok(output) if output.status.success() => {
@@ -584,6 +601,19 @@ mod tests {
         assert!(OpPath::new("op://vault/item&background").is_err());
         assert!(OpPath::new("op://vault/item$var").is_err());
         assert!(OpPath::new("op://vault/item`cmd`").is_err());
+    }
+
+    #[test]
+    fn vault_and_item_parsing() {
+        let path = OpPath::new("op://Private/My Item").unwrap();
+        assert_eq!(path.vault_and_item(), Some(("Private", "My Item")));
+
+        let path = OpPath::new("op://Vault/Item With Spaces").unwrap();
+        assert_eq!(path.vault_and_item(), Some(("Vault", "Item With Spaces")));
+
+        // Three-segment path (field-level) should return None
+        let path = OpPath::new("op://Private/Item/field").unwrap();
+        assert_eq!(path.vault_and_item(), None);
     }
 
     #[test]
@@ -766,35 +796,32 @@ mod tests {
     }
 
     #[test]
-    fn item_fields_cache_roundtrip() {
+    fn read_item_fields_cache_hit() {
         let dir = tempfile::tempdir().unwrap();
         let cache = OpCache::with_path(dir.path().join(CACHE_FILENAME));
 
-        let fields = vec![
-            ItemField { label: "credential".to_string(), value: "key-1".to_string() },
-            ItemField { label: "credential-2".to_string(), value: "key-2".to_string() },
-        ];
-
-        // Write to cache
-        let cache_key = "op://Private/TestItem/__item_fields__/credential";
-        let serialized = serde_json::to_string(&fields.iter().map(|f| (&f.label, &f.value)).collect::<Vec<_>>()).unwrap();
+        // Pre-populate cache using the same key format as read_item_fields
+        let op_path = OpPath::new("op://Private/TestItem").unwrap();
+        let cache_key = format!("{}/__item_fields__/credential", op_path.as_ref());
+        let pairs = vec![("credential", "key-1"), ("credential-2", "key-2")];
+        let serialized = serde_json::to_string(&pairs).unwrap();
         let mut file: CacheFile = HashMap::new();
         file.insert(
-            cache_key.to_string(),
+            cache_key,
             CacheEntry {
-                value: serialized.clone(),
+                value: serialized,
                 fetched_at: "2026-01-01T00:00:00Z".to_string(),
             },
         );
         cache.write_cache(&file).unwrap();
 
-        // Read back and deserialize
-        let raw_cache = cache.read_cache();
-        let entry = raw_cache.get(cache_key).unwrap();
-        let deserialized: Vec<(String, String)> = serde_json::from_str(&entry.value).unwrap();
-        assert_eq!(deserialized.len(), 2);
-        assert_eq!(deserialized[0].0, "credential");
-        assert_eq!(deserialized[0].1, "key-1");
+        // Exercise the actual method through cache-hit path
+        let fields = cache.read_item_fields(&op_path, "credential").unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].label, "credential");
+        assert_eq!(fields[0].value, "key-1");
+        assert_eq!(fields[1].label, "credential-2");
+        assert_eq!(fields[1].value, "key-2");
     }
 
     #[test]
