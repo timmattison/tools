@@ -680,6 +680,16 @@ fn sanitize_branch_for_directory(branch: &str) -> Option<String> {
     sanitize_for_filesystem(branch)
 }
 
+/// Joins branch arguments into a single branch name.
+///
+/// Multiple arguments are joined with hyphens. If the first argument is a bare
+/// number (e.g., "192"), "issue" is prepended so that `nwt -b 192 fix pagination`
+/// becomes "issue-192-fix-pagination".
+fn join_branch_args(args: &[String]) -> String {
+    // TODO: implement multi-arg joining and number prefix
+    args.join("-")
+}
+
 /// Determines the branch name to use based on merged config and generated directory name.
 fn get_branch_name<'a>(config: &'a MergedConfig, dir_name: &'a str) -> &'a str {
     config.branch.as_deref().unwrap_or(dir_name)
@@ -1504,6 +1514,63 @@ mod tests {
         // Branch names that sanitize to only dots are rejected
         assert_eq!(sanitize_branch_for_directory(".."), None);
         assert_eq!(sanitize_branch_for_directory("."), None);
+    }
+
+    #[test]
+    fn test_join_branch_args_single_word() {
+        let args = vec!["my-branch".to_string()];
+        assert_eq!(join_branch_args(&args), "my-branch");
+    }
+
+    #[test]
+    fn test_join_branch_args_multiple_words() {
+        let args = vec![
+            "fix".to_string(),
+            "login".to_string(),
+            "bug".to_string(),
+        ];
+        assert_eq!(join_branch_args(&args), "fix-login-bug");
+    }
+
+    #[test]
+    fn test_join_branch_args_number_prefix() {
+        // A bare number as first arg should get "issue-" prepended
+        let args = vec![
+            "192".to_string(),
+            "fix".to_string(),
+            "pagination".to_string(),
+        ];
+        assert_eq!(join_branch_args(&args), "issue-192-fix-pagination");
+    }
+
+    #[test]
+    fn test_join_branch_args_number_only() {
+        let args = vec!["42".to_string()];
+        assert_eq!(join_branch_args(&args), "issue-42");
+    }
+
+    #[test]
+    fn test_join_branch_args_number_not_first() {
+        // Numbers in non-first position should NOT get "issue-" prefix
+        let args = vec!["fix".to_string(), "192".to_string()];
+        assert_eq!(join_branch_args(&args), "fix-192");
+    }
+
+    #[test]
+    fn test_join_branch_args_issue_already_present() {
+        // If user already typed "issue", don't double-prefix
+        let args = vec![
+            "issue".to_string(),
+            "1234".to_string(),
+            "fix".to_string(),
+        ];
+        assert_eq!(join_branch_args(&args), "issue-1234-fix");
+    }
+
+    #[test]
+    fn test_join_branch_args_empty() {
+        let args: Vec<String> = vec![];
+        assert_eq!(join_branch_args(&args), "");
     }
 
     #[test]
