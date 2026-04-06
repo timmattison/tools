@@ -5,7 +5,6 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
-use serde::{Deserialize, Serialize};
 use toml;
 use which::which;
 
@@ -24,17 +23,6 @@ struct Args {
     /// Build in release mode
     #[clap(long)]
     release: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CrossConfig {
-    #[serde(flatten)]
-    targets: toml::Table,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct TargetConfig {
-    image: String,
 }
 
 fn main() -> Result<()> {

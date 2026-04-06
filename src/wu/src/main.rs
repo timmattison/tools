@@ -4,6 +4,7 @@ use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use walkdir::WalkDir;
 
 #[derive(Parser)]
@@ -139,6 +140,7 @@ fn truncate_string(s: &str, max_len: usize) -> String {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn collect_files_recursively(path: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     

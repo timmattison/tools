@@ -5748,7 +5748,6 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
- "serde",
  "toml",
  "which",
 ]

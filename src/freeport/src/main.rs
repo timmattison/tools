@@ -174,7 +174,7 @@ mod tests {
 
         if let Some(port) = result {
             assert!(
-                port >= 49152 && port <= 65535,
+                port >= 49152,
                 "Port {} should be within requested range",
                 port
             );
@@ -192,7 +192,7 @@ mod tests {
 
         if let Some(port) = result {
             assert!(
-                port >= 49152 && port <= 65535,
+                port >= 49152,
                 "Port {} should be within requested range",
                 port
             );
