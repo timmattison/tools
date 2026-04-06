@@ -708,6 +708,18 @@ fn join_branch_args(args: &[String]) -> String {
     }
 }
 
+/// Shortens a worktree name for use as a tab/window name in terminal multiplexers.
+///
+/// Converts `issue-<digits>` prefixes to `#<digits>` to save space in tab bars.
+/// All other names are returned unchanged.
+///
+/// This shortening is applied to both Zellij tab names and tmux window names.
+/// The worktree directory and branch names are never modified.
+fn shorten_tab_name(name: &str) -> String {
+    // TODO: implement
+    name.to_string()
+}
+
 /// Sanitizes a branch name for use as a directory name.
 ///
 /// Branch names commonly contain slashes (e.g., `feature/login`, `bugfix/auth-fix`)
@@ -2731,5 +2743,45 @@ mod tests {
                 "Should NOT contain untracked.txt"
             );
         }
+    }
+
+    #[test]
+    fn test_shorten_tab_name_issue_prefix() {
+        assert_eq!(shorten_tab_name("issue-99"), "#99");
+        assert_eq!(shorten_tab_name("issue-1234"), "#1234");
+    }
+
+    #[test]
+    fn test_shorten_tab_name_issue_prefix_with_suffix() {
+        assert_eq!(
+            shorten_tab_name("issue-1234-fix-pagination"),
+            "#1234-fix-pagination"
+        );
+        assert_eq!(
+            shorten_tab_name("issue-42-add-login"),
+            "#42-add-login"
+        );
+    }
+
+    #[test]
+    fn test_shorten_tab_name_no_change() {
+        // Random names pass through unchanged
+        assert_eq!(shorten_tab_name("happy-panda"), "happy-panda");
+        // Branch names without issue prefix pass through
+        assert_eq!(shorten_tab_name("fix-login-bug"), "fix-login-bug");
+        // "issue" without digits is not shortened
+        assert_eq!(shorten_tab_name("issue-fix"), "issue-fix");
+        // "issue" alone
+        assert_eq!(shorten_tab_name("issue"), "issue");
+    }
+
+    #[test]
+    fn test_shorten_tab_name_edge_cases() {
+        // "issue-" prefix but starts with non-digit
+        assert_eq!(shorten_tab_name("issue-abc"), "issue-abc");
+        // Empty string
+        assert_eq!(shorten_tab_name(""), "");
+        // Only issue- with digits and no suffix
+        assert_eq!(shorten_tab_name("issue-0"), "#0");
     }
 }
