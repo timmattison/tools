@@ -695,7 +695,10 @@ fn join_branch_args(args: &[String]) -> String {
     if args.is_empty() {
         return String::new();
     }
-    let first_is_number = args[0].chars().all(|c| c.is_ascii_digit()) && !args[0].is_empty();
+    // Guard against vacuous truth: "".chars().all(..) returns true, so we also
+    // check !is_empty(). Clap's `num_args = 1..` prevents empty strings in
+    // practice, but this keeps the function correct when called directly.
+    let first_is_number = !args[0].is_empty() && args[0].chars().all(|c| c.is_ascii_digit());
     if first_is_number {
         let mut parts = vec!["issue".to_string()];
         parts.extend(args.iter().cloned());
@@ -1366,19 +1369,22 @@ mod tests {
         let name = generate_docker_name(&mut generator).expect("Generator should produce a name");
         assert!(name.contains('-'), "Name should contain a hyphen");
 
-        let parts: Vec<&str> = name.split('-').collect();
-        assert_eq!(parts.len(), 2, "Name should have exactly two parts");
+        // Split at the first hyphen only. The `names` crate produces "adjective-noun"
+        // format, but we use splitn(2) to stay resilient if a word ever contains a
+        // hyphen (e.g., after a crate update).
+        let (adjective, noun) = name
+            .split_once('-')
+            .expect("Name should contain a hyphen separator");
 
-        // Verify both parts are non-empty lowercase strings
-        assert!(!parts[0].is_empty(), "Adjective should not be empty");
-        assert!(!parts[1].is_empty(), "Noun should not be empty");
+        assert!(!adjective.is_empty(), "Adjective should not be empty");
+        assert!(!noun.is_empty(), "Noun should not be empty");
         assert!(
-            parts[0].chars().all(|c| c.is_ascii_lowercase()),
-            "Adjective should be lowercase"
+            adjective.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+            "Adjective should be lowercase (possibly hyphenated)"
         );
         assert!(
-            parts[1].chars().all(|c| c.is_ascii_lowercase()),
-            "Noun should be lowercase"
+            noun.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+            "Noun should be lowercase (possibly hyphenated)"
         );
     }
 
