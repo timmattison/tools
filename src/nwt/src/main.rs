@@ -377,6 +377,27 @@ fn is_running_in_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
 
+/// Checks if the current process is running inside a Zellij session.
+///
+/// This is determined by the presence of the `ZELLIJ` environment variable,
+/// which Zellij sets automatically when a shell is spawned inside it.
+fn is_running_in_zellij() -> bool {
+    std::env::var("ZELLIJ").is_ok()
+}
+
+/// Renames the current Zellij tab to the given name.
+///
+/// This is a best-effort operation — if the rename fails (e.g., `zellij` binary
+/// not found or Zellij IPC error), the error is silently ignored. Tab renaming
+/// is a convenience feature, not worth failing the whole command over.
+fn rename_zellij_tab(name: &str) {
+    let _ = Command::new("zellij")
+        .args(["action", "rename-tab", name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Exit codes for different failure modes.
 ///
 /// # Exit Code Design Decision: Why --run passes through the command's exit code
@@ -706,6 +727,28 @@ fn join_branch_args(args: &[String]) -> String {
     } else {
         args.join("-")
     }
+}
+
+/// Shortens a worktree name for use as a tab/window name in terminal multiplexers.
+///
+/// Converts `issue-<digits>` prefixes to `#<digits>` to save space in tab bars.
+/// All other names are returned unchanged.
+///
+/// This shortening is applied to both Zellij tab names and tmux window names.
+/// The worktree directory and branch names are never modified.
+fn shorten_tab_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix("issue-") {
+        // Find where the leading digits end. Since ASCII digits are 1 byte each,
+        // the byte index from `find` always lands on a valid UTF-8 boundary.
+        let digit_end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if digit_end > 0 {
+            let (digits, suffix) = rest.split_at(digit_end);
+            return format!("#{digits}{suffix}");
+        }
+    }
+    name.to_string()
 }
 
 /// Sanitizes a branch name for use as a directory name.
@@ -1183,7 +1226,11 @@ fn main() {
             config.checkout.as_deref(),
         ) {
             WorktreeResult::Success => {
-                // Handle tmux and/or run options
+                // Compute shortened tab name for terminal multiplexers.
+                // This converts "issue-123-fix-bug" to "#123-fix-bug" to save
+                // space in tab bars. The directory/branch names are unaffected.
+                let tab_name = shorten_tab_name(&dir_name);
+
                 if config.tmux {
                     // Directory names are safe for tmux window names because:
                     // - Random names (from names crate): only lowercase ASCII letters and hyphens
@@ -1204,24 +1251,26 @@ fn main() {
                     copy_untracked_env_files(&repo_root, &worktree_path, config.quiet);
                 }
 
+                // Rename Zellij tab if running inside Zellij
+                if is_running_in_zellij() {
+                    rename_zellij_tab(&tab_name);
+                }
+
                 // Execute tmux and/or run commands
                 if config.tmux {
                     #[cfg(unix)]
                     {
                         // Create a new tmux window.
-                        // Note: dir_name is passed directly to tmux as an argument (not through
+                        // Note: tab_name is passed directly to tmux as an argument (not through
                         // a shell), so it doesn't need shell escaping. Control characters are
                         // validated above via debug_assert. Directory names are safe because they're
                         // either random (adjective-noun from names crate) or sanitized branch names.
-                        //
-                        // We move dir_name here (no .clone()) since it's not used after this point
-                        // in the success path - we either run tmux and break, or exit on error.
                         let mut tmux_args: Vec<String> = vec![
                             "new-window".into(),
                             "-c".into(),
                             worktree_path_str.into(),
                             "-n".into(),
-                            dir_name,
+                            tab_name,
                         ];
 
                         // If --run is specified, wrap the command in an interactive shell
@@ -2731,5 +2780,45 @@ mod tests {
                 "Should NOT contain untracked.txt"
             );
         }
+    }
+
+    #[test]
+    fn test_shorten_tab_name_issue_prefix() {
+        assert_eq!(shorten_tab_name("issue-99"), "#99");
+        assert_eq!(shorten_tab_name("issue-1234"), "#1234");
+    }
+
+    #[test]
+    fn test_shorten_tab_name_issue_prefix_with_suffix() {
+        assert_eq!(
+            shorten_tab_name("issue-1234-fix-pagination"),
+            "#1234-fix-pagination"
+        );
+        assert_eq!(
+            shorten_tab_name("issue-42-add-login"),
+            "#42-add-login"
+        );
+    }
+
+    #[test]
+    fn test_shorten_tab_name_no_change() {
+        // Random names pass through unchanged
+        assert_eq!(shorten_tab_name("happy-panda"), "happy-panda");
+        // Branch names without issue prefix pass through
+        assert_eq!(shorten_tab_name("fix-login-bug"), "fix-login-bug");
+        // "issue" without digits is not shortened
+        assert_eq!(shorten_tab_name("issue-fix"), "issue-fix");
+        // "issue" alone
+        assert_eq!(shorten_tab_name("issue"), "issue");
+    }
+
+    #[test]
+    fn test_shorten_tab_name_edge_cases() {
+        // "issue-" prefix but starts with non-digit
+        assert_eq!(shorten_tab_name("issue-abc"), "issue-abc");
+        // Empty string
+        assert_eq!(shorten_tab_name(""), "");
+        // Only issue- with digits and no suffix
+        assert_eq!(shorten_tab_name("issue-0"), "#0");
     }
 }
