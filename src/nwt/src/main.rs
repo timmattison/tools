@@ -237,8 +237,13 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
     let config = config.unwrap_or_default();
 
     MergedConfig {
-        // CLI options override config file values
-        branch: cli.branch.clone().or(config.branch),
+        // CLI options override config file values.
+        // CLI branch is Vec<String> (multi-arg); join into a single hyphenated name.
+        branch: cli
+            .branch
+            .as_ref()
+            .map(|args| join_branch_args(args))
+            .or(config.branch),
         checkout: cli.checkout.clone().or(config.checkout),
         // copy_env: config default is true, CLI --no-copy-env disables it.
         // If CLI specifies --no-copy-env, we disable. Otherwise use config value.
@@ -484,6 +489,8 @@ ENV FILE COPYING:
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
+    nwt -b fix login bug             # Branch 'fix-login-bug'
+    nwt -b 192 fix pagination        # Branch 'issue-192-fix-pagination'
     nwt -b feature/login             # Branch 'feature/login', directory 'feature_login'
     nwt -b fix --random-directory    # Branch 'fix', random directory name
     nwt -c main                      # Checkout existing 'main' branch
@@ -520,8 +527,15 @@ struct Cli {
     /// When this option is used, the branch name is also used as the directory
     /// name (after sanitization to remove invalid characters like slashes).
     /// Use --random-directory to generate a random directory name instead.
-    #[arg(short, long, conflicts_with = "checkout")]
-    branch: Option<String>,
+    ///
+    /// Multiple arguments are joined with hyphens:
+    ///   nwt -b fix login bug    → branch "fix-login-bug"
+    ///
+    /// If the first argument is a bare number, "issue-" is prepended:
+    ///   nwt -b 192 fix pagination → branch "issue-192-fix-pagination"
+    ///   nwt -b 42                 → branch "issue-42"
+    #[arg(short, long, conflicts_with = "checkout", num_args = 1..)]
+    branch: Option<Vec<String>>,
 
     /// Use a random directory name even when branch name is specified.
     ///
@@ -672,22 +686,31 @@ fn sanitize_repo_name(name: &str) -> Option<String> {
     sanitize_for_filesystem(name)
 }
 
-/// Sanitizes a branch name for use as a directory name.
-///
-/// Branch names commonly contain slashes (e.g., `feature/login`, `bugfix/auth-fix`)
-/// which are converted to underscores for filesystem safety.
-fn sanitize_branch_for_directory(branch: &str) -> Option<String> {
-    sanitize_for_filesystem(branch)
-}
-
 /// Joins branch arguments into a single branch name.
 ///
 /// Multiple arguments are joined with hyphens. If the first argument is a bare
 /// number (e.g., "192"), "issue" is prepended so that `nwt -b 192 fix pagination`
 /// becomes "issue-192-fix-pagination".
 fn join_branch_args(args: &[String]) -> String {
-    // TODO: implement multi-arg joining and number prefix
-    args.join("-")
+    if args.is_empty() {
+        return String::new();
+    }
+    let first_is_number = args[0].chars().all(|c| c.is_ascii_digit()) && !args[0].is_empty();
+    if first_is_number {
+        let mut parts = vec!["issue".to_string()];
+        parts.extend(args.iter().cloned());
+        parts.join("-")
+    } else {
+        args.join("-")
+    }
+}
+
+/// Sanitizes a branch name for use as a directory name.
+///
+/// Branch names commonly contain slashes (e.g., `feature/login`, `bugfix/auth-fix`)
+/// which are converted to underscores for filesystem safety.
+fn sanitize_branch_for_directory(branch: &str) -> Option<String> {
+    sanitize_for_filesystem(branch)
 }
 
 /// Determines the branch name to use based on merged config and generated directory name.
@@ -1621,6 +1644,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_cli_branch_multiple_args() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "fix", "login", "bug"]);
+        assert_eq!(
+            cli.branch,
+            Some(vec![
+                "fix".to_string(),
+                "login".to_string(),
+                "bug".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_cli_branch_single_arg() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "my-branch"]);
+        assert_eq!(cli.branch, Some(vec!["my-branch".to_string()]));
+    }
+
+    #[test]
+    fn test_cli_branch_number_first_arg_produces_issue_prefix() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "192", "fix", "pagination"]);
+        let merged = merge_config(&cli, None);
+        assert_eq!(
+            merged.branch,
+            Some("issue-192-fix-pagination".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cli_branch_number_only_produces_issue_prefix() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "42"]);
+        let merged = merge_config(&cli, None);
+        assert_eq!(merged.branch, Some("issue-42".to_string()));
+    }
+
     // shell_escape tests are Unix-only since the function is Unix-only
     #[cfg(unix)]
     #[test]
@@ -2164,7 +2227,7 @@ mod tests {
         #[test]
         fn test_merge_cli_overrides_config() {
             let cli = Cli {
-                branch: Some("cli-branch".to_string()),
+                branch: Some(vec!["cli-branch".to_string()]),
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
@@ -2231,7 +2294,7 @@ mod tests {
         #[test]
         fn test_merge_no_config() {
             let cli = Cli {
-                branch: Some("my-branch".to_string()),
+                branch: Some(vec!["my-branch".to_string()]),
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
