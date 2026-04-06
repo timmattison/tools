@@ -237,8 +237,13 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
     let config = config.unwrap_or_default();
 
     MergedConfig {
-        // CLI options override config file values
-        branch: cli.branch.clone().or(config.branch),
+        // CLI options override config file values.
+        // CLI branch is Vec<String> (multi-arg); join into a single hyphenated name.
+        branch: cli
+            .branch
+            .as_ref()
+            .map(|args| join_branch_args(args))
+            .or(config.branch),
         checkout: cli.checkout.clone().or(config.checkout),
         // copy_env: config default is true, CLI --no-copy-env disables it.
         // If CLI specifies --no-copy-env, we disable. Otherwise use config value.
@@ -484,6 +489,8 @@ ENV FILE COPYING:
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
+    nwt -b fix login bug             # Branch 'fix-login-bug'
+    nwt -b 192 fix pagination        # Branch 'issue-192-fix-pagination'
     nwt -b feature/login             # Branch 'feature/login', directory 'feature_login'
     nwt -b fix --random-directory    # Branch 'fix', random directory name
     nwt -c main                      # Checkout existing 'main' branch
@@ -520,8 +527,15 @@ struct Cli {
     /// When this option is used, the branch name is also used as the directory
     /// name (after sanitization to remove invalid characters like slashes).
     /// Use --random-directory to generate a random directory name instead.
-    #[arg(short, long, conflicts_with = "checkout")]
-    branch: Option<String>,
+    ///
+    /// Multiple arguments are joined with hyphens:
+    ///   nwt -b fix login bug    → branch "fix-login-bug"
+    ///
+    /// If the first argument is a bare number, "issue-" is prepended:
+    ///   nwt -b 192 fix pagination → branch "issue-192-fix-pagination"
+    ///   nwt -b 42                 → branch "issue-42"
+    #[arg(short, long, conflicts_with = "checkout", num_args = 1..)]
+    branch: Option<Vec<String>>,
 
     /// Use a random directory name even when branch name is specified.
     ///
@@ -670,6 +684,28 @@ fn sanitize_for_filesystem(name: &str) -> Option<String> {
 /// Sanitizes a repository name to only allow safe characters.
 fn sanitize_repo_name(name: &str) -> Option<String> {
     sanitize_for_filesystem(name)
+}
+
+/// Joins branch arguments into a single branch name.
+///
+/// Multiple arguments are joined with hyphens. If the first argument is a bare
+/// number (e.g., "192"), "issue" is prepended so that `nwt -b 192 fix pagination`
+/// becomes "issue-192-fix-pagination".
+fn join_branch_args(args: &[String]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    // Guard against vacuous truth: "".chars().all(..) returns true, so we also
+    // check !is_empty(). Clap's `num_args = 1..` prevents empty strings in
+    // practice, but this keeps the function correct when called directly.
+    let first_is_number = !args[0].is_empty() && args[0].chars().all(|c| c.is_ascii_digit());
+    if first_is_number {
+        let mut parts = vec!["issue".to_string()];
+        parts.extend(args.iter().cloned());
+        parts.join("-")
+    } else {
+        args.join("-")
+    }
 }
 
 /// Sanitizes a branch name for use as a directory name.
@@ -1333,19 +1369,22 @@ mod tests {
         let name = generate_docker_name(&mut generator).expect("Generator should produce a name");
         assert!(name.contains('-'), "Name should contain a hyphen");
 
-        let parts: Vec<&str> = name.split('-').collect();
-        assert_eq!(parts.len(), 2, "Name should have exactly two parts");
+        // Split at the first hyphen only. The `names` crate produces "adjective-noun"
+        // format, but we use splitn(2) to stay resilient if a word ever contains a
+        // hyphen (e.g., after a crate update).
+        let (adjective, noun) = name
+            .split_once('-')
+            .expect("Name should contain a hyphen separator");
 
-        // Verify both parts are non-empty lowercase strings
-        assert!(!parts[0].is_empty(), "Adjective should not be empty");
-        assert!(!parts[1].is_empty(), "Noun should not be empty");
+        assert!(!adjective.is_empty(), "Adjective should not be empty");
+        assert!(!noun.is_empty(), "Noun should not be empty");
         assert!(
-            parts[0].chars().all(|c| c.is_ascii_lowercase()),
-            "Adjective should be lowercase"
+            adjective.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+            "Adjective should be lowercase (possibly hyphenated)"
         );
         assert!(
-            parts[1].chars().all(|c| c.is_ascii_lowercase()),
-            "Noun should be lowercase"
+            noun.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+            "Noun should be lowercase (possibly hyphenated)"
         );
     }
 
@@ -1507,6 +1546,63 @@ mod tests {
     }
 
     #[test]
+    fn test_join_branch_args_single_word() {
+        let args = vec!["my-branch".to_string()];
+        assert_eq!(join_branch_args(&args), "my-branch");
+    }
+
+    #[test]
+    fn test_join_branch_args_multiple_words() {
+        let args = vec![
+            "fix".to_string(),
+            "login".to_string(),
+            "bug".to_string(),
+        ];
+        assert_eq!(join_branch_args(&args), "fix-login-bug");
+    }
+
+    #[test]
+    fn test_join_branch_args_number_prefix() {
+        // A bare number as first arg should get "issue-" prepended
+        let args = vec![
+            "192".to_string(),
+            "fix".to_string(),
+            "pagination".to_string(),
+        ];
+        assert_eq!(join_branch_args(&args), "issue-192-fix-pagination");
+    }
+
+    #[test]
+    fn test_join_branch_args_number_only() {
+        let args = vec!["42".to_string()];
+        assert_eq!(join_branch_args(&args), "issue-42");
+    }
+
+    #[test]
+    fn test_join_branch_args_number_not_first() {
+        // Numbers in non-first position should NOT get "issue-" prefix
+        let args = vec!["fix".to_string(), "192".to_string()];
+        assert_eq!(join_branch_args(&args), "fix-192");
+    }
+
+    #[test]
+    fn test_join_branch_args_issue_already_present() {
+        // If user already typed "issue", don't double-prefix
+        let args = vec![
+            "issue".to_string(),
+            "1234".to_string(),
+            "fix".to_string(),
+        ];
+        assert_eq!(join_branch_args(&args), "issue-1234-fix");
+    }
+
+    #[test]
+    fn test_join_branch_args_empty() {
+        let args: Vec<String> = vec![];
+        assert_eq!(join_branch_args(&args), "");
+    }
+
+    #[test]
     fn test_get_branch_name_with_explicit_branch() {
         let config = MergedConfig {
             branch: Some("feature/test".to_string()),
@@ -1552,6 +1648,46 @@ mod tests {
             clap::error::ErrorKind::ArgumentConflict,
             "Error should be an argument conflict"
         );
+    }
+
+    #[test]
+    fn test_cli_branch_multiple_args() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "fix", "login", "bug"]);
+        assert_eq!(
+            cli.branch,
+            Some(vec![
+                "fix".to_string(),
+                "login".to_string(),
+                "bug".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn test_cli_branch_single_arg() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "my-branch"]);
+        assert_eq!(cli.branch, Some(vec!["my-branch".to_string()]));
+    }
+
+    #[test]
+    fn test_cli_branch_number_first_arg_produces_issue_prefix() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "192", "fix", "pagination"]);
+        let merged = merge_config(&cli, None);
+        assert_eq!(
+            merged.branch,
+            Some("issue-192-fix-pagination".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cli_branch_number_only_produces_issue_prefix() {
+        use clap::Parser;
+        let cli = Cli::parse_from(["nwt", "-b", "42"]);
+        let merged = merge_config(&cli, None);
+        assert_eq!(merged.branch, Some("issue-42".to_string()));
     }
 
     // shell_escape tests are Unix-only since the function is Unix-only
@@ -2097,7 +2233,7 @@ mod tests {
         #[test]
         fn test_merge_cli_overrides_config() {
             let cli = Cli {
-                branch: Some("cli-branch".to_string()),
+                branch: Some(vec!["cli-branch".to_string()]),
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
@@ -2164,7 +2300,7 @@ mod tests {
         #[test]
         fn test_merge_no_config() {
             let cli = Cli {
-                branch: Some("my-branch".to_string()),
+                branch: Some(vec!["my-branch".to_string()]),
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
