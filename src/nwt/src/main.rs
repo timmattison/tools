@@ -716,7 +716,16 @@ fn join_branch_args(args: &[String]) -> String {
 /// This shortening is applied to both Zellij tab names and tmux window names.
 /// The worktree directory and branch names are never modified.
 fn shorten_tab_name(name: &str) -> String {
-    // TODO: implement
+    if let Some(rest) = name.strip_prefix("issue-") {
+        // Find where the leading digits end. Since ASCII digits are 1 byte each,
+        // byte indexing here is safe — every index lands on a UTF-8 boundary.
+        let digit_end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        if digit_end > 0 {
+            return format!("#{}{}", &rest[..digit_end], &rest[digit_end..]);
+        }
+    }
     name.to_string()
 }
 
