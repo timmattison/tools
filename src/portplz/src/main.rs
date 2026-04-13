@@ -7,7 +7,7 @@ use std::path::Path;
 #[derive(Parser)]
 #[command(name = "portplz")]
 #[command(version = version_string!())]
-#[command(about = "Generate a port number from the current git branch name", long_about = None)]
+#[command(about = "Generate a port number from the git repo root and branch name", long_about = None)]
 struct Cli {
     #[arg(help = "Directory path (defaults to current directory)")]
     path: Option<String>,
@@ -15,27 +15,72 @@ struct Cli {
     #[arg(
         short,
         long,
-        help = "Print verbose output with directory name and branch"
+        help = "Print verbose output with repo/directory name and branch"
     )]
     verbose: bool,
 
     #[arg(long, help = "Disable git branch detection")]
     no_git: bool,
-
-    #[arg(
-        long,
-        help = "Include directory name in the hash (dirname@branch)",
-        conflicts_with = "no_git"
-    )]
-    with_dir: bool,
 }
 
-fn get_git_branch(path: &Path) -> Option<String> {
-    match gix::discover(path) {
-        Ok(repo) => match repo.head() {
-            Ok(head) => head.referent_name().map(|n| n.shorten().to_string()),
-            Err(_) => None,
-        },
+/// Describes how the port hash input was determined.
+///
+/// Each variant produces a different hash input format and verbose description.
+enum PortSource {
+    /// Git repo with a branch: hash input is `"repo_name\nbranch"`.
+    /// Uses `\n` as separator because git branch names cannot contain newlines
+    /// (per git-check-ref-format), making the hash input unambiguous even when
+    /// repo names or branch names contain `@` or other special characters.
+    GitRepo { repo_name: String, branch: String },
+    /// Git repo with detached HEAD: hash input is just `repo_name`.
+    DetachedHead { repo_name: String },
+    /// No git repo (--no-git or not a repo): hash input is `dirname`.
+    Directory { dirname: String },
+}
+
+impl PortSource {
+    fn hash_input(&self) -> String {
+        match self {
+            Self::GitRepo { repo_name, branch } => format!("{repo_name}\n{branch}"),
+            Self::DetachedHead { repo_name } => repo_name.clone(),
+            Self::Directory { dirname } => dirname.clone(),
+        }
+    }
+
+    fn verbose_description(&self, port: u16) -> String {
+        let desc = match self {
+            Self::GitRepo { repo_name, branch } => {
+                format!("repo '{repo_name}' on branch '{branch}'")
+            }
+            Self::DetachedHead { repo_name } => {
+                format!("repo '{repo_name}' (detached HEAD)")
+            }
+            Self::Directory { dirname } => {
+                format!("directory '{dirname}' (no git repo)")
+            }
+        };
+        format!("Port {port} for {desc}")
+    }
+}
+
+/// Returns the repo root directory basename, consistent across worktrees.
+///
+/// Uses `common_dir()` which points to the shared `.git` directory,
+/// then takes the parent (repo root) and extracts its basename.
+/// For worktrees, `common_dir()` always points back to the main repo's
+/// `.git` directory, so this returns the same name regardless of which
+/// worktree you're in.
+fn get_repo_root_name(repo: &gix::Repository) -> Option<String> {
+    let common = std::fs::canonicalize(repo.common_dir()).ok()?;
+    common
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+}
+
+fn get_git_branch(repo: &gix::Repository) -> Option<String> {
+    match repo.head() {
+        Ok(head) => head.referent_name().map(|n| n.shorten().to_string()),
         Err(_) => None,
     }
 }
@@ -70,32 +115,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Invalid path: no basename")?
         .to_string_lossy();
 
-    let (input_string, verbose_desc) = if cli.no_git {
-        (basename.to_string(), format!("directory '{basename}'"))
+    let source = if cli.no_git {
+        PortSource::Directory {
+            dirname: basename.to_string(),
+        }
     } else {
-        match get_git_branch(path) {
-            Some(branch) => {
-                if cli.with_dir {
-                    (
-                        format!("{basename}@{branch}"),
-                        format!("directory '{basename}' on branch '{branch}'"),
-                    )
-                } else {
-                    let desc = format!("branch '{branch}'");
-                    (branch, desc)
+        match gix::discover(path) {
+            Ok(repo) => {
+                let repo_name =
+                    get_repo_root_name(&repo).unwrap_or_else(|| basename.to_string());
+                match get_git_branch(&repo) {
+                    Some(branch) => PortSource::GitRepo { repo_name, branch },
+                    None => PortSource::DetachedHead { repo_name },
                 }
             }
-            None => (
-                basename.to_string(),
-                format!("directory '{basename}' (no git repo)"),
-            ),
+            Err(_) => PortSource::Directory {
+                dirname: basename.to_string(),
+            },
         }
     };
 
-    let port = unprivileged_port_from_string(&input_string);
+    let port = unprivileged_port_from_string(&source.hash_input());
 
     if cli.verbose {
-        println!("Port {port} for {verbose_desc}");
+        println!("{}", source.verbose_description(port));
     } else {
         println!("{port}");
     }
@@ -129,33 +172,137 @@ mod tests {
     }
 
     #[test]
-    fn test_branch_only_default() {
-        // Default: hash is just the branch name
-        let port1 = unprivileged_port_from_string("main");
-        let port2 = unprivileged_port_from_string("main");
-        assert_eq!(port1, port2);
+    fn test_different_repos_same_branch_different_ports() {
+        // Core requirement of #197: different repo roots + same branch -> different ports
+        let source_a = PortSource::GitRepo {
+            repo_name: "project-a".into(),
+            branch: "main".into(),
+        };
+        let source_b = PortSource::GitRepo {
+            repo_name: "project-b".into(),
+            branch: "main".into(),
+        };
+        assert_ne!(
+            unprivileged_port_from_string(&source_a.hash_input()),
+            unprivileged_port_from_string(&source_b.hash_input()),
+        );
     }
 
     #[test]
-    fn test_with_dir_format() {
-        // --with-dir uses dirname@branch
-        let branch_only = unprivileged_port_from_string("main");
-        let with_dir = unprivileged_port_from_string("myproject@main");
-        assert_ne!(branch_only, with_dir);
+    fn test_get_repo_root_name_returns_valid_basename() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo = gix::discover(path).expect("Should find git repo");
+        let name = get_repo_root_name(&repo);
+        assert!(name.is_some(), "Should find repo root name for a valid repo");
+        let name = name.unwrap();
+        assert!(!name.is_empty(), "Repo root name should not be empty");
+        assert!(!name.contains('/'), "Should be a basename, not a path");
+        assert!(!name.contains('\\'), "Should be a basename, not a path");
     }
 
     #[test]
-    fn test_same_branch_different_dirs() {
-        // Same branch but different directory names produce different ports with --with-dir
-        let dir_a = unprivileged_port_from_string("repo-a@main");
-        let dir_b = unprivileged_port_from_string("repo-b@main");
-        assert_ne!(dir_a, dir_b);
+    fn test_worktree_and_main_repo_share_root_name() {
+        // Discover repo from the current path (may be a worktree)
+        let worktree_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let worktree_repo = gix::discover(worktree_path).expect("Should find repo");
+        let worktree_name =
+            get_repo_root_name(&worktree_repo).expect("Should get repo root name");
+
+        // Discover repo from the main repo root (parent of common_dir)
+        let common = std::fs::canonicalize(worktree_repo.common_dir()).unwrap();
+        let main_repo_root = common.parent().unwrap();
+        let main_repo = gix::discover(main_repo_root).expect("Should find main repo");
+        let main_name =
+            get_repo_root_name(&main_repo).expect("Should get main repo root name");
+
+        assert_eq!(
+            worktree_name, main_name,
+            "get_repo_root_name should return the same name from both worktree and main repo"
+        );
+    }
+
+    // --- PortSource tests ---
+
+    #[test]
+    fn test_port_source_git_repo_hash_input() {
+        let source = PortSource::GitRepo {
+            repo_name: "myproject".into(),
+            branch: "main".into(),
+        };
+        // Separator must be \n (can't appear in git branch names)
+        assert_eq!(source.hash_input(), "myproject\nmain");
     }
 
     #[test]
-    fn test_different_branches() {
-        let main_port = unprivileged_port_from_string("main");
-        let dev_port = unprivileged_port_from_string("dev");
-        assert_ne!(main_port, dev_port);
+    fn test_port_source_detached_head_hash_input() {
+        let source = PortSource::DetachedHead {
+            repo_name: "myproject".into(),
+        };
+        assert_eq!(source.hash_input(), "myproject");
+    }
+
+    #[test]
+    fn test_port_source_directory_hash_input() {
+        let source = PortSource::Directory {
+            dirname: "some-dir".into(),
+        };
+        assert_eq!(source.hash_input(), "some-dir");
+    }
+
+    #[test]
+    fn test_port_source_verbose_git_repo() {
+        let source = PortSource::GitRepo {
+            repo_name: "myproject".into(),
+            branch: "main".into(),
+        };
+        let port = unprivileged_port_from_string(&source.hash_input());
+        assert_eq!(
+            source.verbose_description(port),
+            format!("Port {port} for repo 'myproject' on branch 'main'")
+        );
+    }
+
+    #[test]
+    fn test_port_source_verbose_detached() {
+        let source = PortSource::DetachedHead {
+            repo_name: "myproject".into(),
+        };
+        let port = unprivileged_port_from_string(&source.hash_input());
+        assert_eq!(
+            source.verbose_description(port),
+            format!("Port {port} for repo 'myproject' (detached HEAD)")
+        );
+    }
+
+    #[test]
+    fn test_port_source_verbose_directory() {
+        let source = PortSource::Directory {
+            dirname: "some-dir".into(),
+        };
+        let port = unprivileged_port_from_string(&source.hash_input());
+        assert_eq!(
+            source.verbose_description(port),
+            format!("Port {port} for directory 'some-dir' (no git repo)")
+        );
+    }
+
+    #[test]
+    fn test_separator_prevents_cross_component_collision() {
+        // Repo "a@b" on branch "c" must produce a different hash input
+        // than repo "a" on branch "b@c". With @ as separator both would
+        // be "a@b@c" — a collision. The \n separator prevents this.
+        let source_1 = PortSource::GitRepo {
+            repo_name: "a@b".into(),
+            branch: "c".into(),
+        };
+        let source_2 = PortSource::GitRepo {
+            repo_name: "a".into(),
+            branch: "b@c".into(),
+        };
+        assert_ne!(
+            source_1.hash_input(),
+            source_2.hash_input(),
+            "Different repo/branch combinations must produce different hash inputs"
+        );
     }
 }
