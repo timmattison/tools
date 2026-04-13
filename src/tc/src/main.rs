@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use std::fs;
@@ -109,8 +109,7 @@ fn count_tokens(text: &str, tokenizer: &CoreBPE) -> usize {
 /// # Returns
 /// * `Result<String>` - The file contents or an error
 fn read_file(path: &PathBuf) -> Result<String> {
-    fs::read_to_string(path)
-        .with_context(|| format!("Failed to read file: {}", path.display()))
+    fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path.display()))
 }
 
 /// Read content from stdin
@@ -138,8 +137,7 @@ fn main() -> Result<()> {
     let model = TokenizerModel::from_string(&cli.model)?;
 
     // Get the tokenizer
-    let tokenizer = model.get_tokenizer()
-        .context("Failed to load tokenizer")?;
+    let tokenizer = model.get_tokenizer().context("Failed to load tokenizer")?;
 
     let mut file_counts = Vec::new();
     let mut total_tokens = 0usize;

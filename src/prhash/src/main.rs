@@ -15,7 +15,7 @@ use tokio::task;
 
 // Hash algorithm imports
 use blake3::Hasher as Blake3Hasher;
-use md5::{Md5, Digest};
+use md5::{Digest, Md5};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 
@@ -39,7 +39,7 @@ struct Args {
     /// Hash algorithm to use (defaults to blake3)
     #[arg(short = 'a', long, value_enum)]
     algorithm: Option<HashAlgorithm>,
-    
+
     /// Files to hash
     files: Vec<PathBuf>,
 }
@@ -73,8 +73,13 @@ fn truncate_path_for_display(path: &Path, max_len: usize) -> String {
         let filename_char_count = filename_str.chars().count();
         if filename_char_count < max_len.saturating_sub(4) {
             // We have room for filename + ellipsis + some parent path
-            let remaining = max_len.saturating_sub(filename_char_count).saturating_sub(4); // 4 for ".../"
-            let parent = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            let remaining = max_len
+                .saturating_sub(filename_char_count)
+                .saturating_sub(4); // 4 for ".../"
+            let parent = path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
             if !parent.is_empty() && remaining > 0 {
                 let truncated_parent: String = parent.chars().take(remaining).collect();
                 return format!("{}.../{}", truncated_parent, filename_str);
@@ -115,17 +120,19 @@ impl HashState {
             HashAlgorithm::Blake3 => HashState::Blake3(Box::new(Blake3Hasher::new())),
         }
     }
-    
+
     fn update(&mut self, data: &[u8]) {
         match self {
             HashState::Md5(h) => h.update(data),
             HashState::Sha1(h) => h.update(data),
             HashState::Sha256(h) => h.update(data),
             HashState::Sha512(h) => h.update(data),
-            HashState::Blake3(h) => { h.update(data); },
+            HashState::Blake3(h) => {
+                h.update(data);
+            }
         }
     }
-    
+
     fn finalize(self) -> String {
         match self {
             HashState::Md5(h) => hex::encode(h.finalize()),
@@ -141,7 +148,7 @@ impl HashState {
 async fn main() -> Result<()> {
     // Set up shutdown flag
     let shutdown = Arc::new(AtomicBool::new(false));
-    
+
     let args = Args::parse();
 
     // Default to blake3 if no algorithm specified
@@ -156,7 +163,7 @@ async fn main() -> Result<()> {
     if args.files.is_empty() {
         anyhow::bail!("No files specified");
     }
-    
+
     // Validate all files exist
     for file in &args.files {
         if !file.exists() {
@@ -166,7 +173,7 @@ async fn main() -> Result<()> {
             anyhow::bail!("'{}' is not a file", file.display());
         }
     }
-    
+
     // Calculate total size
     let mut total_size = 0u64;
     for file in &args.files {
@@ -176,7 +183,7 @@ async fn main() -> Result<()> {
             .checked_add(metadata.len())
             .context("Total file size overflowed u64")?;
     }
-    
+
     // Set up progress bar with dynamic width calculation
     let terminal_width = TerminalWidth::get_or_default();
     // Overhead: spinner(2) + elapsed(12) + bytes/total(25) + speed/eta(25) + msg(60+) + brackets/spaces(10) = ~135
@@ -190,26 +197,28 @@ async fn main() -> Result<()> {
             ))?
             .progress_chars(PROGRESS_CHARS)
     );
-    
+
     // Set up pause/resume handling
     let paused = Arc::new(AtomicBool::new(false));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let shutdown_key_listener = shutdown.clone();
-    
+
     // Spawn key listener task
     let key_task = task::spawn(async move {
         loop {
             if shutdown_key_listener.load(Ordering::SeqCst) {
                 break;
             }
-            
+
             if event::poll(Duration::from_millis(100)).unwrap_or(false) {
                 if let Ok(Event::Key(key_event)) = event::read() {
                     match key_event.code {
                         KeyCode::Char(' ') => {
                             let _ = tx.send(());
                         }
-                        KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('c')
+                            if key_event.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             shutdown_key_listener.store(true, Ordering::SeqCst);
                             break;
                         }
@@ -219,18 +228,23 @@ async fn main() -> Result<()> {
             }
         }
     });
-    
+
     // Enable raw mode for keyboard input
     let raw_mode_enabled = crossterm::terminal::enable_raw_mode().is_ok();
-    
+
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
         // SAFETY: idx comes from enumerate() over args.files which is bounded by memory,
         // so idx < usize::MAX and idx + 1 cannot overflow.
         #[allow(clippy::arithmetic_side_effects)]
         let file_num = idx + 1;
-        pb.set_message(format!("Hashing {} ({}/{})", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN), file_num, args.files.len()));
-        
+        pb.set_message(format!(
+            "Hashing {} ({}/{})",
+            truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN),
+            file_num,
+            args.files.len()
+        ));
+
         let result = hash_file_with_progress(
             file,
             algorithm,
@@ -238,8 +252,9 @@ async fn main() -> Result<()> {
             paused.clone(),
             shutdown.clone(),
             &mut rx,
-        ).await;
-        
+        )
+        .await;
+
         match result {
             Ok(hash) => {
                 // Print result to stdout in shasum format.
@@ -263,21 +278,21 @@ async fn main() -> Result<()> {
             }
         }
     }
-    
+
     // Signal shutdown to stop the key listener
     shutdown.store(true, Ordering::SeqCst);
-    
+
     // Disable raw mode
     if raw_mode_enabled {
         let _ = crossterm::terminal::disable_raw_mode();
     }
-    
+
     // Finish progress bar
     pb.finish_and_clear();
-    
+
     // Wait for key task to finish
     let _ = key_task.await;
-    
+
     Ok(())
 }
 
@@ -289,60 +304,68 @@ async fn hash_file_with_progress(
     shutdown: Arc<AtomicBool>,
     rx: &mut mpsc::UnboundedReceiver<()>,
 ) -> Result<String> {
-    let mut file_handle = File::open(file)
-        .context("Failed to open file")?;
-    
+    let mut file_handle = File::open(file).context("Failed to open file")?;
+
     let mut hasher = HashState::new(algorithm);
     let mut buffer = vec![0; BUFFER_SIZE];
-    
+
     loop {
         // Check for shutdown
         if shutdown.load(Ordering::SeqCst) {
             return Err(anyhow::anyhow!("Hash cancelled by user"));
         }
-        
+
         // Check for pause toggle
         if rx.try_recv().is_ok() {
             let was_paused = paused.fetch_xor(true, Ordering::SeqCst);
             if !was_paused {
-                pb.set_message(format!("PAUSED - Press space to resume | Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
+                pb.set_message(format!(
+                    "PAUSED - Press space to resume | Hashing {}",
+                    truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)
+                ));
             } else {
-                pb.set_message(format!("Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
+                pb.set_message(format!(
+                    "Hashing {}",
+                    truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)
+                ));
             }
         }
-        
+
         // Wait while paused
         while paused.load(Ordering::SeqCst) {
             // Check for shutdown while paused
             if shutdown.load(Ordering::SeqCst) {
                 return Err(anyhow::anyhow!("Hash cancelled by user"));
             }
-            
+
             tokio::time::sleep(Duration::from_millis(100)).await;
-            
+
             // Check for unpause
             if rx.try_recv().is_ok() {
                 paused.store(false, Ordering::SeqCst);
-                pb.set_message(format!("Hashing {}", truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)));
+                pb.set_message(format!(
+                    "Hashing {}",
+                    truncate_path_for_display(file, MAX_FILENAME_DISPLAY_LEN)
+                ));
             }
         }
-        
+
         // Read from file
         let bytes_read = match file_handle.read(&mut buffer) {
             Ok(0) => break, // EOF
             Ok(n) => n,
             Err(e) => return Err(e.into()),
         };
-        
+
         // Update hash
         // SAFETY: bytes_read is the return value from read(), which guarantees
         // bytes_read <= buffer.len(), so this slice is always valid.
         #[allow(clippy::indexing_slicing)]
         hasher.update(&buffer[..bytes_read]);
-        
+
         pb.inc(bytes_read as u64);
     }
-    
+
     Ok(hasher.finalize())
 }
 
@@ -369,11 +392,23 @@ mod tests {
         let path = Path::new("/very/long/path/to/some/deeply/nested/directory/file.txt");
         let result = truncate_path_for_display(path, 30);
         // Should contain the filename
-        assert!(result.contains("file.txt"), "Result should contain filename: {}", result);
+        assert!(
+            result.contains("file.txt"),
+            "Result should contain filename: {}",
+            result
+        );
         // Should have ellipsis
-        assert!(result.contains("..."), "Result should contain ellipsis: {}", result);
+        assert!(
+            result.contains("..."),
+            "Result should contain ellipsis: {}",
+            result
+        );
         // Should be within max length
-        assert!(result.len() <= 30, "Result length {} exceeds max 30", result.len());
+        assert!(
+            result.len() <= 30,
+            "Result length {} exceeds max 30",
+            result.len()
+        );
     }
 
     #[test]
@@ -381,8 +416,16 @@ mod tests {
         let path = Path::new("/dir/this_is_a_very_long_filename_that_exceeds_the_limit.txt");
         let result = truncate_path_for_display(path, 30);
         // Should start with ellipsis when filename is too long
-        assert!(result.starts_with("..."), "Result should start with ellipsis: {}", result);
-        assert!(result.len() <= 30, "Result length {} exceeds max 30", result.len());
+        assert!(
+            result.starts_with("..."),
+            "Result should start with ellipsis: {}",
+            result
+        );
+        assert!(
+            result.len() <= 30,
+            "Result length {} exceeds max 30",
+            result.len()
+        );
     }
 
     #[test]
@@ -390,7 +433,11 @@ mod tests {
         let path = Path::new("/home/user/file.txt");
         // Test with very small max_len
         let result = truncate_path_for_display(path, 3);
-        assert!(result.len() <= 3, "Result length {} exceeds max 3", result.len());
+        assert!(
+            result.len() <= 3,
+            "Result length {} exceeds max 3",
+            result.len()
+        );
     }
 
     #[test]
@@ -398,7 +445,11 @@ mod tests {
         let path = Path::new("/home/user/file.txt");
         let result = truncate_path_for_display(path, 4);
         // Should produce something meaningful with 4 chars (e.g., "...t" or similar)
-        assert!(result.len() <= 4, "Result length {} exceeds max 4", result.len());
+        assert!(
+            result.len() <= 4,
+            "Result length {} exceeds max 4",
+            result.len()
+        );
     }
 
     #[test]
@@ -413,8 +464,11 @@ mod tests {
         let path = Path::new("/very/long/path/document.pdf");
         let result = truncate_path_for_display(path, 20);
         // The extension should be preserved when possible
-        assert!(result.contains(".pdf") || result.ends_with("pdf"),
-            "Result should preserve extension: {}", result);
+        assert!(
+            result.contains(".pdf") || result.ends_with("pdf"),
+            "Result should preserve extension: {}",
+            result
+        );
     }
 
     #[test]
@@ -424,27 +478,43 @@ mod tests {
         let path = Path::new("/home/用户/文档/very/long/path/to/文件.txt");
         let result = truncate_path_for_display(path, 20);
         // Should not panic and should be within length limit
-        assert!(result.chars().count() <= 20,
-            "Result char count {} exceeds max 20: {}", result.chars().count(), result);
+        assert!(
+            result.chars().count() <= 20,
+            "Result char count {} exceeds max 20: {}",
+            result.chars().count(),
+            result
+        );
 
         // Test with emoji (4 bytes in UTF-8)
         let path_emoji = Path::new("/home/user/📁/documents/file.txt");
         let result_emoji = truncate_path_for_display(path_emoji, 15);
-        assert!(result_emoji.chars().count() <= 15,
-            "Result char count {} exceeds max 15: {}", result_emoji.chars().count(), result_emoji);
+        assert!(
+            result_emoji.chars().count() <= 15,
+            "Result char count {} exceeds max 15: {}",
+            result_emoji.chars().count(),
+            result_emoji
+        );
 
         // Test very long filename with UTF-8
         let path_long = Path::new("/dir/这是一个非常长的中文文件名称.txt");
         let result_long = truncate_path_for_display(path_long, 20);
-        assert!(result_long.chars().count() <= 20,
-            "Result char count {} exceeds max 20: {}", result_long.chars().count(), result_long);
+        assert!(
+            result_long.chars().count() <= 20,
+            "Result char count {} exceeds max 20: {}",
+            result_long.chars().count(),
+            result_long
+        );
     }
 
     #[test]
     fn test_truncate_path_edge_case_max_len_zero() {
         let path = Path::new("/home/user/file.txt");
         let result = truncate_path_for_display(path, 0);
-        assert!(result.is_empty(), "Result should be empty for max_len 0: {}", result);
+        assert!(
+            result.is_empty(),
+            "Result should be empty for max_len 0: {}",
+            result
+        );
     }
 
     /// Verifies that Blake3Hasher is significantly larger than other hashers,

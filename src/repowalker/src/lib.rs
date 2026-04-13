@@ -1,24 +1,24 @@
+use ignore::WalkBuilder;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use ignore::WalkBuilder;
 use walkdir::{DirEntry, WalkDir};
 
 pub fn find_git_repo() -> Option<PathBuf> {
     let mut current_dir = env::current_dir().ok()?;
-    
+
     loop {
         let git_dir = current_dir.join(".git");
         if git_dir.exists() {
             return Some(current_dir);
         }
-        
+
         if !current_dir.pop() {
             break;
         }
     }
-    
+
     None
 }
 
@@ -98,39 +98,39 @@ impl RepoWalker {
             include_hidden: false,
         }
     }
-    
+
     pub fn skip_node_modules(mut self, skip: bool) -> Self {
         self.skip_node_modules = skip;
         self
     }
-    
+
     pub fn skip_worktrees(mut self, skip: bool) -> Self {
         self.skip_worktrees = skip;
         self
     }
-    
+
     pub fn respect_gitignore(mut self, respect: bool) -> Self {
         self.respect_gitignore = respect;
         self
     }
-    
+
     pub fn include_hidden(mut self, include: bool) -> Self {
         self.include_hidden = include;
         self
     }
-    
+
     pub fn walk_with_walkdir(&self) -> impl Iterator<Item = DirEntry> {
         let root = self.root.clone();
         let skip_node_modules = self.skip_node_modules;
         let skip_worktrees = self.skip_worktrees;
-        
+
         WalkDir::new(&self.root)
             .into_iter()
             .filter_entry(move |e| {
                 if skip_node_modules && e.file_name() == "node_modules" {
                     return false;
                 }
-                
+
                 if skip_worktrees
                     && e.file_type().is_dir()
                     && is_git_worktree(e.path())
@@ -139,12 +139,12 @@ impl RepoWalker {
                     println!("Skipping git worktree directory: {}", e.path().display());
                     return false;
                 }
-                
+
                 true
             })
             .filter_map(|e| e.ok())
     }
-    
+
     pub fn walk_with_ignore(&self) -> impl Iterator<Item = ignore::DirEntry> + '_ {
         let mut builder = WalkBuilder::new(&self.root);
 
@@ -155,9 +155,7 @@ impl RepoWalker {
             .hidden(!self.include_hidden);
 
         if self.skip_node_modules {
-            builder.filter_entry(move |entry| {
-                entry.file_name() != "node_modules"
-            });
+            builder.filter_entry(move |entry| entry.file_name() != "node_modules");
         }
 
         if self.skip_worktrees {
@@ -167,7 +165,10 @@ impl RepoWalker {
                     && is_git_worktree(entry.path())
                     && entry.path() != root
                 {
-                    println!("Skipping git worktree directory: {}", entry.path().display());
+                    println!(
+                        "Skipping git worktree directory: {}",
+                        entry.path().display()
+                    );
                     return false;
                 }
                 true

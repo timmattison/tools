@@ -21,7 +21,10 @@ fn truncate_to_byte_limit(s: &str, max_bytes: usize) -> &str {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    #[allow(clippy::string_slice, reason = "safe: end is verified to be a char boundary")]
+    #[allow(
+        clippy::string_slice,
+        reason = "safe: end is verified to be a char boundary"
+    )]
     &s[..end]
 }
 
@@ -176,7 +179,7 @@ fn get_diff(repo: &Repository, staged: bool) -> Result<String> {
     );
     spinner.set_message("Analyzing git diff...");
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-    
+
     let mut diff_options = DiffOptions::new();
 
     let diff = if staged {
@@ -212,7 +215,7 @@ fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
     );
     spinner.set_message(format!("Analyzing commit {}...", short_hash(commit_hash)));
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-    
+
     let oid = Oid::from_str(commit_hash).context("Invalid commit hash")?;
 
     let commit = repo.find_commit(oid).context("Commit not found")?;
@@ -244,11 +247,15 @@ fn get_commit_diff(repo: &Repository, commit_hash: &str) -> Result<String> {
     Ok(diff_text)
 }
 
-async fn generate_commit_message(diff: &str, long_format: bool, claude_path: &str) -> Result<String> {
+async fn generate_commit_message(
+    diff: &str,
+    long_format: bool,
+    claude_path: &str,
+) -> Result<String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
     use tokio::time::{timeout, Duration};
-    
+
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -356,7 +363,7 @@ async fn generate_commit_message(diff: &str, long_format: bool, claude_path: &st
     }
 
     let mut message = String::from_utf8(output.stdout)?.trim().to_string();
-    
+
     // Strip markdown code block formatting if present
     // Claude sometimes wraps responses in ```
     message = strip_markdown_code_block(&message);
@@ -367,11 +374,12 @@ async fn generate_commit_message(diff: &str, long_format: bool, claude_path: &st
     }
 
     // Check if the message is "Execution error" or other error patterns which indicate Claude CLI failed
-    if message == "Execution error" 
-        || message.starts_with("Error:") 
-        || message.starts_with("error:") 
+    if message == "Execution error"
+        || message.starts_with("Error:")
+        || message.starts_with("error:")
         || message.contains("failed")
-        || message.contains("Failed") {
+        || message.contains("Failed")
+    {
         // Log the stderr output for debugging
         let stderr_output = String::from_utf8_lossy(&output.stderr);
         eprintln!("Error: Claude CLI execution failed");
@@ -389,11 +397,14 @@ async fn generate_commit_message(diff: &str, long_format: bool, claude_path: &st
             message
         );
     }
-    
+
     // Additional safety check: ensure the message looks like a valid commit message
     // (not just an error or diagnostic output)
     if message.len() < 3 || !message.chars().any(|c| c.is_alphabetic()) {
-        eprintln!("Warning: Generated message appears to be invalid: '{}'", message);
+        eprintln!(
+            "Warning: Generated message appears to be invalid: '{}'",
+            message
+        );
         anyhow::bail!(
             "Claude CLI returned an invalid commit message: '{}'\n\
             The message is too short or doesn't contain any letters.\n\
@@ -455,17 +466,17 @@ fn reword_commit_with_rebase(
             let author = target_commit.author();
             let committer = repo.signature()?;
             let tree = target_commit.tree()?;
-            
+
             // Create the new root commit
             let _new_oid = repo.commit(
-                None,             // don't update any refs yet
-                &author,          // use original author
-                &committer,       // use current committer
-                new_message,      // new message
-                &tree,            // same tree
-                &[],              // no parents (root commit)
+                None,        // don't update any refs yet
+                &author,     // use original author
+                &committer,  // use current committer
+                new_message, // new message
+                &tree,       // same tree
+                &[],         // no parents (root commit)
             )?;
-            
+
             // Now we need to update the branch to point to the new commit
             // This is complex because we need to rebase all subsequent commits
             anyhow::bail!(
@@ -579,10 +590,7 @@ async fn main() -> Result<()> {
         }
     } else if let Some(commit_hash) = args.fixup {
         // Handle fixup mode
-        println!(
-            "\nRewording commit {}...",
-            short_hash(&commit_hash)
-        );
+        println!("\nRewording commit {}...", short_hash(&commit_hash));
         println!("This will:");
         println!("- Generate a new commit message using Claude");
         println!("- Update the commit message directly");
@@ -623,7 +631,7 @@ async fn main() -> Result<()> {
             );
             spinner.set_message("Staging all changes...");
             spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-            
+
             let mut index = repo.index()?;
             index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
             index.write()?;
@@ -635,7 +643,8 @@ async fn main() -> Result<()> {
             anyhow::bail!("No staged changes found. Use -a to stage all changes.");
         }
 
-        let commit_message = generate_commit_message(&staged_diff, !args.short, &claude_path).await?;
+        let commit_message =
+            generate_commit_message(&staged_diff, !args.short, &claude_path).await?;
 
         println!("\nGenerated commit message:");
         println!("{}", commit_message);
@@ -755,7 +764,10 @@ mod tests {
 
     #[test]
     fn strip_no_fences() {
-        assert_eq!(strip_markdown_code_block("fix: update deps"), "fix: update deps");
+        assert_eq!(
+            strip_markdown_code_block("fix: update deps"),
+            "fix: update deps"
+        );
     }
 
     #[test]
@@ -767,7 +779,10 @@ mod tests {
     #[test]
     fn strip_fences_with_language_identifier() {
         let input = "```text\nfix: update deps\n\nSome body.\n```";
-        assert_eq!(strip_markdown_code_block(input), "fix: update deps\n\nSome body.");
+        assert_eq!(
+            strip_markdown_code_block(input),
+            "fix: update deps\n\nSome body."
+        );
     }
 
     #[test]

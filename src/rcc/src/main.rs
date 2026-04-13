@@ -54,7 +54,7 @@ fn main() -> Result<()> {
         // Cross.toml exists
         match target {
             Some(t) => t,
-            None => get_target_from_cross_toml()?
+            None => get_target_from_cross_toml()?,
         }
     };
 
@@ -88,19 +88,20 @@ fn determine_target(args: &Args) -> Result<Option<String>> {
 fn parse_uname_string(uname: &str) -> Result<String> {
     // Example: "Linux DreamMachinePro 4.19.152-ui-alpine #4.19.152 SMP Thu May 15 13:28:41 CST 2025 aarch64 GNU/Linux"
     let parts: Vec<&str> = uname.split_whitespace().collect();
-    
+
     // Find the architecture
-    let arch = parts.iter()
+    let arch = parts
+        .iter()
         .find(|&&p| matches!(p, "aarch64" | "x86_64" | "armv7l" | "i686"))
         .ok_or_else(|| anyhow::anyhow!("Could not find architecture in uname string"))?;
-    
+
     // Determine if it's musl or gnu
     let libc = if uname.to_lowercase().contains("alpine") {
         "musl"
     } else {
         "gnu"
     };
-    
+
     // Build the target triple
     let target = match *arch {
         "aarch64" => format!("aarch64-unknown-linux-{}", libc),
@@ -109,7 +110,7 @@ fn parse_uname_string(uname: &str) -> Result<String> {
         "i686" => format!("i686-unknown-linux-{}", libc),
         _ => anyhow::bail!("Unsupported architecture: {}", arch),
     };
-    
+
     Ok(target)
 }
 
@@ -118,33 +119,30 @@ fn create_cross_toml(target: &str) -> Result<()> {
         "[target.{}]\nimage = \"ghcr.io/cross-rs/{}:edge\"\n",
         target, target
     );
-    
-    fs::write("Cross.toml", content)
-        .context("Failed to create Cross.toml")?;
-    
+
+    fs::write("Cross.toml", content).context("Failed to create Cross.toml")?;
+
     println!("Created Cross.toml for target: {}", target);
     Ok(())
 }
 
 fn get_target_from_cross_toml() -> Result<String> {
-    let content = fs::read_to_string("Cross.toml")
-        .context("Failed to read Cross.toml")?;
-    
-    let config: toml::Table = toml::from_str(&content)
-        .context("Failed to parse Cross.toml")?;
-    
+    let content = fs::read_to_string("Cross.toml").context("Failed to read Cross.toml")?;
+
+    let config: toml::Table = toml::from_str(&content).context("Failed to parse Cross.toml")?;
+
     // Look for the "target" section
-    let target_section = config.get("target")
+    let target_section = config
+        .get("target")
         .ok_or_else(|| anyhow::anyhow!("No [target] section found in Cross.toml"))?;
-    
-    let target_table = target_section.as_table()
+
+    let target_table = target_section
+        .as_table()
         .ok_or_else(|| anyhow::anyhow!("Invalid [target] section in Cross.toml"))?;
-    
+
     // Get all target architecture names
-    let targets: Vec<String> = target_table.keys()
-        .map(|k| k.to_string())
-        .collect();
-    
+    let targets: Vec<String> = target_table.keys().map(|k| k.to_string()).collect();
+
     match targets.len() {
         0 => anyhow::bail!("No targets found in Cross.toml"),
         1 => Ok(targets[0].clone()),
@@ -153,33 +151,30 @@ fn get_target_from_cross_toml() -> Result<String> {
             for target in &targets {
                 eprintln!("  - {}", target);
             }
-            anyhow::bail!(
-                "Please specify which target to use with --target <target>"
-            );
+            anyhow::bail!("Please specify which target to use with --target <target>");
         }
     }
 }
 
 fn execute_cross_build(target: &str, release: bool) -> Result<()> {
     let mut cmd = Command::new("cross");
-    cmd.arg("build")
-        .arg("--target")
-        .arg(target);
-    
+    cmd.arg("build").arg("--target").arg(target);
+
     if release {
         cmd.arg("--release");
     }
-    
-    println!("Executing: cross build --target {} {}", 
-             target, 
-             if release { "--release" } else { "" });
-    
-    let status = cmd.status()
-        .context("Failed to execute cross build")?;
-    
+
+    println!(
+        "Executing: cross build --target {} {}",
+        target,
+        if release { "--release" } else { "" }
+    );
+
+    let status = cmd.status().context("Failed to execute cross build")?;
+
     if !status.success() {
         anyhow::bail!("Cross build failed");
     }
-    
+
     Ok(())
 }

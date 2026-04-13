@@ -66,10 +66,7 @@ impl GitHubClient {
             header::AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", token))?,
         );
-        headers.insert(
-            header::USER_AGENT,
-            HeaderValue::from_static("org-borg"),
-        );
+        headers.insert(header::USER_AGENT, HeaderValue::from_static("org-borg"));
         headers.insert(
             header::ACCEPT,
             HeaderValue::from_static("application/vnd.github.v3+json"),
@@ -90,10 +87,7 @@ impl GitHubClient {
             .await?;
 
         if !response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to get current user: {}",
-                response.status()
-            ));
+            return Err(anyhow!("Failed to get current user: {}", response.status()));
         }
 
         Ok(response.json().await?)
@@ -207,10 +201,7 @@ impl GitHubClient {
     pub async fn archive_repository(&self, owner: &str, repo: &str) -> Result<()> {
         let response = self
             .client
-            .patch(format!(
-                "https://api.github.com/repos/{}/{}",
-                owner, repo
-            ))
+            .patch(format!("https://api.github.com/repos/{}/{}", owner, repo))
             .json(&ArchiveRequest { archived: true })
             .send()
             .await?;

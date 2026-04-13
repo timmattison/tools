@@ -28,10 +28,10 @@ enum Commands {
     Play {
         #[arg(help = "Recording file to play")]
         file: PathBuf,
-        
+
         #[arg(short, long, default_value = "1.0", help = "Playback speed multiplier")]
         speed: f64,
-        
+
         #[arg(long, help = "Start playback paused")]
         paused: bool,
     },
@@ -46,32 +46,36 @@ pub enum ExportFormat {
     Web {
         #[arg(help = "Recording file to export")]
         input: PathBuf,
-        
+
         #[arg(short, long, help = "Output HTML file")]
         output: Option<PathBuf>,
-        
-        #[arg(long, default_value = "auto", help = "Theme (auto, dracula, monokai, solarized-dark, solarized-light)")]
+
+        #[arg(
+            long,
+            default_value = "auto",
+            help = "Theme (auto, dracula, monokai, solarized-dark, solarized-light)"
+        )]
         theme: String,
-        
+
         #[arg(long, help = "Embed compressed data")]
         compress: bool,
     },
     Video {
         #[arg(help = "Recording file to export")]
         input: PathBuf,
-        
+
         #[arg(short, long, help = "Output video file (MP4/GIF)")]
         output: Option<PathBuf>,
-        
+
         #[arg(long, default_value = "60", help = "Frame rate (FPS)")]
         fps: u32,
-        
+
         #[arg(long, help = "Resolution (WIDTHxHEIGHT)")]
         resolution: Option<String>,
-        
+
         #[arg(long, default_value = "auto", help = "Theme for terminal rendering")]
         theme: String,
-        
+
         #[arg(long, help = "Optimize for web delivery")]
         optimize_web: bool,
     },
@@ -134,18 +138,16 @@ impl Recording {
 
         if is_gzip {
             let decoder = flate2::read::GzDecoder::new(reader);
-            serde_json::from_reader(decoder)
-                .context("Failed to parse compressed recording")
+            serde_json::from_reader(decoder).context("Failed to parse compressed recording")
         } else {
-            serde_json::from_reader(reader)
-                .context("Failed to parse recording")
+            serde_json::from_reader(reader).context("Failed to parse recording")
         }
     }
 }
 
-mod recorder;
-mod player;
 mod export;
+mod player;
+mod recorder;
 
 #[cfg(test)]
 mod test;
@@ -153,16 +155,18 @@ mod test;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    
+
     match cli.command {
-        Commands::Record { output, command, compress } => {
-            recorder::record(output, command, compress).await
-        }
-        Commands::Play { file, speed, paused } => {
-            player::play(file, speed, paused).await
-        }
-        Commands::Export { format } => {
-            export::handle_export(format).await
-        }
+        Commands::Record {
+            output,
+            command,
+            compress,
+        } => recorder::record(output, command, compress).await,
+        Commands::Play {
+            file,
+            speed,
+            paused,
+        } => player::play(file, speed, paused).await,
+        Commands::Export { format } => export::handle_export(format).await,
     }
 }

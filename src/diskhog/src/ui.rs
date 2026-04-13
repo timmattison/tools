@@ -109,9 +109,19 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 fn render_help_footer(frame: &mut Frame, area: Rect) {
     let help_text = Line::from(vec![
         Span::styled(" Press ", Style::default().fg(Color::DarkGray)),
-        Span::styled("q", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "q",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" or ", Style::default().fg(Color::DarkGray)),
-        Span::styled("Esc", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Esc",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" to quit ", Style::default().fg(Color::DarkGray)),
     ]);
 
@@ -214,9 +224,7 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
             Line::from(""),
             Line::from(Span::styled(
                 "[ERROR] IOPS collection stopped (fs_usage parser failed)",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )),
         ])
         .block(block)
@@ -227,9 +235,15 @@ fn render_iops_pane(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     // Table header
-    let header = Row::new(vec!["PID", "Name", "Read Ops/s", "Write Ops/s", "Total IOPS"])
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .bottom_margin(1);
+    let header = Row::new(vec![
+        "PID",
+        "Name",
+        "Read Ops/s",
+        "Write Ops/s",
+        "Total IOPS",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .bottom_margin(1);
 
     // Table rows
     let rows: Vec<Row> = state

@@ -223,7 +223,10 @@ function prmv() {
 /// Sets up shell integration by adding the prmv function to the user's shell config.
 fn setup_shell_integration() -> Result<()> {
     let integration = ShellIntegration::new("prcp", "Progress Copy", SHELL_CODE)
-        .with_command("prmv", "Copy files with progress, removing sources after verification")
+        .with_command(
+            "prmv",
+            "Copy files with progress, removing sources after verification",
+        )
         // Old installations ended with this line (before end marker was added)
         .with_old_end_marker(r#"prcp --rm "$@""#);
     // Use ? operator to convert ShellSetupError -> anyhow::Error, preserving the error chain
@@ -349,9 +352,7 @@ fn resolve_sources(patterns: &[PathBuf], literal: bool) -> Result<Vec<PathBuf>> 
 
         // Check if pattern contains glob characters (skip glob expansion if --literal is set)
         if !literal
-            && (pattern_str.contains('*')
-                || pattern_str.contains('?')
-                || pattern_str.contains('['))
+            && (pattern_str.contains('*') || pattern_str.contains('?') || pattern_str.contains('['))
         {
             let glob_iter = glob::glob(&pattern_str)
                 .with_context(|| format!("Invalid glob pattern '{}'", pattern_str))?;
@@ -422,7 +423,9 @@ async fn main() -> Result<()> {
     }
 
     if args.yes && args.skip_existing {
-        anyhow::bail!("Cannot use --yes with --skip-existing: these options are mutually exclusive.");
+        anyhow::bail!(
+            "Cannot use --yes with --skip-existing: these options are mutually exclusive."
+        );
     }
 
     // Parse paths: all but last are sources, last is destination
@@ -716,7 +719,8 @@ async fn main() -> Result<()> {
                     skipped_existing.push(source.clone());
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
-                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        current_total_batch_bytes =
+                            current_total_batch_bytes.saturating_sub(file_batch_bytes);
                         pb.set_length(current_total_batch_bytes);
                     }
                     continue;
@@ -725,7 +729,8 @@ async fn main() -> Result<()> {
                     failures.push((source.clone(), error_msg));
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
-                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        current_total_batch_bytes =
+                            current_total_batch_bytes.saturating_sub(file_batch_bytes);
                         pb.set_length(current_total_batch_bytes);
                     }
                     continue;
@@ -744,7 +749,8 @@ async fn main() -> Result<()> {
                     failures.push((source.clone(), error_msg));
                     // Reduce batch total for skipped file
                     if let Some(ref pb) = batch_pb {
-                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        current_total_batch_bytes =
+                            current_total_batch_bytes.saturating_sub(file_batch_bytes);
                         pb.set_length(current_total_batch_bytes);
                     }
                     continue;
@@ -771,7 +777,7 @@ async fn main() -> Result<()> {
                 ProgressStyleBuilder::copy(&filename)
                     .build(current_width)
                     .map_err(|e| anyhow::anyhow!("{}", e))?,
-            )
+            ),
         );
 
         // Perform the copy
@@ -801,7 +807,8 @@ async fn main() -> Result<()> {
                 total_copy_duration += copy_result.copy_duration;
 
                 // Update batch progress for completed copy
-                batch_bytes_processed = batch_bytes_processed.saturating_add(copy_result.bytes_copied);
+                batch_bytes_processed =
+                    batch_bytes_processed.saturating_add(copy_result.bytes_copied);
                 if let Some(ref pb) = batch_pb {
                     pb.set_position(batch_bytes_processed);
                 }
@@ -813,14 +820,26 @@ async fn main() -> Result<()> {
                 // Verify by default (unless --no-verify)
                 // Cancellation prompt and resume happen inside verify_destination now
                 let verify_outcome = if !args.no_verify {
-                    match verify_destination(&dest_path, &copy_result.source_hash, &multi, &shutdown, &input_active, &term_width_rx, args.buffer_size) {
+                    match verify_destination(
+                        &dest_path,
+                        &copy_result.source_hash,
+                        &multi,
+                        &shutdown,
+                        &input_active,
+                        &term_width_rx,
+                        args.buffer_size,
+                    ) {
                         Ok(verify_result) => {
                             total_verify_duration += verify_result.verify_duration;
-                            let verify_speed = format_speed(copy_result.bytes_copied, verify_result.verify_duration);
+                            let verify_speed = format_speed(
+                                copy_result.bytes_copied,
+                                verify_result.verify_duration,
+                            );
                             let verify_time = format_duration(verify_result.verify_duration);
 
                             // Update batch progress for completed verification
-                            batch_bytes_processed = batch_bytes_processed.saturating_add(copy_result.bytes_copied);
+                            batch_bytes_processed =
+                                batch_bytes_processed.saturating_add(copy_result.bytes_copied);
                             if let Some(ref pb) = batch_pb {
                                 pb.set_position(batch_bytes_processed);
                             }
@@ -839,14 +858,19 @@ async fn main() -> Result<()> {
                             }
                             // Reduce batch total since verify won't complete
                             if let Some(ref pb) = batch_pb {
-                                current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
+                                current_total_batch_bytes =
+                                    current_total_batch_bytes.saturating_sub(file_size);
                                 pb.set_length(current_total_batch_bytes);
                             }
                             if args.continue_on_error {
-                                failures.push((source.clone(), "Verification cancelled by user".to_string()));
+                                failures.push((
+                                    source.clone(),
+                                    "Verification cancelled by user".to_string(),
+                                ));
                                 VerifyOutcome::Failed
                             } else {
-                                early_exit_error = Some("Verification cancelled by user".to_string());
+                                early_exit_error =
+                                    Some("Verification cancelled by user".to_string());
                                 VerifyOutcome::Failed
                             }
                         }
@@ -854,7 +878,8 @@ async fn main() -> Result<()> {
                             eprintln!("\n{}", error_msg);
                             // Reduce batch total since verify failed
                             if let Some(ref pb) = batch_pb {
-                                current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_size);
+                                current_total_batch_bytes =
+                                    current_total_batch_bytes.saturating_sub(file_size);
                                 pb.set_length(current_total_batch_bytes);
                             }
                             if args.continue_on_error {
@@ -875,7 +900,10 @@ async fn main() -> Result<()> {
                 }
 
                 // Update completed file count and batch progress message
-                if matches!(verify_outcome, VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped) {
+                if matches!(
+                    verify_outcome,
+                    VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped
+                ) {
                     completed_files += 1;
                     if let Some(ref pb) = batch_pb {
                         pb.set_message(format!("({}/{})", completed_files, total_files));
@@ -883,12 +911,16 @@ async fn main() -> Result<()> {
                 }
 
                 // Remove source if --rm and verification passed (or was skipped, which is blocked by flag validation)
-                let should_allow_removal = matches!(verify_outcome, VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped);
+                let should_allow_removal = matches!(
+                    verify_outcome,
+                    VerifyOutcome::Passed { .. } | VerifyOutcome::Skipped
+                );
                 let removed = if args.rm && should_allow_removal {
                     match fs::remove_file(source) {
                         Ok(()) => true,
                         Err(e) => {
-                            let error_msg = format!("Failed to remove source '{}': {}", source.display(), e);
+                            let error_msg =
+                                format!("Failed to remove source '{}': {}", source.display(), e);
                             eprintln!("\n{}", error_msg);
                             if args.continue_on_error {
                                 failures.push((source.clone(), error_msg));
@@ -903,8 +935,8 @@ async fn main() -> Result<()> {
                 };
 
                 // Print per-file stats (unless quiet mode, but always show problems)
-                let is_problem = matches!(verify_outcome, VerifyOutcome::Failed)
-                    || (args.rm && !removed);
+                let is_problem =
+                    matches!(verify_outcome, VerifyOutcome::Failed) || (args.rm && !removed);
 
                 if !args.quiet || is_problem {
                     let status = match &verify_outcome {
@@ -953,7 +985,8 @@ async fn main() -> Result<()> {
                     failures.push((source.clone(), error_msg));
                     // Reduce batch total for failed copy (both copy and verify bytes if applicable)
                     if let Some(ref pb) = batch_pb {
-                        current_total_batch_bytes = current_total_batch_bytes.saturating_sub(file_batch_bytes);
+                        current_total_batch_bytes =
+                            current_total_batch_bytes.saturating_sub(file_batch_bytes);
                         pb.set_length(current_total_batch_bytes);
                     }
                 } else {
@@ -1036,17 +1069,16 @@ async fn main() -> Result<()> {
             }
         } else {
             // All copies failed - show summary without timing stats
-            println!(
-                "\n{} Copied 0 of {} files",
-                "Summary:".bold(),
-                total_files
-            );
+            println!("\n{} Copied 0 of {} files", "Summary:".bold(), total_files);
         }
     }
 
     // Report skipped files (when using --skip-existing)
     if !skipped_existing.is_empty() {
-        println!("\nSkipped {} file(s) (already exist):", skipped_existing.len());
+        println!(
+            "\nSkipped {} file(s) (already exist):",
+            skipped_existing.len()
+        );
         for path in &skipped_existing {
             let filename = path
                 .file_name()
@@ -1119,10 +1151,7 @@ enum VerifyError {
 /// either "verification passed" or "verification was skipped".
 enum VerifyOutcome {
     /// Verification was performed and succeeded, includes timing stats for display
-    Passed {
-        speed: String,
-        time: String,
-    },
+    Passed { speed: String, time: String },
     /// Verification was skipped (--no-verify flag)
     Skipped,
     /// Verification was performed but failed
@@ -1226,7 +1255,8 @@ fn calculate_file_hash(
                     let current_width = *rx.borrow();
                     if current_width != *prev_width {
                         *prev_width = current_width;
-                        if let Ok(style) = ProgressStyleBuilder::verify(fname).build(current_width) {
+                        if let Ok(style) = ProgressStyleBuilder::verify(fname).build(current_width)
+                        {
                             progress.set_style(style);
                         }
                     }
@@ -1339,21 +1369,27 @@ fn verify_destination(
     let style = ProgressStyleBuilder::verify(&filename)
         .build(current_width)
         .map_err(|e| VerifyError::Failed(format!("Failed to create progress bar: {}", e)))?;
-    let pb = multi.add(
-        ProgressBar::new(file_size).with_style(style)
-    );
+    let pb = multi.add(ProgressBar::new(file_size).with_style(style));
 
     // Calculate destination hash with progress (supports cancellation with resume and resize)
-    let dest_hash = calculate_file_hash(destination, Some(&pb), Some(shutdown), Some(input_active), Some(term_width_rx), Some(&filename), buffer_size)
-        .map_err(|e| {
-            pb.finish_and_clear();
-            let error_msg = e.to_string();
-            if error_msg.contains("cancelled") {
-                VerifyError::Cancelled
-            } else {
-                VerifyError::Failed(format!("Failed to verify destination: {}", e))
-            }
-        })?;
+    let dest_hash = calculate_file_hash(
+        destination,
+        Some(&pb),
+        Some(shutdown),
+        Some(input_active),
+        Some(term_width_rx),
+        Some(&filename),
+        buffer_size,
+    )
+    .map_err(|e| {
+        pb.finish_and_clear();
+        let error_msg = e.to_string();
+        if error_msg.contains("cancelled") {
+            VerifyError::Cancelled
+        } else {
+            VerifyError::Failed(format!("Failed to verify destination: {}", e))
+        }
+    })?;
 
     pb.finish_and_clear();
     multi.remove(&pb);
@@ -2062,7 +2098,9 @@ async fn copy_parallel(
                         let current_width = *term_width_rx.borrow();
                         if current_width != last_width {
                             last_width = current_width;
-                            if let Ok(style) = ProgressStyleBuilder::copy(filename).build(current_width) {
+                            if let Ok(style) =
+                                ProgressStyleBuilder::copy(filename).build(current_width)
+                            {
                                 pb.set_style(style);
                             }
                         }

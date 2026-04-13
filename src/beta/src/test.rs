@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use crate::export::terminal_renderer::{TerminalState, TerminalTheme};
     use crate::{Event, EventType, Recording};
-    use crate::export::terminal_renderer::{TerminalTheme, TerminalState};
 
     #[test]
     fn test_event_serialization() {
@@ -100,7 +100,10 @@ mod tests {
         let grid = state.get_grid();
         assert_eq!(grid[0][0].ch, 'B', "Row 0 should have B after scroll up");
         assert_eq!(grid[1][0].ch, 'C', "Row 1 should have C after scroll up");
-        assert_eq!(grid[2][0].ch, ' ', "Bottom row should be cleared after scroll up");
+        assert_eq!(
+            grid[2][0].ch, ' ',
+            "Bottom row should be cleared after scroll up"
+        );
     }
 
     #[test]
@@ -120,8 +123,14 @@ mod tests {
         state.process_output("\x1bM").unwrap();
 
         let grid = state.get_grid();
-        assert_eq!(grid[0][0].ch, ' ', "Row 0 should be cleared after scroll down");
-        assert_eq!(grid[1][0].ch, 'A', "Content should have moved down to row 1");
+        assert_eq!(
+            grid[0][0].ch, ' ',
+            "Row 0 should be cleared after scroll down"
+        );
+        assert_eq!(
+            grid[1][0].ch, 'A',
+            "Content should have moved down to row 1"
+        );
     }
 
     #[test]
@@ -241,7 +250,10 @@ mod tests {
         // Verify that </script> in recording data gets escaped
         let json = serde_json::to_string(&"</script><script>alert(1)</script>").unwrap();
         let escaped = json.replace("</", r"<\/");
-        assert!(!escaped.contains("</script>"), "Should escape </script> tags");
+        assert!(
+            !escaped.contains("</script>"),
+            "Should escape </script> tags"
+        );
         assert!(escaped.contains(r"<\/script>"));
     }
 
@@ -255,8 +267,14 @@ mod tests {
         assert_eq!(state.parse_color_spec_pub("#000000"), Some((0, 0, 0)));
 
         // Valid rgb:
-        assert_eq!(state.parse_color_spec_pub("rgb:ff/00/ff"), Some((255, 0, 255)));
-        assert_eq!(state.parse_color_spec_pub("rgb:ffff/0000/ffff"), Some((255, 0, 255)));
+        assert_eq!(
+            state.parse_color_spec_pub("rgb:ff/00/ff"),
+            Some((255, 0, 255))
+        );
+        assert_eq!(
+            state.parse_color_spec_pub("rgb:ffff/0000/ffff"),
+            Some((255, 0, 255))
+        );
 
         // Named
         assert_eq!(state.parse_color_spec_pub("red"), Some((255, 0, 0)));
@@ -276,7 +294,9 @@ mod tests {
         // Write colored text on the last row (e.g., colored ls output)
         // This should NOT trigger tmux detection
         // CSI 32m = green foreground, then text, then reset
-        state.process_output("\x1b[24;1H\x1b[32msome_file.txt\x1b[0m").unwrap();
+        state
+            .process_output("\x1b[24;1H\x1b[32msome_file.txt\x1b[0m")
+            .unwrap();
 
         assert!(
             state.detect_tmux_layout().is_none(),

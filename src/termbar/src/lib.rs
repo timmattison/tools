@@ -538,7 +538,10 @@ pub fn truncate_filename(filename: &str, max_width: u16) -> String {
             let ext_budget = remaining - basename_budget;
             let truncated_basename = take_chars_by_width(basename, basename_budget);
             let truncated_ext = take_chars_by_width(&dot_ext, ext_budget);
-            return format!("{}{}{}", truncated_basename, ELLIPSIS_WITH_EXT, truncated_ext);
+            return format!(
+                "{}{}{}",
+                truncated_basename, ELLIPSIS_WITH_EXT, truncated_ext
+            );
         }
 
         // Fall through to no-extension truncation below
@@ -598,7 +601,10 @@ mod tests {
     fn test_constants_runtime_properties() {
         // Compile-time constant relationships are verified at module level.
         // This test verifies runtime properties that can't be checked at compile time.
-        assert!(!PROGRESS_CHARS.is_empty(), "PROGRESS_CHARS must not be empty");
+        assert!(
+            !PROGRESS_CHARS.is_empty(),
+            "PROGRESS_CHARS must not be empty"
+        );
 
         // Verify PROGRESS_CHARS has the expected structure for indicatif:
         // 8 partial block characters + 2 spaces = 10 characters
@@ -684,7 +690,10 @@ mod tests {
     #[test]
     fn test_split_filename_extension_normal() {
         assert_eq!(split_filename_extension("file.txt"), ("file", Some("txt")));
-        assert_eq!(split_filename_extension("document.pdf"), ("document", Some("pdf")));
+        assert_eq!(
+            split_filename_extension("document.pdf"),
+            ("document", Some("pdf"))
+        );
     }
 
     #[test]
@@ -769,7 +778,11 @@ mod tests {
             result
         );
         // Should contain ellipsis
-        assert!(result.contains("..."), "Should contain ellipsis: {}", result);
+        assert!(
+            result.contains("..."),
+            "Should contain ellipsis: {}",
+            result
+        );
         // Should fit within max width
         assert!(
             str_display_width_as_u16(&result) <= 30,
@@ -885,7 +898,8 @@ mod tests {
     #[test]
     fn test_progress_bar_fits_with_truncation() {
         // Simulate the actual use case: very long filename at terminal width 80
-        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+        let long_filename =
+            "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
         let terminal_width: u16 = 80;
         let base_overhead: u16 = 60;
 
@@ -981,7 +995,10 @@ mod tests {
         // Below MIN_TRUNCATION_WIDTH, we just get raw chars with no indicator
         let result = truncate_filename("longfilename.txt", 3);
         assert_eq!(result, "lon");
-        assert!(!result.contains('.'), "No ellipsis below MIN_TRUNCATION_WIDTH");
+        assert!(
+            !result.contains('.'),
+            "No ellipsis below MIN_TRUNCATION_WIDTH"
+        );
     }
 
     // ========================================================================
@@ -1082,7 +1099,11 @@ mod tests {
         let max_width: u16 = 10;
 
         // Self-documenting assertions: verify our understanding of the test data
-        assert_eq!(ext_part.chars().count(), 9, "Test invariant: extension is 9 chars");
+        assert_eq!(
+            ext_part.chars().count(),
+            9,
+            "Test invariant: extension is 9 chars"
+        );
         assert!(
             ext_part.chars().count() <= MAX_EXTENSION_LEN,
             "Test invariant: extension must be <= MAX_EXTENSION_LEN to be recognized"
@@ -1113,7 +1134,10 @@ mod tests {
         assert_eq!(str_display_width_as_u16(&result2), max_width);
 
         // Verify the expected parts are preserved
-        assert!(result2.starts_with("ba"), "Should preserve start of basename");
+        assert!(
+            result2.starts_with("ba"),
+            "Should preserve start of basename"
+        );
         assert!(result2.contains("..."), "Should have ellipsis");
         // Note: The result "ba...exten" is constructed as:
         //   "ba" (truncated basename) + ".." (ellipsis) + ".exten" (truncated extension with dot)
@@ -1130,8 +1154,16 @@ mod tests {
         // CJK characters are multi-byte but count as single characters.
         let ext_part = "日本語";
         // Self-documenting assertions: verify our understanding of the test data
-        assert_eq!(ext_part.chars().count(), 3, "Test invariant: 3 CJK characters");
-        assert_eq!(ext_part.len(), 9, "Test invariant: 9 bytes (3 chars × 3 bytes each)");
+        assert_eq!(
+            ext_part.chars().count(),
+            3,
+            "Test invariant: 3 CJK characters"
+        );
+        assert_eq!(
+            ext_part.len(),
+            9,
+            "Test invariant: 9 bytes (3 chars × 3 bytes each)"
+        );
         assert!(
             ext_part.chars().count() <= MAX_EXTENSION_LEN,
             "Test invariant: extension must be <= MAX_EXTENSION_LEN to be recognized"

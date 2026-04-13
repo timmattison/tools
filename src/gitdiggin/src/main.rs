@@ -4,6 +4,7 @@ use clap::{Parser, ValueHint};
 use crossbeam::channel::{bounded, select, Sender};
 use git2::{Branch, BranchType, Commit, Repository, Sort};
 use indicatif::{ProgressBar, ProgressStyle};
+use repowalker::find_git_repo as find_git_repo_repowalker;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -13,7 +14,6 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
-use repowalker::find_git_repo as find_git_repo_repowalker;
 
 /// Find the base directory of the git repository starting from current directory
 fn get_repo_base() -> Result<String> {
@@ -64,7 +64,12 @@ struct Args {
 
 /// Directories to skip while walking the filesystem
 const SKIP_DIRS: [&str; 6] = [
-    "node_modules", "vendor", ".idea", ".vscode", "dist", "build",
+    "node_modules",
+    "vendor",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
 ];
 
 /// Represents a search result
@@ -261,19 +266,23 @@ fn main() -> Result<()> {
         // Try to find the repository root
         if let Ok(git_dir) = get_repo_base() {
             // Found a repository root
-            let repo_path = Path::new(&git_dir).parent().unwrap().to_string_lossy().to_string();
+            let repo_path = Path::new(&git_dir)
+                .parent()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
             repos_found.fetch_add(1, Ordering::Relaxed);
-            
+
             // Update the current path
             *current_path.lock().unwrap() = repo_path.clone();
-            
+
             // Send progress update
             let _ = tx.send(ProgressInfo {
                 dirs_checked: dirs_checked.load(Ordering::Relaxed),
                 repos_found: repos_found.load(Ordering::Relaxed),
                 current_path: repo_path.clone(),
             });
-            
+
             // Process the repository
             process_git_repo(
                 &repo_path,
@@ -304,10 +313,7 @@ fn main() -> Result<()> {
 
     // Print search results
     if result.found_commits {
-        println!(
-            "🔍 Found commits containing \"{}\"",
-            result.search_term
-        );
+        println!("🔍 Found commits containing \"{}\"", result.search_term);
 
         if result.search_contents {
             println!("📄 Searched in commit messages and contents");
@@ -315,10 +321,7 @@ fn main() -> Result<()> {
             println!("📄 Searched in commit messages only");
         }
 
-        println!(
-            "📂 Search paths: {}",
-            result.abs_paths.join(", ")
-        );
+        println!("📂 Search paths: {}", result.abs_paths.join(", "));
 
         if args.all {
             println!("🔀 Searched across all branches");
@@ -360,10 +363,7 @@ fn main() -> Result<()> {
             println!("   • Searched in commit messages only");
         }
 
-        println!(
-            "   • Search paths: {}",
-            result.abs_paths.join(", ")
-        );
+        println!("   • Search paths: {}", result.abs_paths.join(", "));
     }
 
     Ok(())
@@ -498,10 +498,9 @@ fn process_git_repo(
         Err(err) => {
             if !ignore_failures {
                 let mut result = search_result.lock().unwrap();
-                result.inaccessible_dirs.push(format!(
-                    "{} (error opening git repo: {})",
-                    path, err
-                ));
+                result
+                    .inaccessible_dirs
+                    .push(format!("{} (error opening git repo: {})", path, err));
             }
             return;
         }
@@ -510,85 +509,84 @@ fn process_git_repo(
     let mut matching_commits = Vec::new();
 
     // Process a single branch reference
-    let mut process_branch = |branch_result: Result<(Branch, BranchType), git2::Error>| -> Result<(), git2::Error> {
-        let (branch, _branch_type) = branch_result?;
-        let commit = branch.get().peel_to_commit()?;
+    let mut process_branch =
+        |branch_result: Result<(Branch, BranchType), git2::Error>| -> Result<(), git2::Error> {
+            let (branch, _branch_type) = branch_result?;
+            let commit = branch.get().peel_to_commit()?;
 
-        // Create a revwalk to iterate through commits
-        let mut revwalk = repo.revwalk()?;
-        revwalk.push(commit.id())?;
-        revwalk.set_sorting(Sort::TIME)?;
+            // Create a revwalk to iterate through commits
+            let mut revwalk = repo.revwalk()?;
+            revwalk.push(commit.id())?;
+            revwalk.set_sorting(Sort::TIME)?;
 
-        for oid in revwalk {
-            let oid = oid?;
-            let commit = repo.find_commit(oid)?;
-            let message = commit.message().unwrap_or("");
+            for oid in revwalk {
+                let oid = oid?;
+                let commit = repo.find_commit(oid)?;
+                let message = commit.message().unwrap_or("");
 
-            // Check if commit message contains the search term
-            if message.to_lowercase().contains(&search_term.to_lowercase()) {
-                add_matching_commit(&mut matching_commits, &commit, message);
-                continue;
+                // Check if commit message contains the search term
+                if message.to_lowercase().contains(&search_term.to_lowercase()) {
+                    add_matching_commit(&mut matching_commits, &commit, message);
+                    continue;
+                }
+
+                // If not searching contents, skip to next commit
+                if !search_contents {
+                    continue;
+                }
+
+                // Get parent to compare changes
+                if commit.parent_count() == 0 {
+                    continue;
+                }
+
+                let parent = match commit.parent(0) {
+                    Ok(parent) => parent,
+                    Err(_) => continue,
+                };
+
+                // Get the diff between this commit and its parent
+                let parent_tree = match parent.tree() {
+                    Ok(tree) => tree,
+                    Err(_) => continue,
+                };
+
+                let commit_tree = match commit.tree() {
+                    Ok(tree) => tree,
+                    Err(_) => continue,
+                };
+
+                let diff =
+                    match repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), None) {
+                        Ok(diff) => diff,
+                        Err(_) => continue,
+                    };
+
+                // Search for term in the diff content
+                let mut found_in_diff = false;
+                diff.foreach(
+                    &mut |_, _| true,
+                    None,
+                    Some(&mut |_, hunk| {
+                        // Get the content of the hunk
+                        let content = std::str::from_utf8(hunk.header()).unwrap_or("");
+                        if content.to_lowercase().contains(&search_term.to_lowercase()) {
+                            found_in_diff = true;
+                            return false; // Stop iterating
+                        }
+                        true
+                    }),
+                    None,
+                )
+                .unwrap_or(());
+
+                if found_in_diff {
+                    add_matching_commit(&mut matching_commits, &commit, message);
+                }
             }
 
-            // If not searching contents, skip to next commit
-            if !search_contents {
-                continue;
-            }
-
-            // Get parent to compare changes
-            if commit.parent_count() == 0 {
-                continue;
-            }
-
-            let parent = match commit.parent(0) {
-                Ok(parent) => parent,
-                Err(_) => continue,
-            };
-
-            // Get the diff between this commit and its parent
-            let parent_tree = match parent.tree() {
-                Ok(tree) => tree,
-                Err(_) => continue,
-            };
-
-            let commit_tree = match commit.tree() {
-                Ok(tree) => tree,
-                Err(_) => continue,
-            };
-
-            let diff = match repo.diff_tree_to_tree(
-                Some(&parent_tree),
-                Some(&commit_tree),
-                None,
-            ) {
-                Ok(diff) => diff,
-                Err(_) => continue,
-            };
-
-            // Search for term in the diff content
-            let mut found_in_diff = false;
-            diff.foreach(
-                &mut |_, _| true,
-                None,
-                Some(&mut |_, hunk| {
-                    // Get the content of the hunk
-                    let content = std::str::from_utf8(hunk.header()).unwrap_or("");
-                    if content.to_lowercase().contains(&search_term.to_lowercase()) {
-                        found_in_diff = true;
-                        return false; // Stop iterating
-                    }
-                    true
-                }),
-                None,
-            ).unwrap_or(());
-
-            if found_in_diff {
-                add_matching_commit(&mut matching_commits, &commit, message);
-            }
-        }
-
-        Ok(())
-    };
+            Ok(())
+        };
 
     let _result = if search_all_branches {
         // Search all branches
@@ -597,10 +595,9 @@ fn process_git_repo(
             Err(err) => {
                 if !ignore_failures {
                     let mut result = search_result.lock().unwrap();
-                    result.inaccessible_dirs.push(format!(
-                        "{} (error getting branches: {})",
-                        path, err
-                    ));
+                    result
+                        .inaccessible_dirs
+                        .push(format!("{} (error getting branches: {})", path, err));
                 }
                 return;
             }
@@ -610,10 +607,9 @@ fn process_git_repo(
             if let Err(err) = process_branch(branch) {
                 if !ignore_failures {
                     let mut result = search_result.lock().unwrap();
-                    result.inaccessible_dirs.push(format!(
-                        "{} (error processing branch: {})",
-                        path, err
-                    ));
+                    result
+                        .inaccessible_dirs
+                        .push(format!("{} (error processing branch: {})", path, err));
                 }
             }
         }
@@ -625,20 +621,18 @@ fn process_git_repo(
                 if let Err(err) = process_branch(Ok((branch, BranchType::Local))) {
                     if !ignore_failures {
                         let mut result = search_result.lock().unwrap();
-                        result.inaccessible_dirs.push(format!(
-                            "{} (error processing HEAD: {})",
-                            path, err
-                        ));
+                        result
+                            .inaccessible_dirs
+                            .push(format!("{} (error processing HEAD: {})", path, err));
                     }
                 }
             }
             Err(err) => {
                 if !ignore_failures {
                     let mut result = search_result.lock().unwrap();
-                    result.inaccessible_dirs.push(format!(
-                        "{} (error getting HEAD: {})",
-                        path, err
-                    ));
+                    result
+                        .inaccessible_dirs
+                        .push(format!("{} (error getting HEAD: {})", path, err));
                 }
             }
         }
@@ -648,25 +642,19 @@ fn process_git_repo(
     if !matching_commits.is_empty() {
         let mut result = search_result.lock().unwrap();
         result.found_commits = true;
-        result.repositories.insert(path.to_string(), matching_commits);
+        result
+            .repositories
+            .insert(path.to_string(), matching_commits);
     }
 }
 
 /// Add a matching commit to the results
 fn add_matching_commit(matching_commits: &mut Vec<String>, commit: &Commit, message: &str) {
     // Get the first line of the commit message
-    let first_line = message
-        .lines()
-        .next()
-        .unwrap_or("")
-        .trim();
+    let first_line = message.lines().next().unwrap_or("").trim();
 
     // Format the commit info
-    matching_commits.push(format!(
-        "{} {}",
-        commit.id().to_string(),
-        first_line
-    ));
+    matching_commits.push(format!("{} {}", commit.id().to_string(), first_line));
 }
 
 #[cfg(test)]
@@ -681,25 +669,49 @@ mod tests {
         // Test with ignored directories
         for ignored in SKIP_DIRS.iter() {
             let ignored_path = temp_dir.join(ignored);
-            let entry = WalkDir::new(&ignored_path).into_iter().next().unwrap_or_else(|| {
-                // If the directory doesn't exist, just pretend we got an entry
-                Ok(WalkDir::new(&ignored_path).into_iter().filter_entry(|_| false).next().unwrap().unwrap())
-            });
+            let entry = WalkDir::new(&ignored_path)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| {
+                    // If the directory doesn't exist, just pretend we got an entry
+                    Ok(WalkDir::new(&ignored_path)
+                        .into_iter()
+                        .filter_entry(|_| false)
+                        .next()
+                        .unwrap()
+                        .unwrap())
+                });
 
             if let Ok(entry) = entry {
-                assert!(is_ignored(&entry), "Directory '{}' should be ignored", ignored);
+                assert!(
+                    is_ignored(&entry),
+                    "Directory '{}' should be ignored",
+                    ignored
+                );
             }
         }
 
         // Test with non-ignored directory
         let non_ignored = "test_directory";
         let non_ignored_path = temp_dir.join(non_ignored);
-        let entry = WalkDir::new(&non_ignored_path).into_iter().next().unwrap_or_else(|| {
-            Ok(WalkDir::new(&non_ignored_path).into_iter().filter_entry(|_| false).next().unwrap().unwrap())
-        });
+        let entry = WalkDir::new(&non_ignored_path)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| {
+                Ok(WalkDir::new(&non_ignored_path)
+                    .into_iter()
+                    .filter_entry(|_| false)
+                    .next()
+                    .unwrap()
+                    .unwrap())
+            });
 
         if let Ok(entry) = entry {
-            assert!(!is_ignored(&entry), "Directory '{}' should not be ignored", non_ignored);
+            assert!(
+                !is_ignored(&entry),
+                "Directory '{}' should not be ignored",
+                non_ignored
+            );
         }
     }
 
@@ -718,18 +730,10 @@ mod tests {
         // Create a custom function to test the logic without using the real Commit type
         fn mock_add_matching_commit(commits: &mut Vec<String>, commit_id: &str, message: &str) {
             // Get the first line of the commit message (same logic as the real function)
-            let first_line = message
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim();
+            let first_line = message.lines().next().unwrap_or("").trim();
 
             // Format the commit info (same logic as the real function)
-            commits.push(format!(
-                "{} {}",
-                commit_id,
-                first_line
-            ));
+            commits.push(format!("{} {}", commit_id, first_line));
         }
 
         // Test adding a matching commit
@@ -746,6 +750,9 @@ mod tests {
         mock_add_matching_commit(&mut commits, commit_id, single_line_message);
 
         assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0], format!("{} Fix bug in authentication", commit_id));
+        assert_eq!(
+            commits[0],
+            format!("{} Fix bug in authentication", commit_id)
+        );
     }
 }

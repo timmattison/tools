@@ -76,7 +76,11 @@ enum KillResult {
     /// Process was successfully killed.
     Killed { pid: u32, name: String },
     /// Failed to kill the process.
-    Failed { pid: u32, name: String, error: String },
+    Failed {
+        pid: u32,
+        name: String,
+        error: String,
+    },
     /// Dry run - would have killed.
     WouldKill { pid: u32, name: String },
 }
@@ -285,11 +289,7 @@ fn print_results(results: &[KillResult], signal: i32, dry_run: bool) {
 
     // Print what was/would be killed
     if !would_kill.is_empty() {
-        println!(
-            "{} ({}):",
-            "Would kill".cyan().bold(),
-            signal_desc.cyan()
-        );
+        println!("{} ({}):", "Would kill".cyan().bold(), signal_desc.cyan());
         for (pid, name) in &would_kill {
             println!("  {} {} ({})", "->".cyan(), name, pid.to_string().dimmed());
         }
@@ -423,7 +423,9 @@ fn main() -> Result<()> {
     print_results(&results, signal, args.dry_run);
 
     // Exit with error if any kills failed
-    let had_failures = results.iter().any(|r| matches!(r, KillResult::Failed { .. }));
+    let had_failures = results
+        .iter()
+        .any(|r| matches!(r, KillResult::Failed { .. }));
     if had_failures {
         std::process::exit(1);
     }

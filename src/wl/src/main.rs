@@ -21,26 +21,26 @@ fn main() -> Result<()> {
     match listeners::get_all() {
         Ok(listeners) => {
             let mut found_matches = false;
-            
+
             for listener in &listeners {
                 // Parse the socket address to get the port
                 let socket_str = format!("{}", listener.socket);
                 if let Ok(socket_addr) = socket_str.parse::<SocketAddr>() {
                     if socket_addr.port() == args.port {
                         found_matches = true;
-                        
+
                         if args.verbose {
-                            println!("PID: {} Process: {} Socket: {} Full: {:?}", 
-                                listener.process.pid, 
+                            println!(
+                                "PID: {} Process: {} Socket: {} Full: {:?}",
+                                listener.process.pid,
                                 listener.process.name,
                                 listener.socket,
                                 listener
                             );
                         } else {
-                            println!("PID: {} Process: {} Socket: {}", 
-                                listener.process.pid, 
-                                listener.process.name,
-                                listener.socket
+                            println!(
+                                "PID: {} Process: {} Socket: {}",
+                                listener.process.pid, listener.process.name, listener.socket
                             );
                         }
                     }
@@ -49,29 +49,29 @@ fn main() -> Result<()> {
                     // Look for port number in the socket string
                     if socket_str.contains(&format!(":{}", args.port)) {
                         found_matches = true;
-                        
+
                         if args.verbose {
-                            println!("PID: {} Process: {} Socket: {} Full: {:?}", 
-                                listener.process.pid, 
+                            println!(
+                                "PID: {} Process: {} Socket: {} Full: {:?}",
+                                listener.process.pid,
                                 listener.process.name,
                                 listener.socket,
                                 listener
                             );
                         } else {
-                            println!("PID: {} Process: {} Socket: {}", 
-                                listener.process.pid, 
-                                listener.process.name,
-                                listener.socket
+                            println!(
+                                "PID: {} Process: {} Socket: {}",
+                                listener.process.pid, listener.process.name, listener.socket
                             );
                         }
                     }
                 }
             }
-            
+
             if !found_matches {
                 println!("No processes listening on port {}", args.port);
             }
-        },
+        }
         Err(e) => {
             eprintln!("Error getting listeners: {}", e);
             std::process::exit(1);

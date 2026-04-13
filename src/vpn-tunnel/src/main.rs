@@ -136,8 +136,7 @@ fn run(cli: Cli) -> Result<()> {
             }
 
             // Check docker is available
-            which::which("docker")
-                .context("docker not found in PATH — install Docker Desktop")?;
+            which::which("docker").context("docker not found in PATH — install Docker Desktop")?;
 
             // Fetch WireGuard key via op-cache
             let op_path_validated =
@@ -170,9 +169,7 @@ fn run(cli: Cli) -> Result<()> {
             println!("  ./status.sh          # check VPN IP");
             println!("  ./logs.sh            # view logs");
             println!("  ./stop.sh            # tear down");
-            println!(
-                "\nTo route a container through the VPN, add to your docker-compose.yml:"
-            );
+            println!("\nTo route a container through the VPN, add to your docker-compose.yml:");
             println!("  network_mode: \"service:{container_prefix}-gluetun\"");
             println!("  depends_on:");
             println!("    {container_prefix}-gluetun:");

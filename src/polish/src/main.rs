@@ -1,23 +1,28 @@
-use std::path::{Path, PathBuf};
-use std::process::{Command, exit};
 use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
+use std::path::{Path, PathBuf};
+use std::process::{exit, Command};
 
 fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io::Error> {
     let output = Command::new(command[0])
         .args(&command[1..])
         .current_dir(dir)
         .output()?;
-    
+
     if !output.status.success() {
-        eprintln!("Warning: Error running {} in {}: {}", 
-                 command.join(" "), 
-                 dir.display(), 
-                 String::from_utf8_lossy(&output.stderr));
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Command failed"));
+        eprintln!(
+            "Warning: Error running {} in {}: {}",
+            command.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Command failed",
+        ));
     }
-    
+
     println!("Ran {} in {}", command.join(" "), dir.display());
     Ok(())
 }
@@ -40,7 +45,7 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    
+
     let repo_root = match find_git_repo() {
         Some(root) => root,
         None => {
@@ -48,34 +53,37 @@ fn main() {
             exit(1);
         }
     };
-    
-    println!("Polishing Rust dependencies in repository: {}", repo_root.display());
+
+    println!(
+        "Polishing Rust dependencies in repository: {}",
+        repo_root.display()
+    );
     println!();
-    
+
     // Collect all Rust project directories
     let mut rust_dirs: Vec<PathBuf> = Vec::new();
-    
+
     // Walk through all directories and find Rust projects
     let walker = RepoWalker::new(repo_root.clone())
-        .respect_gitignore(false)  // Don't respect gitignore - find ALL Rust projects
-        .include_hidden(true);     // Include hidden directories
-    
+        .respect_gitignore(false) // Don't respect gitignore - find ALL Rust projects
+        .include_hidden(true); // Include hidden directories
+
     for entry in walker.walk_with_ignore() {
         if entry.file_type().map_or(false, |ft| ft.is_dir()) {
             let dir_path = entry.path();
-            
+
             if dir_path.join("Cargo.toml").exists() {
                 rust_dirs.push(dir_path.to_path_buf());
             }
         }
     }
-    
+
     // Process all Rust projects
     if rust_dirs.is_empty() {
         println!("No Rust projects found in repository");
         return;
     }
-    
+
     // Check if cargo-edit is installed when --latest flag is used
     if args.latest {
         if check_cargo_edit_installed() {
@@ -86,10 +94,10 @@ fn main() {
             eprintln!("   Falling back to standard cargo update (respects version constraints)\n");
         }
     }
-    
+
     for dir_path in rust_dirs {
         println!("[Rust] Found Cargo.toml in {}", dir_path.display());
-        
+
         if args.latest && check_cargo_edit_installed() {
             // First run cargo upgrade to update Cargo.toml to latest versions
             if let Err(e) = run_command_in_directory(&dir_path, &["cargo", "upgrade"]) {
@@ -111,6 +119,6 @@ fn main() {
             }
         }
     }
-    
+
     println!("\n✓ Rust dependency polishing complete!");
 }

@@ -48,18 +48,10 @@ enum Commands {
         )]
         output: PathBuf,
 
-        #[arg(
-            short,
-            long,
-            help = "Use SSH URLs for cloning (default: HTTPS)"
-        )]
+        #[arg(short, long, help = "Use SSH URLs for cloning (default: HTTPS)")]
         ssh: bool,
 
-        #[arg(
-            short,
-            long,
-            help = "Archive repositories after cloning"
-        )]
+        #[arg(short, long, help = "Archive repositories after cloning")]
         archive: bool,
     },
 
@@ -73,18 +65,10 @@ enum Commands {
         )]
         output: PathBuf,
 
-        #[arg(
-            short,
-            long,
-            help = "Use SSH URLs for cloning (default: HTTPS)"
-        )]
+        #[arg(short, long, help = "Use SSH URLs for cloning (default: HTTPS)")]
         ssh: bool,
 
-        #[arg(
-            short,
-            long,
-            help = "Archive repositories after cloning"
-        )]
+        #[arg(short, long, help = "Archive repositories after cloning")]
         archive: bool,
     },
 }
@@ -97,7 +81,9 @@ async fn main() -> Result<()> {
     // 1. CLI argument
     // 2. GITHUB_TOKEN environment variable
     // 3. gh CLI authentication
-    let token = cli.token.clone()
+    let token = cli
+        .token
+        .clone()
         .or_else(|| std::env::var("GITHUB_TOKEN").ok())
         .or_else(|| {
             if auth::is_gh_installed() {
@@ -108,15 +94,29 @@ async fn main() -> Result<()> {
         });
 
     // Check if we need a token and don't have one
-    if token.is_none() && !matches!(cli.command, Commands::CloneOrg { ssh: true, .. } | Commands::CloneAll { ssh: true, .. }) {
+    if token.is_none()
+        && !matches!(
+            cli.command,
+            Commands::CloneOrg { ssh: true, .. } | Commands::CloneAll { ssh: true, .. }
+        )
+    {
         eprintln!("{}", "Error: GitHub authentication required.".red());
         eprintln!();
-        eprintln!("{}", "You can authenticate using one of these methods:".yellow());
+        eprintln!(
+            "{}",
+            "You can authenticate using one of these methods:".yellow()
+        );
         eprintln!("  1. Use the GitHub CLI: {}", "gh auth login".cyan());
-        eprintln!("  2. Set environment variable: {}", "export GITHUB_TOKEN=<your-token>".cyan());
-        eprintln!("  3. Pass token as argument: {}", "--token <your-token>".cyan());
+        eprintln!(
+            "  2. Set environment variable: {}",
+            "export GITHUB_TOKEN=<your-token>".cyan()
+        );
+        eprintln!(
+            "  3. Pass token as argument: {}",
+            "--token <your-token>".cyan()
+        );
         eprintln!();
-        
+
         if auth::is_gh_installed() {
             if let Ok(Some(status)) = auth::get_gh_auth_status() {
                 eprintln!("{}", "Current gh auth status:".dimmed());
@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
             eprintln!("{}", "GitHub CLI (gh) is not installed.".dimmed());
             eprintln!("{}", "Install it from: https://cli.github.com".dimmed());
         }
-        
+
         eprintln!();
         eprintln!("{}", "To create a personal access token:".dimmed());
         eprintln!("{}", "  https://github.com/settings/tokens".dimmed());
@@ -145,9 +145,13 @@ async fn main() -> Result<()> {
         } else {
             "GitHub CLI (gh)"
         };
-        
+
         if std::env::var("VERBOSE").is_ok() {
-            eprintln!("{} {}", "Using authentication from:".dimmed(), auth_source.green());
+            eprintln!(
+                "{} {}",
+                "Using authentication from:".dimmed(),
+                auth_source.green()
+            );
         }
     }
 
@@ -171,15 +175,7 @@ async fn main() -> Result<()> {
             archive,
         } => {
             std::fs::create_dir_all(&output)?;
-            commands::clone_organization_repos(
-                &client,
-                &org,
-                &output,
-                ssh,
-                archive,
-                token,
-            )
-            .await?;
+            commands::clone_organization_repos(&client, &org, &output, ssh, archive, token).await?;
         }
         Commands::CloneAll {
             output,
@@ -187,14 +183,7 @@ async fn main() -> Result<()> {
             archive,
         } => {
             std::fs::create_dir_all(&output)?;
-            commands::clone_all_organizations_repos(
-                &client,
-                &output,
-                ssh,
-                archive,
-                token,
-            )
-            .await?;
+            commands::clone_all_organizations_repos(&client, &output, ssh, archive, token).await?;
         }
     }
 

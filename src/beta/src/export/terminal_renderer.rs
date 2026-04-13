@@ -27,7 +27,7 @@ impl TerminalTheme {
     pub fn auto() -> Self {
         Self::black()
     }
-    
+
     pub fn black() -> Self {
         Self {
             background: (0, 0, 0),
@@ -50,7 +50,7 @@ impl TerminalTheme {
             bright_white: (255, 255, 255),
         }
     }
-    
+
     pub fn dracula() -> Self {
         Self {
             background: (40, 42, 54),
@@ -73,7 +73,7 @@ impl TerminalTheme {
             bright_white: (255, 255, 255),
         }
     }
-    
+
     pub fn monokai() -> Self {
         Self {
             background: (39, 40, 34),
@@ -96,7 +96,7 @@ impl TerminalTheme {
             bright_white: (248, 248, 242),
         }
     }
-    
+
     pub fn solarized_dark() -> Self {
         Self {
             background: (0, 43, 54),
@@ -119,7 +119,7 @@ impl TerminalTheme {
             bright_white: (253, 246, 227),
         }
     }
-    
+
     pub fn solarized_light() -> Self {
         Self {
             background: (253, 246, 227),
@@ -142,7 +142,7 @@ impl TerminalTheme {
             bright_white: (253, 246, 227),
         }
     }
-    
+
     pub fn from_name(name: &str) -> Self {
         match name.to_lowercase().as_str() {
             "black" => Self::black(),
@@ -153,7 +153,7 @@ impl TerminalTheme {
             _ => Self::auto(),
         }
     }
-    
+
     pub fn get_color(&self, index: u8) -> (u8, u8, u8) {
         match index {
             0 => self.black,
@@ -175,29 +175,29 @@ impl TerminalTheme {
             _ => self.foreground,
         }
     }
-    
+
     pub fn get_256_color(index: u8) -> (u8, u8, u8) {
         match index {
             // Standard 16 colors (0-15)
             0..=15 => {
                 // Use standard ANSI colors
                 match index {
-                    0 => (0, 0, 0),         // black
-                    1 => (128, 0, 0),       // red
-                    2 => (0, 128, 0),       // green
-                    3 => (128, 128, 0),     // yellow
-                    4 => (0, 0, 128),       // blue
-                    5 => (128, 0, 128),     // magenta
-                    6 => (0, 128, 128),     // cyan
-                    7 => (192, 192, 192),   // white
-                    8 => (128, 128, 128),   // bright black
-                    9 => (255, 0, 0),       // bright red
-                    10 => (0, 255, 0),      // bright green
-                    11 => (255, 255, 0),    // bright yellow
-                    12 => (0, 0, 255),      // bright blue
-                    13 => (255, 0, 255),    // bright magenta
-                    14 => (0, 255, 255),    // bright cyan
-                    15 => (255, 255, 255),  // bright white
+                    0 => (0, 0, 0),        // black
+                    1 => (128, 0, 0),      // red
+                    2 => (0, 128, 0),      // green
+                    3 => (128, 128, 0),    // yellow
+                    4 => (0, 0, 128),      // blue
+                    5 => (128, 0, 128),    // magenta
+                    6 => (0, 128, 128),    // cyan
+                    7 => (192, 192, 192),  // white
+                    8 => (128, 128, 128),  // bright black
+                    9 => (255, 0, 0),      // bright red
+                    10 => (0, 255, 0),     // bright green
+                    11 => (255, 255, 0),   // bright yellow
+                    12 => (0, 0, 255),     // bright blue
+                    13 => (255, 0, 255),   // bright magenta
+                    14 => (0, 255, 255),   // bright cyan
+                    15 => (255, 255, 255), // bright white
                     _ => (255, 255, 255),
                 }
             }
@@ -207,12 +207,12 @@ impl TerminalTheme {
                 let r = index / 36;
                 let g = (index % 36) / 6;
                 let b = index % 6;
-                
+
                 // Convert 0-5 range to 0-255 range
                 let r = if r == 0 { 0 } else { 55 + r * 40 };
                 let g = if g == 0 { 0 } else { 55 + g * 40 };
                 let b = if b == 0 { 0 } else { 55 + b * 40 };
-                
+
                 (r, g, b)
             }
             // Grayscale (232-255)
@@ -297,13 +297,13 @@ impl TerminalState {
             }
             grid.push(row);
         }
-        
+
         // Initialize the standard 256-color palette
         let mut dynamic_palette = Vec::with_capacity(256);
         for i in 0..=255 {
             dynamic_palette.push(TerminalTheme::get_256_color(i));
         }
-        
+
         Self {
             grid,
             cursor_x: 0,
@@ -324,13 +324,13 @@ impl TerminalState {
             use_acs: false,
             cursor_visible: true,
             dynamic_palette,
-            selection_fg: Some((0, 0, 0)),    // Default selection: black on yellow
+            selection_fg: Some((0, 0, 0)), // Default selection: black on yellow
             selection_bg: Some((255, 255, 0)),
             override_fg: None,
             override_bg: None,
         }
     }
-    
+
     pub fn process_output(&mut self, data: &str) -> Result<()> {
         let bytes: Vec<u8> = data.bytes().collect();
         // The VTE parser expects a slice of bytes
@@ -343,15 +343,15 @@ impl TerminalState {
         }
         Ok(())
     }
-    
+
     pub fn get_grid(&self) -> &Vec<Vec<Cell>> {
         &self.grid
     }
-    
+
     pub fn get_theme(&self) -> &TerminalTheme {
         &self.theme
     }
-    
+
     #[cfg(test)]
     pub fn get_width(&self) -> usize {
         self.width
@@ -361,16 +361,15 @@ impl TerminalState {
     pub fn get_height(&self) -> usize {
         self.height
     }
-    
+
     pub fn get_cursor_position(&self) -> (usize, usize) {
         (self.cursor_x, self.cursor_y)
     }
-    
+
     pub fn is_cursor_visible(&self) -> bool {
         self.cursor_visible
     }
-    
-    
+
     pub fn resolve_cell_colors(&self, cell: &Cell) -> ((u8, u8, u8), (u8, u8, u8)) {
         let mut fg = cell.fg_color;
         let mut bg = cell.bg_color;
@@ -388,7 +387,7 @@ impl TerminalState {
                 bg = dynamic_color;
             }
         }
-        
+
         // Apply global foreground/background color overrides from OSC 10/11
         if let Some(override_fg) = self.override_fg {
             // Replace theme foreground or any color that matches the theme foreground
@@ -402,23 +401,27 @@ impl TerminalState {
                 bg = override_bg;
             }
         }
-        
+
         // Handle common tmux color issues
         // tmux often uses specific color combinations that need adjustment
         self.apply_tmux_color_corrections(fg, bg)
     }
-    
-    fn apply_tmux_color_corrections(&self, fg: (u8, u8, u8), bg: (u8, u8, u8)) -> ((u8, u8, u8), (u8, u8, u8)) {
+
+    fn apply_tmux_color_corrections(
+        &self,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+    ) -> ((u8, u8, u8), (u8, u8, u8)) {
         // Fix common tmux color rendering issues
-        
+
         // Handle tmux status bar colors - bright green should be normal green
         let corrected_bg = match bg {
             (0, 255, 0) => (0, 128, 0),    // Bright green -> normal green
             (85, 255, 85) => (0, 128, 0),  // Another bright green variant
             (80, 250, 123) => (0, 128, 0), // Dracula bright green -> normal green
-            _ => bg
+            _ => bg,
         };
-        
+
         // Handle tmux status bar foreground text color
         let corrected_fg = if corrected_bg == (0, 128, 0) {
             // Status bar should have black text on green background for maximum visibility
@@ -429,25 +432,26 @@ impl TerminalState {
         } else if corrected_bg != (0, 0, 0) && fg == corrected_bg {
             // If foreground matches background, force contrasting color
             if is_light_color_terminal(corrected_bg) {
-                (0, 0, 0)      // Black text on light background
+                (0, 0, 0) // Black text on light background
             } else {
                 (255, 255, 255) // White text on dark background
             }
         } else {
             fg
         };
-        
+
         // Handle selection colors - ensure proper contrast for yellow selection background
-        let (final_fg, final_bg) = if corrected_bg == (255, 255, 0) || corrected_bg == (255, 255, 85) {
-            // Yellow background should have black foreground for selection
-            ((0, 0, 0), corrected_bg)
-        } else {
-            (corrected_fg, corrected_bg)
-        };
-        
+        let (final_fg, final_bg) =
+            if corrected_bg == (255, 255, 0) || corrected_bg == (255, 255, 85) {
+                // Yellow background should have black foreground for selection
+                ((0, 0, 0), corrected_bg)
+            } else {
+                (corrected_fg, corrected_bg)
+            };
+
         (final_fg, final_bg)
     }
-    
+
     pub fn is_status_bar_row(&self, row_index: usize) -> bool {
         // Check if this row index is the tmux status bar
         if let Some(layout) = self.detect_tmux_layout() {
@@ -456,31 +460,33 @@ impl TerminalState {
             false
         }
     }
-    
+
     pub fn detect_tmux_layout(&self) -> Option<TmuxLayout> {
         let grid = &self.grid;
         if grid.is_empty() {
             return None;
         }
-        
+
         // Check for tmux status bar - usually at the bottom
         let last_row = grid.len() - 1;
         if last_row > 0 {
             let status_row = &grid[last_row];
-            
+
             // Check if this row has characteristics of a tmux status bar.
             // Only match on specific known tmux status bar colors, not any non-default color.
             let has_tmux_green_bg = status_row.iter().any(|cell| {
-                matches!(cell.bg_color,
+                matches!(
+                    cell.bg_color,
                     (0, 255, 0) | (85, 255, 85) | (0, 128, 0) | (80, 250, 123)
                 )
             });
 
             // Also check for full-width inverted row (white bg / black fg) with bracket chars
             let has_inverted_status = {
-                let inverted_count = status_row.iter().filter(|cell| {
-                    cell.bg_color == (255, 255, 255) && cell.fg_color == (0, 0, 0)
-                }).count();
+                let inverted_count = status_row
+                    .iter()
+                    .filter(|cell| cell.bg_color == (255, 255, 255) && cell.fg_color == (0, 0, 0))
+                    .count();
                 let has_brackets = status_row.iter().any(|cell| matches!(cell.ch, '[' | ']'));
                 inverted_count > status_row.len() / 2 && has_brackets
             };
@@ -492,10 +498,10 @@ impl TerminalState {
                 });
             }
         }
-        
+
         None
     }
-    
+
     pub fn is_valid_cursor_position(&self, tmux_layout: Option<&TmuxLayout>) -> bool {
         // Check if cursor is within valid content area considering tmux layout
         let max_row = if let Some(layout) = tmux_layout {
@@ -503,11 +509,16 @@ impl TerminalState {
         } else {
             self.height
         };
-        
+
         self.cursor_y < max_row && self.cursor_x < self.width
     }
-    
-    pub fn adjust_coordinates_for_tmux(&self, x: usize, y: usize, tmux_layout: Option<&TmuxLayout>) -> (usize, usize) {
+
+    pub fn adjust_coordinates_for_tmux(
+        &self,
+        x: usize,
+        y: usize,
+        tmux_layout: Option<&TmuxLayout>,
+    ) -> (usize, usize) {
         // Adjust coordinates to account for tmux layout
         if let Some(layout) = tmux_layout {
             // Ensure we don't render outside the content area
@@ -521,25 +532,27 @@ impl TerminalState {
             (x, y)
         }
     }
-    
-    
+
     pub fn protect_status_bar_area(&mut self) {
         // Ensure status bar area is protected from application content
         if let Some(layout) = self.detect_tmux_layout() {
             let status_row = layout.status_bar_row;
-            
+
             // Clear any non-status content that might have been written to the status bar
             if status_row < self.grid.len() {
                 let row = &mut self.grid[status_row];
-                
+
                 // Check if this looks like application content rather than status bar
-                let non_status_chars = row.iter().filter(|cell| {
-                    // Look for patterns that suggest this is application content
-                    matches!(cell.ch, 'A'..='Z' | 'a'..='z' | '0'..='9') &&
+                let non_status_chars = row
+                    .iter()
+                    .filter(|cell| {
+                        // Look for patterns that suggest this is application content
+                        matches!(cell.ch, 'A'..='Z' | 'a'..='z' | '0'..='9') &&
                     cell.bg_color == (0, 0, 0) && // Default background
                     cell.fg_color == (255, 255, 255) // Default foreground
-                }).count();
-                
+                    })
+                    .count();
+
                 // If more than 20% of the status bar looks like application content, clear it
                 if non_status_chars > row.len() / 5 {
                     for cell in row {
@@ -547,14 +560,14 @@ impl TerminalState {
                             // Only clear cells that look like application content
                             cell.ch = ' ';
                             cell.bg_color = (0, 128, 0); // Set to status bar green
-                            cell.fg_color = (0, 0, 0);   // Black text
+                            cell.fg_color = (0, 0, 0); // Black text
                         }
                     }
                 }
             }
         }
     }
-    
+
     pub fn debug_status_bar(&self) {
         // Debug function to analyze status bar content
         if let Some(layout) = self.detect_tmux_layout() {
@@ -562,13 +575,21 @@ impl TerminalState {
             if status_row < self.grid.len() {
                 eprintln!("Status bar analysis (row {}):", status_row);
                 let row = &self.grid[status_row];
-                
-                for (i, cell) in row.iter().enumerate().take(20) { // Show first 20 chars
+
+                for (i, cell) in row.iter().enumerate().take(20) {
+                    // Show first 20 chars
                     if cell.ch != ' ' || cell.bg_color != (0, 0, 0) {
-                        eprintln!("  [{}] char='{}' fg=({},{},{}) bg=({},{},{})", 
-                            i, cell.ch, 
-                            cell.fg_color.0, cell.fg_color.1, cell.fg_color.2,
-                            cell.bg_color.0, cell.bg_color.1, cell.bg_color.2);
+                        eprintln!(
+                            "  [{}] char='{}' fg=({},{},{}) bg=({},{},{})",
+                            i,
+                            cell.ch,
+                            cell.fg_color.0,
+                            cell.fg_color.1,
+                            cell.fg_color.2,
+                            cell.bg_color.0,
+                            cell.bg_color.1,
+                            cell.bg_color.2
+                        );
                     }
                 }
             }
@@ -609,8 +630,7 @@ impl TerminalState {
         } else {
             ch
         };
-        
-        
+
         if self.cursor_y < self.height && self.cursor_x < self.width {
             self.grid[self.cursor_y][self.cursor_x] = Cell {
                 ch: display_char,
@@ -621,14 +641,14 @@ impl TerminalState {
                 underline: self.underline,
             };
             self.cursor_x += 1;
-            
+
             // Don't auto-wrap at line end - just stop at the edge
             if self.cursor_x >= self.width {
                 self.cursor_x = self.width - 1;
             }
         }
     }
-    
+
     fn scroll_up(&mut self) {
         // Only scroll within the scrolling region
         for y in (self.scroll_top + 1)..=self.scroll_bottom {
@@ -636,7 +656,7 @@ impl TerminalState {
                 self.grid[y - 1][x] = self.grid[y][x].clone();
             }
         }
-        
+
         // Clear the bottom line of the scrolling region
         for x in 0..self.width {
             self.grid[self.scroll_bottom][x] = Cell {
@@ -647,7 +667,7 @@ impl TerminalState {
             };
         }
     }
-    
+
     fn clear_line(&mut self, line: usize) {
         if line < self.height {
             for x in 0..self.width {
@@ -660,7 +680,7 @@ impl TerminalState {
             }
         }
     }
-    
+
     fn clear_screen(&mut self) {
         for y in 0..self.height {
             for x in 0..self.width {
@@ -675,14 +695,14 @@ impl TerminalState {
         self.cursor_x = 0;
         self.cursor_y = 0;
     }
-    
+
     fn process_sgr_params(&mut self, params: &vte::Params) {
         let param_vec: Vec<u16> = params.iter().flatten().copied().collect();
         let mut i = 0;
-        
+
         while i < param_vec.len() {
             let param = param_vec[i];
-            
+
             match param {
                 0 => {
                     // Reset
@@ -712,7 +732,8 @@ impl TerminalState {
                                 if i + 2 < param_vec.len() {
                                     let color_index = param_vec[i + 2] as u8;
                                     if (color_index as usize) < self.dynamic_palette.len() {
-                                        self.current_fg = self.dynamic_palette[color_index as usize];
+                                        self.current_fg =
+                                            self.dynamic_palette[color_index as usize];
                                     } else {
                                         self.current_fg = TerminalTheme::get_256_color(color_index);
                                     }
@@ -747,7 +768,8 @@ impl TerminalState {
                                 if i + 2 < param_vec.len() {
                                     let color_index = param_vec[i + 2] as u8;
                                     if (color_index as usize) < self.dynamic_palette.len() {
-                                        self.current_bg = self.dynamic_palette[color_index as usize];
+                                        self.current_bg =
+                                            self.dynamic_palette[color_index as usize];
                                     } else {
                                         self.current_bg = TerminalTheme::get_256_color(color_index);
                                     }
@@ -780,11 +802,11 @@ impl TerminalState {
                 }
                 _ => {}
             }
-            
+
             i += 1;
         }
     }
-    
+
     /// Public wrapper for testing parse_color_spec.
     #[cfg(test)]
     pub fn parse_color_spec_pub(&self, color_spec: &str) -> Option<(u8, u8, u8)> {
@@ -840,7 +862,7 @@ impl TerminalState {
                 _ => {}
             }
         }
-        
+
         None
     }
 }
@@ -849,7 +871,7 @@ impl Perform for TerminalState {
     fn print(&mut self, ch: char) {
         self.put_char(ch);
     }
-    
+
     fn execute(&mut self, byte: u8) {
         match byte {
             b'\n' => {
@@ -878,7 +900,7 @@ impl Perform for TerminalState {
             _ => {}
         }
     }
-    
+
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _action: char) {
         // DCS sequence start — consumed without action
     }
@@ -890,15 +912,15 @@ impl Perform for TerminalState {
     fn unhook(&mut self) {
         // DCS sequence end — consumed without action
     }
-    
+
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // Handle OSC sequences - these are operating system commands
         if params.is_empty() {
             return;
         }
-        
+
         let first_param = std::str::from_utf8(params[0]).unwrap_or("");
-        
+
         match first_param {
             "4" => {
                 // OSC 4 ; color_index ; color_spec ST
@@ -924,7 +946,7 @@ impl Perform for TerminalState {
                 }
             }
             "11" => {
-                // OSC 11 ; color_spec ST - Set text background color  
+                // OSC 11 ; color_spec ST - Set text background color
                 if params.len() >= 2 {
                     let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
                     if let Some(color) = self.parse_color_spec(color_spec) {
@@ -967,7 +989,8 @@ impl Perform for TerminalState {
                         for index_str in indices.split(';') {
                             if let Ok(index) = index_str.parse::<u8>() {
                                 if (index as usize) < self.dynamic_palette.len() {
-                                    self.dynamic_palette[index as usize] = TerminalTheme::get_256_color(index);
+                                    self.dynamic_palette[index as usize] =
+                                        TerminalTheme::get_256_color(index);
                                 }
                             }
                         }
@@ -995,8 +1018,14 @@ impl Perform for TerminalState {
             }
         }
     }
-    
-    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
+
+    fn csi_dispatch(
+        &mut self,
+        params: &vte::Params,
+        intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
         // Check for private mode sequences (CSI ? ...)
         if intermediates.contains(&b'?') {
             match action {
@@ -1031,38 +1060,66 @@ impl Perform for TerminalState {
             }
             return;
         }
-        
+
         match action {
             'H' | 'f' => {
                 // Cursor position
-                let row = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1);
-                let col = params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(1);
+                let row = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1);
+                let col = params
+                    .iter()
+                    .nth(1)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1);
                 self.cursor_y = ((row as usize).saturating_sub(1)).min(self.height - 1);
                 self.cursor_x = ((col as usize).saturating_sub(1)).min(self.width - 1);
             }
             'A' => {
                 // Cursor up
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 self.cursor_y = self.cursor_y.saturating_sub(count);
             }
             'B' => {
                 // Cursor down
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 self.cursor_y = (self.cursor_y + count).min(self.height - 1);
             }
             'C' => {
                 // Cursor right
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 self.cursor_x = (self.cursor_x + count).min(self.width - 1);
             }
             'D' => {
                 // Cursor left
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 self.cursor_x = self.cursor_x.saturating_sub(count);
             }
             'J' => {
                 // Erase in display
-                let mode = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(0);
+                let mode = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
                 match mode {
                     0 => {
                         // Clear from cursor to end of screen
@@ -1101,7 +1158,11 @@ impl Perform for TerminalState {
             }
             'K' => {
                 // Erase in line
-                let mode = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(0);
+                let mode = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
                 match mode {
                     0 => {
                         // Clear from cursor to end of line
@@ -1138,14 +1199,22 @@ impl Perform for TerminalState {
             }
             'r' => {
                 // Set scrolling region (DECSTBM)
-                let top = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-                let bottom = params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(self.height as u16) as usize;
-                
+                let top = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
+                let bottom = params
+                    .iter()
+                    .nth(1)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(self.height as u16) as usize;
+
                 // Validate and set scrolling region
                 if top > 0 && bottom <= self.height && top < bottom {
-                    self.scroll_top = top - 1;  // Convert to 0-based
+                    self.scroll_top = top - 1; // Convert to 0-based
                     self.scroll_bottom = bottom - 1;
-                    
+
                     // DECSTBM also moves cursor to home position
                     self.cursor_x = 0;
                     self.cursor_y = 0;
@@ -1168,14 +1237,22 @@ impl Perform for TerminalState {
             }
             'S' => {
                 // Scroll up
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 for _ in 0..count {
                     self.scroll_up();
                 }
             }
             'T' => {
                 // Scroll down: shift content DOWN within scroll region, clear top
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 for _ in 0..count {
                     for y in (self.scroll_top + 1..=self.scroll_bottom).rev() {
                         for x in 0..self.width {
@@ -1187,7 +1264,11 @@ impl Perform for TerminalState {
             }
             'L' => {
                 // Insert lines
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 for _ in 0..count {
                     // Move lines down from current cursor position
                     for y in (self.cursor_y + 1..self.height).rev() {
@@ -1202,7 +1283,11 @@ impl Perform for TerminalState {
             }
             'M' => {
                 // Delete lines
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 for _ in 0..count {
                     // Move lines up from current cursor position
                     for y in self.cursor_y..(self.height - 1) {
@@ -1215,7 +1300,11 @@ impl Perform for TerminalState {
             }
             'P' => {
                 // Delete characters (clamped to avoid usize underflow)
-                let raw_count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let raw_count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
                 for x in start_x..self.width.saturating_sub(count) {
@@ -1232,7 +1321,11 @@ impl Perform for TerminalState {
             }
             '@' => {
                 // Insert characters (clamped to avoid usize underflow)
-                let raw_count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let raw_count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 let count = raw_count.min(self.width.saturating_sub(self.cursor_x));
                 let start_x = self.cursor_x;
                 for x in (start_x..self.width.saturating_sub(count)).rev() {
@@ -1249,7 +1342,11 @@ impl Perform for TerminalState {
             }
             'X' => {
                 // Erase characters
-                let count = params.iter().nth(0).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                let count = params
+                    .iter()
+                    .nth(0)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1) as usize;
                 for i in 0..count {
                     if self.cursor_x + i < self.width {
                         self.grid[self.cursor_y][self.cursor_x + i] = Cell {
@@ -1264,7 +1361,7 @@ impl Perform for TerminalState {
             _ => {}
         }
     }
-    
+
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         match byte {
             b'7' => {
@@ -1335,17 +1432,17 @@ impl Perform for TerminalState {
                 // Ignore unhandled escape sequences
             }
         }
-        
+
         // Handle character set designation sequences
         if !intermediates.is_empty() {
             match intermediates[0] {
                 b'(' | b')' | b'*' | b'+' => {
                     // Character set designation
                     match byte {
-                        b'0' => self.use_acs = true,  // DEC Special Character and Line Drawing Set
+                        b'0' => self.use_acs = true, // DEC Special Character and Line Drawing Set
                         b'B' => self.use_acs = false, // ASCII character set
                         b'A' => self.use_acs = false, // UK character set
-                        _ => {} // Other character sets - just use ASCII
+                        _ => {}                      // Other character sets - just use ASCII
                     }
                 }
                 _ => {}

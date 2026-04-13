@@ -88,7 +88,11 @@ impl GitCloner {
         let mut fetch_options = FetchOptions::new();
         fetch_options.remote_callbacks(callbacks);
 
-        remote.fetch(&["refs/heads/*:refs/heads/*"], Some(&mut fetch_options), None)?;
+        remote.fetch(
+            &["refs/heads/*:refs/heads/*"],
+            Some(&mut fetch_options),
+            None,
+        )?;
 
         pb.finish_with_message(format!("✓ Updated {}", repo_name));
         Ok(())

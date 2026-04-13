@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
 
     loop {
         pass += 1;
-        
+
         if pass > 1 && !args.all {
             println!("\n📋 Pass {} - Checking for more objects...", pass);
         }
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         if pass == 1 {
             println!("Listing objects in bucket '{}'...", args.bucket);
         }
-        
+
         let (keys, has_more) = client
             .list_objects(&args.bucket)
             .await
@@ -59,7 +59,10 @@ async fn main() -> Result<()> {
             if pass == 1 {
                 println!("No objects found in bucket '{}'", args.bucket);
             } else {
-                println!("\n✅ All objects have been deleted from bucket '{}'", args.bucket);
+                println!(
+                    "\n✅ All objects have been deleted from bucket '{}'",
+                    args.bucket
+                );
                 println!("Total objects deleted: {}", total_deleted);
                 println!("Total time: {:.2}s", start_time.elapsed().as_secs_f64());
             }
@@ -77,7 +80,7 @@ async fn main() -> Result<()> {
             } else {
                 println!("\nFound {} objects:", keys.len());
             }
-            
+
             // Only show file list if NOT using --all (or if --list-only is set)
             if !args.all || args.list_only {
                 if keys.len() <= 10 || args.list_only {
@@ -99,7 +102,9 @@ async fn main() -> Result<()> {
 
         if args.list_only {
             if has_more {
-                println!("\n⚠️  Note: There are more objects in the bucket (showing first 20 only)");
+                println!(
+                    "\n⚠️  Note: There are more objects in the bucket (showing first 20 only)"
+                );
             }
             return Ok(());
         }
@@ -117,14 +122,16 @@ async fn main() -> Result<()> {
         let proceed = if args.force {
             true
         } else if pass == 1 {
-            println!("\n⚠️  WARNING: This will permanently delete {} objects!", 
-                if has_more && !args.all { 
-                    format!("these {}", keys.len()) 
-                } else if has_more { 
-                    "ALL".to_string() 
-                } else { 
-                    keys.len().to_string() 
-                });
+            println!(
+                "\n⚠️  WARNING: This will permanently delete {} objects!",
+                if has_more && !args.all {
+                    format!("these {}", keys.len())
+                } else if has_more {
+                    "ALL".to_string()
+                } else {
+                    keys.len().to_string()
+                }
+            );
             Confirm::new()
                 .with_prompt("Do you want to proceed?")
                 .default(false)
@@ -144,7 +151,7 @@ async fn main() -> Result<()> {
             .delete_objects(&args.bucket, keys.clone())
             .await
             .context("Failed to delete objects")?;
-        
+
         total_deleted += keys.len();
 
         // If not in --all mode or no more objects, stop
@@ -167,7 +174,7 @@ async fn main() -> Result<()> {
         // Show progress for --all mode
         println!("✓ Pass {} complete: {} objects deleted", pass, keys.len());
         println!("Total deleted so far: {}", total_deleted);
-        
+
         // Small delay between passes to avoid overwhelming the API
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }

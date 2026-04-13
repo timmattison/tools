@@ -1,10 +1,10 @@
-use std::env;
-use std::path::Path;
-use std::process::{Command, exit};
-use walkdir::WalkDir;
 use buildinfo::version_string;
 use clap::Parser;
 use repowalker::{find_git_repo, RepoWalker};
+use std::env;
+use std::path::Path;
+use std::process::{exit, Command};
+use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(name = "rr")]
@@ -14,35 +14,45 @@ struct Cli {
     #[arg(long, help = "Don't go to the git repository root before running")]
     no_root: bool,
 
-    #[arg(long, help = "Dry run - show what would be cleaned without actually cleaning")]
+    #[arg(
+        long,
+        help = "Dry run - show what would be cleaned without actually cleaning"
+    )]
     dry_run: bool,
 
     #[arg(long, help = "Include git worktrees in the search")]
     worktrees: bool,
 
-    #[arg(long, help = "Force delete orphaned target directories that cargo clean doesn't remove")]
+    #[arg(
+        long,
+        help = "Force delete orphaned target directories that cargo clean doesn't remove"
+    )]
     force: bool,
 }
-
 
 fn run_cargo_clean(dir: &Path, dry_run: bool) -> Result<(), std::io::Error> {
     if dry_run {
         println!("Would clean: {}", dir.display());
         return Ok(());
     }
-    
+
     let output = Command::new("cargo")
         .arg("clean")
         .current_dir(dir)
         .output()?;
-    
+
     if !output.status.success() {
-        eprintln!("Warning: cargo clean failed in {} - {}", 
-                 dir.display(), 
-                 String::from_utf8_lossy(&output.stderr).trim());
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "cargo clean failed"));
+        eprintln!(
+            "Warning: cargo clean failed in {} - {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "cargo clean failed",
+        ));
     }
-    
+
     println!("Cleaned: {}", dir.display());
     Ok(())
 }
@@ -52,9 +62,9 @@ fn calculate_target_size(dir: &Path) -> u64 {
     if !target_dir.exists() {
         return 0;
     }
-    
+
     let mut total_size = 0u64;
-    
+
     for entry in WalkDir::new(&target_dir) {
         if let Ok(entry) = entry {
             if let Ok(metadata) = entry.metadata() {
@@ -64,7 +74,7 @@ fn calculate_target_size(dir: &Path) -> u64 {
             }
         }
     }
-    
+
     total_size
 }
 
@@ -72,18 +82,18 @@ fn format_size(size: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
     let mut size = size as f64;
     let mut unit_index = 0;
-    
+
     while size >= 1024.0 && unit_index < UNITS.len() - 1 {
         size /= 1024.0;
         unit_index += 1;
     }
-    
+
     format!("{:.2} {}", size, UNITS[unit_index])
 }
 
 fn main() {
     let cli = Cli::parse();
-    
+
     let start_dir = if cli.no_root {
         env::current_dir().unwrap_or_else(|e| {
             eprintln!("Error getting current directory: {}", e);
@@ -92,36 +102,37 @@ fn main() {
     } else {
         match find_git_repo() {
             Some(repo_root) => {
-                println!("Found git repository, starting from root: {}", repo_root.display());
+                println!(
+                    "Found git repository, starting from root: {}",
+                    repo_root.display()
+                );
                 repo_root
             }
-            None => {
-                env::current_dir().unwrap_or_else(|e| {
-                    eprintln!("Error getting current directory: {}", e);
-                    exit(1);
-                })
-            }
+            None => env::current_dir().unwrap_or_else(|e| {
+                eprintln!("Error getting current directory: {}", e);
+                exit(1);
+            }),
         }
     };
-    
+
     println!("Scanning for Rust projects from: {}", start_dir.display());
     if cli.dry_run {
         println!("DRY RUN MODE - no files will be deleted");
     }
     println!();
-    
+
     let mut total_cleaned = 0;
     let mut total_size_freed = 0u64;
     let mut total_not_deleted = 0u64;
     let mut projects_found = 0;
     let mut total_failed = 0;
-    
+
     let walker = RepoWalker::new(start_dir.clone())
-        .respect_gitignore(false)  // Don't respect gitignore - find ALL Rust projects
+        .respect_gitignore(false) // Don't respect gitignore - find ALL Rust projects
         .skip_node_modules(true)
         .skip_worktrees(!cli.worktrees)
-        .include_hidden(true);     // Include hidden directories
-    
+        .include_hidden(true); // Include hidden directories
+
     for entry in walker.walk_with_ignore() {
         if entry.file_type().is_some_and(|ft| ft.is_dir()) {
             let cargo_toml_path = entry.path().join("Cargo.toml");
@@ -130,9 +141,11 @@ fn main() {
                 let size_before = calculate_target_size(entry.path());
 
                 if size_before > 0 {
-                    println!("Found Rust project: {} (target size: {})",
-                            entry.path().display(),
-                            format_size(size_before));
+                    println!(
+                        "Found Rust project: {} (target size: {})",
+                        entry.path().display(),
+                        format_size(size_before)
+                    );
 
                     match run_cargo_clean(entry.path(), cli.dry_run) {
                         Ok(_) => {
@@ -156,11 +169,17 @@ fn main() {
                                             match std::fs::remove_dir_all(&target_dir) {
                                                 Ok(_) => {
                                                     total_size_freed += size_after;
-                                                    println!("  Force deleted orphaned target: {}", format_size(size_after));
+                                                    println!(
+                                                        "  Force deleted orphaned target: {}",
+                                                        format_size(size_after)
+                                                    );
                                                 }
                                                 Err(e) => {
                                                     total_not_deleted += size_after;
-                                                    println!("  Warning: Failed to force delete: {}", e);
+                                                    println!(
+                                                        "  Warning: Failed to force delete: {}",
+                                                        e
+                                                    );
                                                 }
                                             }
                                         }
@@ -182,7 +201,7 @@ fn main() {
             }
         }
     }
-    
+
     println!("\n=== Summary ===");
     println!("Rust projects found: {}", projects_found);
     println!("Projects cleaned: {}", total_cleaned);

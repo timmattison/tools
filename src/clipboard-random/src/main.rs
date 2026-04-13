@@ -11,7 +11,7 @@ use rand::Rng;
 struct Args {
     #[clap(subcommand)]
     mode: Mode,
-    
+
     /// Dry run mode - generate and display data without copying to clipboard
     #[clap(short, long)]
     dry_run: bool,
@@ -24,7 +24,7 @@ enum Mode {
         /// Number of bytes of random data to generate
         #[clap(value_name = "BYTES")]
         bytes: usize,
-        
+
         /// Output format for the random data
         #[clap(short, long, value_enum, default_value_t = OutputFormat::Hex)]
         format: OutputFormat,
@@ -34,27 +34,27 @@ enum Mode {
         /// Number of characters of text to generate
         #[clap(value_name = "CHARS")]
         chars: usize,
-        
+
         /// Probability (0.0-1.0) that each character will have diacritics
         #[clap(short, long, default_value_t = 0.5)]
         probability: f64,
-        
+
         /// Minimum number of diacritics per character
         #[clap(long, default_value_t = 1)]
         min_diacritics: usize,
-        
+
         /// Maximum number of diacritics per character
         #[clap(long, default_value_t = 3)]
         max_diacritics: usize,
-        
+
         /// Minimum number of characters between spaces
         #[clap(long, default_value_t = 3)]
         min_word_length: usize,
-        
+
         /// Maximum number of characters between spaces
         #[clap(long, default_value_t = 8)]
         max_word_length: usize,
-        
+
         /// Use a preset configuration
         #[clap(long, value_enum)]
         preset: Option<TextPreset>,
@@ -140,19 +140,17 @@ struct TextConfig {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    
+
     match args.mode {
-        Mode::Binary { bytes, format } => {
-            generate_binary_data(bytes, format, args.dry_run)
-        }
-        Mode::Text { 
-            chars, 
-            probability, 
-            min_diacritics, 
-            max_diacritics, 
-            min_word_length, 
+        Mode::Binary { bytes, format } => generate_binary_data(bytes, format, args.dry_run),
+        Mode::Text {
+            chars,
+            probability,
+            min_diacritics,
+            max_diacritics,
+            min_word_length,
             max_word_length,
-            preset 
+            preset,
         } => {
             let config = if let Some(preset) = preset {
                 preset.get_config()
@@ -175,11 +173,11 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
     if bytes == 0 {
         anyhow::bail!("Number of bytes must be greater than 0");
     }
-    
+
     // Generate random data
     let mut rng = rand::rng();
     let random_bytes: Vec<u8> = (0..bytes).map(|_| rng.random()).collect();
-    
+
     // Handle raw binary data differently
     if format == OutputFormat::Raw {
         // Copy raw binary data to clipboard
@@ -188,34 +186,42 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
             return Ok(());
         } else {
             copy_binary_to_clipboard(&random_bytes)?;
-            println!("Generated {} bytes of raw binary data and copied to clipboard", bytes);
+            println!(
+                "Generated {} bytes of raw binary data and copied to clipboard",
+                bytes
+            );
         }
         return Ok(());
     }
-    
+
     // Format the data according to the specified format
     let formatted_data = match format {
         OutputFormat::Hex => hex_encode(&random_bytes),
         OutputFormat::Base64 => general_purpose::STANDARD.encode(&random_bytes),
         OutputFormat::Raw => unreachable!(), // Handled above
     };
-    
+
     // Copy to clipboard (unless in dry run mode)
     if dry_run {
         println!("{}", formatted_data);
         return Ok(());
     } else {
-        let mut clipboard = Clipboard::new()
-            .context("Failed to access clipboard. Make sure you're running in a graphical environment.")?;
-        
-        clipboard.set_text(formatted_data.clone())
+        let mut clipboard = Clipboard::new().context(
+            "Failed to access clipboard. Make sure you're running in a graphical environment.",
+        )?;
+
+        clipboard
+            .set_text(formatted_data.clone())
             .context("Failed to copy data to clipboard")?;
-        
-        println!("Generated {} bytes of random data and copied to clipboard", bytes);
+
+        println!(
+            "Generated {} bytes of random data and copied to clipboard",
+            bytes
+        );
     }
     println!("Format: {:?}", format);
     println!("Data length: {} characters", formatted_data.len());
-    
+
     // Show a preview of the data (first 50 characters)
     let preview = if formatted_data.len() > 50 {
         format!("{}...", &formatted_data[..50])
@@ -223,7 +229,7 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
         formatted_data
     };
     println!("Preview: {}", preview);
-    
+
     Ok(())
 }
 
@@ -232,41 +238,51 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
     if chars == 0 {
         anyhow::bail!("Number of characters must be greater than 0");
     }
-    
+
     if config.probability < 0.0 || config.probability > 1.0 {
         anyhow::bail!("Probability must be between 0.0 and 1.0");
     }
-    
+
     if config.min_diacritics > config.max_diacritics {
         anyhow::bail!("Minimum diacritics cannot be greater than maximum diacritics");
     }
-    
+
     if config.min_word_length > config.max_word_length {
         anyhow::bail!("Minimum word length cannot be greater than maximum word length");
     }
-    
+
     // Generate text with diacritics
     let text = generate_zalgo_text(chars, &config)?;
-    
+
     // Copy to clipboard (unless in dry run mode)
     if dry_run {
         println!("{}", text);
         return Ok(());
     } else {
-        let mut clipboard = Clipboard::new()
-            .context("Failed to access clipboard. Make sure you're running in a graphical environment.")?;
-        
-        clipboard.set_text(text.clone())
+        let mut clipboard = Clipboard::new().context(
+            "Failed to access clipboard. Make sure you're running in a graphical environment.",
+        )?;
+
+        clipboard
+            .set_text(text.clone())
             .context("Failed to copy text to clipboard")?;
-        
-        println!("Generated {} characters of text with diacritics and copied to clipboard", chars);
+
+        println!(
+            "Generated {} characters of text with diacritics and copied to clipboard",
+            chars
+        );
     }
-    
+
     println!("Text length: {} characters", text.len());
-    println!("Config: probability={:.2}, diacritics={}-{}, word_length={}-{}", 
-             config.probability, config.min_diacritics, config.max_diacritics,
-             config.min_word_length, config.max_word_length);
-    
+    println!(
+        "Config: probability={:.2}, diacritics={}-{}, word_length={}-{}",
+        config.probability,
+        config.min_diacritics,
+        config.max_diacritics,
+        config.min_word_length,
+        config.max_word_length
+    );
+
     // Show a preview of the text (first 100 characters)
     let preview = if text.chars().count() > 100 {
         format!("{}...", text.chars().take(100).collect::<String>())
@@ -274,7 +290,7 @@ fn generate_text_data(chars: usize, config: TextConfig, dry_run: bool) -> Result
         text
     };
     println!("Preview: {}", preview);
-    
+
     Ok(())
 }
 
@@ -287,13 +303,15 @@ fn copy_binary_to_clipboard(data: &[u8]) -> Result<()> {
     // or handle it as bytes. Since arboard primarily handles text and images,
     // we'll encode as latin-1 which preserves all byte values
     let text = data.iter().map(|&b| char::from(b)).collect::<String>();
-    
-    let mut clipboard = Clipboard::new()
-        .context("Failed to access clipboard. Make sure you're running in a graphical environment.")?;
-    
-    clipboard.set_text(text)
+
+    let mut clipboard = Clipboard::new().context(
+        "Failed to access clipboard. Make sure you're running in a graphical environment.",
+    )?;
+
+    clipboard
+        .set_text(text)
         .context("Failed to copy binary data to clipboard")?;
-    
+
     Ok(())
 }
 
@@ -301,45 +319,48 @@ fn generate_zalgo_text(chars: usize, config: &TextConfig) -> Result<String> {
     let mut rng = rand::rng();
     let mut result = String::new();
     let mut chars_added = 0;
-    
+
     // Base characters for text generation (ASCII letters)
-    let base_chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".chars().collect();
-    
+    let base_chars: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        .chars()
+        .collect();
+
     // Diacritical marks for Zalgo text
     let combining_marks = get_combining_marks();
-    
+
     while chars_added < chars {
         // Generate a word
         let word_length = rng.random_range(config.min_word_length..=config.max_word_length);
         let word_length = std::cmp::min(word_length, chars - chars_added);
-        
+
         for _ in 0..word_length {
             if chars_added >= chars {
                 break;
             }
-            
+
             // Add a base character
             let base_char = base_chars[rng.random_range(0..base_chars.len())];
             result.push(base_char);
             chars_added += 1;
-            
+
             // Potentially add diacritics
             if rng.random::<f64>() < config.probability {
-                let num_diacritics = rng.random_range(config.min_diacritics..=config.max_diacritics);
+                let num_diacritics =
+                    rng.random_range(config.min_diacritics..=config.max_diacritics);
                 for _ in 0..num_diacritics {
                     let mark = combining_marks[rng.random_range(0..combining_marks.len())];
                     result.push(mark);
                 }
             }
         }
-        
+
         // Add space if we haven't reached the character limit
         if chars_added < chars {
             result.push(' ');
             chars_added += 1;
         }
     }
-    
+
     Ok(result)
 }
 

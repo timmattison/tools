@@ -160,7 +160,11 @@ fn rewind_to_time(recording: &Recording, target_time: f64, current_idx: &mut usi
     Ok(())
 }
 
-fn fast_forward_to_time(recording: &Recording, target_time: f64, current_idx: &mut usize) -> Result<()> {
+fn fast_forward_to_time(
+    recording: &Recording,
+    target_time: f64,
+    current_idx: &mut usize,
+) -> Result<()> {
     while *current_idx < recording.events.len() {
         let event = &recording.events[*current_idx];
         if event.time > target_time {

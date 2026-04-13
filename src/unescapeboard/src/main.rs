@@ -10,11 +10,11 @@ impl Transformer for UnescapeTransformer {
         // Check for escaped quotes
         content.contains(r#"\""#)
     }
-    
+
     fn transform(&self, content: &str) -> Result<String, Box<dyn Error>> {
         // Replace escaped quotes with regular quotes
         let unescaped = content.replace(r#"\""#, r#"""#);
-        
+
         // Only return Ok if content actually changed
         if unescaped != content {
             Ok(unescaped)
@@ -22,11 +22,11 @@ impl Transformer for UnescapeTransformer {
             Err("No escaped quotes found".into())
         }
     }
-    
+
     fn waiting_message(&self) -> &str {
         "Waiting for escaped text in clipboard"
     }
-    
+
     fn success_message(&self) -> &str {
         "Unescaped text in clipboard"
     }

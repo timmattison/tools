@@ -1,10 +1,10 @@
+use crate::Recording;
 use anyhow::{Context, Result};
-use minijinja::{Environment, context};
+use base64::{engine::general_purpose, Engine as _};
+use minijinja::{context, Environment};
 use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
-use base64::{Engine as _, engine::general_purpose};
-use crate::Recording;
 
 const HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 <html lang="en">
@@ -356,13 +356,13 @@ pub async fn export_web(
     compress: bool,
 ) -> Result<()> {
     let recording = Recording::load(&input)?;
-    
+
     let output_path = output.unwrap_or_else(|| {
         let mut path = input.clone();
         path.set_extension("html");
         path
     });
-    
+
     // Get theme colors
     let theme_colors = match theme.as_str() {
         "dracula" => Theme::dracula(),
@@ -371,14 +371,13 @@ pub async fn export_web(
         "solarized-light" => Theme::solarized_light(),
         _ => Theme::auto(),
     };
-    
+
     // Prepare recording data
     let recording_data = if compress {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         serde_json::to_writer(&mut encoder, &recording)
             .context("Failed to compress recording data")?;
-        let compressed = encoder.finish()
-            .context("Failed to finish compression")?;
+        let compressed = encoder.finish().context("Failed to finish compression")?;
         format!(
             "JSON.parse(pako.inflate(Uint8Array.from(atob('{}'), c => c.charCodeAt(0)), {{ to: 'string' }}))",
             general_purpose::STANDARD.encode(&compressed)
@@ -389,17 +388,17 @@ pub async fn export_web(
             .context("Failed to serialize recording")?
             .replace("</", r"<\/")
     };
-    
+
     // Format duration
     let duration_minutes = recording.duration as u64 / 60;
     let duration_seconds = recording.duration as u64 % 60;
     let duration_formatted = format!("{}:{:02}", duration_minutes, duration_seconds);
-    
+
     // Create template environment
     let mut env = Environment::new();
     env.add_template("main", HTML_TEMPLATE)?;
     let template = env.get_template("main")?;
-    
+
     // Render HTML
     let html = template.render(context! {
         title => recording.title,
@@ -409,15 +408,15 @@ pub async fn export_web(
         recording_data => recording_data,
         theme => theme_colors,
     })?;
-    
+
     // Write output file
-    let mut output_file = File::create(&output_path)
-        .context("Failed to create output file")?;
-    output_file.write_all(html.as_bytes())
+    let mut output_file = File::create(&output_path).context("Failed to create output file")?;
+    output_file
+        .write_all(html.as_bytes())
         .context("Failed to write HTML file")?;
-    
+
     println!("Web export saved to: {}", output_path.display());
-    
+
     Ok(())
 }
 
@@ -447,7 +446,7 @@ impl Theme {
     fn auto() -> Self {
         Self::black()
     }
-    
+
     fn black() -> Self {
         Self {
             background: String::from("#000000"),
@@ -470,7 +469,7 @@ impl Theme {
             bright_white: String::from("#ffffff"),
         }
     }
-    
+
     fn dracula() -> Self {
         Self {
             background: String::from("#282a36"),
@@ -493,7 +492,7 @@ impl Theme {
             bright_white: String::from("#ffffff"),
         }
     }
-    
+
     fn monokai() -> Self {
         Self {
             background: String::from("#272822"),
@@ -516,7 +515,7 @@ impl Theme {
             bright_white: String::from("#f8f8f2"),
         }
     }
-    
+
     fn solarized_dark() -> Self {
         Self {
             background: String::from("#002b36"),
@@ -539,7 +538,7 @@ impl Theme {
             bright_white: String::from("#fdf6e3"),
         }
     }
-    
+
     fn solarized_light() -> Self {
         Self {
             background: String::from("#fdf6e3"),

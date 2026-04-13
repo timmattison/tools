@@ -20,18 +20,18 @@ impl FileWalker {
         } else {
             paths
         };
-        
+
         Self {
             paths,
             filter: None,
         }
     }
-    
+
     pub fn with_filter(mut self, filter: Option<FilterType>) -> Self {
         self.filter = filter;
         self
     }
-    
+
     /// Walk through all files in the configured paths, applying the filter if set.
     ///
     /// # Errors
@@ -46,7 +46,7 @@ impl FileWalker {
         for path in &self.paths {
             unique_paths.insert(path.as_str());
         }
-        
+
         for path in unique_paths {
             for entry in WalkDir::new(path) {
                 let entry = match entry {
@@ -56,26 +56,26 @@ impl FileWalker {
                         continue;
                     }
                 };
-                
+
                 // Skip directories
                 if entry.file_type().is_dir() {
                     continue;
                 }
-                
+
                 // Apply filter if specified
                 if let Some(filter) = &self.filter {
                     if !self.matches_filter(&entry, filter) {
                         continue;
                     }
                 }
-                
+
                 handler(&entry)?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Walk through all files in the configured paths, grouping entries by their source path.
     ///
     /// # Errors
@@ -90,10 +90,10 @@ impl FileWalker {
         for path in &self.paths {
             unique_paths.insert(path.as_str());
         }
-        
+
         for path in unique_paths {
             let mut entries = Vec::new();
-            
+
             for entry in WalkDir::new(path) {
                 let entry = match entry {
                     Ok(e) => e,
@@ -102,31 +102,31 @@ impl FileWalker {
                         continue;
                     }
                 };
-                
+
                 // Skip directories
                 if entry.file_type().is_dir() {
                     continue;
                 }
-                
+
                 // Apply filter if specified
                 if let Some(filter) = &self.filter {
                     if !self.matches_filter(&entry, filter) {
                         continue;
                     }
                 }
-                
+
                 entries.push(entry);
             }
-            
+
             handler(path, &entries)?;
         }
-        
+
         Ok(())
     }
-    
+
     fn matches_filter(&self, entry: &DirEntry, filter: &FilterType) -> bool {
         let file_name = entry.file_name().to_string_lossy();
-        
+
         match filter {
             FilterType::Suffix(suffix) => file_name.ends_with(suffix),
             FilterType::Prefix(prefix) => file_name.starts_with(prefix),
@@ -154,19 +154,19 @@ pub fn format_count(count: u64) -> String {
 pub fn format_bytes(bytes: u64) -> String {
     const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB", "PB"];
     const THRESHOLD: f64 = 1024.0;
-    
+
     if bytes == 0 {
         return "0 B".to_string();
     }
-    
+
     let mut size = bytes as f64;
     let mut unit_index = 0;
-    
+
     while size >= THRESHOLD && unit_index < UNITS.len() - 1 {
         size /= THRESHOLD;
         unit_index += 1;
     }
-    
+
     if unit_index == 0 {
         format!("{} B", bytes)
     } else {
@@ -177,7 +177,7 @@ pub fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_format_count() {
         assert_eq!(format_count(0), "0");
@@ -185,7 +185,7 @@ mod tests {
         assert_eq!(format_count(1000), "1,000");
         assert_eq!(format_count(1234567), "1,234,567");
     }
-    
+
     #[test]
     fn test_format_bytes() {
         assert_eq!(format_bytes(0), "0 B");

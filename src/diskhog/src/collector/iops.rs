@@ -82,8 +82,7 @@ impl AtomicIOPSCounter {
     /// we double-check the live counters before removing the entry, in case new
     /// operations arrived between snapshot and cleanup.
     pub fn is_zero(&self) -> bool {
-        self.read_ops.load(Ordering::Relaxed) == 0
-            && self.write_ops.load(Ordering::Relaxed) == 0
+        self.read_ops.load(Ordering::Relaxed) == 0 && self.write_ops.load(Ordering::Relaxed) == 0
     }
 }
 
@@ -99,7 +98,10 @@ pub type IOPSData = Arc<parking_lot::RwLock<HashMap<u32, Arc<AtomicIOPSCounter>>
 /// currently displayed in the UI, it can be accessed via `IOPSCollector::parser_stats()`
 /// to diagnose issues with fs_usage parsing.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code, reason = "Diagnostic API - used in tests and available for debugging")]
+#[allow(
+    dead_code,
+    reason = "Diagnostic API - used in tests and available for debugging"
+)]
 pub struct ParserStats {
     /// Number of lines that were not disk I/O operations.
     ///
@@ -127,7 +129,10 @@ struct AtomicParserStats {
 
 impl AtomicParserStats {
     /// Returns a snapshot of the current statistics.
-    #[allow(dead_code, reason = "Diagnostic API - used in tests and available for debugging")]
+    #[allow(
+        dead_code,
+        reason = "Diagnostic API - used in tests and available for debugging"
+    )]
     fn snapshot(&self) -> ParserStats {
         ParserStats {
             non_io_lines: self.non_io_lines.load(Ordering::Relaxed),
@@ -194,7 +199,10 @@ impl IOPSCollector {
     /// This can be useful for debugging or monitoring the health of the parser.
     /// A high skip rate relative to processed lines might indicate issues with
     /// the fs_usage output format or parser logic.
-    #[allow(dead_code, reason = "Diagnostic API - used in tests and available for debugging")]
+    #[allow(
+        dead_code,
+        reason = "Diagnostic API - used in tests and available for debugging"
+    )]
     pub fn parser_stats(&self) -> ParserStats {
         self.parser_stats.snapshot()
     }
@@ -208,9 +216,7 @@ impl IOPSCollector {
     /// Returns an error if fs_usage cannot be started (e.g., not running as root).
     pub async fn start(&mut self) -> Result<IOPSData> {
         if !Self::is_root() {
-            anyhow::bail!(
-                "IOPS collection requires root privileges. Run with: sudo diskhog"
-            );
+            anyhow::bail!("IOPS collection requires root privileges. Run with: sudo diskhog");
         }
 
         // Spawn fs_usage with diskio filter
@@ -559,7 +565,10 @@ mod tests {
 
         // Now it should be cleaned up
         let data = collector.data.read();
-        assert!(data.is_empty(), "Counter should be cleaned up after two zero snapshots");
+        assert!(
+            data.is_empty(),
+            "Counter should be cleaned up after two zero snapshots"
+        );
     }
 
     #[test]

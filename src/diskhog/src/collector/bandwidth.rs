@@ -56,8 +56,11 @@ impl BandwidthCollector {
     pub fn prime(&mut self) {
         // Use a minimal duration - it doesn't matter since we discard the results.
         // We just need to populate previous_readings with current cumulative values.
-        self.system
-            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            process_refresh_kind(),
+        );
 
         for (pid, process) in self.system.processes() {
             let pid_u32 = pid.as_u32();
@@ -99,8 +102,11 @@ impl BandwidthCollector {
     /// Returns a list of `ProcessIOStats` sorted by total bandwidth (descending).
     pub fn collect(&mut self, elapsed: Duration) -> Vec<ProcessIOStats> {
         // Refresh process disk usage
-        self.system
-            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh_kind());
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            process_refresh_kind(),
+        );
 
         let mut stats = Vec::new();
         let mut current_pids = HashSet::new();
@@ -112,13 +118,13 @@ impl BandwidthCollector {
             let usage = process.disk_usage();
 
             // Get previous reading or create default
-            let previous = self
-                .previous_readings
-                .entry(pid_u32)
-                .or_insert_with(|| PreviousReading {
-                    read_bytes: usage.total_read_bytes,
-                    written_bytes: usage.total_written_bytes,
-                });
+            let previous =
+                self.previous_readings
+                    .entry(pid_u32)
+                    .or_insert_with(|| PreviousReading {
+                        read_bytes: usage.total_read_bytes,
+                        written_bytes: usage.total_written_bytes,
+                    });
 
             // Calculate bytes delta since last reading.
             // Note: total_read_bytes and total_written_bytes are cumulative.
@@ -130,7 +136,9 @@ impl BandwidthCollector {
             // on underflow. This may produce one incorrect reading, but it self-corrects
             // on the next collection cycle. This is inherent to PID-based tracking.
             let read_delta = usage.total_read_bytes.saturating_sub(previous.read_bytes);
-            let write_delta = usage.total_written_bytes.saturating_sub(previous.written_bytes);
+            let write_delta = usage
+                .total_written_bytes
+                .saturating_sub(previous.written_bytes);
 
             // Update previous reading
             previous.read_bytes = usage.total_read_bytes;
@@ -145,10 +153,7 @@ impl BandwidthCollector {
                 let write_rate = BytesPerSec::from_bytes_and_duration(write_delta, elapsed);
 
                 stats.push(ProcessIOStats::new_bandwidth_only(
-                    pid_u32,
-                    name,
-                    read_rate,
-                    write_rate,
+                    pid_u32, name, read_rate, write_rate,
                 ));
             }
         }

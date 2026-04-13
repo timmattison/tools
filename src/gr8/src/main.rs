@@ -108,7 +108,10 @@ define_rate_limit_resources! {
 struct RateLimitResponse {
     resources: Resources,
     /// Rate limit for the core API (duplicates resources.core, kept for API structure completeness)
-    #[allow(dead_code, reason = "Required by GitHub API response structure but not used")]
+    #[allow(
+        dead_code,
+        reason = "Required by GitHub API response structure but not used"
+    )]
     rate: RateLimit,
 }
 
@@ -124,8 +127,8 @@ fn fetch_rate_limit_data() -> Result<String> {
         anyhow::bail!("gh command failed: {}", stderr);
     }
 
-    let stdout = String::from_utf8(output.stdout)
-        .context("Failed to parse command output as UTF-8")?;
+    let stdout =
+        String::from_utf8(output.stdout).context("Failed to parse command output as UTF-8")?;
 
     Ok(stdout)
 }
@@ -337,7 +340,13 @@ fn print_rate_limit_table(title: &str, rate_limits: &[NamedRateLimit]) {
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic)
         .set_header(vec![
-            "Resource", "Rate", "Exhausts", "Limit", "Used", "Remaining", "Reset Time",
+            "Resource",
+            "Rate",
+            "Exhausts",
+            "Limit",
+            "Used",
+            "Remaining",
+            "Reset Time",
         ]);
 
     for named in rate_limits {
@@ -359,8 +368,8 @@ fn main() -> Result<()> {
     }
 
     let json_data = fetch_rate_limit_data()?;
-    let response: RateLimitResponse = serde_json::from_str(&json_data)
-        .context("Failed to parse JSON response")?;
+    let response: RateLimitResponse =
+        serde_json::from_str(&json_data).context("Failed to parse JSON response")?;
 
     // Print header
     let now = Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -405,7 +414,10 @@ mod tests {
 
     /// Creates a Resources struct with specified remaining counts for core and graphql,
     /// all other resources get remaining=100. Useful for testing partitioning with specific resources.
-    fn make_resources_with_specific_exhausted(core_remaining: u32, graphql_remaining: u32) -> Resources {
+    fn make_resources_with_specific_exhausted(
+        core_remaining: u32,
+        graphql_remaining: u32,
+    ) -> Resources {
         let mut resources = make_all_resources_with_remaining(100);
         resources.core = make_rate_limit(core_remaining);
         resources.graphql = make_rate_limit(graphql_remaining);
@@ -510,31 +522,46 @@ mod tests {
     #[test]
     fn test_format_time_until_reset_seconds_only() {
         let future_epoch = Utc::now().timestamp() + 45;
-        assert_eq!(format_time_until_reset(future_epoch), Some("45s".to_string()));
+        assert_eq!(
+            format_time_until_reset(future_epoch),
+            Some("45s".to_string())
+        );
     }
 
     #[test]
     fn test_format_time_until_reset_minutes_and_seconds() {
         let future_epoch = Utc::now().timestamp() + 130; // 2m 10s
-        assert_eq!(format_time_until_reset(future_epoch), Some("2m 10s".to_string()));
+        assert_eq!(
+            format_time_until_reset(future_epoch),
+            Some("2m 10s".to_string())
+        );
     }
 
     #[test]
     fn test_format_time_until_reset_hours_minutes_seconds() {
         let future_epoch = Utc::now().timestamp() + 3665; // 1h 1m 5s
-        assert_eq!(format_time_until_reset(future_epoch), Some("1h 1m 5s".to_string()));
+        assert_eq!(
+            format_time_until_reset(future_epoch),
+            Some("1h 1m 5s".to_string())
+        );
     }
 
     #[test]
     fn test_format_time_until_reset_exact_hour() {
         let future_epoch = Utc::now().timestamp() + 3600; // 1h 0m 0s
-        assert_eq!(format_time_until_reset(future_epoch), Some("1h 0m 0s".to_string()));
+        assert_eq!(
+            format_time_until_reset(future_epoch),
+            Some("1h 0m 0s".to_string())
+        );
     }
 
     #[test]
     fn test_format_time_until_reset_exact_minute() {
         let future_epoch = Utc::now().timestamp() + 60; // 1m 0s
-        assert_eq!(format_time_until_reset(future_epoch), Some("1m 0s".to_string()));
+        assert_eq!(
+            format_time_until_reset(future_epoch),
+            Some("1m 0s".to_string())
+        );
     }
 
     #[test]
@@ -576,7 +603,11 @@ mod tests {
     }
 
     /// Creates a RateLimit for testing rate calculations with specific elapsed time and usage
-    fn make_rate_limit_with_timing(used: u32, remaining: u32, seconds_until_reset: i64) -> RateLimit {
+    fn make_rate_limit_with_timing(
+        used: u32,
+        remaining: u32,
+        seconds_until_reset: i64,
+    ) -> RateLimit {
         RateLimit {
             limit: used + remaining,
             used,
@@ -645,7 +676,10 @@ mod tests {
     fn test_predict_exhaustion_not_enough_data() {
         // Only 30 seconds elapsed, not enough for prediction
         let rate_limit = make_rate_limit_with_timing(100, 4900, 3570);
-        assert_eq!(predict_exhaustion(&rate_limit), ExhaustionPrediction::Unknown);
+        assert_eq!(
+            predict_exhaustion(&rate_limit),
+            ExhaustionPrediction::Unknown
+        );
     }
 
     #[test]

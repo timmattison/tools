@@ -282,9 +282,13 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                                         match display_image_from_file(&path, args) {
                                             Ok(_) => {
                                                 recent_files.insert(path.clone());
-                                            },
+                                            }
                                             Err(e) => {
-                                                eprintln!("Failed to display image {}: {}", path.display(), e);
+                                                eprintln!(
+                                                    "Failed to display image {}: {}",
+                                                    path.display(),
+                                                    e
+                                                );
                                             }
                                         }
                                     } else if is_text_file(&path) {
@@ -292,9 +296,13 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                                         match display_text_file(&path) {
                                             Ok(_) => {
                                                 recent_files.insert(path.clone());
-                                            },
+                                            }
                                             Err(e) => {
-                                                eprintln!("Failed to display text file {}: {}", path.display(), e);
+                                                eprintln!(
+                                                    "Failed to display text file {}: {}",
+                                                    path.display(),
+                                                    e
+                                                );
                                             }
                                         }
                                     }
@@ -320,8 +328,6 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
 
     Ok(())
 }
-
-
 
 fn is_video_file(file_path: &PathBuf) -> bool {
     if let Some(extension) = file_path.extension() {
@@ -355,7 +361,20 @@ fn is_image_file(file_path: &PathBuf) -> bool {
             let ext_lower = ext_str.to_lowercase();
             matches!(
                 ext_lower.as_str(),
-                "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tiff" | "tif" | "webp" | "svg" | "ico" | "ppm" | "pbm" | "pgm" | "pnm"
+                "jpg"
+                    | "jpeg"
+                    | "png"
+                    | "gif"
+                    | "bmp"
+                    | "tiff"
+                    | "tif"
+                    | "webp"
+                    | "svg"
+                    | "ico"
+                    | "ppm"
+                    | "pbm"
+                    | "pgm"
+                    | "pnm"
             )
         } else {
             false
@@ -376,7 +395,9 @@ fn ensure_ffmpeg_available() -> Result<()> {
         .output()
         .is_err()
     {
-        anyhow::bail!("ffmpeg is required for video playback but was not found. Please install ffmpeg.");
+        anyhow::bail!(
+            "ffmpeg is required for video playback but was not found. Please install ffmpeg."
+        );
     }
     Ok(())
 }
@@ -387,12 +408,18 @@ fn ensure_ffprobe_available() -> Result<()> {
         .output()
         .is_err()
     {
-        anyhow::bail!("ffprobe is required for video playback but was not found. Please install ffmpeg.");
+        anyhow::bail!(
+            "ffprobe is required for video playback but was not found. Please install ffmpeg."
+        );
     }
     Ok(())
 }
 
-fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, transport: &RemoteTransport, feature: &str) -> Result<()> {
+fn validate_terminal_for_graphics(
+    terminal_caps: &TerminalCapabilities,
+    transport: &RemoteTransport,
+    feature: &str,
+) -> Result<()> {
     // Check for Mosh first, since it strips escape sequences needed by all graphics protocols
     if *transport == RemoteTransport::Mosh {
         anyhow::bail!(
@@ -410,10 +437,10 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, transpor
     if std::env::var("TMUX").is_ok() {
         anyhow::bail!("tmux detected. {} display does not work in tmux. Please run it directly in your terminal.", feature);
     }
-    
+
     if !terminal_caps.supports_graphics {
         let term = std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string());
-        
+
         let error_msg = match terminal_caps.terminal_type {
             TerminalType::Alacritty => format!(
                 "{} display is not supported in Alacritty terminal.\n\
@@ -446,7 +473,7 @@ fn validate_terminal_for_graphics(terminal_caps: &TerminalCapabilities, transpor
                 feature, feature.to_lowercase(), term
             )
         };
-        
+
         anyhow::bail!("{}", error_msg);
     }
     Ok(())
@@ -492,7 +519,13 @@ fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn setup_video_controls(terminal_caps: &TerminalCapabilities) -> Result<(Option<termion::raw::RawTerminal<io::Stdout>>, std::sync::mpsc::Receiver<VideoControl>, Option<thread::JoinHandle<()>>)> {
+fn setup_video_controls(
+    terminal_caps: &TerminalCapabilities,
+) -> Result<(
+    Option<termion::raw::RawTerminal<io::Stdout>>,
+    std::sync::mpsc::Receiver<VideoControl>,
+    Option<thread::JoinHandle<()>>,
+)> {
     let supports_interactive_controls = terminal_caps.supports_raw_mode;
 
     if !supports_interactive_controls {
@@ -535,7 +568,9 @@ fn setup_video_controls(terminal_caps: &TerminalCapabilities) -> Result<(Option<
 fn print_control_notice(terminal_caps: &TerminalCapabilities) {
     match terminal_caps.terminal_type {
         TerminalType::Alacritty => {
-            eprintln!("Notice: Running in Alacritty. Video will play without interactive controls.");
+            eprintln!(
+                "Notice: Running in Alacritty. Video will play without interactive controls."
+            );
             eprintln!("For interactive video controls, consider using iTerm2 or Kitty.");
         }
         _ => {
@@ -636,8 +671,7 @@ fn process_frame_display(
         // Always clear for first frame
         *first_frame = false;
         true
-    } else if let (Some(current), Some(previous)) =
-        (current_terminal_size, *previous_terminal_size)
+    } else if let (Some(current), Some(previous)) = (current_terminal_size, *previous_terminal_size)
     {
         // Clear if terminal dimensions changed at all
         current.0 != previous.0 || current.1 != previous.1
@@ -656,13 +690,7 @@ fn process_frame_display(
 
     // Draw progress bar
     if let Some((term_width, term_height)) = current_terminal_size {
-        draw_progress_bar(
-            current_time,
-            duration,
-            fps,
-            term_width,
-            term_height,
-        )?;
+        draw_progress_bar(current_time, duration, fps, term_width, term_height)?;
     }
 
     // Update previous terminal size for next comparison
@@ -1270,12 +1298,10 @@ fn display_image_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
 fn display_text_file(file_path: &PathBuf) -> Result<()> {
     let contents = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read text file: {}", file_path.display()))?;
-    
+
     print!("{}", contents);
-    io::stdout()
-        .flush()
-        .context("Failed to flush output")?;
-    
+    io::stdout().flush().context("Failed to flush output")?;
+
     Ok(())
 }
 
@@ -1342,10 +1368,22 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
         TerminalType::Zellij => {
             display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
         }
-        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => {
-            display_image_kitty(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline)
-        }
-        _ => display_image_iterm2(&img, scaled_width, scaled_height, args, under_remote_proxy, no_newline),
+        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => display_image_kitty(
+            &img,
+            scaled_width,
+            scaled_height,
+            args,
+            under_remote_proxy,
+            no_newline,
+        ),
+        _ => display_image_iterm2(
+            &img,
+            scaled_width,
+            scaled_height,
+            args,
+            under_remote_proxy,
+            no_newline,
+        ),
     }
 }
 
@@ -1394,14 +1432,12 @@ fn calculate_aspect_preserving_size(
             if img_aspect > box_aspect {
                 // Image is wider than box - constrain by width
                 let display_width = max_w;
-                let display_height =
-                    ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
+                let display_height = ((max_w as f64 / img_aspect) / cell_aspect).round() as u32;
                 (Some(display_width), Some(display_height.max(1)))
             } else {
                 // Image is taller than box - constrain by height
                 let display_height = max_h;
-                let display_width =
-                    (max_h as f64 * cell_aspect * img_aspect).round() as u32;
+                let display_width = (max_h as f64 * cell_aspect * img_aspect).round() as u32;
                 (Some(display_width.max(1)), Some(display_height))
             }
         }
@@ -1478,7 +1514,14 @@ fn downscale_to_display_pixels<'a>(
 /// Kitty terminal display with better performance for video.
 ///
 /// Also used for WezTerm and Ghostty, which support the Kitty graphics protocol.
-fn display_image_kitty(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
+fn display_image_kitty(
+    img: &DynamicImage,
+    width: Option<u32>,
+    height: Option<u32>,
+    args: &Args,
+    under_remote_proxy: bool,
+    no_newline: bool,
+) -> Result<()> {
     // display_width/display_height are in terminal cells (character columns/rows).
     // They serve two roles: (1) the Kitty protocol `c=`/`r=` display hints that tell
     // the terminal how many cells the image should span, and (2) the downscale target
@@ -1670,7 +1713,14 @@ fn display_image_sixel(
 /// Computes aspect-preserving display dimensions and downscales the image to the
 /// target pixel size before encoding. This matches the Kitty path's behavior and
 /// prevents sending oversized payloads for very large images.
-fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u32>, args: &Args, under_remote_proxy: bool, no_newline: bool) -> Result<()> {
+fn display_image_iterm2(
+    img: &DynamicImage,
+    width: Option<u32>,
+    height: Option<u32>,
+    args: &Args,
+    under_remote_proxy: bool,
+    no_newline: bool,
+) -> Result<()> {
     // Calculate aspect-corrected display dimensions in terminal cells, then use them
     // both as the iTerm2 width/height hints and the downscale target.
     let (display_width, display_height) = calculate_aspect_preserving_size(
@@ -1700,7 +1750,13 @@ fn display_image_iterm2(img: &DynamicImage, width: Option<u32>, height: Option<u
     // Use base64 encoding
     let encoded = BASE64_STANDARD.encode(&pnm_data);
 
-    print_iterm2_image(&encoded, display_width, display_height, no_newline, under_remote_proxy)
+    print_iterm2_image(
+        &encoded,
+        display_width,
+        display_height,
+        no_newline,
+        under_remote_proxy,
+    )
 }
 
 /// Optimized Kitty image printing with reduced protocol overhead
@@ -1750,7 +1806,7 @@ fn detect_terminal_capabilities() -> TerminalCapabilities {
     let supports_graphics = !matches!(terminal_type, TerminalType::Alacritty) &&
         !term.contains("linux") &&  // Linux console doesn't support graphics
         !term.contains("screen") &&  // Screen doesn't support graphics
-        !term.starts_with("vt");    // VT terminals don't support graphics
+        !term.starts_with("vt"); // VT terminals don't support graphics
 
     let supports_raw_mode = {
         use std::os::unix::io::AsRawFd;
@@ -2171,14 +2227,16 @@ mod tests {
 
     #[test]
     fn aspect_preserving_returns_original_when_disabled() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(100, 100, Some(50), Some(50), false, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_handles_zero_height_defensively() {
         // Zero height should not panic (division by zero), returns original dimensions
-        let result = calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(100, 0, Some(50), Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), Some(50)));
     }
 
@@ -2188,7 +2246,8 @@ mod tests {
         // With cell aspect ratio of 2:1, effective box is 50x100 pixels
         // Image aspect = 1.0, box aspect = 50/100 = 0.5
         // Image is wider than box, constrain by width
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(100, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/1.0)/2.0 = 25
         assert_eq!(result, (Some(50), Some(25)));
     }
@@ -2198,7 +2257,8 @@ mod tests {
         // Wide image (200x100) in square box (50x50)
         // Image aspect = 2.0
         // Constrain by width
-        let result = calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(200, 100, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_width = 50, display_height = (50/2.0)/2.0 = 12.5 -> 13 (rounded)
         assert_eq!(result, (Some(50), Some(13)));
     }
@@ -2208,20 +2268,23 @@ mod tests {
         // Tall image (100x400) in square box (50x50)
         // Image aspect = 0.25
         // Constrain by height
-        let result = calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(100, 400, Some(50), Some(50), true, TEST_CELL_ASPECT);
         // display_height = 50, display_width = 50 * 2.0 * 0.25 = 25
         assert_eq!(result, (Some(25), Some(50)));
     }
 
     #[test]
     fn aspect_preserving_only_width_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(100, 100, Some(50), None, true, TEST_CELL_ASPECT);
         assert_eq!(result, (Some(50), None));
     }
 
     #[test]
     fn aspect_preserving_only_height_specified() {
-        let result = calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(100, 100, None, Some(50), true, TEST_CELL_ASPECT);
         assert_eq!(result, (None, Some(50)));
     }
 
@@ -2234,12 +2297,14 @@ mod tests {
     #[test]
     fn aspect_preserving_minimum_dimension_is_one() {
         // Very wide image that would result in height < 1
-        let result = calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(10000, 1, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp height to at least 1
         assert!(result.1.unwrap() >= 1);
 
         // Very tall image that would result in width < 1
-        let result = calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true, TEST_CELL_ASPECT);
+        let result =
+            calculate_aspect_preserving_size(1, 10000, Some(10), Some(10), true, TEST_CELL_ASPECT);
         // Should clamp width to at least 1
         assert!(result.0.unwrap() >= 1);
     }

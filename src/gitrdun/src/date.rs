@@ -15,7 +15,7 @@ pub fn parse_duration(duration_str: &str) -> Result<Duration> {
         }
     }
 
-    // Check for week format (e.g., "2w")  
+    // Check for week format (e.g., "2w")
     if let Some(weeks_str) = duration_str.strip_suffix('w') {
         if let Ok(weeks) = weeks_str.parse::<i64>() {
             return Ok(Duration::weeks(weeks));
@@ -64,14 +64,17 @@ pub fn parse_time_string(time_str: &str) -> Result<DateTime<Local>> {
     let formats = [
         "%Y-%m-%d",
         "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S", 
+        "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S%.3fZ",
     ];
 
     for format in &formats {
         if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(time_str, format) {
-            return Ok(Local.from_local_datetime(&naive_dt).single().unwrap_or_else(Local::now));
+            return Ok(Local
+                .from_local_datetime(&naive_dt)
+                .single()
+                .unwrap_or_else(Local::now));
         }
     }
 
@@ -96,12 +99,12 @@ mod tests {
         // Test standard formats
         assert!(parse_time_string("2023-01-01").is_ok());
         assert!(parse_time_string("2023-01-01T12:00:00").is_ok());
-        
+
         // Test natural language (may vary based on system)
         // These tests might be flaky due to natural language parsing
         // assert!(parse_time_string("yesterday").is_ok());
         // assert!(parse_time_string("last week").is_ok());
-        
+
         assert!(parse_time_string("invalid date format").is_err());
     }
 }

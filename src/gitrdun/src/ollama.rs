@@ -74,16 +74,24 @@ impl OllamaClient {
         status_callback: Option<StatusCallback>,
     ) -> Result<String> {
         if let Some(callback) = &status_callback {
-            callback(&format!("Analyzing repository {}", repo_path.file_name().unwrap_or_default().to_string_lossy()));
+            callback(&format!(
+                "Analyzing repository {}",
+                repo_path.file_name().unwrap_or_default().to_string_lossy()
+            ));
         }
 
-        let repo_context = format!("Repository: {}", repo_path.file_name().unwrap_or_default().to_string_lossy());
+        let repo_context = format!(
+            "Repository: {}",
+            repo_path.file_name().unwrap_or_default().to_string_lossy()
+        );
 
         // Try to read README file for additional context
         let readme_content = self.read_readme(repo_path).await;
 
         // Get detailed commit information
-        let detailed_commits = self.format_commits(commits, repo_path, &status_callback).await?;
+        let detailed_commits = self
+            .format_commits(commits, repo_path, &status_callback)
+            .await?;
 
         // Format the prompt for Ollama
         if let Some(callback) = &status_callback {
@@ -110,16 +118,24 @@ Please provide a concise summary of what was worked on in this repository. Focus
 Use the commit information to understand the changes in depth."#,
             repo_context,
             readme_content,
-            commits.iter().map(|c| c.message.as_str()).collect::<Vec<_>>().join("\n"),
+            commits
+                .iter()
+                .map(|c| c.message.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
             detailed_commits
         );
 
         if let Some(callback) = &status_callback {
             let prompt_size = prompt.len() / 1024;
-            callback(&format!("Sending {} KB of data to Ollama for processing", prompt_size));
+            callback(&format!(
+                "Sending {} KB of data to Ollama for processing",
+                prompt_size
+            ));
         }
 
-        self.call_ollama(model, &prompt, true, keep_thinking, status_callback).await
+        self.call_ollama(model, &prompt, true, keep_thinking, status_callback)
+            .await
     }
 
     /// Generate a meta-summary across multiple repositories
@@ -153,10 +169,14 @@ Focus on the big picture rather than repeating details from individual repositor
 
         if let Some(callback) = &status_callback {
             let prompt_size = prompt.len() / 1024;
-            callback(&format!("Sending {} KB of data to Ollama for meta-summary processing", prompt_size));
+            callback(&format!(
+                "Sending {} KB of data to Ollama for meta-summary processing",
+                prompt_size
+            ));
         }
 
-        self.call_ollama(model, &prompt, false, keep_thinking, status_callback).await
+        self.call_ollama(model, &prompt, false, keep_thinking, status_callback)
+            .await
     }
 
     /// Try to read README file from repository
@@ -225,7 +245,7 @@ Focus on the big picture rather than repeating details from individual repositor
     ) -> Result<String> {
         if let Some(callback) = &status_callback {
             callback("Preparing to send request to Ollama");
-            
+
             let context_size = MODEL_CONTEXT_SIZES
                 .iter()
                 .find(|(m, _)| *m == model)
@@ -233,7 +253,10 @@ Focus on the big picture rather than repeating details from individual repositor
                 .unwrap_or(DEFAULT_CONTEXT_SIZE);
 
             let estimated_tokens = estimate_tokens(prompt);
-            callback(&format!("Estimated tokens: {} (model context size: {})", estimated_tokens, context_size));
+            callback(&format!(
+                "Estimated tokens: {} (model context size: {})",
+                estimated_tokens, context_size
+            ));
 
             if estimated_tokens as f64 > context_size as f64 * 0.9 {
                 callback("Prompt is too large, may exceed model context window");
@@ -247,20 +270,18 @@ Focus on the big picture rather than repeating details from individual repositor
         };
 
         let url = format!("{}/api/generate", self.base_url);
-        let response = self.client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.client.post(&url).json(&request).send().await?;
 
         if !response.status().is_success() {
             return Err(anyhow!("Ollama API request failed: {}", response.status()));
         }
 
         if stream {
-            self.handle_streaming_response(response, keep_thinking, status_callback).await
+            self.handle_streaming_response(response, keep_thinking, status_callback)
+                .await
         } else {
-            self.handle_non_streaming_response(response, keep_thinking, status_callback).await
+            self.handle_non_streaming_response(response, keep_thinking, status_callback)
+                .await
         }
     }
 
@@ -276,7 +297,7 @@ Focus on the big picture rather than repeating details from individual repositor
         let mut last_update = std::time::Instant::now();
 
         let text = response.text().await?;
-        
+
         for line in text.lines() {
             if line.trim().is_empty() {
                 continue;
@@ -291,14 +312,20 @@ Focus on the big picture rather than repeating details from individual repositor
             // Update status every 500ms
             if let Some(callback) = &status_callback {
                 if last_update.elapsed() > std::time::Duration::from_millis(500) {
-                    callback(&format!("Receiving response from Ollama ({} characters so far)", response_length));
+                    callback(&format!(
+                        "Receiving response from Ollama ({} characters so far)",
+                        response_length
+                    ));
                     last_update = std::time::Instant::now();
                 }
             }
 
             if chunk.done {
                 if let Some(callback) = &status_callback {
-                    callback(&format!("Response complete, received {} characters", response_length));
+                    callback(&format!(
+                        "Response complete, received {} characters",
+                        response_length
+                    ));
                 }
                 break;
             }
@@ -325,9 +352,12 @@ Focus on the big picture rather than repeating details from individual repositor
         }
 
         let response_text = response.text().await?;
-        
+
         if let Some(callback) = &status_callback {
-            callback(&format!("Received {} KB response from Ollama", response_text.len() / 1024));
+            callback(&format!(
+                "Received {} KB response from Ollama",
+                response_text.len() / 1024
+            ));
         }
 
         let ollama_response: OllamaResponse = serde_json::from_str(&response_text)
@@ -340,7 +370,10 @@ Focus on the big picture rather than repeating details from individual repositor
         };
 
         if let Some(callback) = &status_callback {
-            callback(&format!("Processing complete, final response is {} characters", response.len()));
+            callback(&format!(
+                "Processing complete, final response is {} characters",
+                response.len()
+            ));
         }
 
         Ok(response)
@@ -356,7 +389,7 @@ fn estimate_tokens(text: &str) -> usize {
 /// Remove text between <think> and </think> tags
 fn remove_thinking_text(text: &str) -> String {
     let mut result = text.to_string();
-    
+
     while let Some(start) = result.find("<think>") {
         if let Some(end_pos) = result[start..].find("</think>") {
             let end = start + end_pos + "</think>".len();
@@ -365,7 +398,7 @@ fn remove_thinking_text(text: &str) -> String {
             break;
         }
     }
-    
+
     result
 }
 

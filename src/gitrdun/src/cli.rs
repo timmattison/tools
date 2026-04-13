@@ -74,7 +74,6 @@ pub struct Args {
     #[arg(long = "no-file")]
     pub no_file: bool,
 
-
     /// Only show commits authored by the current git user
     #[arg(long = "filter-user", default_value = "true")]
     pub filter_user: bool,

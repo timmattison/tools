@@ -3,8 +3,8 @@ use chrono::Local;
 use clap::Parser;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -24,7 +24,6 @@ use ui::ProgressDisplay;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-
 
     // Parse the start string
     let start_duration = date::parse_duration(&args.start)?;
@@ -111,13 +110,7 @@ async fn main() -> Result<()> {
                 };
 
                 // Perform the actual directory scan
-                if let Err(e) = git::scan_path(
-                    &path,
-                    &result,
-                    &user_email,
-                    &options,
-                    &progress,
-                ) {
+                if let Err(e) = git::scan_path(&path, &result, &user_email, &options, &progress) {
                     eprintln!("Error scanning {}: {}", path.display(), e);
                 }
             })
@@ -138,7 +131,10 @@ async fn main() -> Result<()> {
                 scanning_cancelled.store(true, Ordering::Relaxed);
             } else {
                 // Simple progress output
-                while !progress.is_cancelled() && !scanning_cancelled.load(Ordering::Relaxed) && !progress.is_all_complete() {
+                while !progress.is_cancelled()
+                    && !scanning_cancelled.load(Ordering::Relaxed)
+                    && !progress.is_all_complete()
+                {
                     progress.print_simple_progress();
                     thread::sleep(Duration::from_millis(100));
                 }
@@ -157,14 +153,14 @@ async fn main() -> Result<()> {
 
     // Signal that scanning is complete
     progress.set_scan_complete();
-    
+
     // Process and display results in a separate task while UI is still running
     let display_handle = {
         let result = Arc::clone(&search_result);
         let args = args.clone();
         let progress_clone = Arc::clone(&progress);
         let cancellation_token = progress.cancellation_token();
-        
+
         // We'll use spawn_blocking to avoid the nested runtime issue
         tokio::task::spawn_blocking(move || {
             // Clone the result data to avoid holding the lock across await
@@ -174,29 +170,37 @@ async fn main() -> Result<()> {
             };
             // Block on the async operation
             tokio::runtime::Handle::current().block_on(async move {
-                if let Err(e) = display_results(&result_data, &args, use_ollama, Some(progress_clone), cancellation_token).await {
+                if let Err(e) = display_results(
+                    &result_data,
+                    &args,
+                    use_ollama,
+                    Some(progress_clone),
+                    cancellation_token,
+                )
+                .await
+                {
                     eprintln!("Error displaying results: {}", e);
                 }
             })
         })
     };
-    
+
     // Check if user cancelled
     let user_cancelled = progress.is_cancelled();
-    
+
     if !user_cancelled {
         // Wait for display task to complete only if not cancelled
         let _ = display_handle.await;
-        
+
         // Signal that Ollama processing is complete (if it was running)
         if use_ollama {
             progress.set_ollama_complete();
         }
     }
-    
+
     // Wait for UI to finish
     let _ = ui_handle.join();
-    
+
     // After TUI exits, print the results to stdout (if not cancelled)
     if !user_cancelled {
         // Clone to avoid holding lock across await
@@ -213,17 +217,23 @@ fn generate_auto_filename(args: &Args) -> PathBuf {
     let now = Local::now();
     let timestamp = now.format("%Y-%m-%d-%H%M%S");
     let duration_str = args.start.replace([' ', ':'], "");
-    
+
     let filename = if args.end.is_some() {
         format!("gitrdun-results-{}-{}-to-end.txt", timestamp, duration_str)
     } else {
         format!("gitrdun-results-{}-{}.txt", timestamp, duration_str)
     };
-    
+
     PathBuf::from(filename)
 }
 
-async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, progress: Option<Arc<ProgressDisplay>>, cancellation_token: CancellationToken) -> Result<()> {
+async fn display_results(
+    result: &SearchResult,
+    args: &Args,
+    use_ollama: bool,
+    progress: Option<Arc<ProgressDisplay>>,
+    cancellation_token: CancellationToken,
+) -> Result<()> {
     // Create output buffer for file writing
     let mut output_buffer = String::new();
 
@@ -249,21 +259,43 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
 
     if result.found_commits {
         write_output("🔍 Found commits\n");
-        write_output(&format!("📅 Start date: {}\n", result.threshold.format("%A, %B %d, %Y at %l:%M %p")));
+        write_output(&format!(
+            "📅 Start date: {}\n",
+            result.threshold.format("%A, %B %d, %Y at %l:%M %p")
+        ));
         if let Some(end) = result.end_time {
-            write_output(&format!("📅 End date: {}\n", end.format("%A, %B %d, %Y at %l:%M %p")));
+            write_output(&format!(
+                "📅 End date: {}\n",
+                end.format("%A, %B %d, %Y at %l:%M %p")
+            ));
         }
-        write_output(&format!("📂 Search paths: {}\n", result.abs_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")));
+        write_output(&format!(
+            "📂 Search paths: {}\n",
+            result
+                .abs_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         if args.all {
             write_output("🔀 Searching across all branches\n");
         }
         write_output("\n");
 
         // Calculate total commits
-        let total_commits: usize = result.repositories.values().map(|commits| commits.len()).sum();
+        let total_commits: usize = result
+            .repositories
+            .values()
+            .map(|commits| commits.len())
+            .sum();
 
         write_output("📊 Summary:\n");
-        write_output(&format!("   • Found {} commits across {} repositories\n\n", total_commits, result.repositories.len()));
+        write_output(&format!(
+            "   • Found {} commits across {} repositories\n\n",
+            total_commits,
+            result.repositories.len()
+        ));
 
         // Sort repository paths for consistent output
         let mut sorted_repo_paths: Vec<_> = result.repositories.keys().collect();
@@ -279,11 +311,14 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
             None
         };
 
-
         // Display results in sorted order
         for repo_path in sorted_repo_paths {
             let commits = &result.repositories[repo_path];
-            write_output(&format!("📁 {} - {} commits\n", repo_path.display(), commits.len()));
+            write_output(&format!(
+                "📁 {} - {} commits\n",
+                repo_path.display(),
+                commits.len()
+            ));
 
             if let Some(client) = &ollama_client {
                 // Check if cancelled before processing
@@ -291,7 +326,7 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
                     write_output("\n⚠️  Processing cancelled by user\n");
                     break;
                 }
-                
+
                 // Show commits if not summary-only
                 if !args.summary_only {
                     for commit in commits {
@@ -303,25 +338,30 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
                 let repo_name = repo_path.file_name().unwrap_or_default().to_string_lossy();
                 let branch_name = git::get_current_branch(repo_path);
                 let full_repo_info = format!("{} ({})", repo_path.display(), branch_name);
-                write_output(&format!("\n🤖 Generating summary for {} with Ollama ({})...\n", repo_name, args.ollama_model));
+                write_output(&format!(
+                    "\n🤖 Generating summary for {} with Ollama ({})...\n",
+                    repo_name, args.ollama_model
+                ));
 
                 // Update progress display with current repo
                 if let Some(progress_ref) = &progress {
                     progress_ref.update_ollama_repo(full_repo_info.clone());
-                    progress_ref.update_ollama_status(format!("Generating summary for {}", full_repo_info));
+                    progress_ref
+                        .update_ollama_status(format!("Generating summary for {}", full_repo_info));
                 }
 
-                let status_callback: Box<dyn Fn(&str) + Send + Sync> = if let Some(progress_ref) = &progress {
-                    let progress_clone = Arc::clone(progress_ref);
-                    Box::new(move |status: &str| {
-                        progress_clone.update_ollama_progress(status.to_string());
-                    })
-                } else {
-                    Box::new(|status: &str| {
-                        print!("\r\x1b[K   ⏳ {}", status);
-                        io::stdout().flush().unwrap();
-                    })
-                };
+                let status_callback: Box<dyn Fn(&str) + Send + Sync> =
+                    if let Some(progress_ref) = &progress {
+                        let progress_clone = Arc::clone(progress_ref);
+                        Box::new(move |status: &str| {
+                            progress_clone.update_ollama_progress(status.to_string());
+                        })
+                    } else {
+                        Box::new(|status: &str| {
+                            print!("\r\x1b[K   ⏳ {}", status);
+                            io::stdout().flush().unwrap();
+                        })
+                    };
 
                 // Use tokio::select! to make the operation cancellable
                 tokio::select! {
@@ -336,7 +376,7 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
                             Ok(summary) => {
                                 write_output("\n");
                                 write_output(&format!("📝 Summary for {} ({}): \n{}\n\n", repo_name, args.ollama_model, summary));
-                                
+
                                 if args.meta_ollama {
                                     all_summaries.push(format!("Repository: {}\n{}", repo_path.display(), summary));
                                 }
@@ -362,28 +402,33 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
         // Generate meta-summary if requested
         if args.meta_ollama && !all_summaries.is_empty() && !cancellation_token.is_cancelled() {
             if let Some(client) = &ollama_client {
-                write_output(&format!("\n🔍 Generating meta-summary of all work with Ollama ({})...\n", args.ollama_model));
+                write_output(&format!(
+                    "\n🔍 Generating meta-summary of all work with Ollama ({})...\n",
+                    args.ollama_model
+                ));
 
                 // Update progress display for meta-summary
                 if let Some(progress_ref) = &progress {
                     progress_ref.update_ollama_repo("Meta-Summary".to_string());
-                    progress_ref.update_ollama_status("Generating meta-summary of all work".to_string());
+                    progress_ref
+                        .update_ollama_status("Generating meta-summary of all work".to_string());
                 }
 
-                let status_callback: Box<dyn Fn(&str) + Send + Sync> = if let Some(progress_ref) = &progress {
-                    let progress_clone = Arc::clone(progress_ref);
-                    Box::new(move |status: &str| {
-                        progress_clone.update_ollama_progress(status.to_string());
-                    })
-                } else {
-                    Box::new(|status: &str| {
-                        print!("\r\x1b[K   ⏳ {}", status);
-                        io::stdout().flush().unwrap();
-                    })
-                };
+                let status_callback: Box<dyn Fn(&str) + Send + Sync> =
+                    if let Some(progress_ref) = &progress {
+                        let progress_clone = Arc::clone(progress_ref);
+                        Box::new(move |status: &str| {
+                            progress_clone.update_ollama_progress(status.to_string());
+                        })
+                    } else {
+                        Box::new(|status: &str| {
+                            print!("\r\x1b[K   ⏳ {}", status);
+                            io::stdout().flush().unwrap();
+                        })
+                    };
 
                 let start_duration = date::parse_duration(&args.start)?;
-                
+
                 // Use tokio::select! to make the meta-summary cancellable
                 tokio::select! {
                     result = client.generate_meta_summary(
@@ -418,35 +463,55 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
         }
     } else {
         write_output("😴 No commits found\n");
-        write_output(&format!("   • Start date: {}\n", result.threshold.format("%A, %B %d, %Y at %l:%M %p")));
+        write_output(&format!(
+            "   • Start date: {}\n",
+            result.threshold.format("%A, %B %d, %Y at %l:%M %p")
+        ));
         if let Some(end) = result.end_time {
-            write_output(&format!("   • End date: {}\n", end.format("%A, %B %d, %Y at %l:%M %p")));
+            write_output(&format!(
+                "   • End date: {}\n",
+                end.format("%A, %B %d, %Y at %l:%M %p")
+            ));
         }
-        write_output(&format!("   • Search paths: {}\n", result.abs_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")));
+        write_output(&format!(
+            "   • Search paths: {}\n",
+            result
+                .abs_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // Show stats if requested
     if args.stats {
         write_output("\n🔍 Git Operation Stats:\n");
-        
+
         if let Ok(get_git_dir_stats) = result.stats.get_git_dir.lock() {
-            write_output(&format!("   • getGitDir: {} calls, avg {:?} per call\n",
+            write_output(&format!(
+                "   • getGitDir: {} calls, avg {:?} per call\n",
                 get_git_dir_stats.count(),
-                get_git_dir_stats.average()));
+                get_git_dir_stats.average()
+            ));
         }
-        
+
         if let Ok(get_log_stats) = result.stats.get_log.lock() {
-            write_output(&format!("   • git log: {} calls, avg {:?} per call\n",
+            write_output(&format!(
+                "   • git log: {} calls, avg {:?} per call\n",
                 get_log_stats.count(),
-                get_log_stats.average()));
+                get_log_stats.average()
+            ));
         }
-        
+
         if let Ok(get_email_stats) = result.stats.get_email.lock() {
-            write_output(&format!("   • git config: {} calls, avg {:?} per call\n",
+            write_output(&format!(
+                "   • git config: {} calls, avg {:?} per call\n",
                 get_email_stats.count(),
-                get_email_stats.average()));
+                get_email_stats.average()
+            ));
         }
-        
+
         write_output("\n");
     }
 
@@ -457,7 +522,7 @@ async fn display_results(result: &SearchResult, args: &Args, use_ollama: bool, p
         } else {
             generate_auto_filename(args)
         };
-        
+
         match std::fs::write(&output_file, &output_buffer) {
             Ok(_) => println!("📝 Results written to {}", output_file.display()),
             Err(e) => println!("⚠️  Error writing to output file: {}", e),

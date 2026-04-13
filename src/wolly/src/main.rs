@@ -1,8 +1,8 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use get_if_addrs::{get_if_addrs, IfAddr};
-use std::net::{UdpSocket, Ipv4Addr};
+use std::net::{Ipv4Addr, UdpSocket};
 use std::thread;
 use std::time::Duration;
 
@@ -65,7 +65,10 @@ impl MacAddress {
         let cleaned = s.replace([':', '-'], "");
 
         if cleaned.len() != 12 {
-            bail!("MAC address must be 12 hex characters (got {} characters)", cleaned.len());
+            bail!(
+                "MAC address must be 12 hex characters (got {} characters)",
+                cleaned.len()
+            );
         }
 
         let mut bytes = [0u8; 6];
@@ -125,8 +128,7 @@ impl NetworkInterface {
 ///
 /// Filters out loopback interfaces and returns only interfaces with IPv4 addresses
 fn get_network_interfaces() -> Result<Vec<NetworkInterface>> {
-    let interfaces = get_if_addrs()
-        .context("Failed to get network interfaces")?;
+    let interfaces = get_if_addrs().context("Failed to get network interfaces")?;
 
     let ipv4_interfaces: Vec<NetworkInterface> = interfaces
         .into_iter()
@@ -162,12 +164,10 @@ fn select_interface(interface_name: Option<&str>) -> Result<NetworkInterface> {
     }
 
     match interface_name {
-        Some(name) => {
-            interfaces
-                .into_iter()
-                .find(|iface| iface.name == name)
-                .ok_or_else(|| anyhow::anyhow!("Interface '{}' not found", name))
-        }
+        Some(name) => interfaces
+            .into_iter()
+            .find(|iface| iface.name == name)
+            .ok_or_else(|| anyhow::anyhow!("Interface '{}' not found", name)),
         None => {
             // Return the first interface
             Ok(interfaces.into_iter().next().unwrap())
@@ -186,7 +186,12 @@ fn list_interfaces() -> Result<()> {
 
     println!("Available network interfaces:");
     for iface in interfaces {
-        println!("  {} - {} (broadcast: {})", iface.name, iface.ip, iface.broadcast_address());
+        println!(
+            "  {} - {} (broadcast: {})",
+            iface.name,
+            iface.ip,
+            iface.broadcast_address()
+        );
     }
 
     Ok(())
@@ -237,7 +242,8 @@ fn send_magic_packets(
     let socket = UdpSocket::bind(&bind_addr)
         .with_context(|| format!("Failed to bind UDP socket to {}", bind_addr))?;
 
-    socket.set_broadcast(true)
+    socket
+        .set_broadcast(true)
         .context("Failed to set broadcast option on socket")?;
 
     let mut total_bytes_sent = 0;
@@ -246,14 +252,21 @@ fn send_magic_packets(
     for (send_num, port) in (1..=count).flat_map(|i| ports.iter().map(move |p| (i, *p))) {
         let destination = format!("{}:{}", broadcast_addr, port);
 
-        let bytes_sent = socket.send_to(&packet, &destination)
+        let bytes_sent = socket
+            .send_to(&packet, &destination)
             .with_context(|| format!("Failed to send magic packet to {}", destination))?;
 
         total_bytes_sent += bytes_sent;
 
         if verbose {
-            println!("  Sent packet {} of {} to {}:{} ({} bytes)",
-                     send_num, total_sends / ports.len(), broadcast_addr, port, bytes_sent);
+            println!(
+                "  Sent packet {} of {} to {}:{} ({} bytes)",
+                send_num,
+                total_sends / ports.len(),
+                broadcast_addr,
+                port,
+                bytes_sent
+            );
         }
 
         // Don't delay after the last send
@@ -274,16 +287,17 @@ fn main() -> Result<()> {
     }
 
     // Validate that MAC address is provided
-    let mac_address = cli.mac_address.as_ref()
+    let mac_address = cli
+        .mac_address
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("MAC address is required (use --help for usage)"))?;
 
     // Parse MAC address
-    let mac = MacAddress::parse(mac_address)
-        .context("Failed to parse MAC address")?;
+    let mac = MacAddress::parse(mac_address).context("Failed to parse MAC address")?;
 
     // Select network interface
-    let interface = select_interface(cli.interface.as_deref())
-        .context("Failed to select network interface")?;
+    let interface =
+        select_interface(cli.interface.as_deref()).context("Failed to select network interface")?;
 
     // Determine broadcast address
     let subnet_broadcast = interface.broadcast_address();
@@ -342,7 +356,11 @@ fn main() -> Result<()> {
         println!();
         println!("Successfully sent {} total bytes", bytes_sent);
     } else {
-        println!("Sent {} magic packet(s) to {}", cli.count * ports.len() as u8, mac.format());
+        println!(
+            "Sent {} magic packet(s) to {}",
+            cli.count * ports.len() as u8,
+            mac.format()
+        );
     }
 
     // Show troubleshooting hints
@@ -355,7 +373,10 @@ fn main() -> Result<()> {
         } else {
             subnet_broadcast.to_string()
         };
-        println!("  2. Try a different broadcast: --broadcast {}", alt_broadcast);
+        println!(
+            "  2. Try a different broadcast: --broadcast {}",
+            alt_broadcast
+        );
         if !cli.try_both_ports {
             println!("  3. Try both ports: --try-both-ports");
         }
@@ -441,8 +462,12 @@ mod tests {
         for repetition in 0..16 {
             let start = 6 + (repetition * 6);
             let mac_slice = &packet[start..start + 6];
-            assert_eq!(mac_slice, &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06],
-                      "MAC address repetition {} is incorrect", repetition);
+            assert_eq!(
+                mac_slice,
+                &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06],
+                "MAC address repetition {} is incorrect",
+                repetition
+            );
         }
     }
 
@@ -509,7 +534,10 @@ mod tests {
             ip: Ipv4Addr::new(192, 168, 1, 100),
             netmask: Ipv4Addr::new(255, 255, 0, 0),
         };
-        assert_eq!(iface2.broadcast_address(), Ipv4Addr::new(192, 168, 255, 255));
+        assert_eq!(
+            iface2.broadcast_address(),
+            Ipv4Addr::new(192, 168, 255, 255)
+        );
 
         // Test /8 network (255.0.0.0)
         let iface3 = NetworkInterface {

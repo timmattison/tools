@@ -11,3 +11,4 @@ target
 .env.bak
 .env.local
 .claude/
+.op-cache.json

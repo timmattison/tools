@@ -133,7 +133,10 @@ volumes:
 
 fn write_env(output_dir: &Path, wireguard_key: &str) -> Result<()> {
     let env_path = output_dir.join(".env");
-    fs::write(&env_path, format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\n"))?;
+    fs::write(
+        &env_path,
+        format!("WIREGUARD_PRIVATE_KEY={wireguard_key}\n"),
+    )?;
     fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }

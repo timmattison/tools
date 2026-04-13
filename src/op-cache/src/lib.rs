@@ -88,7 +88,10 @@ impl OpPath {
             return Err(Error::InvalidOpPath(path.to_string()));
         }
         // Block shell metacharacters as defense-in-depth
-        if path.chars().any(|c| c.is_control() || ";|&$`\\".contains(c)) {
+        if path
+            .chars()
+            .any(|c| c.is_control() || ";|&$`\\".contains(c))
+        {
             return Err(Error::InvalidOpPath(path.to_string()));
         }
         Ok(Self(path.to_string()))
@@ -296,11 +299,8 @@ impl OpCache {
         if let Some(parent) = self.cache_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = NamedTempFile::new_in(
-            self.cache_path
-                .parent()
-                .unwrap_or_else(|| Path::new(".")),
-        )?;
+        let tmp =
+            NamedTempFile::new_in(self.cache_path.parent().unwrap_or_else(|| Path::new(".")))?;
         serde_json::to_writer_pretty(&tmp, cache)?;
         tmp.persist(&self.cache_path)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -337,10 +337,7 @@ fn fetch_from_1password(op_path: &OpPath) -> Result<String> {
     ensure_op_available()?;
 
     for attempt in 1..=OP_MAX_RETRIES {
-        match Command::new("op")
-            .args(["read", op_path.as_ref()])
-            .output()
-        {
+        match Command::new("op").args(["read", op_path.as_ref()]).output() {
             Ok(output) if output.status.success() => {
                 let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !value.is_empty() {

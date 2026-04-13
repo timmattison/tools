@@ -11,11 +11,11 @@ impl Transformer for TubeTransformer {
         // Check for YouTube URLs
         content.contains("youtube.com") || content.contains("youtu.be")
     }
-    
+
     fn transform(&self, content: &str) -> Result<String, Box<dyn Error>> {
         // Parse the URL
         let url = Url::parse(content)?;
-        
+
         // Extract video ID based on URL format
         let video_id = if url.host_str() == Some("youtu.be") {
             // Short URL format: https://youtu.be/VIDEO_ID
@@ -31,19 +31,19 @@ impl Transformer for TubeTransformer {
                 .map(|(_, value)| value.into_owned())
                 .ok_or("No video ID parameter found")?
         };
-        
+
         // Validate video ID (should be 11 characters)
         if video_id.len() != 11 {
             return Err("Invalid video ID length".into());
         }
-        
+
         Ok(video_id)
     }
-    
+
     fn waiting_message(&self) -> &str {
         "Waiting for YouTube URLs in clipboard"
     }
-    
+
     fn success_message(&self) -> &str {
         "Extracted YouTube video ID"
     }

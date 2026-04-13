@@ -57,11 +57,18 @@ fn determine_port_range(args: &Args) -> Result<(u16, u16)> {
     let end_port = args.end_port.unwrap_or(65535);
 
     if start_port > end_port {
-        anyhow::bail!("Start port ({}) cannot be greater than end port ({})", start_port, end_port);
+        anyhow::bail!(
+            "Start port ({}) cannot be greater than end port ({})",
+            start_port,
+            end_port
+        );
     }
 
     if !args.allow_privileged && start_port < 1024 {
-        anyhow::bail!("Start port ({}) is privileged. Use --allow-privileged to search privileged ports", start_port);
+        anyhow::bail!(
+            "Start port ({}) is privileged. Use --allow-privileged to search privileged ports",
+            start_port
+        );
     }
 
     Ok((start_port, end_port))
@@ -80,7 +87,7 @@ fn find_free_port(start_port: u16, end_port: u16, first_available: bool) -> Resu
         let mut ports: Vec<u16> = (start_port..=end_port).collect();
         let mut rng = rand::rng();
         ports.shuffle(&mut rng);
-        
+
         for port in ports {
             if is_port_free(port)? {
                 return Ok(Some(port));
@@ -170,7 +177,10 @@ mod tests {
         // We can't reliably assert the port is still free after find_free_port returns
         // because another process may grab it in the meantime (race condition).
         let result = find_free_port(49152, 65535, true).unwrap();
-        assert!(result.is_some(), "Should find at least one free port in range");
+        assert!(
+            result.is_some(),
+            "Should find at least one free port in range"
+        );
 
         if let Some(port) = result {
             assert!(
@@ -188,7 +198,10 @@ mod tests {
         // We can't reliably assert the port is still free after find_free_port returns
         // because another process may grab it in the meantime (race condition).
         let result = find_free_port(49152, 65535, false).unwrap();
-        assert!(result.is_some(), "Should find at least one free port in range");
+        assert!(
+            result.is_some(),
+            "Should find at least one free port in range"
+        );
 
         if let Some(port) = result {
             assert!(
@@ -205,7 +218,10 @@ mod tests {
         // Note: We can't assert exact port values or re-check availability because
         // system state may change between calls (other processes may grab or release ports).
         let first_result = find_free_port(49152, 49160, true).unwrap();
-        assert!(first_result.is_some(), "first_available mode should find a port");
+        assert!(
+            first_result.is_some(),
+            "first_available mode should find a port"
+        );
         if let Some(port) = first_result {
             assert!(
                 port >= 49152 && port <= 49160,
@@ -218,8 +234,14 @@ mod tests {
         let random_result1 = find_free_port(49152, 49160, false).unwrap();
         let random_result2 = find_free_port(49152, 49160, false).unwrap();
 
-        assert!(random_result1.is_some(), "random mode should find a port (call 1)");
-        assert!(random_result2.is_some(), "random mode should find a port (call 2)");
+        assert!(
+            random_result1.is_some(),
+            "random mode should find a port (call 1)"
+        );
+        assert!(
+            random_result2.is_some(),
+            "random mode should find a port (call 2)"
+        );
 
         if let Some(port) = random_result1 {
             assert!(

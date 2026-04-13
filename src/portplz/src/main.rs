@@ -12,7 +12,11 @@ struct Cli {
     #[arg(help = "Directory path (defaults to current directory)")]
     path: Option<String>,
 
-    #[arg(short, long, help = "Print verbose output with directory name and branch")]
+    #[arg(
+        short,
+        long,
+        help = "Print verbose output with directory name and branch"
+    )]
     verbose: bool,
 
     #[arg(long, help = "Disable git branch detection")]
@@ -61,7 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let path = Path::new(&path_str);
-    let basename = path.file_name()
+    let basename = path
+        .file_name()
         .ok_or("Invalid path: no basename")?
         .to_string_lossy();
 
@@ -80,7 +85,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (branch, desc)
                 }
             }
-            None => (basename.to_string(), format!("directory '{basename}' (no git repo)")),
+            None => (
+                basename.to_string(),
+                format!("directory '{basename}' (no git repo)"),
+            ),
         }
     };
 

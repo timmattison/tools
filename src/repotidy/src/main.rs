@@ -8,15 +8,20 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
         .args(&command[1..])
         .current_dir(dir)
         .output()?;
-    
+
     if !output.status.success() {
-        eprintln!("Error running {} in {}: {}", 
-                 command.join(" "), 
-                 dir.display(), 
-                 String::from_utf8_lossy(&output.stderr));
-        return Err(std::io::Error::new(std::io::ErrorKind::Other, "Command failed"));
+        eprintln!(
+            "Error running {} in {}: {}",
+            command.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Command failed",
+        ));
     }
-    
+
     println!("Ran {} in {}", command.join(" "), dir.display());
     Ok(())
 }
@@ -37,17 +42,21 @@ fn main() {
     };
 
     let walker = RepoWalker::new(repo_root.clone())
-        .respect_gitignore(false)  // Don't respect gitignore - find ALL Go projects
+        .respect_gitignore(false) // Don't respect gitignore - find ALL Go projects
         .skip_node_modules(true)
         .skip_worktrees(true)
-        .include_hidden(true);     // Include hidden directories
-    
+        .include_hidden(true); // Include hidden directories
+
     for entry in walker.walk_with_ignore() {
         if entry.file_type().is_some_and(|ft| ft.is_dir()) {
             let go_mod_path = entry.path().join("go.mod");
             if go_mod_path.exists() {
                 if let Err(e) = run_command_in_directory(entry.path(), &["go", "mod", "tidy"]) {
-                    eprintln!("Error running go mod tidy in {}: {}", entry.path().display(), e);
+                    eprintln!(
+                        "Error running go mod tidy in {}: {}",
+                        entry.path().display(),
+                        e
+                    );
                 }
             }
         }

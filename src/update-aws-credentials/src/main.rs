@@ -62,7 +62,8 @@ fn write_credentials(
         create_dir_all(&aws_dir).context("Could not create .aws directory")?;
     }
 
-    let mut file = File::create(&credentials_path).context("Could not create AWS credentials file")?;
+    let mut file =
+        File::create(&credentials_path).context("Could not create AWS credentials file")?;
 
     let output = format!(
         "[default]\naws_access_key_id = {}\naws_secret_access_key = {}\naws_session_token = {}\n",
@@ -90,21 +91,25 @@ async fn main() -> Result<()> {
 
     let clipboard_strings: Vec<String> = clipboard_data.lines().map(String::from).collect();
 
-    let (aws_access_key_id, aws_secret_access_key, aws_session_token) = if clipboard_strings.len() == 3 {
-        (
-            string_containing(&clipboard_strings, UPPER_AWS_ACCESS_KEY_ID),
-            string_containing(&clipboard_strings, UPPER_AWS_SECRET_ACCESS_KEY),
-            string_containing(&clipboard_strings, UPPER_AWS_SESSION_TOKEN),
-        )
-    } else if clipboard_strings.len() == 4 {
-        (
-            string_containing(&clipboard_strings, &UPPER_AWS_ACCESS_KEY_ID.to_lowercase()),
-            string_containing(&clipboard_strings, &UPPER_AWS_SECRET_ACCESS_KEY.to_lowercase()),
-            string_containing(&clipboard_strings, &UPPER_AWS_SESSION_TOKEN.to_lowercase()),
-        )
-    } else {
-        anyhow::bail!("👎 Expected 3 or 4 lines in clipboard");
-    };
+    let (aws_access_key_id, aws_secret_access_key, aws_session_token) =
+        if clipboard_strings.len() == 3 {
+            (
+                string_containing(&clipboard_strings, UPPER_AWS_ACCESS_KEY_ID),
+                string_containing(&clipboard_strings, UPPER_AWS_SECRET_ACCESS_KEY),
+                string_containing(&clipboard_strings, UPPER_AWS_SESSION_TOKEN),
+            )
+        } else if clipboard_strings.len() == 4 {
+            (
+                string_containing(&clipboard_strings, &UPPER_AWS_ACCESS_KEY_ID.to_lowercase()),
+                string_containing(
+                    &clipboard_strings,
+                    &UPPER_AWS_SECRET_ACCESS_KEY.to_lowercase(),
+                ),
+                string_containing(&clipboard_strings, &UPPER_AWS_SESSION_TOKEN.to_lowercase()),
+            )
+        } else {
+            anyhow::bail!("👎 Expected 3 or 4 lines in clipboard");
+        };
 
     if aws_access_key_id.is_empty() || !aws_access_key_id.contains('=') {
         anyhow::bail!("👎 Could not find the AWS access key ID in the clipboard");
@@ -139,7 +144,8 @@ async fn main() -> Result<()> {
         .trim()
         .replace('"', "");
 
-    let caller_identity = verify_credentials(&access_key_id, &secret_access_key, &session_token).await?;
+    let caller_identity =
+        verify_credentials(&access_key_id, &secret_access_key, &session_token).await?;
 
     write_credentials(&access_key_id, &secret_access_key, &session_token)?;
 
@@ -147,7 +153,9 @@ async fn main() -> Result<()> {
     println!();
     println!(
         "Your AWS account ID is {}",
-        caller_identity.account().context("No account ID returned")?
+        caller_identity
+            .account()
+            .context("No account ID returned")?
     );
     println!(
         "Your AWS user ID is {}",

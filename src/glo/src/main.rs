@@ -3,10 +3,10 @@ use buildinfo::version_string;
 use clap::Parser;
 use git2::{ObjectType, Repository};
 use human_bytes::human_bytes;
-use std::collections::HashSet;
-use std::path::{PathBuf};
-use thiserror::Error;
 use repowalker::find_git_repo as find_git_repo_repowalker;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use thiserror::Error;
 
 /// A tool to find large objects in Git repositories.
 #[derive(Parser)]

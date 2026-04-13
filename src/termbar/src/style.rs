@@ -458,7 +458,8 @@ mod tests {
             width_emoji > width_ascii,
             "Emoji filename (10 cols) should have wider bar than ASCII (12 cols).\n\
              Emoji bar: {}, ASCII bar: {}",
-            width_emoji, width_ascii
+            width_emoji,
+            width_ascii
         );
     }
 
@@ -466,7 +467,8 @@ mod tests {
 
     #[test]
     fn test_copy_style_long_filename_builds() {
-        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+        let long_filename =
+            "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
 
         // Test at various terminal widths
         for width in [80, 100, 120, 60] {
@@ -477,7 +479,8 @@ mod tests {
 
     #[test]
     fn test_verify_style_long_filename_builds() {
-        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+        let long_filename =
+            "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
 
         for width in [80, 100, 120, 60] {
             let style = ProgressStyleBuilder::verify(long_filename).build(width);
@@ -488,7 +491,8 @@ mod tests {
     #[test]
     fn test_template_truncates_long_filename() {
         // This test verifies that very long filenames get truncated
-        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+        let long_filename =
+            "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
         let terminal_width: u16 = 80;
 
         let template = ProgressStyleBuilder::copy(long_filename).create_template(terminal_width);
@@ -540,7 +544,8 @@ mod tests {
 
     #[test]
     fn test_verify_template_truncates_long_filename() {
-        let long_filename = "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
+        let long_filename =
+            "Very.Long.Filename.With.Many.Segments.That.Will.Definitely.Need.Truncation.mkv";
         // Use 120 width - verify style has 70 base overhead, so max_filename = 120 - 70 - 10 = 40
         let terminal_width: u16 = 120;
 
@@ -634,7 +639,8 @@ mod tests {
             bar_width_shorter,
             MIN_BAR_WIDTH + 1,
             "{}: Shorter filename should allow 1 more bar width. Template: {}",
-            style_name, template_shorter
+            style_name,
+            template_shorter
         );
     }
 
@@ -655,8 +661,7 @@ mod tests {
         // Test 1: At minimum terminal width, bar should be MIN_BAR_WIDTH
         let min_terminal_width = overhead + MIN_BAR_WIDTH;
         let template_min = builder_fn().create_template(min_terminal_width);
-        let bar_width_min =
-            extract_bar_width(&template_min).expect("Failed to extract bar width");
+        let bar_width_min = extract_bar_width(&template_min).expect("Failed to extract bar width");
         assert_eq!(
             bar_width_min, MIN_BAR_WIDTH,
             "{}: At minimum terminal width ({}), bar should be MIN_BAR_WIDTH ({}). \
@@ -672,7 +677,8 @@ mod tests {
             bar_width_plus_one,
             MIN_BAR_WIDTH + 1,
             "{}: At terminal width + 1, bar should be MIN_BAR_WIDTH + 1. Template: {}",
-            style_name, template_plus_one
+            style_name,
+            template_plus_one
         );
     }
 

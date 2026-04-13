@@ -1,10 +1,10 @@
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Local, TimeZone};
-use git2::{Repository, BranchType, Commit, Oid, Time};
+use git2::{BranchType, Commit, Oid, Repository, Time};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use walkdir::WalkDir;
 
 use crate::stats::{GitStats, Timer};
@@ -46,7 +46,12 @@ pub struct RepoProcessOptions {
 
 /// Directories to skip while walking the filesystem
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "vendor", ".idea", ".vscode", "dist", "build",
+    "node_modules",
+    "vendor",
+    ".idea",
+    ".vscode",
+    "dist",
+    "build",
 ];
 
 /// Check if a directory is a Git repository.
@@ -66,11 +71,11 @@ pub fn is_git_repository(path: &Path, stats: &GitStats) -> bool {
 /// Returns an error if the git config cannot be read or user.email is not set.
 pub fn get_git_user_email(stats: &GitStats) -> Result<String> {
     let timer = Timer::new();
-    
+
     // Try to get from global git config
     let config = git2::Config::open_default()?;
     let email = config.get_string("user.email")?;
-    
+
     stats.record_email(timer.elapsed());
     Ok(email)
 }
@@ -78,9 +83,7 @@ pub fn get_git_user_email(stats: &GitStats) -> Result<String> {
 /// Get the root directory of the git repository containing the given path
 pub fn get_repository_root(path: &Path) -> Option<PathBuf> {
     match Repository::discover(path) {
-        Ok(repo) => {
-            repo.workdir().map(|p| p.to_path_buf())
-        }
+        Ok(repo) => repo.workdir().map(|p| p.to_path_buf()),
         Err(_) => None,
     }
 }
@@ -123,7 +126,11 @@ impl CommitInfo {
         let author = commit.author();
         Self {
             hash: commit.id().to_string(),
-            message: format!("{} {}", commit.id(), get_first_line(commit.message().unwrap_or(""))),
+            message: format!(
+                "{} {}",
+                commit.id(),
+                get_first_line(commit.message().unwrap_or(""))
+            ),
             author_name: author.name().unwrap_or("").to_string(),
             author_email: author.email().unwrap_or("").to_string(),
             date: git_time_to_datetime(&author.when()),
@@ -265,7 +272,9 @@ pub fn scan_path(
                 Err(e) => {
                     if !options.ignore_failures {
                         result_guard.inaccessible_dirs.push(format!(
-                            "{} (git error: {})", path.display(), e
+                            "{} (git error: {})",
+                            path.display(),
+                            e
                         ));
                     }
                 }
@@ -304,7 +313,12 @@ fn process_git_repo(
                         Ok((branch, _)) => {
                             if let Some(oid) = branch.get().target() {
                                 match get_commits_from_oid(
-                                    &repo, oid, threshold, end_time, user_email, options.filter_by_user
+                                    &repo,
+                                    oid,
+                                    threshold,
+                                    end_time,
+                                    user_email,
+                                    options.filter_by_user,
                                 ) {
                                     Ok(branch_commits) => commits.extend(branch_commits),
                                     Err(_) => continue, // Skip this branch if commits can't be read
@@ -317,7 +331,14 @@ fn process_git_repo(
             }
             Err(_) => {
                 // If we can't get branches, fall back to HEAD
-                return process_head_only(&repo, threshold, end_time, user_email, options.filter_by_user, stats);
+                return process_head_only(
+                    &repo,
+                    threshold,
+                    end_time,
+                    user_email,
+                    options.filter_by_user,
+                    stats,
+                );
             }
         }
     } else {
@@ -326,7 +347,12 @@ fn process_git_repo(
             Ok(head) => {
                 if let Some(oid) = head.target() {
                     match get_commits_from_oid(
-                        &repo, oid, threshold, end_time, user_email, options.filter_by_user
+                        &repo,
+                        oid,
+                        threshold,
+                        end_time,
+                        user_email,
+                        options.filter_by_user,
                     ) {
                         Ok(head_commits) => commits = head_commits,
                         Err(_) => {
@@ -375,7 +401,12 @@ fn process_head_only(
         Ok(head) => {
             if let Some(oid) = head.target() {
                 match get_commits_from_oid(
-                    repo, oid, threshold, end_time, user_email, filter_by_user
+                    repo,
+                    oid,
+                    threshold,
+                    end_time,
+                    user_email,
+                    filter_by_user,
                 ) {
                     Ok(commits) => Ok(commits),
                     Err(_) => Ok(Vec::new()),
@@ -401,11 +432,11 @@ fn get_commits_from_oid(
         Ok(rw) => rw,
         Err(e) => return Err(anyhow!("Failed to create revwalk: {}", e)),
     };
-    
+
     if let Err(e) = revwalk.push(oid) {
         return Err(anyhow!("Failed to push OID to revwalk: {}", e));
     }
-    
+
     if let Err(e) = revwalk.set_sorting(git2::Sort::TIME) {
         return Err(anyhow!("Failed to set revwalk sorting: {}", e));
     }
@@ -417,19 +448,19 @@ fn get_commits_from_oid(
             Ok(oid) => oid,
             Err(_) => continue, // Skip invalid commit OIDs
         };
-        
+
         let commit = match repo.find_commit(commit_oid) {
             Ok(commit) => commit,
             Err(_) => continue, // Skip commits that can't be found
         };
-        
+
         let commit_time = git_time_to_datetime(&commit.author().when());
-        
+
         // Check if commit is within time range
         if commit_time < threshold {
             break; // Commits are sorted by time, so we can break here
         }
-        
+
         if let Some(end) = end_time {
             if commit_time > end {
                 continue;

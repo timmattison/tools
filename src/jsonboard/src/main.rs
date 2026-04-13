@@ -9,25 +9,27 @@ struct JsonTransformer;
 impl Transformer for JsonTransformer {
     fn is_relevant(&self, content: &str) -> bool {
         // Quick check for JSON-like content
-        content.contains('{') || content.contains('}') || 
-        content.contains('[') || content.contains(']') || 
-        content.contains('"')
+        content.contains('{')
+            || content.contains('}')
+            || content.contains('[')
+            || content.contains(']')
+            || content.contains('"')
     }
-    
+
     fn transform(&self, content: &str) -> Result<String, Box<dyn Error>> {
         // Parse JSON to validate
         let value: Value = serde_json::from_str(content)?;
-        
+
         // Pretty print with 3-space indentation (matching Go version)
         let formatted = serde_json::to_string_pretty(&value)?;
-        
+
         Ok(formatted)
     }
-    
+
     fn waiting_message(&self) -> &str {
         "Waiting for JSON in clipboard"
     }
-    
+
     fn success_message(&self) -> &str {
         "Reformatted JSON in clipboard"
     }

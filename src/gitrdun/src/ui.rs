@@ -45,7 +45,11 @@ pub struct ProgressDisplay {
 }
 
 impl ProgressDisplay {
-    pub fn new(threshold_time: DateTime<Local>, end_time: Option<DateTime<Local>>, ollama_enabled: bool) -> Self {
+    pub fn new(
+        threshold_time: DateTime<Local>,
+        end_time: Option<DateTime<Local>>,
+        ollama_enabled: bool,
+    ) -> Self {
         Self {
             dirs_checked: Arc::new(AtomicUsize::new(0)),
             repos_found: Arc::new(AtomicUsize::new(0)),
@@ -150,41 +154,41 @@ impl ProgressDisplay {
     fn run_ui_loop(&self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
         let mut completion_shown = false;
         let mut completion_time: Option<Instant> = None;
-        
+
         loop {
             // Check if all processing is complete (scanning + Ollama if enabled)
             if self.is_all_complete() && !completion_shown {
                 completion_shown = true;
                 completion_time = Some(Instant::now());
             }
-            
+
             // Exit after showing completion for 1 second
             if let Some(time) = completion_time {
                 if time.elapsed() > Duration::from_secs(1) {
                     break;
                 }
             }
-            
+
             terminal.draw(|f| {
                 let show_ollama = self.should_show_ollama_panel();
                 let constraints = if show_ollama {
                     vec![
-                        Constraint::Length(3),  // Title
-                        Constraint::Length(8),  // Stats
-                        Constraint::Length(3),  // Current Path
-                        Constraint::Min(4),     // Ollama Status - expands to use available space
-                        Constraint::Length(3),  // Instructions
+                        Constraint::Length(3), // Title
+                        Constraint::Length(8), // Stats
+                        Constraint::Length(3), // Current Path
+                        Constraint::Min(4),    // Ollama Status - expands to use available space
+                        Constraint::Length(3), // Instructions
                     ]
                 } else {
                     vec![
-                        Constraint::Length(3),  // Title
-                        Constraint::Length(8),  // Stats
-                        Constraint::Length(3),  // Current Path
-                        Constraint::Length(3),  // Instructions
-                        Constraint::Min(0),     // Remaining space
+                        Constraint::Length(3), // Title
+                        Constraint::Length(8), // Stats
+                        Constraint::Length(3), // Current Path
+                        Constraint::Length(3), // Instructions
+                        Constraint::Min(0),    // Remaining space
                     ]
                 };
-                
+
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .margin(1)
@@ -215,7 +219,7 @@ impl ProgressDisplay {
                 // Stats
                 let dirs_checked = self.dirs_checked.load(Ordering::Relaxed);
                 let repos_found = self.repos_found.load(Ordering::Relaxed);
-                
+
                 // Use frozen time if scan is complete, otherwise current elapsed time
                 let elapsed = if self.is_scan_complete() {
                     if let Some(completion_time) = *self.scan_completion_time.lock() {
@@ -226,10 +230,10 @@ impl ProgressDisplay {
                 } else {
                     self.start_time.elapsed()
                 };
-                
+
                 let scan_rate = if self.is_scan_complete() {
                     // Don't show scan rate after completion
-                    -1.0  // Sentinel value to indicate completion
+                    -1.0 // Sentinel value to indicate completion
                 } else if elapsed.as_secs() > 0 {
                     dirs_checked as f64 / elapsed.as_secs() as f64
                 } else {
@@ -241,39 +245,58 @@ impl ProgressDisplay {
                     Line::from(vec![
                         Span::raw("Directories scanned: "),
                         Span::styled(
-                            if scan_complete { format!("{} ✓", dirs_checked) } else { dirs_checked.to_string() },
-                            Style::default().fg(Color::Yellow)
+                            if scan_complete {
+                                format!("{} ✓", dirs_checked)
+                            } else {
+                                dirs_checked.to_string()
+                            },
+                            Style::default().fg(Color::Yellow),
                         ),
                     ]),
                     Line::from(vec![
                         Span::raw("Repositories found: "),
                         Span::styled(
-                            if scan_complete { format!("{} ✓", repos_found) } else { repos_found.to_string() },
-                            Style::default().fg(Color::Green)
+                            if scan_complete {
+                                format!("{} ✓", repos_found)
+                            } else {
+                                repos_found.to_string()
+                            },
+                            Style::default().fg(Color::Green),
                         ),
                     ]),
                     Line::from(vec![
-                        Span::raw(if scan_complete { "Scan duration: " } else { "Time elapsed: " }),
+                        Span::raw(if scan_complete {
+                            "Scan duration: "
+                        } else {
+                            "Time elapsed: "
+                        }),
                         Span::styled(format!("{:?}", elapsed), Style::default().fg(Color::Blue)),
                     ]),
                 ];
-                
+
                 // Add scan rate or status line
                 if scan_rate >= 0.0 {
                     stats_lines.push(Line::from(vec![
                         Span::raw("Scan rate: "),
-                        Span::styled(format!("{:.1} dirs/sec", scan_rate), Style::default().fg(Color::Magenta)),
+                        Span::styled(
+                            format!("{:.1} dirs/sec", scan_rate),
+                            Style::default().fg(Color::Magenta),
+                        ),
                     ]));
                 } else {
                     stats_lines.push(Line::from(vec![
                         Span::raw("Status: "),
                         Span::styled(
-                            if self.is_ollama_active() { "Processing with Ollama..." } else { "Scan complete" },
-                            Style::default().fg(Color::Cyan)
+                            if self.is_ollama_active() {
+                                "Processing with Ollama..."
+                            } else {
+                                "Scan complete"
+                            },
+                            Style::default().fg(Color::Cyan),
                         ),
                     ]));
                 }
-                
+
                 let stats_text = stats_lines;
 
                 let stats = Paragraph::new(stats_text)
@@ -296,17 +319,20 @@ impl ProgressDisplay {
                     } else {
                         current_path.clone()
                     };
-                    
+
                     let truncated_path = if display_path.len() > 60 {
-                        format!("...{}", &display_path[display_path.len().saturating_sub(57)..])
+                        format!(
+                            "...{}",
+                            &display_path[display_path.len().saturating_sub(57)..]
+                        )
                     } else {
                         display_path
                     };
                     format!("🔎 Current: {}", truncated_path)
                 };
 
-                let current = Paragraph::new(current_text)
-                    .block(Block::default().borders(Borders::ALL));
+                let current =
+                    Paragraph::new(current_text).block(Block::default().borders(Borders::ALL));
                 f.render_widget(current, chunks[2]);
 
                 // Conditionally render Ollama Status Panel
@@ -314,7 +340,7 @@ impl ProgressDisplay {
                     let status = self.ollama_status.lock().clone();
                     let repo = self.ollama_repo.lock().clone();
                     let progress = self.ollama_progress.lock().clone();
-                    
+
                     let ollama_text = if self.is_ollama_complete() {
                         "✅ Ollama processing complete".to_string()
                     } else if !repo.is_empty() {
@@ -330,13 +356,17 @@ impl ProgressDisplay {
                     };
 
                     let ollama_panel = Paragraph::new(ollama_text)
-                        .block(Block::default().borders(Borders::ALL).title("Ollama Status"))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title("Ollama Status"),
+                        )
                         .style(Style::default().fg(ollama_color));
                     f.render_widget(ollama_panel, chunks[3]);
-                    
-                    4  // Instructions will be at index 4 when Ollama panel is shown
+
+                    4 // Instructions will be at index 4 when Ollama panel is shown
                 } else {
-                    3  // Instructions will be at index 3 when Ollama panel is hidden
+                    3 // Instructions will be at index 3 when Ollama panel is hidden
                 };
 
                 // Instructions
@@ -374,12 +404,15 @@ impl ProgressDisplay {
         let dirs_checked = self.dirs_checked.load(Ordering::Relaxed);
         let repos_found = self.repos_found.load(Ordering::Relaxed);
         let elapsed = self.start_time.elapsed();
-        
+
         if self.is_all_complete() {
-            println!("\r✅ All processing complete! Scanned: {} dirs, Found: {} repos", dirs_checked, repos_found);
+            println!(
+                "\r✅ All processing complete! Scanned: {} dirs, Found: {} repos",
+                dirs_checked, repos_found
+            );
             return;
         }
-        
+
         let scan_rate = if elapsed.as_secs() > 0 {
             dirs_checked as f64 / elapsed.as_secs() as f64
         } else {
@@ -389,17 +422,14 @@ impl ProgressDisplay {
         if self.is_ollama_active() && self.is_scan_complete() {
             let ollama_repo = self.ollama_repo.lock().clone();
             let ollama_progress = self.ollama_progress.lock().clone();
-            
+
             print!(
                 "\r🤖 Ollama: Processing {}, {} | Scanned: {} dirs, Found: {} repos",
-                ollama_repo,
-                ollama_progress,
-                dirs_checked,
-                repos_found
+                ollama_repo, ollama_progress, dirs_checked, repos_found
             );
         } else {
             let current_path = self.current_path.lock().clone();
-            
+
             // Extract repo name from path if it contains .git
             let display_path = if current_path.contains(".git") {
                 // Get the parent directory of .git (the actual repo)
@@ -411,20 +441,23 @@ impl ProgressDisplay {
             } else {
                 current_path.clone()
             };
-            
+
             print!(
                 "\r🔍 Scanned: {} dirs, Found: {} repos, Rate: {:.1} dirs/sec, Current: {}",
                 dirs_checked,
                 repos_found,
                 scan_rate,
                 if display_path.len() > 40 {
-                    format!("...{}", &display_path[display_path.len().saturating_sub(37)..])
+                    format!(
+                        "...{}",
+                        &display_path[display_path.len().saturating_sub(37)..]
+                    )
                 } else {
                     display_path
                 }
             );
         }
-        
+
         use std::io::Write;
         let _ = io::stdout().flush();
     }

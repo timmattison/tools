@@ -475,7 +475,8 @@ const MAX_ATTEMPTS: u32 = 10;
 #[command(name = "nwt")]
 #[command(version = version_string!())]
 #[command(about = "Create a new git worktree with a Docker-style random name")]
-#[command(long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
+#[command(
+    long_about = "Creates a git worktree in a '{repo-name}-worktrees' directory alongside \
 the repository. Generates Docker-style random names (adjective-noun) for both the directory \
 and branch unless overridden. Automatically copies untracked .env files from the main \
 worktree to preserve development settings.
@@ -541,7 +542,8 @@ EXIT CODES:
     10 Tmux command failed
     12 Config file error (invalid TOML, validation failed)
     13 Not running inside tmux (--tmux specified)
-    14 Shell setup failed")]
+    14 Shell setup failed"
+)]
 struct Cli {
     /// Specify branch name instead of generating a random one.
     ///
@@ -651,7 +653,11 @@ macro_rules! error {
 /// Extracted to a helper to ensure consistent error messages between the
 /// pre-existence check and the PathCollision handler (TOCTOU race handling).
 fn exit_directory_exists(quiet: bool, path: &Path) -> ! {
-    error!(quiet, "Error: Directory '{}' already exists", path.display());
+    error!(
+        quiet,
+        "Error: Directory '{}' already exists",
+        path.display()
+    );
     error!(
         quiet,
         "Use --random-directory to generate a different directory name."
@@ -1141,8 +1147,7 @@ fn main() {
             None => {
                 error!(
                     config.quiet,
-                    "Error: Branch name '{}' cannot be used as a directory name",
-                    branch
+                    "Error: Branch name '{}' cannot be used as a directory name", branch
                 );
                 error!(
                     config.quiet,
@@ -1192,7 +1197,10 @@ fn main() {
                     "Error: Could not find an available directory name after {} attempts",
                     MAX_ATTEMPTS
                 );
-                error!(config.quiet, "Please try again or clean up unused worktrees.");
+                error!(
+                    config.quiet,
+                    "Please try again or clean up unused worktrees."
+                );
                 exit(exit_codes::NAME_COLLISION);
             }
             continue;
@@ -1375,7 +1383,10 @@ fn main() {
                         "Error: Could not find an available directory name after {} attempts",
                         MAX_ATTEMPTS
                     );
-                    error!(config.quiet, "Please try again or clean up unused worktrees.");
+                    error!(
+                        config.quiet,
+                        "Please try again or clean up unused worktrees."
+                    );
                     exit(exit_codes::NAME_COLLISION);
                 }
                 continue;
@@ -1391,8 +1402,7 @@ fn main() {
             WorktreeResult::RefInUse(ref_name) => {
                 error!(
                     config.quiet,
-                    "Error: The ref '{}' is already checked out in another worktree.",
-                    ref_name
+                    "Error: The ref '{}' is already checked out in another worktree.", ref_name
                 );
                 exit(exit_codes::WORKTREE_FAILED);
             }
@@ -1428,7 +1438,9 @@ mod tests {
         assert!(!adjective.is_empty(), "Adjective should not be empty");
         assert!(!noun.is_empty(), "Noun should not be empty");
         assert!(
-            adjective.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+            adjective
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c == '-'),
             "Adjective should be lowercase (possibly hyphenated)"
         );
         assert!(
@@ -1490,14 +1502,8 @@ mod tests {
 
     #[test]
     fn test_sanitize_repo_name_valid() {
-        assert_eq!(
-            sanitize_repo_name("my-repo"),
-            Some("my-repo".to_string())
-        );
-        assert_eq!(
-            sanitize_repo_name("my_repo"),
-            Some("my_repo".to_string())
-        );
+        assert_eq!(sanitize_repo_name("my-repo"), Some("my-repo".to_string()));
+        assert_eq!(sanitize_repo_name("my_repo"), Some("my_repo".to_string()));
         assert_eq!(
             sanitize_repo_name("MyRepo123"),
             Some("MyRepo123".to_string())
@@ -1510,22 +1516,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_repo_name_replaces_invalid_chars() {
-        assert_eq!(
-            sanitize_repo_name("my/repo"),
-            Some("my_repo".to_string())
-        );
-        assert_eq!(
-            sanitize_repo_name("my\\repo"),
-            Some("my_repo".to_string())
-        );
-        assert_eq!(
-            sanitize_repo_name("my repo"),
-            Some("my_repo".to_string())
-        );
-        assert_eq!(
-            sanitize_repo_name("my:repo"),
-            Some("my_repo".to_string())
-        );
+        assert_eq!(sanitize_repo_name("my/repo"), Some("my_repo".to_string()));
+        assert_eq!(sanitize_repo_name("my\\repo"), Some("my_repo".to_string()));
+        assert_eq!(sanitize_repo_name("my repo"), Some("my_repo".to_string()));
+        assert_eq!(sanitize_repo_name("my:repo"), Some("my_repo".to_string()));
     }
 
     #[test]
@@ -1602,11 +1596,7 @@ mod tests {
 
     #[test]
     fn test_join_branch_args_multiple_words() {
-        let args = vec![
-            "fix".to_string(),
-            "login".to_string(),
-            "bug".to_string(),
-        ];
+        let args = vec!["fix".to_string(), "login".to_string(), "bug".to_string()];
         assert_eq!(join_branch_args(&args), "fix-login-bug");
     }
 
@@ -1637,11 +1627,7 @@ mod tests {
     #[test]
     fn test_join_branch_args_issue_already_present() {
         // If user already typed "issue", don't double-prefix
-        let args = vec![
-            "issue".to_string(),
-            "1234".to_string(),
-            "fix".to_string(),
-        ];
+        let args = vec!["issue".to_string(), "1234".to_string(), "fix".to_string()];
         assert_eq!(join_branch_args(&args), "issue-1234-fix");
     }
 
@@ -1725,10 +1711,7 @@ mod tests {
         use clap::Parser;
         let cli = Cli::parse_from(["nwt", "-b", "192", "fix", "pagination"]);
         let merged = merge_config(&cli, None);
-        assert_eq!(
-            merged.branch,
-            Some("issue-192-fix-pagination".to_string())
-        );
+        assert_eq!(merged.branch, Some("issue-192-fix-pagination".to_string()));
     }
 
     #[test]
@@ -1801,11 +1784,7 @@ mod tests {
         sorted.sort();
         sorted.dedup();
 
-        assert_eq!(
-            sorted.len(),
-            codes.len(),
-            "All exit codes should be unique"
-        );
+        assert_eq!(sorted.len(), codes.len(), "All exit codes should be unique");
     }
 
     #[test]
@@ -1905,10 +1884,7 @@ mod tests {
         assert!(result.is_ok(), "Should accept --tmux option");
 
         let matches = result.unwrap();
-        assert!(
-            matches.get_flag("tmux"),
-            "Should set tmux flag"
-        );
+        assert!(matches.get_flag("tmux"), "Should set tmux flag");
     }
 
     #[test]
@@ -1953,8 +1929,7 @@ mod tests {
         let cmd = Cli::command();
 
         // --no-copy-env can be combined with --branch
-        let result =
-            cmd.try_get_matches_from(["nwt", "--no-copy-env", "--branch", "feature/test"]);
+        let result = cmd.try_get_matches_from(["nwt", "--no-copy-env", "--branch", "feature/test"]);
         assert!(result.is_ok(), "Should accept --no-copy-env with --branch");
     }
 
@@ -2198,8 +2173,7 @@ mod tests {
         /// the `#[serde(default)]` attributes on each field.
         #[test]
         fn test_default_impl_matches_serde_defaults() {
-            let serde_defaults: NwtConfig =
-                toml::from_str("").expect("Should parse empty config");
+            let serde_defaults: NwtConfig = toml::from_str("").expect("Should parse empty config");
             let manual_defaults = NwtConfig::default();
 
             // Compare each field explicitly for clear error messages
@@ -2590,7 +2564,11 @@ mod tests {
             assert!(file_has_content(dest.path(), ".env", "ROOT=1"));
             assert!(file_has_content(dest.path(), ".env.local", "LOCAL=2"));
             assert!(file_has_content(dest.path(), "app/.env", "APP=3"));
-            assert!(file_has_content(dest.path(), "app/.env.production", "PROD=4"));
+            assert!(file_has_content(
+                dest.path(),
+                "app/.env.production",
+                "PROD=4"
+            ));
         }
 
         #[test]
@@ -2696,10 +2674,7 @@ mod tests {
             }
 
             // Configure git user for the commit (required in some environments)
-            run_git(
-                source.path(),
-                &["config", "user.email", "test@example.com"],
-            );
+            run_git(source.path(), &["config", "user.email", "test@example.com"]);
             run_git(source.path(), &["config", "user.name", "Test User"]);
 
             // Create a .env file that will be tracked
@@ -2794,10 +2769,7 @@ mod tests {
             shorten_tab_name("issue-1234-fix-pagination"),
             "#1234-fix-pagination"
         );
-        assert_eq!(
-            shorten_tab_name("issue-42-add-login"),
-            "#42-add-login"
-        );
+        assert_eq!(shorten_tab_name("issue-42-add-login"), "#42-add-login");
     }
 
     #[test]

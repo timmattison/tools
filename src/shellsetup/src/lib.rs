@@ -168,7 +168,10 @@ impl ShellIntegration {
 
     /// Returns the start marker comment.
     fn start_marker(&self) -> String {
-        format!("# {} - {} shell integration", self.tool_name, self.tool_description)
+        format!(
+            "# {} - {} shell integration",
+            self.tool_name, self.tool_description
+        )
     }
 
     /// Returns the end marker comment.
@@ -237,12 +240,11 @@ impl ShellIntegration {
 
         // Check if already installed and handle upgrades
         if config_file.exists() {
-            let contents = fs::read_to_string(&config_file).map_err(|e| {
-                ShellSetupError::ReadError {
+            let contents =
+                fs::read_to_string(&config_file).map_err(|e| ShellSetupError::ReadError {
                     path: config_file.clone(),
                     source: e,
-                }
-            })?;
+                })?;
 
             let start_marker = self.start_marker();
             let end_marker = self.end_marker();
@@ -1103,7 +1105,11 @@ alias ll='ls -la'
     #[test]
     fn test_different_tools_dont_interfere() {
         let cwt = ShellIntegration::new("cwt", "Change Worktree", "\nfunction wt() { cwt; }\n");
-        let prcp = ShellIntegration::new("prcp", "Progress Copy", "\nfunction prmv() { prcp --rm; }\n");
+        let prcp = ShellIntegration::new(
+            "prcp",
+            "Progress Copy",
+            "\nfunction prmv() { prcp --rm; }\n",
+        );
 
         let file_with_both = r#"# cwt - Change Worktree shell integration
 function wt() { OLD_CWT; }
@@ -1118,15 +1124,21 @@ function prmv() { OLD_PRCP; }
 
         assert!(!after_cwt_replace.needs_warning);
         assert!(after_cwt_replace.content.contains("function wt() { cwt; }"));
-        assert!(after_cwt_replace.content.contains("function prmv() { OLD_PRCP; }"));
+        assert!(after_cwt_replace
+            .content
+            .contains("function prmv() { OLD_PRCP; }"));
         assert!(!after_cwt_replace.content.contains("OLD_CWT"));
 
         // Replacing prcp should not affect cwt
         let after_prcp_replace = prcp.replace_block(&after_cwt_replace.content);
 
         assert!(!after_prcp_replace.needs_warning);
-        assert!(after_prcp_replace.content.contains("function wt() { cwt; }"));
-        assert!(after_prcp_replace.content.contains("function prmv() { prcp --rm; }"));
+        assert!(after_prcp_replace
+            .content
+            .contains("function wt() { cwt; }"));
+        assert!(after_prcp_replace
+            .content
+            .contains("function prmv() { prcp --rm; }"));
         assert!(!after_prcp_replace.content.contains("OLD_PRCP"));
     }
 }

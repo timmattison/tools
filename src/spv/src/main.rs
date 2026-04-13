@@ -167,9 +167,7 @@ fn get_username(uid: u32) -> String {
         if name.is_null() {
             return uid.to_string();
         }
-        CStr::from_ptr(name)
-            .to_string_lossy()
-            .into_owned()
+        CStr::from_ptr(name).to_string_lossy().into_owned()
     }
 }
 

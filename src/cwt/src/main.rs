@@ -132,7 +132,9 @@ impl Worktree {
 
     /// Get the branch name for display, or short commit hash for detached HEAD.
     fn display_branch(&self) -> String {
-        if let Some(branch) = &self.branch { branch.clone() } else {
+        if let Some(branch) = &self.branch {
+            branch.clone()
+        } else {
             // Show short commit hash for detached HEAD
             let short_hash = if self.head.len() >= SHORT_COMMIT_HASH_LENGTH {
                 &self.head[..SHORT_COMMIT_HASH_LENGTH]
@@ -181,9 +183,7 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
             current_head = Some(head.to_string());
         } else if let Some(branch) = line.strip_prefix("branch ") {
             // Strip the refs/heads/ prefix
-            let branch_name = branch
-                .strip_prefix("refs/heads/")
-                .unwrap_or(branch);
+            let branch_name = branch.strip_prefix("refs/heads/").unwrap_or(branch);
             current_branch = Some(branch_name.to_string());
         }
         // Ignore other lines (like "bare" or "detached")
@@ -416,7 +416,9 @@ fn main() {
     // Handle different modes
     if cli.forward {
         // Next worktree (wrap around)
-        let target_idx = if let Some(i) = current_idx { (i + 1) % worktrees.len() } else {
+        let target_idx = if let Some(i) = current_idx {
+            (i + 1) % worktrees.len()
+        } else {
             error!(cli.quiet, "Error: Could not determine current worktree");
             exit(exit_codes::CURRENT_UNKNOWN);
         };
@@ -753,13 +755,11 @@ mod tests {
 
     #[test]
     fn test_find_worktree_substring_case_insensitive() {
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("Feature/UserAuth".to_string()),
-            },
-        ];
+        let worktrees = vec![Worktree {
+            path: PathBuf::from("/repo"),
+            head: "abc".to_string(),
+            branch: Some("Feature/UserAuth".to_string()),
+        }];
         // Various case combinations should all match
         assert!(matches!(
             find_worktree_by_name(&worktrees, "userauth"),
