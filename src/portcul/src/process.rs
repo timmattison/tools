@@ -145,7 +145,7 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
 
 /// Filters listeners to only those on the given port.
 pub fn filter_by_port(listeners: &[ListeningProcess], port: u16) -> Vec<&ListeningProcess> {
-    todo!("not yet implemented")
+    listeners.iter().filter(|l| l.port == port).collect()
 }
 
 #[cfg(test)]
