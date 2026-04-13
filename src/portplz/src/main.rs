@@ -15,12 +15,52 @@ struct Cli {
     #[arg(
         short,
         long,
-        help = "Print verbose output with directory name and branch"
+        help = "Print verbose output with repo/directory name and branch"
     )]
     verbose: bool,
 
     #[arg(long, help = "Disable git branch detection")]
     no_git: bool,
+}
+
+/// Describes how the port hash input was determined.
+///
+/// Each variant produces a different hash input format and verbose description.
+enum PortSource {
+    /// Git repo with a branch: hash input is `"repo_name\nbranch"`.
+    /// Uses `\n` as separator because git branch names cannot contain newlines
+    /// (per git-check-ref-format), making the hash input unambiguous even when
+    /// repo names or branch names contain `@` or other special characters.
+    GitRepo { repo_name: String, branch: String },
+    /// Git repo with detached HEAD: hash input is just `repo_name`.
+    DetachedHead { repo_name: String },
+    /// No git repo (--no-git or not a repo): hash input is `dirname`.
+    Directory { dirname: String },
+}
+
+impl PortSource {
+    fn hash_input(&self) -> String {
+        match self {
+            Self::GitRepo { repo_name, branch } => format!("{repo_name}\n{branch}"),
+            Self::DetachedHead { repo_name } => repo_name.clone(),
+            Self::Directory { dirname } => dirname.clone(),
+        }
+    }
+
+    fn verbose_description(&self, port: u16) -> String {
+        let desc = match self {
+            Self::GitRepo { repo_name, branch } => {
+                format!("repo '{repo_name}' on branch '{branch}'")
+            }
+            Self::DetachedHead { repo_name } => {
+                format!("repo '{repo_name}' (detached HEAD)")
+            }
+            Self::Directory { dirname } => {
+                format!("directory '{dirname}' (no git repo)")
+            }
+        };
+        format!("Port {port} for {desc}")
+    }
 }
 
 /// Returns the repo root directory basename, consistent across worktrees.
@@ -75,38 +115,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Invalid path: no basename")?
         .to_string_lossy();
 
-    let (input_string, verbose_desc) = if cli.no_git {
-        (
-            basename.to_string(),
-            format!("directory '{basename}' (no git repo)"),
-        )
+    let source = if cli.no_git {
+        PortSource::Directory {
+            dirname: basename.to_string(),
+        }
     } else {
         match gix::discover(path) {
             Ok(repo) => {
-                let repo_name = get_repo_root_name(&repo)
-                    .unwrap_or_else(|| basename.to_string());
+                let repo_name =
+                    get_repo_root_name(&repo).unwrap_or_else(|| basename.to_string());
                 match get_git_branch(&repo) {
-                    Some(branch) => (
-                        format!("{repo_name}@{branch}"),
-                        format!("repo '{repo_name}' on branch '{branch}'"),
-                    ),
-                    None => (
-                        repo_name.clone(),
-                        format!("repo '{repo_name}' (detached HEAD)"),
-                    ),
+                    Some(branch) => PortSource::GitRepo { repo_name, branch },
+                    None => PortSource::DetachedHead { repo_name },
                 }
             }
-            Err(_) => (
-                basename.to_string(),
-                format!("directory '{basename}' (no git repo)"),
-            ),
+            Err(_) => PortSource::Directory {
+                dirname: basename.to_string(),
+            },
         }
     };
 
-    let port = unprivileged_port_from_string(&input_string);
+    let port = unprivileged_port_from_string(&source.hash_input());
 
     if cli.verbose {
-        println!("Port {port} for {verbose_desc}");
+        println!("{}", source.verbose_description(port));
     } else {
         println!("{port}");
     }
