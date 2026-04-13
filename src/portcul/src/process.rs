@@ -79,8 +79,8 @@ pub struct ListeningProcess {
 ///
 /// Returns an error if the underlying system call to enumerate listeners fails.
 pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
-    let raw_listeners = listeners::get_all()
-        .map_err(|e| anyhow::anyhow!("failed to enumerate listeners: {e}"))?;
+    let raw_listeners =
+        listeners::get_all().map_err(|e| anyhow::anyhow!("failed to enumerate listeners: {e}"))?;
 
     let mut result: Vec<ListeningProcess> = raw_listeners
         .iter()

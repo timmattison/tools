@@ -15,16 +15,9 @@ pub enum KillConfirm {
     /// No confirmation dialog shown.
     None,
     /// Asking user to confirm killing a process.
-    Pending {
-        pid: Pid,
-        name: String,
-        port: u16,
-    },
+    Pending { pid: Pid, name: String, port: u16 },
     /// Kill was attempted, showing result.
-    Result {
-        message: String,
-        is_error: bool,
-    },
+    Result { message: String, is_error: bool },
 }
 
 /// Application state for rendering.
@@ -234,7 +227,10 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &AppState) {
         ]),
         KillConfirm::Result { message, is_error } => {
             let color = if *is_error { Color::Red } else { Color::Green };
-            Line::from(Span::styled(format!(" {message}"), Style::default().fg(color)))
+            Line::from(Span::styled(
+                format!(" {message}"),
+                Style::default().fg(color),
+            ))
         }
     };
 
@@ -247,24 +243,64 @@ fn render_help_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     let help_spans = match &state.kill_confirm {
         KillConfirm::Pending { .. } => vec![
             Span::styled(" ", Style::default().fg(Color::DarkGray)),
-            Span::styled("y", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "y",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" confirm  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "n",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("/", Style::default().fg(Color::DarkGray)),
-            Span::styled("Esc", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" cancel", Style::default().fg(Color::DarkGray)),
         ],
         _ => vec![
             Span::styled(" ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Up/Down", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Up/Down",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" navigate  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("d/Enter", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "d/Enter",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" kill  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("r", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "r",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" refresh  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("q", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("/", Style::default().fg(Color::DarkGray)),
-            Span::styled("Esc", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Esc",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" quit", Style::default().fg(Color::DarkGray)),
         ],
     };

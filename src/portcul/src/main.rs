@@ -253,9 +253,7 @@ fn run_app(
                             }
                         }
                         // Ctrl+C exits the app even during confirmation
-                        KeyCode::Char('c')
-                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                        {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break
                         }
                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
