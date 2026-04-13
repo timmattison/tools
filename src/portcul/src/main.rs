@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use buildinfo::version_string;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
@@ -54,27 +54,56 @@ impl Drop for TerminalGuard {
 
 /// A pretty TUI for viewing and killing processes listening on ports.
 ///
-/// Navigate with arrow keys, kill selected process with 'd' or Enter,
-/// refresh with 'r', quit with 'q' or Esc.
+/// Run with no subcommand to launch the interactive TUI.
+/// Use subcommands for non-interactive CLI operations.
 #[derive(Parser)]
 #[command(
     name = "portcul",
     version = version_string!(),
     about = "A pretty TUI for viewing and killing processes listening on ports"
 )]
-struct Args {
-    /// Refresh interval in seconds
-    #[arg(short, long, default_value = "2.0")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Refresh interval in seconds (TUI mode only)
+    #[arg(short, long, default_value = "2.0", global = true)]
     refresh: f64,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
+#[derive(Subcommand)]
+enum Command {
+    /// Kill all processes listening on a port
+    Kill {
+        /// Port number to kill processes on
+        port: u16,
+        /// Skip confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// List processes listening on ports
+    List {
+        /// Only show processes on this port
+        port: Option<u16>,
+    },
+}
 
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Command::Kill { port, yes }) => cmd_kill(port, yes),
+        Some(Command::List { port }) => cmd_list(port),
+        None => cmd_tui(cli.refresh),
+    }
+}
+
+/// Runs the TUI (default when no subcommand given).
+fn cmd_tui(refresh: f64) -> Result<()> {
     anyhow::ensure!(
-        args.refresh > 0.0 && args.refresh.is_finite(),
+        refresh > 0.0 && refresh.is_finite(),
         "refresh interval must be a positive finite number, got {}",
-        args.refresh
+        refresh
     );
 
     // Collect initial data before entering TUI
@@ -96,7 +125,7 @@ fn main() -> Result<()> {
 
     let mut guard = TerminalGuard::new();
 
-    let result = run_app(&mut terminal, args, listeners);
+    let result = run_app(&mut terminal, refresh, listeners);
 
     guard.disarm();
 
@@ -108,6 +137,16 @@ fn main() -> Result<()> {
     result
 }
 
+/// Kills all processes on a given port (CLI mode).
+fn cmd_kill(_port: u16, _yes: bool) -> Result<()> {
+    todo!("kill subcommand not yet implemented")
+}
+
+/// Lists processes listening on ports (CLI mode).
+fn cmd_list(_port: Option<u16>) -> Result<()> {
+    todo!("list subcommand not yet implemented")
+}
+
 /// Runs the main application loop.
 ///
 /// # Errors
@@ -115,10 +154,10 @@ fn main() -> Result<()> {
 /// Returns an error if terminal drawing or event polling fails.
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    args: Args,
+    refresh: f64,
     initial_listeners: Vec<process::ListeningProcess>,
 ) -> Result<()> {
-    let tick_rate = Duration::from_secs_f64(args.refresh);
+    let tick_rate = Duration::from_secs_f64(refresh);
     let mut state = AppState::new(initial_listeners);
 
     loop {
