@@ -236,4 +236,89 @@ mod tests {
         let other = unprivileged_port_from_string("other-directory");
         assert_ne!(port, other);
     }
+
+    // --- PortSource tests ---
+
+    #[test]
+    fn test_port_source_git_repo_hash_input() {
+        let source = PortSource::GitRepo {
+            repo_name: "myproject".into(),
+            branch: "main".into(),
+        };
+        // Separator must be \n (can't appear in git branch names)
+        assert_eq!(source.hash_input(), "myproject\nmain");
+    }
+
+    #[test]
+    fn test_port_source_detached_head_hash_input() {
+        let source = PortSource::DetachedHead {
+            repo_name: "myproject".into(),
+        };
+        assert_eq!(source.hash_input(), "myproject");
+    }
+
+    #[test]
+    fn test_port_source_directory_hash_input() {
+        let source = PortSource::Directory {
+            dirname: "some-dir".into(),
+        };
+        assert_eq!(source.hash_input(), "some-dir");
+    }
+
+    #[test]
+    fn test_port_source_verbose_git_repo() {
+        let source = PortSource::GitRepo {
+            repo_name: "myproject".into(),
+            branch: "main".into(),
+        };
+        let port = unprivileged_port_from_string(&source.hash_input());
+        assert_eq!(
+            source.verbose_description(port),
+            format!("Port {port} for repo 'myproject' on branch 'main'")
+        );
+    }
+
+    #[test]
+    fn test_port_source_verbose_detached() {
+        let source = PortSource::DetachedHead {
+            repo_name: "myproject".into(),
+        };
+        let port = unprivileged_port_from_string(&source.hash_input());
+        assert_eq!(
+            source.verbose_description(port),
+            format!("Port {port} for repo 'myproject' (detached HEAD)")
+        );
+    }
+
+    #[test]
+    fn test_port_source_verbose_directory() {
+        let source = PortSource::Directory {
+            dirname: "some-dir".into(),
+        };
+        let port = unprivileged_port_from_string(&source.hash_input());
+        assert_eq!(
+            source.verbose_description(port),
+            format!("Port {port} for directory 'some-dir' (no git repo)")
+        );
+    }
+
+    #[test]
+    fn test_separator_prevents_cross_component_collision() {
+        // Repo "a@b" on branch "c" must produce a different hash input
+        // than repo "a" on branch "b@c". With @ as separator both would
+        // be "a@b@c" — a collision. The \n separator prevents this.
+        let source_1 = PortSource::GitRepo {
+            repo_name: "a@b".into(),
+            branch: "c".into(),
+        };
+        let source_2 = PortSource::GitRepo {
+            repo_name: "a".into(),
+            branch: "b@c".into(),
+        };
+        assert_ne!(
+            source_1.hash_input(),
+            source_2.hash_input(),
+            "Different repo/branch combinations must produce different hash inputs"
+        );
+    }
 }
