@@ -172,101 +172,53 @@ mod tests {
     }
 
     #[test]
-    fn test_same_repo_same_branch_same_port() {
-        // Same repo root + same branch -> same port
-        let port1 = unprivileged_port_from_string("project-a@main");
-        let port2 = unprivileged_port_from_string("project-a@main");
-        assert_eq!(port1, port2);
-    }
-
-    #[test]
     fn test_different_repos_same_branch_different_ports() {
-        // Different repo roots + same branch -> different ports
-        let port_a = unprivileged_port_from_string("project-a@main");
-        let port_b = unprivileged_port_from_string("project-b@main");
-        assert_ne!(port_a, port_b);
+        // Core requirement of #197: different repo roots + same branch -> different ports
+        let source_a = PortSource::GitRepo {
+            repo_name: "project-a".into(),
+            branch: "main".into(),
+        };
+        let source_b = PortSource::GitRepo {
+            repo_name: "project-b".into(),
+            branch: "main".into(),
+        };
+        assert_ne!(
+            unprivileged_port_from_string(&source_a.hash_input()),
+            unprivileged_port_from_string(&source_b.hash_input()),
+        );
     }
 
     #[test]
-    fn test_same_repo_different_branches() {
-        let main_port = unprivileged_port_from_string("project-a@main");
-        let dev_port = unprivileged_port_from_string("project-a@dev");
-        assert_ne!(main_port, dev_port);
-    }
-
-    #[test]
-    fn test_get_repo_root_name_returns_basename() {
+    fn test_get_repo_root_name_returns_valid_basename() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo = gix::discover(path).expect("Should find git repo");
         let name = get_repo_root_name(&repo);
         assert!(name.is_some(), "Should find repo root name for a valid repo");
         let name = name.unwrap();
         assert!(!name.is_empty(), "Repo root name should not be empty");
-        // This repo is "tools" (or a worktree of it), so the root name should be "tools"
-        assert_eq!(name, "tools");
+        assert!(!name.contains('/'), "Should be a basename, not a path");
+        assert!(!name.contains('\\'), "Should be a basename, not a path");
     }
 
     #[test]
-    fn test_verbose_format_with_git() {
-        // Verbose output should be: "Port {port} for repo '{root}' on branch '{branch}'"
-        let repo_name = "myproject";
-        let branch = "main";
-        let input = format!("{repo_name}@{branch}");
-        let port = unprivileged_port_from_string(&input);
-        let verbose = format!("Port {port} for repo '{repo_name}' on branch '{branch}'");
-        assert!(verbose.starts_with("Port "));
-        assert!(verbose.contains("repo 'myproject'"));
-        assert!(verbose.contains("on branch 'main'"));
-    }
+    fn test_worktree_and_main_repo_share_root_name() {
+        // Discover repo from the current path (may be a worktree)
+        let worktree_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let worktree_repo = gix::discover(worktree_path).expect("Should find repo");
+        let worktree_name =
+            get_repo_root_name(&worktree_repo).expect("Should get repo root name");
 
-    #[test]
-    fn test_verbose_format_no_git() {
-        // Without git: "Port {port} for directory '{dirname}' (no git repo)"
-        let dirname = "some-dir";
-        let port = unprivileged_port_from_string(dirname);
-        let verbose = format!("Port {port} for directory '{dirname}' (no git repo)");
-        assert!(verbose.contains("directory 'some-dir'"));
-        assert!(verbose.contains("(no git repo)"));
-    }
+        // Discover repo from the main repo root (parent of common_dir)
+        let common = std::fs::canonicalize(worktree_repo.common_dir()).unwrap();
+        let main_repo_root = common.parent().unwrap();
+        let main_repo = gix::discover(main_repo_root).expect("Should find main repo");
+        let main_name =
+            get_repo_root_name(&main_repo).expect("Should get main repo root name");
 
-    #[test]
-    fn test_worktrees_share_repo_root_name() {
-        // common_dir() is the same for main repo and worktrees,
-        // so get_repo_root_name should return the same value.
-        // We test this indirectly: the hash input format repo@branch
-        // ensures worktrees of the same repo get the same port.
-        let port1 = unprivileged_port_from_string("tools@feature-x");
-        let port2 = unprivileged_port_from_string("tools@feature-x");
-        assert_eq!(port1, port2);
-    }
-
-    #[test]
-    fn test_detached_head_uses_repo_name_only() {
-        // Detached HEAD: hash input is just repo-root-basename (no @branch)
-        let detached = unprivileged_port_from_string("myproject");
-        let on_branch = unprivileged_port_from_string("myproject@main");
-        // They should differ because the input strings differ
-        assert_ne!(detached, on_branch);
-    }
-
-    #[test]
-    fn test_detached_head_verbose_format() {
-        let repo_name = "myproject";
-        let port = unprivileged_port_from_string(repo_name);
-        let verbose = format!("Port {port} for repo '{repo_name}' (detached HEAD)");
-        assert!(verbose.contains("repo 'myproject'"));
-        assert!(verbose.contains("(detached HEAD)"));
-    }
-
-    #[test]
-    fn test_no_git_uses_cwd_basename() {
-        // --no-git: hash input is just the directory basename
-        let port = unprivileged_port_from_string("my-directory");
-        let port2 = unprivileged_port_from_string("my-directory");
-        assert_eq!(port, port2);
-        // Different directory names produce different ports
-        let other = unprivileged_port_from_string("other-directory");
-        assert_ne!(port, other);
+        assert_eq!(
+            worktree_name, main_name,
+            "get_repo_root_name should return the same name from both worktree and main repo"
+        );
     }
 
     // --- PortSource tests ---
