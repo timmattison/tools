@@ -143,6 +143,11 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     }
 }
 
+/// Filters listeners to only those on the given port.
+pub fn filter_by_port(listeners: &[ListeningProcess], port: u16) -> Vec<&ListeningProcess> {
+    todo!("not yet implemented")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +209,45 @@ mod tests {
         let pid = Pid::try_from(1234_u32).unwrap();
         assert_eq!(pid.as_i32(), 1234);
         assert_eq!(pid.as_u32(), 1234);
+    }
+
+    #[test]
+    fn test_filter_by_port_returns_matching() {
+        let listeners = vec![
+            ListeningProcess {
+                pid: Pid::try_from(100_u32).unwrap(),
+                name: "nginx".to_string(),
+                port: 80,
+                address: "0.0.0.0".to_string(),
+            },
+            ListeningProcess {
+                pid: Pid::try_from(200_u32).unwrap(),
+                name: "node".to_string(),
+                port: 3000,
+                address: "127.0.0.1".to_string(),
+            },
+            ListeningProcess {
+                pid: Pid::try_from(300_u32).unwrap(),
+                name: "nginx".to_string(),
+                port: 80,
+                address: "0.0.0.0".to_string(),
+            },
+        ];
+        let filtered = filter_by_port(&listeners, 80);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].pid, Pid::try_from(100_u32).unwrap());
+        assert_eq!(filtered[1].pid, Pid::try_from(300_u32).unwrap());
+    }
+
+    #[test]
+    fn test_filter_by_port_returns_empty_when_no_match() {
+        let listeners = vec![ListeningProcess {
+            pid: Pid::try_from(100_u32).unwrap(),
+            name: "nginx".to_string(),
+            port: 80,
+            address: "0.0.0.0".to_string(),
+        }];
+        let filtered = filter_by_port(&listeners, 9999);
+        assert!(filtered.is_empty());
     }
 }
