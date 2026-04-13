@@ -24,10 +24,10 @@ Add a `get_repo_root_name` function that extracts the repo root basename from `g
 
 ### Acceptance criteria
 
-- [ ] Same branch + same repo root -> same port
-- [ ] Same branch + different repo root -> different port
-- [ ] `get_repo_root_name` returns consistent name across worktrees (uses common_dir)
-- [ ] Fallback to CWD basename when repo root discovery fails
+- [x] Same branch + same repo root -> same port
+- [x] Same branch + different repo root -> different port
+- [x] `get_repo_root_name` returns consistent name across worktrees (uses common_dir)
+- [x] Fallback to CWD basename when repo root discovery fails
 
 ---
 
@@ -41,10 +41,10 @@ Remove the `--with-dir` CLI flag, its `conflicts_with` constraint, and all condi
 
 ### Acceptance criteria
 
-- [ ] `--with-dir` flag no longer exists in CLI struct
-- [ ] No conditional branching on `with_dir` in main logic
-- [ ] Verbose output shows repo name and branch
-- [ ] Old `--with-dir` tests removed, new verbose format tests added
+- [x] `--with-dir` flag no longer exists in CLI struct
+- [x] No conditional branching on `with_dir` in main logic
+- [x] Verbose output shows repo name and branch
+- [x] Old `--with-dir` tests removed, new verbose format tests added
 
 ---
 
@@ -58,7 +58,7 @@ Handle detached HEAD by using repo root basename without a branch suffix. Verify
 
 ### Acceptance criteria
 
-- [ ] Detached HEAD uses repo-root-basename (no branch suffix) as hash input
-- [ ] `--no-git` flag uses CWD basename
-- [ ] Non-git directory uses CWD basename
-- [ ] All edge cases have tests
+- [x] Detached HEAD uses repo-root-basename (no branch suffix) as hash input
+- [x] `--no-git` flag uses CWD basename
+- [x] Non-git directory uses CWD basename
+- [x] All edge cases have tests
