@@ -147,14 +147,15 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
 ///
 /// Example: "Found 2 processes on port 8080:"
 pub fn format_kill_header(count: usize, port: u16) -> String {
-    todo!("not yet implemented")
+    let noun = if count == 1 { "process" } else { "processes" };
+    format!("Found {count} {noun} on port {port}:")
 }
 
 /// Formats the result message after sending SIGTERM.
 ///
 /// Example: "Sent SIGTERM to nginx (PID 1234)"
 pub fn format_kill_result(listener: &ListeningProcess) -> String {
-    todo!("not yet implemented")
+    format!("Sent SIGTERM to {} (PID {})", listener.name, listener.pid)
 }
 
 /// Formats a listening process as a single line for CLI output.

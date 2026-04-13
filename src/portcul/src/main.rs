@@ -19,7 +19,10 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 mod process;
 mod ui;
 
-use process::{collect_listeners, filter_by_port, format_process_line, kill_process};
+use process::{
+    collect_listeners, filter_by_port, format_kill_header, format_kill_result, format_process_line,
+    kill_process,
+};
 use ui::{AppState, KillConfirm};
 
 /// RAII guard that restores terminal state on drop.
@@ -138,8 +141,50 @@ fn cmd_tui(refresh: f64) -> Result<()> {
 }
 
 /// Kills all processes on a given port (CLI mode).
-fn cmd_kill(_port: u16, _yes: bool) -> Result<()> {
-    todo!("kill subcommand not yet implemented")
+fn cmd_kill(port: u16, yes: bool) -> Result<()> {
+    let listeners = collect_listeners()?;
+    let targets = filter_by_port(&listeners, port);
+
+    if targets.is_empty() {
+        eprintln!("No processes found on port {port}");
+        std::process::exit(1);
+    }
+
+    if yes {
+        // Non-interactive: kill immediately
+        for listener in &targets {
+            match kill_process(listener.pid) {
+                Ok(()) => println!("{}", format_kill_result(listener)),
+                Err(e) => eprintln!("Failed to kill PID {}: {e}", listener.pid),
+            }
+        }
+    } else {
+        // Interactive: show processes and ask for confirmation
+        println!("{}", format_kill_header(targets.len(), port));
+        for listener in &targets {
+            println!("{}", format_process_line(listener));
+        }
+        println!();
+
+        eprint!("Kill these processes? [y/n] ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        if input.trim().eq_ignore_ascii_case("y") {
+            for listener in &targets {
+                match kill_process(listener.pid) {
+                    Ok(()) => println!("{}", format_kill_result(listener)),
+                    Err(e) => eprintln!("Failed to kill PID {}: {e}", listener.pid),
+                }
+            }
+        } else {
+            eprintln!("Cancelled.");
+        }
+    }
+
+    Ok(())
 }
 
 /// Lists processes listening on ports (CLI mode).
