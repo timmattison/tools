@@ -143,6 +143,20 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     }
 }
 
+/// Formats the header shown before listing processes to kill.
+///
+/// Example: "Found 2 processes on port 8080:"
+pub fn format_kill_header(count: usize, port: u16) -> String {
+    todo!("not yet implemented")
+}
+
+/// Formats the result message after sending SIGTERM.
+///
+/// Example: "Sent SIGTERM to nginx (PID 1234)"
+pub fn format_kill_result(listener: &ListeningProcess) -> String {
+    todo!("not yet implemented")
+}
+
 /// Formats a listening process as a single line for CLI output.
 ///
 /// Output format: `  PID <pid>  <name>   <address>:<port>`
@@ -219,6 +233,30 @@ mod tests {
         let pid = Pid::try_from(1234_u32).unwrap();
         assert_eq!(pid.as_i32(), 1234);
         assert_eq!(pid.as_u32(), 1234);
+    }
+
+    #[test]
+    fn test_format_kill_header_single() {
+        let header = format_kill_header(1, 8080);
+        assert_eq!(header, "Found 1 process on port 8080:");
+    }
+
+    #[test]
+    fn test_format_kill_header_multiple() {
+        let header = format_kill_header(3, 443);
+        assert_eq!(header, "Found 3 processes on port 443:");
+    }
+
+    #[test]
+    fn test_format_kill_result() {
+        let listener = ListeningProcess {
+            pid: Pid::try_from(1234_u32).unwrap(),
+            name: "nginx".to_string(),
+            port: 8080,
+            address: "0.0.0.0".to_string(),
+        };
+        let msg = format_kill_result(&listener);
+        assert_eq!(msg, "Sent SIGTERM to nginx (PID 1234)");
     }
 
     #[test]
