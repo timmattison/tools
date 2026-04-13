@@ -143,6 +143,11 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
     }
 }
 
+/// Formats a listening process as a single line for CLI output.
+pub fn format_process_line(listener: &ListeningProcess) -> String {
+    todo!("not yet implemented")
+}
+
 /// Filters listeners to only those on the given port.
 pub fn filter_by_port(listeners: &[ListeningProcess], port: u16) -> Vec<&ListeningProcess> {
     listeners.iter().filter(|l| l.port == port).collect()
@@ -237,6 +242,41 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].pid, Pid::try_from(100_u32).unwrap());
         assert_eq!(filtered[1].pid, Pid::try_from(300_u32).unwrap());
+    }
+
+    #[test]
+    fn test_format_process_line_basic() {
+        let listener = ListeningProcess {
+            pid: Pid::try_from(1234_u32).unwrap(),
+            name: "nginx".to_string(),
+            port: 8080,
+            address: "0.0.0.0".to_string(),
+        };
+        let line = format_process_line(&listener);
+        assert!(line.contains("1234"), "should contain PID");
+        assert!(line.contains("nginx"), "should contain process name");
+        assert!(line.contains("0.0.0.0:8080"), "should contain address:port");
+    }
+
+    #[test]
+    fn test_format_process_line_alignment() {
+        let a = ListeningProcess {
+            pid: Pid::try_from(1_u32).unwrap(),
+            name: "a".to_string(),
+            port: 80,
+            address: "0.0.0.0".to_string(),
+        };
+        let b = ListeningProcess {
+            pid: Pid::try_from(99999_u32).unwrap(),
+            name: "long-process-name".to_string(),
+            port: 443,
+            address: "127.0.0.1".to_string(),
+        };
+        // Both lines should be well-formed (no panic, contains expected data)
+        let line_a = format_process_line(&a);
+        let line_b = format_process_line(&b);
+        assert!(line_a.contains("PID"));
+        assert!(line_b.contains("PID"));
     }
 
     #[test]
