@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use crate::discovery::{discover_controllers, validate_user_url};
 use crate::client::UnifiClient;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub url: Option<String>,
     pub api_key: Option<String>,
@@ -68,7 +68,6 @@ impl Config {
         println!("================================\n");
         
         // Step 1: Discover or get controller URL
-        println!("Searching for UniFi controllers on your network...");
         let controllers = discover_controllers().await?;
         
         let controller_url = if controllers.is_empty() {
@@ -202,17 +201,6 @@ impl Config {
         }
         
         Ok(())
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            url: None,
-            api_key: None,
-            insecure: None,
-            site_manager_api_key: None,
-        }
     }
 }
 
