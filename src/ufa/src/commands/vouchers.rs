@@ -126,27 +126,25 @@ pub async fn handle_vouchers_command(
         VouchersCommand::Get { voucher_id } => {
             get_voucher(client, site_id, voucher_id, output_format).await
         }
-        VouchersCommand::Create { 
-            count, 
-            name, 
+        VouchersCommand::Create {
+            count,
+            name,
             time_limit_minutes,
             authorized_guest_limit,
             data_usage_limit_mbytes,
             rx_rate_limit_kbps,
             tx_rate_limit_kbps,
         } => {
-            create_vouchers(
-                client, 
-                site_id, 
-                count, 
-                name, 
+            let request = VoucherCreateRequest {
+                count,
+                name,
                 time_limit_minutes,
                 authorized_guest_limit,
                 data_usage_limit_mbytes,
                 rx_rate_limit_kbps,
                 tx_rate_limit_kbps,
-                output_format,
-            ).await
+            };
+            create_vouchers(client, site_id, request, output_format).await
         }
         VouchersCommand::Delete { voucher_id } => {
             delete_voucher(client, site_id, voucher_id).await
@@ -210,26 +208,11 @@ async fn get_voucher(
 async fn create_vouchers(
     client: &UnifiClient,
     site_id: Option<Uuid>,
-    count: u32,
-    name: String,
-    time_limit_minutes: u64,
-    authorized_guest_limit: Option<u64>,
-    data_usage_limit_mbytes: Option<u64>,
-    rx_rate_limit_kbps: Option<u64>,
-    tx_rate_limit_kbps: Option<u64>,
+    request: VoucherCreateRequest,
     output_format: OutputFormat,
 ) -> Result<()> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
-    let request = VoucherCreateRequest {
-        count,
-        name,
-        time_limit_minutes,
-        authorized_guest_limit,
-        data_usage_limit_mbytes,
-        rx_rate_limit_kbps,
-        tx_rate_limit_kbps,
-    };
 
     let response: VoucherCreateResponse = client.post(&path, &request).await?;
 

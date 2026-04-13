@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::HashSet;
 use std::time::Duration;
@@ -17,22 +18,28 @@ impl DiscoveredController {
         format!("https://{}:{}", self.ip, self.port)
     }
     
-    pub fn settings_url(&self) -> String {
-        format!("https://{}:{}/settings/control-plane/integrations", self.ip, self.port)
-    }
 }
 
 /// Discover UniFi controllers on the local network
 pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg}")
+            .expect("valid spinner template"),
+    );
+    spinner.enable_steady_tick(Duration::from_millis(80));
+
     let mut controllers = Vec::new();
-    
+
     // Try mDNS discovery
+    spinner.set_message("mDNS: browsing for _unifi._tcp.local. ...");
     if let Ok(mdns_controllers) = discover_via_mdns().await {
         controllers.extend(mdns_controllers);
     }
-    
-    // Try common IPs and ports
-    let common_targets = vec![
+
+    // Try common IPs and ports in parallel
+    let common_targets: Vec<(&str, u16)> = vec![
         ("192.168.1.1", 443),
         ("192.168.1.1", 8443),
         ("192.168.0.1", 443),
@@ -42,17 +49,28 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
         ("unifi.local", 443),
         ("unifi.local", 8443),
     ];
-    
-    for (host, port) in common_targets {
-        if let Ok(controller) = validate_controller(host, port).await {
-            controllers.push(controller);
-        }
+
+    spinner.set_message(format!(
+        "Probing {} common addresses ...",
+        common_targets.len()
+    ));
+
+    let futures: Vec<_> = common_targets
+        .into_iter()
+        .map(|(host, port)| validate_controller(host, port))
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+    for controller in results.into_iter().flatten() {
+        controllers.push(controller);
     }
-    
+
+    spinner.finish_and_clear();
+
     // Deduplicate by IP
     let mut seen = HashSet::new();
     controllers.retain(|c| seen.insert(c.ip.clone()));
-    
+
     Ok(controllers)
 }
 
@@ -67,7 +85,7 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
     // Collect responses for a short time
     let browse_duration = Duration::from_secs(2);
     let _ = timeout(browse_duration, async {
-        while let Ok(event) = receiver.recv() {
+        while let Ok(event) = receiver.recv_async().await {
             if let ServiceEvent::ServiceResolved(info) = event {
                 for addr in info.get_addresses() {
                     let controller = DiscoveredController {

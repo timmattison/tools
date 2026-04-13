@@ -52,8 +52,7 @@ pub async fn handle_cloud_command(
                             .and_then(|s| s.firmware_version.as_ref())
                             .map(|s| s.as_str())
                             .unwrap_or("Unknown");
-                        let ip = host.ip_address.as_ref()
-                            .map(|s| s.as_str())
+                        let ip = host.ip_address.as_deref()
                             .unwrap_or("N/A");
                         let last_seen = host.last_connection_state_change.as_ref()
                             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())

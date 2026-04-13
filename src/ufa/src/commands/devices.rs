@@ -339,7 +339,7 @@ async fn get_single_device_stats(
 async fn get_all_device_stats(
     client: &UnifiClient,
     site_id: Uuid,
-    output_format: OutputFormat,
+    _output_format: OutputFormat,
 ) -> Result<()> {
     // Fetch all devices
     let params: Vec<(&str, &dyn std::fmt::Display)> = vec![];
