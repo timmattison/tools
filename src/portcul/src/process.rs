@@ -144,8 +144,13 @@ pub fn kill_process(pid: Pid) -> anyhow::Result<()> {
 }
 
 /// Formats a listening process as a single line for CLI output.
+///
+/// Output format: `  PID <pid>  <name>   <address>:<port>`
 pub fn format_process_line(listener: &ListeningProcess) -> String {
-    todo!("not yet implemented")
+    format!(
+        "  PID {:<7} {:<20} {}:{}",
+        listener.pid, listener.name, listener.address, listener.port
+    )
 }
 
 /// Filters listeners to only those on the given port.

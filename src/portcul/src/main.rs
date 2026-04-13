@@ -19,7 +19,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 mod process;
 mod ui;
 
-use process::{collect_listeners, kill_process};
+use process::{collect_listeners, filter_by_port, format_process_line, kill_process};
 use ui::{AppState, KillConfirm};
 
 /// RAII guard that restores terminal state on drop.
@@ -143,8 +143,27 @@ fn cmd_kill(_port: u16, _yes: bool) -> Result<()> {
 }
 
 /// Lists processes listening on ports (CLI mode).
-fn cmd_list(_port: Option<u16>) -> Result<()> {
-    todo!("list subcommand not yet implemented")
+fn cmd_list(port: Option<u16>) -> Result<()> {
+    let listeners = collect_listeners()?;
+
+    let to_display: Vec<&process::ListeningProcess> = match port {
+        Some(p) => filter_by_port(&listeners, p),
+        None => listeners.iter().collect(),
+    };
+
+    if to_display.is_empty() {
+        match port {
+            Some(p) => eprintln!("No processes found on port {p}"),
+            None => eprintln!("No processes listening on any ports"),
+        }
+        std::process::exit(1);
+    }
+
+    for listener in &to_display {
+        println!("{}", format_process_line(listener));
+    }
+
+    Ok(())
 }
 
 /// Runs the main application loop.
