@@ -310,6 +310,21 @@ fn render_help_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(paragraph, area);
 }
 
+/// Renders the address column content for a `ListeningProcess`.
+///
+/// For a single address, returns the address directly.
+/// For multiple addresses, returns a multi-line tree with "Multiple" on the
+/// first line and each address on its own line prefixed by tree characters.
+fn format_address_cell(addresses: &[String]) -> String {
+    todo!("not yet implemented")
+}
+
+/// Returns the Ratatui row height needed to render a cell produced by
+/// [`format_address_cell`] with `address_count` addresses.
+fn address_cell_height(address_count: usize) -> u16 {
+    todo!("not yet implemented")
+}
+
 /// Minimum width for truncation (ellipsis + at least 1 char).
 const MIN_TRUNCATION_WIDTH: usize = 4;
 
@@ -355,6 +370,50 @@ fn truncate_to_width(name: &str, max_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_format_address_cell_single() {
+        let cell = format_address_cell(&["0.0.0.0".to_string()]);
+        assert_eq!(cell, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_format_address_cell_multiple_uses_tree() {
+        let cell = format_address_cell(&[
+            "0.0.0.0".to_string(),
+            "127.0.0.1".to_string(),
+            "::".to_string(),
+        ]);
+        let lines: Vec<&str> = cell.split('\n').collect();
+        assert_eq!(lines.len(), 4, "expected 1 header line + 3 address lines");
+        assert_eq!(lines[0], "Multiple");
+        assert_eq!(lines[1], "├─ 0.0.0.0");
+        assert_eq!(lines[2], "├─ 127.0.0.1");
+        assert_eq!(lines[3], "└─ ::");
+    }
+
+    #[test]
+    fn test_format_address_cell_two_addresses() {
+        let cell = format_address_cell(&["0.0.0.0".to_string(), "::".to_string()]);
+        let lines: Vec<&str> = cell.split('\n').collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "Multiple");
+        assert_eq!(lines[1], "├─ 0.0.0.0");
+        assert_eq!(lines[2], "└─ ::");
+    }
+
+    #[test]
+    fn test_address_cell_height_single() {
+        assert_eq!(address_cell_height(1), 1);
+    }
+
+    #[test]
+    fn test_address_cell_height_multiple() {
+        // header row + one line per address
+        assert_eq!(address_cell_height(2), 3);
+        assert_eq!(address_cell_height(3), 4);
+        assert_eq!(address_cell_height(5), 6);
+    }
 
     #[test]
     fn test_truncate_to_width_short() {
