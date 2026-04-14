@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use tempfile::TempDir;
@@ -91,22 +91,31 @@ fn run_workspace_install(
 }
 
 /// Shallow-clone `repo_url` into a new temp directory and return the handle.
+///
+/// git's stderr is captured so that on failure we can surface the underlying
+/// reason (bad URL, network error, auth prompt) rather than just an exit code.
 fn shallow_clone(repo_url: &str) -> Result<TempDir> {
     let temp_dir = tempfile::tempdir().context("Failed to create temp directory")?;
 
-    println!("Cloning {}...", repo_url);
+    println!("Cloning {repo_url}...");
 
-    let status = Command::new("git")
+    let output = Command::new("git")
         .arg("clone")
         .arg("--depth")
         .arg("1")
         .arg(repo_url)
         .arg(temp_dir.path())
-        .status()
+        .output()
         .context("Failed to run git clone (is git installed?)")?;
 
-    if !status.success() {
-        bail!("git clone failed with exit status {}", status);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr.trim();
+        if reason.is_empty() {
+            bail!("git clone failed with exit status {}", output.status);
+        } else {
+            bail!("git clone failed: {reason}");
+        }
     }
 
     Ok(temp_dir)
@@ -165,8 +174,8 @@ fn resolve_workspace_members(repo_root: &Path, patterns: &[String]) -> Result<Ve
         let entries = glob::glob(joined_str)
             .with_context(|| format!("Invalid workspace member pattern: {pattern}"))?;
         for entry in entries {
-            let path = entry
-                .with_context(|| format!("Failed to resolve member pattern: {pattern}"))?;
+            let path =
+                entry.with_context(|| format!("Failed to resolve member pattern: {pattern}"))?;
             if path.is_dir() {
                 resolved.push(path);
             }
@@ -244,17 +253,23 @@ fn install_packages(repo_url: &str, packages: &[BinaryPackage]) -> Vec<InstallOu
 
 /// Format a summary of install outcomes as a multi-line string.
 ///
-/// STUB: shows the counts but omits per-package error details.
+/// Failed entries show the package name followed by the captured error text,
+/// so users don't have to scroll back through the live install output to find
+/// out what went wrong.
 fn format_summary(outcomes: &[InstallOutcome]) -> String {
     let installed = outcomes.iter().filter(|o| o.error.is_none()).count();
     let failed = outcomes.len() - installed;
     let mut out = String::new();
     out.push('\n');
-    out.push_str(&format!("Summary: {installed} installed, {failed} failed\n"));
+    out.push_str(&format!(
+        "Summary: {installed} installed, {failed} failed\n"
+    ));
     if failed > 0 {
         out.push_str("  Failed:\n");
         for outcome in outcomes.iter().filter(|o| o.error.is_some()) {
-            out.push_str(&format!("    {}\n", outcome.package));
+            // error is Some here by the filter.
+            let err = outcome.error.as_deref().unwrap_or("");
+            out.push_str(&format!("    {}: {}\n", outcome.package, err));
         }
     }
     out
@@ -274,7 +289,10 @@ fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
         .context("Failed to run cargo install (is cargo installed?)")?;
 
     if !status.success() {
-        bail!("cargo install failed with exit status {}", status);
+        match status.code() {
+            Some(code) => bail!("cargo install failed with exit code {code}"),
+            None => bail!("cargo install was terminated by signal"),
+        }
     }
 
     Ok(())
@@ -291,7 +309,11 @@ mod tests {
     fn parses_simple_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let manifest_path = dir.path().join("Cargo.toml");
-        fs::write(&manifest_path, "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+        fs::write(
+            &manifest_path,
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         let value = parse_manifest(&manifest_path).unwrap();
         assert_eq!(value["package"]["name"].as_str(), Some("demo"));
     }
