@@ -55,6 +55,24 @@ fn main() -> Result<()> {
     }
 }
 
+/// Discover every binary package in a Cargo workspace.
+///
+/// Expands `workspace.members` globs and optionally includes the root crate
+/// (when the root `Cargo.toml` has a `[package]` section alongside
+/// `[workspace]`). Library-only members are filtered out.
+///
+/// # Errors
+///
+/// Returns an error if a member glob pattern is malformed.
+fn discover_workspace_packages(
+    repo_root: &Path,
+    root_manifest: &toml::Value,
+) -> Result<Vec<BinaryPackage>> {
+    let patterns = extract_workspace_members(root_manifest);
+    let member_dirs = resolve_workspace_members(repo_root, &patterns)?;
+    collect_binary_packages(&member_dirs)
+}
+
 /// Discover all binary packages in a Cargo workspace and install each one,
 /// continuing past individual failures.
 fn run_workspace_install(
@@ -62,9 +80,7 @@ fn run_workspace_install(
     root_manifest: &toml::Value,
     repo_path: &Path,
 ) -> Result<()> {
-    let patterns = extract_workspace_members(root_manifest);
-    let member_dirs = resolve_workspace_members(repo_path, &patterns)?;
-    let packages = collect_binary_packages(&member_dirs)?;
+    let packages = discover_workspace_packages(repo_path, root_manifest)?;
 
     if packages.is_empty() {
         bail!("No binary packages found in repository");
@@ -548,6 +564,36 @@ mod tests {
         assert!(out.contains("Summary: 0 installed, 2 failed"));
         assert!(out.contains("boom one"), "missing first error:\n{out}");
         assert!(out.contains("boom two"), "missing second error:\n{out}");
+    }
+
+    #[test]
+    fn discover_includes_root_package_when_root_is_also_workspace() {
+        // A real-world pattern: the root Cargo.toml contains BOTH [workspace]
+        // and [package] (a root binary crate that also owns a workspace). The
+        // root crate must be installed alongside the workspace members.
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"rootcli\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let foo_dir = root.path().join("crates").join("foo");
+        fs::create_dir_all(foo_dir.join("src")).unwrap();
+        fs::write(
+            foo_dir.join("Cargo.toml"),
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(foo_dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let root_manifest = parse_manifest(&root.path().join("Cargo.toml")).unwrap();
+        let packages = discover_workspace_packages(root.path(), &root_manifest).unwrap();
+        let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"rootcli"), "missing root crate in {names:?}");
+        assert!(names.contains(&"foo"), "missing foo in {names:?}");
     }
 
     #[test]
