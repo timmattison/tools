@@ -69,8 +69,27 @@ fn discover_workspace_packages(
     root_manifest: &toml::Value,
 ) -> Result<Vec<BinaryPackage>> {
     let patterns = extract_workspace_members(root_manifest);
-    let member_dirs = resolve_workspace_members(repo_root, &patterns)?;
+    let mut member_dirs = resolve_workspace_members(repo_root, &patterns)?;
+
+    // If the root manifest itself has a [package] section, the root crate is
+    // part of the workspace and should be considered for install too. Skip if
+    // it's already covered by a members glob.
+    if root_manifest.get("package").is_some()
+        && !member_dirs.iter().any(|d| paths_equal(d, repo_root))
+    {
+        member_dirs.push(repo_root.to_path_buf());
+    }
+
     collect_binary_packages(&member_dirs)
+}
+
+/// Compare two paths by canonicalized form, falling back to raw equality
+/// if canonicalize fails (e.g. path does not yet exist on disk).
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
 }
 
 /// Discover all binary packages in a Cargo workspace and install each one,
