@@ -43,16 +43,14 @@ enum MemberClass {
 }
 
 /// Classify a member directory into [`MemberClass`].
-///
-/// Stub: currently conflates `ParseError` with `LibraryOnly`, which is the
-/// bug this test is locking in.
 fn classify_member(dir: &Path) -> MemberClass {
     let manifest_path = dir.join("Cargo.toml");
     if !manifest_path.exists() {
         return MemberClass::NoManifest;
     }
-    let Ok(manifest) = parse_manifest(&manifest_path) else {
-        return MemberClass::LibraryOnly;
+    let manifest = match parse_manifest(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => return MemberClass::ParseError(e.to_string()),
     };
     if !is_binary_package(&manifest, dir) {
         return MemberClass::LibraryOnly;
@@ -304,41 +302,30 @@ fn resolve_workspace_members(repo_root: &Path, patterns: &[String]) -> Result<Ve
     Ok(resolved)
 }
 
-/// For each member directory, parse its Cargo.toml, skip library-only crates,
-/// and return the list of binary packages with their names and paths.
-///
-/// Directories without a Cargo.toml and directories whose Cargo.toml cannot be
-/// parsed or has no `package.name` are silently skipped. Malformed manifests
-/// do not abort the whole discovery because real workspaces may have stray
-/// directories that match the glob but aren't packages.
+/// For each member directory, classify it via [`classify_member`] and return
+/// the binary packages. Parse errors are written to stderr so the user can
+/// tell why a directory was skipped; missing manifests and library-only
+/// members are skipped silently (real workspaces may have stray directories
+/// that match a glob but aren't packages).
 ///
 /// # Errors
 ///
-/// Currently infallible, but returns `Result` for future validation work.
+/// Currently infallible, but returns `Result` so future validation work
+/// (e.g., aborting on duplicate package names) does not require a signature
+/// change.
 fn collect_binary_packages(member_dirs: &[PathBuf]) -> Result<Vec<BinaryPackage>> {
     let mut packages = Vec::new();
     for dir in member_dirs {
-        let manifest_path = dir.join("Cargo.toml");
-        if !manifest_path.exists() {
-            continue;
+        match classify_member(dir) {
+            MemberClass::Binary(pkg) => packages.push(pkg),
+            MemberClass::ParseError(err) => {
+                eprintln!(
+                    "warning: skipping {}: Cargo.toml did not parse ({err})",
+                    dir.display()
+                );
+            }
+            MemberClass::LibraryOnly | MemberClass::NoManifest => {}
         }
-        let Ok(manifest) = parse_manifest(&manifest_path) else {
-            continue;
-        };
-        if !is_binary_package(&manifest, dir) {
-            continue;
-        }
-        let Some(name) = manifest
-            .get("package")
-            .and_then(|p| p.get("name"))
-            .and_then(|n| n.as_str())
-        else {
-            continue;
-        };
-        packages.push(BinaryPackage {
-            name: name.to_owned(),
-            dir: dir.clone(),
-        });
     }
     Ok(packages)
 }
