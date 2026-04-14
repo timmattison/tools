@@ -1,6 +1,7 @@
 use anyhow::Result;
-use chrono::Duration;
-use gitrdun::{date, stats::GitStats};
+use chrono::{Duration, Local};
+use gitrdun::{cli::Args, date, git::SearchResult, results::format_results, stats::GitStats};
+use tokio_util::sync::CancellationToken;
 
 #[test]
 fn test_parse_duration() -> Result<()> {
@@ -49,6 +50,48 @@ fn test_git_stats() {
     if let Ok(email_stats) = stats.get_email.lock() {
         assert_eq!(email_stats.count(), 1);
     };
+}
+
+/// Regression test for the duplicate-results-files bug.
+///
+/// Previously, `main()` called `display_results` twice (once while the TUI
+/// was running and once after it exited). Each call wrote a timestamped
+/// output file, producing two files ~1 second apart with identical
+/// content.
+///
+/// The fix separates formatting (pure, returns a String) from file
+/// writing (side effect). `format_results` must be a pure function with
+/// no file-system side effects so the caller can control when/how many
+/// times the output is written to disk.
+#[tokio::test]
+async fn test_format_results_is_pure_and_returns_formatted_output() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let args = Args {
+        // Route auto-file writing into the temp dir (if any side effect
+        // occurs, we'll detect it here).
+        output: Some(temp_dir.path().join("should-not-exist.txt")),
+        no_file: false,
+        ..Args::default()
+    };
+    let result = SearchResult::new(Local::now(), None);
+
+    let output = format_results(&result, &args, false, None, CancellationToken::new()).await?;
+
+    assert!(
+        output.contains("No commits"),
+        "Expected formatted output to mention no commits, got: {output:?}"
+    );
+
+    let leftover_files: Vec<_> = std::fs::read_dir(temp_dir.path())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        leftover_files.is_empty(),
+        "format_results must not write files; found: {leftover_files:?}"
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

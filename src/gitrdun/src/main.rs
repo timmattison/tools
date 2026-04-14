@@ -532,27 +532,3 @@ async fn display_results(
     Ok(())
 }
 
-// Implement Default for Args to support the pattern used above
-impl Default for Args {
-    fn default() -> Self {
-        Self {
-            start: "24h".to_string(),
-            end: None,
-            ignore_failures: false,
-            summary_only: false,
-            find_nested: false,
-            stats: false,
-            all: false,
-            ollama: false,
-            meta_ollama: false,
-            ollama_model: "gpt-oss".to_string(),
-            ollama_url: "http://localhost:11434".to_string(),
-            root: None,
-            output: None,
-            no_file: false,
-            filter_user: true,
-            keep_thinking: false,
-            paths: Vec::new(),
-        }
-    }
-}

@@ -86,3 +86,27 @@ pub struct Args {
     #[arg(value_name = "PATH")]
     pub paths: Vec<PathBuf>,
 }
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            start: "24h".to_string(),
+            end: None,
+            ignore_failures: false,
+            summary_only: false,
+            find_nested: false,
+            stats: false,
+            all: false,
+            ollama: false,
+            meta_ollama: false,
+            ollama_model: "gpt-oss".to_string(),
+            ollama_url: "http://localhost:11434".to_string(),
+            root: None,
+            output: None,
+            no_file: false,
+            filter_user: true,
+            keep_thinking: false,
+            paths: Vec::new(),
+        }
+    }
+}
