@@ -11,6 +11,13 @@ use crate::git::{self, SearchResult};
 use crate::ollama::OllamaClient;
 use crate::ui::ProgressDisplay;
 
+/// Message emitted when no commits match the requested window.
+///
+/// Exported so tests can pin against it without duplicating the literal
+/// — a previous inline `output.contains("No commits")` assertion was
+/// fragile to copy changes.
+pub const NO_COMMITS_MESSAGE: &str = "😴 No commits found";
+
 /// Format search results into a string buffer.
 ///
 /// This is a pure function with respect to the file system: it returns

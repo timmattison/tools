@@ -1,6 +1,14 @@
 use anyhow::Result;
 use chrono::{Duration, Local};
-use gitrdun::{cli::Args, date, git::SearchResult, results::format_results, stats::GitStats};
+use gitrdun::{
+    cli::Args,
+    date,
+    git::SearchResult,
+    results::{self, format_results},
+    stats::GitStats,
+    ui::ProgressDisplay,
+};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 #[test]
@@ -91,6 +99,58 @@ async fn test_format_results_is_pure_and_returns_formatted_output() -> Result<()
         "format_results must not write files; found: {leftover_files:?}"
     );
 
+    Ok(())
+}
+
+/// `format_results` is a pure formatter. It must not flip shared UI state
+/// (like the `ollama_complete` flag on `ProgressDisplay`): that's the
+/// caller's responsibility. Mixing the side effect back in is what led to
+/// the duplicate-output-files bug — two code paths each thinking they
+/// "owned" the completion signal.
+#[tokio::test]
+async fn test_format_results_does_not_mutate_ollama_complete_flag() -> Result<()> {
+    let progress = Arc::new(ProgressDisplay::new(Local::now(), None, true));
+    assert!(!progress.is_ollama_complete());
+
+    // found_commits=true with no repositories enters the "found" branch
+    // but skips the Ollama loop, isolating the end-of-branch side effect.
+    let mut result = SearchResult::new(Local::now(), None);
+    result.found_commits = true;
+
+    let args = Args {
+        ollama: true,
+        ..Args::default()
+    };
+
+    format_results(
+        &result,
+        &args,
+        true,
+        Some(Arc::clone(&progress)),
+        CancellationToken::new(),
+    )
+    .await?;
+
+    assert!(
+        !progress.is_ollama_complete(),
+        "format_results must not mark ollama complete; caller owns that state transition"
+    );
+
+    Ok(())
+}
+
+/// Regression guard against phrase drift: the test above relies on the
+/// "no commits" output. Keep the assertion anchored to the exported
+/// constant so a message tweak updates both sites in one place.
+#[tokio::test]
+async fn test_no_commits_output_uses_exported_constant() -> Result<()> {
+    let args = Args::default();
+    let result = SearchResult::new(Local::now(), None);
+    let output = format_results(&result, &args, false, None, CancellationToken::new()).await?;
+    assert!(
+        output.contains(results::NO_COMMITS_MESSAGE),
+        "Expected output to contain NO_COMMITS_MESSAGE, got: {output:?}"
+    );
     Ok(())
 }
 
