@@ -133,13 +133,29 @@ fn parse_manifest(path: &Path) -> Result<toml::Value> {
     toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
-/// A package is "binary" iff its Cargo.toml declares a `[[bin]]` section
-/// OR `src/main.rs` exists inside the package directory.
+/// A package is "binary" iff its Cargo.toml declares a `[[bin]]` section,
+/// `src/main.rs` exists, or `src/bin/` contains at least one `*.rs` file.
+///
+/// The `src/bin/` case matches Cargo's auto-discovery: any `src/bin/*.rs` is
+/// treated as a binary target even without a `[[bin]]` entry.
 fn is_binary_package(manifest: &toml::Value, package_dir: &Path) -> bool {
     if manifest.get("bin").is_some() {
         return true;
     }
-    package_dir.join("src").join("main.rs").exists()
+    if package_dir.join("src").join("main.rs").exists() {
+        return true;
+    }
+    has_rs_file_in(&package_dir.join("src").join("bin"))
+}
+
+/// Return true if `dir` exists and contains at least one `*.rs` entry.
+fn has_rs_file_in(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|e| e.path().extension().is_some_and(|ext| ext == "rs"))
 }
 
 /// Extract the `workspace.members` array from a root Cargo.toml.
