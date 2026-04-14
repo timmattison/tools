@@ -81,7 +81,7 @@ fn run_workspace_install(
 
     let outcomes = install_packages(repo_url, &packages);
 
-    print_summary(&outcomes);
+    print!("{}", format_summary(&outcomes));
 
     let any_succeeded = outcomes.iter().any(|o| o.error.is_none());
     if !any_succeeded {
@@ -242,18 +242,22 @@ fn install_packages(repo_url: &str, packages: &[BinaryPackage]) -> Vec<InstallOu
         .collect()
 }
 
-/// Print a summary of install outcomes.
-fn print_summary(outcomes: &[InstallOutcome]) {
+/// Format a summary of install outcomes as a multi-line string.
+///
+/// STUB: shows the counts but omits per-package error details.
+fn format_summary(outcomes: &[InstallOutcome]) -> String {
     let installed = outcomes.iter().filter(|o| o.error.is_none()).count();
     let failed = outcomes.len() - installed;
-    println!();
-    println!("Summary: {} installed, {} failed", installed, failed);
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str(&format!("Summary: {installed} installed, {failed} failed\n"));
     if failed > 0 {
-        println!("  Failed:");
+        out.push_str("  Failed:\n");
         for outcome in outcomes.iter().filter(|o| o.error.is_some()) {
-            println!("    {}", outcome.package);
+            out.push_str(&format!("    {}\n", outcome.package));
         }
     }
+    out
 }
 
 /// Run `cargo install --git <url>` optionally pinned to a specific package.
@@ -416,6 +420,66 @@ mod tests {
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "binny");
         assert_eq!(packages[0].dir, bin_dir);
+    }
+
+    // ----- Phase 3 tests -----
+
+    #[test]
+    fn summary_with_only_successes_has_no_failed_block() {
+        let outcomes = vec![
+            InstallOutcome {
+                package: "alpha".into(),
+                error: None,
+            },
+            InstallOutcome {
+                package: "beta".into(),
+                error: None,
+            },
+        ];
+        let out = format_summary(&outcomes);
+        assert!(out.contains("Summary: 2 installed, 0 failed"));
+        assert!(!out.contains("Failed:"));
+    }
+
+    #[test]
+    fn summary_shows_error_output_for_failed_packages() {
+        let outcomes = vec![
+            InstallOutcome {
+                package: "alpha".into(),
+                error: None,
+            },
+            InstallOutcome {
+                package: "broken".into(),
+                error: Some("cargo install failed with exit status 101".into()),
+            },
+        ];
+        let out = format_summary(&outcomes);
+        assert!(out.contains("Summary: 1 installed, 1 failed"));
+        assert!(out.contains("broken"));
+        // This is the Phase 3 requirement: captured error output appears in the
+        // summary, not only the package name.
+        assert!(
+            out.contains("cargo install failed with exit status 101"),
+            "expected error text in summary, got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn summary_lists_multiple_failures_with_their_errors() {
+        let outcomes = vec![
+            InstallOutcome {
+                package: "one".into(),
+                error: Some("boom one".into()),
+            },
+            InstallOutcome {
+                package: "two".into(),
+                error: Some("boom two".into()),
+            },
+        ];
+        let out = format_summary(&outcomes);
+        assert!(out.contains("Summary: 0 installed, 2 failed"));
+        assert!(out.contains("boom one"), "missing first error:\n{out}");
+        assert!(out.contains("boom two"), "missing second error:\n{out}");
     }
 
     #[test]
