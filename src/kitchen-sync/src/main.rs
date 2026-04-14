@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitCode, Stdio};
 
 use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
@@ -33,7 +33,7 @@ struct InstallOutcome {
     error: Option<String>,
 }
 
-fn main() -> Result<()> {
+fn main() -> Result<ExitCode> {
     let args = Args::parse();
 
     let temp_dir = shallow_clone(&args.repo_url)?;
@@ -46,14 +46,20 @@ fn main() -> Result<()> {
 
     let manifest = parse_manifest(&root_manifest)?;
 
-    if manifest.get("workspace").is_some() {
-        run_workspace_install(&args.repo_url, &manifest, repo_path)
+    let code = if manifest.get("workspace").is_some() {
+        run_workspace_install(&args.repo_url, &manifest, repo_path)?
     } else {
         if !is_binary_package(&manifest, repo_path) {
             bail!("No binary packages found in repository");
         }
-        install_from_git(&args.repo_url, None)
-    }
+        install_from_git(&args.repo_url, None)?;
+        ExitCode::SUCCESS
+    };
+
+    // `temp_dir` drops here (Drop cleans up the clone) before we propagate
+    // the exit code.
+    drop(temp_dir);
+    Ok(code)
 }
 
 /// Discover every binary package in a Cargo workspace.
@@ -104,7 +110,7 @@ fn run_workspace_install(
     repo_url: &str,
     root_manifest: &toml::Value,
     repo_path: &Path,
-) -> Result<()> {
+) -> Result<ExitCode> {
     let packages = discover_workspace_packages(repo_path, root_manifest)?;
 
     if packages.is_empty() {
@@ -124,11 +130,8 @@ fn run_workspace_install(
 
     print!("{}", format_summary(&outcomes));
 
-    let any_succeeded = outcomes.iter().any(|o| o.error.is_none());
-    if !any_succeeded {
-        std::process::exit(1);
-    }
-    Ok(())
+    let code = u8::try_from(exit_code_for(&outcomes)).unwrap_or(1);
+    Ok(ExitCode::from(code))
 }
 
 /// Shallow-clone `repo_url` into a new temp directory and return the handle.
@@ -333,14 +336,13 @@ fn install_packages(repo_url: &str, packages: &[BinaryPackage]) -> Vec<InstallOu
 
 /// Return the process exit code to use for a set of install outcomes.
 ///
-/// Currently returns the legacy "success if >=1 installed" policy — this
-/// stub exists so the follow-up green commit can flip the behavior.
+/// Returns `1` if any package failed (even if others succeeded) so that
+/// CI and scripted callers see partial failures as failures.
 fn exit_code_for(outcomes: &[InstallOutcome]) -> i32 {
-    let any_ok = outcomes.iter().any(|o| o.error.is_none());
-    if any_ok {
-        0
-    } else {
+    if outcomes.iter().any(|o| o.error.is_some()) {
         1
+    } else {
+        0
     }
 }
 

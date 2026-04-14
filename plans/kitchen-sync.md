@@ -13,7 +13,7 @@ Durable decisions that apply across all phases:
 - **Clone strategy**: shell out to `git clone --depth 1 <url>` into a `tempfile::tempdir()`. Temp directory is auto-cleaned on drop.
 - **Install strategy**: shell out to `cargo install --git <url> <name>` per package (or bare `cargo install --git <url>` for single-package repos). Sequential, not parallel.
 - **Binary detection**: a member is "binary" iff its `Cargo.toml` has a `[[bin]]` section OR `src/main.rs` exists. Library-only crates are silently skipped.
-- **Exit code**: `0` if at least one install succeeded; `1` if all installs failed or clone/discovery failed.
+- **Exit code**: `0` iff every attempted install succeeded; `1` if any install failed or clone/discovery failed. CI/scripted callers must see partial failure as failure.
 - **Error model**: clone and discovery errors abort. Individual install failures are collected and reported in the final summary; the tool continues with remaining packages.
 
 ---
@@ -68,7 +68,7 @@ This phase is demoable against the `tools` monorepo itself — pointing `kitchen
 - [ ] Per-package progress is printed in the format `Installing <name> (i/N)...`
 - [ ] Individual install failures do not abort the run; remaining packages still attempt to install
 - [ ] Final summary prints install count, failure count, and names of failed packages
-- [ ] Exit code is `0` if at least one install succeeded, `1` if all failed
+- [ ] Exit code is `0` only if every install succeeded; any failure yields `1`
 - [ ] `cargo check` and `cargo clippy` pass
 
 ---
