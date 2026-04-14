@@ -232,6 +232,8 @@ fn extract_workspace_string_array(manifest: &toml::Value, key: &str) -> Vec<Stri
 ///
 /// Returns an error if a glob pattern is malformed.
 fn resolve_workspace_members(repo_root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
+    let repo_root_canonical = std::fs::canonicalize(repo_root)
+        .with_context(|| format!("Failed to canonicalize repo root: {}", repo_root.display()))?;
     let mut resolved = Vec::new();
     for pattern in patterns {
         let joined = repo_root.join(pattern);
@@ -243,9 +245,19 @@ fn resolve_workspace_members(repo_root: &Path, patterns: &[String]) -> Result<Ve
         for entry in entries {
             let path =
                 entry.with_context(|| format!("Failed to resolve member pattern: {pattern}"))?;
-            if path.is_dir() {
-                resolved.push(path);
+            if !path.is_dir() {
+                continue;
             }
+            let canonical = std::fs::canonicalize(&path).with_context(|| {
+                format!("Failed to canonicalize member path: {}", path.display())
+            })?;
+            if !canonical.starts_with(&repo_root_canonical) {
+                bail!(
+                    "workspace member {} escapes repo root (pattern: {pattern})",
+                    canonical.display()
+                );
+            }
+            resolved.push(canonical);
         }
     }
     Ok(resolved)
