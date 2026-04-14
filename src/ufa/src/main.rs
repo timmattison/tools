@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
     
     let api_key = args.api_key
         .or_else(|| std::env::var("UNIFI_API_KEY").ok())
-        .or_else(|| file_config.as_ref().and_then(|c| c.api_key.clone()))
+        .or_else(|| file_config.as_ref().and_then(|c| c.resolve_api_key().ok()))
         .context("API key not provided. Set it via --api-key, UNIFI_API_KEY environment variable, or run 'ufa config setup' to create a configuration file.")?;
     
     let insecure = args.insecure
