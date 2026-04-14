@@ -65,17 +65,21 @@ fn shallow_clone(repo_url: &str) -> Result<TempDir> {
 ///
 /// # Errors
 ///
-/// STUB: always returns an empty TOML table to make tests fail.
-fn parse_manifest(_path: &Path) -> Result<toml::Value> {
-    Ok(toml::Value::Table(toml::map::Map::new()))
+/// Returns an error if the file cannot be read or if its contents are not
+/// valid TOML.
+fn parse_manifest(path: &Path) -> Result<toml::Value> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
 /// A package is "binary" iff its Cargo.toml declares a `[[bin]]` section
 /// OR `src/main.rs` exists inside the package directory.
-///
-/// STUB: always returns false to make tests fail.
-fn is_binary_package(_manifest: &toml::Value, _package_dir: &Path) -> bool {
-    false
+fn is_binary_package(manifest: &toml::Value, package_dir: &Path) -> bool {
+    if manifest.get("bin").is_some() {
+        return true;
+    }
+    package_dir.join("src").join("main.rs").exists()
 }
 
 /// Run `cargo install --git <url>` optionally pinned to a specific package.
