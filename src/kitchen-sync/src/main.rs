@@ -33,6 +33,43 @@ struct InstallOutcome {
     error: Option<String>,
 }
 
+/// Result of inspecting a candidate workspace-member directory.
+#[derive(Debug)]
+enum MemberClass {
+    Binary(BinaryPackage),
+    LibraryOnly,
+    NoManifest,
+    ParseError(String),
+}
+
+/// Classify a member directory into [`MemberClass`].
+///
+/// Stub: currently conflates `ParseError` with `LibraryOnly`, which is the
+/// bug this test is locking in.
+fn classify_member(dir: &Path) -> MemberClass {
+    let manifest_path = dir.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return MemberClass::NoManifest;
+    }
+    let Ok(manifest) = parse_manifest(&manifest_path) else {
+        return MemberClass::LibraryOnly;
+    };
+    if !is_binary_package(&manifest, dir) {
+        return MemberClass::LibraryOnly;
+    }
+    let Some(name) = manifest
+        .get("package")
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+    else {
+        return MemberClass::LibraryOnly;
+    };
+    MemberClass::Binary(BinaryPackage {
+        name: name.to_owned(),
+        dir: dir.to_path_buf(),
+    })
+}
+
 fn main() -> Result<ExitCode> {
     let args = Args::parse();
 
@@ -587,6 +624,64 @@ mod tests {
             resolved[0].file_name().unwrap().to_string_lossy(),
             "foo".to_string()
         );
+    }
+
+    #[test]
+    fn classify_member_reports_parse_error() {
+        // A malformed Cargo.toml should be reported as ParseError, not
+        // silently skipped — users otherwise have no way to tell why their
+        // binary wasn't picked up.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "this is not = valid [toml").unwrap();
+        let kind = classify_member(dir.path());
+        assert!(
+            matches!(kind, MemberClass::ParseError(_)),
+            "expected ParseError, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_member_reports_no_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let kind = classify_member(dir.path());
+        assert!(
+            matches!(kind, MemberClass::NoManifest),
+            "expected NoManifest, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_member_reports_library_only() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src").join("lib.rs"), "").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"libby\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let kind = classify_member(dir.path());
+        assert!(
+            matches!(kind, MemberClass::LibraryOnly),
+            "expected LibraryOnly, got {kind:?}"
+        );
+    }
+
+    #[test]
+    fn classify_member_reports_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src").join("main.rs"), "fn main(){}").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"binny\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let kind = classify_member(dir.path());
+        match kind {
+            MemberClass::Binary(pkg) => assert_eq!(pkg.name, "binny"),
+            other => panic!("expected Binary, got {other:?}"),
+        }
     }
 
     #[test]
