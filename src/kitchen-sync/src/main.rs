@@ -331,6 +331,19 @@ fn install_packages(repo_url: &str, packages: &[BinaryPackage]) -> Vec<InstallOu
         .collect()
 }
 
+/// Return the process exit code to use for a set of install outcomes.
+///
+/// Currently returns the legacy "success if >=1 installed" policy — this
+/// stub exists so the follow-up green commit can flip the behavior.
+fn exit_code_for(outcomes: &[InstallOutcome]) -> i32 {
+    let any_ok = outcomes.iter().any(|o| o.error.is_none());
+    if any_ok {
+        0
+    } else {
+        1
+    }
+}
+
 /// Format a summary of install outcomes as a multi-line string.
 ///
 /// Failed entries show the package name followed by the captured error text,
@@ -624,6 +637,36 @@ mod tests {
     }
 
     // ----- Phase 3 tests -----
+
+    #[test]
+    fn exit_code_is_failure_when_any_install_failed() {
+        // Callers (CI scripts, other tools) need a non-zero exit code if any
+        // package failed, even when others succeeded. The original policy
+        // (exit 0 if >= 1 succeeded) masked partial failures from automation.
+        let all_ok = vec![InstallOutcome {
+            package: "a".into(),
+            error: None,
+        }];
+        assert_eq!(exit_code_for(&all_ok), 0);
+
+        let partial = vec![
+            InstallOutcome {
+                package: "a".into(),
+                error: None,
+            },
+            InstallOutcome {
+                package: "b".into(),
+                error: Some("boom".into()),
+            },
+        ];
+        assert_eq!(exit_code_for(&partial), 1);
+
+        let all_failed = vec![InstallOutcome {
+            package: "a".into(),
+            error: Some("boom".into()),
+        }];
+        assert_eq!(exit_code_for(&all_failed), 1);
+    }
 
     #[test]
     fn summary_with_only_successes_has_no_failed_block() {
