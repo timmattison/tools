@@ -75,14 +75,37 @@ pub struct ListeningProcess {
     pub addresses: Vec<String>,
 }
 
-/// Groups flat `ListeningProcess` entries (each with exactly one address) by
-/// (port, pid, name), merging their addresses into a single entry with a
-/// sorted address list.
+/// Groups flat `ListeningProcess` entries by (port, pid, name), merging their
+/// addresses into a single entry with a sorted, deduplicated address list.
 ///
-/// The input is expected to have one address per entry; callers should not
-/// pass already-grouped entries.
+/// Inputs with any number of addresses are accepted; all of them flow into the
+/// output group. The result order tracks the first occurrence of each group
+/// key in the input.
 pub fn group_by_process(flat: Vec<ListeningProcess>) -> Vec<ListeningProcess> {
-    todo!("not yet implemented")
+    use std::collections::HashMap;
+
+    // Key by (port, pid, name). Track insertion order via a parallel Vec so
+    // the output is deterministic given a deterministic input order.
+    let mut index: HashMap<(u16, Pid, String), usize> = HashMap::new();
+    let mut groups: Vec<ListeningProcess> = Vec::new();
+
+    for entry in flat {
+        let key = (entry.port, entry.pid, entry.name.clone());
+        match index.get(&key) {
+            Some(&i) => groups[i].addresses.extend(entry.addresses),
+            None => {
+                index.insert(key, groups.len());
+                groups.push(entry);
+            }
+        }
+    }
+
+    for group in &mut groups {
+        group.addresses.sort();
+        group.addresses.dedup();
+    }
+
+    groups
 }
 
 /// Collects all processes currently listening on ports.
