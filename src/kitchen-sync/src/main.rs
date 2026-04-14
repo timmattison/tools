@@ -339,6 +339,36 @@ mod tests {
     }
 
     #[test]
+    fn detects_src_bin_auto_discovery_as_binary_package() {
+        // Cargo auto-discovers binaries from any `src/bin/*.rs` file even when
+        // there is no `[[bin]]` section and no `src/main.rs`. Treat these as
+        // binary packages.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src").join("bin")).unwrap();
+        fs::write(dir.path().join("src").join("lib.rs"), "").unwrap();
+        fs::write(
+            dir.path().join("src").join("bin").join("thing.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+        let manifest: toml::Value =
+            toml::from_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+        assert!(is_binary_package(&manifest, dir.path()));
+    }
+
+    #[test]
+    fn empty_src_bin_directory_is_not_binary() {
+        // An empty `src/bin/` directory alone (no main.rs, no rs files in it)
+        // is not a binary package.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("src").join("bin")).unwrap();
+        fs::write(dir.path().join("src").join("lib.rs"), "").unwrap();
+        let manifest: toml::Value =
+            toml::from_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
+        assert!(!is_binary_package(&manifest, dir.path()));
+    }
+
+    #[test]
     fn library_only_package_is_not_binary() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("src")).unwrap();
