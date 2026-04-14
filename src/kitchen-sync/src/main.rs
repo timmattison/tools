@@ -354,6 +354,20 @@ fn format_summary(outcomes: &[InstallOutcome]) -> String {
     out
 }
 
+/// Run `cmd`, forwarding its stderr to our own stderr while also capturing
+/// it so the caller can surface diagnostics in a summary.
+///
+/// stdout is left inherited (cargo's progress bars remain visible live).
+///
+/// # Errors
+///
+/// Returns an `io::Error` from `spawn`, `wait`, or the stderr reader thread.
+fn run_streaming(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus, String)> {
+    // Placeholder: no stderr capture yet — intentional failure for TDD red.
+    let status = cmd.status()?;
+    Ok((status, String::new()))
+}
+
 /// Run `cargo install --git <url>` optionally pinned to a specific package.
 fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
     let mut cmd = Command::new("cargo");
@@ -551,6 +565,25 @@ mod tests {
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "binny");
         assert_eq!(packages[0].dir, bin_dir);
+    }
+
+    // ----- stderr capture helper -----
+
+    #[test]
+    fn run_streaming_captures_stderr_and_returns_exit_code() {
+        // The helper must run a subprocess, return the exit status, AND give
+        // back whatever the child wrote to stderr so the caller can include
+        // it in a summary. We use `sh -c` so the test does not depend on any
+        // specific real tool being installed.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg("printf 'oops line 1\\noops line 2\\n' 1>&2; exit 3");
+        let (status, captured) = run_streaming(&mut cmd).unwrap();
+        assert_eq!(status.code(), Some(3));
+        assert!(
+            captured.contains("oops line 1") && captured.contains("oops line 2"),
+            "expected captured stderr to contain both lines, got: {captured:?}"
+        );
     }
 
     // ----- Phase 3 tests -----
