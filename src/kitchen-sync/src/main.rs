@@ -918,4 +918,62 @@ mod tests {
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "my-cool-tool");
     }
+
+    // ----- integration-style tests (use real `git` subprocess) -----
+
+    /// Create a local non-bare git repo with the given files already committed.
+    /// Returns the repo path inside a `TempDir` that lives as long as the caller
+    /// keeps the handle.
+    fn make_local_git_repo(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
+        let td = tempfile::tempdir().unwrap();
+        let repo = td.path().to_path_buf();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git must be on PATH for integration tests");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        for (path, contents) in files {
+            let full = repo.join(path);
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(&full, contents).unwrap();
+        }
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "init"]);
+        (td, repo)
+    }
+
+    #[test]
+    fn shallow_clone_of_local_repo_preserves_files() {
+        let (_src_td, src_repo) = make_local_git_repo(&[
+            ("Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n"),
+            ("src/main.rs", "fn main() {}\n"),
+        ]);
+
+        let cloned = shallow_clone(src_repo.to_str().unwrap()).unwrap();
+        assert!(cloned.path().join("Cargo.toml").exists());
+        assert!(cloned.path().join("src").join("main.rs").exists());
+    }
+
+    #[test]
+    fn shallow_clone_of_nonexistent_repo_surfaces_git_error() {
+        let bogus = tempfile::tempdir().unwrap();
+        let target = bogus.path().join("does-not-exist");
+        let err = shallow_clone(target.to_str().unwrap()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.to_lowercase().contains("clone failed"),
+            "expected 'clone failed' in error, got: {msg}"
+        );
+    }
 }
