@@ -420,9 +420,9 @@ fn run_streaming(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus
         Ok::<String, std::io::Error>(captured)
     });
     let status = child.wait()?;
-    let captured = reader.join().map_err(|_| {
-        std::io::Error::other("stderr reader thread panicked")
-    })??;
+    let captured = reader
+        .join()
+        .map_err(|_| std::io::Error::other("stderr reader thread panicked"))??;
     Ok((status, captured))
 }
 
@@ -836,7 +836,10 @@ mod tests {
         let root_manifest = parse_manifest(&root.path().join("Cargo.toml")).unwrap();
         let packages = discover_workspace_packages(root.path(), &root_manifest).unwrap();
         let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
-        assert!(names.contains(&"rootcli"), "missing root crate in {names:?}");
+        assert!(
+            names.contains(&"rootcli"),
+            "missing root crate in {names:?}"
+        );
         assert!(names.contains(&"foo"), "missing foo in {names:?}");
     }
 
@@ -857,9 +860,7 @@ mod tests {
             fs::create_dir_all(dir.join("src")).unwrap();
             fs::write(
                 dir.join("Cargo.toml"),
-                format!(
-                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
-                ),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
             )
             .unwrap();
             fs::write(dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
@@ -956,7 +957,10 @@ mod tests {
     #[test]
     fn shallow_clone_of_local_repo_preserves_files() {
         let (_src_td, src_repo) = make_local_git_repo(&[
-            ("Cargo.toml", "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n"),
+            (
+                "Cargo.toml",
+                "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+            ),
             ("src/main.rs", "fn main() {}\n"),
         ]);
 
