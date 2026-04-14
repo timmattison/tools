@@ -1,5 +1,6 @@
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
@@ -363,12 +364,33 @@ fn format_summary(outcomes: &[InstallOutcome]) -> String {
 ///
 /// Returns an `io::Error` from `spawn`, `wait`, or the stderr reader thread.
 fn run_streaming(cmd: &mut Command) -> std::io::Result<(std::process::ExitStatus, String)> {
-    // Placeholder: no stderr capture yet — intentional failure for TDD red.
-    let status = cmd.status()?;
-    Ok((status, String::new()))
+    let mut child = cmd.stderr(Stdio::piped()).spawn()?;
+    let stderr = child
+        .stderr
+        .take()
+        .expect("stderr was configured as piped above");
+    let reader = std::thread::spawn(move || {
+        let mut captured = String::new();
+        for line in BufReader::new(stderr).lines() {
+            let line = line?;
+            eprintln!("{line}");
+            captured.push_str(&line);
+            captured.push('\n');
+        }
+        Ok::<String, std::io::Error>(captured)
+    });
+    let status = child.wait()?;
+    let captured = reader.join().map_err(|_| {
+        std::io::Error::other("stderr reader thread panicked")
+    })??;
+    Ok((status, captured))
 }
 
 /// Run `cargo install --git <url>` optionally pinned to a specific package.
+///
+/// On failure the error message includes the tail of cargo's stderr so the
+/// caller can surface a useful diagnostic in the summary without the user
+/// having to scroll back.
 fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.arg("install").arg("--git").arg(repo_url);
@@ -377,18 +399,33 @@ fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
         cmd.arg(pkg);
     }
 
-    let status = cmd
-        .status()
-        .context("Failed to run cargo install (is cargo installed?)")?;
+    let (status, captured_stderr) =
+        run_streaming(&mut cmd).context("Failed to run cargo install (is cargo installed?)")?;
 
     if !status.success() {
+        let tail = last_lines(&captured_stderr, STDERR_TAIL_LINES);
+        let detail = if tail.is_empty() {
+            String::new()
+        } else {
+            format!("\n{tail}")
+        };
         match status.code() {
-            Some(code) => bail!("cargo install failed with exit code {code}"),
-            None => bail!("cargo install was terminated by signal"),
+            Some(code) => bail!("cargo install failed with exit code {code}{detail}"),
+            None => bail!("cargo install was terminated by signal{detail}"),
         }
     }
 
     Ok(())
+}
+
+/// Number of trailing stderr lines to include in a failed-install summary.
+const STDERR_TAIL_LINES: usize = 10;
+
+/// Return the last `n` non-empty lines of `s`, joined by newlines.
+fn last_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
 }
 
 #[cfg(test)]
