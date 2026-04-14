@@ -667,6 +667,33 @@ mod tests {
     }
 
     #[test]
+    fn resolve_rejects_members_that_escape_repo_root() {
+        // A hostile (or buggy) workspace.members entry using `..` could point
+        // outside the cloned repo. Reject it rather than walk up the tree.
+        let root = tempfile::tempdir().unwrap();
+        // Create a sibling directory outside `root` that would be the target
+        // of `../sibling` resolution. Put a Cargo.toml there so glob() would
+        // otherwise happily resolve it.
+        let sibling = root.path().parent().unwrap().join("sibling-outside-repo");
+        fs::create_dir_all(&sibling).unwrap();
+        fs::write(
+            sibling.join("Cargo.toml"),
+            "[package]\nname = \"sneaky\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let patterns = vec!["../sibling-outside-repo".to_string()];
+        let err = resolve_workspace_members(root.path(), &patterns).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("outside") || msg.contains("escapes"),
+            "expected escape error, got: {msg}"
+        );
+
+        fs::remove_dir_all(sibling).ok();
+    }
+
+    #[test]
     fn collect_binary_packages_extracts_names_from_manifest() {
         let root = tempfile::tempdir().unwrap();
         let pkg_dir = root.path().join("anywhere");
