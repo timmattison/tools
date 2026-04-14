@@ -69,7 +69,12 @@ fn discover_workspace_packages(
     root_manifest: &toml::Value,
 ) -> Result<Vec<BinaryPackage>> {
     let patterns = extract_workspace_members(root_manifest);
-    let mut member_dirs = resolve_workspace_members(repo_root, &patterns)?;
+    let excludes = extract_workspace_exclude(root_manifest);
+    let excluded_dirs = resolve_workspace_members(repo_root, &excludes)?;
+    let mut member_dirs: Vec<PathBuf> = resolve_workspace_members(repo_root, &patterns)?
+        .into_iter()
+        .filter(|d| !excluded_dirs.iter().any(|ex| paths_equal(d, ex)))
+        .collect();
 
     // If the root manifest itself has a [package] section, the root crate is
     // part of the workspace and should be considered for install too. Skip if
@@ -195,9 +200,20 @@ fn has_rs_file_in(dir: &Path) -> bool {
 
 /// Extract the `workspace.members` array from a root Cargo.toml.
 fn extract_workspace_members(manifest: &toml::Value) -> Vec<String> {
+    extract_workspace_string_array(manifest, "members")
+}
+
+/// Extract the `workspace.exclude` array from a root Cargo.toml.
+fn extract_workspace_exclude(manifest: &toml::Value) -> Vec<String> {
+    extract_workspace_string_array(manifest, "exclude")
+}
+
+/// Extract a named string-array under `[workspace]`. Returns an empty vec
+/// if the key is missing or not an array of strings.
+fn extract_workspace_string_array(manifest: &toml::Value, key: &str) -> Vec<String> {
     manifest
         .get("workspace")
-        .and_then(|w| w.get("members"))
+        .and_then(|w| w.get(key))
         .and_then(|m| m.as_array())
         .map(|arr| {
             arr.iter()
