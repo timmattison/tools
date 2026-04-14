@@ -8129,6 +8129,7 @@ dependencies = [
  "dirs 5.0.1",
  "dotenvy",
  "mdns-sd",
+ "op-cache",
  "open",
  "reqwest",
  "serde",
