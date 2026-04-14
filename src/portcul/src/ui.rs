@@ -170,7 +170,8 @@ fn render_table(frame: &mut Frame, area: Rect, state: &mut AppState) {
                 listener.port.to_string(),
                 listener.pid.as_u32().to_string(),
                 truncate_to_width(&listener.name, 30),
-                listener.address.clone(),
+                // TODO(slice C): render tree display for multiple addresses
+                listener.addresses.join(", "),
             ])
         })
         .collect();
@@ -413,7 +414,7 @@ mod tests {
             pid: Pid::try_from(1234_u32).unwrap(),
             name: "test".to_string(),
             port: 8080,
-            address: "0.0.0.0".to_string(),
+            addresses: vec!["0.0.0.0".to_string()],
         }];
         let state = AppState::new(listeners);
         assert_eq!(state.table_state.selected(), Some(0));
@@ -426,13 +427,13 @@ mod tests {
                 pid: Pid::try_from(1_u32).unwrap(),
                 name: "a".to_string(),
                 port: 80,
-                address: "0.0.0.0".to_string(),
+                addresses: vec!["0.0.0.0".to_string()],
             },
             ListeningProcess {
                 pid: Pid::try_from(2_u32).unwrap(),
                 name: "b".to_string(),
                 port: 443,
-                address: "0.0.0.0".to_string(),
+                addresses: vec!["0.0.0.0".to_string()],
             },
         ];
         let mut state = AppState::new(listeners);
@@ -450,13 +451,13 @@ mod tests {
                 pid: Pid::try_from(1_u32).unwrap(),
                 name: "a".to_string(),
                 port: 80,
-                address: "0.0.0.0".to_string(),
+                addresses: vec!["0.0.0.0".to_string()],
             },
             ListeningProcess {
                 pid: Pid::try_from(2_u32).unwrap(),
                 name: "b".to_string(),
                 port: 443,
-                address: "0.0.0.0".to_string(),
+                addresses: vec!["0.0.0.0".to_string()],
             },
         ];
         let mut state = AppState::new(listeners);
@@ -481,13 +482,13 @@ mod tests {
                 pid: Pid::try_from(100_u32).unwrap(),
                 name: "nginx".to_string(),
                 port: 80,
-                address: "0.0.0.0".to_string(),
+                addresses: vec!["0.0.0.0".to_string()],
             },
             ListeningProcess {
                 pid: Pid::try_from(200_u32).unwrap(),
                 name: "node".to_string(),
                 port: 3000,
-                address: "127.0.0.1".to_string(),
+                addresses: vec!["127.0.0.1".to_string()],
             },
         ];
         let mut state = AppState::new(listeners);
@@ -503,13 +504,13 @@ mod tests {
                 pid: Pid::try_from(50_u32).unwrap(),
                 name: "redis".to_string(),
                 port: 6379,
-                address: "127.0.0.1".to_string(),
+                addresses: vec!["127.0.0.1".to_string()],
             },
             ListeningProcess {
                 pid: Pid::try_from(200_u32).unwrap(),
                 name: "node".to_string(),
                 port: 3000,
-                address: "127.0.0.1".to_string(),
+                addresses: vec!["127.0.0.1".to_string()],
             },
         ];
         state.refresh(new_listeners);

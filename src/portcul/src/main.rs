@@ -159,10 +159,14 @@ fn cmd_kill(port: u16, yes: bool) -> Result<()> {
             }
         }
     } else {
-        // Interactive: show processes and ask for confirmation
-        println!("{}", format_kill_header(targets.len(), port));
+        // Interactive: show processes and ask for confirmation.
+        // Print one line per address so output is easy to grep/pipe.
+        let address_count: usize = targets.iter().map(|l| l.addresses.len()).sum();
+        println!("{}", format_kill_header(address_count, port));
         for listener in &targets {
-            println!("{}", format_process_line(listener));
+            for address in &listener.addresses {
+                println!("{}", format_process_line(listener, address));
+            }
         }
         println!();
 
@@ -205,7 +209,9 @@ fn cmd_list(port: Option<u16>) -> Result<()> {
     }
 
     for listener in &to_display {
-        println!("{}", format_process_line(listener));
+        for address in &listener.addresses {
+            println!("{}", format_process_line(listener, address));
+        }
     }
 
     Ok(())

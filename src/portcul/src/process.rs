@@ -58,6 +58,11 @@ impl fmt::Display for Pid {
 }
 
 /// A process listening on a port.
+///
+/// A single `ListeningProcess` represents all sockets that a given process
+/// has open on a single port. A process can listen on multiple addresses
+/// for the same port (e.g., `0.0.0.0` and `::` for dual-stack); those are
+/// collected into `addresses` in sorted order.
 #[derive(Debug, Clone)]
 pub struct ListeningProcess {
     /// Process ID.
@@ -66,8 +71,18 @@ pub struct ListeningProcess {
     pub name: String,
     /// Port number.
     pub port: u16,
-    /// Bind address (e.g., "0.0.0.0", "127.0.0.1", "::1").
-    pub address: String,
+    /// Bind addresses for this (pid, port), sorted. Non-empty.
+    pub addresses: Vec<String>,
+}
+
+/// Groups flat `ListeningProcess` entries (each with exactly one address) by
+/// (port, pid, name), merging their addresses into a single entry with a
+/// sorted address list.
+///
+/// The input is expected to have one address per entry; callers should not
+/// pass already-grouped entries.
+pub fn group_by_process(flat: Vec<ListeningProcess>) -> Vec<ListeningProcess> {
+    todo!("not yet implemented")
 }
 
 /// Collects all processes currently listening on ports.
@@ -82,19 +97,20 @@ pub fn collect_listeners() -> anyhow::Result<Vec<ListeningProcess>> {
     let raw_listeners =
         listeners::get_all().map_err(|e| anyhow::anyhow!("failed to enumerate listeners: {e}"))?;
 
-    let mut result: Vec<ListeningProcess> = raw_listeners
+    let flat: Vec<ListeningProcess> = raw_listeners
         .iter()
         .map(|listener| {
             Ok(ListeningProcess {
                 pid: Pid::try_from(listener.process.pid)?,
                 name: listener.process.name.clone(),
                 port: listener.socket.port(),
-                address: listener.socket.ip().to_string(),
+                addresses: vec![listener.socket.ip().to_string()],
             })
         })
         .collect::<Result<Vec<_>, PidRangeError>>()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let mut result = group_by_process(flat);
     // Sort by port number, then by PID for stable ordering
     result.sort_by(|a, b| a.port.cmp(&b.port).then(a.pid.cmp(&b.pid)));
     Ok(result)
@@ -158,13 +174,13 @@ pub fn format_kill_result(listener: &ListeningProcess) -> String {
     format!("Sent SIGTERM to {} (PID {})", listener.name, listener.pid)
 }
 
-/// Formats a listening process as a single line for CLI output.
+/// Formats a single (process, address) pair as a line for CLI output.
 ///
 /// Output format: `  PID <pid>  <name>   <address>:<port>`
-pub fn format_process_line(listener: &ListeningProcess) -> String {
+pub fn format_process_line(listener: &ListeningProcess, address: &str) -> String {
     format!(
         "  PID {:<7} {:<20} {}:{}",
-        listener.pid, listener.name, listener.address, listener.port
+        listener.pid, listener.name, address, listener.port
     )
 }
 
@@ -254,7 +270,7 @@ mod tests {
             pid: Pid::try_from(1234_u32).unwrap(),
             name: "nginx".to_string(),
             port: 8080,
-            address: "0.0.0.0".to_string(),
+            addresses: vec!["0.0.0.0".to_string()],
         };
         let msg = format_kill_result(&listener);
         assert_eq!(msg, "Sent SIGTERM to nginx (PID 1234)");
@@ -267,19 +283,19 @@ mod tests {
                 pid: Pid::try_from(100_u32).unwrap(),
                 name: "nginx".to_string(),
                 port: 80,
-                address: "0.0.0.0".to_string(),
+                addresses: vec!["0.0.0.0".to_string()],
             },
             ListeningProcess {
                 pid: Pid::try_from(200_u32).unwrap(),
                 name: "node".to_string(),
                 port: 3000,
-                address: "127.0.0.1".to_string(),
+                addresses: vec!["127.0.0.1".to_string()],
             },
             ListeningProcess {
                 pid: Pid::try_from(300_u32).unwrap(),
                 name: "nginx".to_string(),
                 port: 80,
-                address: "0.0.0.0".to_string(),
+                addresses: vec!["0.0.0.0".to_string()],
             },
         ];
         let filtered = filter_by_port(&listeners, 80);
@@ -294,9 +310,9 @@ mod tests {
             pid: Pid::try_from(1234_u32).unwrap(),
             name: "nginx".to_string(),
             port: 8080,
-            address: "0.0.0.0".to_string(),
+            addresses: vec!["0.0.0.0".to_string()],
         };
-        let line = format_process_line(&listener);
+        let line = format_process_line(&listener, "0.0.0.0");
         assert!(line.contains("1234"), "should contain PID");
         assert!(line.contains("nginx"), "should contain process name");
         assert!(line.contains("0.0.0.0:8080"), "should contain address:port");
@@ -308,17 +324,17 @@ mod tests {
             pid: Pid::try_from(1_u32).unwrap(),
             name: "a".to_string(),
             port: 80,
-            address: "0.0.0.0".to_string(),
+            addresses: vec!["0.0.0.0".to_string()],
         };
         let b = ListeningProcess {
             pid: Pid::try_from(99999_u32).unwrap(),
             name: "long-process-name".to_string(),
             port: 443,
-            address: "127.0.0.1".to_string(),
+            addresses: vec!["127.0.0.1".to_string()],
         };
         // Both lines should be well-formed (no panic, contains expected data)
-        let line_a = format_process_line(&a);
-        let line_b = format_process_line(&b);
+        let line_a = format_process_line(&a, "0.0.0.0");
+        let line_b = format_process_line(&b, "127.0.0.1");
         assert!(line_a.contains("PID"));
         assert!(line_b.contains("PID"));
     }
@@ -329,9 +345,97 @@ mod tests {
             pid: Pid::try_from(100_u32).unwrap(),
             name: "nginx".to_string(),
             port: 80,
-            address: "0.0.0.0".to_string(),
+            addresses: vec!["0.0.0.0".to_string()],
         }];
         let filtered = filter_by_port(&listeners, 9999);
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_group_by_process_merges_addresses() {
+        let flat = vec![
+            ListeningProcess {
+                pid: Pid::try_from(1221_u32).unwrap(),
+                name: "ControlCenter".to_string(),
+                port: 5000,
+                addresses: vec!["::".to_string()],
+            },
+            ListeningProcess {
+                pid: Pid::try_from(1221_u32).unwrap(),
+                name: "ControlCenter".to_string(),
+                port: 5000,
+                addresses: vec!["0.0.0.0".to_string()],
+            },
+        ];
+        let grouped = group_by_process(flat);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].pid, Pid::try_from(1221_u32).unwrap());
+        assert_eq!(grouped[0].port, 5000);
+        // Addresses should be sorted for stable ordering
+        assert_eq!(grouped[0].addresses, vec!["0.0.0.0", "::"]);
+    }
+
+    #[test]
+    fn test_group_by_process_keeps_distinct_processes_separate() {
+        let flat = vec![
+            ListeningProcess {
+                pid: Pid::try_from(100_u32).unwrap(),
+                name: "a".to_string(),
+                port: 80,
+                addresses: vec!["0.0.0.0".to_string()],
+            },
+            ListeningProcess {
+                pid: Pid::try_from(200_u32).unwrap(),
+                name: "b".to_string(),
+                port: 80,
+                addresses: vec!["0.0.0.0".to_string()],
+            },
+        ];
+        let grouped = group_by_process(flat);
+        // Different PIDs on same port must remain separate
+        assert_eq!(grouped.len(), 2);
+    }
+
+    #[test]
+    fn test_group_by_process_different_ports_stay_separate() {
+        let flat = vec![
+            ListeningProcess {
+                pid: Pid::try_from(100_u32).unwrap(),
+                name: "a".to_string(),
+                port: 80,
+                addresses: vec!["0.0.0.0".to_string()],
+            },
+            ListeningProcess {
+                pid: Pid::try_from(100_u32).unwrap(),
+                name: "a".to_string(),
+                port: 443,
+                addresses: vec!["0.0.0.0".to_string()],
+            },
+        ];
+        let grouped = group_by_process(flat);
+        // Same PID, different ports must remain separate
+        assert_eq!(grouped.len(), 2);
+    }
+
+    #[test]
+    fn test_group_by_process_deduplicates_addresses() {
+        let flat = vec![
+            ListeningProcess {
+                pid: Pid::try_from(1_u32).unwrap(),
+                name: "x".to_string(),
+                port: 80,
+                addresses: vec!["0.0.0.0".to_string()],
+            },
+            ListeningProcess {
+                pid: Pid::try_from(1_u32).unwrap(),
+                name: "x".to_string(),
+                port: 80,
+                addresses: vec!["0.0.0.0".to_string()],
+            },
+        ];
+        let grouped = group_by_process(flat);
+        assert_eq!(grouped.len(), 1);
+        // Duplicate address entries should not produce duplicate addresses
+        assert_eq!(grouped[0].addresses, vec!["0.0.0.0"]);
     }
 }
