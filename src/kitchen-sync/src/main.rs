@@ -616,6 +616,41 @@ mod tests {
     }
 
     #[test]
+    fn discover_respects_workspace_exclude() {
+        // workspace.members = ["crates/*"] with workspace.exclude =
+        // ["crates/vendored"] must skip the excluded dir even though it
+        // matches the glob.
+        let root = tempfile::tempdir().unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\nexclude = [\"crates/vendored\"]\n",
+        )
+        .unwrap();
+
+        for name in ["keep", "vendored"] {
+            let dir = root.path().join("crates").join(name);
+            fs::create_dir_all(dir.join("src")).unwrap();
+            fs::write(
+                dir.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"
+                ),
+            )
+            .unwrap();
+            fs::write(dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+        }
+
+        let root_manifest = parse_manifest(&root.path().join("Cargo.toml")).unwrap();
+        let packages = discover_workspace_packages(root.path(), &root_manifest).unwrap();
+        let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"keep"), "expected keep in {names:?}");
+        assert!(
+            !names.contains(&"vendored"),
+            "excluded dir should not appear: {names:?}"
+        );
+    }
+
+    #[test]
     fn collect_binary_packages_extracts_names_from_manifest() {
         let root = tempfile::tempdir().unwrap();
         let pkg_dir = root.path().join("anywhere");
