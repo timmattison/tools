@@ -1,3 +1,10 @@
+// Crate-local lints locking in review fixes:
+//   - clippy::exit catches std::process::exit() which skips destructors
+//     (leaked our TempDir before this was enforced).
+//   - clippy::format_push_string catches `s.push_str(&format!(...))` which
+//     allocates an extra String; `write!(&mut s, ...)` is the idiomatic form.
+#![deny(clippy::exit, clippy::format_push_string)]
+
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -370,19 +377,19 @@ fn exit_code_for(outcomes: &[InstallOutcome]) -> i32 {
 /// so users don't have to scroll back through the live install output to find
 /// out what went wrong.
 fn format_summary(outcomes: &[InstallOutcome]) -> String {
+    use std::fmt::Write as _;
     let installed = outcomes.iter().filter(|o| o.error.is_none()).count();
     let failed = outcomes.len() - installed;
     let mut out = String::new();
     out.push('\n');
-    out.push_str(&format!(
-        "Summary: {installed} installed, {failed} failed\n"
-    ));
+    // writeln! into a String is infallible; unwrap preserves the "can't
+    // fail" guarantee loudly if that ever changes.
+    writeln!(out, "Summary: {installed} installed, {failed} failed").unwrap();
     if failed > 0 {
         out.push_str("  Failed:\n");
         for outcome in outcomes.iter().filter(|o| o.error.is_some()) {
-            // error is Some here by the filter.
             let err = outcome.error.as_deref().unwrap_or("");
-            out.push_str(&format!("    {}: {}\n", outcome.package, err));
+            writeln!(out, "    {}: {err}", outcome.package).unwrap();
         }
     }
     out
