@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -12,6 +12,24 @@ use tempfile::TempDir;
 struct Args {
     /// Git repository URL (e.g. https://github.com/user/repo)
     repo_url: String,
+}
+
+/// A workspace member that produces at least one binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BinaryPackage {
+    name: String,
+    #[allow(
+        dead_code,
+        reason = "directory is captured for debugging and future filtering features"
+    )]
+    dir: PathBuf,
+}
+
+/// Outcome of attempting to install a single package.
+#[derive(Debug)]
+struct InstallOutcome {
+    package: String,
+    error: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -28,15 +46,48 @@ fn main() -> Result<()> {
     let manifest = parse_manifest(&root_manifest)?;
 
     if manifest.get("workspace").is_some() {
-        // Phase 2 will implement workspace discovery.
-        bail!("workspace support not yet implemented");
+        run_workspace_install(&args.repo_url, &manifest, repo_path)
+    } else {
+        if !is_binary_package(&manifest, repo_path) {
+            bail!("No binary packages found in repository");
+        }
+        install_from_git(&args.repo_url, None)
     }
+}
 
-    if !is_binary_package(&manifest, repo_path) {
+/// Discover all binary packages in a Cargo workspace and install each one,
+/// continuing past individual failures.
+fn run_workspace_install(
+    repo_url: &str,
+    root_manifest: &toml::Value,
+    repo_path: &Path,
+) -> Result<()> {
+    let patterns = extract_workspace_members(root_manifest);
+    let member_dirs = resolve_workspace_members(repo_path, &patterns)?;
+    let packages = collect_binary_packages(&member_dirs)?;
+
+    if packages.is_empty() {
         bail!("No binary packages found in repository");
     }
 
-    install_from_git(&args.repo_url, None)
+    let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
+    println!(
+        "Found {} binary package{}: {}",
+        packages.len(),
+        if packages.len() == 1 { "" } else { "s" },
+        names.join(", ")
+    );
+    println!();
+
+    let outcomes = install_packages(repo_url, &packages);
+
+    print_summary(&outcomes);
+
+    let any_succeeded = outcomes.iter().any(|o| o.error.is_none());
+    if !any_succeeded {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// Shallow-clone `repo_url` into a new temp directory and return the handle.
@@ -82,11 +133,81 @@ fn is_binary_package(manifest: &toml::Value, package_dir: &Path) -> bool {
     package_dir.join("src").join("main.rs").exists()
 }
 
+/// Extract the `workspace.members` array from a root Cargo.toml.
+///
+/// STUB: always returns empty.
+fn extract_workspace_members(_manifest: &toml::Value) -> Vec<String> {
+    Vec::new()
+}
+
+/// Resolve `workspace.members` patterns (which may contain globs) into concrete
+/// directory paths inside `repo_root`.
+///
+/// STUB: always returns empty.
+///
+/// # Errors
+///
+/// Returns an error if a glob pattern is malformed.
+fn resolve_workspace_members(_repo_root: &Path, _patterns: &[String]) -> Result<Vec<PathBuf>> {
+    Ok(Vec::new())
+}
+
+/// For each member directory, parse its Cargo.toml, skip library-only crates,
+/// and return the list of binary packages with their names and paths.
+///
+/// STUB: always returns empty.
+///
+/// # Errors
+///
+/// Returns an error if a member's Cargo.toml cannot be read or parsed.
+fn collect_binary_packages(_member_dirs: &[PathBuf]) -> Result<Vec<BinaryPackage>> {
+    Ok(Vec::new())
+}
+
+/// Install each package sequentially, returning an outcome per package.
+fn install_packages(repo_url: &str, packages: &[BinaryPackage]) -> Vec<InstallOutcome> {
+    let total = packages.len();
+    packages
+        .iter()
+        .enumerate()
+        .map(|(i, pkg)| {
+            println!("Installing {} ({}/{})...", pkg.name, i + 1, total);
+            let outcome = match install_from_git(repo_url, Some(&pkg.name)) {
+                Ok(()) => InstallOutcome {
+                    package: pkg.name.clone(),
+                    error: None,
+                },
+                Err(e) => InstallOutcome {
+                    package: pkg.name.clone(),
+                    error: Some(e.to_string()),
+                },
+            };
+            if outcome.error.is_some() {
+                println!("  FAILED");
+            } else {
+                println!("  Installed {}", pkg.name);
+            }
+            outcome
+        })
+        .collect()
+}
+
+/// Print a summary of install outcomes.
+fn print_summary(outcomes: &[InstallOutcome]) {
+    let installed = outcomes.iter().filter(|o| o.error.is_none()).count();
+    let failed = outcomes.len() - installed;
+    println!();
+    println!("Summary: {} installed, {} failed", installed, failed);
+    if failed > 0 {
+        println!("  Failed:");
+        for outcome in outcomes.iter().filter(|o| o.error.is_some()) {
+            println!("    {}", outcome.package);
+        }
+    }
+}
+
 /// Run `cargo install --git <url>` optionally pinned to a specific package.
 fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
-    let label = package.unwrap_or("repository");
-    println!("Installing {}...", label);
-
     let mut cmd = Command::new("cargo");
     cmd.arg("install").arg("--git").arg(repo_url);
     if let Some(pkg) = package {
@@ -108,6 +229,8 @@ fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+
+    // ----- Phase 1 tests -----
 
     #[test]
     fn parses_simple_manifest() {
@@ -146,5 +269,118 @@ mod tests {
         let manifest: toml::Value =
             toml::from_str("[package]\nname = \"demo\"\nversion = \"0.1.0\"\n").unwrap();
         assert!(!is_binary_package(&manifest, dir.path()));
+    }
+
+    // ----- Phase 2 tests -----
+
+    #[test]
+    fn extracts_workspace_members_array() {
+        let manifest: toml::Value = toml::from_str(
+            "[workspace]\nresolver = \"2\"\nmembers = [\"src/*\", \"crates/foo\"]\n",
+        )
+        .unwrap();
+        let members = extract_workspace_members(&manifest);
+        assert_eq!(members, vec!["src/*".to_string(), "crates/foo".to_string()]);
+    }
+
+    #[test]
+    fn extracts_empty_members_when_workspace_has_none() {
+        let manifest: toml::Value = toml::from_str("[workspace]\nresolver = \"2\"\n").unwrap();
+        let members = extract_workspace_members(&manifest);
+        assert!(members.is_empty());
+    }
+
+    #[test]
+    fn resolves_glob_patterns_to_member_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        // Create src/alpha, src/beta, src/gamma
+        for name in ["alpha", "beta", "gamma"] {
+            fs::create_dir_all(root.path().join("src").join(name)).unwrap();
+            fs::write(
+                root.path().join("src").join(name).join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                    name
+                ),
+            )
+            .unwrap();
+        }
+
+        let patterns = vec!["src/*".to_string()];
+        let resolved = resolve_workspace_members(root.path(), &patterns).unwrap();
+        assert_eq!(resolved.len(), 3);
+        let names: Vec<String> = resolved
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"alpha".to_string()));
+        assert!(names.contains(&"beta".to_string()));
+        assert!(names.contains(&"gamma".to_string()));
+    }
+
+    #[test]
+    fn resolves_literal_paths_without_glob() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("crates").join("foo")).unwrap();
+        fs::write(
+            root.path().join("crates").join("foo").join("Cargo.toml"),
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let patterns = vec!["crates/foo".to_string()];
+        let resolved = resolve_workspace_members(root.path(), &patterns).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].file_name().unwrap().to_string_lossy(),
+            "foo".to_string()
+        );
+    }
+
+    #[test]
+    fn collect_binary_packages_skips_library_only_members() {
+        let root = tempfile::tempdir().unwrap();
+        // binary crate: has main.rs
+        let bin_dir = root.path().join("binny");
+        fs::create_dir_all(bin_dir.join("src")).unwrap();
+        fs::write(
+            bin_dir.join("Cargo.toml"),
+            "[package]\nname = \"binny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(bin_dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        // lib crate: only lib.rs, no [[bin]]
+        let lib_dir = root.path().join("libby");
+        fs::create_dir_all(lib_dir.join("src")).unwrap();
+        fs::write(
+            lib_dir.join("Cargo.toml"),
+            "[package]\nname = \"libby\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(lib_dir.join("src").join("lib.rs"), "").unwrap();
+
+        let members = vec![bin_dir.clone(), lib_dir.clone()];
+        let packages = collect_binary_packages(&members).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "binny");
+        assert_eq!(packages[0].dir, bin_dir);
+    }
+
+    #[test]
+    fn collect_binary_packages_extracts_names_from_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let pkg_dir = root.path().join("anywhere");
+        fs::create_dir_all(pkg_dir.join("src")).unwrap();
+        fs::write(
+            pkg_dir.join("Cargo.toml"),
+            "[package]\nname = \"my-cool-tool\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(pkg_dir.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+
+        let packages = collect_binary_packages(&[pkg_dir]).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "my-cool-tool");
     }
 }
