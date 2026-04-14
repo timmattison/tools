@@ -134,34 +134,84 @@ fn is_binary_package(manifest: &toml::Value, package_dir: &Path) -> bool {
 }
 
 /// Extract the `workspace.members` array from a root Cargo.toml.
-///
-/// STUB: always returns empty.
-fn extract_workspace_members(_manifest: &toml::Value) -> Vec<String> {
-    Vec::new()
+fn extract_workspace_members(manifest: &toml::Value) -> Vec<String> {
+    manifest
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve `workspace.members` patterns (which may contain globs) into concrete
-/// directory paths inside `repo_root`.
-///
-/// STUB: always returns empty.
+/// directory paths inside `repo_root`. Patterns are joined with `repo_root`
+/// before globbing so literal paths like `crates/foo` work even when they do
+/// not contain glob metacharacters.
 ///
 /// # Errors
 ///
 /// Returns an error if a glob pattern is malformed.
-fn resolve_workspace_members(_repo_root: &Path, _patterns: &[String]) -> Result<Vec<PathBuf>> {
-    Ok(Vec::new())
+fn resolve_workspace_members(repo_root: &Path, patterns: &[String]) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::new();
+    for pattern in patterns {
+        let joined = repo_root.join(pattern);
+        let joined_str = joined
+            .to_str()
+            .with_context(|| format!("Non-UTF-8 path in workspace member pattern: {pattern}"))?;
+        let entries = glob::glob(joined_str)
+            .with_context(|| format!("Invalid workspace member pattern: {pattern}"))?;
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("Failed to resolve member pattern: {pattern}"))?;
+            if path.is_dir() {
+                resolved.push(path);
+            }
+        }
+    }
+    Ok(resolved)
 }
 
 /// For each member directory, parse its Cargo.toml, skip library-only crates,
 /// and return the list of binary packages with their names and paths.
 ///
-/// STUB: always returns empty.
+/// Directories without a Cargo.toml and directories whose Cargo.toml cannot be
+/// parsed or has no `package.name` are silently skipped. Malformed manifests
+/// do not abort the whole discovery because real workspaces may have stray
+/// directories that match the glob but aren't packages.
 ///
 /// # Errors
 ///
-/// Returns an error if a member's Cargo.toml cannot be read or parsed.
-fn collect_binary_packages(_member_dirs: &[PathBuf]) -> Result<Vec<BinaryPackage>> {
-    Ok(Vec::new())
+/// Currently infallible, but returns `Result` for future validation work.
+fn collect_binary_packages(member_dirs: &[PathBuf]) -> Result<Vec<BinaryPackage>> {
+    let mut packages = Vec::new();
+    for dir in member_dirs {
+        let manifest_path = dir.join("Cargo.toml");
+        if !manifest_path.exists() {
+            continue;
+        }
+        let Ok(manifest) = parse_manifest(&manifest_path) else {
+            continue;
+        };
+        if !is_binary_package(&manifest, dir) {
+            continue;
+        }
+        let Some(name) = manifest
+            .get("package")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+        else {
+            continue;
+        };
+        packages.push(BinaryPackage {
+            name: name.to_owned(),
+            dir: dir.clone(),
+        });
+    }
+    Ok(packages)
 }
 
 /// Install each package sequentially, returning an outcome per package.
@@ -210,8 +260,9 @@ fn print_summary(outcomes: &[InstallOutcome]) {
 fn install_from_git(repo_url: &str, package: Option<&str>) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.arg("install").arg("--git").arg(repo_url);
+    // cargo install selects specific packages via a positional crate name, not --package.
     if let Some(pkg) = package {
-        cmd.arg("--package").arg(pkg);
+        cmd.arg(pkg);
     }
 
     let status = cmd
@@ -360,7 +411,7 @@ mod tests {
         .unwrap();
         fs::write(lib_dir.join("src").join("lib.rs"), "").unwrap();
 
-        let members = vec![bin_dir.clone(), lib_dir.clone()];
+        let members = vec![bin_dir.clone(), lib_dir];
         let packages = collect_binary_packages(&members).unwrap();
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "binny");

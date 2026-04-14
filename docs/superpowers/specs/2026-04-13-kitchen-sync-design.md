@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A CLI tool that takes a git repo URL, discovers all Rust binary packages in the repo, and installs them via `cargo install --git <url> --package <name>`.
+A CLI tool that takes a git repo URL, discovers all Rust binary packages in the repo, and installs them via `cargo install --git <url> <name>` (the crate name is a positional argument to `cargo install`).
 
 The name is a play on "kitchen sink" — it installs everything.
 
@@ -27,7 +27,7 @@ Single positional argument: the git repo URL (e.g., `https://github.com/user/rep
    - If neither, skip (library-only crate).
 6. **Extract package names** — read `package.name` from each member's `Cargo.toml`.
 7. **Print plan** — list all packages that will be installed.
-8. **Install each package** — run `cargo install --git <url> --package <name>` sequentially. Capture stdout/stderr.
+8. **Install each package** — run `cargo install --git <url> <name>` sequentially. Capture stdout/stderr.
 9. **Track results** — collect successes and failures (package name + error message).
 10. **Clean up** — temp directory is cleaned up automatically by `tempfile`.
 11. **Print summary** — show count of successes and failures. List failed packages with error messages.

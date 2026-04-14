@@ -11,7 +11,7 @@ Durable decisions that apply across all phases:
 - **Version output**: via `buildinfo::version_string!()` macro, matching every other tool in the workspace.
 - **Dependencies**: `clap` (derive), `anyhow`, `buildinfo`, plus workspace `toml`, `glob`, `tempfile`.
 - **Clone strategy**: shell out to `git clone --depth 1 <url>` into a `tempfile::tempdir()`. Temp directory is auto-cleaned on drop.
-- **Install strategy**: shell out to `cargo install --git <url> --package <name>` per package (or bare `cargo install --git <url>` for single-package repos). Sequential, not parallel.
+- **Install strategy**: shell out to `cargo install --git <url> <name>` per package (or bare `cargo install --git <url>` for single-package repos). Sequential, not parallel.
 - **Binary detection**: a member is "binary" iff its `Cargo.toml` has a `[[bin]]` section OR `src/main.rs` exists. Library-only crates are silently skipped.
 - **Exit code**: `0` if at least one install succeeded; `1` if all installs failed or clone/discovery failed.
 - **Error model**: clone and discovery errors abort. Individual install failures are collected and reported in the final summary; the tool continues with remaining packages.
@@ -53,7 +53,7 @@ Extend `kitchen-sync` to handle Cargo workspaces end-to-end. When the root `Carg
 
 For each resolved member, inspect its `Cargo.toml` and filesystem to decide whether it produces a binary. Members with a `[[bin]]` section or a `src/main.rs` file qualify; library-only members are silently skipped. Extract the `package.name` from each qualifying member's `Cargo.toml` and print the full list before installing.
 
-Install each package sequentially via `cargo install --git <url> --package <name>`. Stream per-install progress to the user (e.g., `Installing freeport (1/12)...`). Track which packages succeeded and which failed, collecting error output for failures. After the loop, print a summary: `N installed, M failed` and list failed package names.
+Install each package sequentially via `cargo install --git <url> <name>`. Stream per-install progress to the user (e.g., `Installing freeport (1/12)...`). Track which packages succeeded and which failed, collecting error output for failures. After the loop, print a summary: `N installed, M failed` and list failed package names.
 
 This phase is demoable against the `tools` monorepo itself — pointing `kitchen-sync` at it should install every binary tool it contains.
 
@@ -64,7 +64,7 @@ This phase is demoable against the `tools` monorepo itself — pointing `kitchen
 - [ ] Members without `[[bin]]` and without `src/main.rs` are filtered out (library-only crates skipped)
 - [ ] Package names are extracted from each binary member's `Cargo.toml`
 - [ ] A plan line is printed listing the packages that will be installed
-- [ ] Each package is installed via `cargo install --git <url> --package <name>` in sequence
+- [ ] Each package is installed via `cargo install --git <url> <name>` in sequence
 - [ ] Per-package progress is printed in the format `Installing <name> (i/N)...`
 - [ ] Individual install failures do not abort the run; remaining packages still attempt to install
 - [ ] Final summary prints install count, failure count, and names of failed packages
