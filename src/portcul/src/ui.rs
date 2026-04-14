@@ -170,9 +170,9 @@ fn render_table(frame: &mut Frame, area: Rect, state: &mut AppState) {
                 listener.port.to_string(),
                 listener.pid.as_u32().to_string(),
                 truncate_to_width(&listener.name, 30),
-                // TODO(slice C): render tree display for multiple addresses
-                listener.addresses.join(", "),
+                format_address_cell(&listener.addresses),
             ])
+            .height(address_cell_height(listener.addresses.len()))
         })
         .collect();
 
@@ -314,15 +314,34 @@ fn render_help_footer(frame: &mut Frame, area: Rect, state: &AppState) {
 ///
 /// For a single address, returns the address directly.
 /// For multiple addresses, returns a multi-line tree with "Multiple" on the
-/// first line and each address on its own line prefixed by tree characters.
+/// first line and each address on its own line prefixed by tree characters
+/// (`├─` for middle entries, `└─` for the last).
 fn format_address_cell(addresses: &[String]) -> String {
-    todo!("not yet implemented")
+    if addresses.len() <= 1 {
+        return addresses.first().cloned().unwrap_or_default();
+    }
+
+    let mut out = String::from("Multiple");
+    let last_idx = addresses.len() - 1;
+    for (i, addr) in addresses.iter().enumerate() {
+        let prefix = if i == last_idx { "└─" } else { "├─" };
+        out.push('\n');
+        out.push_str(prefix);
+        out.push(' ');
+        out.push_str(addr);
+    }
+    out
 }
 
 /// Returns the Ratatui row height needed to render a cell produced by
 /// [`format_address_cell`] with `address_count` addresses.
 fn address_cell_height(address_count: usize) -> u16 {
-    todo!("not yet implemented")
+    if address_count <= 1 {
+        1
+    } else {
+        // header "Multiple" + one row per address
+        u16::try_from(address_count + 1).unwrap_or(u16::MAX)
+    }
 }
 
 /// Minimum width for truncation (ellipsis + at least 1 char).
