@@ -19,11 +19,6 @@ struct Args {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BinaryPackage {
     name: String,
-    #[allow(
-        dead_code,
-        reason = "directory is captured for debugging and future filtering features"
-    )]
-    dir: PathBuf,
 }
 
 /// Outcome of attempting to install a single package.
@@ -64,7 +59,6 @@ fn classify_member(dir: &Path) -> MemberClass {
     };
     MemberClass::Binary(BinaryPackage {
         name: name.to_owned(),
-        dir: dir.to_path_buf(),
     })
 }
 
@@ -694,11 +688,10 @@ mod tests {
         .unwrap();
         fs::write(lib_dir.join("src").join("lib.rs"), "").unwrap();
 
-        let members = vec![bin_dir.clone(), lib_dir];
+        let members = vec![bin_dir, lib_dir];
         let packages = collect_binary_packages(&members).unwrap();
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "binny");
-        assert_eq!(packages[0].dir, bin_dir);
     }
 
     // ----- stderr capture helper -----
