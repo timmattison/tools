@@ -181,46 +181,46 @@ async fn main() -> Result<()> {
         })
     };
 
-    // Check if user cancelled
-    let user_cancelled = progress.is_cancelled();
-
-    // Wait for formatting to complete (only if not cancelled) and capture the buffer
-    let formatted_output: Option<String> = if user_cancelled {
-        None
-    } else {
-        let buffer = match format_handle.await {
-            Ok(Ok(buffer)) => Some(buffer),
-            Ok(Err(e)) => {
-                eprintln!("Error formatting results: {}", e);
-                None
-            }
-            Err(e) => {
-                eprintln!("Error joining format task: {}", e);
-                None
-            }
-        };
-        if use_ollama {
-            progress.set_ollama_complete();
-        }
-        buffer
-    };
+    // Always drive the format task to completion — even on cancel — so
+    // the spawn_blocking thread doesn't outlive main(). The buffer is
+    // discarded if the user cancelled.
+    let format_result = format_handle.await;
+    if use_ollama {
+        progress.set_ollama_complete();
+    }
 
     // Wait for UI to finish
     let _ = ui_handle.join();
+
+    // Re-sample cancellation AFTER format_handle resolves: a cancel that
+    // arrives mid-formatting should also suppress the final write.
+    if progress.is_cancelled() {
+        return Ok(());
+    }
+
+    let buffer = match format_result {
+        Ok(Ok(buffer)) => buffer,
+        Ok(Err(e)) => {
+            eprintln!("Error formatting results: {}", e);
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("Error joining format task: {}", e);
+            return Ok(());
+        }
+    };
 
     // After the TUI exits, print the captured output to stdout exactly
     // once and write it to a file exactly once. Previously this block
     // re-ran `format_results` (duplicating work and creating a second
     // timestamped output file one second later).
-    if let Some(buffer) = formatted_output {
-        print!("{}", buffer);
-        io::stdout().flush().ok();
+    print!("{}", buffer);
+    let _ = io::stdout().flush();
 
-        match write_output_file(&args, &buffer) {
-            Ok(Some(path)) => println!("📝 Results written to {}", path.display()),
-            Ok(None) => {}
-            Err(e) => println!("⚠️  Error writing to output file: {}", e),
-        }
+    match write_output_file(&args, &buffer) {
+        Ok(Some(path)) => println!("📝 Results written to {}", path.display()),
+        Ok(None) => {}
+        Err(e) => println!("⚠️  Error writing to output file: {}", e),
     }
 
     Ok(())

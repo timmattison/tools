@@ -20,22 +20,21 @@ pub const NO_COMMITS_MESSAGE: &str = "😴 No commits found";
 
 /// Format search results into a string buffer.
 ///
-/// This is a pure function with respect to the file system: it returns
-/// the formatted output as a `String` without creating or modifying any
-/// files. The caller is responsible for writing the result to a file or
-/// to stdout.
+/// Pure with respect to the file system and to shared UI state: it
+/// returns the formatted output as a `String` and does not create files
+/// or flip flags on the caller-provided `ProgressDisplay`. The caller
+/// owns writing the buffer to stdout/disk and owns signalling
+/// completion (`set_ollama_complete`, etc.).
 ///
-/// When `progress` is `Some`, Ollama status updates are routed through
-/// the UI instead of being printed to stdout.
+/// When `progress` is `Some` the buffer is built silently (output is
+/// printed once by the caller after the TUI exits). When `progress` is
+/// `None` — the library-consumer / test path — each write is also
+/// streamed to stdout so callers without a TUI still see incremental
+/// output.
 ///
 /// # Errors
 ///
 /// Returns an error if duration parsing fails for the meta-summary path.
-///
-/// # Panics
-///
-/// Panics if flushing stdout fails (only when `progress` is `None`,
-/// which means output is being streamed directly to stdout).
 pub async fn format_results(
     result: &SearchResult,
     args: &Args,
@@ -50,7 +49,8 @@ pub async fn format_results(
         output_buffer.push_str(text);
         if !has_progress {
             print!("{}", text);
-            io::stdout().flush().unwrap();
+            // Ignore flush failures (e.g. closed pipe from `gitrdun | head`).
+            let _ = io::stdout().flush();
         }
     };
 
@@ -155,7 +155,7 @@ pub async fn format_results(
                     } else {
                         Box::new(|status: &str| {
                             print!("\r\x1b[K   ⏳ {}", status);
-                            io::stdout().flush().unwrap();
+                            let _ = io::stdout().flush();
                         })
                     };
 
@@ -216,7 +216,7 @@ pub async fn format_results(
                     } else {
                         Box::new(|status: &str| {
                             print!("\r\x1b[K   ⏳ {}", status);
-                            io::stdout().flush().unwrap();
+                            let _ = io::stdout().flush();
                         })
                     };
 
@@ -246,14 +246,8 @@ pub async fn format_results(
                 }
             }
         }
-
-        if let Some(progress_ref) = &progress {
-            if use_ollama {
-                progress_ref.set_ollama_complete();
-            }
-        }
     } else {
-        write_output("😴 No commits found\n");
+        write_output(&format!("{}\n", NO_COMMITS_MESSAGE));
         write_output(&format!(
             "   • Start date: {}\n",
             result.threshold.format("%A, %B %d, %Y at %l:%M %p")
