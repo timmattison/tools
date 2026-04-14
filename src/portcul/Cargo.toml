@@ -1,0 +1,22 @@
+[package]
+name = "portcul"
+version = "0.1.0"
+edition.workspace = true
+description = "A pretty TUI for viewing and killing processes listening on ports"
+
+[[bin]]
+name = "portcul"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+listeners.workspace = true
+libc.workspace = true
+ratatui.workspace = true
+unicode-width.workspace = true
+
+[lints]
+workspace = true
