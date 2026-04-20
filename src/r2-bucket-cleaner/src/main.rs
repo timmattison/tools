@@ -305,7 +305,11 @@ mod tests {
             "got: {}",
             text
         );
-        assert!(text.contains("and delete the bucket itself"), "got: {}", text);
+        assert!(
+            text.contains("and delete the bucket itself"),
+            "got: {}",
+            text
+        );
     }
 
     #[test]
