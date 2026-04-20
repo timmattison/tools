@@ -24,6 +24,10 @@ pub struct R2Object {
 
 pub struct R2WranglerClient;
 
+pub(crate) fn delete_bucket_argv(_bucket: &str) -> Vec<String> {
+    Vec::new()
+}
+
 impl R2WranglerClient {
     pub fn new() -> Self {
         Self
@@ -191,5 +195,30 @@ impl R2WranglerClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_bucket_argv_builds_correct_args() {
+        assert_eq!(
+            delete_bucket_argv("my-bucket"),
+            vec!["r2", "bucket", "delete", "my-bucket"]
+        );
+    }
+
+    #[test]
+    fn delete_bucket_argv_handles_special_characters() {
+        assert_eq!(
+            delete_bucket_argv("bucket-1.2.3"),
+            vec!["r2", "bucket", "delete", "bucket-1.2.3"]
+        );
+        assert_eq!(
+            delete_bucket_argv("a-b-c-123"),
+            vec!["r2", "bucket", "delete", "a-b-c-123"]
+        );
     }
 }
