@@ -24,8 +24,13 @@ pub struct R2Object {
 
 pub struct R2WranglerClient;
 
-pub(crate) fn delete_bucket_argv(_bucket: &str) -> Vec<String> {
-    Vec::new()
+pub(crate) fn delete_bucket_argv(bucket: &str) -> Vec<String> {
+    vec![
+        "r2".to_string(),
+        "bucket".to_string(),
+        "delete".to_string(),
+        bucket.to_string(),
+    ]
 }
 
 impl R2WranglerClient {
@@ -191,6 +196,24 @@ impl R2WranglerClient {
                 "Failed to delete {} objects. First few failures: {:?}",
                 failed_keys.len(),
                 &failed_keys[..failed_keys.len().min(5)]
+            ));
+        }
+
+        Ok(())
+    }
+
+    pub async fn delete_bucket(&self, bucket_name: &str) -> Result<()> {
+        let args = delete_bucket_argv(bucket_name);
+        let output = task::spawn_blocking(move || Command::new("wrangler").args(&args).output())
+            .await
+            .context("Failed to spawn wrangler task")?
+            .context("Failed to execute wrangler command. Is wrangler installed?")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!(
+                "wrangler r2 bucket delete failed: {}",
+                stderr
             ));
         }
 
