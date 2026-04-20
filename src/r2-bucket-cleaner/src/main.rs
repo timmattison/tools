@@ -181,3 +181,37 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::error::ErrorKind;
+
+    #[test]
+    fn args_delete_bucket_long_parses() {
+        let result = Args::try_parse_from(["r2-bucket-cleaner", "b", "--delete-bucket"]);
+        assert!(
+            result.is_ok(),
+            "expected --delete-bucket to parse, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn args_delete_bucket_short_parses() {
+        let result = Args::try_parse_from(["r2-bucket-cleaner", "b", "-d"]);
+        assert!(
+            result.is_ok(),
+            "expected -d to parse, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn args_list_only_and_delete_bucket_conflict() {
+        let result =
+            Args::try_parse_from(["r2-bucket-cleaner", "b", "--list-only", "--delete-bucket"]);
+        let err = result.expect_err("expected --list-only --delete-bucket to conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+}
