@@ -8,6 +8,10 @@ mod r2_wrangler;
 
 use r2_wrangler::R2WranglerClient;
 
+fn warning_text(_count_phrase: &str, _delete_bucket: bool) -> String {
+    String::new()
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version = version_string!(), about, long_about = None)]
 struct Args {
@@ -242,5 +246,37 @@ mod tests {
     fn args_delete_bucket_defaults_false() {
         let args = Args::try_parse_from(["r2-bucket-cleaner", "b"]).unwrap();
         assert!(!args.delete_bucket);
+    }
+
+    #[test]
+    fn warning_text_without_delete_bucket_mentions_only_objects() {
+        let text = warning_text("5", false);
+        assert!(
+            text.contains("permanently delete 5 objects"),
+            "got: {}",
+            text
+        );
+        assert!(
+            !text.to_lowercase().contains("bucket itself"),
+            "got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn warning_text_with_delete_bucket_mentions_bucket() {
+        let text = warning_text("5", true);
+        assert!(
+            text.contains("permanently delete 5 objects"),
+            "got: {}",
+            text
+        );
+        assert!(text.contains("and delete the bucket itself"), "got: {}", text);
+    }
+
+    #[test]
+    fn warning_text_preserves_count_phrase() {
+        assert!(warning_text("these 20", false).contains("these 20 objects"));
+        assert!(warning_text("ALL", true).contains("ALL objects"));
     }
 }
