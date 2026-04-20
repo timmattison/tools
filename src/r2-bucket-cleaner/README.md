@@ -33,6 +33,12 @@ r2-bucket-cleaner BUCKET_NAME --all
 
 # Delete all objects without confirmation and bypass limit
 r2-bucket-cleaner BUCKET_NAME --force --all
+
+# Empty the bucket and then delete the bucket itself
+r2-bucket-cleaner BUCKET_NAME --delete-bucket --all
+
+# Delete an empty (or emptied) bucket without any prompts
+r2-bucket-cleaner BUCKET_NAME -d --force --all
 ```
 
 ## Options
@@ -41,6 +47,7 @@ r2-bucket-cleaner BUCKET_NAME --force --all
 - `-l, --list-only`: Only list objects, don't delete them
 - `-f, --force`: Skip confirmation prompt and delete all objects
 - `-a, --all`: Automatically continue until all objects are deleted (bypass 20 object limit)
+- `-d, --delete-bucket`: After emptying, delete the bucket itself (conflicts with `--list-only`)
 - `-h, --help`: Print help information
 - `-V, --version`: Print version information
 
@@ -83,5 +90,6 @@ This tool wraps the `wrangler r2` commands to provide a convenient way to clear 
 1. Uses `wrangler r2 object get --remote BUCKET/` to list objects (limited to 20 per request)
 2. Uses `wrangler r2 object delete` to remove objects with retries
 3. Reports any failures at the end
+4. Optionally, when `--delete-bucket` is set, runs `wrangler r2 bucket delete BUCKET` once the bucket is empty to remove the bucket itself
 
 The tool inherits authentication from your existing wrangler configuration (typically stored in `~/Library/Preferences/.wrangler/config/default.toml` on macOS).
