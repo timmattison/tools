@@ -25,6 +25,10 @@ struct Args {
     /// Automatically continue until all objects are deleted (bypass 20 object limit)
     #[arg(short, long)]
     all: bool,
+
+    /// After emptying, delete the bucket itself
+    #[arg(short = 'd', long, conflicts_with = "list_only")]
+    delete_bucket: bool,
 }
 
 #[tokio::main]
@@ -213,5 +217,23 @@ mod tests {
             Args::try_parse_from(["r2-bucket-cleaner", "b", "--list-only", "--delete-bucket"]);
         let err = result.expect_err("expected --list-only --delete-bucket to conflict");
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn args_delete_bucket_long_sets_flag() {
+        let args = Args::try_parse_from(["r2-bucket-cleaner", "b", "--delete-bucket"]).unwrap();
+        assert!(args.delete_bucket);
+    }
+
+    #[test]
+    fn args_delete_bucket_short_sets_flag() {
+        let args = Args::try_parse_from(["r2-bucket-cleaner", "b", "-d"]).unwrap();
+        assert!(args.delete_bucket);
+    }
+
+    #[test]
+    fn args_delete_bucket_defaults_false() {
+        let args = Args::try_parse_from(["r2-bucket-cleaner", "b"]).unwrap();
+        assert!(!args.delete_bucket);
     }
 }
