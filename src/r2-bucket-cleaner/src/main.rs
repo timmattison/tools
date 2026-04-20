@@ -8,8 +8,18 @@ mod r2_wrangler;
 
 use r2_wrangler::R2WranglerClient;
 
-fn warning_text(_count_phrase: &str, _delete_bucket: bool) -> String {
-    String::new()
+fn warning_text(count_phrase: &str, delete_bucket: bool) -> String {
+    if delete_bucket {
+        format!(
+            "\n⚠️  WARNING: This will permanently delete {} objects and delete the bucket itself!",
+            count_phrase
+        )
+    } else {
+        format!(
+            "\n⚠️  WARNING: This will permanently delete {} objects!",
+            count_phrase
+        )
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -137,16 +147,14 @@ async fn main() -> Result<()> {
         let proceed = if args.force {
             true
         } else if pass == 1 {
-            println!(
-                "\n⚠️  WARNING: This will permanently delete {} objects!",
-                if has_more && !args.all {
-                    format!("these {}", keys.len())
-                } else if has_more {
-                    "ALL".to_string()
-                } else {
-                    keys.len().to_string()
-                }
-            );
+            let count_phrase = if has_more && !args.all {
+                format!("these {}", keys.len())
+            } else if has_more {
+                "ALL".to_string()
+            } else {
+                keys.len().to_string()
+            };
+            println!("{}", warning_text(&count_phrase, args.delete_bucket));
             Confirm::new()
                 .with_prompt("Do you want to proceed?")
                 .default(false)
