@@ -62,6 +62,13 @@ async fn main() -> Result<()> {
         if keys.is_empty() {
             if pass == 1 {
                 println!("No objects found in bucket '{}'", args.bucket);
+                if args.delete_bucket && args.force {
+                    client
+                        .delete_bucket(&args.bucket)
+                        .await
+                        .context("Failed to delete bucket")?;
+                    println!("✅ Bucket '{}' deleted.", args.bucket);
+                }
             } else {
                 println!(
                     "\n✅ All objects have been deleted from bucket '{}'",
