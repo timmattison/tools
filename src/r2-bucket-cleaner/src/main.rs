@@ -76,12 +76,25 @@ async fn main() -> Result<()> {
         if keys.is_empty() {
             if pass == 1 {
                 println!("No objects found in bucket '{}'", args.bucket);
-                if args.delete_bucket && args.force {
-                    client
-                        .delete_bucket(&args.bucket)
-                        .await
-                        .context("Failed to delete bucket")?;
-                    println!("✅ Bucket '{}' deleted.", args.bucket);
+                if args.delete_bucket {
+                    let proceed = if args.force {
+                        true
+                    } else {
+                        Confirm::new()
+                            .with_prompt(format!("Delete bucket '{}'?", args.bucket))
+                            .default(false)
+                            .interact()
+                            .context("Failed to get user confirmation")?
+                    };
+                    if proceed {
+                        client
+                            .delete_bucket(&args.bucket)
+                            .await
+                            .context("Failed to delete bucket")?;
+                        println!("✅ Bucket '{}' deleted.", args.bucket);
+                    } else {
+                        println!("Operation cancelled.");
+                    }
                 }
             } else {
                 println!(
@@ -90,6 +103,13 @@ async fn main() -> Result<()> {
                 );
                 println!("Total objects deleted: {}", total_deleted);
                 println!("Total time: {:.2}s", start_time.elapsed().as_secs_f64());
+                if args.delete_bucket {
+                    client
+                        .delete_bucket(&args.bucket)
+                        .await
+                        .context("Failed to delete bucket")?;
+                    println!("✅ Bucket '{}' deleted.", args.bucket);
+                }
             }
             return Ok(());
         }
@@ -189,6 +209,12 @@ async fn main() -> Result<()> {
                 );
                 if has_more {
                     println!("Note: There are more objects in the bucket. Run again to continue.");
+                } else if args.delete_bucket {
+                    client
+                        .delete_bucket(&args.bucket)
+                        .await
+                        .context("Failed to delete bucket")?;
+                    println!("✅ Bucket '{}' deleted.", args.bucket);
                 }
             }
             break;
