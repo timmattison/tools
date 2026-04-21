@@ -5,9 +5,8 @@ use dialoguer::Confirm;
 use std::time::Instant;
 
 mod r2_client;
-mod r2_wrangler;
 
-use r2_wrangler::R2WranglerClient;
+use r2_client::R2Client;
 
 fn warning_text(count_phrase: &str, delete_bucket: bool) -> String {
     if delete_bucket {
@@ -50,8 +49,9 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Create R2 wrangler client
-    let client = R2WranglerClient::new();
+    let client = R2Client::new()
+        .await
+        .context("Failed to initialize R2 client")?;
 
     let mut total_deleted = 0;
     let mut pass = 0;

@@ -28,6 +28,7 @@ futures = "0.3"
 # AWS SDK
 aws-config = "1.8"
 aws-credential-types = "1.2"
+aws-sdk-s3 = "1"
 aws-sdk-sts = "1.80"
 
 # File system
