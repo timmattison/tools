@@ -198,16 +198,21 @@ impl R2Client {
                 let msg = e.message().unwrap_or("").to_string();
                 failed.push((key, msg));
             }
-            let ok_in_chunk = chunk.len().saturating_sub(errors.len());
-            on_progress(ok_in_chunk);
+            on_progress(chunk.len());
         }
 
         if !failed.is_empty() {
             let preview_len = failed.len().min(5);
+            let preview = failed[..preview_len]
+                .iter()
+                .map(|(key, msg)| format!("  {key}: {msg}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             return Err(anyhow::anyhow!(
-                "Failed to delete {} objects. First few failures: {:?}",
+                "Failed to delete {} objects. First {} failures:\n{}",
                 failed.len(),
-                &failed[..preview_len]
+                preview_len,
+                preview
             ));
         }
 
