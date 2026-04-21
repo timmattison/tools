@@ -4,6 +4,8 @@
 **Tool:** `src/r2-bucket-cleaner`
 **Type:** Feature addition
 
+> **Update (2026-04-21):** The "No migration to the S3 API" scope decision below was reversed mid-implementation. `wrangler r2 object get --remote <bucket>/` turned out to not be a listing command (it fetches a single object by key), so the existing tool was broken end-to-end. The fix was to swap the wrangler shell-out for `aws-sdk-s3` against R2's S3-compatible endpoint. The `--delete-bucket` flag surface described here is unchanged; only the backend it calls through to is different. See commit `4dde246` for the migration. Sections that reference `wrangler` (e.g. *Code changes → r2_wrangler.rs*, *Risks → Wrangler version drift*) are stale.
+
 ## Motivation
 
 Today `r2-bucket-cleaner` empties the objects out of a Cloudflare R2 bucket but leaves the (now-empty) bucket behind. R2 requires a bucket to be empty before it can be deleted, so clearing objects is only half of the job for anyone who wants the bucket gone. Users have to follow the tool with a separate `wrangler r2 bucket delete <bucket>` to finish up.

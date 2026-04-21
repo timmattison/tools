@@ -2,6 +2,8 @@
 
 > Source PRD: [specs/2026-04-20-r2-bucket-cleaner-delete-bucket-flag-design.md](../specs/2026-04-20-r2-bucket-cleaner-delete-bucket-flag-design.md)
 
+> **Update (2026-04-21):** Phases 1–2 landed as planned, then the backend was migrated from wrangler to `aws-sdk-s3` because `wrangler r2 object get` is not a listing command and the old tool was broken end-to-end. The architectural decisions below about shelling out to wrangler and the `delete_bucket_argv` helper are historical — in the current tree, `r2_wrangler.rs` is deleted and `r2_client.rs` uses `aws-sdk-s3` directly. See commit `4dde246`.
+
 ## Architectural decisions
 
 Durable decisions that apply across all phases:
