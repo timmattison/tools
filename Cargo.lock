@@ -5798,9 +5798,11 @@ dependencies = [
  "clap",
  "dialoguer",
  "futures",
+ "indicatif",
  "op-cache",
  "serde",
  "serde_json",
+ "termbar",
  "tokio",
 ]
 

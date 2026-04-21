@@ -15,6 +15,7 @@ const ACCESS_KEY_ID_OP_PATH: &str = "op://Private/R2 Credentials/R2_ACCESS_KEY_I
 const SECRET_ACCESS_KEY_OP_PATH: &str = "op://Private/R2 Credentials/R2_SECRET_ACCESS_KEY";
 
 const LIST_PAGE_SIZE: i32 = 20;
+const LIST_ALL_PAGE_SIZE: i32 = 1000;
 const DELETE_BATCH_SIZE: usize = 1000;
 
 pub fn endpoint_url(account_id: &str) -> String {
@@ -113,15 +114,61 @@ impl R2Client {
         Ok((keys, has_more))
     }
 
-    pub async fn delete_objects(&self, bucket: &str, keys: Vec<String>) -> Result<()> {
+    pub async fn list_all_objects<F>(&self, bucket: &str, mut on_progress: F) -> Result<Vec<String>>
+    where
+        F: FnMut(usize),
+    {
+        let mut all_keys: Vec<String> = Vec::new();
+        let mut continuation_token: Option<String> = None;
+
+        loop {
+            let mut req = self
+                .s3
+                .list_objects_v2()
+                .bucket(bucket)
+                .max_keys(LIST_ALL_PAGE_SIZE);
+            if let Some(token) = &continuation_token {
+                req = req.continuation_token(token);
+            }
+
+            let resp = req
+                .send()
+                .await
+                .with_context(|| format!("listing objects in bucket '{bucket}'"))?;
+
+            all_keys.extend(
+                resp.contents()
+                    .iter()
+                    .filter_map(|obj| obj.key().map(str::to_string)),
+            );
+            on_progress(all_keys.len());
+
+            if !resp.is_truncated().unwrap_or(false) {
+                break;
+            }
+
+            match resp.next_continuation_token() {
+                Some(token) => continuation_token = Some(token.to_string()),
+                None => break,
+            }
+        }
+
+        Ok(all_keys)
+    }
+
+    pub async fn delete_objects<F>(
+        &self,
+        bucket: &str,
+        keys: &[String],
+        mut on_progress: F,
+    ) -> Result<()>
+    where
+        F: FnMut(usize),
+    {
         if keys.is_empty() {
             return Ok(());
         }
 
-        let total = keys.len();
-        println!("Deleting {total} objects in batches of up to {DELETE_BATCH_SIZE}...");
-
-        let mut deleted_count = 0_usize;
         let mut failed: Vec<(String, String)> = Vec::new();
 
         for chunk in keys.chunks(DELETE_BATCH_SIZE) {
@@ -151,10 +198,8 @@ impl R2Client {
                 let msg = e.message().unwrap_or("").to_string();
                 failed.push((key, msg));
             }
-            let errs_in_chunk = errors.len();
-            let ok_in_chunk = chunk.len().saturating_sub(errs_in_chunk);
-            deleted_count += ok_in_chunk;
-            println!("Progress: {deleted_count} / {total} deleted...");
+            let ok_in_chunk = chunk.len().saturating_sub(errors.len());
+            on_progress(ok_in_chunk);
         }
 
         if !failed.is_empty() {
@@ -166,7 +211,6 @@ impl R2Client {
             ));
         }
 
-        println!("Successfully deleted {deleted_count} objects");
         Ok(())
     }
 
