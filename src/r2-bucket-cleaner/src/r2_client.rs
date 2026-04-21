@@ -14,7 +14,10 @@ const ACCOUNT_ID_OP_PATH: &str = "op://Private/R2 Credentials/R2_ACCOUNT_ID";
 const ACCESS_KEY_ID_OP_PATH: &str = "op://Private/R2 Credentials/R2_ACCESS_KEY_ID";
 const SECRET_ACCESS_KEY_OP_PATH: &str = "op://Private/R2 Credentials/R2_SECRET_ACCESS_KEY";
 
-const LIST_PAGE_SIZE: i32 = 20;
+// Preview-only page size for the initial `list_objects` call that drives the
+// pre-delete confirmation. Full-bucket enumeration (`list_all_objects`) uses
+// `LIST_ALL_PAGE_SIZE` instead.
+const PREVIEW_PAGE_SIZE: i32 = 20;
 const LIST_ALL_PAGE_SIZE: i32 = 1000;
 const DELETE_BATCH_SIZE: usize = 1000;
 
@@ -100,7 +103,7 @@ impl R2Client {
             .s3
             .list_objects_v2()
             .bucket(bucket)
-            .max_keys(LIST_PAGE_SIZE)
+            .max_keys(PREVIEW_PAGE_SIZE)
             .send()
             .await
             .with_context(|| format!("listing objects in bucket '{bucket}'"))?;
