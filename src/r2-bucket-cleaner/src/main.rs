@@ -4,6 +4,7 @@ use clap::Parser;
 use dialoguer::Confirm;
 use std::time::Instant;
 
+mod r2_client;
 mod r2_wrangler;
 
 use r2_wrangler::R2WranglerClient;
