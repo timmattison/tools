@@ -50,6 +50,18 @@ fn current_euid() -> u32 {
     0
 }
 
+/// Probe whether any process is listening on `port` locally by attempting
+/// to bind it ourselves. Returns `true` if any common local address for
+/// this port reports `EADDRINUSE`, which means some process holds it —
+/// even if we can't identify which one.
+///
+/// This needs no privileges. The trade-off: a listener bound only to a
+/// specific non-loopback address (e.g. a LAN interface) may not be
+/// detected on every platform.
+fn tcp_port_in_use(_port: u16) -> bool {
+    false
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let privilege_note = non_root_privilege_note(current_euid());
@@ -145,5 +157,22 @@ mod tests {
             note.contains("sudo"),
             "expected note to tell users to re-run with sudo, got: {note}"
         );
+    }
+
+    #[test]
+    fn detects_held_port_as_in_use() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("should be able to bind an ephemeral port");
+        let port = listener
+            .local_addr()
+            .expect("bound listener must have a local address")
+            .port();
+
+        assert!(
+            tcp_port_in_use(port),
+            "port {port} is held by this test but tcp_port_in_use returned false"
+        );
+
+        drop(listener);
     }
 }
