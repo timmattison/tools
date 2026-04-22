@@ -9670,6 +9670,7 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "clap",
+ "libc",
  "listeners",
 ]
 
