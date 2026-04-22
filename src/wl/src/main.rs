@@ -15,6 +15,16 @@ struct Args {
     verbose: bool,
 }
 
+/// Note shown to users who lack privileges to enumerate other users' sockets.
+///
+/// On macOS and Linux, `proc_pidinfo` / `/proc/<pid>/fd` inspection for
+/// processes owned by other users requires root. Without it, the underlying
+/// `listeners` crate silently skips those processes, producing a partial view
+/// that looks identical to "nothing is listening".
+fn non_root_privilege_note(_euid: u32) -> Option<&'static str> {
+    None
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -79,4 +89,28 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emits_note_for_non_root_euid() {
+        assert!(non_root_privilege_note(1000).is_some());
+    }
+
+    #[test]
+    fn no_note_for_root_euid() {
+        assert!(non_root_privilege_note(0).is_none());
+    }
+
+    #[test]
+    fn note_mentions_sudo() {
+        let note = non_root_privilege_note(1000).expect("non-root should produce a note");
+        assert!(
+            note.contains("sudo"),
+            "expected note to tell users to re-run with sudo, got: {note}"
+        );
+    }
 }
