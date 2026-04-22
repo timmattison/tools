@@ -21,12 +21,38 @@ struct Args {
 /// processes owned by other users requires root. Without it, the underlying
 /// `listeners` crate silently skips those processes, producing a partial view
 /// that looks identical to "nothing is listening".
+#[cfg(unix)]
+fn non_root_privilege_note(euid: u32) -> Option<&'static str> {
+    if euid == 0 {
+        None
+    } else {
+        Some(
+            "note: running without root; processes owned by other users are not visible. \
+             Re-run with sudo (e.g. `sudo -E wl <port>`) for complete results.",
+        )
+    }
+}
+
+#[cfg(not(unix))]
 fn non_root_privilege_note(_euid: u32) -> Option<&'static str> {
     None
 }
 
+#[cfg(unix)]
+fn current_euid() -> u32 {
+    // SAFETY: `geteuid` is a POSIX syscall with no preconditions; it always
+    // succeeds and returns the effective UID of the calling process.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn current_euid() -> u32 {
+    0
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    let privilege_note = non_root_privilege_note(current_euid());
 
     match listeners::get_all() {
         Ok(listeners) => {
@@ -88,6 +114,10 @@ fn main() -> Result<()> {
         }
     }
 
+    if let Some(note) = privilege_note {
+        eprintln!("{note}");
+    }
+
     Ok(())
 }
 
@@ -95,16 +125,19 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn emits_note_for_non_root_euid() {
         assert!(non_root_privilege_note(1000).is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn no_note_for_root_euid() {
         assert!(non_root_privilege_note(0).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn note_mentions_sudo() {
         let note = non_root_privilege_note(1000).expect("non-root should produce a note");
