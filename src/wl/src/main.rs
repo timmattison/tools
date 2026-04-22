@@ -1,7 +1,8 @@
 use anyhow::Result;
 use buildinfo::version_string;
 use clap::Parser;
-use std::net::SocketAddr;
+use std::io;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener as StdTcpListener};
 
 /// Show which program is listening on a given port
 #[derive(Parser, Debug)]
@@ -58,8 +59,20 @@ fn current_euid() -> u32 {
 /// This needs no privileges. The trade-off: a listener bound only to a
 /// specific non-loopback address (e.g. a LAN interface) may not be
 /// detected on every platform.
-fn tcp_port_in_use(_port: u16) -> bool {
-    false
+fn tcp_port_in_use(port: u16) -> bool {
+    let candidates: [SocketAddr; 4] = [
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+        SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
+    ];
+
+    candidates.iter().any(|addr| {
+        matches!(
+            StdTcpListener::bind(addr),
+            Err(e) if e.kind() == io::ErrorKind::AddrInUse
+        )
+    })
 }
 
 fn main() -> Result<()> {
@@ -117,7 +130,14 @@ fn main() -> Result<()> {
             }
 
             if !found_matches {
-                println!("No processes listening on port {}", args.port);
+                if tcp_port_in_use(args.port) {
+                    println!(
+                        "Port {} is in use, but no owning process is visible to the current user.",
+                        args.port
+                    );
+                } else {
+                    println!("No processes listening on port {}", args.port);
+                }
             }
         }
         Err(e) => {
