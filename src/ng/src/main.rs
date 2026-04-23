@@ -106,8 +106,25 @@ fn collect_watch_dirs(root: &Path) -> Vec<PathBuf> {
     let mut out = vec![root.to_path_buf()];
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        // STUB: intentionally not descending yet (red TDD step).
-        let _ = dir;
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if !ft.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name_str) = name.to_str() else {
+                continue;
+            };
+            if IGNORE_DIRS.contains(&name_str) {
+                continue;
+            }
+            let child = entry.path();
+            out.push(child.clone());
+            stack.push(child);
+        }
     }
     out
 }
@@ -130,9 +147,11 @@ fn main() -> Result<()> {
     let (tx, rx) = mpsc::channel();
     let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
         .context("Failed to create file watcher")?;
-    watcher
-        .watch(&cwd, RecursiveMode::Recursive)
-        .with_context(|| format!("Failed to watch {}", cwd.display()))?;
+    for dir in collect_watch_dirs(&cwd) {
+        watcher
+            .watch(&dir, RecursiveMode::NonRecursive)
+            .with_context(|| format!("Failed to watch {}", dir.display()))?;
+    }
 
     run_pnpm_script(script);
 
