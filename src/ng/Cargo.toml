@@ -1,0 +1,22 @@
+[package]
+name = "ng"
+version = "0.1.0"
+edition.workspace = true
+description = "Watch source files and re-run pnpm lint (or typecheck) on changes"
+
+[[bin]]
+name = "ng"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+colored.workspace = true
+notify.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

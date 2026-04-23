@@ -310,6 +310,13 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     `-p` (previous). Can also jump directly to a worktree by directory name or branch name.
     Use `--shell-setup` to automatically add shell integration to your config.
   - To install: `cargo install --git https://github.com/timmattison/tools cwt`
+- ng (navel-gaze)
+  - Watches JS/TS source files in the current directory and re-runs `pnpm lint` on change. Pass
+    `-t` / `--typecheck` to run `pnpm typecheck` instead. Events are debounced (300ms), and common
+    build/dependency directories (`node_modules`, `dist`, `.output`, `.git`, `.next`, `target`,
+    `build`, `.turbo`, `.cache`) and `*.test.ts(x)` files are ignored. The screen is cleared and
+    pass/fail status is printed in color before each run.
+  - To install: `cargo install --git https://github.com/timmattison/tools ng`
 
 ## dirhash
 
