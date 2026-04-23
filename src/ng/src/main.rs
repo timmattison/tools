@@ -58,6 +58,15 @@ fn should_consider(path: &Path) -> bool {
         .is_some_and(|ext| WATCH_EXTENSIONS.contains(&ext))
 }
 
+const CLEAR_SCREEN: &str = "\x1B[2J\x1B[1;1H";
+
+/// Returns the ANSI clear-screen sequence only when stdout is an interactive
+/// terminal. When piped or redirected, returns an empty string so the output
+/// stays clean.
+fn screen_clear_sequence(_is_tty: bool) -> &'static str {
+    CLEAR_SCREEN
+}
+
 fn run_pnpm_script(script: &str) {
     print!("\x1B[2J\x1B[1;1H");
     println!(
@@ -221,6 +230,12 @@ mod tests {
             "日本語/node_modules/foo.ts"
         )));
         assert!(should_consider(&PathBuf::from("日本語/src/foo.ts")));
+    }
+
+    #[test]
+    fn screen_clear_sequence_gates_on_tty() {
+        assert_eq!(screen_clear_sequence(true), CLEAR_SCREEN);
+        assert_eq!(screen_clear_sequence(false), "");
     }
 
     #[test]
