@@ -9,7 +9,6 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const DEBOUNCE_MS: u64 = 300;
-const IDLE_TICK_SECS: u64 = 60;
 const WATCH_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "mjs", "cjs"];
 const IGNORE_DIRS: &[&str] = &[
     "node_modules",
@@ -111,33 +110,32 @@ fn main() -> Result<()> {
     run_pnpm_script(script);
 
     let debounce = Duration::from_millis(DEBOUNCE_MS);
-    let idle_tick = Duration::from_secs(IDLE_TICK_SECS);
     let mut pending: Option<Instant> = None;
 
     loop {
-        let timeout = match pending {
-            Some(t) => debounce.saturating_sub(t.elapsed()),
-            None => idle_tick,
-        };
-
-        match rx.recv_timeout(timeout) {
-            Ok(Ok(event)) => {
-                if is_relevant_event(&event.kind)
-                    && event.paths.iter().any(|p| should_consider(p))
-                {
-                    pending = Some(Instant::now());
-                }
-            }
-            Ok(Err(_)) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Some(t) = pending {
-                    if t.elapsed() >= debounce {
+        let event = match pending {
+            None => match rx.recv() {
+                Ok(e) => e,
+                Err(_) => break,
+            },
+            Some(t) => {
+                let remaining = debounce.saturating_sub(t.elapsed());
+                match rx.recv_timeout(remaining) {
+                    Ok(e) => e,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
                         pending = None;
                         run_pnpm_script(script);
+                        continue;
                     }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
+        if let Ok(event) = event {
+            if is_relevant_event(&event.kind) && event.paths.iter().any(|p| should_consider(p)) {
+                pending = Some(Instant::now());
+            }
         }
     }
 
