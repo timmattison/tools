@@ -211,6 +211,21 @@ mod tests {
     }
 
     #[test]
+    fn considers_multibyte_filename() {
+        assert!(should_consider(&PathBuf::from("src/日本語.ts")));
+        assert!(should_consider(&PathBuf::from("src/🎉.tsx")));
+        assert!(should_consider(&PathBuf::from("src/café.mjs")));
+    }
+
+    #[test]
+    fn respects_ignore_dirs_beside_multibyte_components() {
+        assert!(!should_consider(&PathBuf::from(
+            "日本語/node_modules/foo.ts"
+        )));
+        assert!(should_consider(&PathBuf::from("日本語/src/foo.ts")));
+    }
+
+    #[test]
     fn relevant_event_kinds() {
         use notify::event::{CreateKind, ModifyKind, RemoveKind};
         assert!(is_relevant_event(&notify::EventKind::Create(
