@@ -27,7 +27,7 @@ const IGNORE_DIRS: &[&str] = &[
 #[command(version = version_string!())]
 #[command(
     about = "Watch source files and re-run pnpm lint on changes",
-    long_about = "Watch source files in the current directory and re-run pnpm lint (or pnpm typecheck with -t) when they change."
+    long_about = "Watch source files in the current directory (recursively) and re-run pnpm lint (or pnpm typecheck with -t) when they change."
 )]
 struct Cli {
     #[arg(short = 't', long, help = "Run pnpm typecheck instead of pnpm lint")]
