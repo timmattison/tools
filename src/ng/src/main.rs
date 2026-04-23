@@ -4,7 +4,7 @@ use clap::Parser;
 use colored::Colorize;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -93,6 +93,23 @@ fn run_pnpm_script(script: &str) {
         }
     }
     println!("{}", "Watching for changes...".dimmed());
+}
+
+/// Walk `root` depth-first and collect every directory whose name is not in
+/// `IGNORE_DIRS`. The root itself is always included. Descent into an ignored
+/// directory is skipped so its subtree is never registered with the watcher.
+///
+/// Errors from individual `read_dir` calls are swallowed: a permission issue
+/// on one subdirectory should not prevent the rest of the tree from being
+/// watched.
+fn collect_watch_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut out = vec![root.to_path_buf()];
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        // STUB: intentionally not descending yet (red TDD step).
+        let _ = dir;
+    }
+    out
 }
 
 fn is_relevant_event(kind: &notify::EventKind) -> bool {
@@ -231,6 +248,40 @@ mod tests {
             "日本語/node_modules/foo.ts"
         )));
         assert!(should_consider(&PathBuf::from("日本語/src/foo.ts")));
+    }
+
+    #[test]
+    fn collect_watch_dirs_includes_non_ignored_subtrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src/foo")).unwrap();
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+
+        let dirs = collect_watch_dirs(root);
+
+        assert!(dirs.contains(&root.to_path_buf()));
+        assert!(dirs.contains(&root.join("src")));
+        assert!(dirs.contains(&root.join("src/foo")));
+    }
+
+    #[test]
+    fn collect_watch_dirs_excludes_ignored_subtrees() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
+        std::fs::create_dir_all(root.join("packages/a/node_modules/b")).unwrap();
+
+        let dirs = collect_watch_dirs(root);
+
+        assert!(!dirs.contains(&root.join("node_modules")));
+        assert!(!dirs.contains(&root.join("node_modules/pkg")));
+        assert!(!dirs.contains(&root.join("target")));
+        assert!(!dirs.contains(&root.join(".git")));
+        assert!(!dirs.contains(&root.join("packages/a/node_modules")));
+        assert!(!dirs.contains(&root.join("packages/a/node_modules/b")));
     }
 
     #[test]
