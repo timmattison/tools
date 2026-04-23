@@ -3,6 +3,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use std::io::IsTerminal;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
@@ -63,12 +64,12 @@ const CLEAR_SCREEN: &str = "\x1B[2J\x1B[1;1H";
 /// Returns the ANSI clear-screen sequence only when stdout is an interactive
 /// terminal. When piped or redirected, returns an empty string so the output
 /// stays clean.
-fn screen_clear_sequence(_is_tty: bool) -> &'static str {
-    CLEAR_SCREEN
+fn screen_clear_sequence(is_tty: bool) -> &'static str {
+    if is_tty { CLEAR_SCREEN } else { "" }
 }
 
 fn run_pnpm_script(script: &str) {
-    print!("\x1B[2J\x1B[1;1H");
+    print!("{}", screen_clear_sequence(std::io::stdout().is_terminal()));
     println!(
         "{} {}",
         "ng".cyan(),
