@@ -9,6 +9,8 @@
 //! - `tsm record` is the precmd-time recorder; in this slice it is a stub
 //!   that accepts the same args the snippet will pass.
 
+use std::collections::BTreeMap;
+
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use tsm_id::SessionId;
@@ -38,13 +40,33 @@ enum Commands {
     /// Record one command's metadata. Invoked by the shell precmd hook.
     Record {
         /// Exit status of the last command in the shell.
-        #[arg(long, allow_hyphen_values = true)]
+        #[arg(long, allow_hyphen_values = true, default_value_t = 0)]
         exit_code: i32,
 
         /// Verbatim text of the last command line.
         #[arg(long, default_value = "")]
         last_command: String,
+
+        /// Hidden: synthetic subprocess probe for the watchdog acceptance test.
+        ///
+        /// When set, the recorder skips its normal append path and instead
+        /// spawns the provided command (split on whitespace, no shell), wraps
+        /// it in the watchdog timeout, and exits 0 regardless of outcome.
+        #[arg(long, hide = true)]
+        probe_subprocess: Option<String>,
     },
+}
+
+/// Stub returning false for every input. Implemented in the green commit.
+fn is_redacted(_name: &str) -> bool {
+    false
+}
+
+/// Stub: returns env unchanged with empty `redacted_keys`. Implemented in green.
+fn redact_env(
+    env: BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, Vec<String>) {
+    (env, Vec::new())
 }
 
 /// Maximum number of consecutive `tsm record` failures before the precmd
@@ -156,8 +178,12 @@ fn main() {
             let session_id = SessionId::random();
             print!("{}", generate_zsh_snippet(&session_id));
         }
-        Commands::Record { exit_code: _, last_command: _ } => {
-            // Stub for this slice. Subagent 4 will replace this body with the
+        Commands::Record {
+            exit_code: _,
+            last_command: _,
+            probe_subprocess: _,
+        } => {
+            // Stub for this slice. The green commit replaces this body with the
             // real recorder. We intentionally do not write anything to stderr
             // (per the safety policy that `tsm record` never writes to stderr
             // from the hot path).
@@ -281,5 +307,90 @@ mod tests {
             s.contains("${XDG_STATE_HOME:-$HOME/.local/state}"),
             "snippet should compute state dir via XDG_STATE_HOME fallback, got:\n{s}"
         );
+    }
+
+    // ----- redaction unit tests (red commit will see these fail against stubs) -----
+
+    #[test]
+    fn is_redacted_matches_suffix_patterns() {
+        assert!(is_redacted("AWS_SESSION_TOKEN"));
+        assert!(is_redacted("MY_API_KEY"));
+        assert!(is_redacted("DB_PASSWORD"));
+        assert!(is_redacted("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn is_redacted_case_insensitive() {
+        assert!(is_redacted("aws_session_token"));
+        assert!(is_redacted("github_token"));
+        assert!(is_redacted("my_secret"));
+    }
+
+    #[test]
+    fn is_redacted_does_not_match_plain_names() {
+        assert!(!is_redacted("HOME"));
+        assert!(!is_redacted("PATH"));
+        assert!(!is_redacted("USER"));
+        assert!(!is_redacted("SHELL"));
+    }
+
+    #[test]
+    fn is_redacted_prefix_aws() {
+        assert!(is_redacted("AWS_REGION"));
+        assert!(is_redacted("AWS_PROFILE"));
+        assert!(is_redacted("AWS_DEFAULT_REGION"));
+    }
+
+    #[test]
+    fn is_redacted_prefix_op() {
+        assert!(is_redacted("OP_SESSION"));
+        assert!(is_redacted("OP_DEVICE"));
+    }
+
+    #[test]
+    fn is_redacted_anthropic_exact() {
+        assert!(is_redacted("ANTHROPIC_API_KEY"));
+        assert!(is_redacted("GH_TOKEN"));
+        assert!(is_redacted("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn is_redacted_claude_prefix() {
+        assert!(is_redacted("CLAUDE_CODE_THING"));
+        assert!(is_redacted("CLAUDE_API_KEY"));
+    }
+
+    #[test]
+    fn redact_env_filters_keys_and_keeps_redacted_keys_list() {
+        let mut env = BTreeMap::new();
+        env.insert("HOME".to_string(), "/home/x".to_string());
+        env.insert("AWS_SESSION_TOKEN".to_string(), "secret1".to_string());
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        env.insert("MY_API_KEY".to_string(), "secret2".to_string());
+
+        let (filtered, redacted_keys) = redact_env(env);
+
+        assert!(filtered.contains_key("HOME"));
+        assert!(filtered.contains_key("PATH"));
+        assert!(!filtered.contains_key("AWS_SESSION_TOKEN"));
+        assert!(!filtered.contains_key("MY_API_KEY"));
+        assert!(redacted_keys.contains(&"AWS_SESSION_TOKEN".to_string()));
+        assert!(redacted_keys.contains(&"MY_API_KEY".to_string()));
+        assert_eq!(redacted_keys.len(), 2);
+    }
+
+    #[test]
+    fn redact_env_redacted_keys_is_sorted() {
+        let mut env = BTreeMap::new();
+        env.insert("Z_TOKEN".to_string(), "v".to_string());
+        env.insert("A_SECRET".to_string(), "v".to_string());
+        env.insert("M_PASSWORD".to_string(), "v".to_string());
+        env.insert("HOME".to_string(), "v".to_string());
+
+        let (_filtered, redacted_keys) = redact_env(env);
+        let mut sorted = redacted_keys.clone();
+        sorted.sort();
+        assert_eq!(redacted_keys, sorted, "redacted_keys must be sorted");
+        assert_eq!(redacted_keys.len(), 3);
     }
 }
