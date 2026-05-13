@@ -1,14 +1,20 @@
 //! Session ID type for tsm.
 //!
 //! A [`SessionId`] is a 128-bit identifier represented as exactly 32 lowercase
-//! hexadecimal characters. This slice covers only the random-construction path;
-//! the deterministic SHA-256 path will be added in a later issue.
+//! hexadecimal characters. There are two construction paths:
+//!
+//! - [`SessionId::random`] generates a fresh random id from 16 random bytes.
+//! - [`session_id_from_tuple`] derives a stable id from a Zellij
+//!   (session-name, tab-name, pane-ordinal) tuple by length-prefixed canonical
+//!   encoding + SHA-256 truncated to its first 16 bytes.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tsm_tuple::Tuple;
 
 /// Number of hex characters in a [`SessionId`] (16 bytes * 2).
 const SESSION_ID_HEX_LEN: usize = 32;
@@ -110,11 +116,53 @@ impl<'de> Deserialize<'de> for SessionId {
     }
 }
 
+/// Encode a [`Tuple`] into its canonical, length-prefixed byte representation.
+///
+/// The encoding concatenates, in this fixed order:
+///
+/// 1. `u32::to_be_bytes(byte_len(session))` followed by the session name's
+///    UTF-8 bytes.
+/// 2. `u32::to_be_bytes(byte_len(tab))` followed by the tab name's UTF-8
+///    bytes.
+/// 3. `u32::to_be_bytes(4)` followed by `u32::to_be_bytes(ordinal)`.
+///
+/// The length prefix is the **byte length** of the following segment, not its
+/// character count. This is the input fed into SHA-256 by
+/// [`session_id_from_tuple`]; the length prefixes prevent two distinct tuples
+/// from ever producing the same hash input by exploiting the fact that
+/// `"x" + "\0y"` and `"x\0y" + ""` have the same concatenation.
+pub(crate) fn canonical_bytes(tuple: &Tuple) -> Vec<u8> {
+    let _ = tuple;
+    todo!("canonical_bytes: implementation in green commit")
+}
+
+/// Derive a deterministic [`SessionId`] from a Zellij tuple.
+///
+/// The same tuple always yields the same id; two tuples that differ in any
+/// field yield different ids with overwhelming probability.
+///
+/// The id is the first 16 bytes of `SHA-256(canonical_bytes(&tuple))`, hex
+/// encoded as 32 lowercase characters.
+pub fn session_id_from_tuple(tuple: &Tuple) -> SessionId {
+    let _ = tuple;
+    todo!("session_id_from_tuple: implementation in green commit")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tsm_tuple::{PaneOrdinal, TabName, Tuple, ZellijSessionName};
 
     const GOOD_HEX: &str = "0123456789abcdef0123456789abcdef";
+
+    /// Build a [`Tuple`] from raw strings + ordinal for KAT fixtures.
+    fn make_tuple(session: &str, tab: &str, ordinal: u32) -> Tuple {
+        Tuple {
+            zellij_session_name: ZellijSessionName::from(session.to_string()),
+            tab_name: TabName::from(tab.to_string()),
+            pane_ordinal_within_tab: PaneOrdinal::from(ordinal),
+        }
+    }
 
     #[test]
     fn random_produces_32_chars() {
@@ -206,5 +254,99 @@ mod tests {
         let via_from_str: SessionId = GOOD_HEX.parse().expect("parse");
         let via_from_hex = SessionId::from_hex(GOOD_HEX).expect("from_hex");
         assert_eq!(via_from_str, via_from_hex);
+    }
+
+    // ---------- Known-answer fixtures for session_id_from_tuple ----------
+    //
+    // Expected hex strings below were computed independently with Python
+    // (hashlib.sha256 + struct.pack('>I', ...)) against the canonical
+    // length-prefixed encoding spelled out in `canonical_bytes`. They are
+    // pasted as literals here so the test does not self-validate against the
+    // same code under test.
+
+    #[test]
+    fn kat_my_session_main_zero() {
+        let t = make_tuple("my-session", "main", 0);
+        assert_eq!(
+            session_id_from_tuple(&t).as_hex(),
+            "f429a77343e6ee531923b1e054435dcc",
+        );
+    }
+
+    #[test]
+    fn kat_dev_logs_three() {
+        let t = make_tuple("dev", "logs", 3);
+        assert_eq!(
+            session_id_from_tuple(&t).as_hex(),
+            "991dc61a48f0b5f10dcb980cc0a80e41",
+        );
+    }
+
+    #[test]
+    fn kat_multi_byte_utf8_tab_name() {
+        // "日本語" — three CJK chars, three bytes each in UTF-8.
+        let t = make_tuple("workshop", "日本語", 1);
+        assert_eq!(
+            session_id_from_tuple(&t).as_hex(),
+            "7296beed29bbd436464232eb264edf56",
+        );
+    }
+
+    #[test]
+    fn kat_embedded_nul_in_tab_name() {
+        // Embedded NUL in the tab name MUST NOT terminate the string when
+        // hashing — UTF-8 bytes are passed wholesale, length-prefixed.
+        let t = make_tuple("ci", "tab\0null", 0);
+        assert_eq!(
+            session_id_from_tuple(&t).as_hex(),
+            "e75a8cabfe8d72640b3b16c95a628bf4",
+        );
+    }
+
+    #[test]
+    fn kat_empty_session_and_tab() {
+        // Zero-length data segments must still hash, with the length-prefix
+        // being four zero bytes. This guards against accidental
+        // empty-string short-circuiting.
+        let t = make_tuple("", "", 0);
+        assert_eq!(
+            session_id_from_tuple(&t).as_hex(),
+            "56ae268ef08d7137cef01fcd73902eda",
+        );
+    }
+
+    #[test]
+    fn length_prefix_prevents_boundary_collision() {
+        // Without length-prefixing, T_A and T_B would produce identical
+        // concatenated bytes: "x" + "\0y" == "x\0y" + "". The whole point of
+        // the u32-BE length prefix is to make their canonical encodings
+        // (and therefore their session ids) differ. This is exactly the
+        // example from the PRD.
+        let a = make_tuple("x", "\u{0}y", 0);
+        let b = make_tuple("x\u{0}y", "", 0);
+        assert_ne!(
+            session_id_from_tuple(&a),
+            session_id_from_tuple(&b),
+            "length-prefix must prevent boundary collisions"
+        );
+    }
+
+    #[test]
+    fn session_id_from_tuple_is_deterministic() {
+        let t = make_tuple("repeat", "tab", 42);
+        let first = session_id_from_tuple(&t);
+        let second = session_id_from_tuple(&t);
+        assert_eq!(first, second, "the same tuple must always hash to the same id");
+    }
+
+    #[test]
+    fn canonical_bytes_matches_hand_computed_layout() {
+        // Hand-built reference for ("a", "bc", 7):
+        //   [0,0,0,1] 'a' [0,0,0,2] 'b' 'c' [0,0,0,4] [0,0,0,7]
+        let t = make_tuple("a", "bc", 7);
+        let expected: Vec<u8> = vec![
+            0, 0, 0, 1, b'a', 0, 0, 0, 2, b'b', b'c', 0, 0, 0, 4, 0, 0, 0, 7,
+        ];
+        assert_eq!(canonical_bytes(&t), expected);
     }
 }

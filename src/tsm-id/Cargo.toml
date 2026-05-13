@@ -9,7 +9,9 @@ license.workspace = true
 hex.workspace = true
 rand.workspace = true
 serde.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
+tsm-tuple = { path = "../tsm-tuple" }
 
 [dev-dependencies]
 serde_json.workspace = true
