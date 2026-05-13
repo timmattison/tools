@@ -286,7 +286,6 @@ fn zellij_session_layout_path(session: &str) -> Option<PathBuf> {
 
 /// Read Zellij session + pane env vars. Returns `None` when either is missing
 /// or empty.
-#[allow(dead_code)]
 fn read_zellij_env() -> Option<TupleEnv> {
     let session = std::env::var("ZELLIJ_SESSION_NAME").ok()?;
     if session.is_empty() {
@@ -317,7 +316,6 @@ fn read_zellij_env() -> Option<TupleEnv> {
 /// because it runs from `tsm shell-init zsh` where a stderr write would
 /// disrupt the user's shell startup. The `tsm doctor` subcommand surfaces
 /// the same information through a structured report instead.
-#[allow(dead_code)]
 fn try_derive_zellij_session_id() -> Option<SessionId> {
     let env = read_zellij_env()?;
     let layout_path = zellij_session_layout_path(&env.zellij_session_name)?;
@@ -879,7 +877,16 @@ fn main() {
                 );
                 std::process::exit(EXIT_UNSUPPORTED_SHELL);
             }
-            let session_id = SessionId::random();
+            // Inside Zellij with a readable session-layout.kdl, derive a
+            // deterministic SessionId from the (session, tab, pane-ordinal)
+            // tuple so resurrecting the pane yields the same id. Anywhere
+            // else we fall back to a random id; this includes derivation
+            // errors, which are surfaced through `tsm doctor` rather than
+            // stderr-from-shell-init.
+            let session_id = match try_derive_zellij_session_id() {
+                Some(id) => id,
+                None => SessionId::random(),
+            };
             print!("{}", generate_zsh_snippet(&session_id));
         }
         Commands::Doctor => {

@@ -2,7 +2,7 @@
 //!
 //! When invoked inside a Zellij pane (with `ZELLIJ_SESSION_NAME` and
 //! `ZELLIJ_PANE_ID` set and a readable `session-layout.kdl` on disk),
-//! `tsm shell-init zsh` must inline a **deterministic** SessionId derived
+//! `tsm shell-init zsh` must inline a **deterministic** `SessionId` derived
 //! from the Zellij tuple — not the random fallback. Outside Zellij, the
 //! random fallback path is used and the deterministic id from the same
 //! tuple must not appear in the output.
