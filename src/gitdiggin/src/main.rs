@@ -15,6 +15,19 @@ use std::thread;
 use std::time::{Duration, Instant};
 use walkdir::{DirEntry, WalkDir};
 
+/// Truncate a path-like string from the front (keeping the tail) so it fits
+/// within `max_chars` characters. Uses character counts to remain UTF-8 safe.
+fn truncate_path_tail(path: &str, max_chars: usize) -> String {
+    let char_count = path.chars().count();
+    if char_count <= max_chars {
+        return path.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    let skip = char_count - keep;
+    let tail: String = path.chars().skip(skip).collect();
+    format!("...{tail}")
+}
+
 /// Find the base directory of the git repository starting from current directory
 fn get_repo_base() -> Result<String> {
     match find_git_repo_repowalker() {
@@ -184,11 +197,7 @@ fn main() -> Result<()> {
                             "Directories scanned: {} | Repositories found: {} | Current: {}",
                             progress.dirs_checked,
                             progress.repos_found,
-                            if progress.current_path.len() > 38 {
-                                format!("...{}", &progress.current_path[progress.current_path.len() - 35..])
-                            } else {
-                                progress.current_path
-                            }
+                            truncate_path_tail(&progress.current_path, 38)
                         ));
                     }
                 },
@@ -379,6 +388,10 @@ fn is_ignored(entry: &DirEntry) -> bool {
 }
 
 /// Scan a path for git repositories
+#[allow(
+    clippy::too_many_arguments,
+    reason = "internal helper called from a single site; refactoring to a context struct is tracked separately"
+)]
 fn scan_path(
     path: &str,
     search_result: Arc<Mutex<SearchResult>>,

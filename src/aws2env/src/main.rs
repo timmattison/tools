@@ -54,7 +54,14 @@ fn parse_ini_file(content: &str) -> HashMap<String, HashMap<String, String>> {
         }
 
         if line.starts_with('[') && line.ends_with(']') {
-            current_section = line[1..line.len() - 1].to_string();
+            // strip_prefix/strip_suffix work at character boundaries (since the
+            // matched chars are ASCII '[' and ']') and avoid the byte-index
+            // slice that triggers clippy::string_slice on UTF-8 input.
+            current_section = line
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or("")
+                .to_string();
             result
                 .entry(current_section.clone())
                 .or_insert_with(HashMap::new);
