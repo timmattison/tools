@@ -7,8 +7,8 @@
 //! Every line is a single JSON object terminated by `\n`. UTF-8.
 
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,26 @@ pub struct SessionLog {
     pub records: Vec<PrecmdRecord>,
 }
 
-// ----- stubs (red commit): compile but do not honor invariants -----
+/// Returns the byte length of `path`, or `None` if the file does not exist.
+///
+/// Any I/O error other than [`NotFound`](std::io::ErrorKind::NotFound) is propagated.
+fn file_size_if_exists(path: &Path) -> Result<Option<u64>, JsonlError> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(Some(meta.len())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(JsonlError::Io(e)),
+    }
+}
+
+/// Serialize one record and append it (plus a trailing `\n`) to `path` in a single
+/// `write_all` call so the append stays atomic for lines ≤ `PIPE_BUF` bytes on POSIX.
+fn append_line<T: Serialize>(path: &Path, value: &T) -> Result<(), JsonlError> {
+    let mut buf = serde_json::to_vec(value)?;
+    buf.push(b'\n');
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&buf)?;
+    Ok(())
+}
 
 /// Append a header to `path`.
 ///
@@ -132,13 +151,14 @@ pub struct SessionLog {
 /// Returns [`JsonlError::DuplicateHeader`] if `path` already has data, or [`JsonlError::Io`] /
 /// [`JsonlError::Json`] for underlying failures.
 pub fn append_header(path: &Path, header: &Header) -> Result<(), JsonlError> {
-    // STUB: does not enforce empty-file invariant.
-    let line = serde_json::to_string(header)?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let mut buf = line.into_bytes();
-    buf.push(b'\n');
-    file.write_all(&buf)?;
-    Ok(())
+    // Enforce empty-file invariant before opening for append. If the file exists with size > 0,
+    // refuse and do NOT touch it.
+    if let Some(size) = file_size_if_exists(path)? {
+        if size > 0 {
+            return Err(JsonlError::DuplicateHeader);
+        }
+    }
+    append_line(path, header)
 }
 
 /// Append a precmd record to `path`.
@@ -150,13 +170,13 @@ pub fn append_header(path: &Path, header: &Header) -> Result<(), JsonlError> {
 /// Returns [`JsonlError::MissingHeader`] if `path` is empty or absent, or [`JsonlError::Io`] /
 /// [`JsonlError::Json`] for underlying failures.
 pub fn append_record(path: &Path, record: &PrecmdRecord) -> Result<(), JsonlError> {
-    // STUB: does not enforce header-first invariant.
-    let line = serde_json::to_string(record)?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let mut buf = line.into_bytes();
-    buf.push(b'\n');
-    file.write_all(&buf)?;
-    Ok(())
+    // Header-first invariant: file must exist and be non-empty. We use the size as a cheap proxy
+    // for "has a header" — fully validating line 1 on every append would defeat the point of
+    // append-only logging. read_all enforces the structural invariant on read.
+    match file_size_if_exists(path)? {
+        Some(size) if size > 0 => append_line(path, record),
+        _ => Err(JsonlError::MissingHeader),
+    }
 }
 
 /// Read an entire session log; returns the parsed header and all subsequent records.
@@ -166,24 +186,44 @@ pub fn append_record(path: &Path, record: &PrecmdRecord) -> Result<(), JsonlErro
 /// Returns [`JsonlError::MalformedFirstLine`] if line 1 is missing or unparseable as a
 /// [`Header`], [`JsonlError::MalformedRecordLine`] if any subsequent line cannot be parsed as a
 /// [`PrecmdRecord`], or [`JsonlError::Io`] for underlying failures.
-pub fn read_all(_path: &Path) -> Result<SessionLog, JsonlError> {
-    // STUB: returns a default-ish session log so round-trip tests fail.
-    Ok(SessionLog {
-        header: Header {
-            kind: HeaderKind::Header,
-            schema_version: 0,
-            tsm_version: String::new(),
-            hostname: String::new(),
-            terminal_program: String::new(),
-            tuple: TupleStub {
-                zellij_session: None,
-                tab: None,
-                pane_ordinal_str: None,
-            },
-            created_at: String::new(),
-        },
-        records: Vec::new(),
-    })
+pub fn read_all(path: &Path) -> Result<SessionLog, JsonlError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    // Line 1: must be a Header. An empty file yields None and is treated as MalformedFirstLine.
+    let first_line = match lines.next() {
+        Some(Ok(line)) => line,
+        Some(Err(e)) => return Err(JsonlError::Io(e)),
+        None => {
+            return Err(JsonlError::MalformedFirstLine {
+                line: String::new(),
+            });
+        }
+    };
+    let header: Header = serde_json::from_str(&first_line).map_err(|_| {
+        JsonlError::MalformedFirstLine {
+            line: first_line.clone(),
+        }
+    })?;
+
+    // Lines 2..N: each must parse as a PrecmdRecord. Track the 1-indexed line number for
+    // error reporting (line 1 = header, so the first record is line 2).
+    let mut records = Vec::new();
+    let mut line_number: u64 = 1;
+    for line_result in lines {
+        line_number = line_number.saturating_add(1);
+        let line = line_result?;
+        let record: PrecmdRecord = serde_json::from_str(&line).map_err(|_| {
+            JsonlError::MalformedRecordLine {
+                line_number,
+                line: line.clone(),
+            }
+        })?;
+        records.push(record);
+    }
+
+    Ok(SessionLog { header, records })
 }
 
 #[cfg(test)]
@@ -379,13 +419,13 @@ mod tests {
         append_header(&path, &header).expect("append_header");
         append_record(&path, &r1).expect("append r1");
         // Manually append a garbage line as line 3.
-        use std::io::Write as _;
-        let mut f = OpenOptions::new()
-            .append(true)
-            .open(&path)
-            .expect("open append");
-        f.write_all(b"not a record\n").expect("write garbage");
-        drop(f);
+        {
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open append");
+            f.write_all(b"not a record\n").expect("write garbage");
+        }
         let err = read_all(&path).expect_err("read_all with bad record must fail");
         match err {
             JsonlError::MalformedRecordLine { line_number, line } => {
