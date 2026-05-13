@@ -1,0 +1,10 @@
+layout {
+    tab name="editor" focus=true {
+        pane id=1 command="nvim"
+        pane id=2 cwd="/tmp"
+    }
+    tab name="logs" {
+        pane id=3
+        pane id=4
+    }
+}

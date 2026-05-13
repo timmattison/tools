@@ -1,20 +1,13 @@
 [package]
-name = "tsm-id"
+name = "tsm-tuple"
 version = "0.1.0"
 edition.workspace = true
-description = "Session ID type for tsm: 32 lowercase hex chars (128 bits)"
+description = "Pure derivation of the Zellij (session, tab, pane-ordinal) tuple from env + layout"
 license.workspace = true
 
 [dependencies]
-hex.workspace = true
-rand.workspace = true
-serde.workspace = true
-sha2.workspace = true
+kdl.workspace = true
 thiserror.workspace = true
-tsm-tuple = { path = "../tsm-tuple" }
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints.rust]
 unsafe_code = "deny"

@@ -17,13 +17,16 @@ clap.workspace = true
 hostname = "0.4"
 tsm-id = { path = "../tsm-id" }
 tsm-jsonl = { path = "../tsm-jsonl" }
+tsm-tuple = { path = "../tsm-tuple" }
 wait-timeout = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
 serde_json.workspace = true
 tempfile.workspace = true
+tsm-id = { path = "../tsm-id" }
 tsm-jsonl = { path = "../tsm-jsonl" }
+tsm-tuple = { path = "../tsm-tuple" }
 
 [lints.rust]
 unsafe_code = "deny"

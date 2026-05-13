@@ -102,6 +102,9 @@ rodio = { version = "0.20", default-features = false, features = ["wav"] }
 log = "0.4"
 env_logger = "0.11"
 
+# KDL (Zellij layout file format)
+kdl = { version = "6", features = ["v1-fallback"] }
+
 # Misc
 tiktoken-rs = "0.5"
 num-format = "0.4"

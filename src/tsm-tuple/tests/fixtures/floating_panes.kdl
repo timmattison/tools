@@ -1,0 +1,10 @@
+layout {
+    tab name="main" {
+        pane id=10
+        pane id=11
+        floating_panes {
+            pane id=20 x=10 y=10 width=80 height=24
+            pane id=21 x=15 y=15 width=80 height=24
+        }
+    }
+}

@@ -10,6 +10,7 @@
 //!   that accepts the same args the snippet will pass.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -19,11 +20,12 @@ use std::time::Duration;
 use buildinfo::version_string;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use tsm_id::SessionId;
+use tsm_id::{SessionId, session_id_from_tuple};
 use tsm_jsonl::{
     Header, HeaderKind, JsonlError, PrecmdKind, PrecmdRecord, TupleStub, append_header,
     append_record,
 };
+use tsm_tuple::{Env as TupleEnv, LayoutText, Tuple, TupleError, derive_tuple};
 use wait_timeout::ChildExt;
 
 /// Exit code returned when `tsm shell-init` receives an unsupported shell.
@@ -72,6 +74,9 @@ enum Commands {
         /// The shell to emit integration for. Only `zsh` is supported in v1.
         shell: String,
     },
+    /// Print a diagnostic report about the Zellij environment and derived
+    /// session id. Exit code is always 0; failures are part of the report.
+    Doctor,
     /// Record one command's metadata. Invoked by the shell precmd hook.
     Record {
         /// Exit status of the last command in the shell.
@@ -247,6 +252,321 @@ fn xdg_state_home() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()
         .map(|h| PathBuf::from(h).join(".local").join("state"))
+}
+
+/// Resolve the Zellij cache directory. Resolution order:
+///
+/// 1. `$ZELLIJ_CACHE_DIR`
+/// 2. `$XDG_CACHE_HOME/zellij`
+/// 3. `$HOME/.cache/zellij`
+///
+/// Returns `None` when none of the above can be determined.
+fn zellij_cache_dir() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("ZELLIJ_CACHE_DIR") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    if let Ok(v) = std::env::var("XDG_CACHE_HOME") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v).join("zellij"));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".cache").join("zellij"))
+}
+
+/// Compute the path to the active `session-layout.kdl` for the given Zellij
+/// session, joining the cache dir with `<session>/session-layout.kdl`. Returns
+/// `None` when no cache dir can be resolved.
+fn zellij_session_layout_path(session: &str) -> Option<PathBuf> {
+    zellij_cache_dir().map(|d| d.join(session).join("session-layout.kdl"))
+}
+
+/// Read Zellij session + pane env vars. Returns `None` when either is missing
+/// or empty.
+fn read_zellij_env() -> Option<TupleEnv> {
+    let session = std::env::var("ZELLIJ_SESSION_NAME").ok()?;
+    if session.is_empty() {
+        return None;
+    }
+    let pane = std::env::var("ZELLIJ_PANE_ID").ok()?;
+    if pane.is_empty() {
+        return None;
+    }
+    Some(TupleEnv {
+        zellij_session_name: session,
+        zellij_pane_id: pane,
+    })
+}
+
+/// Attempt to derive a deterministic [`SessionId`] from the current process
+/// environment + on-disk Zellij `session-layout.kdl`.
+///
+/// Returns `None` when:
+///
+/// - either `ZELLIJ_SESSION_NAME` or `ZELLIJ_PANE_ID` is missing/empty
+///   (outside-Zellij path),
+/// - the layout file can't be located or read, or
+/// - the layout can't produce a tuple (parse error, no tabs, missing pane,
+///   etc — see [`TupleError`]).
+///
+/// This function is silent on failure: it MUST NOT print or log anything,
+/// because it runs from `tsm shell-init zsh` where a stderr write would
+/// disrupt the user's shell startup. The `tsm doctor` subcommand surfaces
+/// the same information through a structured report instead.
+fn try_derive_zellij_session_id() -> Option<SessionId> {
+    let env = read_zellij_env()?;
+    let layout_path = zellij_session_layout_path(&env.zellij_session_name)?;
+    let layout_text = fs::read_to_string(&layout_path).ok()?;
+    let tuple = derive_tuple(&env, &LayoutText(layout_text)).ok()?;
+    Some(session_id_from_tuple(&tuple))
+}
+
+/// Pretty-format a derived [`Tuple`] for diagnostic output (`tsm doctor`).
+///
+/// Format: `(session=<name>, tab=<name>, ordinal=<N>)`.
+fn format_tuple(tuple: &Tuple) -> String {
+    format!(
+        "(session={}, tab={}, ordinal={})",
+        tuple.zellij_session_name,
+        tuple.tab_name,
+        tuple.pane_ordinal_within_tab,
+    )
+}
+
+/// One observation row in the doctor report's "Layout file" section.
+struct LayoutObservation {
+    /// The resolved path, or `None` when the cache directory could not be
+    /// determined at all (`$HOME` unset and no `$ZELLIJ_CACHE_DIR`).
+    path: Option<PathBuf>,
+    /// Whether the file exists on disk.
+    exists: bool,
+    /// File size in bytes; `None` when the file doesn't exist or stat failed.
+    bytes: Option<u64>,
+    /// File contents, if readable.
+    contents: Option<String>,
+}
+
+/// Observe the layout file on disk for the doctor report. Pushes a
+/// `layout file not found at ...` warning to `warnings` when the resolved
+/// path does not exist.
+fn observe_layout(session: &str, warnings: &mut Vec<String>) -> LayoutObservation {
+    let mut obs = LayoutObservation {
+        path: zellij_session_layout_path(session),
+        exists: false,
+        bytes: None,
+        contents: None,
+    };
+    if let Some(p) = obs.path.as_deref() {
+        if let Ok(meta) = fs::metadata(p) {
+            obs.exists = true;
+            obs.bytes = Some(meta.len());
+            obs.contents = fs::read_to_string(p).ok();
+        } else {
+            obs.exists = false;
+            warnings.push(format!("layout file not found at {}", p.display()));
+        }
+    }
+    obs
+}
+
+/// Tuple-derivation step of the doctor report. Returns a (status, detail,
+/// tuple) triple and may push extra warnings.
+fn derive_for_doctor(
+    session_env: Option<&str>,
+    pane_env: Option<&str>,
+    layout: &LayoutObservation,
+    warnings: &mut Vec<String>,
+) -> (String, String, Option<Tuple>) {
+    let (Some(session), Some(pane)) = (session_env, pane_env) else {
+        return (
+            "skipped".to_string(),
+            "outside Zellij — random id path".to_string(),
+            None,
+        );
+    };
+    let Some(text) = layout.contents.as_deref() else {
+        return (
+            "skipped".to_string(),
+            "layout file unreadable or missing".to_string(),
+            None,
+        );
+    };
+    let env_inputs = TupleEnv {
+        zellij_session_name: session.to_string(),
+        zellij_pane_id: pane.to_string(),
+    };
+    match derive_tuple(&env_inputs, &LayoutText(text.to_string())) {
+        Ok(t) => {
+            let pretty = format_tuple(&t);
+            ("ok".to_string(), pretty, Some(t))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if matches!(&e, TupleError::AmbiguousPaneId { .. }) {
+                warnings.push("pane id is ambiguous in layout".to_string());
+            }
+            warnings.push(format!("tuple derivation failed: {msg}"));
+            ("error".to_string(), msg, None)
+        }
+    }
+}
+
+/// Aggregated inputs to [`render_doctor_report`].
+struct DoctorReport<'a> {
+    session_display: &'a str,
+    pane_display: &'a str,
+    layout: &'a LayoutObservation,
+    status: &'a str,
+    detail: &'a str,
+    id_source: &'a str,
+    id_value: &'a str,
+    warnings: &'a [String],
+}
+
+/// Render the structured doctor report to a `String`. The output is plain
+/// text designed to be readable by humans and parse-friendly for tests.
+fn render_doctor_report(report: &DoctorReport<'_>) -> String {
+    let DoctorReport {
+        session_display,
+        pane_display,
+        layout,
+        status,
+        detail,
+        id_source,
+        id_value,
+        warnings,
+    } = *report;
+    let path_display = layout
+        .path
+        .as_deref()
+        .map_or_else(|| "(unresolved)".to_string(), |p| p.display().to_string());
+    let exists_display = if layout.path.is_none() {
+        "-"
+    } else if layout.exists {
+        "yes"
+    } else {
+        "no"
+    };
+    let bytes_display = layout
+        .bytes
+        .map_or_else(|| "-".to_string(), |b| b.to_string());
+
+    let mut out = String::new();
+    let _ = writeln!(out, "tsm doctor");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Zellij environment:");
+    let _ = writeln!(out, "  ZELLIJ_SESSION_NAME = {session_display}");
+    let _ = writeln!(out, "  ZELLIJ_PANE_ID      = {pane_display}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Layout file:");
+    let _ = writeln!(out, "  path     = {path_display}");
+    let _ = writeln!(out, "  exists   = {exists_display}");
+    let _ = writeln!(out, "  bytes    = {bytes_display}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Tuple derivation:");
+    let _ = writeln!(out, "  status   = {status}");
+    let _ = writeln!(out, "  detail   = {detail}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Session id:");
+    let _ = writeln!(out, "  source   = {id_source}");
+    let _ = writeln!(out, "  value    = {id_value}");
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Warnings:");
+    if warnings.is_empty() {
+        let _ = writeln!(out, "  none");
+    } else {
+        for w in warnings {
+            let _ = writeln!(out, "  {w}");
+        }
+    }
+    out
+}
+
+/// Compute the `(source, value)` pair for the "Session id" section of the
+/// report. `source` is one of `deterministic`, `random`, or `none`.
+fn session_id_for_doctor(
+    derived: Option<&Tuple>,
+    in_zellij: bool,
+) -> (String, String) {
+    if let Some(t) = derived {
+        (
+            "deterministic".to_string(),
+            session_id_from_tuple(t).as_hex().to_string(),
+        )
+    } else if in_zellij {
+        // We're inside Zellij but failed somewhere. The runtime fallback in
+        // main() would have used a random id, but reporting the actual hex
+        // would lie about determinism — emit `none` instead.
+        ("none".to_string(), "-".to_string())
+    } else {
+        ("random".to_string(), "-".to_string())
+    }
+}
+
+/// Render the `tsm doctor` report to stdout. Always exits 0 on the caller's
+/// behalf — every failure shows up in the report rather than as an error.
+fn handle_doctor() {
+    let mut warnings: Vec<String> = Vec::new();
+    let session_env = std::env::var("ZELLIJ_SESSION_NAME").ok();
+    let pane_env = std::env::var("ZELLIJ_PANE_ID").ok();
+    let session_set = session_env.as_deref().is_some_and(|v| !v.is_empty());
+    let pane_set = pane_env.as_deref().is_some_and(|v| !v.is_empty());
+
+    let session_display = if session_set {
+        session_env.clone().unwrap_or_default()
+    } else {
+        "(unset)".to_string()
+    };
+    let pane_display = if pane_set {
+        pane_env.clone().unwrap_or_default()
+    } else {
+        "(unset)".to_string()
+    };
+
+    if session_set != pane_set {
+        warnings.push(
+            "ZELLIJ_SESSION_NAME is set but ZELLIJ_PANE_ID is not (or vice versa)"
+                .to_string(),
+        );
+    }
+
+    let layout = if session_set {
+        observe_layout(session_env.as_deref().unwrap_or(""), &mut warnings)
+    } else {
+        LayoutObservation {
+            path: None,
+            exists: false,
+            bytes: None,
+            contents: None,
+        }
+    };
+
+    let session_for_derive = if session_set { session_env.as_deref() } else { None };
+    let pane_for_derive = if pane_set { pane_env.as_deref() } else { None };
+    let (status, detail, derived_tuple) = derive_for_doctor(
+        session_for_derive,
+        pane_for_derive,
+        &layout,
+        &mut warnings,
+    );
+
+    let (id_source, id_value) =
+        session_id_for_doctor(derived_tuple.as_ref(), session_set && pane_set);
+
+    let out = render_doctor_report(&DoctorReport {
+        session_display: &session_display,
+        pane_display: &pane_display,
+        layout: &layout,
+        status: &status,
+        detail: &detail,
+        id_source: &id_source,
+        id_value: &id_value,
+        warnings: &warnings,
+    });
+    print!("{out}");
 }
 
 /// Compute the session log path for `<session-id>`. Creates parent dirs with
@@ -557,8 +877,20 @@ fn main() {
                 );
                 std::process::exit(EXIT_UNSUPPORTED_SHELL);
             }
-            let session_id = SessionId::random();
+            // Inside Zellij with a readable session-layout.kdl, derive a
+            // deterministic SessionId from the (session, tab, pane-ordinal)
+            // tuple so resurrecting the pane yields the same id. Anywhere
+            // else we fall back to a random id; this includes derivation
+            // errors, which are surfaced through `tsm doctor` rather than
+            // stderr-from-shell-init.
+            let session_id = match try_derive_zellij_session_id() {
+                Some(id) => id,
+                None => SessionId::random(),
+            };
             print!("{}", generate_zsh_snippet(&session_id));
+        }
+        Commands::Doctor => {
+            handle_doctor();
         }
         Commands::Record {
             exit_code,
