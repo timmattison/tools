@@ -72,6 +72,9 @@ enum Commands {
         /// The shell to emit integration for. Only `zsh` is supported in v1.
         shell: String,
     },
+    /// Print a diagnostic report about the Zellij environment and derived
+    /// session id. Exit code is always 0; failures are part of the report.
+    Doctor,
     /// Record one command's metadata. Invoked by the shell precmd hook.
     Record {
         /// Exit status of the last command in the shell.
@@ -559,6 +562,9 @@ fn main() {
             }
             let session_id = SessionId::random();
             print!("{}", generate_zsh_snippet(&session_id));
+        }
+        Commands::Doctor => {
+            // Stub for red phase: emits nothing so the doctor tests fail.
         }
         Commands::Record {
             exit_code,

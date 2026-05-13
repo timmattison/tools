@@ -7566,6 +7566,7 @@ dependencies = [
  "tempfile",
  "tsm-id",
  "tsm-jsonl",
+ "tsm-tuple",
  "wait-timeout",
 ]
 
