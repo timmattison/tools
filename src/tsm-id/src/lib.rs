@@ -132,8 +132,26 @@ impl<'de> Deserialize<'de> for SessionId {
 /// from ever producing the same hash input by exploiting the fact that
 /// `"x" + "\0y"` and `"x\0y" + ""` have the same concatenation.
 pub(crate) fn canonical_bytes(tuple: &Tuple) -> Vec<u8> {
-    let _ = tuple;
-    todo!("canonical_bytes: implementation in green commit")
+    let session = tuple.zellij_session_name.as_ref().as_bytes();
+    let tab = tuple.tab_name.as_ref().as_bytes();
+    let ordinal = tuple.pane_ordinal_within_tab.value().to_be_bytes();
+
+    // u32 is enough for any realistic session or tab name. Names with more
+    // than 4 GiB of UTF-8 are vanishingly unlikely to exist on a Zellij
+    // tab bar, so we treat overflow as a programmer error.
+    let session_len = u32::try_from(session.len()).expect("session name fits in u32");
+    let tab_len = u32::try_from(tab.len()).expect("tab name fits in u32");
+    let ordinal_len: u32 = u32::try_from(ordinal.len()).expect("4 bytes fits in u32");
+
+    let mut out =
+        Vec::with_capacity(4 + session.len() + 4 + tab.len() + 4 + ordinal.len());
+    out.extend_from_slice(&session_len.to_be_bytes());
+    out.extend_from_slice(session);
+    out.extend_from_slice(&tab_len.to_be_bytes());
+    out.extend_from_slice(tab);
+    out.extend_from_slice(&ordinal_len.to_be_bytes());
+    out.extend_from_slice(&ordinal);
+    out
 }
 
 /// Derive a deterministic [`SessionId`] from a Zellij tuple.
@@ -144,8 +162,16 @@ pub(crate) fn canonical_bytes(tuple: &Tuple) -> Vec<u8> {
 /// The id is the first 16 bytes of `SHA-256(canonical_bytes(&tuple))`, hex
 /// encoded as 32 lowercase characters.
 pub fn session_id_from_tuple(tuple: &Tuple) -> SessionId {
-    let _ = tuple;
-    todo!("session_id_from_tuple: implementation in green commit")
+    let bytes = canonical_bytes(tuple);
+    let digest = Sha256::new().chain_update(&bytes).finalize();
+    // Take the leading 128 bits (16 bytes) of the SHA-256 output.
+    let hex = hex::encode(&digest.as_slice()[..16]);
+    // The hex crate emits lowercase 0-9a-f exclusively, so the SessionId
+    // invariants (length 32, lowercase hex only) are satisfied by
+    // construction. Re-validate through from_hex to keep all SessionId
+    // values flowing through the same gate and to surface a bug
+    // immediately if hex::encode ever changed its contract.
+    SessionId::from_hex(&hex).expect("sha256 truncated to 16 bytes is always valid hex")
 }
 
 #[cfg(test)]
