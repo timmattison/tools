@@ -22,6 +22,34 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+/// Strip a trailing `.git` (and any path remnants after it) from a path-like string,
+/// returning the parent repository directory.
+fn strip_dot_git_suffix(path: &str) -> String {
+    if let Some(idx) = path.rfind(".git") {
+        // `idx` comes from str::rfind, so it is a valid UTF-8 boundary; split_at
+        // is the safe way to slice without triggering clippy::string_slice.
+        let (head, _) = path.split_at(idx);
+        head.trim_end_matches('/').to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+/// Truncate a string to at most `max_chars` characters by trimming from the front
+/// (keeping the tail) and prefixing with `...`. Uses character (not byte) counts so
+/// it is safe for multi-byte UTF-8 input.
+fn truncate_path_tail(path: &str, max_chars: usize) -> String {
+    let char_count = path.chars().count();
+    if char_count <= max_chars {
+        return path.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    // Skip the leading chars to keep only the last `keep` characters.
+    let skip = char_count - keep;
+    let tail: String = path.chars().skip(skip).collect();
+    format!("...{tail}")
+}
+
 /// Simple progress display for the terminal UI
 pub struct ProgressDisplay {
     dirs_checked: Arc<AtomicUsize>,
@@ -308,26 +336,8 @@ impl ProgressDisplay {
                     "✅ Scanning complete - preparing results...".to_string()
                 } else {
                     let current_path = self.current_path.lock().clone();
-                    // Extract repo name from path if it contains .git
-                    let display_path = if current_path.contains(".git") {
-                        // Get the parent directory of .git (the actual repo)
-                        if let Some(repo_end) = current_path.rfind(".git") {
-                            current_path[..repo_end].trim_end_matches('/').to_string()
-                        } else {
-                            current_path.clone()
-                        }
-                    } else {
-                        current_path
-                    };
-
-                    let truncated_path = if display_path.len() > 60 {
-                        format!(
-                            "...{}",
-                            &display_path[display_path.len().saturating_sub(57)..]
-                        )
-                    } else {
-                        display_path
-                    };
+                    let display_path = strip_dot_git_suffix(&current_path);
+                    let truncated_path = truncate_path_tail(&display_path, 60);
                     format!("🔎 Current: {}", truncated_path)
                 };
 
@@ -429,32 +439,12 @@ impl ProgressDisplay {
             );
         } else {
             let current_path = self.current_path.lock().clone();
-
-            // Extract repo name from path if it contains .git
-            let display_path = if current_path.contains(".git") {
-                // Get the parent directory of .git (the actual repo)
-                if let Some(repo_end) = current_path.rfind(".git") {
-                    current_path[..repo_end].trim_end_matches('/').to_string()
-                } else {
-                    current_path.clone()
-                }
-            } else {
-                current_path
-            };
+            let display_path = strip_dot_git_suffix(&current_path);
+            let shown_path = truncate_path_tail(&display_path, 40);
 
             print!(
                 "\r🔍 Scanned: {} dirs, Found: {} repos, Rate: {:.1} dirs/sec, Current: {}",
-                dirs_checked,
-                repos_found,
-                scan_rate,
-                if display_path.len() > 40 {
-                    format!(
-                        "...{}",
-                        &display_path[display_path.len().saturating_sub(37)..]
-                    )
-                } else {
-                    display_path
-                }
+                dirs_checked, repos_found, scan_rate, shown_path
             );
         }
 
