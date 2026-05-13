@@ -29,8 +29,12 @@
 //!
 //! # Format support
 //!
-//! The parser accepts the subset of Zellij's `session-layout.kdl` format
-//! that is observably stable across recent releases:
+//! Zellij currently emits **KDL v1** for `session-layout.kdl`, but the wider
+//! Rust ecosystem is migrating to KDL v2. This crate enables `kdl`'s
+//! `v1-fallback` feature, so documents are parsed as v2 first and re-parsed
+//! as v1 on failure — either dialect is accepted, with the same surface
+//! semantics. The parser accepts the subset of Zellij's `session-layout.kdl`
+//! format that is observably stable across recent releases:
 //!
 //! ```kdl
 //! layout {
@@ -67,6 +71,7 @@
 
 use std::fmt;
 
+use kdl::{KdlDocument, KdlNode};
 use thiserror::Error;
 
 /// Human-readable summary of the ordinal-assignment policy used by
@@ -207,6 +212,205 @@ pub enum TupleError {
 /// Returns a typed [`TupleError`] when the layout cannot be parsed, contains
 /// no tabs, has no pane matching `env.zellij_pane_id`, the matching tab is
 /// nameless, or the same pane id appears in more than one place.
-pub fn derive_tuple(_env: &Env, _layout: &LayoutText) -> Result<Tuple, TupleError> {
-    todo!("derive_tuple — implemented in green slice (#214)")
+pub fn derive_tuple(env: &Env, layout: &LayoutText) -> Result<Tuple, TupleError> {
+    let doc: KdlDocument = layout
+        .0
+        .parse()
+        .map_err(|e: kdl::KdlError| TupleError::LayoutParse(e.to_string()))?;
+
+    // Collect tabs. The document may be wrapped in a top-level `layout { ... }`
+    // node, or it may contain `tab` nodes directly.
+    let tabs: Vec<&KdlNode> = collect_tabs(&doc);
+    if tabs.is_empty() {
+        return Err(TupleError::NoTabs);
+    }
+
+    // For every tab, run a fresh walker and record any ordinals at which the
+    // target pane id was matched. Multiple matches across tabs (or within a
+    // single tab) constitute an ambiguous layout.
+    let mut matches: Vec<(&KdlNode, u32)> = Vec::new();
+    for tab in &tabs {
+        let mut walker = TabWalker::new(&env.zellij_pane_id);
+        walker.walk_tab(tab);
+        for ord in walker.matched_ordinals {
+            matches.push((tab, ord));
+        }
+    }
+
+    if matches.len() > 1 {
+        return Err(TupleError::AmbiguousPaneId {
+            pane_id: env.zellij_pane_id.clone(),
+        });
+    }
+
+    let (tab, ordinal) = matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| TupleError::PaneNotFound {
+            pane_id: env.zellij_pane_id.clone(),
+        })?;
+
+    let tab_name = tab_name_of(tab).ok_or_else(|| TupleError::TabNameMissing {
+        pane_id: env.zellij_pane_id.clone(),
+    })?;
+
+    Ok(Tuple {
+        zellij_session_name: ZellijSessionName(env.zellij_session_name.clone()),
+        tab_name: TabName(tab_name),
+        pane_ordinal_within_tab: PaneOrdinal(ordinal),
+    })
+}
+
+/// Find all `tab` nodes in the document. Tolerates both
+/// `layout { tab ...; tab ...; }` and bare top-level `tab` nodes.
+fn collect_tabs(doc: &KdlDocument) -> Vec<&KdlNode> {
+    let mut out = Vec::new();
+    for node in doc.nodes() {
+        match node.name().value() {
+            "tab" => out.push(node),
+            "layout" => {
+                if let Some(children) = node.children() {
+                    for inner in children.nodes() {
+                        if inner.name().value() == "tab" {
+                            out.push(inner);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Extract the `name=` attribute of a tab node, if present.
+fn tab_name_of(tab: &KdlNode) -> Option<String> {
+    tab.entries()
+        .iter()
+        .find(|e| e.name().map(kdl::KdlIdentifier::value) == Some("name"))
+        .and_then(|e| e.value().as_string().map(String::from))
+}
+
+/// Walks a single tab and records ordinals + which ordinals matched the
+/// caller's target pane id.
+struct TabWalker<'a> {
+    target_pane_id: &'a str,
+    next_ordinal: u32,
+    matched_ordinals: Vec<u32>,
+}
+
+impl<'a> TabWalker<'a> {
+    fn new(target_pane_id: &'a str) -> Self {
+        Self {
+            target_pane_id,
+            next_ordinal: 0,
+            matched_ordinals: Vec::new(),
+        }
+    }
+
+    fn walk_tab(&mut self, tab: &KdlNode) {
+        let Some(children) = tab.children() else {
+            return;
+        };
+
+        // First pass: tiled panes. Recurse into every direct `pane` child.
+        for node in children.nodes() {
+            if node.name().value() == "pane" {
+                self.visit_pane(node);
+            }
+        }
+
+        // Second pass: floating panes, appended after tiled.
+        for node in children.nodes() {
+            if node.name().value() == "floating_panes" {
+                if let Some(fc) = node.children() {
+                    for inner in fc.nodes() {
+                        if inner.name().value() == "pane" {
+                            self.visit_pane(inner);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Visit one pane. Decides whether it is a plugin pane (skip),
+    /// a container (recurse without ordinaling), or a terminal pane
+    /// (assign ordinal, possibly recording a match).
+    fn visit_pane(&mut self, pane: &KdlNode) {
+        if is_plugin_pane(pane) {
+            return;
+        }
+
+        if let Some(children) = pane.children() {
+            // A pane with `pane` child nodes is a container. Walk in
+            // document order; non-`pane` children (e.g. comments, future
+            // metadata) are skipped without affecting numbering.
+            let has_pane_child = children
+                .nodes()
+                .iter()
+                .any(|n| n.name().value() == "pane");
+
+            if has_pane_child {
+                for inner in children.nodes() {
+                    if inner.name().value() == "pane" {
+                        self.visit_pane(inner);
+                    }
+                }
+                return;
+            }
+            // Otherwise treat as a terminal pane (children are some
+            // non-pane block other than `plugin`, which was caught above).
+        }
+
+        // Terminal pane (tiled, floating, or suppressed — all ordinaled).
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+
+        if let Some(id) = pane_id_string(pane) {
+            if id == self.target_pane_id {
+                self.matched_ordinals.push(ordinal);
+            }
+        }
+    }
+}
+
+/// A pane is a plugin pane if either:
+/// - it has an attribute named `plugin`, or
+/// - it has a child node named `plugin`.
+fn is_plugin_pane(pane: &KdlNode) -> bool {
+    let has_plugin_attr = pane
+        .entries()
+        .iter()
+        .any(|e| e.name().map(kdl::KdlIdentifier::value) == Some("plugin"));
+    if has_plugin_attr {
+        return true;
+    }
+    if let Some(children) = pane.children() {
+        if children
+            .nodes()
+            .iter()
+            .any(|n| n.name().value() == "plugin")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Stringify the `id=` attribute on a pane, regardless of whether KDL parsed
+/// it as integer or string.
+fn pane_id_string(pane: &KdlNode) -> Option<String> {
+    let entry = pane
+        .entries()
+        .iter()
+        .find(|e| e.name().map(kdl::KdlIdentifier::value) == Some("id"))?;
+    let v = entry.value();
+    if let Some(s) = v.as_string() {
+        return Some(s.to_string());
+    }
+    if let Some(i) = v.as_integer() {
+        return Some(i.to_string());
+    }
+    None
 }
