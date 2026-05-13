@@ -4,9 +4,7 @@
 //! fresh temporary directory for `$XDG_DATA_HOME` / `$XDG_STATE_HOME` so test
 //! runs cannot pollute each other or the developer's real session log.
 
-use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -251,8 +249,6 @@ fn record_redacts_aws_session_token() {
         !contents.contains("abc-secret-do-not-leak"),
         "secret value leaked into log: {contents}"
     );
-    // Verify type-safe values exist
-    let _kv: BTreeMap<String, String> = record.env;
 }
 
 #[test]
@@ -299,8 +295,4 @@ fn record_writes_no_stderr_in_happy_path() {
         "stderr must be empty in happy path, got: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // Drain stdout to satisfy clippy's unused variable concerns.
-    let mut _stdout = std::io::Cursor::new(output.stdout);
-    let mut buf = String::new();
-    _stdout.read_to_string(&mut buf).expect("read stdout");
 }

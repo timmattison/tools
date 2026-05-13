@@ -10,13 +10,48 @@
 //!   that accepts the same args the snippet will pass.
 
 use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command as ProcCommand, Stdio};
+use std::time::Duration;
 
 use buildinfo::version_string;
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use tsm_id::SessionId;
+use tsm_jsonl::{
+    Header, HeaderKind, JsonlError, PrecmdKind, PrecmdRecord, TupleStub, append_header,
+    append_record,
+};
+use wait_timeout::ChildExt;
 
 /// Exit code returned when `tsm shell-init` receives an unsupported shell.
 const EXIT_UNSUPPORTED_SHELL: i32 = 2;
+
+/// Watchdog timeout for any subprocess the recorder spawns.
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Soft upper bound on the error log size in bytes; rotation kicks in above this.
+const ERROR_LOG_MAX_BYTES: u64 = 1 << 20; // 1 MiB
+
+/// Bytes kept after rotation.
+const ERROR_LOG_KEEP_BYTES: usize = 1 << 19; // 512 KiB
+
+/// Hardcoded redaction patterns. Three shapes are supported:
+/// - exact match (full uppercase name)
+/// - suffix match (`*_FOO` — `_FOO` literal suffix)
+/// - prefix match (`FOO_*` — `FOO_` literal prefix)
+///
+/// Matching is case-insensitive on the env var name (we uppercase once).
+const REDACTION_SUFFIXES: &[&str] = &["_TOKEN", "_KEY", "_SECRET", "_PASSWORD", "_PASSWD"];
+const REDACTION_PREFIXES: &[&str] = &["AWS_", "OP_", "CLAUDE_"];
+const REDACTION_EXACT: &[&str] = &[
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+];
 
 /// Top-level CLI for `tsm`.
 #[derive(Parser)]
@@ -57,16 +92,41 @@ enum Commands {
     },
 }
 
-/// Stub returning false for every input. Implemented in the green commit.
-fn is_redacted(_name: &str) -> bool {
+/// Return true if `name` matches any of the hardcoded redaction patterns.
+///
+/// Matching is case-insensitive on the env var name. The value is never
+/// inspected — pattern decisions are purely structural on the key.
+fn is_redacted(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if REDACTION_EXACT.iter().any(|p| upper == *p) {
+        return true;
+    }
+    if REDACTION_PREFIXES.iter().any(|p| upper.starts_with(p)) {
+        return true;
+    }
+    if REDACTION_SUFFIXES.iter().any(|p| upper.ends_with(p)) {
+        return true;
+    }
     false
 }
 
-/// Stub: returns env unchanged with empty `redacted_keys`. Implemented in green.
+/// Split `env` into (kept, redacted-keys-sorted). Values for keys that match
+/// the redaction list are dropped entirely from the kept map; their names are
+/// pushed onto `redacted_keys` and the result is sorted alphabetically.
 fn redact_env(
     env: BTreeMap<String, String>,
 ) -> (BTreeMap<String, String>, Vec<String>) {
-    (env, Vec::new())
+    let mut kept = BTreeMap::new();
+    let mut redacted = Vec::new();
+    for (k, v) in env {
+        if is_redacted(&k) {
+            redacted.push(k);
+        } else {
+            kept.insert(k, v);
+        }
+    }
+    redacted.sort();
+    (kept, redacted)
 }
 
 /// Maximum number of consecutive `tsm record` failures before the precmd
@@ -165,6 +225,328 @@ add-zsh-hook precmd _tsm_precmd
     )
 }
 
+/// Resolve `$XDG_DATA_HOME` with the `$HOME/.local/share` fallback.
+fn xdg_data_home() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("XDG_DATA_HOME") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".local").join("share"))
+}
+
+/// Resolve `$XDG_STATE_HOME` with the `$HOME/.local/state` fallback.
+fn xdg_state_home() -> Option<PathBuf> {
+    if let Ok(v) = std::env::var("XDG_STATE_HOME") {
+        if !v.is_empty() {
+            return Some(PathBuf::from(v));
+        }
+    }
+    std::env::var("HOME")
+        .ok()
+        .map(|h| PathBuf::from(h).join(".local").join("state"))
+}
+
+/// Compute the session log path for `<session-id>`. Creates parent dirs with
+/// mode 0700 on the `tsm/` directory.
+fn session_log_path(session_id: &SessionId) -> Option<PathBuf> {
+    let data = xdg_data_home()?;
+    let tsm_dir = data.join("tsm");
+    let sessions_dir = tsm_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir).ok()?;
+    // Best-effort: tighten permissions on the tsm/ root to 0700. We don't fail
+    // if this errors — the session log is the load-bearing artifact.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = fs::metadata(&tsm_dir) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o700);
+            let _ = fs::set_permissions(&tsm_dir, perms);
+        }
+    }
+    Some(sessions_dir.join(format!("{}.jsonl", session_id.as_hex())))
+}
+
+/// Compute the error log path. Creates parent dir if missing.
+fn error_log_path_in(state_dir: &Path) -> PathBuf {
+    let tsm_dir = state_dir.join("tsm");
+    let _ = fs::create_dir_all(&tsm_dir);
+    tsm_dir.join("errors.log")
+}
+
+/// Compute the fail-counter file path for our parent process.
+fn fail_count_path_in(state_dir: &Path) -> PathBuf {
+    let tsm_dir = state_dir.join("tsm");
+    let _ = fs::create_dir_all(&tsm_dir);
+    // On Unix `parent_id` is always available; if we're somehow init (PPID 0)
+    // we fall back to our own pid so the path is still unique.
+    let ppid = parent_pid();
+    tsm_dir.join(format!("fail-count.{ppid}"))
+}
+
+/// Return the parent process id. Falls back to our own pid if PPID is 0.
+fn parent_pid() -> u32 {
+    #[cfg(unix)]
+    {
+        let p = std::os::unix::process::parent_id();
+        if p == 0 { std::process::id() } else { p }
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::id()
+    }
+}
+
+/// Truncate the error log to keep only the last `ERROR_LOG_KEEP_BYTES` bytes
+/// if it has grown past `ERROR_LOG_MAX_BYTES`. Best-effort; failures swallowed.
+fn rotate_error_log_if_needed(path: &Path) {
+    let Ok(meta) = fs::metadata(path) else { return };
+    if meta.len() <= ERROR_LOG_MAX_BYTES {
+        return;
+    }
+    // Read the tail of the file and rename a `.tmp` sibling over the original.
+    let Ok(mut f) = File::open(path) else { return };
+    let len = meta.len();
+    let keep = u64::try_from(ERROR_LOG_KEEP_BYTES).unwrap_or(0);
+    let start = len.saturating_sub(keep);
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return;
+    }
+    let mut buf = Vec::with_capacity(ERROR_LOG_KEEP_BYTES);
+    if f.read_to_end(&mut buf).is_err() {
+        return;
+    }
+    // Drop everything up to the first newline so we don't have a partial line.
+    if let Some(nl) = buf.iter().position(|b| *b == b'\n') {
+        buf.drain(..=nl);
+    }
+    let tmp = path.with_extension(format!("log.tmp.{}", std::process::id()));
+    let Ok(mut out) = File::create(&tmp) else { return };
+    if out.write_all(&buf).is_err() {
+        let _ = fs::remove_file(&tmp);
+        return;
+    }
+    let _ = fs::rename(&tmp, path);
+}
+
+/// Append `msg` to the error log at `path`, prefixed with an RFC3339 timestamp.
+/// Best-effort: any failure is silently dropped (we cannot recurse on logging).
+fn log_error_to(path: &Path, msg: &str) {
+    rotate_error_log_if_needed(path);
+    let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let ts = Utc::now().to_rfc3339();
+    let _ = writeln!(f, "{ts} {msg}");
+}
+
+/// Atomically write `value` to the fail-counter file at `path`. Uses a tmp
+/// sibling + rename so a partial write is never observed.
+fn write_fail_counter(path: &Path, value: u32) {
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if let Ok(mut f) = File::create(&tmp) {
+        if writeln!(f, "{value}").is_ok() {
+            let _ = fs::rename(&tmp, path);
+            return;
+        }
+    }
+    let _ = fs::remove_file(&tmp);
+}
+
+/// Read the current fail counter (0 if absent or unparseable).
+fn read_fail_counter(path: &Path) -> u32 {
+    let Ok(s) = fs::read_to_string(path) else { return 0 };
+    s.trim().parse::<u32>().unwrap_or(0)
+}
+
+/// Bump the fail counter by 1, atomically.
+fn bump_fail_counter(state_dir: &Path) {
+    let path = fail_count_path_in(state_dir);
+    let v = read_fail_counter(&path).saturating_add(1);
+    write_fail_counter(&path, v);
+}
+
+/// Reset the fail counter to 0.
+fn reset_fail_counter(state_dir: &Path) {
+    let path = fail_count_path_in(state_dir);
+    write_fail_counter(&path, 0);
+}
+
+/// Run `cmd` with a watchdog timeout. On timeout, the child is killed and
+/// reaped; we return `Err(())`. We intentionally do not expose the underlying
+/// error type — the recorder swallows all subprocess errors anyway.
+fn run_with_timeout(mut cmd: ProcCommand, timeout: Duration) -> Result<(), ()> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+    if child.wait_timeout(timeout).map_err(|_| ())?.is_some() {
+        Ok(())
+    } else {
+        // Timeout: kill and reap. Both errors are swallowed.
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(())
+    }
+}
+
+/// Parse a free-form `--probe-subprocess "/bin/sleep 5"` string into a
+/// `Command`. Whitespace-split, no shell. The first token is the program;
+/// subsequent tokens are args.
+fn parse_probe_command(spec: &str) -> Option<ProcCommand> {
+    let mut tokens = spec.split_whitespace();
+    let prog = tokens.next()?;
+    let mut cmd = ProcCommand::new(prog);
+    for arg in tokens {
+        cmd.arg(arg);
+    }
+    Some(cmd)
+}
+
+/// Build the Header used for line 1 of a fresh session log.
+fn build_header() -> Header {
+    let hostname = hostname::get().map_or_else(
+        |_| "unknown".to_string(),
+        |h| h.to_string_lossy().into_owned(),
+    );
+    let terminal_program =
+        std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
+    Header {
+        kind: HeaderKind::Header,
+        schema_version: 1,
+        tsm_version: version_string!().to_string(),
+        hostname,
+        terminal_program,
+        tuple: TupleStub {
+            zellij_session: None,
+            tab: None,
+            pane_ordinal_str: None,
+        },
+        created_at: Utc::now().to_rfc3339(),
+    }
+}
+
+/// Build a `PrecmdRecord` from the current process environment plus the
+/// caller-supplied exit code and last-command text.
+fn build_record(exit_code: i32, last_command: String) -> PrecmdRecord {
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let (env, redacted_keys) = redact_env(env);
+    PrecmdRecord {
+        kind: PrecmdKind::Precmd,
+        at: Utc::now().to_rfc3339(),
+        cwd,
+        exit_code,
+        last_command,
+        env,
+        redacted_keys,
+    }
+}
+
+/// Append a record. If the file is empty / missing, write a header first and
+/// then retry. Handles a concurrent-writer race on the header by treating
+/// `DuplicateHeader` as success.
+fn append_record_with_header(path: &Path, record: &PrecmdRecord) -> Result<(), JsonlError> {
+    match append_record(path, record) {
+        Ok(()) => Ok(()),
+        Err(JsonlError::MissingHeader) => {
+            let header = build_header();
+            match append_header(path, &header) {
+                Ok(()) | Err(JsonlError::DuplicateHeader) => append_record(path, record),
+                Err(e) => Err(e),
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The core of the recorder. Returns `Ok(())` on success, `Err(String)` on
+/// any internal failure (the caller logs the message and bumps the counter).
+fn do_record(
+    state_dir: &Path,
+    exit_code: i32,
+    last_command: String,
+) -> Result<(), String> {
+    let raw_id = std::env::var("TSM_SESSION_ID")
+        .map_err(|_| "record: TSM_SESSION_ID is not set".to_string())?;
+    let session_id = SessionId::from_hex(&raw_id)
+        .map_err(|e| format!("record: invalid TSM_SESSION_ID: {e}"))?;
+
+    let _ = state_dir; // path resolution for the session log uses XDG_DATA_HOME.
+    let log_path = session_log_path(&session_id)
+        .ok_or_else(|| "record: could not resolve session log path".to_string())?;
+
+    // First call: file is empty/missing → write header.
+    let first_call = match fs::metadata(&log_path) {
+        Ok(m) => m.len() == 0,
+        Err(_) => true,
+    };
+
+    if first_call {
+        let header = build_header();
+        match append_header(&log_path, &header) {
+            Ok(()) | Err(JsonlError::DuplicateHeader) => {}
+            Err(e) => return Err(format!("record: append_header failed: {e}")),
+        }
+        return Ok(());
+    }
+
+    let record = build_record(exit_code, last_command);
+    append_record_with_header(&log_path, &record)
+        .map_err(|e| format!("record: append_record failed: {e}"))?;
+    Ok(())
+}
+
+fn handle_record(
+    exit_code: i32,
+    last_command: String,
+    probe_subprocess: Option<String>,
+) {
+    let state_dir = xdg_state_home();
+    let err_log = state_dir.as_deref().map(error_log_path_in);
+
+    // Probe path: synthetic subprocess for the watchdog acceptance test. We do
+    // NOT touch the session log on this path.
+    if let Some(spec) = probe_subprocess {
+        if let Some(cmd) = parse_probe_command(&spec) {
+            if run_with_timeout(cmd, SUBPROCESS_TIMEOUT).is_err() {
+                if let Some(p) = err_log.as_deref() {
+                    log_error_to(
+                        p,
+                        &format!("record: probe subprocess timed out after 2s: {spec}"),
+                    );
+                }
+            }
+        } else if let Some(p) = err_log.as_deref() {
+            log_error_to(p, &format!("record: probe-subprocess empty: {spec}"));
+        }
+        return;
+    }
+
+    match do_record(state_dir.as_deref().unwrap_or(Path::new(".")), exit_code, last_command) {
+        Ok(()) => {
+            if let Some(dir) = state_dir.as_deref() {
+                reset_fail_counter(dir);
+            }
+        }
+        Err(msg) => {
+            if let Some(p) = err_log.as_deref() {
+                log_error_to(p, &msg);
+            }
+            if let Some(dir) = state_dir.as_deref() {
+                bump_fail_counter(dir);
+            }
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -179,14 +561,14 @@ fn main() {
             print!("{}", generate_zsh_snippet(&session_id));
         }
         Commands::Record {
-            exit_code: _,
-            last_command: _,
-            probe_subprocess: _,
+            exit_code,
+            last_command,
+            probe_subprocess,
         } => {
-            // Stub for this slice. The green commit replaces this body with the
-            // real recorder. We intentionally do not write anything to stderr
-            // (per the safety policy that `tsm record` never writes to stderr
-            // from the hot path).
+            // Safety contract: never panic, never write stderr from the hot
+            // path. Internal failures go to the error log; the fail counter
+            // ticks up; we always exit 0.
+            handle_record(exit_code, last_command, probe_subprocess);
         }
     }
 }
