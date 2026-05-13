@@ -76,14 +76,12 @@ impl TokenizerModel {
 fn format_count(n: usize) -> String {
     let s = n.to_string();
     let mut result = String::new();
-    let mut count = 0;
 
-    for c in s.chars().rev() {
+    for (count, c) in s.chars().rev().enumerate() {
         if count > 0 && count % 3 == 0 {
             result.push(',');
         }
         result.push(c);
-        count += 1;
     }
 
     result.chars().rev().collect()

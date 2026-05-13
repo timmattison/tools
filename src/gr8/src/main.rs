@@ -235,8 +235,17 @@ fn predict_exhaustion(rate_limit: &RateLimit) -> ExhaustionPrediction {
         return ExhaustionPrediction::Sustainable;
     }
 
-    let time_to_exhaust_minutes = rate_limit.remaining as f64 / rate_per_minute;
-    let time_to_exhaust_seconds = (time_to_exhaust_minutes * 60.0) as i64;
+    let time_to_exhaust_minutes = f64::from(rate_limit.remaining) / rate_per_minute;
+    // Clamp before casting: the value is always non-negative (rate_per_minute > 0
+    // and remaining >= 0) and we cap at i64::MAX to ensure the cast is well
+    // defined for arbitrarily small rates.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to [0, i64::MAX] above, so the cast is representable in i64"
+    )]
+    let time_to_exhaust_seconds =
+        (time_to_exhaust_minutes * 60.0).clamp(0.0, i64::MAX as f64) as i64;
 
     let now = Utc::now().timestamp();
     let time_until_reset = rate_limit.reset - now;

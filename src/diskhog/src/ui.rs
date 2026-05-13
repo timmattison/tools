@@ -481,21 +481,33 @@ mod tests {
         const CONTENT_LINES: u16 = 2; // Line::from("") + Line::from(message)
         const MIN_REQUIRED: u16 = BORDER_LINES + CONTENT_LINES;
 
-        assert!(
-            IOPS_MESSAGE_HEIGHT >= MIN_REQUIRED,
-            "IOPS_MESSAGE_HEIGHT ({IOPS_MESSAGE_HEIGHT}) must be at least {MIN_REQUIRED} \
-             to display the status message with borders"
-        );
+        #[allow(
+            clippy::assertions_on_constants,
+            reason = "intentional change-detector test guarding the layout invariant if either constant is modified"
+        )]
+        {
+            assert!(
+                IOPS_MESSAGE_HEIGHT >= MIN_REQUIRED,
+                "IOPS_MESSAGE_HEIGHT ({IOPS_MESSAGE_HEIGHT}) must be at least {MIN_REQUIRED} \
+                 to display the status message with borders"
+            );
+        }
     }
 
     #[test]
     fn test_min_truncation_width_constant() {
         // Verify the constant is at least ellipsis width + 1
         // (need room for at least one character plus "...")
-        assert!(
-            MIN_TRUNCATION_WIDTH >= 4,
-            "MIN_TRUNCATION_WIDTH should be at least 4 (ellipsis + 1 char)"
-        );
+        #[allow(
+            clippy::assertions_on_constants,
+            reason = "intentional change-detector test guarding MIN_TRUNCATION_WIDTH if it is modified"
+        )]
+        {
+            assert!(
+                MIN_TRUNCATION_WIDTH >= 4,
+                "MIN_TRUNCATION_WIDTH should be at least 4 (ellipsis + 1 char)"
+            );
+        }
     }
 
     #[test]

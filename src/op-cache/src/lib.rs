@@ -477,6 +477,9 @@ mod tests {
         }
         let result = cache.read(&path, Some("OP_CACHE_TEST_VAR")).unwrap();
         assert_eq!(result, "from-env");
+        // SAFETY: same justification as above — this test owns the env var and
+        // runs in a single thread, so the mutation cannot race with another
+        // reader of the environment.
         unsafe {
             std::env::remove_var("OP_CACHE_TEST_VAR");
         }

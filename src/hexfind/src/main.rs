@@ -47,6 +47,11 @@ fn main() -> Result<()> {
 
     // Open and memory map the file
     let file = File::open(&cli.file).context("Error opening file")?;
+    // SAFETY: memory-mapping a file is unsafe because the mapped region can
+    // change underneath us if the file is modified or truncated by another
+    // process. hexfind is a read-only search tool over user-supplied files; the
+    // caller accepts that risk by selecting the path, and we never write
+    // through the mapping or hand it out across thread boundaries.
     let mmap = unsafe { Mmap::map(&file)? };
 
     // Search for the pattern
