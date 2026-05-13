@@ -117,8 +117,8 @@ fn print_human_readable(processes: &[ProcessInfo], verbose: bool) {
         }
     } else {
         println!(
-            "{:<8} {:<20} {:<15} {:<10} {}",
-            "PID", "NAME", "USER", "ACCESS", "FILE"
+            "{:<8} {:<20} {:<15} {:<10} FILE",
+            "PID", "NAME", "USER", "ACCESS"
         );
         println!("{}", "-".repeat(80));
 
@@ -308,7 +308,7 @@ fn get_file_users_macos(target_path: &Path) -> Result<Vec<ProcessInfo>> {
     let output = if is_dir {
         // Use +D for recursive directory search
         Command::new("lsof")
-            .args(&["+D", &target_str])
+            .args(["+D", &target_str])
             .output()
             .context("Failed to execute lsof command")?
     } else {

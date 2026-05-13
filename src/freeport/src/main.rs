@@ -224,7 +224,7 @@ mod tests {
         );
         if let Some(port) = first_result {
             assert!(
-                port >= 49152 && port <= 49160,
+                (49152..=49160).contains(&port),
                 "Port {} should be in range 49152-49160",
                 port
             );
@@ -245,14 +245,14 @@ mod tests {
 
         if let Some(port) = random_result1 {
             assert!(
-                port >= 49152 && port <= 49160,
+                (49152..=49160).contains(&port),
                 "Port {} should be in range 49152-49160",
                 port
             );
         }
         if let Some(port) = random_result2 {
             assert!(
-                port >= 49152 && port <= 49160,
+                (49152..=49160).contains(&port),
                 "Port {} should be in range 49152-49160",
                 port
             );

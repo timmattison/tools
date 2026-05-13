@@ -71,7 +71,7 @@ impl MacAddress {
             );
         }
 
-        let mut bytes = [0u8; 6];
+        let mut bytes = [0_u8; 6];
         for (i, byte) in bytes.iter_mut().enumerate() {
             let hex_str = &cleaned[i * 2..i * 2 + 2];
             *byte = u8::from_str_radix(hex_str, 16)

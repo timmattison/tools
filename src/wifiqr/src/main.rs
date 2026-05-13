@@ -126,7 +126,7 @@ fn add_logo_to_qr(
     let logo_size_percent = logo_size_percent.min(100.0);
 
     // Maximum logo size is 1/5 of QR code size
-    let max_logo_size = (qr_width.min(qr_height) / 5) as u32;
+    let max_logo_size = qr_width.min(qr_height) / 5 ;
     let desired_logo_size = (max_logo_size as f64 * logo_size_percent / 100.0) as u32;
     let desired_logo_size = desired_logo_size.max(1);
 
@@ -134,7 +134,7 @@ fn add_logo_to_qr(
     let logo_resized = resize_image(logo, desired_logo_size);
 
     // Create a new image with the QR code
-    let mut combined = qr_image.clone();
+    let mut combined = qr_image;
 
     // Calculate position to center the logo
     let x_pos = (qr_width - desired_logo_size) / 2;

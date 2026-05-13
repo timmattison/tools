@@ -140,7 +140,7 @@ fn main() -> Result<()> {
     let tokenizer = model.get_tokenizer().context("Failed to load tokenizer")?;
 
     let mut file_counts = Vec::new();
-    let mut total_tokens = 0usize;
+    let mut total_tokens = 0_usize;
 
     // If no files specified, read from stdin
     if cli.files.is_empty() {

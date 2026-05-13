@@ -59,15 +59,14 @@ fn main() {
         let entry_name = entry.file_name().to_string_lossy();
 
         // Check for target directories
-        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
-            if target_dirs.contains(&entry_name.as_ref()) {
+        if entry.file_type().is_some_and(|ft| ft.is_dir())
+            && target_dirs.contains(&entry_name.as_ref()) {
                 found_any = true;
                 println!("Removing directory: {}", entry.path().display());
                 if let Err(e) = fs::remove_dir_all(entry.path()) {
                     eprintln!("Error removing {}: {}", entry.path().display(), e);
                 }
             }
-        }
     }
 
     // Also check for cdk.out at the top level even without --hidden

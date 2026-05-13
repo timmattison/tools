@@ -169,7 +169,7 @@ fn main() -> Result<()> {
 
     // Set up progress monitoring thread
     let running_clone = running.clone();
-    let pb_clone = pb.clone();
+    let pb_clone = pb;
     let dirs_checked_clone = dirs_checked.clone();
     let repos_found_clone = repos_found.clone();
     let start_time = Instant::now();
@@ -588,7 +588,7 @@ fn process_git_repo(
             Ok(())
         };
 
-    let _result = if search_all_branches {
+    if search_all_branches {
         // Search all branches
         let branches = match repo.branches(Some(BranchType::Local)) {
             Ok(branches) => branches,
@@ -654,7 +654,7 @@ fn add_matching_commit(matching_commits: &mut Vec<String>, commit: &Commit, mess
     let first_line = message.lines().next().unwrap_or("").trim();
 
     // Format the commit info
-    matching_commits.push(format!("{} {}", commit.id().to_string(), first_line));
+    matching_commits.push(format!("{} {}", commit.id(), first_line));
 }
 
 #[cfg(test)]

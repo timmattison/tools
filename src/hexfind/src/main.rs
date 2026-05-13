@@ -182,7 +182,7 @@ fn display_hex_dump(data: &[u8], file_offset: usize, context_bytes: usize, patte
                 let in_pattern = data_index >= pattern_pos_in_data
                     && data_index < pattern_pos_in_data + pattern_len;
 
-                let c = if byte >= 32 && byte <= 126 {
+                let c = if (32..=126).contains(&byte) {
                     byte as char
                 } else {
                     '.'

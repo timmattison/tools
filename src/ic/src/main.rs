@@ -535,25 +535,20 @@ fn setup_video_controls(
     }
 
     // Set up raw mode for non-blocking input
-    let raw_mode = match io::stdout().into_raw_mode() {
-        Ok(raw_mode) => Some(raw_mode),
-        Err(_) => None,
-    };
+    let raw_mode = io::stdout().into_raw_mode().ok();
 
     // Spawn a thread to handle keyboard input
     let (input_tx, input_rx) = std::sync::mpsc::channel();
     let input_handle = if raw_mode.is_some() {
         Some(thread::spawn(move || {
             let stdin = io::stdin();
-            for key_result in stdin.keys() {
-                if let Ok(key) = key_result {
-                    let control = map_key_to_control(key);
-                    if let Some(ctrl) = control {
-                        let is_exit = matches!(ctrl, VideoControl::Exit);
-                        let _ = input_tx.send(ctrl);
-                        if is_exit {
-                            break;
-                        }
+            for key in stdin.keys().flatten() {
+                let control = map_key_to_control(key);
+                if let Some(ctrl) = control {
+                    let is_exit = matches!(ctrl, VideoControl::Exit);
+                    let _ = input_tx.send(ctrl);
+                    if is_exit {
+                        break;
                     }
                 }
             }
@@ -626,7 +621,7 @@ fn handle_frame_timing(
             let new_time = current_time + frames_to_skip as f64 / fps;
 
             // Try to skip the frame data in ffmpeg output
-            let mut skip_buffer = vec![0u8; frame_size];
+            let mut skip_buffer = vec![0_u8; frame_size];
             for _ in 0..frames_to_skip {
                 if reader.read_exact(&mut skip_buffer).is_err() {
                     break;
@@ -815,7 +810,7 @@ fn play_video_inner(
         let (video_width, video_height) = get_video_dimensions(file_path)?;
 
         let mut ffmpeg_child = std::process::Command::new("ffmpeg")
-            .args(&[
+            .args([
                 "-i",
                 file_path.to_str().unwrap(),
                 "-ss",
@@ -840,7 +835,7 @@ fn play_video_inner(
 
         let mut reader = BufReader::new(stdout);
         let frame_size = (video_width * video_height * 3) as usize;
-        let mut frame_buffer = vec![0u8; frame_size];
+        let mut frame_buffer = vec![0_u8; frame_size];
 
         // Read and display frames until paused, finished, or exit
         'frame_loop: loop {
@@ -1091,7 +1086,7 @@ fn get_video_dimensions(file_path: &PathBuf) -> Result<(u32, u32)> {
 
     // Use ffprobe to get video dimensions
     let output = std::process::Command::new("ffprobe")
-        .args(&[
+        .args([
             "-v",
             "quiet",
             "-select_streams",
@@ -1136,7 +1131,7 @@ fn get_video_fps(file_path: &PathBuf) -> Result<f64> {
 
     // Use ffprobe to get video frame rate
     let output = std::process::Command::new("ffprobe")
-        .args(&[
+        .args([
             "-v",
             "quiet",
             "-select_streams",
@@ -1174,7 +1169,7 @@ fn get_video_duration(file_path: &PathBuf) -> Result<f64> {
 
     // Use ffprobe to get video duration in seconds
     let output = std::process::Command::new("ffprobe")
-        .args(&[
+        .args([
             "-v",
             "quiet",
             "-select_streams",

@@ -317,7 +317,7 @@ impl ProgressDisplay {
                             current_path.clone()
                         }
                     } else {
-                        current_path.clone()
+                        current_path
                     };
 
                     let truncated_path = if display_path.len() > 60 {
@@ -439,7 +439,7 @@ impl ProgressDisplay {
                     current_path.clone()
                 }
             } else {
-                current_path.clone()
+                current_path
             };
 
             print!(

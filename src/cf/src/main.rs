@@ -43,15 +43,11 @@ fn main() -> Result<()> {
         Some(FilterType::Suffix(suffix))
     } else if let Some(prefix) = cli.prefix {
         Some(FilterType::Prefix(prefix))
-    } else if let Some(substring) = cli.substring {
-        Some(FilterType::Substring(substring))
-    } else {
-        None
-    };
+    } else { cli.substring.map(FilterType::Substring) };
 
     let walker = FileWalker::new(cli.paths).with_filter(filter);
 
-    let mut total_count = 0u64;
+    let mut total_count = 0_u64;
 
     walker.walk(|_entry| {
         total_count += 1;

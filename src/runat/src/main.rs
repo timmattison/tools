@@ -139,14 +139,13 @@ fn run_app(
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('c') => {
+                    KeyCode::Char('q') | KeyCode::Char('c')
                         if key
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL)
-                        {
+                        => {
                             app.should_quit = true;
                         }
-                    }
                     _ => {}
                 }
             }

@@ -303,7 +303,7 @@ impl OpCache {
             NamedTempFile::new_in(self.cache_path.parent().unwrap_or_else(|| Path::new(".")))?;
         serde_json::to_writer_pretty(&tmp, cache)?;
         tmp.persist(&self.cache_path)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         // Restrict permissions to owner-only since file contains secrets
         #[cfg(unix)]
@@ -373,11 +373,10 @@ fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<(
             ])
             .output()
         {
-            Ok(output) if output.status.success() => {
-                if output_path.exists() && output_path.metadata().map_or(false, |m| m.len() > 0) {
+            Ok(output) if output.status.success()
+                && output_path.exists() && output_path.metadata().is_ok_and(|m| m.len() > 0) => {
                     return Ok(());
                 }
-            }
             _ => {}
         }
 
@@ -424,7 +423,7 @@ mod tests {
     fn cache_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join(CACHE_FILENAME);
-        let cache = OpCache::with_path(cache_path.clone());
+        let cache = OpCache::with_path(cache_path);
 
         // Empty cache
         assert!(cache.entries().unwrap().is_empty());
