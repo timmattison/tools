@@ -73,8 +73,11 @@ fn generate_wifi_qr_code(
     let code = QrCode::with_error_correction_level(&wifi_string, EcLevel::H)
         .context("Failed to create QR code")?;
 
-    // Render to image - start with a reasonable base size
-    let base_size = (21 + (code.width() - 21) * 4) as u32; // Scale based on QR code version
+    // Render to image - start with a reasonable base size.
+    // QR codes have widths from 21 (version 1) to 177 (version 40), so the
+    // computed value is at most 21 + (177 - 21) * 4 = 645, well within u32.
+    let base_size = u32::try_from(21 + (code.width() - 21) * 4)
+        .context("QR base size unexpectedly exceeds u32 range")?;
     let img = code
         .render::<Rgba<u8>>()
         .quiet_zone(false)
@@ -122,12 +125,21 @@ fn add_logo_to_qr(
     // Get QR code dimensions
     let (qr_width, qr_height) = qr_image.dimensions();
 
-    // Calculate logo size (capped at 100%)
-    let logo_size_percent = logo_size_percent.min(100.0);
+    // Calculate logo size (capped at 100% and clamped non-negative so the
+    // subsequent cast cannot truncate or lose sign).
+    let logo_size_percent = logo_size_percent.clamp(0.0, 100.0);
 
     // Maximum logo size is 1/5 of QR code size
-    let max_logo_size = qr_width.min(qr_height) / 5 ;
-    let desired_logo_size = (max_logo_size as f64 * logo_size_percent / 100.0) as u32;
+    let max_logo_size = qr_width.min(qr_height) / 5;
+    let scaled = f64::from(max_logo_size) * logo_size_percent / 100.0;
+    // `scaled` is in [0, max_logo_size] (a u32 magnitude), so the as-cast is
+    // representable in u32 and non-negative.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "scaled is bounded to [0, max_logo_size] where max_logo_size is a u32 by construction"
+    )]
+    let desired_logo_size = scaled as u32;
     let desired_logo_size = desired_logo_size.max(1);
 
     // Resize logo to square

@@ -64,18 +64,28 @@ impl MacAddress {
         // Remove common separators
         let cleaned = s.replace([':', '-'], "");
 
-        if cleaned.len() != 12 {
+        // Operate on bytes once we have ensured the input is plain ASCII; this
+        // keeps the per-pair slicing safe across UTF-8 inputs (multi-byte chars
+        // would not be valid hex anyway, but we surface a clean error instead
+        // of panicking on a non-boundary index).
+        if !cleaned.is_ascii() {
+            bail!("MAC address must contain only ASCII hex characters");
+        }
+        let cleaned_bytes = cleaned.as_bytes();
+        if cleaned_bytes.len() != 12 {
             bail!(
                 "MAC address must be 12 hex characters (got {} characters)",
-                cleaned.len()
+                cleaned_bytes.len()
             );
         }
 
         let mut bytes = [0_u8; 6];
         for (i, byte) in bytes.iter_mut().enumerate() {
-            let hex_str = &cleaned[i * 2..i * 2 + 2];
+            // Safe: cleaned_bytes is ASCII, len == 12, and i ranges 0..6.
+            let pair = &cleaned_bytes[i * 2..i * 2 + 2];
+            let hex_str = std::str::from_utf8(pair).expect("ASCII pair is valid UTF-8");
             *byte = u8::from_str_radix(hex_str, 16)
-                .with_context(|| format!("Invalid hex in MAC address: {}", hex_str))?;
+                .with_context(|| format!("Invalid hex in MAC address: {hex_str}"))?;
         }
 
         Ok(MacAddress(bytes))
@@ -202,9 +212,10 @@ fn list_interfaces() -> Result<()> {
 /// A magic packet consists of:
 /// - 6 bytes of 0xFF
 /// - 16 repetitions of the target MAC address (6 bytes each)
+///
 /// Total: 102 bytes
 ///
-/// Returns the magic packet as a Vec<u8>
+/// Returns the magic packet as a `Vec<u8>`
 fn create_magic_packet(mac: &MacAddress) -> Vec<u8> {
     let mut packet = Vec::with_capacity(102);
 
@@ -354,12 +365,15 @@ fn main() -> Result<()> {
 
     if cli.verbose {
         println!();
-        println!("Successfully sent {} total bytes", bytes_sent);
+        println!("Successfully sent {bytes_sent} total bytes");
     } else {
+        // Use usize math to avoid a u8 overflow if ports ever grows beyond what
+        // u8 can hold. cli.count is u8 and ports.len() is at most 2 today, but
+        // there is no reason to keep the narrow type and risk silent wrap.
+        let packets_sent = usize::from(cli.count) * ports.len();
         println!(
-            "Sent {} magic packet(s) to {}",
-            cli.count * ports.len() as u8,
-            mac.format()
+            "Sent {packets_sent} magic packet(s) to {mac_fmt}",
+            mac_fmt = mac.format()
         );
     }
 
@@ -454,8 +468,8 @@ mod tests {
         assert_eq!(packet.len(), 102);
 
         // Check first 6 bytes are 0xFF
-        for i in 0..6 {
-            assert_eq!(packet[i], 0xFF, "Byte {} should be 0xFF", i);
+        for (i, byte) in packet.iter().take(6).enumerate() {
+            assert_eq!(*byte, 0xFF, "Byte {i} should be 0xFF");
         }
 
         // Check MAC address is repeated 16 times
