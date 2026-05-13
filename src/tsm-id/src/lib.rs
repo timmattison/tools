@@ -42,16 +42,32 @@ impl SessionId {
     /// Construct a [`SessionId`] from 16 random bytes, hex-encoded as 32
     /// lowercase characters.
     pub fn random() -> Self {
-        // Stub: returns an empty string so tests fail on behavior, not symbol resolution.
-        Self(String::new())
+        let bytes: [u8; 16] = rand::random();
+        Self(hex::encode(bytes))
     }
 
     /// Try to construct a [`SessionId`] from a pre-existing hex string.
     ///
     /// The input must be exactly 32 characters long and consist solely of
-    /// lowercase hex characters (`0-9`, `a-f`).
+    /// lowercase hex characters (`0-9`, `a-f`). Uppercase hex is rejected
+    /// to keep the canonical representation unambiguous.
     pub fn from_hex(s: &str) -> Result<Self, SessionIdError> {
-        // Stub: accept anything so validation tests fail on behavior.
+        let actual = s.chars().count();
+        if actual != SESSION_ID_HEX_LEN {
+            return Err(SessionIdError::WrongLength {
+                expected: SESSION_ID_HEX_LEN,
+                actual,
+            });
+        }
+        for c in s.chars() {
+            if c.is_ascii_digit() || ('a'..='f').contains(&c) {
+                continue;
+            }
+            if ('A'..='F').contains(&c) {
+                return Err(SessionIdError::UppercaseHex(c));
+            }
+            return Err(SessionIdError::NonHexCharacter(c));
+        }
         Ok(Self(s.to_string()))
     }
 
