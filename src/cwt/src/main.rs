@@ -232,8 +232,7 @@ fn find_current_worktree(worktrees: &[Worktree], repo_root: &Path) -> Option<usi
 
     worktrees.iter().position(|wt| {
         std::fs::canonicalize(&wt.path)
-            .map(|p| paths_equal(&p, &canonical))
-            .unwrap_or(false)
+            .is_ok_and(|p| paths_equal(&p, &canonical))
     })
 }
 
@@ -649,7 +648,7 @@ mod tests {
                 assert!(indices.contains(&1));
                 assert!(indices.contains(&2));
             }
-            other => panic!("Expected Multiple, got {:?}", other),
+            other => panic!("Expected Multiple, got {other:?}"),
         }
 
         // Partial path within branch name
@@ -721,14 +720,14 @@ mod tests {
                 assert!(indices.contains(&1));
                 assert!(indices.contains(&2));
             }
-            other => panic!("Expected Multiple, got {:?}", other),
+            other => panic!("Expected Multiple, got {other:?}"),
         }
         // "page" also matches both
         match find_worktree_by_name(&worktrees, "page") {
             WorktreeMatch::Multiple(indices) => {
                 assert_eq!(indices.len(), 2);
             }
-            other => panic!("Expected Multiple, got {:?}", other),
+            other => panic!("Expected Multiple, got {other:?}"),
         }
     }
 

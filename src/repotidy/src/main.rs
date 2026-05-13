@@ -16,8 +16,7 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
             dir.display(),
             String::from_utf8_lossy(&output.stderr)
         );
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "Command failed",
         ));
     }
@@ -41,7 +40,7 @@ fn main() {
         }
     };
 
-    let walker = RepoWalker::new(repo_root.clone())
+    let walker = RepoWalker::new(repo_root)
         .respect_gitignore(false) // Don't respect gitignore - find ALL Go projects
         .skip_node_modules(true)
         .skip_worktrees(true)

@@ -90,13 +90,13 @@ fn main() {
         println!("Using --latest flag to update to latest versions");
     }
 
-    let walker = RepoWalker::new(start_dir.clone())
+    let walker = RepoWalker::new(start_dir)
         .respect_gitignore(false) // Don't respect gitignore - find ALL Node.js projects
         .include_hidden(true); // Include hidden directories
 
     for entry in walker.walk_with_ignore() {
         // Check for directories with package.json
-        if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+        if entry.file_type().is_some_and(|ft| ft.is_dir()) {
             let dir_path = entry.path();
 
             // Determine package manager to use

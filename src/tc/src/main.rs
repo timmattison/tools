@@ -76,14 +76,12 @@ impl TokenizerModel {
 fn format_count(n: usize) -> String {
     let s = n.to_string();
     let mut result = String::new();
-    let mut count = 0;
 
-    for c in s.chars().rev() {
+    for (count, c) in s.chars().rev().enumerate() {
         if count > 0 && count % 3 == 0 {
             result.push(',');
         }
         result.push(c);
-        count += 1;
     }
 
     result.chars().rev().collect()
@@ -140,7 +138,7 @@ fn main() -> Result<()> {
     let tokenizer = model.get_tokenizer().context("Failed to load tokenizer")?;
 
     let mut file_counts = Vec::new();
-    let mut total_tokens = 0usize;
+    let mut total_tokens = 0_usize;
 
     // If no files specified, read from stdin
     if cli.files.is_empty() {

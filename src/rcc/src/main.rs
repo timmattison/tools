@@ -5,7 +5,6 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
-use toml;
 use which::which;
 
 /// Rust Cross Compiler helper - simplifies cross-compilation setup

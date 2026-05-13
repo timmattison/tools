@@ -117,8 +117,8 @@ fn print_human_readable(processes: &[ProcessInfo], verbose: bool) {
         }
     } else {
         println!(
-            "{:<8} {:<20} {:<15} {:<10} {}",
-            "PID", "NAME", "USER", "ACCESS", "FILE"
+            "{:<8} {:<20} {:<15} {:<10} FILE",
+            "PID", "NAME", "USER", "ACCESS"
         );
         println!("{}", "-".repeat(80));
 
@@ -142,10 +142,15 @@ fn print_human_readable(processes: &[ProcessInfo], verbose: bool) {
 }
 
 fn truncate_string(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    // Compare on character counts (not bytes) and truncate via chars().take so
+    // we never slice in the middle of a multi-byte UTF-8 codepoint.
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        let keep = max_len.saturating_sub(3);
+        let prefix: String = s.chars().take(keep).collect();
+        format!("{prefix}...")
     }
 }
 
@@ -308,7 +313,7 @@ fn get_file_users_macos(target_path: &Path) -> Result<Vec<ProcessInfo>> {
     let output = if is_dir {
         // Use +D for recursive directory search
         Command::new("lsof")
-            .args(&["+D", &target_str])
+            .args(["+D", &target_str])
             .output()
             .context("Failed to execute lsof command")?
     } else {

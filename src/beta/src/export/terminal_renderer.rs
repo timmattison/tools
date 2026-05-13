@@ -723,13 +723,13 @@ impl TerminalState {
                     let color_index = (param - 30) as u8;
                     self.current_fg = self.theme.get_color(color_index);
                 }
-                38 => {
+                38
                     // Extended foreground color
-                    if i + 1 < param_vec.len() {
+                    if i + 1 < param_vec.len() => {
                         match param_vec[i + 1] {
-                            5 => {
+                            5
                                 // 256-color mode: ESC[38;5;n
-                                if i + 2 < param_vec.len() {
+                                if i + 2 < param_vec.len() => {
                                     let color_index = param_vec[i + 2] as u8;
                                     if (color_index as usize) < self.dynamic_palette.len() {
                                         self.current_fg =
@@ -739,33 +739,30 @@ impl TerminalState {
                                     }
                                     i += 2; // Skip the 5 and color index
                                 }
-                            }
-                            2 => {
+                            2
                                 // 24-bit RGB mode: ESC[38;2;r;g;b
-                                if i + 4 < param_vec.len() {
+                                if i + 4 < param_vec.len() => {
                                     let r = param_vec[i + 2] as u8;
                                     let g = param_vec[i + 3] as u8;
                                     let b = param_vec[i + 4] as u8;
                                     self.current_fg = (r, g, b);
                                     i += 4; // Skip the 2, r, g, b
                                 }
-                            }
                             _ => {}
                         }
                     }
-                }
                 40..=47 => {
                     // Background colors
                     let color_index = (param - 40) as u8;
                     self.current_bg = self.theme.get_color(color_index);
                 }
-                48 => {
+                48
                     // Extended background color
-                    if i + 1 < param_vec.len() {
+                    if i + 1 < param_vec.len() => {
                         match param_vec[i + 1] {
-                            5 => {
+                            5
                                 // 256-color mode: ESC[48;5;n
-                                if i + 2 < param_vec.len() {
+                                if i + 2 < param_vec.len() => {
                                     let color_index = param_vec[i + 2] as u8;
                                     if (color_index as usize) < self.dynamic_palette.len() {
                                         self.current_bg =
@@ -775,21 +772,18 @@ impl TerminalState {
                                     }
                                     i += 2; // Skip the 5 and color index
                                 }
-                            }
-                            2 => {
+                            2
                                 // 24-bit RGB mode: ESC[48;2;r;g;b
-                                if i + 4 < param_vec.len() {
+                                if i + 4 < param_vec.len() => {
                                     let r = param_vec[i + 2] as u8;
                                     let g = param_vec[i + 3] as u8;
                                     let b = param_vec[i + 4] as u8;
                                     self.current_bg = (r, g, b);
                                     i += 4; // Skip the 2, r, g, b
                                 }
-                            }
                             _ => {}
                         }
                     }
-                }
                 90..=97 => {
                     // Bright foreground colors
                     let color_index = (param - 90 + 8) as u8;
@@ -891,12 +885,11 @@ impl Perform for TerminalState {
                     self.put_char(' ');
                 }
             }
-            b'\x08' => {
+            b'\x08'
                 // Backspace
-                if self.cursor_x > 0 {
+                if self.cursor_x > 0 => {
                     self.cursor_x -= 1;
                 }
-            }
             _ => {}
         }
     }
@@ -922,10 +915,10 @@ impl Perform for TerminalState {
         let first_param = std::str::from_utf8(params[0]).unwrap_or("");
 
         match first_param {
-            "4" => {
+            "4"
                 // OSC 4 ; color_index ; color_spec ST
                 // Set/modify color palette entry
-                if params.len() >= 3 {
+                if params.len() >= 3 => {
                     if let Ok(index) = std::str::from_utf8(params[1]).unwrap_or("").parse::<u8>() {
                         let color_spec = std::str::from_utf8(params[2]).unwrap_or("");
                         if let Some(color) = self.parse_color_spec(color_spec) {
@@ -935,49 +928,44 @@ impl Perform for TerminalState {
                         }
                     }
                 }
-            }
-            "10" => {
+            "10"
                 // OSC 10 ; color_spec ST - Set text foreground color
-                if params.len() >= 2 {
+                if params.len() >= 2 => {
                     let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
                     if let Some(color) = self.parse_color_spec(color_spec) {
                         self.override_fg = Some(color);
                     }
                 }
-            }
-            "11" => {
+            "11"
                 // OSC 11 ; color_spec ST - Set text background color
-                if params.len() >= 2 {
+                if params.len() >= 2 => {
                     let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
                     if let Some(color) = self.parse_color_spec(color_spec) {
                         self.override_bg = Some(color);
                     }
                 }
-            }
-            "17" => {
+            "17"
                 // OSC 17 ; color_spec ST - Set selection background color
-                if params.len() >= 2 {
+                if params.len() >= 2 => {
                     let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
                     if let Some(color) = self.parse_color_spec(color_spec) {
                         self.selection_bg = Some(color);
                     }
                 }
-            }
-            "19" => {
+            "19"
                 // OSC 19 ; color_spec ST - Set selection foreground color
-                if params.len() >= 2 {
+                if params.len() >= 2 => {
                     let color_spec = std::str::from_utf8(params[1]).unwrap_or("");
                     if let Some(color) = self.parse_color_spec(color_spec) {
                         self.selection_fg = Some(color);
                     }
                 }
-            }
             "52" => {
                 // OSC 52 - Clipboard operations - ignore for security
             }
-            "104" => {
+            "104"
                 // OSC 104 ; index_list ST - Reset color palette entries
-                if params.len() >= 2 {
+                if params.len() >= 2 => {
                     let indices = std::str::from_utf8(params[1]).unwrap_or("");
                     if indices.is_empty() {
                         // Reset all colors
@@ -996,7 +984,6 @@ impl Perform for TerminalState {
                         }
                     }
                 }
-            }
             "110" => {
                 // OSC 110 ST - Reset text foreground color
                 self.override_fg = None;

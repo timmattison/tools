@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone)]
 pub struct GitHubClient {
     client: reqwest::Client,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "retained for future API calls that need the raw token")]
     token: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct User {
     pub login: String,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub id: i64,
     pub name: Option<String>,
     pub email: Option<String>,
@@ -25,7 +25,7 @@ pub struct User {
 #[derive(Debug, Deserialize)]
 pub struct Organization {
     pub login: String,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub id: i64,
     pub description: Option<String>,
     pub public_repos: Option<i32>,
@@ -33,24 +33,24 @@ pub struct Organization {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Repository {
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub id: i64,
     pub name: String,
     pub full_name: String,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub html_url: String,
     pub ssh_url: String,
     pub clone_url: String,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub description: Option<String>,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub fork: bool,
     pub archived: bool,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub disabled: bool,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub private: bool,
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "deserialized from GitHub API but not yet surfaced")]
     pub default_branch: Option<String>,
 }
 

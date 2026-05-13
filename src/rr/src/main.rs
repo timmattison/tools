@@ -47,8 +47,7 @@ fn run_cargo_clean(dir: &Path, dry_run: bool) -> Result<(), std::io::Error> {
             dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "cargo clean failed",
         ));
     }
@@ -63,14 +62,12 @@ fn calculate_target_size(dir: &Path) -> u64 {
         return 0;
     }
 
-    let mut total_size = 0u64;
+    let mut total_size = 0_u64;
 
-    for entry in WalkDir::new(&target_dir) {
-        if let Ok(entry) = entry {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.is_file() {
-                    total_size += metadata.len();
-                }
+    for entry in WalkDir::new(&target_dir).into_iter().flatten() {
+        if let Ok(metadata) = entry.metadata() {
+            if metadata.is_file() {
+                total_size += metadata.len();
             }
         }
     }
@@ -122,12 +119,12 @@ fn main() {
     println!();
 
     let mut total_cleaned = 0;
-    let mut total_size_freed = 0u64;
-    let mut total_not_deleted = 0u64;
+    let mut total_size_freed = 0_u64;
+    let mut total_not_deleted = 0_u64;
     let mut projects_found = 0;
     let mut total_failed = 0;
 
-    let walker = RepoWalker::new(start_dir.clone())
+    let walker = RepoWalker::new(start_dir)
         .respect_gitignore(false) // Don't respect gitignore - find ALL Rust projects
         .skip_node_modules(true)
         .skip_worktrees(!cli.worktrees)

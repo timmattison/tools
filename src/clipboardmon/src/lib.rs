@@ -10,7 +10,12 @@ pub trait Transformer: Send {
     /// Check if the clipboard content is relevant for this transformer
     fn is_relevant(&self, content: &str) -> bool;
 
-    /// Transform the content
+    /// Transform the content.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transformation fails (for example, an invalid
+    /// input or an external operation reported by the implementor).
     fn transform(&self, content: &str) -> Result<String, Box<dyn Error>>;
 
     /// Get the waiting message to display at startup
@@ -24,7 +29,13 @@ pub trait Transformer: Send {
     }
 }
 
-/// Monitor clipboard and apply transformations
+/// Monitor clipboard and apply transformations.
+///
+/// # Errors
+///
+/// Returns an error if the system clipboard cannot be opened, or — when the
+/// transformer rejects the current contents — if those rejection errors should
+/// be surfaced. Transient `set_text` failures are logged and the loop continues.
 pub fn monitor_clipboard<T: Transformer>(transformer: T, poll_interval: Duration) -> Result<()> {
     let mut clipboard = Clipboard::new()?;
     let mut last_seen = String::new();

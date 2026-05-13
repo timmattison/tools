@@ -1503,15 +1503,14 @@ fn read_yes_no_with_ctrlc() -> bool {
                         let _ = io::stderr().flush();
                         let _ = crossterm::terminal::enable_raw_mode();
                     }
-                    KeyCode::Backspace => {
-                        if input.pop().is_some() {
+                    KeyCode::Backspace
+                        if input.pop().is_some() => {
                             // Erase character from display
                             let _ = crossterm::terminal::disable_raw_mode();
                             eprint!("\x08 \x08"); // backspace, space, backspace
                             let _ = io::stderr().flush();
                             let _ = crossterm::terminal::enable_raw_mode();
                         }
-                    }
                     _ => {}
                 }
             }
@@ -2427,7 +2426,7 @@ mod tests {
             let file = temp_dir.path().join("test.txt");
             fs::write(&file, "content").unwrap();
 
-            let result = resolve_sources(&[file.clone()], false).unwrap();
+            let result = resolve_sources(std::slice::from_ref(&file), false).unwrap();
             assert_eq!(result, vec![file]);
         }
 
@@ -2439,7 +2438,7 @@ mod tests {
             fs::write(&file, "content").unwrap();
 
             // Without --literal flag, but file exists literally
-            let result = resolve_sources(&[file.clone()], false).unwrap();
+            let result = resolve_sources(std::slice::from_ref(&file), false).unwrap();
             assert_eq!(result, vec![file]);
         }
 
@@ -2539,7 +2538,7 @@ mod tests {
             fs::write(&bracket_file, "brackets").unwrap();
 
             // When [abc].txt exists, it should be used literally, NOT expanded to a.txt, b.txt
-            let result = resolve_sources(&[bracket_file.clone()], false).unwrap();
+            let result = resolve_sources(std::slice::from_ref(&bracket_file), false).unwrap();
             assert_eq!(result, vec![bracket_file]);
         }
     }

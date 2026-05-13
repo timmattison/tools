@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(format_memory(1024 * 1024 * 1024), "1 GiB");
 
         // Verify large values don't panic (precision is documented in the function)
-        let one_tib = 1024u64 * 1024 * 1024 * 1024;
+        let one_tib = 1024_u64 * 1024 * 1024 * 1024;
         assert_eq!(format_memory(one_tib), "1 TiB");
     }
 

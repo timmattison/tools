@@ -478,7 +478,7 @@ alias ttv='tt --verbose'
     #[test]
     fn test_replace_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# Some config
+        let old_contents = r"# Some config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -490,7 +490,7 @@ function tt() {
 
 # More config
 export BAZ=qux
-"#;
+";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -509,7 +509,7 @@ export BAZ=qux
     #[test]
     fn test_upgrade_old_installation() {
         let integration = create_test_integration();
-        let old_contents = r#"# Some config
+        let old_contents = r"# Some config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -521,7 +521,7 @@ alias ttv='tt --verbose'
 
 # More config
 export BAZ=qux
-"#;
+";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -563,7 +563,7 @@ export BAZ=qux
     #[test]
     fn test_upgrade_old_format_at_file_start() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
@@ -572,7 +572,7 @@ alias ttv='tt --verbose'
 
 # Other config
 export PATH=/usr/bin
-"#;
+";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -590,7 +590,7 @@ export PATH=/usr/bin
     #[test]
     fn test_upgrade_old_format_at_file_end() {
         let integration = create_test_integration();
-        let old_contents = r#"# Other config
+        let old_contents = r"# Other config
 export PATH=/usr/bin
 
 # testtool - Test Tool shell integration
@@ -598,7 +598,7 @@ export PATH=/usr/bin
 function tt() {
     OLD CONTENT
 }
-alias ttv='tt --verbose'"#;
+alias ttv='tt --verbose'";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -616,12 +616,12 @@ alias ttv='tt --verbose'"#;
     #[test]
     fn test_upgrade_old_format_only_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
 }
-alias ttv='tt --verbose'"#;
+alias ttv='tt --verbose'";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -645,12 +645,12 @@ alias ttv='tt --verbose'"#;
         .with_old_end_marker("FIRST_MARKER")
         .with_old_end_marker("SECOND_MARKER");
 
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 OLD LINE 1
 FIRST_MARKER
 SHOULD_BE_PRESERVED
 SECOND_MARKER
-"#;
+";
         let result = integration.upgrade_old_installation(old_contents);
 
         // Should not need warning (old end marker was found)
@@ -695,7 +695,7 @@ export BAZ=qux
     #[test]
     fn test_replace_block_at_file_start() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
@@ -704,7 +704,7 @@ function tt() {
 
 # Other config
 export PATH=/usr/bin
-"#;
+";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -720,7 +720,7 @@ export PATH=/usr/bin
     #[test]
     fn test_replace_block_at_file_end() {
         let integration = create_test_integration();
-        let old_contents = r#"# Other config
+        let old_contents = r"# Other config
 export PATH=/usr/bin
 
 # testtool - Test Tool shell integration
@@ -728,7 +728,7 @@ export PATH=/usr/bin
 function tt() {
     OLD CONTENT
 }
-# End testtool shell integration"#;
+# End testtool shell integration";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -744,12 +744,12 @@ function tt() {
     #[test]
     fn test_replace_block_only_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# testtool - Test Tool shell integration
+        let old_contents = r"# testtool - Test Tool shell integration
 # Added by: testtool --shell-setup
 function tt() {
     OLD CONTENT
 }
-# End testtool shell integration"#;
+# End testtool shell integration";
         let result = integration.replace_block(old_contents);
 
         // Should not need warning (end marker was found)
@@ -801,7 +801,7 @@ export FOO=bar
     #[test]
     fn test_replace_is_idempotent() {
         let integration = create_test_integration();
-        let initial = r#"# Config
+        let initial = r"# Config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -812,7 +812,7 @@ function tt() {
 # End testtool shell integration
 
 export BAZ=qux
-"#;
+";
         let first_replace = integration.replace_block(initial);
         let second_replace = integration.replace_block(&first_replace.content);
 
@@ -826,7 +826,7 @@ export BAZ=qux
     #[test]
     fn test_upgrade_then_replace_is_idempotent() {
         let integration = create_test_integration();
-        let old_format = r#"# Config
+        let old_format = r"# Config
 export FOO=bar
 
 # testtool - Test Tool shell integration
@@ -837,7 +837,7 @@ function tt() {
 alias ttv='tt --verbose'
 
 export BAZ=qux
-"#;
+";
         // First upgrade from old format
         let upgraded = integration.upgrade_old_installation(old_format);
         // Then replace (simulating running --shell-setup again)
@@ -875,7 +875,7 @@ export BAZ=qux
     #[test]
     fn test_preserves_comments_around_block() {
         let integration = create_test_integration();
-        let old_contents = r#"# === MY CUSTOM SECTION ===
+        let old_contents = r"# === MY CUSTOM SECTION ===
 export FOO=bar
 # === END CUSTOM ===
 
@@ -885,7 +885,7 @@ OLD
 
 # === ANOTHER SECTION ===
 export BAZ=qux
-"#;
+";
         let result = integration.replace_block(old_contents);
 
         assert!(result.content.contains("# === MY CUSTOM SECTION ==="));
@@ -1111,14 +1111,14 @@ alias ll='ls -la'
             "\nfunction prmv() { prcp --rm; }\n",
         );
 
-        let file_with_both = r#"# cwt - Change Worktree shell integration
+        let file_with_both = r"# cwt - Change Worktree shell integration
 function wt() { OLD_CWT; }
 # End cwt shell integration
 
 # prcp - Progress Copy shell integration
 function prmv() { OLD_PRCP; }
 # End prcp shell integration
-"#;
+";
         // Replacing cwt should not affect prcp
         let after_cwt_replace = cwt.replace_block(file_with_both);
 

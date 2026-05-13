@@ -222,13 +222,16 @@ fn generate_binary_data(bytes: usize, format: OutputFormat, dry_run: bool) -> Re
     println!("Format: {:?}", format);
     println!("Data length: {} characters", formatted_data.len());
 
-    // Show a preview of the data (first 50 characters)
-    let preview = if formatted_data.len() > 50 {
-        format!("{}...", &formatted_data[..50])
+    // Show a preview of the data (first 50 characters). Use chars().take so the
+    // truncation is safe on multi-byte UTF-8 (random text could include
+    // wide-character output in future formats).
+    let preview = if formatted_data.chars().count() > 50 {
+        let prefix: String = formatted_data.chars().take(50).collect();
+        format!("{prefix}...")
     } else {
         formatted_data
     };
-    println!("Preview: {}", preview);
+    println!("Preview: {preview}");
 
     Ok(())
 }

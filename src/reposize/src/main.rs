@@ -4,9 +4,9 @@ use repowalker::{find_git_repo, RepoWalker};
 use std::process::exit;
 
 fn calculate_dir_size(repo_root: std::path::PathBuf) -> Result<u64, std::io::Error> {
-    let mut total_size = 0u64;
+    let mut total_size = 0_u64;
 
-    let walker = RepoWalker::new(repo_root.clone())
+    let walker = RepoWalker::new(repo_root)
         .respect_gitignore(true)
         .skip_node_modules(true)
         .skip_worktrees(true);

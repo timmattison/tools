@@ -386,17 +386,22 @@ fn estimate_tokens(text: &str) -> usize {
     text.len() / 4
 }
 
-/// Remove text between <think> and </think> tags
+/// Remove text between `<think>` and `</think>` tags
 fn remove_thinking_text(text: &str) -> String {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+
     let mut result = text.to_string();
 
-    while let Some(start) = result.find("<think>") {
-        if let Some(end_pos) = result[start..].find("</think>") {
-            let end = start + end_pos + "</think>".len();
-            result.replace_range(start..end, "");
-        } else {
+    while let Some(start) = result.find(OPEN) {
+        // `start` was returned by str::find, so it is a valid UTF-8 boundary.
+        // Splitting at `start` lets us scan the tail half without slicing.
+        let (_, tail) = result.split_at(start);
+        let Some(end_pos) = tail.find(CLOSE) else {
             break;
-        }
+        };
+        let end = start + end_pos + CLOSE.len();
+        result.replace_range(start..end, "");
     }
 
     result

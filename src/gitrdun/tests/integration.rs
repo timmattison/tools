@@ -162,7 +162,7 @@ mod cli_tests {
 
     #[test]
     fn test_cli_defaults() {
-        let args = Args::parse_from(&["gitrdun"]);
+        let args = Args::parse_from(["gitrdun"]);
 
         assert_eq!(args.start, "24h");
         assert_eq!(args.end, None);
@@ -181,7 +181,7 @@ mod cli_tests {
 
     #[test]
     fn test_cli_with_args() {
-        let args = Args::parse_from(&[
+        let args = Args::parse_from([
             "gitrdun",
             "--start",
             "7d",
