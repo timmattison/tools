@@ -47,16 +47,103 @@ enum Commands {
     },
 }
 
+/// Maximum number of consecutive `tsm record` failures before the precmd
+/// hook self-disables for the current shell.
+const FAILURE_THRESHOLD: u32 = 3;
+
 /// Generate the zsh `eval`-able shell-init snippet.
 ///
-/// In the red commit this returns an obviously-broken placeholder so the
-/// behavioral test suite fails. The green commit replaces the body with the
-/// actual snippet.
-fn generate_zsh_snippet(_session_id: &SessionId) -> String {
-    String::from("# tsm placeholder\n")
+/// The emitted snippet, when sourced via `eval "$(tsm shell-init zsh)"`:
+///
+/// 1. Bails out silently if `$TSM_DISABLE` is set in the environment.
+/// 2. Runs `tsm --version` as a health check with a ~1 second timeout. On
+///    failure it prints one warning to stderr and returns without installing
+///    the hook.
+/// 3. Exports `$TSM_SESSION_ID`. The id is inlined into the snippet at print
+///    time (one fresh id per `tsm shell-init zsh` invocation). If the env var
+///    is already set on entry, the existing value is preserved.
+/// 4. Registers a `precmd` hook that backgrounds `tsm record &!`, passing
+///    `--exit-code` and `--last-command`. Before backgrounding, the hook
+///    reads `$XDG_STATE_HOME/tsm/fail-count.<shell-pid>`; if the count has
+///    reached the failure threshold it unregisters itself and emits one
+///    warning line pointing at the error log.
+/// 5. Does NOT emit any OSC pane-title sequences; pane-title work is deferred
+///    to a later slice.
+fn generate_zsh_snippet(session_id: &SessionId) -> String {
+    let id = session_id.as_hex();
+    let threshold = FAILURE_THRESHOLD;
+    format!(
+        r#"# === tsm shell integration (begin) ===
+if [[ -n "${{TSM_DISABLE-}}" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+
+# Health check: tsm --version with a ~1 second timeout. macOS does not ship
+# GNU timeout(1), so we implement the timeout inline by backgrounding the
+# health check, racing it against a sleep, and killing the loser.
+_tsm_health_check() {{
+    local _pid _watchdog _rc
+    ( tsm --version >/dev/null 2>&1 ) &
+    _pid=$!
+    ( sleep 1 && kill -TERM $_pid 2>/dev/null ) &!
+    _watchdog=$!
+    if wait $_pid 2>/dev/null; then
+        _rc=0
+    else
+        _rc=$?
+    fi
+    kill $_watchdog 2>/dev/null
+    return $_rc
+}}
+if ! _tsm_health_check; then
+    unset -f _tsm_health_check
+    print -u2 "tsm: health check failed; tsm functionality disabled for this shell"
+    return 0 2>/dev/null || exit 0
+fi
+unset -f _tsm_health_check
+
+# Export session id. The literal hex below is generated fresh by `tsm shell-init`
+# at print time, so each `eval "$(tsm shell-init zsh)"` yields a new id. If
+# TSM_SESSION_ID is already set in the environment (parent shell exported it),
+# the existing value is preserved.
+: ${{TSM_SESSION_ID:={id}}}
+export TSM_SESSION_ID
+
+typeset -g _tsm_state_dir="${{XDG_STATE_HOME:-$HOME/.local/state}}/tsm"
+typeset -g _tsm_fail_file="${{_tsm_state_dir}}/fail-count.$$"
+typeset -g _tsm_error_log="${{_tsm_state_dir}}/errors.log"
+
+_tsm_precmd() {{
+    local _last_exit=$?
+    local _last_cmd
+    _last_cmd=$(fc -ln -1 2>/dev/null) || _last_cmd=""
+
+    # Self-disable after {threshold} consecutive failures. The recorder writes
+    # this counter; we read it synchronously before dispatching the next call.
+    if [[ -r "$_tsm_fail_file" ]]; then
+        local _fc
+        _fc=$(<"$_tsm_fail_file")
+        if [[ "$_fc" -ge {threshold} ]]; then
+            add-zsh-hook -d precmd _tsm_precmd
+            rm -f "$_tsm_fail_file"
+            print -u2 "tsm: precmd hook disabled after {threshold} consecutive failures; see ${{_tsm_error_log}}"
+            return 0
+        fi
+    fi
+
+    # Dispatch recorder in the background and disown so the parent shell never
+    # waits and the prompt is not delayed.
+    {{ tsm record --exit-code "$_last_exit" --last-command "$_last_cmd" }} &!
+}}
+
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _tsm_precmd
+# === tsm shell integration (end) ===
+"#
+    )
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::ShellInit { shell } => {
@@ -76,7 +163,6 @@ fn main() -> anyhow::Result<()> {
             // from the hot path).
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
