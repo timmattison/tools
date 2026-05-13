@@ -329,7 +329,7 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn is_video_file(file_path: &PathBuf) -> bool {
+fn is_video_file(file_path: &Path) -> bool {
     if let Some(extension) = file_path.extension() {
         if let Some(ext_str) = extension.to_str() {
             let ext_lower = ext_str.to_lowercase();
@@ -355,7 +355,7 @@ fn is_video_file(file_path: &PathBuf) -> bool {
     }
 }
 
-fn is_image_file(file_path: &PathBuf) -> bool {
+fn is_image_file(file_path: &Path) -> bool {
     if let Some(extension) = file_path.extension() {
         if let Some(ext_str) = extension.to_str() {
             let ext_lower = ext_str.to_lowercase();
@@ -384,7 +384,7 @@ fn is_image_file(file_path: &PathBuf) -> bool {
     }
 }
 
-fn is_text_file(file_path: &PathBuf) -> bool {
+fn is_text_file(file_path: &Path) -> bool {
     // If it's not an image or video file, treat it as text
     !is_image_file(file_path) && !is_video_file(file_path)
 }
@@ -479,7 +479,7 @@ fn validate_terminal_for_graphics(
     Ok(())
 }
 
-fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
+fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
 
@@ -519,13 +519,15 @@ fn display_video_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
     Ok(())
 }
 
-fn setup_video_controls(
-    terminal_caps: &TerminalCapabilities,
-) -> Result<(
+/// Bundle of state created by [`setup_video_controls`]: optional raw-mode
+/// guard, the channel receiving keyboard events, and the input thread handle.
+type VideoControlSetup = (
     Option<termion::raw::RawTerminal<io::Stdout>>,
     std::sync::mpsc::Receiver<VideoControl>,
     Option<thread::JoinHandle<()>>,
-)> {
+);
+
+fn setup_video_controls(terminal_caps: &TerminalCapabilities) -> Result<VideoControlSetup> {
     let supports_interactive_controls = terminal_caps.supports_raw_mode;
 
     if !supports_interactive_controls {
@@ -611,9 +613,18 @@ fn handle_frame_timing(
         thread::sleep(Duration::from_secs_f64(time_ahead));
         Ok((current_time, false))
     } else if current_time < expected_video_time && !args.do_not_drop_frames {
-        // We're behind schedule - check if we should drop frames
+        // We're behind schedule - check if we should drop frames.
+        // time_behind > 0 (from the branch condition) and fps >= 0, so the
+        // product is non-negative; clamp to u32::MAX to avoid truncation panics
+        // if it ever exceeds that bound.
         let time_behind = expected_video_time - current_time;
-        let frames_behind = (time_behind * fps) as u32;
+        let frames_behind_f = (time_behind * fps).clamp(0.0, f64::from(u32::MAX));
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "frames_behind_f is clamped to [0, u32::MAX] above"
+        )]
+        let frames_behind = frames_behind_f as u32;
 
         if frames_behind > 1 {
             // Skip frames to catch up
@@ -636,6 +647,10 @@ fn handle_frame_timing(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "frame display needs image, args, timing, and three pieces of mutable per-call state; bundling into a struct just shifts boilerplate"
+)]
 fn process_frame_display(
     img: DynamicImage,
     args: &Args,
@@ -759,7 +774,7 @@ impl Drop for AlternateScreenGuard {
 }
 
 fn play_video_simple(
-    file_path: &PathBuf,
+    file_path: &Path,
     _frame_duration: Duration,
     args: &Args,
     duration: f64,
@@ -774,7 +789,7 @@ fn play_video_simple(
 }
 
 fn play_video_inner(
-    file_path: &PathBuf,
+    file_path: &Path,
     args: &Args,
     duration: f64,
     mut fps: f64,
@@ -1081,7 +1096,7 @@ fn rgb_data_to_image(rgb_data: &[u8], width: u32, height: u32) -> Result<Dynamic
     Ok(DynamicImage::ImageRgb8(rgb_image))
 }
 
-fn get_video_dimensions(file_path: &PathBuf) -> Result<(u32, u32)> {
+fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
     ensure_ffprobe_available()?;
 
     // Use ffprobe to get video dimensions
@@ -1109,21 +1124,17 @@ fn get_video_dimensions(file_path: &PathBuf) -> Result<(u32, u32)> {
 
     let dimensions_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // Parse "width,height" format
-    if let Some(comma_pos) = dimensions_str.find(',') {
-        let width: u32 = dimensions_str[..comma_pos]
-            .parse()
-            .context("Failed to parse video width")?;
-        let height: u32 = dimensions_str[comma_pos + 1..]
-            .parse()
-            .context("Failed to parse video height")?;
+    // Parse "width,height" format using char-based splitting for UTF-8 safety
+    if let Some((width_str, height_str)) = dimensions_str.split_once(',') {
+        let width: u32 = width_str.parse().context("Failed to parse video width")?;
+        let height: u32 = height_str.parse().context("Failed to parse video height")?;
         Ok((width, height))
     } else {
         anyhow::bail!("Invalid dimensions format from ffprobe: {}", dimensions_str);
     }
 }
 
-fn get_video_fps(file_path: &PathBuf) -> Result<f64> {
+fn get_video_fps(file_path: &Path) -> Result<f64> {
     if ensure_ffprobe_available().is_err() {
         eprintln!("Warning: ffprobe not found, using default 24 fps");
         return Ok(24.0);
@@ -1151,17 +1162,18 @@ fn get_video_fps(file_path: &PathBuf) -> Result<f64> {
 
     let fps_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // Parse fraction like "24/1" or "30000/1001"
-    if let Some(slash_pos) = fps_str.find('/') {
-        let numerator: f64 = fps_str[..slash_pos].parse().unwrap_or(24.0);
-        let denominator: f64 = fps_str[slash_pos + 1..].parse().unwrap_or(1.0);
+    // Parse fraction like "24/1" or "30000/1001" using char-based splitting
+    // for UTF-8 safety (in practice ffprobe output is ASCII).
+    if let Some((num_str, denom_str)) = fps_str.split_once('/') {
+        let numerator: f64 = num_str.parse().unwrap_or(24.0);
+        let denominator: f64 = denom_str.parse().unwrap_or(1.0);
         Ok(numerator / denominator)
     } else {
         Ok(fps_str.parse().unwrap_or(24.0))
     }
 }
 
-fn get_video_duration(file_path: &PathBuf) -> Result<f64> {
+fn get_video_duration(file_path: &Path) -> Result<f64> {
     if ensure_ffprobe_available().is_err() {
         eprintln!("Warning: ffprobe not found, using default duration");
         return Ok(60.0); // Default to 60 seconds
@@ -1226,31 +1238,56 @@ fn draw_progress_bar(
 
     // Calculate progress
     let progress = if total_duration > 0.0 {
-        (current_time / total_duration).min(1.0).max(0.0)
+        (current_time / total_duration).clamp(0.0, 1.0)
     } else {
         0.0
     };
 
-    // Format time strings with frame numbers
-    let current_min = (current_time / 60.0) as u32;
-    let current_sec = (current_time % 60.0) as u32;
-    let current_frame = ((current_time % 1.0) * fps) as u32;
+    // Format time strings with frame numbers.
+    // Convert f64 components to u32 via a clamping helper so values that are
+    // negative (shouldn't happen but defend against ffprobe surprises) or
+    // absurdly large get pinned to the u32 range without panicking.
+    let f64_to_u32_clamped = |v: f64| -> u32 {
+        if v.is_nan() || v <= 0.0 {
+            0
+        } else if v >= f64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            // SAFETY of cast: v is finite and in [0.0, u32::MAX), so truncation
+            // toward zero produces a representable u32.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "value is bounded to [0, u32::MAX) above"
+            )]
+            let out = v as u32;
+            out
+        }
+    };
 
-    let total_min = (total_duration / 60.0) as u32;
-    let total_sec = (total_duration % 60.0) as u32;
-    let total_frame = ((total_duration % 1.0) * fps) as u32;
+    let current_min = f64_to_u32_clamped(current_time / 60.0);
+    let current_sec = f64_to_u32_clamped(current_time % 60.0);
+    let current_frame = f64_to_u32_clamped((current_time % 1.0) * fps);
+
+    let total_min = f64_to_u32_clamped(total_duration / 60.0);
+    let total_sec = f64_to_u32_clamped(total_duration % 60.0);
+    let total_frame = f64_to_u32_clamped((total_duration % 1.0) * fps);
 
     let time_str = format!(
         "{:02}:{:02}:{:02} / {:02}:{:02}:{:02}",
         current_min, current_sec, current_frame, total_min, total_sec, total_frame
     );
 
-    // Calculate available width for progress bar (leave space for time and brackets)
-    let time_len = time_str.len() as u32;
+    // Calculate available width for progress bar (leave space for time and brackets).
+    // time_str length here is a tiny ASCII string ("MM:SS:FF / MM:SS:FF" ~= 19 chars),
+    // far below u32::MAX, so the conversion cannot truncate.
+    let time_len = u32::try_from(time_str.len()).unwrap_or(u32::MAX);
     let available_width = terminal_width.saturating_sub(time_len + 4); // 4 chars for " [" and "] "
 
     if available_width > 0 {
-        let filled_chars = (progress * available_width as f64) as u32;
+        // progress is in [0.0, 1.0] (clamped above) and available_width is u32,
+        // so `progress * available_width as f64` is in [0.0, u32::MAX as f64].
+        let filled_chars = f64_to_u32_clamped(progress * f64::from(available_width));
         let empty_chars = available_width - filled_chars;
 
         // Draw the progress bar
@@ -1283,14 +1320,14 @@ fn get_terminal_size() -> Result<(u32, u32)> {
     }
 }
 
-fn display_image_from_file(file_path: &PathBuf, args: &Args) -> Result<()> {
+fn display_image_from_file(file_path: &Path, args: &Args) -> Result<()> {
     let img = image::open(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
     display_image(img, args, args.no_newline)
 }
 
-fn display_text_file(file_path: &PathBuf) -> Result<()> {
+fn display_text_file(file_path: &Path) -> Result<()> {
     let contents = fs::read_to_string(file_path)
         .with_context(|| format!("Failed to read text file: {}", file_path.display()))?;
 
@@ -1341,13 +1378,31 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
         (Some(safe_width), Some(safe_height))
     };
 
-    // Apply scaling
+    // Apply scaling.
+    // args.scale is u8 in [0, 100); scale_factor is therefore in [0.0, 1.0),
+    // so `w as f32 * scale_factor` is non-negative and <= w, and a u32 input
+    // always fits in f32's value range (with possible precision loss for very
+    // large widths, which is acceptable for display scaling).
     let (scaled_width, scaled_height) = if args.scale < 100 {
-        let scale_factor = args.scale as f32 / 100.0;
-        (
-            target_width.map(|w| ((w as f32 * scale_factor) as u32).max(1)),
-            target_height.map(|h| ((h as f32 * scale_factor) as u32).max(1)),
-        )
+        let scale_factor = f32::from(args.scale) / 100.0;
+        let scale_dim = |dim: u32| -> u32 {
+            // Cast u32 -> f32 can lose precision for values above 2^24, but
+            // that's fine for image dimensions in this codebase.
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "image dimensions rarely exceed 2^24"
+            )]
+            let dim_f = dim as f32 * scale_factor;
+            // dim_f is finite and in [0.0, dim as f32], so it fits in u32.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "dim_f is non-negative and bounded by the original u32 dimension"
+            )]
+            let scaled = dim_f as u32;
+            scaled.max(1)
+        };
+        (target_width.map(scale_dim), target_height.map(scale_dim))
     } else {
         (target_width, target_height)
     };
@@ -2392,20 +2447,20 @@ mod tests {
         assert!(fallback_aspect < 4.0);
 
         // Cell pixel estimates should be positive and reasonable
-        assert!(ESTIMATED_CELL_WIDTH_PX >= 6);
-        assert!(ESTIMATED_CELL_WIDTH_PX <= 20);
-        assert!(ESTIMATED_CELL_HEIGHT_PX >= 12);
-        assert!(ESTIMATED_CELL_HEIGHT_PX <= 40);
+        const { assert!(ESTIMATED_CELL_WIDTH_PX >= 6) };
+        const { assert!(ESTIMATED_CELL_WIDTH_PX <= 20) };
+        const { assert!(ESTIMATED_CELL_HEIGHT_PX >= 12) };
+        const { assert!(ESTIMATED_CELL_HEIGHT_PX <= 40) };
 
         // Default sixel dimensions should be reasonable screen sizes
-        assert!(DEFAULT_SIXEL_WIDTH_PX >= 640);
-        assert!(DEFAULT_SIXEL_HEIGHT_PX >= 480);
+        const { assert!(DEFAULT_SIXEL_WIDTH_PX >= 640) };
+        const { assert!(DEFAULT_SIXEL_HEIGHT_PX >= 480) };
 
         // Margins should be between 0.5 and 1.0
-        assert!(SIXEL_HORIZONTAL_MARGIN > 0.5);
-        assert!(SIXEL_HORIZONTAL_MARGIN <= 1.0);
-        assert!(SIXEL_VERTICAL_MARGIN > 0.5);
-        assert!(SIXEL_VERTICAL_MARGIN <= 1.0);
+        const { assert!(SIXEL_HORIZONTAL_MARGIN > 0.5) };
+        const { assert!(SIXEL_HORIZONTAL_MARGIN <= 1.0) };
+        const { assert!(SIXEL_VERTICAL_MARGIN > 0.5) };
+        const { assert!(SIXEL_VERTICAL_MARGIN <= 1.0) };
     }
 
     // =========================================================================
