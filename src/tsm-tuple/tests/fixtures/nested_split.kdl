@@ -1,0 +1,18 @@
+layout {
+    tab name="deep" {
+        pane split_direction="vertical" {
+            pane split_direction="horizontal" {
+                pane id=50
+                pane id=51
+            }
+            pane id=52
+        }
+        pane split_direction="horizontal" {
+            pane id=53
+            pane split_direction="vertical" {
+                pane id=54
+                pane id=55
+            }
+        }
+    }
+}

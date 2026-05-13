@@ -1,0 +1,11 @@
+layout {
+    tab name="mixed" {
+        pane id=30
+        pane {
+            plugin location="zellij:status-bar"
+        }
+        pane id=31
+        pane id=32 plugin="zellij:tab-bar"
+        pane id=33
+    }
+}

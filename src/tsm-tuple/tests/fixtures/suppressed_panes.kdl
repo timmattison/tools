@@ -1,0 +1,7 @@
+layout {
+    tab name="work" {
+        pane id=40
+        pane id=41 suppressed=true
+        pane id=42
+    }
+}
