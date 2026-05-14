@@ -45,14 +45,131 @@ pub struct NumStat {
 /// Input is a single string with `\0`-separated records (the `-z` form).
 /// For renames/copies the new path and original path are split by `\0`
 /// within the entry, which is why we consume two records for a type-2 entry.
-pub fn parse_status(_input: &str) -> Vec<FileEntry> {
-    // Stub.
-    vec![FileEntry {
-        path: String::from("TODO"),
+pub fn parse_status(input: &str) -> Vec<FileEntry> {
+    let pieces: Vec<&str> = input.split('\0').filter(|s| !s.is_empty()).collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < pieces.len() {
+        let piece = pieces[i];
+        let (type_ch, rest) = split_first(piece);
+        match type_ch {
+            Some('1') => {
+                if let Some(rest) = rest.strip_prefix(' ') {
+                    parse_ordinary_entry(rest, None, &mut out);
+                }
+                i += 1;
+            }
+            Some('2') => {
+                let orig = pieces.get(i + 1).map(|s| (*s).to_string());
+                if let Some(rest) = rest.strip_prefix(' ') {
+                    parse_rename_entry(rest, orig, &mut out);
+                }
+                i += 2;
+            }
+            Some('u') => {
+                if let Some(rest) = rest.strip_prefix(' ') {
+                    parse_unmerged_entry(rest, &mut out);
+                }
+                i += 1;
+            }
+            Some('?') => {
+                if let Some(path) = rest.strip_prefix(' ') {
+                    let status = if path.ends_with('/') {
+                        FileStatus::UntrackedDir
+                    } else {
+                        FileStatus::Untracked
+                    };
+                    out.push(FileEntry {
+                        path: path.to_string(),
+                        orig_path: None,
+                        status,
+                        staged: false,
+                    });
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out
+}
+
+fn split_first(s: &str) -> (Option<char>, &str) {
+    let mut chars = s.chars();
+    let first = chars.next();
+    (first, chars.as_str())
+}
+
+fn parse_ordinary_entry(rest: &str, orig: Option<String>, out: &mut Vec<FileEntry>) {
+    // <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
+    let parts: Vec<&str> = rest.splitn(8, ' ').collect();
+    if parts.len() < 8 {
+        return;
+    }
+    emit_xy(parts[0], parts[7], orig, out);
+}
+
+fn parse_rename_entry(rest: &str, orig: Option<String>, out: &mut Vec<FileEntry>) {
+    // <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> <path>
+    let parts: Vec<&str> = rest.splitn(9, ' ').collect();
+    if parts.len() < 9 {
+        return;
+    }
+    emit_xy(parts[0], parts[8], orig, out);
+}
+
+fn parse_unmerged_entry(rest: &str, out: &mut Vec<FileEntry>) {
+    // <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
+    let parts: Vec<&str> = rest.splitn(10, ' ').collect();
+    if parts.len() < 10 {
+        return;
+    }
+    out.push(FileEntry {
+        path: parts[9].to_string(),
         orig_path: None,
-        status: FileStatus::Modified,
+        status: FileStatus::Conflicted,
         staged: false,
-    }]
+    });
+}
+
+fn emit_xy(xy: &str, path: &str, orig: Option<String>, out: &mut Vec<FileEntry>) {
+    let mut xy_chars = xy.chars();
+    let x = xy_chars.next().unwrap_or('.');
+    let y = xy_chars.next().unwrap_or('.');
+    if let Some(status) = char_to_status(x) {
+        out.push(FileEntry {
+            path: path.to_string(),
+            orig_path: orig.clone(),
+            status,
+            staged: true,
+        });
+    }
+    if let Some(status) = char_to_status(y) {
+        // The worktree side of a rename is just an edit on the new path,
+        // not a rename itself — drop orig_path for non-rename statuses.
+        let orig_for_y = match status {
+            FileStatus::Renamed | FileStatus::Copied => orig,
+            _ => None,
+        };
+        out.push(FileEntry {
+            path: path.to_string(),
+            orig_path: orig_for_y,
+            status,
+            staged: false,
+        });
+    }
+}
+
+fn char_to_status(c: char) -> Option<FileStatus> {
+    match c {
+        'M' => Some(FileStatus::Modified),
+        'A' => Some(FileStatus::Added),
+        'D' => Some(FileStatus::Deleted),
+        'R' => Some(FileStatus::Renamed),
+        'C' => Some(FileStatus::Copied),
+        'T' => Some(FileStatus::TypeChange),
+        _ => None,
+    }
 }
 
 /// Parse the output of `git diff [--cached] --numstat -z`.
@@ -60,18 +177,38 @@ pub fn parse_status(_input: &str) -> Vec<FileEntry> {
 /// Returns a map from path to its [`NumStat`]. Renames in `-z` numstat
 /// emit three NUL-separated tokens: `adds\tdels\t\0origPath\0newPath`,
 /// and we key the result on the new path.
-pub fn parse_numstat(_input: &str) -> HashMap<String, NumStat> {
-    // Stub.
-    let mut m = HashMap::new();
-    m.insert(
-        String::from("TODO"),
-        NumStat {
-            adds: 0,
-            dels: 0,
-            binary: false,
-        },
-    );
-    m
+pub fn parse_numstat(input: &str) -> HashMap<String, NumStat> {
+    let pieces: Vec<&str> = input.split('\0').filter(|s| !s.is_empty()).collect();
+    let mut out = HashMap::new();
+    let mut i = 0;
+    while i < pieces.len() {
+        let header = pieces[i];
+        let mut tabs = header.split('\t');
+        let adds_str = tabs.next().unwrap_or("");
+        let dels_str = tabs.next().unwrap_or("");
+        let path_part = tabs.next().unwrap_or("");
+        let (binary, adds, dels) = if adds_str == "-" && dels_str == "-" {
+            (true, 0, 0)
+        } else {
+            (
+                false,
+                adds_str.parse::<u32>().unwrap_or(0),
+                dels_str.parse::<u32>().unwrap_or(0),
+            )
+        };
+        let (path, step) = if path_part.is_empty() {
+            // Rename: next is origPath, then newPath. Key on newPath.
+            let new_path = pieces.get(i + 2).map_or(String::new(), |s| (*s).to_string());
+            (new_path, 3)
+        } else {
+            (path_part.to_string(), 1)
+        };
+        if !path.is_empty() {
+            out.insert(path, NumStat { adds, dels, binary });
+        }
+        i += step;
+    }
+    out
 }
 
 #[cfg(test)]
