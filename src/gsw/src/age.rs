@@ -21,13 +21,31 @@ pub enum AgeDim {
 /// - `< 60m`              → `Nm`
 /// - `< 24h`              → `Nh`
 /// - everything else      → `Nd`
-pub fn format_age(_age: Duration) -> String {
-    String::from("TODO")
+pub fn format_age(age: Duration) -> String {
+    let secs = age.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 60 * 60 {
+        format!("{}m", secs / 60)
+    } else if secs < 60 * 60 * 24 {
+        format!("{}h", secs / (60 * 60))
+    } else {
+        format!("{}d", secs / (60 * 60 * 24))
+    }
 }
 
 /// Classify an age into a display brightness bucket.
-pub fn age_dim_level(_age: Duration) -> AgeDim {
-    AgeDim::Fresh
+pub fn age_dim_level(age: Duration) -> AgeDim {
+    let secs = age.as_secs();
+    if secs < 60 * 5 {
+        AgeDim::Fresh
+    } else if secs < 60 * 60 {
+        AgeDim::Recent
+    } else if secs < 60 * 60 * 24 {
+        AgeDim::Aging
+    } else {
+        AgeDim::Stale
+    }
 }
 
 #[cfg(test)]
