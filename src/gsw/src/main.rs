@@ -8,7 +8,7 @@ use buildinfo::version_string;
 use clap::Parser;
 
 use crate::git::{parse_numstat, parse_status, FileEntry, NumStat};
-use crate::render::{render, RenderOptions};
+use crate::render::{default_max_files, render, RenderOptions};
 use crate::snapshot::build_snapshot;
 
 mod age;
@@ -88,13 +88,13 @@ fn main() -> Result<()> {
         &ages,
     );
 
-    let terminal_width = terminal_size::terminal_size()
-        .map_or(80, |(w, _)| usize::from(w.0));
+    let (terminal_width, terminal_height) = terminal_size::terminal_size()
+        .map_or((80, 24), |(w, h)| (usize::from(w.0), h.0));
 
     let opts = RenderOptions {
         terminal_width,
         bar_width: cli.bar_width,
-        max_files: cli.max_files,
+        max_files: cli.max_files.or(Some(default_max_files(terminal_height))),
     };
 
     println!("{}", render(&snapshot, &opts));

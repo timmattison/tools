@@ -334,9 +334,8 @@ fn center(text: &str, width: usize) -> String {
 /// Reserves space for our own header, separator, and a potential `+N more`
 /// footer (plus one row of breathing room for whatever shell/viddy chrome
 /// sits above us). Always returns at least 1.
-pub fn default_max_files(_terminal_height: u16) -> usize {
-    // Stub: return a wrong fixed value so behavioral tests fail.
-    999
+pub fn default_max_files(terminal_height: u16) -> usize {
+    usize::from(terminal_height.saturating_sub(4)).max(1)
 }
 
 /// Like [`format_age`] but spells out two units, e.g. `5m23s` or `2h14m`.
