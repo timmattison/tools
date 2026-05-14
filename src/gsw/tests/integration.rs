@@ -92,6 +92,32 @@ fn shows_untracked_file() {
 }
 
 #[test]
+fn outside_git_repo_prints_friendly_header_and_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Deliberately no `git init`. Set GIT_CEILING_DIRECTORIES so git won't
+    // walk upward into whatever happens to be above /tmp on this host.
+    let parent = dir.path().parent().unwrap_or(Path::new("/"));
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .current_dir(dir.path())
+        .env("GIT_CEILING_DIRECTORIES", parent)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw should exit 0 outside a repo: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("not a git repository"),
+        "expected a friendly header outside a repo: {stdout}",
+    );
+}
+
+#[test]
 fn shows_untracked_directory_with_slash() {
     let dir = setup_repo();
     fs::create_dir(dir.path().join("new-dir")).unwrap();
