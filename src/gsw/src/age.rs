@@ -15,22 +15,17 @@ pub enum AgeDim {
     Stale,
 }
 
-/// Format a duration like `30s`, `5m`, `2h`, `3d`. Always 1–3 chars + unit.
-///
-/// - `< 60s`              → `Ns`
-/// - `< 60m`              → `Nm`
-/// - `< 24h`              → `Nh`
-/// - everything else      → `Nd`
-pub fn format_age(age: Duration) -> String {
+/// Format a duration with two units, e.g. `5m23s`, `2h14m`, `3d12h`.
+pub fn format_age_detailed(age: Duration) -> String {
     let secs = age.as_secs();
     if secs < 60 {
         format!("{secs}s")
-    } else if secs < 60 * 60 {
-        format!("{}m", secs / 60)
-    } else if secs < 60 * 60 * 24 {
-        format!("{}h", secs / (60 * 60))
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     } else {
-        format!("{}d", secs / (60 * 60 * 24))
+        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
     }
 }
 
@@ -53,31 +48,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_seconds_below_a_minute() {
-        assert_eq!(format_age(Duration::from_secs(0)), "0s");
-        assert_eq!(format_age(Duration::from_secs(30)), "30s");
-        assert_eq!(format_age(Duration::from_secs(59)), "59s");
+    fn detailed_age_seconds_only() {
+        assert_eq!(format_age_detailed(Duration::from_secs(0)), "0s");
+        assert_eq!(format_age_detailed(Duration::from_secs(5)), "5s");
+        assert_eq!(format_age_detailed(Duration::from_secs(59)), "59s");
     }
 
     #[test]
-    fn format_minutes_below_an_hour() {
-        assert_eq!(format_age(Duration::from_secs(60)), "1m");
-        assert_eq!(format_age(Duration::from_secs(60 * 5)), "5m");
-        assert_eq!(format_age(Duration::from_secs(60 * 59)), "59m");
+    fn detailed_age_minutes_and_seconds() {
+        assert_eq!(format_age_detailed(Duration::from_secs(60)), "1m0s");
+        assert_eq!(format_age_detailed(Duration::from_secs(5 * 60 + 23)), "5m23s");
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(59 * 60 + 59)),
+            "59m59s",
+        );
     }
 
     #[test]
-    fn format_hours_below_a_day() {
-        assert_eq!(format_age(Duration::from_secs(60 * 60)), "1h");
-        assert_eq!(format_age(Duration::from_secs(60 * 60 * 2)), "2h");
-        assert_eq!(format_age(Duration::from_secs(60 * 60 * 23)), "23h");
+    fn detailed_age_hours_and_minutes() {
+        assert_eq!(format_age_detailed(Duration::from_secs(60 * 60)), "1h0m");
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(2 * 3600 + 14 * 60)),
+            "2h14m",
+        );
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(23 * 3600 + 59 * 60)),
+            "23h59m",
+        );
     }
 
     #[test]
-    fn format_days_and_above() {
-        assert_eq!(format_age(Duration::from_secs(60 * 60 * 24)), "1d");
-        assert_eq!(format_age(Duration::from_secs(60 * 60 * 24 * 3)), "3d");
-        assert_eq!(format_age(Duration::from_secs(60 * 60 * 24 * 365)), "365d");
+    fn detailed_age_days_and_hours() {
+        assert_eq!(format_age_detailed(Duration::from_secs(86400)), "1d0h");
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(3 * 86400 + 12 * 3600)),
+            "3d12h",
+        );
     }
 
     #[test]

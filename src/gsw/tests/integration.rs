@@ -118,6 +118,31 @@ fn outside_git_repo_prints_friendly_header_and_exits_zero() {
 }
 
 #[test]
+fn bare_repo_prints_friendly_header_and_exits_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A bare repo has no working tree, so gsw can't render a per-file view.
+    // It should bail out cleanly the same way it does outside any repo.
+    run_git(dir.path(), &["init", "--bare", "-q"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .current_dir(dir.path())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw should exit 0 in a bare repo: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("not a git repository"),
+        "expected a friendly header in a bare repo: {stdout}",
+    );
+}
+
+#[test]
 fn shows_untracked_directory_with_slash() {
     let dir = setup_repo();
     fs::create_dir(dir.path().join("new-dir")).unwrap();

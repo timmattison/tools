@@ -5,7 +5,7 @@ use std::time::Duration;
 use colored::{ColoredString, Colorize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::age::{age_dim_level, format_age, AgeDim};
+use crate::age::{age_dim_level, format_age_detailed, AgeDim};
 use crate::bar::render_bar;
 use crate::git::FileStatus;
 
@@ -45,7 +45,8 @@ pub struct RenderOptions {
 /// Width of the "+adds" / "-dels" / age column fields.
 const ADDS_FIELD: usize = 5;
 const DELS_FIELD: usize = 4;
-const AGE_FIELD: usize = 4;
+/// Wide enough for `59m59s`, `23h59m`, `99d23h`. Older files overflow slightly.
+const AGE_FIELD: usize = 6;
 
 /// Visible separator characters between columns.
 const SEP_PATH_BAR: usize = 0;
@@ -57,13 +58,15 @@ const SEP_DELS_AGE: usize = 3;
 pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     let mut lines = Vec::new();
 
-    lines.push(render_header(snapshot));
-    lines.push(render_separator(opts.terminal_width));
+    let header_plain = header_text(snapshot);
+    let header_width = UnicodeWidthStr::width(header_plain.as_str());
+    lines.push(header_plain.bold().to_string());
+    lines.push(render_separator(header_width));
 
-    let display_count = opts
-        .max_files
-        .unwrap_or(usize::MAX)
-        .min(snapshot.files.len());
+    let display_count = match opts.max_files {
+        Some(0) | None => snapshot.files.len(),
+        Some(n) => n.min(snapshot.files.len()),
+    };
     let max_change = snapshot
         .files
         .iter()
@@ -77,7 +80,7 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         lines.push(render_row(entry, opts, max_change, path_width));
     }
 
-    let hidden = snapshot.files.len() - display_count;
+    let hidden = snapshot.files.len().saturating_sub(display_count);
     if hidden > 0 {
         lines.push(
             format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
@@ -90,8 +93,8 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 }
 
 fn compute_path_width(opts: &RenderOptions) -> usize {
-    // Layout overhead per row: icon(1) + letter(1) + " "(1) + bar(N) + seps + fields.
-    let overhead = 3
+    // Layout overhead per row: icon(1) + " "(1) + letter(1) + " "(1) + bar(N) + seps + fields.
+    let overhead = 4
         + opts.bar_width
         + SEP_PATH_BAR
         + SEP_BAR_ADDS
@@ -103,18 +106,16 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
     opts.terminal_width.saturating_sub(overhead).max(8)
 }
 
-fn render_header(snap: &Snapshot) -> String {
+fn header_text(snap: &Snapshot) -> String {
     let commit_word = if snap.commits_ahead == 1 { "commit" } else { "commits" };
     let age = format_age_detailed(snap.last_commit_age);
-    let header = format!(
+    format!(
         "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
         branch = snap.branch,
         n = snap.commits_ahead,
         word = commit_word,
         base = snap.base,
-        age = age,
-    );
-    header.bold().to_string()
+    )
 }
 
 fn render_separator(width: usize) -> String {
@@ -140,15 +141,24 @@ fn render_row(
     let letter_str = colorize_letter(letter, entry);
     let path_str = colorize_path(&path_padded, entry);
 
-    // Untracked files get a stripped-down row — no bar, no counts.
+    // Untracked files get a stripped-down row — no bar, no counts — but
+    // pad the gutter where bar/adds/dels would be so the age column still
+    // lines up with normal rows above and below it.
     if matches!(
         entry.status,
         FileStatus::Untracked | FileStatus::UntrackedDir
     ) {
-        let age = entry.age.map(format_age).unwrap_or_default();
+        let gutter_width = opts.bar_width
+            + SEP_BAR_ADDS
+            + ADDS_FIELD
+            + SEP_ADDS_DELS
+            + DELS_FIELD
+            + SEP_DELS_AGE;
+        let gutter = " ".repeat(gutter_width);
+        let age = entry.age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
         let age_str = colorize_age(&age_field, entry.age);
-        return format!("{icon_str}{letter_str} {path_str}{age_str}");
+        return format!("{icon_str} {letter_str} {path_str}{gutter}{age_str}");
     }
 
     let bar_raw = if entry.binary {
@@ -182,7 +192,10 @@ fn render_row(
         dels_field
     };
 
-    let age_raw = entry.age.map(format_age).unwrap_or_else(|| String::from("—"));
+    let age_raw = entry
+        .age
+        .map(format_age_detailed)
+        .unwrap_or_else(|| String::from("—"));
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
     let age_str = colorize_age(&age_field, entry.age);
 
@@ -191,7 +204,7 @@ fn render_row(
     let sep_dels_age = " ".repeat(SEP_DELS_AGE);
 
     format!(
-        "{icon_str}{letter_str} {path_str}{bar_str}{sep_bar_adds}{adds_str}{sep_adds_dels}{dels_str}{sep_dels_age}{age_str}",
+        "{icon_str} {letter_str} {path_str}{bar_str}{sep_bar_adds}{adds_str}{sep_adds_dels}{dels_str}{sep_dels_age}{age_str}",
     )
 }
 
@@ -338,20 +351,6 @@ pub fn default_max_files(terminal_height: u16) -> usize {
     usize::from(terminal_height.saturating_sub(4)).max(1)
 }
 
-/// Like [`format_age`] but spells out two units, e.g. `5m23s` or `2h14m`.
-fn format_age_detailed(age: Duration) -> String {
-    let secs = age.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else if secs < 86400 {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    } else {
-        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +413,22 @@ mod tests {
     }
 
     #[test]
+    fn separator_matches_header_visible_width() {
+        // If the separator is wider than the header line, resizing the
+        // terminal smaller wraps it onto the next line. Size it to match.
+        let snap = snap_with(vec![]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let mut lines = out.lines();
+        let header = lines.next().expect("header line");
+        let sep = lines.next().expect("separator line");
+        assert_eq!(
+            UnicodeWidthStr::width(header),
+            UnicodeWidthStr::width(sep),
+            "separator width should match header width\n  header: {header:?}\n  sep:    {sep:?}",
+        );
+    }
+
+    #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
@@ -457,6 +472,47 @@ mod tests {
     }
 
     #[test]
+    fn row_has_space_between_icon_and_status_letter() {
+        let snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            row.contains("● M "),
+            "icon and letter should be separated by a space: {row}",
+        );
+    }
+
+    #[test]
+    fn untracked_row_has_space_between_icon_and_status_letter() {
+        let snap = snap_with(vec![entry(
+            "scratch.txt",
+            FileStatus::Untracked,
+            false,
+            0,
+            0,
+        )]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            row.contains("? ? "),
+            "untracked icon and letter should also be space-separated: {row}",
+        );
+    }
+
+    #[test]
+    fn per_file_age_uses_detailed_two_unit_format() {
+        let mut e = entry("file.rs", FileStatus::Modified, true, 1, 0);
+        e.age = Some(Duration::from_secs(5 * 60 + 23));
+        let snap = snap_with(vec![e]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            row.contains("5m23s"),
+            "per-file age should match the header's two-unit format: {row}",
+        );
+    }
+
+    #[test]
     fn unstaged_file_uses_open_circle_icon() {
         let snap = snap_with(vec![entry("a.rs", FileStatus::Modified, false, 1, 0)]);
         let out = strip_ansi(&render(&snap, &opts()));
@@ -476,6 +532,28 @@ mod tests {
         assert!(
             !row.contains('█') && !row.contains('░'),
             "untracked row should not include a bar: {row}",
+        );
+    }
+
+    #[test]
+    fn untracked_row_aligns_age_column_with_normal_rows() {
+        let modified = entry("file.rs", FileStatus::Modified, false, 5, 2);
+        let mut untracked = entry("scratch.txt", FileStatus::Untracked, false, 0, 0);
+        untracked.age = Some(Duration::from_secs(30));
+        let snap = snap_with(vec![modified, untracked]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let mod_row = out
+            .lines()
+            .find(|l| l.contains("file.rs"))
+            .expect("modified row");
+        let untr_row = out
+            .lines()
+            .find(|l| l.contains("scratch.txt"))
+            .expect("untracked row");
+        assert_eq!(
+            UnicodeWidthStr::width(mod_row),
+            UnicodeWidthStr::width(untr_row),
+            "untracked row should pad to same total width so age columns align:\n  mod:   {mod_row:?}\n  untr:  {untr_row:?}",
         );
     }
 
@@ -596,6 +674,32 @@ mod tests {
     }
 
     #[test]
+    fn max_files_zero_means_unlimited() {
+        let files: Vec<RenderEntry> = (0..5)
+            .map(|i| entry(&format!("f{i}.rs"), FileStatus::Modified, true, 1, 0))
+            .collect();
+        let snap = snap_with(files);
+        let out = strip_ansi(&render(
+            &snap,
+            &RenderOptions {
+                terminal_width: 80,
+                bar_width: 6,
+                max_files: Some(0),
+            },
+        ));
+        for i in 0..5 {
+            assert!(
+                out.contains(&format!("f{i}.rs")),
+                "every file should appear when max_files=0 means unlimited: {out}",
+            );
+        }
+        assert!(
+            !out.contains("more file"),
+            "no 'more files' footer when nothing is hidden: {out}",
+        );
+    }
+
+    #[test]
     fn bar_scales_to_max_change_in_snapshot() {
         let big = entry("big.rs", FileStatus::Modified, true, 100, 0);
         let small = entry("small.rs", FileStatus::Modified, true, 1, 0);
@@ -619,36 +723,6 @@ mod tests {
     }
 
     #[test]
-    fn detailed_age_seconds_only() {
-        assert_eq!(format_age_detailed(Duration::from_secs(0)), "0s");
-        assert_eq!(format_age_detailed(Duration::from_secs(5)), "5s");
-        assert_eq!(format_age_detailed(Duration::from_secs(59)), "59s");
-    }
-
-    #[test]
-    fn detailed_age_minutes_and_seconds() {
-        assert_eq!(format_age_detailed(Duration::from_secs(60)), "1m0s");
-        assert_eq!(format_age_detailed(Duration::from_secs(5 * 60 + 23)), "5m23s");
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(59 * 60 + 59)),
-            "59m59s",
-        );
-    }
-
-    #[test]
-    fn detailed_age_hours_and_minutes() {
-        assert_eq!(format_age_detailed(Duration::from_secs(60 * 60)), "1h0m");
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(2 * 3600 + 14 * 60)),
-            "2h14m",
-        );
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(23 * 3600 + 59 * 60)),
-            "23h59m",
-        );
-    }
-
-    #[test]
     fn default_max_files_reserves_room_for_chrome() {
         // Reserve 4 rows for header, separator, footer, and breathing room.
         assert_eq!(default_max_files(24), 20);
@@ -664,12 +738,4 @@ mod tests {
         assert_eq!(default_max_files(5), 1);
     }
 
-    #[test]
-    fn detailed_age_days_and_hours() {
-        assert_eq!(format_age_detailed(Duration::from_secs(86400)), "1d0h");
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(3 * 86400 + 12 * 3600)),
-            "3d12h",
-        );
-    }
 }

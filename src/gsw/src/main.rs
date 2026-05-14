@@ -8,7 +8,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::{parse_numstat, parse_status, FileEntry, NumStat};
+use crate::git::{parse_numstat, parse_status, FileEntry};
 use crate::render::{default_max_files, render, RenderOptions};
 use crate::snapshot::build_snapshot;
 
@@ -58,11 +58,11 @@ fn main() -> Result<()> {
     }
 
     let branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .context("not inside a git repository")?
+        .context("failed to read HEAD ref")?
         .trim()
         .to_string();
 
-    let base = cli.base.unwrap_or_else(|| resolve_base_ref().unwrap_or_else(|_| "HEAD".to_string()));
+    let base = cli.base.unwrap_or_else(resolve_base_ref);
 
     let commits_ahead = run_git(&["rev-list", "--count", &format!("{base}..HEAD")])
         .ok()
@@ -108,11 +108,21 @@ fn main() -> Result<()> {
 }
 
 /// True if the current working directory is inside a git work tree.
+///
+/// `git rev-parse --is-inside-work-tree` returns status 0 with stdout
+/// `false` for bare repos, so we have to inspect the output, not just
+/// the exit code.
 fn inside_git_repo() -> bool {
-    Command::new("git")
+    let Ok(output) = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
-        .is_ok_and(|o| o.status.success())
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
 /// Run `git` with the given args and return captured stdout as UTF-8.
@@ -133,20 +143,21 @@ fn run_git(args: &[&str]) -> Result<String> {
 }
 
 /// Pick the first base ref that actually resolves: `main`, then `master`,
-/// then whatever `origin/HEAD` points to.
-fn resolve_base_ref() -> Result<String> {
+/// then whatever `origin/HEAD` points to. Falls back to `HEAD` so the
+/// commits-ahead count degrades gracefully to zero.
+fn resolve_base_ref() -> String {
     for candidate in ["main", "master"] {
         if run_git(&["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
-            return Ok(candidate.to_string());
+            return candidate.to_string();
         }
     }
     if let Ok(out) = run_git(&["symbolic-ref", "refs/remotes/origin/HEAD"]) {
         let trimmed = out.trim();
         if let Some(name) = trimmed.strip_prefix("refs/remotes/origin/") {
-            return Ok(format!("origin/{name}"));
+            return format!("origin/{name}");
         }
     }
-    Ok("HEAD".to_string())
+    "HEAD".to_string()
 }
 
 /// How long ago the current HEAD commit was authored.
@@ -177,6 +188,3 @@ fn collect_ages(entries: &[FileEntry]) -> HashMap<String, Duration> {
     }
     out
 }
-
-// Silence: NumStat is only constructed inside parse_numstat / tests.
-const _: fn() -> NumStat = || NumStat::default();
