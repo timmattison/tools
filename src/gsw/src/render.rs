@@ -77,7 +77,7 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         lines.push(render_row(entry, opts, max_change, path_width));
     }
 
-    let hidden = snapshot.files.len() - display_count;
+    let hidden = snapshot.files.len().saturating_sub(display_count);
     if hidden > 0 {
         lines.push(
             format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
