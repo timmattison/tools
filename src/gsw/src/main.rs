@@ -58,7 +58,7 @@ fn main() -> Result<()> {
     }
 
     let branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .context("not inside a git repository")?
+        .context("failed to read HEAD ref")?
         .trim()
         .to_string();
 
