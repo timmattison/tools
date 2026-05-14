@@ -5,7 +5,7 @@ use std::time::Duration;
 use colored::{ColoredString, Colorize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::age::{age_dim_level, format_age, format_age_detailed, AgeDim};
+use crate::age::{age_dim_level, format_age_detailed, AgeDim};
 use crate::bar::render_bar;
 use crate::git::FileStatus;
 
@@ -45,7 +45,8 @@ pub struct RenderOptions {
 /// Width of the "+adds" / "-dels" / age column fields.
 const ADDS_FIELD: usize = 5;
 const DELS_FIELD: usize = 4;
-const AGE_FIELD: usize = 4;
+/// Wide enough for `59m59s`, `23h59m`, `99d23h`. Older files overflow slightly.
+const AGE_FIELD: usize = 6;
 
 /// Visible separator characters between columns.
 const SEP_PATH_BAR: usize = 0;
@@ -90,8 +91,8 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 }
 
 fn compute_path_width(opts: &RenderOptions) -> usize {
-    // Layout overhead per row: icon(1) + letter(1) + " "(1) + bar(N) + seps + fields.
-    let overhead = 3
+    // Layout overhead per row: icon(1) + " "(1) + letter(1) + " "(1) + bar(N) + seps + fields.
+    let overhead = 4
         + opts.bar_width
         + SEP_PATH_BAR
         + SEP_BAR_ADDS
@@ -154,10 +155,10 @@ fn render_row(
             + DELS_FIELD
             + SEP_DELS_AGE;
         let gutter = " ".repeat(gutter_width);
-        let age = entry.age.map(format_age).unwrap_or_default();
+        let age = entry.age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
         let age_str = colorize_age(&age_field, entry.age);
-        return format!("{icon_str}{letter_str} {path_str}{gutter}{age_str}");
+        return format!("{icon_str} {letter_str} {path_str}{gutter}{age_str}");
     }
 
     let bar_raw = if entry.binary {
@@ -191,7 +192,10 @@ fn render_row(
         dels_field
     };
 
-    let age_raw = entry.age.map(format_age).unwrap_or_else(|| String::from("—"));
+    let age_raw = entry
+        .age
+        .map(format_age_detailed)
+        .unwrap_or_else(|| String::from("—"));
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
     let age_str = colorize_age(&age_field, entry.age);
 
@@ -200,7 +204,7 @@ fn render_row(
     let sep_dels_age = " ".repeat(SEP_DELS_AGE);
 
     format!(
-        "{icon_str}{letter_str} {path_str}{bar_str}{sep_bar_adds}{adds_str}{sep_adds_dels}{dels_str}{sep_dels_age}{age_str}",
+        "{icon_str} {letter_str} {path_str}{bar_str}{sep_bar_adds}{adds_str}{sep_adds_dels}{dels_str}{sep_dels_age}{age_str}",
     )
 }
 
