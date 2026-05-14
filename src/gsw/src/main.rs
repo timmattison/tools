@@ -8,7 +8,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::{parse_numstat, parse_status, FileEntry, NumStat};
+use crate::git::{parse_numstat, parse_status, FileEntry};
 use crate::render::{default_max_files, render, RenderOptions};
 use crate::snapshot::build_snapshot;
 
@@ -177,6 +177,3 @@ fn collect_ages(entries: &[FileEntry]) -> HashMap<String, Duration> {
     }
     out
 }
-
-// Silence: NumStat is only constructed inside parse_numstat / tests.
-const _: fn() -> NumStat = || NumStat::default();
