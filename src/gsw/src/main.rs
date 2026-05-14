@@ -108,11 +108,21 @@ fn main() -> Result<()> {
 }
 
 /// True if the current working directory is inside a git work tree.
+///
+/// `git rev-parse --is-inside-work-tree` returns status 0 with stdout
+/// `false` for bare repos, so we have to inspect the output, not just
+/// the exit code.
 fn inside_git_repo() -> bool {
-    Command::new("git")
+    let Ok(output) = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
-        .is_ok_and(|o| o.status.success())
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
 /// Run `git` with the given args and return captured stdout as UTF-8.
