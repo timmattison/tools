@@ -329,6 +329,16 @@ fn center(text: &str, width: usize) -> String {
     result
 }
 
+/// Pick a sensible default file-row limit for the given terminal height.
+///
+/// Reserves space for our own header, separator, and a potential `+N more`
+/// footer (plus one row of breathing room for whatever shell/viddy chrome
+/// sits above us). Always returns at least 1.
+pub fn default_max_files(_terminal_height: u16) -> usize {
+    // Stub: return a wrong fixed value so behavioral tests fail.
+    999
+}
+
 /// Like [`format_age`] but spells out two units, e.g. `5m23s` or `2h14m`.
 fn format_age_detailed(age: Duration) -> String {
     let secs = age.as_secs();
@@ -637,6 +647,22 @@ mod tests {
             format_age_detailed(Duration::from_secs(23 * 3600 + 59 * 60)),
             "23h59m",
         );
+    }
+
+    #[test]
+    fn default_max_files_reserves_room_for_chrome() {
+        // Reserve 4 rows for header, separator, footer, and breathing room.
+        assert_eq!(default_max_files(24), 20);
+        assert_eq!(default_max_files(50), 46);
+        assert_eq!(default_max_files(10), 6);
+    }
+
+    #[test]
+    fn default_max_files_never_returns_zero() {
+        assert_eq!(default_max_files(0), 1);
+        assert_eq!(default_max_files(1), 1);
+        assert_eq!(default_max_files(4), 1);
+        assert_eq!(default_max_files(5), 1);
     }
 
     #[test]
