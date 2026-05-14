@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::git::{FileEntry, FileStatus, NumStat};
+use crate::git::{FileEntry, NumStat};
 use crate::render::{RenderEntry, Snapshot};
 
 /// Assemble a [`Snapshot`] from parsed git outputs.
@@ -20,25 +20,43 @@ pub fn build_snapshot(
     unstaged_numstat: &HashMap<String, NumStat>,
     ages: &HashMap<String, Duration>,
 ) -> Snapshot {
-    let _ = (
-        &status_entries,
-        staged_numstat,
-        unstaged_numstat,
-        ages,
-    );
-    // Stub: return an empty file list to fail the substance tests.
+    let files = status_entries
+        .into_iter()
+        .map(|e| {
+            let side = if e.staged {
+                staged_numstat
+            } else {
+                unstaged_numstat
+            };
+            let (adds, dels, binary) = side
+                .get(&e.path)
+                .map_or((0, 0, false), |n| (n.adds, n.dels, n.binary));
+            let age = ages.get(&e.path).copied();
+            RenderEntry {
+                path: e.path,
+                orig_path: e.orig_path,
+                status: e.status,
+                staged: e.staged,
+                adds,
+                dels,
+                binary,
+                age,
+            }
+        })
+        .collect();
     Snapshot {
         branch,
         base,
         commits_ahead,
         last_commit_age,
-        files: vec![],
+        files,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::FileStatus;
 
     fn ns(adds: u32, dels: u32) -> NumStat {
         NumStat {
@@ -297,19 +315,3 @@ mod tests {
     }
 }
 
-// Tests above must remain failing until build_snapshot is implemented.
-// The stub returns an empty `files` so substance assertions fail
-// behaviorally, not at compile time.
-#[allow(dead_code)]
-fn _ensure_render_entry_constructible_for_tests() -> RenderEntry {
-    RenderEntry {
-        path: String::new(),
-        orig_path: None,
-        status: FileStatus::Modified,
-        staged: false,
-        adds: 0,
-        dels: 0,
-        binary: false,
-        age: None,
-    }
-}
