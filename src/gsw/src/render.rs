@@ -413,6 +413,22 @@ mod tests {
     }
 
     #[test]
+    fn separator_matches_header_visible_width() {
+        // If the separator is wider than the header line, resizing the
+        // terminal smaller wraps it onto the next line. Size it to match.
+        let snap = snap_with(vec![]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let mut lines = out.lines();
+        let header = lines.next().expect("header line");
+        let sep = lines.next().expect("separator line");
+        assert_eq!(
+            UnicodeWidthStr::width(header),
+            UnicodeWidthStr::width(sep),
+            "separator width should match header width\n  header: {header:?}\n  sep:    {sep:?}",
+        );
+    }
+
+    #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
