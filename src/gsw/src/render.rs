@@ -466,6 +466,28 @@ mod tests {
     }
 
     #[test]
+    fn untracked_row_aligns_age_column_with_normal_rows() {
+        let modified = entry("file.rs", FileStatus::Modified, false, 5, 2);
+        let mut untracked = entry("scratch.txt", FileStatus::Untracked, false, 0, 0);
+        untracked.age = Some(Duration::from_secs(30));
+        let snap = snap_with(vec![modified, untracked]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let mod_row = out
+            .lines()
+            .find(|l| l.contains("file.rs"))
+            .expect("modified row");
+        let untr_row = out
+            .lines()
+            .find(|l| l.contains("scratch.txt"))
+            .expect("untracked row");
+        assert_eq!(
+            UnicodeWidthStr::width(mod_row),
+            UnicodeWidthStr::width(untr_row),
+            "untracked row should pad to same total width so age columns align:\n  mod:   {mod_row:?}\n  untr:  {untr_row:?}",
+        );
+    }
+
+    #[test]
     fn untracked_directory_keeps_trailing_slash() {
         let snap = snap_with(vec![entry(
             "new-folder/",
