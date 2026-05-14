@@ -5,6 +5,7 @@ mod age;
 mod bar;
 mod git;
 mod render;
+mod snapshot;
 
 #[derive(Parser)]
 #[command(name = "gsw")]
