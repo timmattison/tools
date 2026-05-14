@@ -731,6 +731,24 @@ mod tests {
     }
 
     #[test]
+    fn missing_age_renders_as_blank_not_emdash() {
+        // The em-dash placeholder visually drifts past the terminal edge in
+        // some font/terminal combos (zellij + certain fonts render em-dash
+        // wider than unicode-width reports). Leave the age column empty
+        // when we don't have an mtime — the row already shows `D` / `?` /
+        // etc. to explain why.
+        let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
+        e.age = None;
+        let snap = snap_with(vec![e]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            !row.contains('\u{2014}'),
+            "no-age row should not include an em-dash placeholder: {row}",
+        );
+    }
+
+    #[test]
     fn default_max_files_never_returns_zero() {
         assert_eq!(default_max_files(0), 1);
         assert_eq!(default_max_files(1), 1);

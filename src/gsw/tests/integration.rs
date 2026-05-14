@@ -143,6 +143,39 @@ fn bare_repo_prints_friendly_header_and_exits_zero() {
 }
 
 #[test]
+fn shows_age_for_modified_file_when_run_from_subdir() {
+    // git status --porcelain=v2 -z reports paths relative to the repo root,
+    // not the cwd. If gsw resolves those paths against cwd, every fs::metadata
+    // lookup fails when gsw runs from a subdirectory — every age becomes None
+    // and the row collapses to a placeholder. Make sure gsw resolves paths
+    // against the repo root so ages still appear from a subdirectory.
+    let dir = setup_repo();
+    fs::create_dir(dir.path().join("sub")).unwrap();
+    fs::write(dir.path().join("a.txt"), "edited from sub\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .current_dir(dir.path().join("sub"))
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(output.status.success(), "gsw exited non-zero");
+    let out = String::from_utf8_lossy(&output.stdout);
+
+    let row = out
+        .lines()
+        .find(|l| l.contains("a.txt"))
+        .unwrap_or_else(|| panic!("expected a row for a.txt: {out}"));
+    assert!(
+        !row.contains('\u{2014}'),
+        "modified file should show an age, not the em-dash placeholder: {row}",
+    );
+    assert!(
+        row.contains('s') || row.contains('m') || row.contains('h') || row.contains('d'),
+        "modified file row should include a duration suffix (s/m/h/d): {row}",
+    );
+}
+
+#[test]
 fn shows_untracked_directory_with_slash() {
     let dir = setup_repo();
     fs::create_dir(dir.path().join("new-dir")).unwrap();
