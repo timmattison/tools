@@ -192,10 +192,7 @@ fn render_row(
         dels_field
     };
 
-    let age_raw = entry
-        .age
-        .map(format_age_detailed)
-        .unwrap_or_else(|| String::from("—"));
+    let age_raw = entry.age.map(format_age_detailed).unwrap_or_default();
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
     let age_str = colorize_age(&age_field, entry.age);
 
@@ -728,6 +725,24 @@ mod tests {
         assert_eq!(default_max_files(24), 20);
         assert_eq!(default_max_files(50), 46);
         assert_eq!(default_max_files(10), 6);
+    }
+
+    #[test]
+    fn missing_age_renders_as_blank_not_emdash() {
+        // The em-dash placeholder visually drifts past the terminal edge in
+        // some font/terminal combos (zellij + certain fonts render em-dash
+        // wider than unicode-width reports). Leave the age column empty
+        // when we don't have an mtime — the row already shows `D` / `?` /
+        // etc. to explain why.
+        let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
+        e.age = None;
+        let snap = snap_with(vec![e]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            !row.contains('\u{2014}'),
+            "no-age row should not include an em-dash placeholder: {row}",
+        );
     }
 
     #[test]
