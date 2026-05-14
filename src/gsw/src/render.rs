@@ -2,6 +2,11 @@
 
 use std::time::Duration;
 
+use colored::{ColoredString, Colorize};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+use crate::age::{age_dim_level, format_age, AgeDim};
+use crate::bar::render_bar;
 use crate::git::FileStatus;
 
 /// Everything render() needs to draw one frame.
@@ -37,10 +42,305 @@ pub struct RenderOptions {
     pub max_files: Option<usize>,
 }
 
+/// Width of the "+adds" / "-dels" / age column fields.
+const ADDS_FIELD: usize = 5;
+const DELS_FIELD: usize = 4;
+const AGE_FIELD: usize = 4;
+
+/// Visible separator characters between columns.
+const SEP_PATH_BAR: usize = 0;
+const SEP_BAR_ADDS: usize = 2;
+const SEP_ADDS_DELS: usize = 1;
+const SEP_DELS_AGE: usize = 3;
+
 /// Produce the colored, multi-line frame.
-pub fn render(_snapshot: &Snapshot, _opts: &RenderOptions) -> String {
-    // Stub.
-    String::from("TODO")
+pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
+    let mut lines = Vec::new();
+
+    lines.push(render_header(snapshot));
+    lines.push(render_separator(opts.terminal_width));
+
+    let display_count = opts
+        .max_files
+        .unwrap_or(usize::MAX)
+        .min(snapshot.files.len());
+    let max_change = snapshot
+        .files
+        .iter()
+        .map(|e| e.adds.saturating_add(e.dels))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let path_width = compute_path_width(opts);
+
+    for entry in snapshot.files.iter().take(display_count) {
+        lines.push(render_row(entry, opts, max_change, path_width));
+    }
+
+    let hidden = snapshot.files.len() - display_count;
+    if hidden > 0 {
+        lines.push(
+            format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
+                .dimmed()
+                .to_string(),
+        );
+    }
+
+    lines.join("\n")
+}
+
+fn compute_path_width(opts: &RenderOptions) -> usize {
+    // Layout overhead per row: icon(1) + letter(1) + " "(1) + bar(N) + seps + fields.
+    let overhead = 3
+        + opts.bar_width
+        + SEP_PATH_BAR
+        + SEP_BAR_ADDS
+        + ADDS_FIELD
+        + SEP_ADDS_DELS
+        + DELS_FIELD
+        + SEP_DELS_AGE
+        + AGE_FIELD;
+    opts.terminal_width.saturating_sub(overhead).max(8)
+}
+
+fn render_header(snap: &Snapshot) -> String {
+    let commit_word = if snap.commits_ahead == 1 { "commit" } else { "commits" };
+    let age = format_age_detailed(snap.last_commit_age);
+    let header = format!(
+        "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
+        branch = snap.branch,
+        n = snap.commits_ahead,
+        word = commit_word,
+        base = snap.base,
+        age = age,
+    );
+    header.bold().to_string()
+}
+
+fn render_separator(width: usize) -> String {
+    "─".repeat(width).dimmed().to_string()
+}
+
+fn render_row(
+    entry: &RenderEntry,
+    opts: &RenderOptions,
+    max_change: u32,
+    path_width: usize,
+) -> String {
+    let (icon, letter) = icon_and_letter(entry);
+
+    let path_display_raw = match &entry.orig_path {
+        Some(orig) => format!("{orig} → {new}", new = entry.path),
+        None => entry.path.clone(),
+    };
+    let path_truncated = truncate_left(&path_display_raw, path_width);
+    let path_padded = pad_right(&path_truncated, path_width);
+
+    let icon_str = colorize_icon(icon, entry);
+    let letter_str = colorize_letter(letter, entry);
+    let path_str = colorize_path(&path_padded, entry);
+
+    // Untracked files get a stripped-down row — no bar, no counts.
+    if matches!(
+        entry.status,
+        FileStatus::Untracked | FileStatus::UntrackedDir
+    ) {
+        let age = entry.age.map(format_age).unwrap_or_default();
+        let age_field = format!("{age:>width$}", width = AGE_FIELD);
+        let age_str = colorize_age(&age_field, entry.age);
+        return format!("{icon_str}{letter_str} {path_str}{age_str}");
+    }
+
+    let bar_raw = if entry.binary {
+        center("bin", opts.bar_width)
+    } else {
+        render_bar(entry.adds.saturating_add(entry.dels), max_change, opts.bar_width)
+    };
+    let bar_str = colorize_bar(&bar_raw, entry);
+
+    let adds_raw = if entry.adds > 0 {
+        format!("+{}", entry.adds)
+    } else {
+        String::new()
+    };
+    let dels_raw = if entry.dels > 0 {
+        format!("-{}", entry.dels)
+    } else {
+        String::new()
+    };
+    let adds_field = format!("{adds_raw:>width$}", width = ADDS_FIELD);
+    let dels_field = format!("{dels_raw:>width$}", width = DELS_FIELD);
+
+    let adds_str = if entry.adds > 0 {
+        adds_field.green().to_string()
+    } else {
+        adds_field
+    };
+    let dels_str = if entry.dels > 0 {
+        dels_field.red().to_string()
+    } else {
+        dels_field
+    };
+
+    let age_raw = entry.age.map(format_age).unwrap_or_else(|| String::from("—"));
+    let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
+    let age_str = colorize_age(&age_field, entry.age);
+
+    let sep_bar_adds = " ".repeat(SEP_BAR_ADDS);
+    let sep_adds_dels = " ".repeat(SEP_ADDS_DELS);
+    let sep_dels_age = " ".repeat(SEP_DELS_AGE);
+
+    format!(
+        "{icon_str}{letter_str} {path_str}{bar_str}{sep_bar_adds}{adds_str}{sep_adds_dels}{dels_str}{sep_dels_age}{age_str}",
+    )
+}
+
+fn icon_and_letter(entry: &RenderEntry) -> (char, char) {
+    let icon = match entry.status {
+        FileStatus::Conflicted => '!',
+        FileStatus::Untracked | FileStatus::UntrackedDir => '?',
+        _ if entry.staged => '●',
+        _ => '○',
+    };
+    let letter = match entry.status {
+        FileStatus::Modified => 'M',
+        FileStatus::Added => 'A',
+        FileStatus::Deleted => 'D',
+        FileStatus::Renamed => 'R',
+        FileStatus::Copied => 'C',
+        FileStatus::TypeChange => 'T',
+        FileStatus::Untracked | FileStatus::UntrackedDir => '?',
+        FileStatus::Conflicted => 'U',
+    };
+    (icon, letter)
+}
+
+fn colorize_icon(icon: char, entry: &RenderEntry) -> ColoredString {
+    let s = icon.to_string();
+    match entry.status {
+        FileStatus::Conflicted => s.red().bold(),
+        FileStatus::Untracked | FileStatus::UntrackedDir => s.cyan().dimmed(),
+        _ if entry.staged => s.green(),
+        _ => s.yellow(),
+    }
+}
+
+fn colorize_letter(letter: char, entry: &RenderEntry) -> ColoredString {
+    let s = letter.to_string();
+    match entry.status {
+        FileStatus::Conflicted => s.red().bold(),
+        FileStatus::Untracked | FileStatus::UntrackedDir => s.cyan().dimmed(),
+        FileStatus::Added => s.green().bold(),
+        FileStatus::Deleted => s.red().bold(),
+        FileStatus::Renamed | FileStatus::Copied => s.magenta().bold(),
+        _ => s.bold(),
+    }
+}
+
+fn colorize_path(path: &str, entry: &RenderEntry) -> ColoredString {
+    match entry.status {
+        FileStatus::Conflicted => path.red(),
+        FileStatus::Untracked | FileStatus::UntrackedDir => path.cyan().dimmed(),
+        _ if entry.staged => path.normal().dimmed(),
+        _ => path.yellow(),
+    }
+}
+
+fn colorize_bar(bar: &str, entry: &RenderEntry) -> ColoredString {
+    if entry.binary {
+        bar.dimmed()
+    } else if matches!(entry.status, FileStatus::Conflicted) {
+        bar.red()
+    } else {
+        bar.cyan()
+    }
+}
+
+fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
+    let Some(age) = age else {
+        return text.dimmed();
+    };
+    match age_dim_level(age) {
+        AgeDim::Fresh => text.bold(),
+        AgeDim::Recent => text.normal(),
+        AgeDim::Aging => text.dimmed(),
+        AgeDim::Stale => text.dimmed(),
+    }
+}
+
+/// Pad `s` on the right with spaces until its display width reaches `width`.
+fn pad_right(s: &str, width: usize) -> String {
+    let current = UnicodeWidthStr::width(s);
+    if current >= width {
+        s.to_string()
+    } else {
+        let mut result = String::with_capacity(s.len() + (width - current));
+        result.push_str(s);
+        for _ in 0..(width - current) {
+            result.push(' ');
+        }
+        result
+    }
+}
+
+/// Truncate `s` from the left to fit within `max_width` display columns,
+/// prefixing with `…` when truncation happens. UTF-8 safe.
+fn truncate_left(s: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let ellipsis_width = 1usize;
+    let target = max_width.saturating_sub(ellipsis_width);
+    let chars: Vec<char> = s.chars().collect();
+    let mut acc = 0usize;
+    let mut start = chars.len();
+    for (i, c) in chars.iter().enumerate().rev() {
+        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
+        if acc + cw > target {
+            break;
+        }
+        acc += cw;
+        start = i;
+    }
+    let mut result = String::from("…");
+    for c in &chars[start..] {
+        result.push(*c);
+    }
+    result
+}
+
+/// Center `text` within `width` display columns, padding with spaces.
+fn center(text: &str, width: usize) -> String {
+    let text_w = UnicodeWidthStr::width(text);
+    if text_w >= width {
+        return text.to_string();
+    }
+    let total_pad = width - text_w;
+    let left = total_pad / 2;
+    let right = total_pad - left;
+    let mut result = String::with_capacity(width);
+    for _ in 0..left {
+        result.push(' ');
+    }
+    result.push_str(text);
+    for _ in 0..right {
+        result.push(' ');
+    }
+    result
+}
+
+/// Like [`format_age`] but spells out two units, e.g. `5m23s` or `2h14m`.
+fn format_age_detailed(age: Duration) -> String {
+    let secs = age.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else if secs < 86400 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
+    }
 }
 
 #[cfg(test)]
@@ -53,7 +353,6 @@ mod tests {
         let mut in_escape = false;
         for c in s.chars() {
             if in_escape {
-                // CSI terminator is any byte in 0x40..=0x7E.
                 if (0x40..=0x7E).contains(&(c as u32)) {
                     in_escape = false;
                 }
@@ -144,7 +443,6 @@ mod tests {
         assert!(row.contains("+12"), "row should include +adds: {row}");
         assert!(row.contains("-3"), "row should include -dels: {row}");
         assert!(row.contains("30s"), "row should include age: {row}");
-        // Staged → filled-circle icon.
         assert!(row.contains('●'), "row should use ● for staged: {row}");
         assert!(row.contains('M'), "row should include status letter: {row}");
     }
@@ -166,7 +464,6 @@ mod tests {
         let row = out.lines().nth(2).unwrap_or("");
         assert!(row.contains('?'), "untracked should use ? icon: {row}");
         assert!(row.contains("scratch.txt"));
-        // No counts, no bar — the bar block chars should not appear.
         assert!(
             !row.contains('█') && !row.contains('░'),
             "untracked row should not include a bar: {row}",
@@ -252,10 +549,8 @@ mod tests {
 
     #[test]
     fn utf8_path_truncation_does_not_panic() {
-        // Japanese (each char is 3 bytes UTF-8 but display width 2)
         let path = "日本語/とても/長い/ファイル名.rs".to_string();
         let snap = snap_with(vec![entry(&path, FileStatus::Modified, true, 1, 0)]);
-        // Narrow width to force truncation through multi-byte chars.
         let out = render(
             &snap,
             &RenderOptions {
@@ -265,7 +560,6 @@ mod tests {
             },
         );
         let stripped = strip_ansi(&out);
-        // Must contain SOME suffix of the file name.
         assert!(stripped.contains(".rs"));
     }
 
@@ -283,7 +577,6 @@ mod tests {
                 max_files: Some(3),
             },
         ));
-        // Three file rows, then "+7 more".
         assert!(out.contains("f0.rs"));
         assert!(out.contains("f2.rs"));
         assert!(!out.contains("f3.rs"), "files past the limit should be hidden");
