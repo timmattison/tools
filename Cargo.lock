@@ -3409,6 +3409,8 @@ dependencies = [
  "clap",
  "colored",
  "tempfile",
+ "terminal_size",
+ "unicode-width",
 ]
 
 [[package]]
