@@ -5,7 +5,7 @@ use std::time::Duration;
 use colored::{ColoredString, Colorize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::age::{age_dim_level, format_age, AgeDim};
+use crate::age::{age_dim_level, format_age, format_age_detailed, AgeDim};
 use crate::bar::render_bar;
 use crate::git::FileStatus;
 
@@ -338,20 +338,6 @@ pub fn default_max_files(terminal_height: u16) -> usize {
     usize::from(terminal_height.saturating_sub(4)).max(1)
 }
 
-/// Like [`format_age`] but spells out two units, e.g. `5m23s` or `2h14m`.
-fn format_age_detailed(age: Duration) -> String {
-    let secs = age.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else if secs < 86400 {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    } else {
-        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -619,36 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn detailed_age_seconds_only() {
-        assert_eq!(format_age_detailed(Duration::from_secs(0)), "0s");
-        assert_eq!(format_age_detailed(Duration::from_secs(5)), "5s");
-        assert_eq!(format_age_detailed(Duration::from_secs(59)), "59s");
-    }
-
-    #[test]
-    fn detailed_age_minutes_and_seconds() {
-        assert_eq!(format_age_detailed(Duration::from_secs(60)), "1m0s");
-        assert_eq!(format_age_detailed(Duration::from_secs(5 * 60 + 23)), "5m23s");
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(59 * 60 + 59)),
-            "59m59s",
-        );
-    }
-
-    #[test]
-    fn detailed_age_hours_and_minutes() {
-        assert_eq!(format_age_detailed(Duration::from_secs(60 * 60)), "1h0m");
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(2 * 3600 + 14 * 60)),
-            "2h14m",
-        );
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(23 * 3600 + 59 * 60)),
-            "23h59m",
-        );
-    }
-
-    #[test]
     fn default_max_files_reserves_room_for_chrome() {
         // Reserve 4 rows for header, separator, footer, and breathing room.
         assert_eq!(default_max_files(24), 20);
@@ -664,12 +620,4 @@ mod tests {
         assert_eq!(default_max_files(5), 1);
     }
 
-    #[test]
-    fn detailed_age_days_and_hours() {
-        assert_eq!(format_age_detailed(Duration::from_secs(86400)), "1d0h");
-        assert_eq!(
-            format_age_detailed(Duration::from_secs(3 * 86400 + 12 * 3600)),
-            "3d12h",
-        );
-    }
 }
