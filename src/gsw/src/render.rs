@@ -140,15 +140,24 @@ fn render_row(
     let letter_str = colorize_letter(letter, entry);
     let path_str = colorize_path(&path_padded, entry);
 
-    // Untracked files get a stripped-down row — no bar, no counts.
+    // Untracked files get a stripped-down row — no bar, no counts — but
+    // pad the gutter where bar/adds/dels would be so the age column still
+    // lines up with normal rows above and below it.
     if matches!(
         entry.status,
         FileStatus::Untracked | FileStatus::UntrackedDir
     ) {
+        let gutter_width = opts.bar_width
+            + SEP_BAR_ADDS
+            + ADDS_FIELD
+            + SEP_ADDS_DELS
+            + DELS_FIELD
+            + SEP_DELS_AGE;
+        let gutter = " ".repeat(gutter_width);
         let age = entry.age.map(format_age).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
         let age_str = colorize_age(&age_field, entry.age);
-        return format!("{icon_str}{letter_str} {path_str}{age_str}");
+        return format!("{icon_str}{letter_str} {path_str}{gutter}{age_str}");
     }
 
     let bar_raw = if entry.binary {
