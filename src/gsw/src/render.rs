@@ -58,8 +58,10 @@ const SEP_DELS_AGE: usize = 3;
 pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     let mut lines = Vec::new();
 
-    lines.push(render_header(snapshot));
-    lines.push(render_separator(opts.terminal_width));
+    let header_plain = header_text(snapshot);
+    let header_width = UnicodeWidthStr::width(header_plain.as_str());
+    lines.push(header_plain.bold().to_string());
+    lines.push(render_separator(header_width));
 
     let display_count = match opts.max_files {
         Some(0) | None => snapshot.files.len(),
@@ -104,18 +106,16 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
     opts.terminal_width.saturating_sub(overhead).max(8)
 }
 
-fn render_header(snap: &Snapshot) -> String {
+fn header_text(snap: &Snapshot) -> String {
     let commit_word = if snap.commits_ahead == 1 { "commit" } else { "commits" };
     let age = format_age_detailed(snap.last_commit_age);
-    let header = format!(
+    format!(
         "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
         branch = snap.branch,
         n = snap.commits_ahead,
         word = commit_word,
         base = snap.base,
-        age = age,
-    );
-    header.bold().to_string()
+    )
 }
 
 fn render_separator(width: usize) -> String {
