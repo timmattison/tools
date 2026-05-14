@@ -613,6 +613,32 @@ mod tests {
     }
 
     #[test]
+    fn max_files_zero_means_unlimited() {
+        let files: Vec<RenderEntry> = (0..5)
+            .map(|i| entry(&format!("f{i}.rs"), FileStatus::Modified, true, 1, 0))
+            .collect();
+        let snap = snap_with(files);
+        let out = strip_ansi(&render(
+            &snap,
+            &RenderOptions {
+                terminal_width: 80,
+                bar_width: 6,
+                max_files: Some(0),
+            },
+        ));
+        for i in 0..5 {
+            assert!(
+                out.contains(&format!("f{i}.rs")),
+                "every file should appear when max_files=0 means unlimited: {out}",
+            );
+        }
+        assert!(
+            !out.contains("more file"),
+            "no 'more files' footer when nothing is hidden: {out}",
+        );
+    }
+
+    #[test]
     fn bar_scales_to_max_change_in_snapshot() {
         let big = entry("big.rs", FileStatus::Modified, true, 100, 0);
         let small = entry("small.rs", FileStatus::Modified, true, 1, 0);
