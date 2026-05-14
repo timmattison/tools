@@ -192,10 +192,7 @@ fn render_row(
         dels_field
     };
 
-    let age_raw = entry
-        .age
-        .map(format_age_detailed)
-        .unwrap_or_else(|| String::from("—"));
+    let age_raw = entry.age.map(format_age_detailed).unwrap_or_default();
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
     let age_str = colorize_age(&age_field, entry.age);
 

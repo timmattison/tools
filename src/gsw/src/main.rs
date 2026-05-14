@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
@@ -81,7 +81,10 @@ fn main() -> Result<()> {
         .map(|s| parse_numstat(&s))
         .unwrap_or_default();
 
-    let ages = collect_ages(&entries);
+    let repo_root = run_git(&["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|s| PathBuf::from(s.trim()));
+    let ages = collect_ages(&entries, repo_root.as_deref());
 
     let snapshot = build_snapshot(
         branch,
@@ -169,15 +172,23 @@ fn last_commit_age() -> Result<Duration> {
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
-fn collect_ages(entries: &[FileEntry]) -> HashMap<String, Duration> {
+///
+/// `repo_root` anchors the lookup: `git status --porcelain=v2 -z` reports
+/// paths relative to the repo root, not the cwd, so resolving against the
+/// cwd misses every file when gsw runs from a subdirectory. Falls back to
+/// cwd-relative resolution when the root can't be determined.
+fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<String, Duration> {
     let now = SystemTime::now();
     let mut out = HashMap::with_capacity(entries.len());
     for e in entries {
         if out.contains_key(&e.path) {
             continue;
         }
-        let path = Path::new(&e.path);
-        let Ok(meta) = std::fs::metadata(path) else {
+        let full = match repo_root {
+            Some(root) => root.join(&e.path),
+            None => PathBuf::from(&e.path),
+        };
+        let Ok(meta) = std::fs::metadata(&full) else {
             continue;
         };
         let Ok(mtime) = meta.modified() else {
