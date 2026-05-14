@@ -60,10 +60,10 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     lines.push(render_header(snapshot));
     lines.push(render_separator(opts.terminal_width));
 
-    let display_count = opts
-        .max_files
-        .unwrap_or(usize::MAX)
-        .min(snapshot.files.len());
+    let display_count = match opts.max_files {
+        Some(0) | None => snapshot.files.len(),
+        Some(n) => n.min(snapshot.files.len()),
+    };
     let max_change = snapshot
         .files
         .iter()
