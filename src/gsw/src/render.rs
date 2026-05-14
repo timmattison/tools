@@ -452,6 +452,47 @@ mod tests {
     }
 
     #[test]
+    fn row_has_space_between_icon_and_status_letter() {
+        let snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            row.contains("● M "),
+            "icon and letter should be separated by a space: {row}",
+        );
+    }
+
+    #[test]
+    fn untracked_row_has_space_between_icon_and_status_letter() {
+        let snap = snap_with(vec![entry(
+            "scratch.txt",
+            FileStatus::Untracked,
+            false,
+            0,
+            0,
+        )]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            row.contains("? ? "),
+            "untracked icon and letter should also be space-separated: {row}",
+        );
+    }
+
+    #[test]
+    fn per_file_age_uses_detailed_two_unit_format() {
+        let mut e = entry("file.rs", FileStatus::Modified, true, 1, 0);
+        e.age = Some(Duration::from_secs(5 * 60 + 23));
+        let snap = snap_with(vec![e]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let row = out.lines().nth(2).unwrap_or("");
+        assert!(
+            row.contains("5m23s"),
+            "per-file age should match the header's two-unit format: {row}",
+        );
+    }
+
+    #[test]
     fn unstaged_file_uses_open_circle_icon() {
         let snap = snap_with(vec![entry("a.rs", FileStatus::Modified, false, 1, 0)]);
         let out = strip_ansi(&render(&snap, &opts()));
