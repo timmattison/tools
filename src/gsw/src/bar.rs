@@ -12,9 +12,32 @@ const EIGHTHS: [char; 9] = [EMPTY, '▏', '▎', '▍', '▌', '▋', '▊', '�
 /// - When `value >= max`, the bar is fully filled.
 /// - Fractional fill is approximated to the nearest eighth, so a value at
 ///   90% of max produces ~5 full cells and one ~3/8-filled cell at width 6.
-pub fn render_bar(_value: u32, _max: u32, width: usize) -> String {
-    // Stub: returns wrong fixed shape so tests fail behaviorally.
-    EMPTY.to_string().repeat(width)
+pub fn render_bar(value: u32, max: u32, width: usize) -> String {
+    if max == 0 || width == 0 {
+        return EMPTY.to_string().repeat(width);
+    }
+    let clamped = value.min(max);
+    let ratio = f64::from(clamped) / f64::from(max);
+    // Total eighth-cells to fill across the bar.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let total_eighths = (ratio * (width as f64) * 8.0).round() as usize;
+    let full_cells = (total_eighths / 8).min(width);
+    let partial = total_eighths % 8;
+    let mut result = String::with_capacity(width * 4);
+    for _ in 0..full_cells {
+        result.push('█');
+    }
+    if full_cells < width && partial > 0 {
+        result.push(EIGHTHS[partial]);
+        for _ in (full_cells + 1)..width {
+            result.push(EMPTY);
+        }
+    } else {
+        for _ in full_cells..width {
+            result.push(EMPTY);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
