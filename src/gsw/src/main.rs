@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{bail, Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
+use colored::Colorize;
 
 use crate::git::{parse_numstat, parse_status, FileEntry, NumStat};
 use crate::render::{default_max_files, render, RenderOptions};
@@ -49,6 +50,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.no_color {
         colored::control::set_override(false);
+    }
+
+    if !inside_git_repo() {
+        println!("{}", "gsw • not a git repository".dimmed());
+        return Ok(());
     }
 
     let branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
@@ -99,6 +105,14 @@ fn main() -> Result<()> {
 
     println!("{}", render(&snapshot, &opts));
     Ok(())
+}
+
+/// True if the current working directory is inside a git work tree.
+fn inside_git_repo() -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Run `git` with the given args and return captured stdout as UTF-8.
