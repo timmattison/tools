@@ -1,0 +1,21 @@
+[package]
+name = "gsw"
+version = "0.1.0"
+edition.workspace = true
+description = "Compact git status watch — one-shot pretty output of branch state for viddy"
+
+[[bin]]
+name = "gsw"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+colored.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
