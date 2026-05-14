@@ -289,10 +289,10 @@ fn truncate_left(s: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(s) <= max_width {
         return s.to_string();
     }
-    let ellipsis_width = 1usize;
+    let ellipsis_width = 1_usize;
     let target = max_width.saturating_sub(ellipsis_width);
     let chars: Vec<char> = s.chars().collect();
-    let mut acc = 0usize;
+    let mut acc = 0_usize;
     let mut start = chars.len();
     for (i, c) in chars.iter().enumerate().rev() {
         let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
