@@ -989,6 +989,22 @@ mod tests {
     }
 
     #[test]
+    fn stale_age_renders_differently_from_aging() {
+        // AgeDim has four buckets; if Stale and Aging both render `.dimmed()`
+        // the bucket distinction is invisible to the user. Forcing colors on
+        // and rendering the same text against the two age levels should
+        // produce different byte sequences (different ANSI styles).
+        colored::control::set_override(true);
+        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600))).to_string();
+        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400))).to_string();
+        colored::control::unset_override();
+        assert_ne!(
+            aging, stale,
+            "Aging and Stale should render with visibly distinct styles",
+        );
+    }
+
+    #[test]
     fn log_section_has_separator_before_entries() {
         let mut snap = snap_with(vec![]);
         snap.log = vec![log_entry("abc1234", "first", 0)];
