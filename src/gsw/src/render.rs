@@ -1013,16 +1013,20 @@ mod tests {
     #[test]
     fn stale_age_renders_differently_from_aging() {
         // AgeDim has four buckets; if Stale and Aging both render `.dimmed()`
-        // the bucket distinction is invisible to the user. Forcing colors on
-        // and rendering the same text against the two age levels should
-        // produce different byte sequences (different ANSI styles).
-        colored::control::set_override(true);
-        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600))).to_string();
-        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400))).to_string();
-        colored::control::unset_override();
-        assert_ne!(
-            aging, stale,
-            "Aging and Stale should render with visibly distinct styles",
+        // the bucket distinction is invisible to the user. Compare the Style
+        // bitsets on the returned ColoredStrings directly — avoids touching
+        // `colored::control::set_override`, which is process-global and would
+        // race with other tests in parallel.
+        use colored::Styles;
+        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)));
+        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)));
+        assert!(
+            stale.style.contains(Styles::Italic),
+            "Stale should be italicized",
+        );
+        assert!(
+            !aging.style.contains(Styles::Italic),
+            "Aging should not be italicized",
         );
     }
 
