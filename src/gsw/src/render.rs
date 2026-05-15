@@ -414,15 +414,6 @@ fn center(text: &str, width: usize) -> String {
     result
 }
 
-/// Pick a sensible default file-row limit for the given terminal height.
-///
-/// Reserves space for our own header, separator, and a potential `+N more`
-/// footer (plus one row of breathing room for whatever shell/viddy chrome
-/// sits above us). Always returns at least 1.
-pub fn default_max_files(terminal_height: u16) -> usize {
-    usize::from(terminal_height.saturating_sub(4)).max(1)
-}
-
 /// Plan how many file rows and how many log rows the frame should render,
 /// given the actual demand from each section and the total terminal rows
 /// available for content (i.e. terminal height minus chrome the caller has
@@ -444,10 +435,28 @@ pub fn plan_section_caps(
     log_demand: usize,
     available_rows: usize,
 ) -> (usize, usize) {
-    // Stub: real implementation lands in the green commit. This forces the
-    // accompanying tests to fail on *behavior*, not on a missing symbol.
-    let _ = (file_demand, log_demand, available_rows);
-    (0, 0)
+    if available_rows == 0 {
+        return (0, 0);
+    }
+    if file_demand + log_demand <= available_rows {
+        return (file_demand, log_demand);
+    }
+    if file_demand == 0 {
+        return (0, available_rows.min(log_demand));
+    }
+    if log_demand == 0 {
+        return (available_rows.min(file_demand), 0);
+    }
+
+    // Both sections want rows and the total overflows. Compute each
+    // section's proportional share with banker-style rounding so the two
+    // shares always sum to `available_rows` exactly, then guarantee a
+    // floor of 1 row for the smaller side.
+    let total_demand = file_demand + log_demand;
+    let raw_file = (file_demand * available_rows + total_demand / 2) / total_demand;
+    let file_share = raw_file.clamp(1, available_rows - 1);
+    let log_share = available_rows - file_share;
+    (file_share.min(file_demand), log_share.min(log_demand))
 }
 
 #[cfg(test)]
@@ -828,14 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn default_max_files_reserves_room_for_chrome() {
-        // Reserve 4 rows for header, separator, footer, and breathing room.
-        assert_eq!(default_max_files(24), 20);
-        assert_eq!(default_max_files(50), 46);
-        assert_eq!(default_max_files(10), 6);
-    }
-
-    #[test]
     fn missing_age_renders_as_blank_not_emdash() {
         // The em-dash placeholder visually drifts past the terminal edge in
         // some font/terminal combos (zellij + certain fonts render em-dash
@@ -851,14 +852,6 @@ mod tests {
             !row.contains('\u{2014}'),
             "no-age row should not include an em-dash placeholder: {row}",
         );
-    }
-
-    #[test]
-    fn default_max_files_never_returns_zero() {
-        assert_eq!(default_max_files(0), 1);
-        assert_eq!(default_max_files(1), 1);
-        assert_eq!(default_max_files(4), 1);
-        assert_eq!(default_max_files(5), 1);
     }
 
     #[test]

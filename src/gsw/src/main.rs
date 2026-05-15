@@ -10,7 +10,7 @@ use clap::Parser;
 use colored::Colorize;
 
 use crate::git::{parse_numstat, parse_status, FileEntry};
-use crate::render::{default_max_files, render, LogEntry, RenderOptions};
+use crate::render::{plan_section_caps, render, LogEntry, RenderOptions};
 use crate::snapshot::build_snapshot;
 
 mod age;
@@ -171,23 +171,43 @@ fn main() -> Result<()> {
     let terminal_width =
         effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
 
-    // Reserve room for the log section so the file list shrinks instead of
-    // pushing log rows off the bottom under viddy. The +1 is the separator
-    // line that sits between the file list and the log block.
-    const PRE_LOG_SEPARATOR_ROW: usize = 1;
-    let log_reserve = if log_lines == 0 {
-        0
-    } else {
-        PRE_LOG_SEPARATOR_ROW + log_lines
+    // Split available terminal rows between the file list and the log
+    // section based on what each actually needs to show. Chrome we
+    // deduct up front:
+    //   header                                                          1
+    //   post-header separator                                            1
+    //   inter-section separator (only when both sections render)         0 or 1
+    //   reserved row for a `+N more files` footer (only when files > 0)  0 or 1
+    // Whatever's left is split proportionally — so a short file list
+    // paired with a long log gets a fair share rather than being
+    // squeezed to one or two rows because `--log-lines` defaults to 20.
+    let file_count = snapshot.files.len();
+    let log_count = snapshot.log.len();
+    let header_chrome: u16 = 2;
+    let inter_chrome: u16 = if file_count > 0 && log_count > 0 { 1 } else { 0 };
+    let footer_chrome: u16 = if file_count > 0 { 1 } else { 0 };
+    let chrome = header_chrome + inter_chrome + footer_chrome;
+    let available_rows = usize::from(terminal_height.saturating_sub(chrome)).max(1);
+    let (planned_file_cap, planned_log_cap) =
+        plan_section_caps(file_count, log_count, available_rows);
+
+    // `--max-files` always wins when the user has set it (including 0,
+    // which means unlimited). When the user pinned a file cap, the log
+    // section just takes whatever rows are left over up to its demand.
+    let (file_cap_opt, log_cap) = match cli.max_files {
+        Some(n) => {
+            let consumed_by_files = if n == 0 { file_count } else { n.min(file_count) };
+            let log_budget = available_rows.saturating_sub(consumed_by_files);
+            (Some(n), log_count.min(log_budget))
+        }
+        None => (Some(planned_file_cap), planned_log_cap),
     };
-    let files_height =
-        terminal_height.saturating_sub(u16::try_from(log_reserve).unwrap_or(u16::MAX));
 
     let opts = RenderOptions {
         terminal_width,
         bar_width: cli.bar_width,
-        max_files: cli.max_files.or(Some(default_max_files(files_height))),
-        log_lines,
+        max_files: file_cap_opt,
+        log_lines: log_cap,
     };
 
     println!("{}", render(&snapshot, &opts));
