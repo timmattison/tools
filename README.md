@@ -317,6 +317,48 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     `build`, `.turbo`, `.cache`) and `*.test.ts(x)` files are ignored. The screen is cleared and
     pass/fail status is printed in color before each run.
   - To install: `cargo install --git https://github.com/timmattison/tools ng`
+- gsw (git status watch)
+  - Compact one-shot pretty output of branch state, designed to be wrapped by `viddy` (or `watch`)
+    for a continuously refreshing dashboard. Shows branch, ahead/behind, working-tree changes, and
+    a `git log --oneline` tail. Respects `COLUMNS` and preserves colors under watch wrappers.
+  - To install: `cargo install --git https://github.com/timmattison/tools gsw`
+- tsm (terminal session manager)
+  - Records every shell command you run via a precmd hook, writing JSONL session logs you can later
+    search and replay. `tsm shell-init <shell>` emits the hook snippet to eval; `tsm record` is the
+    per-command recorder invoked by the hook.
+  - To install: `cargo install --git https://github.com/timmattison/tools tsm`
+- beta
+  - Terminal session recorder and player — because Betamax was always better than VHS. Captures
+    terminal I/O with microsecond timestamps, replays with speed control / pause / rewind, and can
+    export recordings to self-contained HTML players or MP4/GIF videos with multiple themes.
+  - To install: `cargo install --git https://github.com/timmattison/tools beta`
+- vpn-tunnel
+  - Generates Docker-based VPN tunnels using gluetun + ProtonVPN + WireGuard. Produces a ready-to-run
+    `docker-compose.yml` plus helper scripts; pulls the WireGuard credential from 1Password via
+    op-cache. Supports per-city pinning or US-wide IP diversity and configurable container prefixes.
+  - To install: `cargo install --git https://github.com/timmattison/tools vpn-tunnel`
+- op-cache
+  - 1Password credential cache with retry logic, atomic writes, and worktree support. Wraps `op read`
+    so repeated calls don't re-hit 1Password (or trigger Touch ID) for every secret. Supports text and
+    binary secrets, env-var overrides, cache invalidation, and includes worktree hooks for automatic
+    setup. Required by other tools in this repo (e.g. `vpn-tunnel`).
+  - To install: `cargo install --git https://github.com/timmattison/tools op-cache`
+- kitchen-sync
+  - Installs every Rust binary from a git repository with a single command. Clones the repo, parses
+    the workspace, finds every member that produces a binary, and runs `cargo install` for each.
+    Useful for installing this entire toolbox at once.
+  - To install: `cargo install --git https://github.com/timmattison/tools kitchen-sync`
+- claude-usage
+  - Parses an Anthropic API usage CSV export and computes per-model costs using built-in pricing for
+    each Claude model. Useful for reconciling spend or estimating burn across date ranges.
+  - To install: `cargo install --git https://github.com/timmattison/tools claude-usage`
+- swt (subagent worktree)
+  - Subagent worktree helper for parallel TDD. `swt create <name>` verifies HEAD is green and spins
+    up an isolated worktree on a new branch; `swt merge <path>` verifies the subagent is green,
+    rebases if the parent advanced, fast-forward-merges, and cleans up. Concurrent merges are
+    serialized via `.git/swt.lock`. Drop a `./.swt-check` script to override the default green check.
+  - To install: symlink `swt/swt.ts` from a clone of this repo into your `PATH`
+    (e.g. `ln -s "$PWD/swt/swt.ts" ~/.local/bin/swt`). Requires `npx`/`tsx`.
 
 ## dirhash
 
