@@ -163,6 +163,7 @@ fn main() -> Result<()> {
         terminal_width,
         bar_width: cli.bar_width,
         max_files: cli.max_files.or(Some(default_max_files(terminal_height))),
+        log_lines: 0,
     };
 
     println!("{}", render(&snapshot, &opts));
