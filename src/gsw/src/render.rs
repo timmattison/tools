@@ -63,7 +63,6 @@ const DELS_FIELD: usize = 4;
 const AGE_FIELD: usize = 6;
 
 /// Visible separator characters between columns.
-const SEP_PATH_BAR: usize = 0;
 const SEP_BAR_ADDS: usize = 2;
 const SEP_ADDS_DELS: usize = 1;
 const SEP_DELS_AGE: usize = 3;
@@ -157,7 +156,7 @@ fn right_block_width(bar_width: usize) -> usize {
 
 fn compute_path_width(opts: &RenderOptions) -> usize {
     // Per-row overhead: icon(1) + " "(1) + letter(1) + " "(1) + right block.
-    let overhead = 4 + SEP_PATH_BAR + right_block_width(opts.bar_width);
+    let overhead = 4 + right_block_width(opts.bar_width);
     opts.terminal_width.saturating_sub(overhead).max(8)
 }
 
