@@ -26,6 +26,9 @@ pub struct Snapshot {
 pub struct LogEntry {
     pub hash: String,
     pub subject: String,
+    /// How long ago this commit was authored. Same `Duration` shape as the
+    /// per-file age column so the two render in identical units.
+    pub age: Duration,
 }
 
 /// One file row in the frame.
@@ -116,13 +119,26 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 }
 
 fn render_log_row(entry: &LogEntry, width: usize) -> String {
+    // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
+    // hold the right-aligned age, matching the file-row age column exactly.
+    // The subject is padded to fill the gap so the age column lines up.
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
-    let sep = "  ";
-    let sep_width = sep.chars().count();
-    let subject_budget = width.saturating_sub(hash_width + sep_width);
-    let subject = truncate_right(&entry.subject, subject_budget);
+    let hash_sep = "  ";
+    let hash_sep_width = hash_sep.chars().count();
+    let sep_to_age = " ".repeat(SEP_DELS_AGE);
+
+    let subject_budget = width
+        .saturating_sub(hash_width + hash_sep_width + SEP_DELS_AGE + AGE_FIELD)
+        .max(1);
+    let subject_truncated = truncate_right(&entry.subject, subject_budget);
+    let subject_padded = pad_right(&subject_truncated, subject_budget);
+
+    let age_raw = format_age_detailed(entry.age);
+    let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
+    let age_str = colorize_age(&age_field, Some(entry.age));
+
     let hash_str = entry.hash.yellow().to_string();
-    format!("{hash_str}{sep}{subject}")
+    format!("{hash_str}{hash_sep}{subject_padded}{sep_to_age}{age_str}")
 }
 
 fn compute_path_width(opts: &RenderOptions) -> usize {
@@ -814,18 +830,20 @@ mod tests {
         assert_eq!(default_max_files(5), 1);
     }
 
+    fn log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
+        LogEntry {
+            hash: hash.into(),
+            subject: subject.into(),
+            age: Duration::from_secs(age_secs),
+        }
+    }
+
     #[test]
     fn log_section_renders_hash_and_subject() {
         let mut snap = snap_with(vec![]);
         snap.log = vec![
-            LogEntry {
-                hash: "abc1234".into(),
-                subject: "first commit subject".into(),
-            },
-            LogEntry {
-                hash: "def5678".into(),
-                subject: "second commit subject".into(),
-            },
+            log_entry("abc1234", "first commit subject", 30),
+            log_entry("def5678", "second commit subject", 60),
         ];
         let mut o = opts();
         o.log_lines = 10;
@@ -845,10 +863,11 @@ mod tests {
     #[test]
     fn log_section_caps_at_log_lines() {
         let mut snap = snap_with(vec![]);
-        snap.log = (0..30)
+        snap.log = (0..30_u64)
             .map(|i| LogEntry {
                 hash: format!("h{i:06}"),
                 subject: format!("subj {i}"),
+                age: Duration::from_secs(i * 60),
             })
             .collect();
         let mut o = opts();
@@ -865,10 +884,7 @@ mod tests {
     #[test]
     fn log_lines_zero_disables_section() {
         let mut snap = snap_with(vec![]);
-        snap.log = vec![LogEntry {
-            hash: "abc1234".into(),
-            subject: "first".into(),
-        }];
+        snap.log = vec![log_entry("abc1234", "first", 0)];
         let mut o = opts();
         o.log_lines = 0;
         let out = strip_ansi(&render(&snap, &o));
@@ -884,6 +900,7 @@ mod tests {
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "really long subject ".repeat(20),
+            age: Duration::from_secs(30),
         }];
         let mut o = opts();
         o.log_lines = 1;
@@ -912,14 +929,8 @@ mod tests {
         // them. Collapse to a single ─ line.
         let mut snap = snap_with(vec![]);
         snap.log = vec![
-            LogEntry {
-                hash: "abc1234".into(),
-                subject: "first".into(),
-            },
-            LogEntry {
-                hash: "def5678".into(),
-                subject: "second".into(),
-            },
+            log_entry("abc1234", "first", 0),
+            log_entry("def5678", "second", 60),
         ];
         let mut o = opts();
         o.log_lines = 5;
@@ -935,12 +946,52 @@ mod tests {
     }
 
     #[test]
+    fn log_row_renders_age_in_detailed_format() {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry("abc1234", "subject", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 1;
+        let out = strip_ansi(&render(&snap, &o));
+        let log_line = out
+            .lines()
+            .find(|l| l.contains("abc1234"))
+            .expect("log row should appear");
+        assert!(
+            log_line.contains("5m23s"),
+            "log row should include the commit age in the two-unit format: {log_line:?}",
+        );
+    }
+
+    #[test]
+    fn log_row_age_column_aligns_with_file_row_age_column() {
+        // The age column on a log row should occupy the same rightmost
+        // AGE_FIELD cells as the file rows, so the two stacked sections
+        // align cleanly under viddy.
+        let file = entry("file.rs", FileStatus::Modified, true, 1, 0);
+        let mut snap = snap_with(vec![file]);
+        snap.log = vec![log_entry("abc1234", "subject", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 1;
+        let out = strip_ansi(&render(&snap, &o));
+        let file_row = out
+            .lines()
+            .find(|l| l.contains("file.rs"))
+            .expect("file row should appear");
+        let log_line = out
+            .lines()
+            .find(|l| l.contains("abc1234"))
+            .expect("log row should appear");
+        assert_eq!(
+            UnicodeWidthStr::width(file_row.trim_end()),
+            UnicodeWidthStr::width(log_line.trim_end()),
+            "file row and log row should occupy the same width so age columns align:\n  file: {file_row:?}\n  log:  {log_line:?}",
+        );
+    }
+
+    #[test]
     fn log_section_has_separator_before_entries() {
         let mut snap = snap_with(vec![]);
-        snap.log = vec![LogEntry {
-            hash: "abc1234".into(),
-            subject: "first".into(),
-        }];
+        snap.log = vec![log_entry("abc1234", "first", 0)];
         let mut o = opts();
         o.log_lines = 5;
         let out = strip_ansi(&render(&snap, &o));

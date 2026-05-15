@@ -241,25 +241,32 @@ fn resolve_base_ref() -> String {
     "HEAD".to_string()
 }
 
-/// Fetch the `n` most recent commits as (short-hash, subject) pairs.
+/// Fetch the `n` most recent commits as (short-hash, age, subject) records.
 ///
 /// Returns an empty list when `n == 0` or git fails (e.g. no commits yet).
-/// Uses `%h %s` and splits on the first space — git short hashes never
-/// contain spaces, so the split is unambiguous.
+/// Uses `%h %ct %s` and splits on the first two spaces — the hash never
+/// contains spaces and `%ct` is a bare unix timestamp, so the splits are
+/// unambiguous. The subject keeps any internal spaces.
 fn fetch_log(n: usize) -> Vec<LogEntry> {
     if n == 0 {
         return Vec::new();
     }
     let n_arg = format!("-n{n}");
-    let Ok(out) = run_git(&["log", &n_arg, "--pretty=format:%h %s"]) else {
+    let Ok(out) = run_git(&["log", &n_arg, "--pretty=format:%h %ct %s"]) else {
         return Vec::new();
     };
+    let now = SystemTime::now();
     out.lines()
         .filter_map(|line| {
-            let (hash, subject) = line.split_once(' ')?;
+            let (hash, rest) = line.split_once(' ')?;
+            let (ct_str, subject) = rest.split_once(' ')?;
+            let secs: u64 = ct_str.parse().ok()?;
+            let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            let age = now.duration_since(when).unwrap_or(Duration::ZERO);
             Some(LogEntry {
                 hash: hash.to_string(),
                 subject: subject.to_string(),
+                age,
             })
         })
         .collect()
