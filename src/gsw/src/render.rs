@@ -101,7 +101,12 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     }
 
     if opts.log_lines > 0 && !snapshot.log.is_empty() {
-        lines.push(render_separator(header_width));
+        // When there are no file rows above us, the post-header separator
+        // already sits directly above the log section; adding another would
+        // produce a double rule with nothing between them.
+        if !snapshot.files.is_empty() {
+            lines.push(render_separator(header_width));
+        }
         for entry in snapshot.log.iter().take(opts.log_lines) {
             lines.push(render_log_row(entry, opts.terminal_width));
         }
