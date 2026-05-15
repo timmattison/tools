@@ -374,4 +374,20 @@ mod tests {
         // Honor https://no-color.org even when under viddy.
         assert!(!should_force_colors(false, true, true));
     }
+
+    #[test]
+    fn parse_log_line_keeps_entry_when_line_has_no_space() {
+        // Defensive: don't silently drop a log line just because it lacks
+        // the expected `%h SP %s` shape. Preserve the whole line as the hash
+        // with an empty subject so the row still surfaces.
+        let entry = parse_log_line("abc1234", SystemTime::now())
+            .expect("hash-only line should parse");
+        assert_eq!(entry.hash, "abc1234");
+        assert_eq!(entry.subject, "");
+    }
+
+    #[test]
+    fn parse_log_line_drops_empty_lines() {
+        assert!(parse_log_line("", SystemTime::now()).is_none());
+    }
 }
