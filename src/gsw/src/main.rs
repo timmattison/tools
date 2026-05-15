@@ -172,8 +172,14 @@ fn main() -> Result<()> {
         effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
 
     // Reserve room for the log section so the file list shrinks instead of
-    // pushing log rows off the bottom under viddy.
-    let log_reserve = if log_lines == 0 { 0 } else { 1 + log_lines };
+    // pushing log rows off the bottom under viddy. The +1 is the separator
+    // line that sits between the file list and the log block.
+    const PRE_LOG_SEPARATOR_ROW: usize = 1;
+    let log_reserve = if log_lines == 0 {
+        0
+    } else {
+        PRE_LOG_SEPARATOR_ROW + log_lines
+    };
     let files_height =
         terminal_height.saturating_sub(u16::try_from(log_reserve).unwrap_or(u16::MAX));
 
