@@ -117,13 +117,15 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     lines.join("\n")
 }
 
+/// Visible gap between the short hash and the subject in a log row.
+const LOG_HASH_SUBJECT_SEP: &str = "  ";
+
 fn render_log_row(entry: &LogEntry, width: usize) -> String {
     // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
     // hold the right-aligned age, matching the file-row age column exactly.
     // The subject is padded to fill the gap so the age column lines up.
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
-    let hash_sep = "  ";
-    let hash_sep_width = hash_sep.chars().count();
+    let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
 
     let subject_budget = width
@@ -137,7 +139,7 @@ fn render_log_row(entry: &LogEntry, width: usize) -> String {
     let age_str = colorize_age(&age_field, Some(entry.age));
 
     let hash_str = entry.hash.yellow().to_string();
-    format!("{hash_str}{hash_sep}{subject_padded}{sep_to_age}{age_str}")
+    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_padded}{sep_to_age}{age_str}")
 }
 
 /// Total width of everything to the right of the path column: the bar plus
