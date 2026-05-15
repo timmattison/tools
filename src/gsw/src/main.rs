@@ -260,11 +260,17 @@ fn fetch_log(n: usize) -> Vec<LogEntry> {
 }
 
 fn parse_log_line(line: &str, now: SystemTime) -> Option<LogEntry> {
-    let (hash, rest) = line.split_once(' ')?;
-    let (ct_str, subject) = rest.split_once(' ')?;
-    let secs: u64 = ct_str.parse().ok()?;
-    let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-    let age = now.duration_since(when).unwrap_or(Duration::ZERO);
+    if line.is_empty() {
+        return None;
+    }
+    let (hash, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let (ct_str, subject) = rest.split_once(' ').unwrap_or((rest, ""));
+    let age = ct_str
+        .parse::<u64>()
+        .ok()
+        .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        .and_then(|when| now.duration_since(when).ok())
+        .unwrap_or(Duration::ZERO);
     Some(LogEntry {
         hash: hash.to_string(),
         subject: subject.to_string(),
