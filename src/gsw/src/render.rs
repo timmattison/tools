@@ -15,7 +15,7 @@ pub struct Snapshot {
     pub branch: String,
     pub base: String,
     pub commits_ahead: u32,
-    pub last_commit_age: Duration,
+    pub last_commit_age: Option<Duration>,
     pub files: Vec<RenderEntry>,
     /// Most recent commits, newest first. Empty when not requested.
     pub log: Vec<LogEntry>,
@@ -163,7 +163,7 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 
 fn header_text(snap: &Snapshot) -> String {
     let commit_word = if snap.commits_ahead == 1 { "commit" } else { "commits" };
-    let age = format_age_detailed(snap.last_commit_age);
+    let age = format_age_detailed(snap.last_commit_age.unwrap_or(Duration::ZERO));
     format!(
         "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
         branch = snap.branch,
@@ -458,7 +458,7 @@ mod tests {
             branch: "gsv".into(),
             base: "main".into(),
             commits_ahead: 3,
-            last_commit_age: Duration::from_secs(5 * 60 + 23),
+            last_commit_age: Some(Duration::from_secs(5 * 60 + 23)),
             files,
             log: vec![],
         }

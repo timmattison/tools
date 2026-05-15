@@ -134,7 +134,7 @@ fn main() -> Result<()> {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
 
-    let last_commit_age = last_commit_age().unwrap_or(Duration::ZERO);
+    let last_commit_age = last_commit_age();
 
     let status_raw = run_git(&["status", "--porcelain=v2", "-z"])?;
     let entries = parse_status(&status_raw);
@@ -278,12 +278,14 @@ fn parse_log_line(line: &str, now: SystemTime) -> Option<LogEntry> {
     })
 }
 
-/// How long ago the current HEAD commit was authored.
-fn last_commit_age() -> Result<Duration> {
-    let raw = run_git(&["log", "-1", "--format=%ct"])?;
-    let secs: u64 = raw.trim().parse().unwrap_or(0);
+/// How long ago the current HEAD commit was authored, or `None` when that
+/// can't be determined (no commits yet, malformed git output, clock skew
+/// putting the commit in the future).
+fn last_commit_age() -> Option<Duration> {
+    let raw = run_git(&["log", "-1", "--format=%ct"]).ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
     let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-    Ok(SystemTime::now().duration_since(when).unwrap_or(Duration::ZERO))
+    SystemTime::now().duration_since(when).ok()
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.

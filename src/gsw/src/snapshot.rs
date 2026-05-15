@@ -18,7 +18,7 @@ pub fn build_snapshot(
     branch: String,
     base: String,
     commits_ahead: u32,
-    last_commit_age: Duration,
+    last_commit_age: Option<Duration>,
     status_entries: Vec<FileEntry>,
     staged_numstat: &HashMap<String, NumStat>,
     unstaged_numstat: &HashMap<String, NumStat>,
@@ -85,7 +85,7 @@ mod tests {
             "gsv".into(),
             "main".into(),
             5,
-            Duration::from_secs(120),
+            Some(Duration::from_secs(120)),
             vec![],
             &HashMap::new(),
             &HashMap::new(),
@@ -94,7 +94,7 @@ mod tests {
         assert_eq!(snap.branch, "gsv");
         assert_eq!(snap.base, "main");
         assert_eq!(snap.commits_ahead, 5);
-        assert_eq!(snap.last_commit_age, Duration::from_secs(120));
+        assert_eq!(snap.last_commit_age, Some(Duration::from_secs(120)));
     }
 
     #[test]
@@ -114,7 +114,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &staged,
             &unstaged,
@@ -143,7 +143,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &staged,
             &unstaged,
@@ -170,7 +170,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &staged,
             &HashMap::new(),
@@ -197,7 +197,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),
@@ -219,7 +219,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),
@@ -243,7 +243,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &staged,
             &HashMap::new(),
@@ -279,7 +279,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &staged,
             &unstaged,
@@ -307,7 +307,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
-            Duration::ZERO,
+            Some(Duration::ZERO),
             entries,
             &HashMap::new(),
             &HashMap::new(),
