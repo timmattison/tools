@@ -354,6 +354,17 @@ mod tests {
     }
 
     #[test]
+    fn width_leaves_safety_margin_when_stdout_is_tty() {
+        // Direct TTY: terminal_size reports the full column count, but if
+        // gsw renders a row exactly that many cells wide, terminals with
+        // auto-wrap (DECAWM) or right-edge chrome (scrollbars, padding)
+        // push the rightmost glyph onto the next line — the user sees the
+        // last character of the age column wrap. Leave one cell of margin,
+        // matching the viddy path so direct and viddy renderings agree.
+        assert_eq!(effective_terminal_width(Some(200), None, true, 0), 199);
+    }
+
+    #[test]
     fn width_uses_tty_width_when_stdout_is_tty() {
         // Interactive: trust the ioctl-reported width, not the env.
         assert_eq!(effective_terminal_width(Some(200), None, true, 0), 200);
