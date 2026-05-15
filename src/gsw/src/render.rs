@@ -163,7 +163,9 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 
 fn header_text(snap: &Snapshot) -> String {
     let commit_word = if snap.commits_ahead == 1 { "commit" } else { "commits" };
-    let age = format_age_detailed(snap.last_commit_age.unwrap_or(Duration::ZERO));
+    let age = snap
+        .last_commit_age
+        .map_or_else(|| "?".to_string(), format_age_detailed);
     format!(
         "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
         branch = snap.branch,
