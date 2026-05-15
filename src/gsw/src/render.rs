@@ -141,17 +141,23 @@ fn render_log_row(entry: &LogEntry, width: usize) -> String {
     format!("{hash_str}{hash_sep}{subject_padded}{sep_to_age}{age_str}")
 }
 
-fn compute_path_width(opts: &RenderOptions) -> usize {
-    // Layout overhead per row: icon(1) + " "(1) + letter(1) + " "(1) + bar(N) + seps + fields.
-    let overhead = 4
-        + opts.bar_width
-        + SEP_PATH_BAR
+/// Total width of everything to the right of the path column: the bar plus
+/// the +adds/-dels/age fields and their separators. Used both for sizing the
+/// path column and for padding the gutter on untracked rows that skip the
+/// bar/adds/dels so the age column still aligns.
+fn right_block_width(bar_width: usize) -> usize {
+    bar_width
         + SEP_BAR_ADDS
         + ADDS_FIELD
         + SEP_ADDS_DELS
         + DELS_FIELD
         + SEP_DELS_AGE
-        + AGE_FIELD;
+        + AGE_FIELD
+}
+
+fn compute_path_width(opts: &RenderOptions) -> usize {
+    // Per-row overhead: icon(1) + " "(1) + letter(1) + " "(1) + right block.
+    let overhead = 4 + SEP_PATH_BAR + right_block_width(opts.bar_width);
     opts.terminal_width.saturating_sub(overhead).max(8)
 }
 
@@ -197,12 +203,7 @@ fn render_row(
         entry.status,
         FileStatus::Untracked | FileStatus::UntrackedDir
     ) {
-        let gutter_width = opts.bar_width
-            + SEP_BAR_ADDS
-            + ADDS_FIELD
-            + SEP_ADDS_DELS
-            + DELS_FIELD
-            + SEP_DELS_AGE;
+        let gutter_width = right_block_width(opts.bar_width) - AGE_FIELD;
         let gutter = " ".repeat(gutter_width);
         let age = entry.age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
