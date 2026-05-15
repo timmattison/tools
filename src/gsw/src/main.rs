@@ -64,12 +64,16 @@ struct Cli {
 
 /// Decide the effective terminal width gsw should render for.
 ///
-/// - When stdout is a TTY, trust `tty_width` directly (interactive use).
-/// - When stdout is *not* a TTY but `COLUMNS` is set in env, a watch-like
-///   wrapper (e.g. viddy) is framing us. Viddy reports the full terminal
-///   width via `COLUMNS` but renders into a content area that's one column
-///   narrower (its scroll indicator). So we use `columns_env - 1`.
-/// - Otherwise fall back to 80 columns.
+/// Always leaves one cell of margin against the detected column count:
+/// - Direct TTY: rendering a row exactly `cols` cells wide collides with
+///   DECAWM auto-wrap quirks and right-edge chrome (scrollbars, padding)
+///   on many terminals, pushing the last glyph onto the next line. The
+///   margin keeps the rightmost cell empty.
+/// - Watch-like wrapper (stdout not a TTY but `COLUMNS` set, e.g. viddy):
+///   `COLUMNS` reports the full terminal width but the wrapper renders
+///   into a content area one column narrower (its scroll indicator).
+/// - Fallback (no signal): treat the implicit 80-column default the same
+///   way for consistency.
 ///
 /// `width_offset` always stacks on top, and the result is at least 1.
 fn effective_terminal_width(
@@ -78,11 +82,14 @@ fn effective_terminal_width(
     stdout_is_tty: bool,
     width_offset: usize,
 ) -> usize {
-    let base = match (stdout_is_tty, columns_env) {
-        (false, Some(cols)) => cols.saturating_sub(1),
+    let detected = match (stdout_is_tty, columns_env) {
+        (false, Some(cols)) => cols,
         _ => tty_width.unwrap_or(80),
     };
-    base.saturating_sub(width_offset).max(1)
+    detected
+        .saturating_sub(1)
+        .saturating_sub(width_offset)
+        .max(1)
 }
 
 /// Should `colored::control::set_override(true)` be called?
@@ -366,27 +373,31 @@ mod tests {
 
     #[test]
     fn width_uses_tty_width_when_stdout_is_tty() {
-        // Interactive: trust the ioctl-reported width, not the env.
-        assert_eq!(effective_terminal_width(Some(200), None, true, 0), 200);
+        // Interactive: trust the ioctl-reported width, not the env — but
+        // still subtract the one-cell safety margin.
+        assert_eq!(effective_terminal_width(Some(200), None, true, 0), 199);
     }
 
     #[test]
     fn width_ignores_columns_when_stdout_is_tty() {
         // If a shell leaked COLUMNS into our env but we have a real TTY,
         // the TTY measurement wins.
-        assert_eq!(effective_terminal_width(Some(200), Some(120), true, 0), 200);
+        assert_eq!(effective_terminal_width(Some(200), Some(120), true, 0), 199);
     }
 
     #[test]
-    fn width_falls_back_to_eighty_when_no_signal() {
-        // Piped to a plain file with no COLUMNS in env: nothing to go on.
-        assert_eq!(effective_terminal_width(None, None, false, 0), 80);
+    fn width_falls_back_to_eighty_minus_margin_when_no_signal() {
+        // Piped to a plain file with no COLUMNS in env: nothing to go on,
+        // so fall back to the 80-column default. The safety margin still
+        // applies so the fallback matches the detected paths.
+        assert_eq!(effective_terminal_width(None, None, false, 0), 79);
     }
 
     #[test]
     fn width_offset_stacks_on_top_of_detection() {
-        assert_eq!(effective_terminal_width(Some(200), None, true, 3), 197);
-        // 120 (COLUMNS) - 1 (scroll bar) - 2 (offset) = 117
+        // 200 (TTY) - 1 (safety margin) - 3 (offset) = 196
+        assert_eq!(effective_terminal_width(Some(200), None, true, 3), 196);
+        // 120 (COLUMNS) - 1 (safety margin) - 2 (offset) = 117
         assert_eq!(effective_terminal_width(None, Some(120), false, 2), 117);
     }
 
