@@ -100,7 +100,24 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         );
     }
 
+    if opts.log_lines > 0 && !snapshot.log.is_empty() {
+        lines.push(render_separator(header_width));
+        for entry in snapshot.log.iter().take(opts.log_lines) {
+            lines.push(render_log_row(entry, opts.terminal_width));
+        }
+    }
+
     lines.join("\n")
+}
+
+fn render_log_row(entry: &LogEntry, width: usize) -> String {
+    let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
+    let sep = "  ";
+    let sep_width = sep.chars().count();
+    let subject_budget = width.saturating_sub(hash_width + sep_width);
+    let subject = truncate_right(&entry.subject, subject_budget);
+    let hash_str = entry.hash.yellow().to_string();
+    format!("{hash_str}{sep}{subject}")
 }
 
 fn compute_path_width(opts: &RenderOptions) -> usize {
@@ -302,6 +319,28 @@ fn pad_right(s: &str, width: usize) -> String {
         }
         result
     }
+}
+
+/// Truncate `s` from the right to fit within `max_width` display columns,
+/// suffixing with `…` when truncation happens. UTF-8 safe.
+fn truncate_right(s: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let ellipsis_width = 1_usize;
+    let target = max_width.saturating_sub(ellipsis_width);
+    let mut acc = 0_usize;
+    let mut result = String::new();
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if acc + cw > target {
+            break;
+        }
+        acc += cw;
+        result.push(c);
+    }
+    result.push('…');
+    result
 }
 
 /// Truncate `s` from the left to fit within `max_width` display columns,
