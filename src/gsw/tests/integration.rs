@@ -285,6 +285,38 @@ fn no_log_flag_suppresses_log_section() {
 }
 
 #[test]
+fn log_row_ends_with_commit_age_in_detailed_format() {
+    // Each rendered log row should end with the commit age in the same
+    // two-unit format the file rows and the header use (e.g. `0s`, `5m23s`,
+    // `2h14m`, `3d12h`). The "initial" commit is freshly minted, so its row
+    // should end with a digit followed by `s`/`m`/`h`/`d`.
+    let dir = setup_repo();
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .args(["--no-color", "--log-lines", "1"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(output.status.success(), "gsw exited non-zero");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let log_line = out
+        .lines()
+        .find(|l| l.contains("initial"))
+        .expect("log row should appear");
+    let trimmed = log_line.trim_end();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let last = chars.last().copied().unwrap_or(' ');
+    let prev = chars.iter().rev().nth(1).copied().unwrap_or(' ');
+    assert!(
+        matches!(last, 's' | 'm' | 'h' | 'd'),
+        "log row should end with an age unit (s/m/h/d): {log_line:?}",
+    );
+    assert!(
+        prev.is_ascii_digit(),
+        "log row age unit should be preceded by a digit: {log_line:?}",
+    );
+}
+
+#[test]
 fn log_lines_flag_caps_visible_commits() {
     let dir = setup_repo();
     // Add several commits so we can verify --log-lines actually caps.
