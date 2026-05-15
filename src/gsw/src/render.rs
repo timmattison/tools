@@ -900,6 +900,36 @@ mod tests {
     }
 
     #[test]
+    fn empty_file_list_collapses_to_single_separator_before_log() {
+        // When there are no staged/unstaged files, the post-header separator
+        // already sits directly above the log section, so the additional
+        // pre-log separator just creates a double rule with nothing between
+        // them. Collapse to a single ─ line.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            LogEntry {
+                hash: "abc1234".into(),
+                subject: "first".into(),
+            },
+            LogEntry {
+                hash: "def5678".into(),
+                subject: "second".into(),
+            },
+        ];
+        let mut o = opts();
+        o.log_lines = 5;
+        let out = strip_ansi(&render(&snap, &o));
+        let separator_count = out
+            .lines()
+            .filter(|l| !l.is_empty() && l.chars().all(|c| c == '─'))
+            .count();
+        assert_eq!(
+            separator_count, 1,
+            "expected exactly one separator when file list is empty:\n{out}",
+        );
+    }
+
+    #[test]
     fn log_section_has_separator_before_entries() {
         let mut snap = snap_with(vec![]);
         snap.log = vec![LogEntry {
