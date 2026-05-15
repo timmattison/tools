@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -44,12 +45,67 @@ struct Cli {
     /// Width of the magnitude bar in cells.
     #[arg(long, default_value_t = 6)]
     bar_width: usize,
+
+    /// Columns to subtract from the detected terminal width. Useful when a
+    /// wrapping TUI (e.g. viddy) eats a column for its own chrome that the
+    /// child process can't see.
+    #[arg(long, default_value_t = 0)]
+    width_offset: usize,
+}
+
+/// Decide the effective terminal width gsw should render for.
+///
+/// - When stdout is a TTY, trust `tty_width` directly (interactive use).
+/// - When stdout is *not* a TTY but `COLUMNS` is set in env, a watch-like
+///   wrapper (e.g. viddy) is framing us. Viddy reports the full terminal
+///   width via `COLUMNS` but renders into a content area that's one column
+///   narrower (its scroll indicator). So we use `columns_env - 1`.
+/// - Otherwise fall back to 80 columns.
+///
+/// `width_offset` always stacks on top, and the result is at least 1.
+fn effective_terminal_width(
+    tty_width: Option<usize>,
+    columns_env: Option<usize>,
+    stdout_is_tty: bool,
+    width_offset: usize,
+) -> usize {
+    let base = match (stdout_is_tty, columns_env) {
+        (false, Some(cols)) => cols.saturating_sub(1),
+        _ => tty_width.unwrap_or(80),
+    };
+    base.saturating_sub(width_offset).max(1)
+}
+
+/// Should `colored::control::set_override(true)` be called?
+///
+/// True only when output is captured by a watch-like wrapper (stdout is not
+/// a TTY *and* `COLUMNS` is set in env), and the user has not asked to
+/// suppress colors via `NO_COLOR`. The wrapper renders the captured bytes
+/// inside its own TTY-backed UI, so colors should pass through.
+fn should_force_colors(
+    stdout_is_tty: bool,
+    columns_env_present: bool,
+    no_color_env: bool,
+) -> bool {
+    !stdout_is_tty && columns_env_present && !no_color_env
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let columns_env: Option<usize> = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let no_color_env = std::env::var_os("NO_COLOR").is_some();
+
     if cli.no_color {
         colored::control::set_override(false);
+    } else if should_force_colors(stdout_is_tty, columns_env.is_some(), no_color_env) {
+        // A watch-like wrapper (e.g. viddy) is rendering our output inside
+        // its own TTY-backed UI. The colored crate would otherwise strip
+        // colors because our stdout is a pipe.
+        colored::control::set_override(true);
     }
 
     if !inside_git_repo() {
@@ -97,8 +153,11 @@ fn main() -> Result<()> {
         &ages,
     );
 
-    let (terminal_width, terminal_height) = terminal_size::terminal_size()
-        .map_or((80, 24), |(w, h)| (usize::from(w.0), h.0));
+    let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), h.0));
+    let tty_width = tty_size.map(|(w, _)| w);
+    let terminal_height = tty_size.map_or(24, |(_, h)| h);
+    let terminal_width =
+        effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
 
     let opts = RenderOptions {
         terminal_width,
@@ -198,4 +257,71 @@ fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<Stri
         out.insert(e.path.clone(), elapsed);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn width_uses_columns_minus_one_when_stdout_not_tty() {
+        // viddy case: pipes captured, COLUMNS exported.
+        assert_eq!(effective_terminal_width(None, Some(120), false, 0), 119);
+    }
+
+    #[test]
+    fn width_uses_tty_width_when_stdout_is_tty() {
+        // Interactive: trust the ioctl-reported width, not the env.
+        assert_eq!(effective_terminal_width(Some(200), None, true, 0), 200);
+    }
+
+    #[test]
+    fn width_ignores_columns_when_stdout_is_tty() {
+        // If a shell leaked COLUMNS into our env but we have a real TTY,
+        // the TTY measurement wins.
+        assert_eq!(effective_terminal_width(Some(200), Some(120), true, 0), 200);
+    }
+
+    #[test]
+    fn width_falls_back_to_eighty_when_no_signal() {
+        // Piped to a plain file with no COLUMNS in env: nothing to go on.
+        assert_eq!(effective_terminal_width(None, None, false, 0), 80);
+    }
+
+    #[test]
+    fn width_offset_stacks_on_top_of_detection() {
+        assert_eq!(effective_terminal_width(Some(200), None, true, 3), 197);
+        // 120 (COLUMNS) - 1 (scroll bar) - 2 (offset) = 117
+        assert_eq!(effective_terminal_width(None, Some(120), false, 2), 117);
+    }
+
+    #[test]
+    fn width_never_drops_below_one() {
+        // A pathologically large offset should clamp to 1, not underflow.
+        assert_eq!(effective_terminal_width(Some(10), None, true, 999), 1);
+    }
+
+    #[test]
+    fn force_colors_when_piped_to_wrapper_with_columns_env() {
+        assert!(should_force_colors(false, true, false));
+    }
+
+    #[test]
+    fn no_force_colors_when_interactive() {
+        // TTY → let colored auto-detect (it will say yes anyway).
+        assert!(!should_force_colors(true, true, false));
+        assert!(!should_force_colors(true, false, false));
+    }
+
+    #[test]
+    fn no_force_colors_when_piped_without_columns_env() {
+        // Plain pipe to file: respect the colored crate's default (off).
+        assert!(!should_force_colors(false, false, false));
+    }
+
+    #[test]
+    fn no_force_colors_when_no_color_env_set() {
+        // Honor https://no-color.org even when under viddy.
+        assert!(!should_force_colors(false, true, true));
+    }
 }

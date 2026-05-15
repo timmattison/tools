@@ -187,3 +187,107 @@ fn shows_untracked_directory_with_slash() {
         "untracked dir should show with trailing slash: {out}",
     );
 }
+
+/// Stage a deeply-nested file under a long path so the rendered row's
+/// path column is wide enough that narrow terminals will visibly truncate
+/// it with `…`. Untracked nested dirs would otherwise collapse to their
+/// topmost segment in `git status` output and defeat the test.
+fn make_long_staged(dir: &Path) -> String {
+    let rel = "a/very/long/path/to/deeply/nested/file.txt";
+    let full = dir.join(rel);
+    fs::create_dir_all(full.parent().unwrap()).unwrap();
+    fs::write(&full, "x\n").unwrap();
+    run_git(dir, &["add", rel]);
+    rel.to_string()
+}
+
+#[test]
+fn columns_env_with_piped_stdout_narrows_width_and_preserves_colors() {
+    // Simulate viddy: stdout is captured (no TTY) and the wrapper exports
+    // its terminal's width via COLUMNS. gsw should use COLUMNS-1 (reserving
+    // one cell for the wrapper's scroll bar) and force colors through.
+    let dir = setup_repo();
+    make_long_staged(dir.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .env("COLUMNS", "50")
+        // Make the test independent of the host's NO_COLOR / CLICOLOR setup.
+        .env_remove("NO_COLOR")
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        raw.contains('\u{1b}'),
+        "expected ANSI color escapes when COLUMNS is set: {raw:?}",
+    );
+    assert!(
+        raw.contains('…'),
+        "long path should be left-truncated to fit COLUMNS-1: {raw:?}",
+    );
+}
+
+#[test]
+fn columns_env_ignored_when_no_color_env_is_set() {
+    // NO_COLOR must win even when we'd otherwise force colors on under
+    // a watch wrapper. https://no-color.org/
+    let dir = setup_repo();
+    make_long_staged(dir.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .env("COLUMNS", "50")
+        .env("NO_COLOR", "1")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(output.status.success(), "gsw exited non-zero");
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !raw.contains('\u{1b}'),
+        "NO_COLOR=1 should suppress colors even under a watch wrapper: {raw:?}",
+    );
+}
+
+#[test]
+fn width_offset_flag_narrows_render() {
+    // With a fixed COLUMNS, --width-offset should subtract that many cells
+    // on top of the auto-detection, narrowing the file-row path column
+    // enough to force ellipsis truncation.
+    let dir = setup_repo();
+    make_long_staged(dir.path());
+
+    let baseline = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .env("COLUMNS", "80")
+        .current_dir(dir.path())
+        .output()
+        .expect("baseline gsw failed");
+    assert!(baseline.status.success());
+    let baseline_str = String::from_utf8_lossy(&baseline.stdout);
+    assert!(
+        !baseline_str.contains('…'),
+        "baseline width should fit the long path without truncation: {baseline_str}",
+    );
+
+    let with_offset = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .arg("--width-offset")
+        .arg("30")
+        .env("COLUMNS", "80")
+        .current_dir(dir.path())
+        .output()
+        .expect("offset gsw failed");
+    assert!(with_offset.status.success());
+    let offset_str = String::from_utf8_lossy(&with_offset.stdout);
+    assert!(
+        offset_str.contains('…'),
+        "--width-offset 30 should narrow render enough to truncate path: {offset_str}",
+    );
+}
