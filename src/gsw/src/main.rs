@@ -256,20 +256,20 @@ fn fetch_log(n: usize) -> Vec<LogEntry> {
         return Vec::new();
     };
     let now = SystemTime::now();
-    out.lines()
-        .filter_map(|line| {
-            let (hash, rest) = line.split_once(' ')?;
-            let (ct_str, subject) = rest.split_once(' ')?;
-            let secs: u64 = ct_str.parse().ok()?;
-            let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-            let age = now.duration_since(when).unwrap_or(Duration::ZERO);
-            Some(LogEntry {
-                hash: hash.to_string(),
-                subject: subject.to_string(),
-                age,
-            })
-        })
-        .collect()
+    out.lines().filter_map(|line| parse_log_line(line, now)).collect()
+}
+
+fn parse_log_line(line: &str, now: SystemTime) -> Option<LogEntry> {
+    let (hash, rest) = line.split_once(' ')?;
+    let (ct_str, subject) = rest.split_once(' ')?;
+    let secs: u64 = ct_str.parse().ok()?;
+    let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+    let age = now.duration_since(when).unwrap_or(Duration::ZERO);
+    Some(LogEntry {
+        hash: hash.to_string(),
+        subject: subject.to_string(),
+        age,
+    })
 }
 
 /// How long ago the current HEAD commit was authored.
