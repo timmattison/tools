@@ -323,7 +323,7 @@ fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
         AgeDim::Fresh => text.bold(),
         AgeDim::Recent => text.normal(),
         AgeDim::Aging => text.dimmed(),
-        AgeDim::Stale => text.dimmed(),
+        AgeDim::Stale => text.dimmed().italic(),
     }
 }
 
