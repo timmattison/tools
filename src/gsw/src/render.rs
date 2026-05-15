@@ -423,6 +423,33 @@ pub fn default_max_files(terminal_height: u16) -> usize {
     usize::from(terminal_height.saturating_sub(4)).max(1)
 }
 
+/// Plan how many file rows and how many log rows the frame should render,
+/// given the actual demand from each section and the total terminal rows
+/// available for content (i.e. terminal height minus chrome the caller has
+/// already deducted: header, post-header separator, inter-section
+/// separator, and a reserved row for a possible `+N more files` footer).
+///
+/// When everything fits, both sections are rendered in full. When the
+/// combined demand exceeds the available rows, the rows are split
+/// proportionally to each section's demand — so a small file list paired
+/// with a long log gets a fair-but-larger share of the screen, rather than
+/// being squeezed to one or two rows because the log was configured with
+/// a large `--log-lines`. Each non-empty section is guaranteed at least
+/// one row of its own.
+///
+/// Returns `(file_cap, log_cap)`. Each cap never exceeds the corresponding
+/// demand.
+pub fn plan_section_caps(
+    file_demand: usize,
+    log_demand: usize,
+    available_rows: usize,
+) -> (usize, usize) {
+    // Stub: real implementation lands in the green commit. This forces the
+    // accompanying tests to fail on *behavior*, not on a missing symbol.
+    let _ = (file_demand, log_demand, available_rows);
+    (0, 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,6 +859,58 @@ mod tests {
         assert_eq!(default_max_files(1), 1);
         assert_eq!(default_max_files(4), 1);
         assert_eq!(default_max_files(5), 1);
+    }
+
+    #[test]
+    fn plan_section_caps_returns_full_demand_when_room_is_plenty() {
+        // No contention: 5 files + 20 log rows easily fit in 100 rows.
+        assert_eq!(plan_section_caps(5, 20, 100), (5, 20));
+    }
+
+    #[test]
+    fn plan_section_caps_splits_proportionally_when_overflowing() {
+        // 5 files vs 20 log rows competing for 10 rows: file share is
+        // round(5*10/25) = 2, log gets the remaining 8. This is the case
+        // that motivated the change — today the file list gets squeezed
+        // to 1 or 2 rows regardless of how few files the user actually has.
+        assert_eq!(plan_section_caps(5, 20, 10), (2, 8));
+    }
+
+    #[test]
+    fn plan_section_caps_guarantees_each_section_at_least_one_row() {
+        // file=1, log=100 would proportionally give file 0 rows (rounded
+        // down). Each non-empty section must keep at least one row so we
+        // never silently hide a section that has content.
+        let (f, l) = plan_section_caps(1, 100, 10);
+        assert!(f >= 1, "non-empty file section must get at least 1 row, got {f}");
+        assert_eq!(f + l, 10, "all rows should be allocated when overflowing");
+    }
+
+    #[test]
+    fn plan_section_caps_grants_all_rows_to_lone_section() {
+        // When only one section has content, it should claim every
+        // available row up to its demand. The other section gets zero.
+        assert_eq!(plan_section_caps(0, 20, 10), (0, 10));
+        assert_eq!(plan_section_caps(20, 0, 10), (10, 0));
+    }
+
+    #[test]
+    fn plan_section_caps_returns_zero_when_no_rows_available() {
+        // Pathologically short terminal: nothing fits, so nothing is
+        // promised. The caller will at least render header chrome.
+        assert_eq!(plan_section_caps(5, 5, 0), (0, 0));
+    }
+
+    #[test]
+    fn plan_section_caps_never_exceeds_demand() {
+        // The contract: returned caps never exceed the corresponding
+        // demand, even when the proportional formula would round up past
+        // it. file=2, log=20, available=14 is the kind of edge case where
+        // a naive proportional formula could produce a file cap > 2.
+        let (f, l) = plan_section_caps(2, 20, 14);
+        assert!(f <= 2, "file cap must not exceed demand: got {f}");
+        assert!(l <= 20, "log cap must not exceed demand: got {l}");
+        assert!(f + l <= 14, "total must fit in available rows: {f}+{l}");
     }
 
     fn log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
