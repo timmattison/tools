@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
@@ -63,13 +64,16 @@ struct Cli {
 ///
 /// `width_offset` always stacks on top, and the result is at least 1.
 fn effective_terminal_width(
-    _tty_width: Option<usize>,
-    _columns_env: Option<usize>,
-    _stdout_is_tty: bool,
-    _width_offset: usize,
+    tty_width: Option<usize>,
+    columns_env: Option<usize>,
+    stdout_is_tty: bool,
+    width_offset: usize,
 ) -> usize {
-    // RED stub — green commit replaces this with real behavior.
-    80
+    let base = match (stdout_is_tty, columns_env) {
+        (false, Some(cols)) => cols.saturating_sub(1),
+        _ => tty_width.unwrap_or(80),
+    };
+    base.saturating_sub(width_offset).max(1)
 }
 
 /// Should `colored::control::set_override(true)` be called?
@@ -79,18 +83,29 @@ fn effective_terminal_width(
 /// suppress colors via `NO_COLOR`. The wrapper renders the captured bytes
 /// inside its own TTY-backed UI, so colors should pass through.
 fn should_force_colors(
-    _stdout_is_tty: bool,
-    _columns_env_present: bool,
-    _no_color_env: bool,
+    stdout_is_tty: bool,
+    columns_env_present: bool,
+    no_color_env: bool,
 ) -> bool {
-    // RED stub — green commit replaces this with real behavior.
-    false
+    !stdout_is_tty && columns_env_present && !no_color_env
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let columns_env: Option<usize> = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let no_color_env = std::env::var_os("NO_COLOR").is_some();
+
     if cli.no_color {
         colored::control::set_override(false);
+    } else if should_force_colors(stdout_is_tty, columns_env.is_some(), no_color_env) {
+        // A watch-like wrapper (e.g. viddy) is rendering our output inside
+        // its own TTY-backed UI. The colored crate would otherwise strip
+        // colors because our stdout is a pipe.
+        colored::control::set_override(true);
     }
 
     if !inside_git_repo() {
@@ -138,8 +153,11 @@ fn main() -> Result<()> {
         &ages,
     );
 
-    let (terminal_width, terminal_height) = terminal_size::terminal_size()
-        .map_or((80, 24), |(w, h)| (usize::from(w.0), h.0));
+    let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), h.0));
+    let tty_width = tty_size.map(|(w, _)| w);
+    let terminal_height = tty_size.map_or(24, |(_, h)| h);
+    let terminal_width =
+        effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
 
     let opts = RenderOptions {
         terminal_width,
@@ -212,6 +230,35 @@ fn last_commit_age() -> Result<Duration> {
     Ok(SystemTime::now().duration_since(when).unwrap_or(Duration::ZERO))
 }
 
+/// Get mtime ages for each entry's path, where the path still exists on disk.
+///
+/// `repo_root` anchors the lookup: `git status --porcelain=v2 -z` reports
+/// paths relative to the repo root, not the cwd, so resolving against the
+/// cwd misses every file when gsw runs from a subdirectory. Falls back to
+/// cwd-relative resolution when the root can't be determined.
+fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<String, Duration> {
+    let now = SystemTime::now();
+    let mut out = HashMap::with_capacity(entries.len());
+    for e in entries {
+        if out.contains_key(&e.path) {
+            continue;
+        }
+        let full = match repo_root {
+            Some(root) => root.join(&e.path),
+            None => PathBuf::from(&e.path),
+        };
+        let Ok(meta) = std::fs::metadata(&full) else {
+            continue;
+        };
+        let Ok(mtime) = meta.modified() else {
+            continue;
+        };
+        let elapsed = now.duration_since(mtime).unwrap_or(Duration::ZERO);
+        out.insert(e.path.clone(), elapsed);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,33 +324,4 @@ mod tests {
         // Honor https://no-color.org even when under viddy.
         assert!(!should_force_colors(false, true, true));
     }
-}
-
-/// Get mtime ages for each entry's path, where the path still exists on disk.
-///
-/// `repo_root` anchors the lookup: `git status --porcelain=v2 -z` reports
-/// paths relative to the repo root, not the cwd, so resolving against the
-/// cwd misses every file when gsw runs from a subdirectory. Falls back to
-/// cwd-relative resolution when the root can't be determined.
-fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<String, Duration> {
-    let now = SystemTime::now();
-    let mut out = HashMap::with_capacity(entries.len());
-    for e in entries {
-        if out.contains_key(&e.path) {
-            continue;
-        }
-        let full = match repo_root {
-            Some(root) => root.join(&e.path),
-            None => PathBuf::from(&e.path),
-        };
-        let Ok(meta) = std::fs::metadata(&full) else {
-            continue;
-        };
-        let Ok(mtime) = meta.modified() else {
-            continue;
-        };
-        let elapsed = now.duration_since(mtime).unwrap_or(Duration::ZERO);
-        out.insert(e.path.clone(), elapsed);
-    }
-    out
 }
