@@ -44,6 +44,47 @@ struct Cli {
     /// Width of the magnitude bar in cells.
     #[arg(long, default_value_t = 6)]
     bar_width: usize,
+
+    /// Columns to subtract from the detected terminal width. Useful when a
+    /// wrapping TUI (e.g. viddy) eats a column for its own chrome that the
+    /// child process can't see.
+    #[arg(long, default_value_t = 0)]
+    width_offset: usize,
+}
+
+/// Decide the effective terminal width gsw should render for.
+///
+/// - When stdout is a TTY, trust `tty_width` directly (interactive use).
+/// - When stdout is *not* a TTY but `COLUMNS` is set in env, a watch-like
+///   wrapper (e.g. viddy) is framing us. Viddy reports the full terminal
+///   width via `COLUMNS` but renders into a content area that's one column
+///   narrower (its scroll indicator). So we use `columns_env - 1`.
+/// - Otherwise fall back to 80 columns.
+///
+/// `width_offset` always stacks on top, and the result is at least 1.
+fn effective_terminal_width(
+    _tty_width: Option<usize>,
+    _columns_env: Option<usize>,
+    _stdout_is_tty: bool,
+    _width_offset: usize,
+) -> usize {
+    // RED stub — green commit replaces this with real behavior.
+    80
+}
+
+/// Should `colored::control::set_override(true)` be called?
+///
+/// True only when output is captured by a watch-like wrapper (stdout is not
+/// a TTY *and* `COLUMNS` is set in env), and the user has not asked to
+/// suppress colors via `NO_COLOR`. The wrapper renders the captured bytes
+/// inside its own TTY-backed UI, so colors should pass through.
+fn should_force_colors(
+    _stdout_is_tty: bool,
+    _columns_env_present: bool,
+    _no_color_env: bool,
+) -> bool {
+    // RED stub — green commit replaces this with real behavior.
+    false
 }
 
 fn main() -> Result<()> {
@@ -169,6 +210,73 @@ fn last_commit_age() -> Result<Duration> {
     let secs: u64 = raw.trim().parse().unwrap_or(0);
     let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
     Ok(SystemTime::now().duration_since(when).unwrap_or(Duration::ZERO))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn width_uses_columns_minus_one_when_stdout_not_tty() {
+        // viddy case: pipes captured, COLUMNS exported.
+        assert_eq!(effective_terminal_width(None, Some(120), false, 0), 119);
+    }
+
+    #[test]
+    fn width_uses_tty_width_when_stdout_is_tty() {
+        // Interactive: trust the ioctl-reported width, not the env.
+        assert_eq!(effective_terminal_width(Some(200), None, true, 0), 200);
+    }
+
+    #[test]
+    fn width_ignores_columns_when_stdout_is_tty() {
+        // If a shell leaked COLUMNS into our env but we have a real TTY,
+        // the TTY measurement wins.
+        assert_eq!(effective_terminal_width(Some(200), Some(120), true, 0), 200);
+    }
+
+    #[test]
+    fn width_falls_back_to_eighty_when_no_signal() {
+        // Piped to a plain file with no COLUMNS in env: nothing to go on.
+        assert_eq!(effective_terminal_width(None, None, false, 0), 80);
+    }
+
+    #[test]
+    fn width_offset_stacks_on_top_of_detection() {
+        assert_eq!(effective_terminal_width(Some(200), None, true, 3), 197);
+        // 120 (COLUMNS) - 1 (scroll bar) - 2 (offset) = 117
+        assert_eq!(effective_terminal_width(None, Some(120), false, 2), 117);
+    }
+
+    #[test]
+    fn width_never_drops_below_one() {
+        // A pathologically large offset should clamp to 1, not underflow.
+        assert_eq!(effective_terminal_width(Some(10), None, true, 999), 1);
+    }
+
+    #[test]
+    fn force_colors_when_piped_to_wrapper_with_columns_env() {
+        assert!(should_force_colors(false, true, false));
+    }
+
+    #[test]
+    fn no_force_colors_when_interactive() {
+        // TTY → let colored auto-detect (it will say yes anyway).
+        assert!(!should_force_colors(true, true, false));
+        assert!(!should_force_colors(true, false, false));
+    }
+
+    #[test]
+    fn no_force_colors_when_piped_without_columns_env() {
+        // Plain pipe to file: respect the colored crate's default (off).
+        assert!(!should_force_colors(false, false, false));
+    }
+
+    #[test]
+    fn no_force_colors_when_no_color_env_set() {
+        // Honor https://no-color.org even when under viddy.
+        assert!(!should_force_colors(false, true, true));
+    }
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
