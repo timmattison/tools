@@ -256,6 +256,68 @@ fn columns_env_ignored_when_no_color_env_is_set() {
 }
 
 #[test]
+fn shows_recent_commit_subject_in_log_section() {
+    // By default gsw should append a `git log --oneline`-style block so
+    // `viddy gsw` shows recent commits alongside status. The setup repo has
+    // one commit with subject "initial".
+    let dir = setup_repo();
+    let out = run_gsw(dir.path());
+    assert!(
+        out.contains("initial"),
+        "default output should include the recent commit subject: {out}",
+    );
+}
+
+#[test]
+fn no_log_flag_suppresses_log_section() {
+    let dir = setup_repo();
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .args(["--no-color", "--no-log"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(output.status.success(), "gsw exited non-zero");
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !out.contains("initial"),
+        "--no-log should hide the log section: {out}",
+    );
+}
+
+#[test]
+fn log_lines_flag_caps_visible_commits() {
+    let dir = setup_repo();
+    // Add several commits so we can verify --log-lines actually caps.
+    for i in 0..5 {
+        fs::write(dir.path().join("a.txt"), format!("rev {i}\n")).unwrap();
+        run_git(dir.path(), &["add", "a.txt"]);
+        run_git(
+            dir.path(),
+            &["commit", "-q", "-m", &format!("rev-{i}-subject")],
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .args(["--no-color", "--log-lines", "2"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(output.status.success(), "gsw exited non-zero");
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        out.contains("rev-4-subject"),
+        "newest commit should be visible with --log-lines 2: {out}",
+    );
+    assert!(
+        out.contains("rev-3-subject"),
+        "second-newest commit should be visible with --log-lines 2: {out}",
+    );
+    assert!(
+        !out.contains("rev-2-subject"),
+        "third-newest commit should be hidden by --log-lines 2: {out}",
+    );
+}
+
+#[test]
 fn width_offset_flag_narrows_render() {
     // With a fixed COLUMNS, --width-offset should subtract that many cells
     // on top of the auto-detection, narrowing the file-row path column

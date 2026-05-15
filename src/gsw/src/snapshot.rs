@@ -54,6 +54,7 @@ pub fn build_snapshot(
         commits_ahead,
         last_commit_age,
         files,
+        log: Vec::new(),
     }
 }
 

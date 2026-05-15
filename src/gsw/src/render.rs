@@ -17,6 +17,15 @@ pub struct Snapshot {
     pub commits_ahead: u32,
     pub last_commit_age: Duration,
     pub files: Vec<RenderEntry>,
+    /// Most recent commits, newest first. Empty when not requested.
+    pub log: Vec<LogEntry>,
+}
+
+/// One recent-commit row.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub hash: String,
+    pub subject: String,
 }
 
 /// One file row in the frame.
@@ -40,6 +49,8 @@ pub struct RenderOptions {
     pub terminal_width: usize,
     pub bar_width: usize,
     pub max_files: Option<usize>,
+    /// Maximum recent-commit rows to render. 0 disables the log section.
+    pub log_lines: usize,
 }
 
 /// Width of the "+adds" / "-dels" / age column fields.
@@ -89,7 +100,29 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         );
     }
 
+    if opts.log_lines > 0 && !snapshot.log.is_empty() {
+        // When there are no file rows above us, the post-header separator
+        // already sits directly above the log section; adding another would
+        // produce a double rule with nothing between them.
+        if !snapshot.files.is_empty() {
+            lines.push(render_separator(header_width));
+        }
+        for entry in snapshot.log.iter().take(opts.log_lines) {
+            lines.push(render_log_row(entry, opts.terminal_width));
+        }
+    }
+
     lines.join("\n")
+}
+
+fn render_log_row(entry: &LogEntry, width: usize) -> String {
+    let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
+    let sep = "  ";
+    let sep_width = sep.chars().count();
+    let subject_budget = width.saturating_sub(hash_width + sep_width);
+    let subject = truncate_right(&entry.subject, subject_budget);
+    let hash_str = entry.hash.yellow().to_string();
+    format!("{hash_str}{sep}{subject}")
 }
 
 fn compute_path_width(opts: &RenderOptions) -> usize {
@@ -293,6 +326,28 @@ fn pad_right(s: &str, width: usize) -> String {
     }
 }
 
+/// Truncate `s` from the right to fit within `max_width` display columns,
+/// suffixing with `…` when truncation happens. UTF-8 safe.
+fn truncate_right(s: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let ellipsis_width = 1_usize;
+    let target = max_width.saturating_sub(ellipsis_width);
+    let mut acc = 0_usize;
+    let mut result = String::new();
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if acc + cw > target {
+            break;
+        }
+        acc += cw;
+        result.push(c);
+    }
+    result.push('…');
+    result
+}
+
 /// Truncate `s` from the left to fit within `max_width` display columns,
 /// prefixing with `…` when truncation happens. UTF-8 safe.
 fn truncate_left(s: &str, max_width: usize) -> String {
@@ -377,6 +432,7 @@ mod tests {
             terminal_width: 80,
             bar_width: 6,
             max_files: None,
+            log_lines: 0,
         }
     }
 
@@ -387,6 +443,7 @@ mod tests {
             commits_ahead: 3,
             last_commit_age: Duration::from_secs(5 * 60 + 23),
             files,
+            log: vec![],
         }
     }
 
@@ -621,6 +678,7 @@ mod tests {
                 terminal_width: 60,
                 bar_width: 6,
                 max_files: None,
+                log_lines: 0,
             },
         ));
         let row = out.lines().nth(2).unwrap_or("");
@@ -641,6 +699,7 @@ mod tests {
                 terminal_width: 40,
                 bar_width: 6,
                 max_files: None,
+                log_lines: 0,
             },
         );
         let stripped = strip_ansi(&out);
@@ -659,6 +718,7 @@ mod tests {
                 terminal_width: 80,
                 bar_width: 6,
                 max_files: Some(3),
+                log_lines: 0,
             },
         ));
         assert!(out.contains("f0.rs"));
@@ -682,6 +742,7 @@ mod tests {
                 terminal_width: 80,
                 bar_width: 6,
                 max_files: Some(0),
+                log_lines: 0,
             },
         ));
         for i in 0..5 {
@@ -753,4 +814,146 @@ mod tests {
         assert_eq!(default_max_files(5), 1);
     }
 
+    #[test]
+    fn log_section_renders_hash_and_subject() {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            LogEntry {
+                hash: "abc1234".into(),
+                subject: "first commit subject".into(),
+            },
+            LogEntry {
+                hash: "def5678".into(),
+                subject: "second commit subject".into(),
+            },
+        ];
+        let mut o = opts();
+        o.log_lines = 10;
+        let out = strip_ansi(&render(&snap, &o));
+        assert!(out.contains("abc1234"), "first hash should appear: {out}");
+        assert!(
+            out.contains("first commit subject"),
+            "first subject should appear: {out}",
+        );
+        assert!(out.contains("def5678"), "second hash should appear: {out}");
+        assert!(
+            out.contains("second commit subject"),
+            "second subject should appear: {out}",
+        );
+    }
+
+    #[test]
+    fn log_section_caps_at_log_lines() {
+        let mut snap = snap_with(vec![]);
+        snap.log = (0..30)
+            .map(|i| LogEntry {
+                hash: format!("h{i:06}"),
+                subject: format!("subj {i}"),
+            })
+            .collect();
+        let mut o = opts();
+        o.log_lines = 5;
+        let out = strip_ansi(&render(&snap, &o));
+        assert!(out.contains("h000000"), "first entry shown: {out}");
+        assert!(out.contains("h000004"), "fifth entry shown: {out}");
+        assert!(
+            !out.contains("h000005"),
+            "sixth entry hidden by log_lines limit: {out}",
+        );
+    }
+
+    #[test]
+    fn log_lines_zero_disables_section() {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![LogEntry {
+            hash: "abc1234".into(),
+            subject: "first".into(),
+        }];
+        let mut o = opts();
+        o.log_lines = 0;
+        let out = strip_ansi(&render(&snap, &o));
+        assert!(
+            !out.contains("abc1234"),
+            "log_lines=0 disables log section: {out}",
+        );
+    }
+
+    #[test]
+    fn log_row_truncates_long_subject_to_fit_terminal_width() {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![LogEntry {
+            hash: "abc1234".into(),
+            subject: "really long subject ".repeat(20),
+        }];
+        let mut o = opts();
+        o.log_lines = 1;
+        o.terminal_width = 40;
+        let out = strip_ansi(&render(&snap, &o));
+        let log_line = out
+            .lines()
+            .find(|l| l.contains("abc1234"))
+            .expect("log line should appear");
+        let w = UnicodeWidthStr::width(log_line);
+        assert!(
+            w <= 40,
+            "log row width {w} should not exceed terminal_width=40: {log_line:?}",
+        );
+        assert!(
+            log_line.contains('…'),
+            "truncated subject should end with ellipsis: {log_line:?}",
+        );
+    }
+
+    #[test]
+    fn empty_file_list_collapses_to_single_separator_before_log() {
+        // When there are no staged/unstaged files, the post-header separator
+        // already sits directly above the log section, so the additional
+        // pre-log separator just creates a double rule with nothing between
+        // them. Collapse to a single ─ line.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            LogEntry {
+                hash: "abc1234".into(),
+                subject: "first".into(),
+            },
+            LogEntry {
+                hash: "def5678".into(),
+                subject: "second".into(),
+            },
+        ];
+        let mut o = opts();
+        o.log_lines = 5;
+        let out = strip_ansi(&render(&snap, &o));
+        let separator_count = out
+            .lines()
+            .filter(|l| !l.is_empty() && l.chars().all(|c| c == '─'))
+            .count();
+        assert_eq!(
+            separator_count, 1,
+            "expected exactly one separator when file list is empty:\n{out}",
+        );
+    }
+
+    #[test]
+    fn log_section_has_separator_before_entries() {
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![LogEntry {
+            hash: "abc1234".into(),
+            subject: "first".into(),
+        }];
+        let mut o = opts();
+        o.log_lines = 5;
+        let out = strip_ansi(&render(&snap, &o));
+        let lines: Vec<&str> = out.lines().collect();
+        let log_idx = lines
+            .iter()
+            .position(|l| l.contains("abc1234"))
+            .expect("log row should appear");
+        assert!(log_idx >= 1, "log row should be preceded by other lines");
+        let preceding = lines[log_idx - 1];
+        assert!(
+            preceding.chars().all(|c| c == '─' || c.is_whitespace()),
+            "line before log section should be a ─ separator: {preceding:?}",
+        );
+    }
 }

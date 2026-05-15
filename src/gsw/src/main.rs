@@ -10,7 +10,7 @@ use clap::Parser;
 use colored::Colorize;
 
 use crate::git::{parse_numstat, parse_status, FileEntry};
-use crate::render::{default_max_files, render, RenderOptions};
+use crate::render::{default_max_files, render, LogEntry, RenderOptions};
 use crate::snapshot::build_snapshot;
 
 mod age;
@@ -51,6 +51,15 @@ struct Cli {
     /// child process can't see.
     #[arg(long, default_value_t = 0)]
     width_offset: usize,
+
+    /// Number of recent commits to show in the `git log --oneline`-style
+    /// section appended after the file list.
+    #[arg(long, default_value_t = 20)]
+    log_lines: usize,
+
+    /// Disable the recent-commit section entirely.
+    #[arg(long)]
+    no_log: bool,
 }
 
 /// Decide the effective terminal width gsw should render for.
@@ -142,7 +151,7 @@ fn main() -> Result<()> {
         .map(|s| PathBuf::from(s.trim()));
     let ages = collect_ages(&entries, repo_root.as_deref());
 
-    let snapshot = build_snapshot(
+    let mut snapshot = build_snapshot(
         branch,
         base,
         commits_ahead,
@@ -153,16 +162,26 @@ fn main() -> Result<()> {
         &ages,
     );
 
+    let log_lines = if cli.no_log { 0 } else { cli.log_lines };
+    snapshot.log = fetch_log(log_lines);
+
     let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), h.0));
     let tty_width = tty_size.map(|(w, _)| w);
     let terminal_height = tty_size.map_or(24, |(_, h)| h);
     let terminal_width =
         effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
 
+    // Reserve room for the log section so the file list shrinks instead of
+    // pushing log rows off the bottom under viddy.
+    let log_reserve = if log_lines == 0 { 0 } else { 1 + log_lines };
+    let files_height =
+        terminal_height.saturating_sub(u16::try_from(log_reserve).unwrap_or(u16::MAX));
+
     let opts = RenderOptions {
         terminal_width,
         bar_width: cli.bar_width,
-        max_files: cli.max_files.or(Some(default_max_files(terminal_height))),
+        max_files: cli.max_files.or(Some(default_max_files(files_height))),
+        log_lines,
     };
 
     println!("{}", render(&snapshot, &opts));
@@ -220,6 +239,30 @@ fn resolve_base_ref() -> String {
         }
     }
     "HEAD".to_string()
+}
+
+/// Fetch the `n` most recent commits as (short-hash, subject) pairs.
+///
+/// Returns an empty list when `n == 0` or git fails (e.g. no commits yet).
+/// Uses `%h %s` and splits on the first space — git short hashes never
+/// contain spaces, so the split is unambiguous.
+fn fetch_log(n: usize) -> Vec<LogEntry> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let n_arg = format!("-n{n}");
+    let Ok(out) = run_git(&["log", &n_arg, "--pretty=format:%h %s"]) else {
+        return Vec::new();
+    };
+    out.lines()
+        .filter_map(|line| {
+            let (hash, subject) = line.split_once(' ')?;
+            Some(LogEntry {
+                hash: hash.to_string(),
+                subject: subject.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// How long ago the current HEAD commit was authored.
