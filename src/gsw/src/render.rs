@@ -990,6 +990,26 @@ mod tests {
     }
 
     #[test]
+    fn header_renders_question_mark_when_last_commit_age_unknown() {
+        // When git can't tell us when HEAD was authored (empty repo, malformed
+        // %ct, clock skew), the header used to say "last commit 0s ago" — i.e.
+        // it lied about a fresh commit. Render an explicit "?" instead so the
+        // unknown state is visible.
+        let mut snap = snap_with(vec![]);
+        snap.last_commit_age = None;
+        let out = strip_ansi(&render(&snap, &opts()));
+        let header = out.lines().next().unwrap_or("");
+        assert!(
+            header.contains("last commit ? ago"),
+            "header should mark unknown last-commit age explicitly: {header}",
+        );
+        assert!(
+            !header.contains("0s ago"),
+            "unknown age must not be misrepresented as 0s: {header}",
+        );
+    }
+
+    #[test]
     fn stale_age_renders_differently_from_aging() {
         // AgeDim has four buckets; if Stale and Aging both render `.dimmed()`
         // the bucket distinction is invisible to the user. Forcing colors on
