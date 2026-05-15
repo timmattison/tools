@@ -15,7 +15,7 @@ pub struct Snapshot {
     pub branch: String,
     pub base: String,
     pub commits_ahead: u32,
-    pub last_commit_age: Duration,
+    pub last_commit_age: Option<Duration>,
     pub files: Vec<RenderEntry>,
     /// Most recent commits, newest first. Empty when not requested.
     pub log: Vec<LogEntry>,
@@ -63,7 +63,6 @@ const DELS_FIELD: usize = 4;
 const AGE_FIELD: usize = 6;
 
 /// Visible separator characters between columns.
-const SEP_PATH_BAR: usize = 0;
 const SEP_BAR_ADDS: usize = 2;
 const SEP_ADDS_DELS: usize = 1;
 const SEP_DELS_AGE: usize = 3;
@@ -118,13 +117,15 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     lines.join("\n")
 }
 
+/// Visible gap between the short hash and the subject in a log row.
+const LOG_HASH_SUBJECT_SEP: &str = "  ";
+
 fn render_log_row(entry: &LogEntry, width: usize) -> String {
     // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
     // hold the right-aligned age, matching the file-row age column exactly.
     // The subject is padded to fill the gap so the age column lines up.
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
-    let hash_sep = "  ";
-    let hash_sep_width = hash_sep.chars().count();
+    let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
 
     let subject_budget = width
@@ -138,26 +139,34 @@ fn render_log_row(entry: &LogEntry, width: usize) -> String {
     let age_str = colorize_age(&age_field, Some(entry.age));
 
     let hash_str = entry.hash.yellow().to_string();
-    format!("{hash_str}{hash_sep}{subject_padded}{sep_to_age}{age_str}")
+    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_padded}{sep_to_age}{age_str}")
 }
 
-fn compute_path_width(opts: &RenderOptions) -> usize {
-    // Layout overhead per row: icon(1) + " "(1) + letter(1) + " "(1) + bar(N) + seps + fields.
-    let overhead = 4
-        + opts.bar_width
-        + SEP_PATH_BAR
+/// Total width of everything to the right of the path column: the bar plus
+/// the +adds/-dels/age fields and their separators. Used both for sizing the
+/// path column and for padding the gutter on untracked rows that skip the
+/// bar/adds/dels so the age column still aligns.
+fn right_block_width(bar_width: usize) -> usize {
+    bar_width
         + SEP_BAR_ADDS
         + ADDS_FIELD
         + SEP_ADDS_DELS
         + DELS_FIELD
         + SEP_DELS_AGE
-        + AGE_FIELD;
+        + AGE_FIELD
+}
+
+fn compute_path_width(opts: &RenderOptions) -> usize {
+    // Per-row overhead: icon(1) + " "(1) + letter(1) + " "(1) + right block.
+    let overhead = 4 + right_block_width(opts.bar_width);
     opts.terminal_width.saturating_sub(overhead).max(8)
 }
 
 fn header_text(snap: &Snapshot) -> String {
     let commit_word = if snap.commits_ahead == 1 { "commit" } else { "commits" };
-    let age = format_age_detailed(snap.last_commit_age);
+    let age = snap
+        .last_commit_age
+        .map_or_else(|| "?".to_string(), format_age_detailed);
     format!(
         "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
         branch = snap.branch,
@@ -197,12 +206,7 @@ fn render_row(
         entry.status,
         FileStatus::Untracked | FileStatus::UntrackedDir
     ) {
-        let gutter_width = opts.bar_width
-            + SEP_BAR_ADDS
-            + ADDS_FIELD
-            + SEP_ADDS_DELS
-            + DELS_FIELD
-            + SEP_DELS_AGE;
+        let gutter_width = right_block_width(opts.bar_width) - AGE_FIELD;
         let gutter = " ".repeat(gutter_width);
         let age = entry.age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
@@ -323,7 +327,7 @@ fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
         AgeDim::Fresh => text.bold(),
         AgeDim::Recent => text.normal(),
         AgeDim::Aging => text.dimmed(),
-        AgeDim::Stale => text.dimmed(),
+        AgeDim::Stale => text.dimmed().italic(),
     }
 }
 
@@ -410,13 +414,49 @@ fn center(text: &str, width: usize) -> String {
     result
 }
 
-/// Pick a sensible default file-row limit for the given terminal height.
+/// Plan how many file rows and how many log rows the frame should render,
+/// given the actual demand from each section and the total terminal rows
+/// available for content (i.e. terminal height minus chrome the caller has
+/// already deducted: header, post-header separator, inter-section
+/// separator, and a reserved row for a possible `+N more files` footer).
 ///
-/// Reserves space for our own header, separator, and a potential `+N more`
-/// footer (plus one row of breathing room for whatever shell/viddy chrome
-/// sits above us). Always returns at least 1.
-pub fn default_max_files(terminal_height: u16) -> usize {
-    usize::from(terminal_height.saturating_sub(4)).max(1)
+/// When everything fits, both sections are rendered in full. When the
+/// combined demand exceeds the available rows, the rows are split
+/// proportionally to each section's demand — so a small file list paired
+/// with a long log gets a fair-but-larger share of the screen, rather than
+/// being squeezed to one or two rows because the log was configured with
+/// a large `--log-lines`. Each non-empty section is guaranteed at least
+/// one row of its own.
+///
+/// Returns `(file_cap, log_cap)`. Each cap never exceeds the corresponding
+/// demand.
+pub fn plan_section_caps(
+    file_demand: usize,
+    log_demand: usize,
+    available_rows: usize,
+) -> (usize, usize) {
+    if available_rows == 0 {
+        return (0, 0);
+    }
+    if file_demand + log_demand <= available_rows {
+        return (file_demand, log_demand);
+    }
+    if file_demand == 0 {
+        return (0, available_rows.min(log_demand));
+    }
+    if log_demand == 0 {
+        return (available_rows.min(file_demand), 0);
+    }
+
+    // Both sections want rows and the total overflows. Compute each
+    // section's proportional share with banker-style rounding so the two
+    // shares always sum to `available_rows` exactly, then guarantee a
+    // floor of 1 row for the smaller side.
+    let total_demand = file_demand + log_demand;
+    let raw_file = (file_demand * available_rows + total_demand / 2) / total_demand;
+    let file_share = raw_file.clamp(1, available_rows - 1);
+    let log_share = available_rows - file_share;
+    (file_share.min(file_demand), log_share.min(log_demand))
 }
 
 #[cfg(test)]
@@ -457,7 +497,7 @@ mod tests {
             branch: "gsv".into(),
             base: "main".into(),
             commits_ahead: 3,
-            last_commit_age: Duration::from_secs(5 * 60 + 23),
+            last_commit_age: Some(Duration::from_secs(5 * 60 + 23)),
             files,
             log: vec![],
         }
@@ -797,14 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn default_max_files_reserves_room_for_chrome() {
-        // Reserve 4 rows for header, separator, footer, and breathing room.
-        assert_eq!(default_max_files(24), 20);
-        assert_eq!(default_max_files(50), 46);
-        assert_eq!(default_max_files(10), 6);
-    }
-
-    #[test]
     fn missing_age_renders_as_blank_not_emdash() {
         // The em-dash placeholder visually drifts past the terminal edge in
         // some font/terminal combos (zellij + certain fonts render em-dash
@@ -823,11 +855,55 @@ mod tests {
     }
 
     #[test]
-    fn default_max_files_never_returns_zero() {
-        assert_eq!(default_max_files(0), 1);
-        assert_eq!(default_max_files(1), 1);
-        assert_eq!(default_max_files(4), 1);
-        assert_eq!(default_max_files(5), 1);
+    fn plan_section_caps_returns_full_demand_when_room_is_plenty() {
+        // No contention: 5 files + 20 log rows easily fit in 100 rows.
+        assert_eq!(plan_section_caps(5, 20, 100), (5, 20));
+    }
+
+    #[test]
+    fn plan_section_caps_splits_proportionally_when_overflowing() {
+        // 5 files vs 20 log rows competing for 10 rows: file share is
+        // round(5*10/25) = 2, log gets the remaining 8. This is the case
+        // that motivated the change — today the file list gets squeezed
+        // to 1 or 2 rows regardless of how few files the user actually has.
+        assert_eq!(plan_section_caps(5, 20, 10), (2, 8));
+    }
+
+    #[test]
+    fn plan_section_caps_guarantees_each_section_at_least_one_row() {
+        // file=1, log=100 would proportionally give file 0 rows (rounded
+        // down). Each non-empty section must keep at least one row so we
+        // never silently hide a section that has content.
+        let (f, l) = plan_section_caps(1, 100, 10);
+        assert!(f >= 1, "non-empty file section must get at least 1 row, got {f}");
+        assert_eq!(f + l, 10, "all rows should be allocated when overflowing");
+    }
+
+    #[test]
+    fn plan_section_caps_grants_all_rows_to_lone_section() {
+        // When only one section has content, it should claim every
+        // available row up to its demand. The other section gets zero.
+        assert_eq!(plan_section_caps(0, 20, 10), (0, 10));
+        assert_eq!(plan_section_caps(20, 0, 10), (10, 0));
+    }
+
+    #[test]
+    fn plan_section_caps_returns_zero_when_no_rows_available() {
+        // Pathologically short terminal: nothing fits, so nothing is
+        // promised. The caller will at least render header chrome.
+        assert_eq!(plan_section_caps(5, 5, 0), (0, 0));
+    }
+
+    #[test]
+    fn plan_section_caps_never_exceeds_demand() {
+        // The contract: returned caps never exceed the corresponding
+        // demand, even when the proportional formula would round up past
+        // it. file=2, log=20, available=14 is the kind of edge case where
+        // a naive proportional formula could produce a file cap > 2.
+        let (f, l) = plan_section_caps(2, 20, 14);
+        assert!(f <= 2, "file cap must not exceed demand: got {f}");
+        assert!(l <= 20, "log cap must not exceed demand: got {l}");
+        assert!(f + l <= 14, "total must fit in available rows: {f}+{l}");
     }
 
     fn log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
@@ -985,6 +1061,46 @@ mod tests {
             UnicodeWidthStr::width(file_row.trim_end()),
             UnicodeWidthStr::width(log_line.trim_end()),
             "file row and log row should occupy the same width so age columns align:\n  file: {file_row:?}\n  log:  {log_line:?}",
+        );
+    }
+
+    #[test]
+    fn header_renders_question_mark_when_last_commit_age_unknown() {
+        // When git can't tell us when HEAD was authored (empty repo, malformed
+        // %ct, clock skew), the header used to say "last commit 0s ago" — i.e.
+        // it lied about a fresh commit. Render an explicit "?" instead so the
+        // unknown state is visible.
+        let mut snap = snap_with(vec![]);
+        snap.last_commit_age = None;
+        let out = strip_ansi(&render(&snap, &opts()));
+        let header = out.lines().next().unwrap_or("");
+        assert!(
+            header.contains("last commit ? ago"),
+            "header should mark unknown last-commit age explicitly: {header}",
+        );
+        assert!(
+            !header.contains("0s ago"),
+            "unknown age must not be misrepresented as 0s: {header}",
+        );
+    }
+
+    #[test]
+    fn stale_age_renders_differently_from_aging() {
+        // AgeDim has four buckets; if Stale and Aging both render `.dimmed()`
+        // the bucket distinction is invisible to the user. Compare the Style
+        // bitsets on the returned ColoredStrings directly — avoids touching
+        // `colored::control::set_override`, which is process-global and would
+        // race with other tests in parallel.
+        use colored::Styles;
+        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)));
+        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)));
+        assert!(
+            stale.style.contains(Styles::Italic),
+            "Stale should be italicized",
+        );
+        assert!(
+            !aging.style.contains(Styles::Italic),
+            "Aging should not be italicized",
         );
     }
 

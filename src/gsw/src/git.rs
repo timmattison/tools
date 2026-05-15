@@ -134,23 +134,26 @@ fn parse_unmerged_entry(rest: &str, out: &mut Vec<FileEntry>) {
 
 fn emit_xy(xy: &str, path: &str, orig: Option<String>, out: &mut Vec<FileEntry>) {
     let mut xy_chars = xy.chars();
-    let x = xy_chars.next().unwrap_or('.');
-    let y = xy_chars.next().unwrap_or('.');
-    if let Some(status) = char_to_status(x) {
+    let x_status = char_to_status(xy_chars.next().unwrap_or('.'));
+    let y_status = char_to_status(xy_chars.next().unwrap_or('.'));
+    // The worktree side of a rename is just an edit on the new path, not a
+    // rename itself — orig_path only flows to Y when Y is itself a rename/copy.
+    let y_takes_orig = matches!(y_status, Some(FileStatus::Renamed | FileStatus::Copied));
+    let (orig_for_x, orig_for_y) = match (x_status.is_some(), y_takes_orig) {
+        (true, true) => (orig.clone(), orig),
+        (true, false) => (orig, None),
+        (false, true) => (None, orig),
+        (false, false) => (None, None),
+    };
+    if let Some(status) = x_status {
         out.push(FileEntry {
             path: path.to_string(),
-            orig_path: orig.clone(),
+            orig_path: orig_for_x,
             status,
             staged: true,
         });
     }
-    if let Some(status) = char_to_status(y) {
-        // The worktree side of a rename is just an edit on the new path,
-        // not a rename itself — drop orig_path for non-rename statuses.
-        let orig_for_y = match status {
-            FileStatus::Renamed | FileStatus::Copied => orig,
-            _ => None,
-        };
+    if let Some(status) = y_status {
         out.push(FileEntry {
             path: path.to_string(),
             orig_path: orig_for_y,

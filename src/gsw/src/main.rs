@@ -10,7 +10,7 @@ use clap::Parser;
 use colored::Colorize;
 
 use crate::git::{parse_numstat, parse_status, FileEntry};
-use crate::render::{default_max_files, render, LogEntry, RenderOptions};
+use crate::render::{plan_section_caps, render, LogEntry, RenderOptions};
 use crate::snapshot::build_snapshot;
 
 mod age;
@@ -134,7 +134,7 @@ fn main() -> Result<()> {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(0);
 
-    let last_commit_age = last_commit_age().unwrap_or(Duration::ZERO);
+    let last_commit_age = last_commit_age();
 
     let status_raw = run_git(&["status", "--porcelain=v2", "-z"])?;
     let entries = parse_status(&status_raw);
@@ -171,17 +171,43 @@ fn main() -> Result<()> {
     let terminal_width =
         effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
 
-    // Reserve room for the log section so the file list shrinks instead of
-    // pushing log rows off the bottom under viddy.
-    let log_reserve = if log_lines == 0 { 0 } else { 1 + log_lines };
-    let files_height =
-        terminal_height.saturating_sub(u16::try_from(log_reserve).unwrap_or(u16::MAX));
+    // Split available terminal rows between the file list and the log
+    // section based on what each actually needs to show. Chrome we
+    // deduct up front:
+    //   header                                                          1
+    //   post-header separator                                            1
+    //   inter-section separator (only when both sections render)         0 or 1
+    //   reserved row for a `+N more files` footer (only when files > 0)  0 or 1
+    // Whatever's left is split proportionally — so a short file list
+    // paired with a long log gets a fair share rather than being
+    // squeezed to one or two rows because `--log-lines` defaults to 20.
+    let file_count = snapshot.files.len();
+    let log_count = snapshot.log.len();
+    let header_chrome: u16 = 2;
+    let inter_chrome: u16 = if file_count > 0 && log_count > 0 { 1 } else { 0 };
+    let footer_chrome: u16 = if file_count > 0 { 1 } else { 0 };
+    let chrome = header_chrome + inter_chrome + footer_chrome;
+    let available_rows = usize::from(terminal_height.saturating_sub(chrome)).max(1);
+    let (planned_file_cap, planned_log_cap) =
+        plan_section_caps(file_count, log_count, available_rows);
+
+    // `--max-files` always wins when the user has set it (including 0,
+    // which means unlimited). When the user pinned a file cap, the log
+    // section just takes whatever rows are left over up to its demand.
+    let (file_cap_opt, log_cap) = match cli.max_files {
+        Some(n) => {
+            let consumed_by_files = if n == 0 { file_count } else { n.min(file_count) };
+            let log_budget = available_rows.saturating_sub(consumed_by_files);
+            (Some(n), log_count.min(log_budget))
+        }
+        None => (Some(planned_file_cap), planned_log_cap),
+    };
 
     let opts = RenderOptions {
         terminal_width,
         bar_width: cli.bar_width,
-        max_files: cli.max_files.or(Some(default_max_files(files_height))),
-        log_lines,
+        max_files: file_cap_opt,
+        log_lines: log_cap,
     };
 
     println!("{}", render(&snapshot, &opts));
@@ -256,28 +282,36 @@ fn fetch_log(n: usize) -> Vec<LogEntry> {
         return Vec::new();
     };
     let now = SystemTime::now();
-    out.lines()
-        .filter_map(|line| {
-            let (hash, rest) = line.split_once(' ')?;
-            let (ct_str, subject) = rest.split_once(' ')?;
-            let secs: u64 = ct_str.parse().ok()?;
-            let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-            let age = now.duration_since(when).unwrap_or(Duration::ZERO);
-            Some(LogEntry {
-                hash: hash.to_string(),
-                subject: subject.to_string(),
-                age,
-            })
-        })
-        .collect()
+    out.lines().filter_map(|line| parse_log_line(line, now)).collect()
 }
 
-/// How long ago the current HEAD commit was authored.
-fn last_commit_age() -> Result<Duration> {
-    let raw = run_git(&["log", "-1", "--format=%ct"])?;
-    let secs: u64 = raw.trim().parse().unwrap_or(0);
+fn parse_log_line(line: &str, now: SystemTime) -> Option<LogEntry> {
+    if line.is_empty() {
+        return None;
+    }
+    let (hash, rest) = line.split_once(' ').unwrap_or((line, ""));
+    let (ct_str, subject) = rest.split_once(' ').unwrap_or((rest, ""));
+    let age = ct_str
+        .parse::<u64>()
+        .ok()
+        .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+        .and_then(|when| now.duration_since(when).ok())
+        .unwrap_or(Duration::ZERO);
+    Some(LogEntry {
+        hash: hash.to_string(),
+        subject: subject.to_string(),
+        age,
+    })
+}
+
+/// How long ago the current HEAD commit was authored, or `None` when that
+/// can't be determined (no commits yet, malformed git output, clock skew
+/// putting the commit in the future).
+fn last_commit_age() -> Option<Duration> {
+    let raw = run_git(&["log", "-1", "--format=%ct"]).ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
     let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-    Ok(SystemTime::now().duration_since(when).unwrap_or(Duration::ZERO))
+    SystemTime::now().duration_since(when).ok()
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
@@ -373,5 +407,21 @@ mod tests {
     fn no_force_colors_when_no_color_env_set() {
         // Honor https://no-color.org even when under viddy.
         assert!(!should_force_colors(false, true, true));
+    }
+
+    #[test]
+    fn parse_log_line_keeps_entry_when_line_has_no_space() {
+        // Defensive: don't silently drop a log line just because it lacks
+        // the expected `%h SP %s` shape. Preserve the whole line as the hash
+        // with an empty subject so the row still surfaces.
+        let entry = parse_log_line("abc1234", SystemTime::now())
+            .expect("hash-only line should parse");
+        assert_eq!(entry.hash, "abc1234");
+        assert_eq!(entry.subject, "");
+    }
+
+    #[test]
+    fn parse_log_line_drops_empty_lines() {
+        assert!(parse_log_line("", SystemTime::now()).is_none());
     }
 }
