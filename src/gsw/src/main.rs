@@ -290,13 +290,10 @@ fn resolve_base_ref() -> String {
 /// is "in upstream but not HEAD" (i.e. how far behind we are) and the
 /// right side is "in HEAD but not upstream" (how far ahead).
 fn detect_upstream() -> Option<UpstreamStatus> {
-    let name = run_git(&["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+    let name = run_git(&["rev-parse", "--abbrev-ref", "@{upstream}"])
         .ok()?
         .trim()
         .to_string();
-    if name.is_empty() {
-        return None;
-    }
     let counts = run_git(&[
         "rev-list",
         "--left-right",
