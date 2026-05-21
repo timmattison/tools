@@ -43,6 +43,30 @@ pub fn age_dim_level(age: Duration) -> AgeDim {
     }
 }
 
+/// Minimum fraction of base brightness retained at the stale boundary and
+/// beyond. The fade approaches this floor so commits never disappear into
+/// the background.
+pub const FADE_FLOOR: f32 = 0.30;
+
+/// Continuous fade factor in `[0.0, 1.0]` for a commit `age`.
+///
+/// `0.0` means use the full base color; `1.0` means use the dark floor.
+/// Piecewise-linear across the same boundaries as [`age_dim_level`] so the
+/// per-minute change is visible inside Fresh and Recent (the buckets a user
+/// is most likely to be staring at while working), while the long tail
+/// across Aging still fades visibly over tens of minutes.
+pub fn age_fade_factor(_age: Duration) -> f32 {
+    0.0
+}
+
+/// Linearly interpolate `base` toward a dark floor by `factor` in `[0,1]`.
+///
+/// `factor = 0` returns `base` unchanged; `factor = 1` returns
+/// `base * FADE_FLOOR` (rounded). Out-of-range factors are clamped.
+pub fn fade_rgb(base: (u8, u8, u8), _factor: f32) -> (u8, u8, u8) {
+    base
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +120,128 @@ mod tests {
         assert_eq!(age_dim_level(Duration::from_secs(60 * 60 * 24 - 1)), AgeDim::Aging);
         assert_eq!(age_dim_level(Duration::from_secs(60 * 60 * 24)), AgeDim::Stale);
         assert_eq!(age_dim_level(Duration::from_secs(60 * 60 * 24 * 30)), AgeDim::Stale);
+    }
+
+    #[test]
+    fn fade_factor_is_zero_at_age_zero() {
+        // A just-authored commit should display at full base brightness.
+        assert!(
+            (age_fade_factor(Duration::from_secs(0)) - 0.0).abs() < 1e-6,
+            "factor at age=0 should be exactly 0.0",
+        );
+    }
+
+    #[test]
+    fn fade_factor_reaches_one_at_stale_boundary() {
+        // At and beyond the 24h stale boundary the gradient should hit its
+        // floor — i.e. factor = 1.0 — so further aging doesn't keep darkening.
+        let day = Duration::from_secs(60 * 60 * 24);
+        assert!(
+            (age_fade_factor(day) - 1.0).abs() < 1e-6,
+            "factor at 24h should be 1.0, was {}",
+            age_fade_factor(day),
+        );
+        let week = Duration::from_secs(60 * 60 * 24 * 7);
+        assert!(
+            (age_fade_factor(week) - 1.0).abs() < 1e-6,
+            "factor past 24h should clamp at 1.0, was {}",
+            age_fade_factor(week),
+        );
+    }
+
+    #[test]
+    fn fade_factor_increases_with_age() {
+        // The user requested visible darkening per minute. Walk minute by
+        // minute through the Fresh and Recent buckets and confirm every step
+        // strictly increases — that's what "every minute they get a little
+        // darker" requires.
+        let mut prev = age_fade_factor(Duration::from_secs(0));
+        for m in 1..=70_u64 {
+            let next = age_fade_factor(Duration::from_secs(m * 60));
+            assert!(
+                next > prev,
+                "factor must strictly increase between minute {} and {}: prev={prev} next={next}",
+                m - 1,
+                m,
+            );
+            prev = next;
+        }
+    }
+
+    #[test]
+    fn fade_factor_visible_step_per_minute_in_fresh_and_recent() {
+        // The fade has to actually move enough per minute to be perceptible.
+        // With a base channel of 200 and a floor of 30%, the available range
+        // is 140 RGB units; a 1 RGB-unit minimum step requires the factor to
+        // advance by >= 1/140 ≈ 0.007 per minute somewhere in the Fresh and
+        // Recent buckets. This guards against a future "stretch the gradient
+        // over 24h" change that would silently make per-minute changes
+        // invisible to the eye.
+        for m in 0..60_u64 {
+            let a = age_fade_factor(Duration::from_secs(m * 60));
+            let b = age_fade_factor(Duration::from_secs((m + 1) * 60));
+            if m < 5 {
+                assert!(
+                    b - a >= 0.01,
+                    "fresh-bucket step too small at minute {m}: {a} -> {b}",
+                );
+            } else {
+                assert!(
+                    b - a >= 0.001,
+                    "recent-bucket step too small at minute {m}: {a} -> {b}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fade_rgb_returns_base_at_zero() {
+        // factor=0 means "no fade applied" — color comes out untouched.
+        let base = (200, 150, 50);
+        assert_eq!(fade_rgb(base, 0.0), base);
+    }
+
+    #[test]
+    fn fade_rgb_hits_floor_at_factor_one() {
+        // factor=1 should scale every channel to FADE_FLOOR * base, rounded.
+        let base: (u8, u8, u8) = (200, 100, 50);
+        let (r, g, b) = fade_rgb(base, 1.0);
+        let expect = |c: u8| (f32::from(c) * FADE_FLOOR).round() as u8;
+        assert_eq!(
+            (r, g, b),
+            (expect(base.0), expect(base.1), expect(base.2)),
+            "factor=1 should scale every channel by FADE_FLOOR",
+        );
+    }
+
+    #[test]
+    fn fade_rgb_is_monotonic_per_channel() {
+        // Each channel must monotonically decrease as factor grows — no
+        // bumps, no overshoots. We sample a representative non-grey base so
+        // any per-channel logic error (e.g. swapping channels) would show.
+        let base = (255, 215, 80);
+        let mut prev = fade_rgb(base, 0.0);
+        for step in 1..=10 {
+            let factor = step as f32 / 10.0;
+            let now = fade_rgb(base, factor);
+            assert!(
+                now.0 <= prev.0 && now.1 <= prev.1 && now.2 <= prev.2,
+                "channels must not brighten as factor increases ({prev:?} -> {now:?} at factor={factor})",
+            );
+            prev = now;
+        }
+    }
+
+    #[test]
+    fn fade_rgb_clamps_out_of_range_factors() {
+        // Defensive: callers might hand in factors slightly outside [0,1]
+        // through floating-point drift. We should clamp, not blow past the
+        // floor (which would let colors disappear) or back past the base.
+        let base = (200, 100, 50);
+        let below = fade_rgb(base, -0.5);
+        let above = fade_rgb(base, 1.5);
+        assert_eq!(below, base, "negative factor should clamp to base");
+        let floored = fade_rgb(base, 1.0);
+        assert_eq!(above, floored, "factor > 1 should clamp to the floor color");
     }
 }
