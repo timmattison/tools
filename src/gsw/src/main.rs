@@ -217,6 +217,7 @@ fn main() -> Result<()> {
         bar_width: cli.bar_width,
         max_files: file_cap_opt,
         log_lines: log_cap,
+        truecolor: false,
     };
 
     println!("{}", render(&snapshot, &opts));

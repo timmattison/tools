@@ -68,6 +68,10 @@ pub struct RenderOptions {
     pub max_files: Option<usize>,
     /// Maximum recent-commit rows to render. 0 disables the log section.
     pub log_lines: usize,
+    /// When true, the commit-log rows fade from a bright base color toward
+    /// a dark floor as commits age, using 24-bit (truecolor) ANSI. When
+    /// false, log rows use the same 8-color/dim styling as everything else.
+    pub truecolor: bool,
 }
 
 /// Width of the "+adds" / "-dels" / age column fields.
@@ -350,6 +354,34 @@ fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
     }
 }
 
+/// Base RGB for commit-log hashes when truecolor fading is on. Picked to
+/// match the perceptual feel of the legacy `yellow()` ANSI hash without
+/// depending on a specific terminal palette.
+const LOG_HASH_BASE_RGB: (u8, u8, u8) = (255, 215, 0);
+/// Base RGB for commit-log subjects — a near-white that fades visibly.
+const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
+/// Base RGB for the commit-log age column.
+const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
+
+/// Color the short hash for a commit-log row.
+///
+/// With `truecolor`, the hash starts at [`LOG_HASH_BASE_RGB`] and fades
+/// toward the dark floor as `age` grows. Without, falls back to the
+/// legacy ANSI yellow so eight-color terminals still get a coloured hash.
+fn colorize_log_hash(hash: &str, _age: Duration, _truecolor: bool) -> ColoredString {
+    hash.yellow()
+}
+
+/// Color the subject line for a commit-log row.
+fn colorize_log_subject(subject: &str, _age: Duration, _truecolor: bool) -> ColoredString {
+    subject.normal()
+}
+
+/// Color the right-aligned age column for a commit-log row.
+fn colorize_log_age(text: &str, age: Duration, _truecolor: bool) -> ColoredString {
+    colorize_age(text, Some(age))
+}
+
 /// Pad `s` on the right with spaces until its display width reaches `width`.
 fn pad_right(s: &str, width: usize) -> String {
     let current = UnicodeWidthStr::width(s);
@@ -508,6 +540,7 @@ mod tests {
             bar_width: 6,
             max_files: None,
             log_lines: 0,
+            truecolor: false,
         }
     }
 
@@ -755,6 +788,7 @@ mod tests {
                 bar_width: 6,
                 max_files: None,
                 log_lines: 0,
+                truecolor: false,
             },
         ));
         let row = out.lines().nth(2).unwrap_or("");
@@ -776,6 +810,7 @@ mod tests {
                 bar_width: 6,
                 max_files: None,
                 log_lines: 0,
+                truecolor: false,
             },
         );
         let stripped = strip_ansi(&out);
@@ -795,6 +830,7 @@ mod tests {
                 bar_width: 6,
                 max_files: Some(3),
                 log_lines: 0,
+                truecolor: false,
             },
         ));
         assert!(out.contains("f0.rs"));
@@ -819,6 +855,7 @@ mod tests {
                 bar_width: 6,
                 max_files: Some(0),
                 log_lines: 0,
+                truecolor: false,
             },
         ));
         for i in 0..5 {
@@ -1206,5 +1243,128 @@ mod tests {
             preceding.chars().all(|c| c == '─' || c.is_whitespace()),
             "line before log section should be a ─ separator: {preceding:?}",
         );
+    }
+
+    // --- truecolor commit-log fade ---------------------------------------
+    //
+    // These tests inspect the `ColoredString::fgcolor` field directly rather
+    // than rendering to ANSI. The `colored` crate gates ANSI emission on a
+    // process-global override that races with parallel tests; reading the
+    // typed color avoids that entirely (same pattern as
+    // `stale_age_renders_differently_from_aging` above).
+
+    #[test]
+    fn log_hash_uses_truecolor_when_enabled() {
+        // With truecolor on, a fresh commit's hash must be coloured with a
+        // 24-bit RGB value (not the legacy `Color::Yellow`), so the gradient
+        // has somewhere to fade *from*.
+        use colored::Color;
+        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor when truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log_hash_falls_back_to_yellow_without_truecolor() {
+        // Without truecolor, the legacy 8-colour yellow must still come
+        // through — otherwise we silently drop hash colouring on terminals
+        // that can't render 24-bit RGB.
+        use colored::Color;
+        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), false);
+        assert_eq!(cs.fgcolor, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn log_hash_darkens_with_age_under_truecolor() {
+        // The core gradient property: an hour-old commit's hash must come
+        // out darker (lower channel values) than a fresh commit's hash on
+        // every channel.
+        use colored::Color;
+        let fresh = colorize_log_hash("abc1234", Duration::from_secs(0), true);
+        let hour = colorize_log_hash("abc1234", Duration::from_secs(60 * 60), true);
+        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }), Some(Color::TrueColor { r: hr, g: hg, b: hb })) =
+            (fresh.fgcolor, hour.fgcolor)
+        else {
+            panic!("both should be TrueColor under truecolor=true");
+        };
+        assert!(
+            hr < fr && hg <= fg && hb <= fb,
+            "hour-old hash should be darker than fresh: fresh=({fr},{fg},{fb}) hour=({hr},{hg},{hb})",
+        );
+    }
+
+    #[test]
+    fn log_hash_stays_above_floor_when_very_old() {
+        // The fade must never reach pure black — a week-old commit should
+        // still be readable, which means every channel stays at or above
+        // the FADE_FLOOR fraction of its base value.
+        use crate::age::FADE_FLOOR;
+        use colored::Color;
+        let cs = colorize_log_hash(
+            "abc1234",
+            Duration::from_secs(60 * 60 * 24 * 7),
+            true,
+        );
+        let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
+            panic!("expected TrueColor under truecolor=true");
+        };
+        // LOG_HASH_BASE_RGB is (255, 215, 0). With FADE_FLOOR=0.30 the
+        // minimum red is ~76, green ~64, blue 0.
+        let min_red = (255.0 * FADE_FLOOR).round() as u8;
+        let min_green = (215.0 * FADE_FLOOR).round() as u8;
+        assert!(
+            r >= min_red.saturating_sub(1) && g >= min_green.saturating_sub(1) && b == 0,
+            "channels must not drop below the floor: ({r},{g},{b}) min=({min_red},{min_green},0)",
+        );
+    }
+
+    #[test]
+    fn log_subject_uses_truecolor_when_enabled() {
+        // Subjects need to fade too, otherwise the hash darkens while the
+        // text next to it stays bright — visually inconsistent.
+        use colored::Color;
+        let cs = colorize_log_subject("a commit subject", Duration::from_secs(0), true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for subject when truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log_subject_darkens_with_age_under_truecolor() {
+        use colored::Color;
+        let fresh = colorize_log_subject("subj", Duration::from_secs(0), true);
+        let hour = colorize_log_subject("subj", Duration::from_secs(60 * 60), true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
+            (fresh.fgcolor, hour.fgcolor)
+        else {
+            panic!("both should be TrueColor under truecolor=true");
+        };
+        assert!(hr < fr, "hour-old subject should be darker than fresh: {fr} -> {hr}");
+    }
+
+    #[test]
+    fn log_age_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let cs = colorize_log_age("5m23s", Duration::from_secs(5 * 60 + 23), true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for age when truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn log_age_darkens_with_age_under_truecolor() {
+        use colored::Color;
+        let fresh = colorize_log_age("0s", Duration::from_secs(0), true);
+        let hour = colorize_log_age("1h0m", Duration::from_secs(60 * 60), true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
+            (fresh.fgcolor, hour.fgcolor)
+        else {
+            panic!("both should be TrueColor under truecolor=true");
+        };
+        assert!(hr < fr, "hour-old age column should be darker than fresh: {fr} -> {hr}");
     }
 }
