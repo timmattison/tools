@@ -5,7 +5,7 @@ use std::time::Duration;
 use colored::{ColoredString, Colorize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::age::{age_dim_level, format_age_detailed, AgeDim};
+use crate::age::{age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim};
 use crate::bar::render_bar;
 use crate::git::FileStatus;
 
@@ -128,7 +128,7 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
             lines.push(render_separator(header_width));
         }
         for entry in snapshot.log.iter().take(opts.log_lines) {
-            lines.push(render_log_row(entry, opts.terminal_width));
+            lines.push(render_log_row(entry, opts.terminal_width, opts.truecolor));
         }
     }
 
@@ -138,7 +138,7 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
 /// Visible gap between the short hash and the subject in a log row.
 const LOG_HASH_SUBJECT_SEP: &str = "  ";
 
-fn render_log_row(entry: &LogEntry, width: usize) -> String {
+fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool) -> String {
     // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
     // hold the right-aligned age, matching the file-row age column exactly.
     // The subject is padded to fill the gap so the age column lines up.
@@ -154,10 +154,11 @@ fn render_log_row(entry: &LogEntry, width: usize) -> String {
 
     let age_raw = format_age_detailed(entry.age);
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
-    let age_str = colorize_age(&age_field, Some(entry.age));
 
-    let hash_str = entry.hash.yellow().to_string();
-    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_padded}{sep_to_age}{age_str}")
+    let hash_str = colorize_log_hash(&entry.hash, entry.age, truecolor);
+    let subject_str = colorize_log_subject(&subject_padded, entry.age, truecolor);
+    let age_str = colorize_log_age(&age_field, entry.age, truecolor);
+    format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
 }
 
 /// Total width of everything to the right of the path column: the bar plus
@@ -368,18 +369,41 @@ const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
 /// With `truecolor`, the hash starts at [`LOG_HASH_BASE_RGB`] and fades
 /// toward the dark floor as `age` grows. Without, falls back to the
 /// legacy ANSI yellow so eight-color terminals still get a coloured hash.
-fn colorize_log_hash(hash: &str, _age: Duration, _truecolor: bool) -> ColoredString {
-    hash.yellow()
+fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredString {
+    if truecolor {
+        let (r, g, b) = fade_rgb(LOG_HASH_BASE_RGB, age_fade_factor(age));
+        hash.truecolor(r, g, b)
+    } else {
+        hash.yellow()
+    }
 }
 
 /// Color the subject line for a commit-log row.
-fn colorize_log_subject(subject: &str, _age: Duration, _truecolor: bool) -> ColoredString {
-    subject.normal()
+///
+/// With `truecolor`, the subject fades from a near-white base toward the
+/// dark floor. Without, falls back to the same Aging/Stale dim styling as
+/// the file-row age column, so the row still gets quieter as it ages.
+fn colorize_log_subject(subject: &str, age: Duration, truecolor: bool) -> ColoredString {
+    if truecolor {
+        let (r, g, b) = fade_rgb(LOG_SUBJECT_BASE_RGB, age_fade_factor(age));
+        subject.truecolor(r, g, b)
+    } else {
+        match age_dim_level(age) {
+            AgeDim::Fresh | AgeDim::Recent => subject.normal(),
+            AgeDim::Aging => subject.dimmed(),
+            AgeDim::Stale => subject.dimmed().italic(),
+        }
+    }
 }
 
 /// Color the right-aligned age column for a commit-log row.
-fn colorize_log_age(text: &str, age: Duration, _truecolor: bool) -> ColoredString {
-    colorize_age(text, Some(age))
+fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString {
+    if truecolor {
+        let (r, g, b) = fade_rgb(LOG_AGE_BASE_RGB, age_fade_factor(age));
+        text.truecolor(r, g, b)
+    } else {
+        colorize_age(text, Some(age))
+    }
 }
 
 /// Pad `s` on the right with spaces until its display width reaches `width`.
