@@ -181,8 +181,13 @@ fn header_text(snap: &Snapshot) -> String {
     let age = snap
         .last_commit_age
         .map_or_else(|| "?".to_string(), format_age_detailed);
+    let upstream_field = snap
+        .upstream
+        .as_ref()
+        .map(|u| format!(" • ↑{ahead} ↓{behind} {name}", ahead = u.ahead, behind = u.behind, name = u.name))
+        .unwrap_or_default();
     format!(
-        "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
+        "gsw • {branch} • {n} {word} ahead of {base}{upstream_field} • last commit {age} ago",
         branch = snap.branch,
         n = snap.commits_ahead,
         word = commit_word,
