@@ -60,6 +60,17 @@ struct Cli {
     /// Disable the recent-commit section entirely.
     #[arg(long)]
     no_log: bool,
+
+    /// Force the 24-bit truecolor commit-log gradient on, regardless of
+    /// what `COLORTERM` says. Useful when a wrapper (cargo run, viddy)
+    /// strips the env var or your terminal doesn't export it.
+    #[arg(long, conflicts_with = "no_truecolor")]
+    truecolor: bool,
+
+    /// Force the 24-bit truecolor commit-log gradient off, falling back
+    /// to the 8-color path even on a terminal that supports truecolor.
+    #[arg(long, conflicts_with = "truecolor")]
+    no_truecolor: bool,
 }
 
 /// Decide the effective terminal width gsw should render for.
@@ -133,9 +144,13 @@ fn effective_truecolor(
     no_color_env: bool,
     colorterm_env: Option<&str>,
 ) -> bool {
-    // Stub: ignore the CLI overrides so the new tests can fail on behavior.
-    let _ = (cli_force_truecolor, cli_force_no_truecolor);
-    !cli_no_color && !no_color_env && truecolor_supported(colorterm_env)
+    if cli_no_color || no_color_env || cli_force_no_truecolor {
+        false
+    } else if cli_force_truecolor {
+        true
+    } else {
+        truecolor_supported(colorterm_env)
+    }
 }
 
 fn main() -> Result<()> {
@@ -147,11 +162,13 @@ fn main() -> Result<()> {
         .and_then(|s| s.parse().ok());
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
     let colorterm_env = std::env::var("COLORTERM").ok();
-    // If the user asked for `--no-color` we disable the gradient too — a
-    // 24-bit gradient would re-enable colours the user just opted out of.
-    let truecolor = !cli.no_color
-        && !no_color_env
-        && truecolor_supported(colorterm_env.as_deref());
+    let truecolor = effective_truecolor(
+        cli.no_color,
+        cli.truecolor,
+        cli.no_truecolor,
+        no_color_env,
+        colorterm_env.as_deref(),
+    );
 
     if cli.no_color {
         colored::control::set_override(false);
