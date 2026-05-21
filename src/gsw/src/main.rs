@@ -113,8 +113,10 @@ fn should_force_colors(
 /// var, is treated as "no truecolor" and the renderer falls back to the
 /// eight-color path. Comparison is case-insensitive.
 fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
-    let _ = colorterm_env;
-    false
+    matches!(
+        colorterm_env.map(str::to_ascii_lowercase).as_deref(),
+        Some("truecolor" | "24bit")
+    )
 }
 
 fn main() -> Result<()> {
@@ -125,6 +127,12 @@ fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok());
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
+    let colorterm_env = std::env::var("COLORTERM").ok();
+    // If the user asked for `--no-color` we disable the gradient too — a
+    // 24-bit gradient would re-enable colours the user just opted out of.
+    let truecolor = !cli.no_color
+        && !no_color_env
+        && truecolor_supported(colorterm_env.as_deref());
 
     if cli.no_color {
         colored::control::set_override(false);
@@ -228,7 +236,7 @@ fn main() -> Result<()> {
         bar_width: cli.bar_width,
         max_files: file_cap_opt,
         log_lines: log_cap,
-        truecolor: false,
+        truecolor,
     };
 
     println!("{}", render(&snapshot, &opts));

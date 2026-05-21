@@ -93,6 +93,13 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 pub fn fade_rgb(base: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
     let f = factor.clamp(0.0, 1.0);
     let scale = 1.0 - f * (1.0 - FADE_FLOOR);
+    // The cast is bounded: `scale` is in [FADE_FLOOR, 1.0] and `c` is u8, so
+    // the product is in [0, 255]; the explicit clamp is belt-and-braces.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "value is clamped to [0.0, 255.0] before the cast"
+    )]
     let scl = |c: u8| (f32::from(c) * scale).round().clamp(0.0, 255.0) as u8;
     (scl(base.0), scl(base.1), scl(base.2))
 }
@@ -236,6 +243,11 @@ mod tests {
         // factor=1 should scale every channel to FADE_FLOOR * base, rounded.
         let base: (u8, u8, u8) = (200, 100, 50);
         let (r, g, b) = fade_rgb(base, 1.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "c is u8 and FADE_FLOOR is in (0, 1), so the product is in [0, 255]"
+        )]
         let expect = |c: u8| (f32::from(c) * FADE_FLOOR).round() as u8;
         assert_eq!(
             (r, g, b),

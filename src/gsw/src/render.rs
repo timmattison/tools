@@ -1336,7 +1336,17 @@ mod tests {
         };
         // LOG_HASH_BASE_RGB is (255, 215, 0). With FADE_FLOOR=0.30 the
         // minimum red is ~76, green ~64, blue 0.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "255 * 0.30 ≈ 76, well within u8 range"
+        )]
         let min_red = (255.0 * FADE_FLOOR).round() as u8;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "215 * 0.30 ≈ 64, well within u8 range"
+        )]
         let min_green = (215.0 * FADE_FLOOR).round() as u8;
         assert!(
             r >= min_red.saturating_sub(1) && g >= min_green.saturating_sub(1) && b == 0,
