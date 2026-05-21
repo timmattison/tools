@@ -350,6 +350,79 @@ fn log_lines_flag_caps_visible_commits() {
 }
 
 #[test]
+fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
+    // End-to-end: a repo whose local branch tracks an upstream should have
+    // gsw report ↑M ↓N <upstream> in the header. Set up a bare repo to act
+    // as the remote, push the initial commit, then create divergence by
+    // landing a commit on the "remote" side (via a second clone) and another
+    // commit on the local side. The local branch ends up 1 ahead and 1
+    // behind its upstream.
+    let dir = setup_repo();
+    let local = dir.path();
+
+    let remote_dir = tempfile::tempdir().expect("remote tempdir");
+    let remote = remote_dir.path();
+    run_git(remote, &["init", "--bare", "-q", "-b", "main"]);
+
+    run_git(local, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    run_git(local, &["push", "-q", "-u", "origin", "main"]);
+
+    // Land a "remote" commit by cloning the bare repo, committing there,
+    // and pushing back. This is what would normally happen when a teammate
+    // pushes while you've been working locally.
+    let other_dir = tempfile::tempdir().expect("other tempdir");
+    let other = other_dir.path();
+    run_git(other, &["clone", "-q", remote.to_str().unwrap(), "."]);
+    run_git(other, &["config", "user.email", "other@example.com"]);
+    run_git(other, &["config", "user.name", "Other"]);
+    run_git(other, &["config", "commit.gpgsign", "false"]);
+    fs::write(other.join("b.txt"), "from other\n").unwrap();
+    run_git(other, &["add", "b.txt"]);
+    run_git(other, &["commit", "-q", "-m", "remote-side commit"]);
+    run_git(other, &["push", "-q", "origin", "main"]);
+
+    // Now make a local commit so we're both ahead AND behind the upstream
+    // without ever fetching the remote-side change.
+    fs::write(local.join("c.txt"), "local only\n").unwrap();
+    run_git(local, &["add", "c.txt"]);
+    run_git(local, &["commit", "-q", "-m", "local-side commit"]);
+
+    // Fetch so the tracking ref knows about the remote-side commit, but
+    // don't merge. Now `git rev-list --left-right --count @{u}...HEAD`
+    // reports 1 behind, 1 ahead.
+    run_git(local, &["fetch", "-q"]);
+
+    let out = run_gsw(local);
+    let header = out.lines().next().unwrap_or("");
+    assert!(
+        header.contains("origin/main"),
+        "header should name the upstream tracking branch: {header}",
+    );
+    assert!(
+        header.contains("↑1"),
+        "header should show 1 commit ahead of upstream: {header}",
+    );
+    assert!(
+        header.contains("↓1"),
+        "header should show 1 commit behind upstream: {header}",
+    );
+}
+
+#[test]
+fn omits_upstream_field_when_branch_has_no_remote() {
+    // No `git remote add`, no `git push -u`. The branch has no upstream
+    // configured, so gsw should not invent one or print arrows for a
+    // nonexistent tracking ref.
+    let dir = setup_repo();
+    let out = run_gsw(dir.path());
+    let header = out.lines().next().unwrap_or("");
+    assert!(
+        !header.contains('↑') && !header.contains('↓'),
+        "header should not show upstream arrows when no upstream exists: {header}",
+    );
+}
+
+#[test]
 fn width_offset_flag_narrows_render() {
     // With a fixed COLUMNS, --width-offset should subtract that many cells
     // on top of the auto-detection, narrowing the file-row path column

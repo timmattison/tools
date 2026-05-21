@@ -19,6 +19,20 @@ pub struct Snapshot {
     pub files: Vec<RenderEntry>,
     /// Most recent commits, newest first. Empty when not requested.
     pub log: Vec<LogEntry>,
+    /// Upstream tracking branch status (ahead/behind). `None` when the
+    /// current branch has no configured upstream.
+    pub upstream: Option<UpstreamStatus>,
+}
+
+/// State of the local branch relative to its upstream tracking ref.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamStatus {
+    /// Short upstream name, e.g. `origin/gsw-origin`.
+    pub name: String,
+    /// Commits on HEAD not yet on the upstream.
+    pub ahead: u32,
+    /// Commits on the upstream not yet on HEAD.
+    pub behind: u32,
 }
 
 /// One recent-commit row.
@@ -167,8 +181,13 @@ fn header_text(snap: &Snapshot) -> String {
     let age = snap
         .last_commit_age
         .map_or_else(|| "?".to_string(), format_age_detailed);
+    let upstream_field = snap
+        .upstream
+        .as_ref()
+        .map(|u| format!(" • ↑{} ↓{} {}", u.ahead, u.behind, u.name))
+        .unwrap_or_default();
     format!(
-        "gsw • {branch} • {n} {word} ahead of {base} • last commit {age} ago",
+        "gsw • {branch} • {n} {word} ahead of {base}{upstream_field} • last commit {age} ago",
         branch = snap.branch,
         n = snap.commits_ahead,
         word = commit_word,
@@ -500,6 +519,7 @@ mod tests {
             last_commit_age: Some(Duration::from_secs(5 * 60 + 23)),
             files,
             log: vec![],
+            upstream: None,
         }
     }
 
@@ -1101,6 +1121,70 @@ mod tests {
         assert!(
             !aging.style.contains(Styles::Italic),
             "Aging should not be italicized",
+        );
+    }
+
+    #[test]
+    fn header_includes_upstream_arrows_and_name_when_set() {
+        // When the current branch has an upstream tracking ref, the header
+        // should report how far ahead/behind we are of it, alongside the
+        // existing base-branch comparison. Using arrows keeps the field
+        // compact for the viddy header line.
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 1,
+        });
+        let out = strip_ansi(&render(&snap, &opts()));
+        let header = out.lines().next().unwrap_or("");
+        assert!(
+            header.contains("origin/gsv"),
+            "header should name the upstream tracking branch: {header}",
+        );
+        assert!(
+            header.contains("↑2"),
+            "header should show commits-ahead count with ↑: {header}",
+        );
+        assert!(
+            header.contains("↓1"),
+            "header should show commits-behind count with ↓: {header}",
+        );
+    }
+
+    #[test]
+    fn header_shows_zero_ahead_zero_behind_when_in_sync_with_upstream() {
+        // Predictable shape: even when ahead/behind are both 0, render the
+        // arrows so the eye can scan a column of values under viddy without
+        // the field appearing/disappearing.
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/main".into(),
+            ahead: 0,
+            behind: 0,
+        });
+        let out = strip_ansi(&render(&snap, &opts()));
+        let header = out.lines().next().unwrap_or("");
+        assert!(
+            header.contains("↑0") && header.contains("↓0"),
+            "header should still show ↑0 ↓0 when in sync: {header}",
+        );
+        assert!(
+            header.contains("origin/main"),
+            "header should name the upstream even when in sync: {header}",
+        );
+    }
+
+    #[test]
+    fn header_omits_upstream_field_when_no_upstream() {
+        // No upstream configured: the header should not include the arrows
+        // at all, and certainly not invent an "origin/…" name.
+        let snap = snap_with(vec![]);
+        let out = strip_ansi(&render(&snap, &opts()));
+        let header = out.lines().next().unwrap_or("");
+        assert!(
+            !header.contains('↑') && !header.contains('↓'),
+            "header should not show upstream arrows without an upstream: {header}",
         );
     }
 
