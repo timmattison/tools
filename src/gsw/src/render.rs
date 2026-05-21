@@ -1401,4 +1401,21 @@ mod tests {
         };
         assert!(hr < fr, "hour-old age column should be darker than fresh: {fr} -> {hr}");
     }
+
+    #[test]
+    fn fallback_stale_subject_is_not_italic() {
+        // User feedback: italics on old subjects looks weird and out of
+        // place. The fallback path should still dim stale subjects (so
+        // age is conveyed at all) but without leaning the text.
+        use colored::Styles;
+        let stale = colorize_log_subject(
+            "an old subject",
+            Duration::from_secs(60 * 60 * 24 * 7),
+            false,
+        );
+        assert!(
+            !stale.style.contains(Styles::Italic),
+            "stale subjects should be dimmed but not italicized in fallback mode",
+        );
+    }
 }
