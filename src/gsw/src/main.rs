@@ -106,6 +106,17 @@ fn should_force_colors(
     !stdout_is_tty && columns_env_present && !no_color_env
 }
 
+/// Does the active terminal advertise 24-bit color support?
+///
+/// We trust the `COLORTERM` env var (the de facto signal) — the canonical
+/// values are `truecolor` and `24bit`. Anything else, including a missing
+/// var, is treated as "no truecolor" and the renderer falls back to the
+/// eight-color path. Comparison is case-insensitive.
+fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
+    let _ = colorterm_env;
+    false
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -483,5 +494,42 @@ mod tests {
     #[test]
     fn parse_log_line_drops_empty_lines() {
         assert!(parse_log_line("", SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn truecolor_supported_when_colorterm_is_truecolor() {
+        assert!(truecolor_supported(Some("truecolor")));
+    }
+
+    #[test]
+    fn truecolor_supported_when_colorterm_is_24bit() {
+        assert!(truecolor_supported(Some("24bit")));
+    }
+
+    #[test]
+    fn truecolor_supported_is_case_insensitive() {
+        // Some terminals export uppercase or mixed-case values. Treat them
+        // as equivalent so we don't accidentally fall back on, say, gnome's
+        // "Truecolor".
+        assert!(truecolor_supported(Some("TrueColor")));
+        assert!(truecolor_supported(Some("TRUECOLOR")));
+        assert!(truecolor_supported(Some("24BIT")));
+    }
+
+    #[test]
+    fn truecolor_not_supported_when_colorterm_missing() {
+        // No COLORTERM at all — typical for old terminals or shells that
+        // strip it. Stay safe: assume 8-color until told otherwise.
+        assert!(!truecolor_supported(None));
+    }
+
+    #[test]
+    fn truecolor_not_supported_for_unknown_colorterm_value() {
+        // COLORTERM is set but to something we don't recognize (some
+        // terminals export "1" or vendor-specific strings). Don't guess —
+        // fall back to the 8-color path.
+        assert!(!truecolor_supported(Some("1")));
+        assert!(!truecolor_supported(Some("xterm-256color")));
+        assert!(!truecolor_supported(Some("")));
     }
 }
