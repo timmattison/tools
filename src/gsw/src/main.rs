@@ -119,6 +119,25 @@ fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
     )
 }
 
+/// Resolve the effective truecolor setting from CLI flags, env, and detection.
+///
+/// Priority, highest first:
+///   1. `--no-color` or `NO_COLOR` → false (kills all color)
+///   2. `--no-truecolor` → false (force the 8-color path)
+///   3. `--truecolor` → true (force the gradient regardless of detection)
+///   4. otherwise, auto-detect via `COLORTERM`
+fn effective_truecolor(
+    cli_no_color: bool,
+    cli_force_truecolor: bool,
+    cli_force_no_truecolor: bool,
+    no_color_env: bool,
+    colorterm_env: Option<&str>,
+) -> bool {
+    // Stub: ignore the CLI overrides so the new tests can fail on behavior.
+    let _ = (cli_force_truecolor, cli_force_no_truecolor);
+    !cli_no_color && !no_color_env && truecolor_supported(colorterm_env)
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -539,5 +558,47 @@ mod tests {
         assert!(!truecolor_supported(Some("1")));
         assert!(!truecolor_supported(Some("xterm-256color")));
         assert!(!truecolor_supported(Some("")));
+    }
+
+    // --- --truecolor / --no-truecolor override --------------------------
+
+    #[test]
+    fn truecolor_flag_forces_on_when_env_unset() {
+        // The escape hatch: some terminals support 24-bit color but don't
+        // export COLORTERM (or strip it through wrappers like cargo run /
+        // viddy). `--truecolor` lets the user assert capability directly.
+        assert!(effective_truecolor(false, true, false, false, None));
+    }
+
+    #[test]
+    fn truecolor_flag_forces_on_when_env_unrecognized() {
+        // Same escape hatch when COLORTERM is set to something we don't
+        // know how to interpret.
+        assert!(effective_truecolor(false, true, false, false, Some("1")));
+    }
+
+    #[test]
+    fn no_truecolor_flag_forces_off_even_with_colorterm() {
+        // Symmetric escape hatch: users on truecolor terminals can opt
+        // back to the legacy 8-color path (e.g. screen-recording, or just
+        // preferring the look).
+        assert!(!effective_truecolor(false, false, true, false, Some("truecolor")));
+    }
+
+    #[test]
+    fn no_color_beats_truecolor_flag() {
+        // `--no-color` / `$NO_COLOR` mean "no colors at all" — overriding
+        // them with `--truecolor` would re-enable the very thing the user
+        // opted out of. Honor the opt-out.
+        assert!(!effective_truecolor(true, true, false, false, Some("truecolor")));
+        assert!(!effective_truecolor(false, true, false, true, Some("truecolor")));
+    }
+
+    #[test]
+    fn truecolor_auto_uses_colorterm_when_no_flags() {
+        // No CLI overrides → fall back to the existing COLORTERM detection.
+        assert!(effective_truecolor(false, false, false, false, Some("truecolor")));
+        assert!(!effective_truecolor(false, false, false, false, None));
+        assert!(!effective_truecolor(false, false, false, false, Some("xterm-256color")));
     }
 }
