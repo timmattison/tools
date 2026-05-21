@@ -55,16 +55,46 @@ pub const FADE_FLOOR: f32 = 0.30;
 /// per-minute change is visible inside Fresh and Recent (the buckets a user
 /// is most likely to be staring at while working), while the long tail
 /// across Aging still fades visibly over tens of minutes.
-pub fn age_fade_factor(_age: Duration) -> f32 {
-    0.0
+pub fn age_fade_factor(age: Duration) -> f32 {
+    // Bucket boundaries in seconds — match `age_dim_level` exactly so the
+    // gradient lines up with the existing Fresh/Recent/Aging/Stale model.
+    const FRESH_END: f32 = (60 * 5) as f32;
+    const RECENT_END: f32 = (60 * 60) as f32;
+    const AGING_END: f32 = (60 * 60 * 24) as f32;
+    // Factor checkpoints at each boundary. Front-loaded so Fresh and Recent
+    // get a perceptible per-minute step before the long Aging tail.
+    const F_FRESH: f32 = 0.00;
+    const F_RECENT: f32 = 0.15;
+    const F_AGING: f32 = 0.50;
+    const F_STALE: f32 = 1.00;
+
+    let secs = age.as_secs_f32();
+    if secs <= 0.0 {
+        F_FRESH
+    } else if secs < FRESH_END {
+        lerp(F_FRESH, F_RECENT, secs / FRESH_END)
+    } else if secs < RECENT_END {
+        lerp(F_RECENT, F_AGING, (secs - FRESH_END) / (RECENT_END - FRESH_END))
+    } else if secs < AGING_END {
+        lerp(F_AGING, F_STALE, (secs - RECENT_END) / (AGING_END - RECENT_END))
+    } else {
+        F_STALE
+    }
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 /// Linearly interpolate `base` toward a dark floor by `factor` in `[0,1]`.
 ///
 /// `factor = 0` returns `base` unchanged; `factor = 1` returns
 /// `base * FADE_FLOOR` (rounded). Out-of-range factors are clamped.
-pub fn fade_rgb(base: (u8, u8, u8), _factor: f32) -> (u8, u8, u8) {
-    base
+pub fn fade_rgb(base: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
+    let f = factor.clamp(0.0, 1.0);
+    let scale = 1.0 - f * (1.0 - FADE_FLOOR);
+    let scl = |c: u8| (f32::from(c) * scale).round().clamp(0.0, 255.0) as u8;
+    (scl(base.0), scl(base.1), scl(base.2))
 }
 
 #[cfg(test)]
