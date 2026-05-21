@@ -390,8 +390,7 @@ fn colorize_log_subject(subject: &str, age: Duration, truecolor: bool) -> Colore
     } else {
         match age_dim_level(age) {
             AgeDim::Fresh | AgeDim::Recent => subject.normal(),
-            AgeDim::Aging => subject.dimmed(),
-            AgeDim::Stale => subject.dimmed().italic(),
+            AgeDim::Aging | AgeDim::Stale => subject.dimmed(),
         }
     }
 }
