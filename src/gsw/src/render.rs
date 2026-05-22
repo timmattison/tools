@@ -428,11 +428,12 @@ fn is_partial_block(c: char) -> bool {
 fn colorize_age(
     text: &str,
     age: Option<Duration>,
-    _factor: f32,
+    factor: f32,
     truecolor: bool,
 ) -> ColoredString {
     if truecolor {
-        return text.truecolor(50, 50, 50);
+        let (r, g, b) = fade_rgb(FILE_AGE_RGB, factor);
+        return text.truecolor(r, g, b);
     }
     let Some(age) = age else {
         return text.dimmed();
