@@ -220,7 +220,7 @@ fn render_row(
     let path_padded = pad_right(&path_truncated, path_width);
 
     let icon_str = colorize_icon(icon, entry, 0.0, false);
-    let letter_str = colorize_letter(letter, entry);
+    let letter_str = colorize_letter(letter, entry, 0.0, false);
     let path_str = colorize_path(&path_padded, entry, 0.0, false);
 
     // Untracked files get a stripped-down row — no bar, no counts — but
@@ -327,8 +327,16 @@ fn colorize_icon(
     }
 }
 
-fn colorize_letter(letter: char, entry: &RenderEntry) -> ColoredString {
+fn colorize_letter(
+    letter: char,
+    entry: &RenderEntry,
+    _factor: f32,
+    truecolor: bool,
+) -> ColoredString {
     let s = letter.to_string();
+    if truecolor {
+        return s.truecolor(50, 50, 50);
+    }
     match entry.status {
         FileStatus::Conflicted => s.red().bold(),
         FileStatus::Untracked | FileStatus::UntrackedDir => s.cyan().dimmed(),
@@ -444,6 +452,13 @@ const FILE_ICON_STAGED_RGB: (u8, u8, u8) = (90, 220, 110);
 const FILE_ICON_UNSTAGED_RGB: (u8, u8, u8) = (220, 200, 100);
 const FILE_ICON_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
 const FILE_ICON_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
+
+const FILE_LETTER_ADDED_RGB: (u8, u8, u8) = (90, 220, 110);
+const FILE_LETTER_DELETED_RGB: (u8, u8, u8) = (255, 80, 80);
+const FILE_LETTER_RENAMED_RGB: (u8, u8, u8) = (220, 120, 220);
+const FILE_LETTER_DEFAULT_RGB: (u8, u8, u8) = (230, 230, 230);
+const FILE_LETTER_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
+const FILE_LETTER_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
 
 /// Fade factor for a file row.
 ///
@@ -1730,5 +1745,36 @@ mod tests {
             panic!("both should be TrueColor");
         };
         assert!(ar < fr, "aged icon should be darker: fresh={fr} aged={ar}");
+    }
+
+    #[test]
+    fn file_letter_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Added, true, 1, 0);
+        let cs = colorize_letter('A', &e, 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor under truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_letter_falls_back_to_ansi_without_truecolor() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Added, true, 1, 0);
+        let cs = colorize_letter('A', &e, 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Green));
+    }
+
+    #[test]
+    fn file_letter_darkens_with_age_under_truecolor() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Deleted, true, 0, 1);
+        let fresh = colorize_letter('D', &e, 0.0, true);
+        let aged = colorize_letter('D', &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else { panic!("both should be TrueColor") };
+        assert!(ar < fr, "aged letter should be darker: fresh={fr} aged={ar}");
     }
 }
