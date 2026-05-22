@@ -993,6 +993,31 @@ mod tests {
         assert!(f + l <= 14, "total must fit in available rows: {f}+{l}");
     }
 
+    #[test]
+    fn plan_section_caps_floors_log_at_five_rows_when_files_dominate() {
+        // Repro of the "too many files" report: a branch with ~129
+        // changed files vs the default 20-line log on a ~26-row
+        // terminal. A naive proportional split would squeeze the log
+        // section down to ~3 rows; the floor lifts that to 5 so the
+        // recent-commit context stays visible.
+        let (f, l) = plan_section_caps(129, 20, 26);
+        assert_eq!(l, 5, "log section should be floored at 5 rows, got {l}");
+        assert_eq!(
+            f, 21,
+            "file section should claim the remaining rows after the log floor, got {f}"
+        );
+    }
+
+    #[test]
+    fn plan_section_caps_log_floor_does_not_pad_above_demand() {
+        // The floor is min(5, log_demand). With only 3 commits ahead,
+        // the log section should get exactly those 3 rows rather than 5
+        // rows with two empty lines at the bottom.
+        let (f, l) = plan_section_caps(100, 3, 20);
+        assert_eq!(l, 3, "log cap should equal demand when demand < floor, got {l}");
+        assert_eq!(f, 17, "file section should get the remaining rows, got {f}");
+    }
+
     fn log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
         LogEntry {
             hash: hash.into(),
