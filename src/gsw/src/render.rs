@@ -221,7 +221,7 @@ fn render_row(
 
     let icon_str = colorize_icon(icon, entry);
     let letter_str = colorize_letter(letter, entry);
-    let path_str = colorize_path(&path_padded, entry);
+    let path_str = colorize_path(&path_padded, entry, 0.0, false);
 
     // Untracked files get a stripped-down row — no bar, no counts — but
     // pad the gutter where bar/adds/dels would be so the age column still
@@ -324,7 +324,18 @@ fn colorize_letter(letter: char, entry: &RenderEntry) -> ColoredString {
     }
 }
 
-fn colorize_path(path: &str, entry: &RenderEntry) -> ColoredString {
+fn colorize_path(
+    path: &str,
+    entry: &RenderEntry,
+    _factor: f32,
+    truecolor: bool,
+) -> ColoredString {
+    if truecolor {
+        // Deliberately wrong stub — should be FILE_PATH_UNSTAGED_RGB faded,
+        // but returns a constant truecolor so the gradient + floor tests
+        // fail on their *behavior*, not on the structural shape.
+        return path.truecolor(50, 50, 50);
+    }
     match entry.status {
         FileStatus::Conflicted => path.red(),
         FileStatus::Untracked | FileStatus::UntrackedDir => path.cyan().dimmed(),
@@ -398,6 +409,17 @@ const LOG_HASH_BASE_RGB: (u8, u8, u8) = (255, 215, 0);
 const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
+
+// --- File-row truecolor base palette ---------------------------------------
+//
+// Per-status base RGB values for the file list under truecolor mode. Each
+// base is tuned so factor=0 reads as the same hue family as the legacy
+// ANSI color, and factor=1 (× FADE_FLOOR) still keeps the hue visible.
+
+const FILE_PATH_UNSTAGED_RGB: (u8, u8, u8) = (220, 200, 100);
+const FILE_PATH_STAGED_RGB: (u8, u8, u8) = (200, 200, 200);
+const FILE_PATH_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
+const FILE_PATH_CONFLICT_RGB: (u8, u8, u8) = (255, 90, 90);
 
 /// Fade factor for a file row.
 ///
@@ -1574,6 +1596,81 @@ mod tests {
         assert!(
             (file - commit).abs() < 1e-6,
             "file fade must equal commit fade for matching Some(age): file={file}, commit={commit}",
+        );
+    }
+
+    #[test]
+    fn file_path_uses_truecolor_when_enabled() {
+        // With truecolor on, a fresh modified file's path must come back as a
+        // 24-bit color so the gradient has somewhere to fade from.
+        use colored::Color;
+        let mut e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        e.age = Some(Duration::from_secs(0));
+        let cs = colorize_path("src/foo.rs", &e, 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor under truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_path_falls_back_to_legacy_color_without_truecolor() {
+        // Without truecolor, the legacy ANSI yellow for unstaged-modified
+        // paths must still come through unchanged. Regression guard for the
+        // 8-color path.
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        let cs = colorize_path("src/foo.rs", &e, 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn file_path_darkens_with_age_under_truecolor() {
+        // Core gradient property: an older path is dimmer than a fresh one on
+        // every channel.
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        let fresh = colorize_path("src/foo.rs", &e, 0.0, true);
+        let aged = colorize_path("src/foo.rs", &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }),
+             Some(Color::TrueColor { r: ar, g: ag, b: ab })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else {
+            panic!("both should be TrueColor under truecolor=true");
+        };
+        assert!(
+            ar <= fr && ag <= fg && ab <= fb,
+            "aged path should not be brighter on any channel: fresh=({fr},{fg},{fb}) aged=({ar},{ag},{ab})",
+        );
+        assert!(
+            ar < fr || ag < fg || ab < fb,
+            "aged path should be strictly darker on at least one channel: fresh=({fr},{fg},{fb}) aged=({ar},{ag},{ab})",
+        );
+    }
+
+    #[test]
+    fn file_path_stays_above_floor_at_factor_one() {
+        // The fade must never reach pure black — at the floor, channels stay
+        // at FADE_FLOOR * base. Mirrors log_hash_stays_above_floor_when_very_old.
+        use crate::age::FADE_FLOOR;
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        let cs = colorize_path("src/foo.rs", &e, 1.0, true);
+        let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
+            panic!("expected TrueColor under truecolor=true");
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
+        )]
+        let floor_of = |c: u8| (f32::from(c) * FADE_FLOOR).round() as u8;
+        let (br, bg, bb) = FILE_PATH_UNSTAGED_RGB;
+        assert!(
+            r >= floor_of(br).saturating_sub(1)
+                && g >= floor_of(bg).saturating_sub(1)
+                && b >= floor_of(bb).saturating_sub(1),
+            "channels must not drop below the floor: actual=({r},{g},{b}) base=({br},{bg},{bb})",
         );
     }
 }
