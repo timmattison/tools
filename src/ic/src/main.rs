@@ -2913,4 +2913,23 @@ not_a_number  1 /bin/bash
     fn parse_fps_empty_falls_back_to_default() {
         assert_eq!(parse_video_fps(""), DEFAULT_FPS);
     }
+
+    #[test]
+    fn parse_fps_prefers_avg_frame_rate_over_r_frame_rate() {
+        // A variable-frame-rate screen recording: r_frame_rate is the timebase
+        // tick (287/12 ≈ 23.92 fps) while avg_frame_rate is the true average
+        // (≈ 12.06 fps). Playback timing must use the average, or the video
+        // plays roughly 2× too fast.
+        let probe = "r_frame_rate=287/12\navg_frame_rate=60525000/5017157\n";
+        let fps = parse_video_fps(probe);
+        assert!((fps - 12.063).abs() < 0.01, "got {fps}");
+    }
+
+    #[test]
+    fn parse_fps_falls_back_to_r_frame_rate_when_avg_unknown() {
+        // Some containers report avg_frame_rate as "0/0" (unknown). Fall back to
+        // r_frame_rate rather than the hard-coded default.
+        let probe = "r_frame_rate=30/1\navg_frame_rate=0/0\n";
+        assert_eq!(parse_video_fps(probe), 30.0);
+    }
 }
