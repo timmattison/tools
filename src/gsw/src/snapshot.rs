@@ -1,5 +1,6 @@
 //! Combine parsed git data + filesystem ages into a [`Snapshot`].
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ pub fn build_snapshot(
     unstaged_numstat: &HashMap<String, NumStat>,
     ages: &HashMap<String, Duration>,
 ) -> Snapshot {
-    let files = status_entries
+    let mut files: Vec<RenderEntry> = status_entries
         .into_iter()
         .map(|e| {
             let side = if e.staged {
@@ -48,6 +49,15 @@ pub fn build_snapshot(
             }
         })
         .collect();
+    // Newest mtime on top; rows with no mtime (deleted files, untracked
+    // dirs) sink to the bottom. Stable so same-mtime rows keep git's order
+    // (e.g., staged + unstaged of the same path).
+    files.sort_by(|a, b| match (a.age, b.age) {
+        (Some(x), Some(y)) => x.cmp(&y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    });
     Snapshot {
         branch,
         base,
@@ -293,6 +303,93 @@ mod tests {
         assert_eq!(staged_row.dels, 0);
         assert_eq!(unstaged_row.adds, 0);
         assert_eq!(unstaged_row.dels, 3);
+    }
+
+    #[test]
+    fn files_sorted_newest_mtime_first_then_none() {
+        // Three files with mtimes (newest, mid, oldest) and one with no mtime.
+        // Git status emits them in an arbitrary order; the snapshot should
+        // re-order so newest mtime is on top and the no-mtime row sinks to
+        // the bottom.
+        let entries = vec![
+            FileEntry {
+                path: "mid.rs".into(),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: false,
+            },
+            FileEntry {
+                path: "no_age.rs".into(),
+                orig_path: None,
+                status: FileStatus::Deleted,
+                staged: false,
+            },
+            FileEntry {
+                path: "newest.rs".into(),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: false,
+            },
+            FileEntry {
+                path: "oldest.rs".into(),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: false,
+            },
+        ];
+        let mut ages = HashMap::new();
+        ages.insert("newest.rs".to_string(), Duration::from_secs(10));
+        ages.insert("mid.rs".to_string(), Duration::from_secs(60));
+        ages.insert("oldest.rs".to_string(), Duration::from_secs(3600));
+
+        let snap = build_snapshot(
+            "x".into(),
+            "main".into(),
+            0,
+            Some(Duration::ZERO),
+            entries,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ages,
+        );
+        let paths: Vec<&str> = snap.files.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, vec!["newest.rs", "mid.rs", "oldest.rs", "no_age.rs"]);
+    }
+
+    #[test]
+    fn sort_is_stable_for_equal_ages() {
+        // Same-path staged + unstaged rows share an mtime; their input order
+        // must be preserved after sorting.
+        let entries = vec![
+            FileEntry {
+                path: "src/foo.rs".into(),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: true,
+            },
+            FileEntry {
+                path: "src/foo.rs".into(),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: false,
+            },
+        ];
+        let mut ages = HashMap::new();
+        ages.insert("src/foo.rs".to_string(), Duration::from_secs(30));
+
+        let snap = build_snapshot(
+            "x".into(),
+            "main".into(),
+            0,
+            Some(Duration::ZERO),
+            entries,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ages,
+        );
+        assert_eq!(snap.files.len(), 2);
+        assert!(snap.files[0].staged);
+        assert!(!snap.files[1].staged);
     }
 
     #[test]
