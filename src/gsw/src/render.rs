@@ -541,7 +541,7 @@ const FILE_ADDS_RGB: (u8, u8, u8) = (90, 220, 110);
 const FILE_DELS_RGB: (u8, u8, u8) = (255, 90, 90);
 const FILE_BAR_RGB: (u8, u8, u8) = (60, 200, 200);
 const FILE_BAR_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
-const FILE_BIN_RGB: (u8, u8, u8) = (140, 140, 140);
+const FILE_BIN_RGB: (u8, u8, u8) = (160, 160, 160);
 
 /// Fade factor for a file row.
 ///
