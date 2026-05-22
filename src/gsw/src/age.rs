@@ -48,44 +48,18 @@ pub fn age_dim_level(age: Duration) -> AgeDim {
 /// the background.
 pub const FADE_FLOOR: f32 = 0.30;
 
+/// Age at which the fade reaches the dark floor and stops darkening further.
+pub const FADE_DARKEST_AT: Duration = Duration::from_secs(2 * 60 * 60);
+
 /// Continuous fade factor in `[0.0, 1.0]` for a commit `age`.
 ///
 /// `0.0` means use the full base color; `1.0` means use the dark floor.
-/// Piecewise-linear across the same boundaries as [`age_dim_level`] so the
-/// per-minute change is visible inside Fresh and Recent (the buckets a user
-/// is most likely to be staring at while working), while the long tail
-/// across Aging still fades visibly over tens of minutes.
+/// One smooth linear ramp from age=0 to [`FADE_DARKEST_AT`], then clamped
+/// at the floor — no per-bucket checkpoints, just a single gradient.
 pub fn age_fade_factor(age: Duration) -> f32 {
-    // Bucket boundaries in seconds — match `age_dim_level` exactly so the
-    // gradient lines up with the existing Fresh/Recent/Aging/Stale model.
-    const FRESH_END: f32 = (60 * 5) as f32;
-    const RECENT_END: f32 = (60 * 60) as f32;
-    const AGING_END: f32 = (60 * 60 * 24) as f32;
-    // Factor checkpoints at each boundary. Front-loaded so most of the
-    // gradient from base toward FADE_FLOOR is spent by the 1h Aging boundary
-    // — hour-old commits should already read as dim, and the 1h–24h tail is
-    // just the final sliver of darkening rather than the bulk of it.
-    const F_FRESH: f32 = 0.00;
-    const F_RECENT: f32 = 0.20;
-    const F_AGING: f32 = 0.85;
-    const F_STALE: f32 = 1.00;
-
     let secs = age.as_secs_f32();
-    if secs <= 0.0 {
-        F_FRESH
-    } else if secs < FRESH_END {
-        lerp(F_FRESH, F_RECENT, secs / FRESH_END)
-    } else if secs < RECENT_END {
-        lerp(F_RECENT, F_AGING, (secs - FRESH_END) / (RECENT_END - FRESH_END))
-    } else if secs < AGING_END {
-        lerp(F_AGING, F_STALE, (secs - RECENT_END) / (AGING_END - RECENT_END))
-    } else {
-        F_STALE
-    }
-}
-
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
+    let end = FADE_DARKEST_AT.as_secs_f32();
+    (secs / end).clamp(0.0, 1.0)
 }
 
 /// Linearly interpolate `base` toward a dark floor by `factor` in `[0,1]`.
@@ -171,46 +145,39 @@ mod tests {
     }
 
     #[test]
-    fn fade_factor_is_pretty_dark_by_one_hour() {
-        // Commits past the 1h boundary should already look pretty dark — most
-        // of the gradient from base toward FADE_FLOOR is spent by then, so the
-        // long Aging tail is just the last bit of darkening rather than the
-        // bulk of it. Concretely: at 1h the factor should be >= 0.80, putting
-        // brightness at <= ~44% of base for the default 30% floor.
+    fn fade_factor_midpoint_at_one_hour() {
+        // With a single linear ramp from 0 to 2h, the halfway point is 1h.
         let one_hour = Duration::from_secs(60 * 60);
         let factor = age_fade_factor(one_hour);
         assert!(
-            factor >= 0.80,
-            "factor at 1h should be >= 0.80 so hour-old commits read as dim, was {factor}",
+            (factor - 0.5).abs() < 1e-6,
+            "factor at 1h should be 0.5 on a 0..2h linear ramp, was {factor}",
         );
     }
 
     #[test]
-    fn fade_factor_reaches_one_at_stale_boundary() {
-        // At and beyond the 24h stale boundary the gradient should hit its
-        // floor — i.e. factor = 1.0 — so further aging doesn't keep darkening.
-        let day = Duration::from_secs(60 * 60 * 24);
+    fn fade_factor_reaches_one_at_two_hours() {
+        // At and beyond 2h the gradient hits its floor and stops darkening.
+        let two_h = FADE_DARKEST_AT;
         assert!(
-            (age_fade_factor(day) - 1.0).abs() < 1e-6,
-            "factor at 24h should be 1.0, was {}",
-            age_fade_factor(day),
+            (age_fade_factor(two_h) - 1.0).abs() < 1e-6,
+            "factor at 2h should be 1.0, was {}",
+            age_fade_factor(two_h),
         );
         let week = Duration::from_secs(60 * 60 * 24 * 7);
         assert!(
             (age_fade_factor(week) - 1.0).abs() < 1e-6,
-            "factor past 24h should clamp at 1.0, was {}",
+            "factor past 2h should clamp at 1.0, was {}",
             age_fade_factor(week),
         );
     }
 
     #[test]
     fn fade_factor_increases_with_age() {
-        // The user requested visible darkening per minute. Walk minute by
-        // minute through the Fresh and Recent buckets and confirm every step
-        // strictly increases — that's what "every minute they get a little
-        // darker" requires.
+        // Walk minute by minute through the ramp and confirm every step
+        // strictly increases until we hit the floor at 2h.
         let mut prev = age_fade_factor(Duration::from_secs(0));
-        for m in 1..=70_u64 {
+        for m in 1..=120_u64 {
             let next = age_fade_factor(Duration::from_secs(m * 60));
             assert!(
                 next > prev,
@@ -223,28 +190,21 @@ mod tests {
     }
 
     #[test]
-    fn fade_factor_visible_step_per_minute_in_fresh_and_recent() {
-        // The fade has to actually move enough per minute to be perceptible.
-        // With a base channel of 200 and a floor of 30%, the available range
-        // is 140 RGB units; a 1 RGB-unit minimum step requires the factor to
-        // advance by >= 1/140 ≈ 0.007 per minute somewhere in the Fresh and
-        // Recent buckets. This guards against a future "stretch the gradient
-        // over 24h" change that would silently make per-minute changes
-        // invisible to the eye.
-        for m in 0..60_u64 {
+    fn fade_factor_per_minute_step_is_perceptible() {
+        // A linear ramp over 2h moves by 1/120 ≈ 0.00833 per minute. With a
+        // base channel of 200 and a floor of 30%, that's ~1.17 RGB units per
+        // minute — perceptible to the eye and enough to read as continuous.
+        let expected_step = 1.0 / 120.0;
+        for m in 0..120_u64 {
             let a = age_fade_factor(Duration::from_secs(m * 60));
             let b = age_fade_factor(Duration::from_secs((m + 1) * 60));
-            if m < 5 {
-                assert!(
-                    b - a >= 0.01,
-                    "fresh-bucket step too small at minute {m}: {a} -> {b}",
-                );
-            } else {
-                assert!(
-                    b - a >= 0.001,
-                    "recent-bucket step too small at minute {m}: {a} -> {b}",
-                );
-            }
+            assert!(
+                (b - a - expected_step).abs() < 1e-5,
+                "per-minute step at minute {m} should be ~{expected_step}, got {} -> {} (delta {})",
+                a,
+                b,
+                b - a,
+            );
         }
     }
 
