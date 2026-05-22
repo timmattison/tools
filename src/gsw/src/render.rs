@@ -1973,4 +1973,137 @@ mod tests {
         use colored::Color;
         assert_eq!(cells[0].fgcolor, Some(Color::Cyan));
     }
+
+    // --- Phase 8: end-to-end render() truecolor wiring ----------------------
+
+    #[test]
+    fn file_row_renders_with_truecolor_when_enabled() {
+        use colored::Color;
+        // Force the colored crate to actually emit ANSI in the test process so
+        // we can detect the truecolor codes from the rendered output.
+        colored::control::set_override(true);
+        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+        let mut o = opts();
+        o.truecolor = true;
+        let out = render(&snap, &o);
+        colored::control::unset_override();
+        // Truecolor foreground sequences start with `\x1b[38;2;`.
+        assert!(
+            out.contains("\x1b[38;2;"),
+            "rendered file row should contain a truecolor ANSI sequence when truecolor=true",
+        );
+        // Silence the unused-import warning when the macro doesn't fire below.
+        let _ = Color::Red;
+    }
+
+    #[test]
+    fn file_row_no_truecolor_in_8_color_mode() {
+        colored::control::set_override(true);
+        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+        let out = render(&snap, &opts());
+        colored::control::unset_override();
+        assert!(
+            !out.contains("\x1b[38;2;"),
+            "8-color mode must not emit any truecolor sequences for file rows",
+        );
+    }
+
+    #[test]
+    fn file_row_darkens_with_mtime_under_truecolor() {
+        // End-to-end: an older file's row should contain a darker (lower-channel)
+        // truecolor sequence than a fresher row of the same status.
+        colored::control::set_override(true);
+        let mut fresh_entry = entry("src/foo.rs", FileStatus::Modified, false, 5, 2);
+        fresh_entry.age = Some(Duration::from_secs(0));
+        let mut aged_entry = entry("src/bar.rs", FileStatus::Modified, false, 5, 2);
+        aged_entry.age = Some(Duration::from_secs(60 * 60));
+
+        let fresh_snap = snap_with(vec![fresh_entry]);
+        let aged_snap = snap_with(vec![aged_entry]);
+        let mut o = opts();
+        o.truecolor = true;
+        let fresh_out = render(&fresh_snap, &o);
+        let aged_out = render(&aged_snap, &o);
+        colored::control::unset_override();
+
+        let max_r = |s: &str| {
+            // Extract the largest r-channel from any 38;2;r;g;b foreground sequence.
+            let mut best: Option<u8> = None;
+            let bytes = s.as_bytes();
+            let needle = b"\x1b[38;2;";
+            let mut i = 0;
+            while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
+                let start = i + pos + needle.len();
+                // Read r digits.
+                let mut j = start;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > start {
+                    if let Ok(r) = std::str::from_utf8(&bytes[start..j]).unwrap().parse::<u8>() {
+                        best = Some(best.map_or(r, |b| b.max(r)));
+                    }
+                }
+                i = j;
+            }
+            best.expect("at least one truecolor sequence")
+        };
+
+        let fresh_max = max_r(&fresh_out);
+        let aged_max = max_r(&aged_out);
+        assert!(
+            aged_max < fresh_max,
+            "aged row's brightest channel should be lower than fresh row's: fresh={fresh_max} aged={aged_max}",
+        );
+    }
+
+    #[test]
+    fn file_row_no_age_renders_at_floor_under_truecolor() {
+        // Deleted file (age=None) should produce only sequences with channels
+        // at or below the FADE_FLOOR fraction of their base.
+        use crate::age::FADE_FLOOR;
+        colored::control::set_override(true);
+        let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
+        e.age = None;
+        let snap = snap_with(vec![e]);
+        let mut o = opts();
+        o.truecolor = true;
+        let out = render(&snap, &o);
+        colored::control::unset_override();
+
+        // The brightest channel allowed at the floor is `255 × FADE_FLOOR`
+        // (a base channel of 255 hits the highest floor). Use that as the
+        // conservative upper bound for any column, plus a small slack for
+        // rounding. Any row column emitting a channel above this means a
+        // colorize_* fn forgot to apply the fade.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "255.0 × FADE_FLOOR ∈ [0, 255]"
+        )]
+        let upper = ((255.0_f32 * FADE_FLOOR).round() as u8).saturating_add(2);
+
+        // Parse every r-channel and assert all are <= upper.
+        let bytes = out.as_bytes();
+        let needle = b"\x1b[38;2;";
+        let mut i = 0;
+        let mut saw_any = false;
+        while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
+            let start = i + pos + needle.len();
+            let mut j = start;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > start {
+                let r: u8 = std::str::from_utf8(&bytes[start..j]).unwrap().parse().unwrap();
+                assert!(
+                    r <= upper,
+                    "every channel on a no-age row should sit at or below the floor (got {r}, upper {upper})",
+                );
+                saw_any = true;
+            }
+            i = j;
+        }
+        assert!(saw_any, "should have emitted at least one truecolor sequence");
+    }
 }
