@@ -1175,7 +1175,9 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
             "-show_entries",
             "stream=r_frame_rate",
             "-of",
-            "csv=p=0",
+            // Avoids the empty trailing field that `csv=p=0` appends for a
+            // stream's side-data section (e.g. a Dolby Vision config record).
+            "default=noprint_wrappers=1:nokey=1",
             file_path.to_str().unwrap(),
         ])
         .output()
@@ -1190,17 +1192,31 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
 }
 
 /// Parse a frame rate from ffprobe's `stream=r_frame_rate` output.
+///
+/// ffprobe reports frame rates as a fraction such as `"24000/1001"`. As with the
+/// dimension probe, a stream's side data (e.g. a Dolby Vision configuration
+/// record) makes the CSV writer append an empty trailing field — `"24000/1001,"`
+/// — so we take the first whitespace/comma-delimited token before splitting the
+/// fraction. A `"0/0"` rate (unknown frame rate) or any unparseable value falls
+/// back to [`DEFAULT_FPS`] rather than producing NaN.
 fn parse_video_fps(output: &str) -> f64 {
-    let fps_str = output.trim();
+    let Some(token) = output
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .find(|token| !token.is_empty())
+    else {
+        return DEFAULT_FPS;
+    };
 
-    // Parse fraction like "24/1" or "30000/1001" using char-based splitting
-    // for UTF-8 safety (in practice ffprobe output is ASCII).
-    if let Some((num_str, denom_str)) = fps_str.split_once('/') {
+    // Parse fraction like "24/1" or "30000/1001"; the token is ASCII in practice.
+    if let Some((num_str, denom_str)) = token.split_once('/') {
         let numerator: f64 = num_str.parse().unwrap_or(DEFAULT_FPS);
         let denominator: f64 = denom_str.parse().unwrap_or(1.0);
+        if denominator == 0.0 {
+            return DEFAULT_FPS;
+        }
         numerator / denominator
     } else {
-        fps_str.parse().unwrap_or(DEFAULT_FPS)
+        token.parse().unwrap_or(DEFAULT_FPS)
     }
 }
 
