@@ -3,6 +3,8 @@
 I started this repo forever ago (2014!) to hold some tools I needed at the time. Now I'm converting the tools to ~~Golang~~ Rust
 for fun.
 
+> **In a hurry?** See [TLDR.md](./TLDR.md) for a one-line description of every tool.
+
 ## Shared Libraries
 
 ### repowalker
