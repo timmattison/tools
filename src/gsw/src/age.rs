@@ -61,11 +61,13 @@ pub fn age_fade_factor(age: Duration) -> f32 {
     const FRESH_END: f32 = (60 * 5) as f32;
     const RECENT_END: f32 = (60 * 60) as f32;
     const AGING_END: f32 = (60 * 60 * 24) as f32;
-    // Factor checkpoints at each boundary. Front-loaded so Fresh and Recent
-    // get a perceptible per-minute step before the long Aging tail.
+    // Factor checkpoints at each boundary. Front-loaded so most of the
+    // gradient from base toward FADE_FLOOR is spent by the 1h Aging boundary
+    // — hour-old commits should already read as dim, and the 1h–24h tail is
+    // just the final sliver of darkening rather than the bulk of it.
     const F_FRESH: f32 = 0.00;
-    const F_RECENT: f32 = 0.15;
-    const F_AGING: f32 = 0.50;
+    const F_RECENT: f32 = 0.20;
+    const F_AGING: f32 = 0.85;
     const F_STALE: f32 = 1.00;
 
     let secs = age.as_secs_f32();
