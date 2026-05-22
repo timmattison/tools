@@ -1340,23 +1340,29 @@ mod tests {
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
-        // LOG_HASH_BASE_RGB is (255, 215, 0). With FADE_FLOOR=0.30 the
-        // minimum red is ~76, green ~64, blue 0.
+        // Derive the per-channel floor from the live base RGB so this
+        // test asserts the invariant ("no channel drops below its
+        // FADE_FLOOR fraction") rather than hardcoding numbers tied to
+        // today's choice of LOG_HASH_BASE_RGB. If the base later gains
+        // a non-zero blue, the test still checks the right bound.
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "255 * 0.30 ≈ 76, well within u8 range"
+            reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
         )]
-        let min_red = (255.0 * FADE_FLOOR).round() as u8;
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "215 * 0.30 ≈ 64, well within u8 range"
-        )]
-        let min_green = (215.0 * FADE_FLOOR).round() as u8;
+        let floor_of = |c: u8| (f32::from(c) * FADE_FLOOR).round() as u8;
+        let (base_r, base_g, base_b) = LOG_HASH_BASE_RGB;
+        let min_r = floor_of(base_r);
+        let min_g = floor_of(base_g);
+        let min_b = floor_of(base_b);
+        // .saturating_sub(1) absorbs one RGB-unit of rounding drift at
+        // the fade-curve boundary; the test still fails if any channel
+        // drops meaningfully below its computed floor.
         assert!(
-            r >= min_red.saturating_sub(1) && g >= min_green.saturating_sub(1) && b == 0,
-            "channels must not drop below the floor: ({r},{g},{b}) min=({min_red},{min_green},0)",
+            r >= min_r.saturating_sub(1)
+                && g >= min_g.saturating_sub(1)
+                && b >= min_b.saturating_sub(1),
+            "channels must not drop below the floor: actual=({r},{g},{b}) min=({min_r},{min_g},{min_b}) base=({base_r},{base_g},{base_b})",
         );
     }
 
