@@ -327,14 +327,18 @@ fn colorize_letter(letter: char, entry: &RenderEntry) -> ColoredString {
 fn colorize_path(
     path: &str,
     entry: &RenderEntry,
-    _factor: f32,
+    factor: f32,
     truecolor: bool,
 ) -> ColoredString {
     if truecolor {
-        // Deliberately wrong stub — should be FILE_PATH_UNSTAGED_RGB faded,
-        // but returns a constant truecolor so the gradient + floor tests
-        // fail on their *behavior*, not on the structural shape.
-        return path.truecolor(50, 50, 50);
+        let base = match entry.status {
+            FileStatus::Conflicted => FILE_PATH_CONFLICT_RGB,
+            FileStatus::Untracked | FileStatus::UntrackedDir => FILE_PATH_UNTRACKED_RGB,
+            _ if entry.staged => FILE_PATH_STAGED_RGB,
+            _ => FILE_PATH_UNSTAGED_RGB,
+        };
+        let (r, g, b) = fade_rgb(base, factor);
+        return path.truecolor(r, g, b);
     }
     match entry.status {
         FileStatus::Conflicted => path.red(),
