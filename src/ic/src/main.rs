@@ -1122,7 +1122,13 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
         );
     }
 
-    let dimensions_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let dimensions_str = String::from_utf8_lossy(&output.stdout);
+    parse_video_dimensions(&dimensions_str)
+}
+
+/// Parse video width and height out of ffprobe's `stream=width,height` output.
+fn parse_video_dimensions(output: &str) -> Result<(u32, u32)> {
+    let dimensions_str = output.trim();
 
     // Parse "width,height" format using char-based splitting for UTF-8 safety
     if let Some((width_str, height_str)) = dimensions_str.split_once(',') {
@@ -2791,5 +2797,43 @@ not_a_number  1 /bin/bash
         assert!(matches!(result, Cow::Owned(_)));
         assert!(result.width() <= max_w);
         assert!(result.height() <= max_h);
+    }
+
+    // =========================================================================
+    // Tests for parse_video_dimensions
+    // =========================================================================
+
+    #[test]
+    fn parse_dimensions_plain_csv() {
+        assert_eq!(parse_video_dimensions("1920,1080").unwrap(), (1920, 1080));
+    }
+
+    #[test]
+    fn parse_dimensions_trailing_newline() {
+        assert_eq!(parse_video_dimensions("1920,1080\n").unwrap(), (1920, 1080));
+    }
+
+    #[test]
+    fn parse_dimensions_handles_dolby_vision_trailing_comma() {
+        // A Dolby Vision HEVC stream carries a DoVi configuration record as side
+        // data. ffprobe's CSV writer appends an empty trailing field for that
+        // nested section, yielding "3840,2160," — splitting only on the first
+        // comma used to leave the height as "2160,", which failed to parse.
+        assert_eq!(
+            parse_video_dimensions("3840,2160,\n").unwrap(),
+            (3840, 2160)
+        );
+    }
+
+    #[test]
+    fn parse_dimensions_handles_newline_separated() {
+        // ffprobe's `default=noprint_wrappers=1:nokey=1` writer emits one value
+        // per line; the parser must accept that layout too.
+        assert_eq!(parse_video_dimensions("3840\n2160\n").unwrap(), (3840, 2160));
+    }
+
+    #[test]
+    fn parse_dimensions_errors_when_height_missing() {
+        assert!(parse_video_dimensions("3840").is_err());
     }
 }
