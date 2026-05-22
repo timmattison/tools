@@ -2160,4 +2160,36 @@ mod tests {
         }
         assert!(saw_any, "should have emitted at least one truecolor sequence");
     }
+
+    #[test]
+    fn file_row_status_hues_remain_distinct_at_floor() {
+        // At the dark floor, fading must not collapse different statuses into
+        // the same RGB. We check icon base hues fade to distinct floored RGBs.
+        let bases = [
+            ("staged", FILE_ICON_STAGED_RGB),
+            ("unstaged", FILE_ICON_UNSTAGED_RGB),
+            ("untracked", FILE_ICON_UNTRACKED_RGB),
+            ("conflict", FILE_ICON_CONFLICT_RGB),
+        ];
+        let floored: Vec<((u8,u8,u8), &str)> = bases
+            .iter()
+            .map(|(name, rgb)| (fade_rgb(*rgb, 1.0), *name))
+            .collect();
+        for i in 0..floored.len() {
+            for j in (i + 1)..floored.len() {
+                let ((ar, ag, ab), aname) = floored[i];
+                let ((br, bg, bb), bname) = floored[j];
+                // Manhattan distance > 0 isn't enough — we want a perceptible
+                // difference even after the channels shrink. Require at least
+                // 10 units of total channel difference.
+                let dist = (i32::from(ar) - i32::from(br)).abs()
+                    + (i32::from(ag) - i32::from(bg)).abs()
+                    + (i32::from(ab) - i32::from(bb)).abs();
+                assert!(
+                    dist >= 10,
+                    "{aname} and {bname} floored RGBs too close: {ar:?},{ag:?},{ab:?} vs {br:?},{bg:?},{bb:?} (dist {dist})",
+                );
+            }
+        }
+    }
 }
