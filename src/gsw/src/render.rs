@@ -399,6 +399,18 @@ const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
 
+/// Fade factor for a file row.
+///
+/// `Some(age)` shares the commit-log ramp via [`age_fade_factor`] so the
+/// file list and log section darken in lockstep. `None` returns `1.0`
+/// so files we can't stat (deleted entries, skipped untracked dirs)
+/// render at the dark floor.
+fn file_fade_factor(_age: Option<Duration>) -> f32 {
+    // Intentionally wrong stub — the red test must fail on the assertion,
+    // not on a missing symbol.
+    0.5
+}
+
 /// Apply the age-driven truecolor fade to `s`, starting from `base`.
 ///
 /// Shared by every truecolor commit-log colorizer so the fade math lives
@@ -1530,6 +1542,40 @@ mod tests {
         assert!(
             !stale.style.contains(Styles::Italic),
             "stale subjects should be dimmed but not italicized in fallback mode",
+        );
+    }
+
+    #[test]
+    fn file_fade_factor_is_zero_for_fresh_age() {
+        // A file modified moments ago must render at full base brightness,
+        // which means factor=0 — the no-fade end of the ramp.
+        assert!(
+            (file_fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
+            "fresh file should produce factor=0",
+        );
+    }
+
+    #[test]
+    fn file_fade_factor_floors_when_age_is_none() {
+        // Deleted files and unstat'd untracked dirs have no mtime. They must
+        // render at the dark floor (factor=1.0) so the row visually announces
+        // "this is an unusual state, not actively changing".
+        assert!(
+            (file_fade_factor(None) - 1.0).abs() < 1e-6,
+            "None age should clamp to factor=1.0 (the floor)",
+        );
+    }
+
+    #[test]
+    fn file_fade_factor_matches_commit_ramp_for_some_age() {
+        // The file fade must share the *same* ramp as commit rows so the two
+        // sections darken in lockstep under viddy. Spot-check the 1h midpoint.
+        let one_hour = Duration::from_secs(60 * 60);
+        let file = file_fade_factor(Some(one_hour));
+        let commit = age_fade_factor(one_hour);
+        assert!(
+            (file - commit).abs() < 1e-6,
+            "file fade must equal commit fade for matching Some(age): file={file}, commit={commit}",
         );
     }
 }
