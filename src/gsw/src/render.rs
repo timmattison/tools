@@ -243,7 +243,7 @@ fn render_row(
     } else {
         render_bar(entry.adds.saturating_add(entry.dels), max_change, opts.bar_width)
     };
-    let bar_str = colorize_bar(&bar_raw, entry);
+    let bar_str = colorize_bar(&bar_raw, entry, 0.0, false);
 
     let adds_raw = if entry.adds > 0 {
         format!("+{}", entry.adds)
@@ -389,9 +389,18 @@ const BAR_PARTIAL_BG_CYAN: (u8, u8, u8) = (0, 48, 48);
 /// Same idea for the conflicted-file bar, which paints in red.
 const BAR_PARTIAL_BG_RED: (u8, u8, u8) = (48, 0, 0);
 
-fn colorize_bar(bar: &str, entry: &RenderEntry) -> String {
+/// Build one `ColoredString` per visible cell of `bar`. The joined string
+/// returned by [`colorize_bar`] is just `colorize_bar_styled(...).join("")`
+/// with `.to_string()` applied to each cell — sharing the cell builder lets
+/// tests inspect the typed fg/bg colors per cell instead of parsing ANSI.
+fn colorize_bar_styled(
+    bar: &str,
+    entry: &RenderEntry,
+    _factor: f32,
+    truecolor: bool,
+) -> Vec<ColoredString> {
     if entry.binary {
-        return bar.dimmed().to_string();
+        return bar.chars().map(|c| c.to_string().dimmed()).collect();
     }
     let is_conflicted = matches!(entry.status, FileStatus::Conflicted);
     let (br, bg, bb) = if is_conflicted {
@@ -399,21 +408,36 @@ fn colorize_bar(bar: &str, entry: &RenderEntry) -> String {
     } else {
         BAR_PARTIAL_BG_CYAN
     };
-    let mut out = String::with_capacity(bar.len() * 2);
-    for c in bar.chars() {
-        let s = c.to_string();
-        let colored = if is_partial_block(c) {
-            if is_conflicted {
-                s.red().on_truecolor(br, bg, bb)
+    bar.chars()
+        .map(|c| {
+            let s = c.to_string();
+            if truecolor {
+                // Wrong stub — constant grey breaks gradient + bg tests only.
+                if is_partial_block(c) {
+                    s.truecolor(50, 50, 50).on_truecolor(20, 20, 20)
+                } else {
+                    s.truecolor(50, 50, 50)
+                }
+            } else if is_partial_block(c) {
+                if is_conflicted {
+                    s.red().on_truecolor(br, bg, bb)
+                } else {
+                    s.cyan().on_truecolor(br, bg, bb)
+                }
+            } else if is_conflicted {
+                s.red()
             } else {
-                s.cyan().on_truecolor(br, bg, bb)
+                s.cyan()
             }
-        } else if is_conflicted {
-            s.red()
-        } else {
-            s.cyan()
-        };
-        out.push_str(&colored.to_string());
+        })
+        .collect()
+}
+
+fn colorize_bar(bar: &str, entry: &RenderEntry, factor: f32, truecolor: bool) -> String {
+    let cells = colorize_bar_styled(bar, entry, factor, truecolor);
+    let mut out = String::with_capacity(bar.len() * 2);
+    for c in cells {
+        out.push_str(&c.to_string());
     }
     out
 }
@@ -1097,9 +1121,9 @@ mod tests {
         // in non-TTY test runs.
         colored::control::set_override(true);
         let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
-        let with_partial = colorize_bar("█████▍", &e);
-        let all_full = colorize_bar("██████", &e);
-        let all_empty = colorize_bar("░░░░░░", &e);
+        let with_partial = colorize_bar("█████▍", &e, 0.0, false);
+        let all_full = colorize_bar("██████", &e, 0.0, false);
+        let all_empty = colorize_bar("░░░░░░", &e, 0.0, false);
         colored::control::unset_override();
 
         assert!(
@@ -1899,5 +1923,45 @@ mod tests {
             (fresh.fgcolor, aged.fgcolor)
         else { panic!("both should be TrueColor") };
         assert!(ar < fr || ag < fg, "aged +adds should be darker");
+    }
+
+    #[test]
+    fn file_bar_fill_fades_with_factor_under_truecolor() {
+        use colored::Color;
+        let e = entry("foo.rs", FileStatus::Modified, true, 6, 0);
+        let fresh = colorize_bar_styled("██████", &e, 0.0, true);
+        let aged = colorize_bar_styled("██████", &e, 1.0, true);
+        // We expect the first cell's fg to be TrueColor in both cases and
+        // the aged channel to be strictly lower.
+        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }),
+             Some(Color::TrueColor { r: ar, g: ag, b: ab })) =
+            (fresh[0].fgcolor, aged[0].fgcolor)
+        else { panic!("first cell should be TrueColor under truecolor=true") };
+        assert!(
+            ar < fr || ag < fg || ab < fb,
+            "aged bar fill should be darker on at least one channel",
+        );
+    }
+
+    #[test]
+    fn file_bar_partial_bg_fades_with_factor_under_truecolor() {
+        use colored::Color;
+        // Use a partial-fill glyph (▍ = U+258D) so a background color is set.
+        let e = entry("foo.rs", FileStatus::Modified, true, 6, 0);
+        let fresh = colorize_bar_styled("▍", &e, 0.0, true);
+        let aged = colorize_bar_styled("▍", &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh[0].bgcolor, aged[0].bgcolor)
+        else { panic!("partial cell should have a TrueColor background") };
+        assert!(ar < fr, "aged partial-cell bg should be darker: fresh={fr} aged={ar}");
+    }
+
+    #[test]
+    fn file_bar_fallback_unchanged_without_truecolor() {
+        // 8-color path returns the cyan-fill bytes today. Regression guard.
+        let e = entry("foo.rs", FileStatus::Modified, true, 6, 0);
+        let cells = colorize_bar_styled("█", &e, 0.0, false);
+        use colored::Color;
+        assert_eq!(cells[0].fgcolor, Some(Color::Cyan));
     }
 }
