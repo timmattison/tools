@@ -405,10 +405,8 @@ const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
 /// file list and log section darken in lockstep. `None` returns `1.0`
 /// so files we can't stat (deleted entries, skipped untracked dirs)
 /// render at the dark floor.
-fn file_fade_factor(_age: Option<Duration>) -> f32 {
-    // Intentionally wrong stub — the red test must fail on the assertion,
-    // not on a missing symbol.
-    0.5
+fn file_fade_factor(age: Option<Duration>) -> f32 {
+    age.map_or(1.0, age_fade_factor)
 }
 
 /// Apply the age-driven truecolor fade to `s`, starting from `base`.
