@@ -330,12 +330,21 @@ fn colorize_icon(
 fn colorize_letter(
     letter: char,
     entry: &RenderEntry,
-    _factor: f32,
+    factor: f32,
     truecolor: bool,
 ) -> ColoredString {
     let s = letter.to_string();
     if truecolor {
-        return s.truecolor(50, 50, 50);
+        let base = match entry.status {
+            FileStatus::Conflicted => FILE_LETTER_CONFLICT_RGB,
+            FileStatus::Untracked | FileStatus::UntrackedDir => FILE_LETTER_UNTRACKED_RGB,
+            FileStatus::Added => FILE_LETTER_ADDED_RGB,
+            FileStatus::Deleted => FILE_LETTER_DELETED_RGB,
+            FileStatus::Renamed | FileStatus::Copied => FILE_LETTER_RENAMED_RGB,
+            _ => FILE_LETTER_DEFAULT_RGB,
+        };
+        let (r, g, b) = fade_rgb(base, factor);
+        return s.truecolor(r, g, b);
     }
     match entry.status {
         FileStatus::Conflicted => s.red().bold(),
