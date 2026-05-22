@@ -2027,7 +2027,6 @@ mod tests {
 
     #[test]
     fn file_row_renders_with_truecolor_when_enabled() {
-        use colored::Color;
         // Force the colored crate to actually emit ANSI in the test process so
         // we can detect the truecolor codes from the rendered output.
         let _guard = COLORED_OVERRIDE_GUARD
@@ -2044,8 +2043,6 @@ mod tests {
             out.contains("\x1b[38;2;"),
             "rendered file row should contain a truecolor ANSI sequence when truecolor=true",
         );
-        // Silence the unused-import warning when the macro doesn't fire below.
-        let _ = Color::Red;
     }
 
     #[test]
