@@ -2282,4 +2282,32 @@ mod tests {
         else { panic!("both should be TrueColor under truecolor=true") };
         assert!(ar < fr, "aged binary marker should be darker: fresh={fr} aged={ar}");
     }
+
+    #[test]
+    fn file_bar_binary_emits_single_ansi_wrapper() {
+        // Binary bars have no per-cell variation (no partial-fill bg, no
+        // status-varying fill), so the rendered string should wrap the whole
+        // marker in one fg sequence + one reset — not pay 3× the ANSI overhead
+        // by re-emitting the sequence for every char of "bin". Holds for both
+        // 8-color and truecolor paths.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        let out_ansi = colorize_bar("bin", &e, 0.0, false);
+        let out_tc = colorize_bar("bin", &e, 0.0, true);
+        colored::control::unset_override();
+        assert_eq!(
+            out_ansi.matches("\x1b[").count(),
+            2,
+            "8-color binary bar should emit exactly one ANSI fg + one reset: {out_ansi:?}",
+        );
+        assert_eq!(
+            out_tc.matches("\x1b[").count(),
+            2,
+            "truecolor binary bar should emit exactly one ANSI fg + one reset: {out_tc:?}",
+        );
+    }
 }
