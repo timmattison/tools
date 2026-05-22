@@ -1156,10 +1156,13 @@ fn parse_video_dimensions(output: &str) -> Result<(u32, u32)> {
     Ok((width, height))
 }
 
+/// Frame rate used when ffprobe is unavailable or its output is unparseable.
+const DEFAULT_FPS: f64 = 24.0;
+
 fn get_video_fps(file_path: &Path) -> Result<f64> {
     if ensure_ffprobe_available().is_err() {
         eprintln!("Warning: ffprobe not found, using default 24 fps");
-        return Ok(24.0);
+        return Ok(DEFAULT_FPS);
     }
 
     // Use ffprobe to get video frame rate
@@ -1179,19 +1182,25 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
         .context("Failed to run ffprobe")?;
 
     if !output.status.success() {
-        return Ok(24.0); // Default to 24 fps
+        return Ok(DEFAULT_FPS); // Default to 24 fps
     }
 
-    let fps_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let fps_str = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_video_fps(&fps_str))
+}
+
+/// Parse a frame rate from ffprobe's `stream=r_frame_rate` output.
+fn parse_video_fps(output: &str) -> f64 {
+    let fps_str = output.trim();
 
     // Parse fraction like "24/1" or "30000/1001" using char-based splitting
     // for UTF-8 safety (in practice ffprobe output is ASCII).
     if let Some((num_str, denom_str)) = fps_str.split_once('/') {
-        let numerator: f64 = num_str.parse().unwrap_or(24.0);
+        let numerator: f64 = num_str.parse().unwrap_or(DEFAULT_FPS);
         let denominator: f64 = denom_str.parse().unwrap_or(1.0);
-        Ok(numerator / denominator)
+        numerator / denominator
     } else {
-        Ok(fps_str.parse().unwrap_or(24.0))
+        fps_str.parse().unwrap_or(DEFAULT_FPS)
     }
 }
 
@@ -2851,5 +2860,41 @@ not_a_number  1 /bin/bash
     #[test]
     fn parse_dimensions_errors_when_height_missing() {
         assert!(parse_video_dimensions("3840").is_err());
+    }
+
+    // =========================================================================
+    // Tests for parse_video_fps
+    // =========================================================================
+
+    #[test]
+    fn parse_fps_ntsc_fraction() {
+        assert!((parse_video_fps("30000/1001") - 29.970_029_97).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_fps_integer_fraction() {
+        assert_eq!(parse_video_fps("25/1\n"), 25.0);
+    }
+
+    #[test]
+    fn parse_fps_handles_dolby_vision_trailing_comma() {
+        // Same DoVi side-data trailing comma as the dimension probe:
+        // "24000/1001,". Splitting the fraction left the denominator as
+        // "1001,", which silently fell back to 1.0 — yielding 24000 fps
+        // instead of 23.976.
+        let fps = parse_video_fps("24000/1001,\n");
+        assert!((fps - 23.976_023_976).abs() < 1e-6, "got {fps}");
+    }
+
+    #[test]
+    fn parse_fps_handles_zero_denominator() {
+        // ffprobe reports "0/0" for streams with an unknown frame rate; a naive
+        // divide produces NaN, so we must fall back to the default instead.
+        assert_eq!(parse_video_fps("0/0"), DEFAULT_FPS);
+    }
+
+    #[test]
+    fn parse_fps_empty_falls_back_to_default() {
+        assert_eq!(parse_video_fps(""), DEFAULT_FPS);
     }
 }
