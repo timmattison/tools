@@ -364,6 +364,16 @@ const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
 
+/// Apply the age-driven truecolor fade to `s`, starting from `base`.
+///
+/// Shared by every truecolor commit-log colorizer so the fade math lives
+/// in exactly one place — keeps the per-column functions to a single
+/// readable `if truecolor { fade } else { fallback }` shape.
+fn fade_truecolor(s: &str, age: Duration, base: (u8, u8, u8)) -> ColoredString {
+    let (r, g, b) = fade_rgb(base, age_fade_factor(age));
+    s.truecolor(r, g, b)
+}
+
 /// Color the short hash for a commit-log row.
 ///
 /// With `truecolor`, the hash starts at [`LOG_HASH_BASE_RGB`] and fades
@@ -371,8 +381,7 @@ const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
 /// legacy ANSI yellow so eight-color terminals still get a coloured hash.
 fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredString {
     if truecolor {
-        let (r, g, b) = fade_rgb(LOG_HASH_BASE_RGB, age_fade_factor(age));
-        hash.truecolor(r, g, b)
+        fade_truecolor(hash, age, LOG_HASH_BASE_RGB)
     } else {
         hash.yellow()
     }
@@ -385,8 +394,7 @@ fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredStrin
 /// the file-row age column, so the row still gets quieter as it ages.
 fn colorize_log_subject(subject: &str, age: Duration, truecolor: bool) -> ColoredString {
     if truecolor {
-        let (r, g, b) = fade_rgb(LOG_SUBJECT_BASE_RGB, age_fade_factor(age));
-        subject.truecolor(r, g, b)
+        fade_truecolor(subject, age, LOG_SUBJECT_BASE_RGB)
     } else {
         match age_dim_level(age) {
             AgeDim::Fresh | AgeDim::Recent => subject.normal(),
@@ -398,8 +406,7 @@ fn colorize_log_subject(subject: &str, age: Duration, truecolor: bool) -> Colore
 /// Color the right-aligned age column for a commit-log row.
 fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString {
     if truecolor {
-        let (r, g, b) = fade_rgb(LOG_AGE_BASE_RGB, age_fade_factor(age));
-        text.truecolor(r, g, b)
+        fade_truecolor(text, age, LOG_AGE_BASE_RGB)
     } else {
         colorize_age(text, Some(age))
     }
