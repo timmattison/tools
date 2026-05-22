@@ -495,6 +495,14 @@ fn center(text: &str, width: usize) -> String {
     result
 }
 
+/// Minimum rows the recent-commit section gets when it has content and
+/// the file list is also non-empty. Without this floor, a branch with
+/// hundreds of changed files would proportionally squeeze the log down
+/// to one or two rows, hiding the very context the log section exists
+/// to provide. The floor is capped by `log_demand` so a 3-commit branch
+/// doesn't render with blank padding.
+const LOG_FLOOR_ROWS: usize = 5;
+
 /// Plan how many file rows and how many log rows the frame should render,
 /// given the actual demand from each section and the total terminal rows
 /// available for content (i.e. terminal height minus chrome the caller has
@@ -502,12 +510,11 @@ fn center(text: &str, width: usize) -> String {
 /// separator, and a reserved row for a possible `+N more files` footer).
 ///
 /// When everything fits, both sections are rendered in full. When the
-/// combined demand exceeds the available rows, the rows are split
-/// proportionally to each section's demand — so a small file list paired
-/// with a long log gets a fair-but-larger share of the screen, rather than
-/// being squeezed to one or two rows because the log was configured with
-/// a large `--log-lines`. Each non-empty section is guaranteed at least
-/// one row of its own.
+/// combined demand exceeds the available rows, rows are split
+/// proportionally to each section's demand — except the log section is
+/// floored at `min(LOG_FLOOR_ROWS, log_demand)` rows so recent commits
+/// stay readable even with a very long file list. Each non-empty
+/// section is guaranteed at least one row of its own.
 ///
 /// Returns `(file_cap, log_cap)`. Each cap never exceeds the corresponding
 /// demand.
@@ -529,15 +536,18 @@ pub fn plan_section_caps(
         return (available_rows.min(file_demand), 0);
     }
 
-    // Both sections want rows and the total overflows. Compute each
-    // section's proportional share with banker-style rounding so the two
-    // shares always sum to `available_rows` exactly, then guarantee a
-    // floor of 1 row for the smaller side.
+    // Both sections want rows and the total overflows. Compute the log
+    // section's proportional share, then lift it to the floor so a
+    // dominant file list can't squeeze the recent-commit context away.
+    // The cap on log_share preserves the existing invariant that the
+    // file section keeps at least one row when it has content.
     let total_demand = file_demand + log_demand;
-    let raw_file = (file_demand * available_rows + total_demand / 2) / total_demand;
-    let file_share = raw_file.clamp(1, available_rows - 1);
-    let log_share = available_rows - file_share;
-    (file_share.min(file_demand), log_share.min(log_demand))
+    let raw_log = (log_demand * available_rows + total_demand / 2) / total_demand;
+    let log_ceiling = available_rows.saturating_sub(1).min(log_demand);
+    let log_floor = LOG_FLOOR_ROWS.min(log_demand).min(log_ceiling);
+    let log_share = raw_log.max(log_floor).min(log_ceiling);
+    let file_share = available_rows.saturating_sub(log_share).min(file_demand);
+    (file_share, log_share)
 }
 
 #[cfg(test)]
@@ -991,6 +1001,31 @@ mod tests {
         assert!(f <= 2, "file cap must not exceed demand: got {f}");
         assert!(l <= 20, "log cap must not exceed demand: got {l}");
         assert!(f + l <= 14, "total must fit in available rows: {f}+{l}");
+    }
+
+    #[test]
+    fn plan_section_caps_floors_log_at_five_rows_when_files_dominate() {
+        // Repro of the "too many files" report: a branch with ~129
+        // changed files vs the default 20-line log on a ~26-row
+        // terminal. A naive proportional split would squeeze the log
+        // section down to ~3 rows; the floor lifts that to 5 so the
+        // recent-commit context stays visible.
+        let (f, l) = plan_section_caps(129, 20, 26);
+        assert_eq!(l, 5, "log section should be floored at 5 rows, got {l}");
+        assert_eq!(
+            f, 21,
+            "file section should claim the remaining rows after the log floor, got {f}"
+        );
+    }
+
+    #[test]
+    fn plan_section_caps_log_floor_does_not_pad_above_demand() {
+        // The floor is min(5, log_demand). With only 3 commits ahead,
+        // the log section should get exactly those 3 rows rather than 5
+        // rows with two empty lines at the bottom.
+        let (f, l) = plan_section_caps(100, 3, 20);
+        assert_eq!(l, 3, "log cap should equal demand when demand < floor, got {l}");
+        assert_eq!(f, 17, "file section should get the remaining rows, got {f}");
     }
 
     fn log_entry(hash: &str, subject: &str, age_secs: u64) -> LogEntry {
