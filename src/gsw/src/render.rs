@@ -305,13 +305,19 @@ fn icon_and_letter(entry: &RenderEntry) -> (char, char) {
 fn colorize_icon(
     icon: char,
     entry: &RenderEntry,
-    _factor: f32,
+    factor: f32,
     truecolor: bool,
 ) -> ColoredString {
     let s = icon.to_string();
     if truecolor {
-        // Wrong stub — constant grey breaks the gradient assertion only.
-        return s.truecolor(50, 50, 50);
+        let base = match entry.status {
+            FileStatus::Conflicted => FILE_ICON_CONFLICT_RGB,
+            FileStatus::Untracked | FileStatus::UntrackedDir => FILE_ICON_UNTRACKED_RGB,
+            _ if entry.staged => FILE_ICON_STAGED_RGB,
+            _ => FILE_ICON_UNSTAGED_RGB,
+        };
+        let (r, g, b) = fade_rgb(base, factor);
+        return s.truecolor(r, g, b);
     }
     match entry.status {
         FileStatus::Conflicted => s.red().bold(),
