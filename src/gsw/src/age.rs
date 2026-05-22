@@ -61,11 +61,13 @@ pub fn age_fade_factor(age: Duration) -> f32 {
     const FRESH_END: f32 = (60 * 5) as f32;
     const RECENT_END: f32 = (60 * 60) as f32;
     const AGING_END: f32 = (60 * 60 * 24) as f32;
-    // Factor checkpoints at each boundary. Front-loaded so Fresh and Recent
-    // get a perceptible per-minute step before the long Aging tail.
+    // Factor checkpoints at each boundary. Front-loaded so most of the
+    // gradient from base toward FADE_FLOOR is spent by the 1h Aging boundary
+    // — hour-old commits should already read as dim, and the 1h–24h tail is
+    // just the final sliver of darkening rather than the bulk of it.
     const F_FRESH: f32 = 0.00;
-    const F_RECENT: f32 = 0.15;
-    const F_AGING: f32 = 0.50;
+    const F_RECENT: f32 = 0.20;
+    const F_AGING: f32 = 0.85;
     const F_STALE: f32 = 1.00;
 
     let secs = age.as_secs_f32();
@@ -165,6 +167,21 @@ mod tests {
         assert!(
             (age_fade_factor(Duration::from_secs(0)) - 0.0).abs() < 1e-6,
             "factor at age=0 should be exactly 0.0",
+        );
+    }
+
+    #[test]
+    fn fade_factor_is_pretty_dark_by_one_hour() {
+        // Commits past the 1h boundary should already look pretty dark — most
+        // of the gradient from base toward FADE_FLOOR is spent by then, so the
+        // long Aging tail is just the last bit of darkening rather than the
+        // bulk of it. Concretely: at 1h the factor should be >= 0.80, putting
+        // brightness at <= ~44% of base for the default 30% floor.
+        let one_hour = Duration::from_secs(60 * 60);
+        let factor = age_fade_factor(one_hour);
+        assert!(
+            factor >= 0.80,
+            "factor at 1h should be >= 0.80 so hour-old commits read as dim, was {factor}",
         );
     }
 
