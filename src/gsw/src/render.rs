@@ -450,9 +450,10 @@ fn colorize_age(
 ///
 /// With `truecolor`, applies the age-driven fade starting from
 /// [`FILE_ADDS_RGB`]. Without, falls back to ANSI green.
-fn colorize_adds(text: &str, _factor: f32, truecolor: bool) -> ColoredString {
+fn colorize_adds(text: &str, factor: f32, truecolor: bool) -> ColoredString {
     if truecolor {
-        return text.truecolor(50, 50, 50);
+        let (r, g, b) = fade_rgb(FILE_ADDS_RGB, factor);
+        return text.truecolor(r, g, b);
     }
     text.green()
 }
@@ -461,9 +462,10 @@ fn colorize_adds(text: &str, _factor: f32, truecolor: bool) -> ColoredString {
 ///
 /// With `truecolor`, applies the age-driven fade starting from
 /// [`FILE_DELS_RGB`]. Without, falls back to ANSI red.
-fn colorize_dels(text: &str, _factor: f32, truecolor: bool) -> ColoredString {
+fn colorize_dels(text: &str, factor: f32, truecolor: bool) -> ColoredString {
     if truecolor {
-        return text.truecolor(50, 50, 50);
+        let (r, g, b) = fade_rgb(FILE_DELS_RGB, factor);
+        return text.truecolor(r, g, b);
     }
     text.red()
 }
