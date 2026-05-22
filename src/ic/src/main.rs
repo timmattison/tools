@@ -1109,7 +1109,10 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
             "-show_entries",
             "stream=width,height",
             "-of",
-            "csv=p=0",
+            // One value per line. Unlike `csv=p=0`, this writer does not append
+            // an empty trailing field for a stream's side-data section (e.g. a
+            // Dolby Vision configuration record), so the output stays clean.
+            "default=noprint_wrappers=1:nokey=1",
             file_path.to_str().unwrap(),
         ])
         .output()
@@ -1127,17 +1130,30 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
 }
 
 /// Parse video width and height out of ffprobe's `stream=width,height` output.
+///
+/// ffprobe can emit more than the two values we ask for. When a stream carries
+/// side data — for example a Dolby Vision configuration record on a 4K HDR HEVC
+/// stream — its CSV writer appends an empty trailing field, yielding output like
+/// `"3840,2160,"`. Rather than assume an exact `W,H` layout, we take the first
+/// two integer tokens, tolerating commas, whitespace, and newlines so the parse
+/// stays correct across ffprobe output formats.
 fn parse_video_dimensions(output: &str) -> Result<(u32, u32)> {
-    let dimensions_str = output.trim();
+    let mut tokens = output
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|token| !token.is_empty());
 
-    // Parse "width,height" format using char-based splitting for UTF-8 safety
-    if let Some((width_str, height_str)) = dimensions_str.split_once(',') {
-        let width: u32 = width_str.parse().context("Failed to parse video width")?;
-        let height: u32 = height_str.parse().context("Failed to parse video height")?;
-        Ok((width, height))
-    } else {
-        anyhow::bail!("Invalid dimensions format from ffprobe: {}", dimensions_str);
-    }
+    let width: u32 = tokens
+        .next()
+        .context("ffprobe returned no video width")?
+        .parse()
+        .context("Failed to parse video width")?;
+    let height: u32 = tokens
+        .next()
+        .context("ffprobe returned no video height")?
+        .parse()
+        .context("Failed to parse video height")?;
+
+    Ok((width, height))
 }
 
 fn get_video_fps(file_path: &Path) -> Result<f64> {
