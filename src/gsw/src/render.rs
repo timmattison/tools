@@ -400,9 +400,10 @@ fn colorize_bar_styled(
 ) -> Vec<ColoredString> {
     if entry.binary {
         if truecolor {
-            // Wrong stub — returns constant grey so the gradient test
-            // fails on behavior, not on missing structure.
-            return bar.chars().map(|c| c.to_string().truecolor(50, 50, 50)).collect();
+            let (r, g, b) = fade_rgb(FILE_BIN_RGB, factor);
+            return bar.chars()
+                .map(|c| c.to_string().truecolor(r, g, b))
+                .collect();
         }
         return bar.chars().map(|c| c.to_string().dimmed()).collect();
     }
