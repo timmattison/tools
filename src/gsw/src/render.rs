@@ -234,7 +234,7 @@ fn render_row(
         let gutter = " ".repeat(gutter_width);
         let age = entry.age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
-        let age_str = colorize_age(&age_field, entry.age);
+        let age_str = colorize_age(&age_field, entry.age, 0.0, false);
         return format!("{icon_str} {letter_str} {path_str}{gutter}{age_str}");
     }
 
@@ -271,7 +271,7 @@ fn render_row(
 
     let age_raw = entry.age.map(format_age_detailed).unwrap_or_default();
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
-    let age_str = colorize_age(&age_field, entry.age);
+    let age_str = colorize_age(&age_field, entry.age, 0.0, false);
 
     let sep_bar_adds = " ".repeat(SEP_BAR_ADDS);
     let sep_adds_dels = " ".repeat(SEP_ADDS_DELS);
@@ -425,7 +425,15 @@ fn is_partial_block(c: char) -> bool {
     matches!(c, '\u{2589}'..='\u{258F}')
 }
 
-fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
+fn colorize_age(
+    text: &str,
+    age: Option<Duration>,
+    _factor: f32,
+    truecolor: bool,
+) -> ColoredString {
+    if truecolor {
+        return text.truecolor(50, 50, 50);
+    }
     let Some(age) = age else {
         return text.dimmed();
     };
@@ -468,6 +476,7 @@ const FILE_LETTER_RENAMED_RGB: (u8, u8, u8) = (220, 120, 220);
 const FILE_LETTER_DEFAULT_RGB: (u8, u8, u8) = (230, 230, 230);
 const FILE_LETTER_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
 const FILE_LETTER_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
+const FILE_AGE_RGB: (u8, u8, u8) = (190, 190, 190);
 
 /// Fade factor for a file row.
 ///
@@ -523,7 +532,7 @@ fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString
     if truecolor {
         fade_truecolor(text, age, LOG_AGE_BASE_RGB)
     } else {
-        colorize_age(text, Some(age))
+        colorize_age(text, Some(age), 0.0, false)
     }
 }
 
@@ -1361,8 +1370,8 @@ mod tests {
         // `colored::control::set_override`, which is process-global and would
         // race with other tests in parallel.
         use colored::Styles;
-        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)));
-        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)));
+        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)), 0.0, false);
+        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)), 0.0, false);
         assert!(
             stale.style.contains(Styles::Italic),
             "Stale should be italicized",
@@ -1594,6 +1603,38 @@ mod tests {
             panic!("both should be TrueColor under truecolor=true");
         };
         assert!(hr < fr, "hour-old age column should be darker than fresh: {fr} -> {hr}");
+    }
+
+    #[test]
+    fn file_age_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let cs = colorize_age("5m23s", Some(Duration::from_secs(5 * 60 + 23)), 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for file age, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_age_falls_back_to_dim_buckets_without_truecolor() {
+        // 8-color fallback must still bold a fresh row's age, matching today.
+        use colored::Styles;
+        let fresh = colorize_age("30s", Some(Duration::from_secs(30)), 0.0, false);
+        assert!(
+            fresh.style.contains(Styles::Bold),
+            "fresh age should still be bolded in the 8-color path",
+        );
+    }
+
+    #[test]
+    fn file_age_darkens_with_factor_under_truecolor() {
+        use colored::Color;
+        let fresh = colorize_age("30s", Some(Duration::from_secs(30)), 0.0, true);
+        let aged = colorize_age("3d0h", Some(Duration::from_secs(3 * 86400)), 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else { panic!("both should be TrueColor") };
+        assert!(ar < fr, "aged file-age column should be darker: fresh={fr} aged={ar}");
     }
 
     #[test]
