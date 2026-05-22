@@ -388,10 +388,14 @@ const BAR_PARTIAL_BG_CYAN: (u8, u8, u8) = (0, 48, 48);
 /// Same idea for the conflicted-file bar, which paints in red.
 const BAR_PARTIAL_BG_RED: (u8, u8, u8) = (48, 0, 0);
 
-/// Build one `ColoredString` per visible cell of `bar`. The joined string
-/// returned by [`colorize_bar`] is just `colorize_bar_styled(...).join("")`
-/// with `.to_string()` applied to each cell — sharing the cell builder lets
-/// tests inspect the typed fg/bg colors per cell instead of parsing ANSI.
+/// Build one `ColoredString` per styling region of `bar`. For normal bars
+/// each visible cell needs its own region because partial-fill cells get a
+/// distinct background color; for binary bars there's no per-cell variation
+/// so the whole marker collapses to a single region (avoids paying 3× the
+/// ANSI overhead on the common "bin" string). The joined string returned
+/// by [`colorize_bar`] is just `colorize_bar_styled(...).join("")` with
+/// `.to_string()` applied to each region — sharing the builder lets tests
+/// inspect typed fg/bg colors instead of parsing ANSI.
 fn colorize_bar_styled(
     bar: &str,
     entry: &RenderEntry,
@@ -401,11 +405,9 @@ fn colorize_bar_styled(
     if entry.binary {
         if truecolor {
             let (r, g, b) = fade_rgb(FILE_BIN_RGB, factor);
-            return bar.chars()
-                .map(|c| c.to_string().truecolor(r, g, b))
-                .collect();
+            return vec![bar.to_string().truecolor(r, g, b)];
         }
-        return bar.chars().map(|c| c.to_string().dimmed()).collect();
+        return vec![bar.to_string().dimmed()];
     }
     let is_conflicted = matches!(entry.status, FileStatus::Conflicted);
     let (bg_br, bg_bg, bg_bb) = if is_conflicted {
