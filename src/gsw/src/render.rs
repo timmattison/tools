@@ -2179,36 +2179,69 @@ mod tests {
         assert!(saw_any, "should have emitted at least one truecolor sequence");
     }
 
-    #[test]
-    fn file_row_status_hues_remain_distinct_at_floor() {
-        // At the dark floor, fading must not collapse different statuses into
-        // the same RGB. We check icon base hues fade to distinct floored RGBs.
-        let bases = [
-            ("staged", FILE_ICON_STAGED_RGB),
-            ("unstaged", FILE_ICON_UNSTAGED_RGB),
-            ("untracked", FILE_ICON_UNTRACKED_RGB),
-            ("conflict", FILE_ICON_CONFLICT_RGB),
-        ];
-        let floored: Vec<((u8,u8,u8), &str)> = bases
-            .iter()
-            .map(|(name, rgb)| (fade_rgb(*rgb, 1.0), *name))
-            .collect();
-        for i in 0..floored.len() {
-            for j in (i + 1)..floored.len() {
-                let ((ar, ag, ab), aname) = floored[i];
-                let ((br, bg, bb), bname) = floored[j];
-                // Manhattan distance > 0 isn't enough — we want a perceptible
-                // difference even after the channels shrink. Require at least
-                // 10 units of total channel difference.
+    /// Shared invariant: every pair of *distinct* base RGBs in `palette`
+    /// must still differ by ≥ 10 units of Manhattan distance after fading
+    /// to the floor. Pairs that share the exact same base RGB (e.g. the
+    /// Deleted and Conflicted letters, both danger-red by design) are
+    /// skipped — fading can't separate what was equal to start with, and
+    /// merging those is the intent.
+    fn assert_palette_distinct_at_floor(palette_name: &str, palette: &[(&str, (u8, u8, u8))]) {
+        for i in 0..palette.len() {
+            for j in (i + 1)..palette.len() {
+                let (aname, abase) = palette[i];
+                let (bname, bbase) = palette[j];
+                if abase == bbase {
+                    continue;
+                }
+                let (ar, ag, ab) = fade_rgb(abase, 1.0);
+                let (br, bg, bb) = fade_rgb(bbase, 1.0);
                 let dist = (i32::from(ar) - i32::from(br)).abs()
                     + (i32::from(ag) - i32::from(bg)).abs()
                     + (i32::from(ab) - i32::from(bb)).abs();
                 assert!(
                     dist >= 10,
-                    "{aname} and {bname} floored RGBs too close: {ar:?},{ag:?},{ab:?} vs {br:?},{bg:?},{bb:?} (dist {dist})",
+                    "{palette_name}: {aname} and {bname} floored RGBs too close: \
+                     ({ar},{ag},{ab}) vs ({br},{bg},{bb}) (dist {dist})",
                 );
             }
         }
+    }
+
+    #[test]
+    fn file_row_status_hues_remain_distinct_at_floor() {
+        // At the dark floor, fading must not collapse different statuses
+        // into the same RGB. Guard each palette that varies by status so a
+        // future palette tweak can't silently merge two visually-distinct
+        // states (e.g. staged vs unstaged paths).
+        assert_palette_distinct_at_floor(
+            "icon",
+            &[
+                ("staged", FILE_ICON_STAGED_RGB),
+                ("unstaged", FILE_ICON_UNSTAGED_RGB),
+                ("untracked", FILE_ICON_UNTRACKED_RGB),
+                ("conflict", FILE_ICON_CONFLICT_RGB),
+            ],
+        );
+        assert_palette_distinct_at_floor(
+            "path",
+            &[
+                ("staged", FILE_PATH_STAGED_RGB),
+                ("unstaged", FILE_PATH_UNSTAGED_RGB),
+                ("untracked", FILE_PATH_UNTRACKED_RGB),
+                ("conflict", FILE_PATH_CONFLICT_RGB),
+            ],
+        );
+        assert_palette_distinct_at_floor(
+            "letter",
+            &[
+                ("added", FILE_LETTER_ADDED_RGB),
+                ("deleted", FILE_LETTER_DELETED_RGB),
+                ("renamed", FILE_LETTER_RENAMED_RGB),
+                ("default", FILE_LETTER_DEFAULT_RGB),
+                ("conflict", FILE_LETTER_CONFLICT_RGB),
+                ("untracked", FILE_LETTER_UNTRACKED_RGB),
+            ],
+        );
     }
 
     #[test]
