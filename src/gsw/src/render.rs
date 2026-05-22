@@ -475,6 +475,13 @@ fn colorize_age_ansi(text: &str, age: Option<Duration>) -> ColoredString {
     }
 }
 
+/// Color the file-row age column.
+///
+/// Truecolor mode applies only the age-driven fade — the bucket-based
+/// `bold`/`italic`/`dimmed` styling from [`colorize_age_ansi`] is
+/// intentionally dropped because the gradient itself communicates
+/// freshness (no need to double-encode it with text decorations).
+/// Without truecolor, falls through to the legacy bucket styling.
 fn colorize_age(
     text: &str,
     age: Option<Duration>,
