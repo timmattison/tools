@@ -211,6 +211,8 @@ fn render_row(
     path_width: usize,
 ) -> String {
     let (icon, letter) = icon_and_letter(entry);
+    let factor = file_fade_factor(entry.age);
+    let tc = opts.truecolor;
 
     let path_display_raw = match &entry.orig_path {
         Some(orig) => format!("{orig} → {new}", new = entry.path),
@@ -219,13 +221,10 @@ fn render_row(
     let path_truncated = truncate_left(&path_display_raw, path_width);
     let path_padded = pad_right(&path_truncated, path_width);
 
-    let icon_str = colorize_icon(icon, entry, 0.0, false);
-    let letter_str = colorize_letter(letter, entry, 0.0, false);
-    let path_str = colorize_path(&path_padded, entry, 0.0, false);
+    let icon_str = colorize_icon(icon, entry, factor, tc);
+    let letter_str = colorize_letter(letter, entry, factor, tc);
+    let path_str = colorize_path(&path_padded, entry, factor, tc);
 
-    // Untracked files get a stripped-down row — no bar, no counts — but
-    // pad the gutter where bar/adds/dels would be so the age column still
-    // lines up with normal rows above and below it.
     if matches!(
         entry.status,
         FileStatus::Untracked | FileStatus::UntrackedDir
@@ -234,7 +233,7 @@ fn render_row(
         let gutter = " ".repeat(gutter_width);
         let age = entry.age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
-        let age_str = colorize_age(&age_field, entry.age, 0.0, false);
+        let age_str = colorize_age(&age_field, entry.age, factor, tc);
         return format!("{icon_str} {letter_str} {path_str}{gutter}{age_str}");
     }
 
@@ -243,7 +242,7 @@ fn render_row(
     } else {
         render_bar(entry.adds.saturating_add(entry.dels), max_change, opts.bar_width)
     };
-    let bar_str = colorize_bar(&bar_raw, entry, 0.0, false);
+    let bar_str = colorize_bar(&bar_raw, entry, factor, tc);
 
     let adds_raw = if entry.adds > 0 {
         format!("+{}", entry.adds)
@@ -259,19 +258,19 @@ fn render_row(
     let dels_field = format!("{dels_raw:>width$}", width = DELS_FIELD);
 
     let adds_str = if entry.adds > 0 {
-        colorize_adds(&adds_field, 0.0, false).to_string()
+        colorize_adds(&adds_field, factor, tc).to_string()
     } else {
         adds_field
     };
     let dels_str = if entry.dels > 0 {
-        colorize_dels(&dels_field, 0.0, false).to_string()
+        colorize_dels(&dels_field, factor, tc).to_string()
     } else {
         dels_field
     };
 
     let age_raw = entry.age.map(format_age_detailed).unwrap_or_default();
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
-    let age_str = colorize_age(&age_field, entry.age, 0.0, false);
+    let age_str = colorize_age(&age_field, entry.age, factor, tc);
 
     let sep_bar_adds = " ".repeat(SEP_BAR_ADDS);
     let sep_adds_dels = " ".repeat(SEP_ADDS_DELS);
