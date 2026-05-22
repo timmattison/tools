@@ -1165,7 +1165,12 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
         return Ok(DEFAULT_FPS);
     }
 
-    // Use ffprobe to get video frame rate
+    // Use ffprobe to get both frame-rate fields. avg_frame_rate is the true
+    // average rate (total frames / duration) and is what playback timing must
+    // use; r_frame_rate is only the timebase tick and, for variable-frame-rate
+    // recordings, can be a large multiple of the real rate. We keep the keys
+    // (no `nokey=1`) because ffprobe emits these fields in its own internal
+    // order regardless of the requested order, so position alone is ambiguous.
     let output = std::process::Command::new("ffprobe")
         .args([
             "-v",
@@ -1173,11 +1178,9 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=r_frame_rate",
+            "stream=avg_frame_rate,r_frame_rate",
             "-of",
-            // Avoids the empty trailing field that `csv=p=0` appends for a
-            // stream's side-data section (e.g. a Dolby Vision config record).
-            "default=noprint_wrappers=1:nokey=1",
+            "default=noprint_wrappers=1",
             file_path.to_str().unwrap(),
         ])
         .output()
@@ -1191,33 +1194,57 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
     Ok(parse_video_fps(&fps_str))
 }
 
-/// Parse a frame rate from ffprobe's `stream=r_frame_rate` output.
+/// Choose a playback frame rate from ffprobe's `stream=avg_frame_rate,r_frame_rate`
+/// output (keyed `default` format, one `key=value` per line).
 ///
-/// ffprobe reports frame rates as a fraction such as `"24000/1001"`. As with the
-/// dimension probe, a stream's side data (e.g. a Dolby Vision configuration
-/// record) makes the CSV writer append an empty trailing field — `"24000/1001,"`
-/// — so we take the first whitespace/comma-delimited token before splitting the
-/// fraction. A `"0/0"` rate (unknown frame rate) or any unparseable value falls
-/// back to [`DEFAULT_FPS`] rather than producing NaN.
+/// `avg_frame_rate` (total frames ÷ duration) is the true playback rate and is
+/// preferred. For variable-frame-rate recordings — screen captures, for example —
+/// `r_frame_rate` is only the timebase tick and can be a large multiple of the
+/// real rate, which would make playback run too fast. We fall back to
+/// `r_frame_rate` only when `avg_frame_rate` is unknown (ffprobe reports `"0/0"`),
+/// and to [`DEFAULT_FPS`] when neither field is usable.
 fn parse_video_fps(output: &str) -> f64 {
-    let Some(token) = output
+    let mut avg = None;
+    let mut r = None;
+
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "avg_frame_rate" => avg = parse_fps_fraction(value),
+            "r_frame_rate" => r = parse_fps_fraction(value),
+            _ => {}
+        }
+    }
+
+    avg.or(r).unwrap_or(DEFAULT_FPS)
+}
+
+/// Parse a single frame-rate field such as `"24000/1001"` into frames per second.
+///
+/// ffprobe reports rates as a `numerator/denominator` fraction. A stream's side
+/// data (e.g. a Dolby Vision configuration record) can make some output formats
+/// append an empty trailing field — `"24000/1001,"` — so we take the first
+/// whitespace/comma-delimited token before splitting the fraction. Returns
+/// [`None`] for an unknown rate (`"0/0"`), an empty field, or any value that does
+/// not parse to a finite, positive rate, so the caller can fall back rather than
+/// using NaN or a nonsensical rate.
+fn parse_fps_fraction(value: &str) -> Option<f64> {
+    let token = value
         .split(|c: char| c == ',' || c.is_whitespace())
-        .find(|token| !token.is_empty())
-    else {
-        return DEFAULT_FPS;
-    };
+        .find(|token| !token.is_empty())?;
 
     // Parse fraction like "24/1" or "30000/1001"; the token is ASCII in practice.
-    if let Some((num_str, denom_str)) = token.split_once('/') {
-        let numerator: f64 = num_str.parse().unwrap_or(DEFAULT_FPS);
-        let denominator: f64 = denom_str.parse().unwrap_or(1.0);
-        if denominator == 0.0 {
-            return DEFAULT_FPS;
-        }
+    let fps = if let Some((num_str, denom_str)) = token.split_once('/') {
+        let numerator: f64 = num_str.parse().ok()?;
+        let denominator: f64 = denom_str.parse().ok()?;
         numerator / denominator
     } else {
-        token.parse().unwrap_or(DEFAULT_FPS)
-    }
+        token.parse().ok()?
+    };
+
+    (fps.is_finite() && fps > 0.0).then_some(fps)
 }
 
 fn get_video_duration(file_path: &Path) -> Result<f64> {
@@ -2879,39 +2906,56 @@ not_a_number  1 /bin/bash
     }
 
     // =========================================================================
-    // Tests for parse_video_fps
+    // Tests for parse_fps_fraction (single frame-rate field)
     // =========================================================================
 
     #[test]
-    fn parse_fps_ntsc_fraction() {
-        assert!((parse_video_fps("30000/1001") - 29.970_029_97).abs() < 1e-6);
+    fn parse_fps_fraction_ntsc() {
+        assert!((parse_fps_fraction("30000/1001").unwrap() - 29.970_029_97).abs() < 1e-6);
     }
 
     #[test]
-    fn parse_fps_integer_fraction() {
-        assert_eq!(parse_video_fps("25/1\n"), 25.0);
+    fn parse_fps_fraction_integer() {
+        assert_eq!(parse_fps_fraction("25/1\n"), Some(25.0));
     }
 
     #[test]
-    fn parse_fps_handles_dolby_vision_trailing_comma() {
+    fn parse_fps_fraction_handles_dolby_vision_trailing_comma() {
         // Same DoVi side-data trailing comma as the dimension probe:
         // "24000/1001,". Splitting the fraction left the denominator as
         // "1001,", which silently fell back to 1.0 — yielding 24000 fps
         // instead of 23.976.
-        let fps = parse_video_fps("24000/1001,\n");
+        let fps = parse_fps_fraction("24000/1001,\n").unwrap();
         assert!((fps - 23.976_023_976).abs() < 1e-6, "got {fps}");
     }
 
     #[test]
-    fn parse_fps_handles_zero_denominator() {
+    fn parse_fps_fraction_zero_denominator_is_none() {
         // ffprobe reports "0/0" for streams with an unknown frame rate; a naive
-        // divide produces NaN, so we must fall back to the default instead.
-        assert_eq!(parse_video_fps("0/0"), DEFAULT_FPS);
+        // divide produces NaN, so this must be None and let the caller fall back.
+        assert_eq!(parse_fps_fraction("0/0"), None);
     }
+
+    #[test]
+    fn parse_fps_fraction_empty_is_none() {
+        assert_eq!(parse_fps_fraction(""), None);
+    }
+
+    // =========================================================================
+    // Tests for parse_video_fps (avg/r selection)
+    // =========================================================================
 
     #[test]
     fn parse_fps_empty_falls_back_to_default() {
         assert_eq!(parse_video_fps(""), DEFAULT_FPS);
+    }
+
+    #[test]
+    fn parse_fps_both_unknown_falls_back_to_default() {
+        assert_eq!(
+            parse_video_fps("r_frame_rate=0/0\navg_frame_rate=0/0\n"),
+            DEFAULT_FPS
+        );
     }
 
     #[test]
