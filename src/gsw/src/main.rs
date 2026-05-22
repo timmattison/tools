@@ -60,6 +60,17 @@ struct Cli {
     /// Disable the recent-commit section entirely.
     #[arg(long)]
     no_log: bool,
+
+    /// Force the 24-bit truecolor commit-log gradient on, regardless of
+    /// what `COLORTERM` says. Useful when a wrapper (cargo run, viddy)
+    /// strips the env var or your terminal doesn't export it.
+    #[arg(long, conflicts_with = "no_truecolor")]
+    truecolor: bool,
+
+    /// Force the 24-bit truecolor commit-log gradient off, falling back
+    /// to the 8-color path even on a terminal that supports truecolor.
+    #[arg(long, conflicts_with = "truecolor")]
+    no_truecolor: bool,
 }
 
 /// Decide the effective terminal width gsw should render for.
@@ -106,6 +117,42 @@ fn should_force_colors(
     !stdout_is_tty && columns_env_present && !no_color_env
 }
 
+/// Does the active terminal advertise 24-bit color support?
+///
+/// We trust the `COLORTERM` env var (the de facto signal) — the canonical
+/// values are `truecolor` and `24bit`. Anything else, including a missing
+/// var, is treated as "no truecolor" and the renderer falls back to the
+/// eight-color path. Comparison is case-insensitive.
+fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
+    matches!(
+        colorterm_env.map(str::to_ascii_lowercase).as_deref(),
+        Some("truecolor" | "24bit")
+    )
+}
+
+/// Resolve the effective truecolor setting from CLI flags, env, and detection.
+///
+/// Priority, highest first:
+///   1. `--no-color` or `NO_COLOR` → false (kills all color)
+///   2. `--no-truecolor` → false (force the 8-color path)
+///   3. `--truecolor` → true (force the gradient regardless of detection)
+///   4. otherwise, auto-detect via `COLORTERM`
+fn effective_truecolor(
+    cli_no_color: bool,
+    cli_force_truecolor: bool,
+    cli_force_no_truecolor: bool,
+    no_color_env: bool,
+    colorterm_env: Option<&str>,
+) -> bool {
+    if cli_no_color || no_color_env || cli_force_no_truecolor {
+        false
+    } else if cli_force_truecolor {
+        true
+    } else {
+        truecolor_supported(colorterm_env)
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -114,6 +161,14 @@ fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok());
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
+    let colorterm_env = std::env::var("COLORTERM").ok();
+    let truecolor = effective_truecolor(
+        cli.no_color,
+        cli.truecolor,
+        cli.no_truecolor,
+        no_color_env,
+        colorterm_env.as_deref(),
+    );
 
     if cli.no_color {
         colored::control::set_override(false);
@@ -217,6 +272,7 @@ fn main() -> Result<()> {
         bar_width: cli.bar_width,
         max_files: file_cap_opt,
         log_lines: log_cap,
+        truecolor,
     };
 
     println!("{}", render(&snapshot, &opts));
@@ -482,5 +538,84 @@ mod tests {
     #[test]
     fn parse_log_line_drops_empty_lines() {
         assert!(parse_log_line("", SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn truecolor_supported_when_colorterm_is_truecolor() {
+        assert!(truecolor_supported(Some("truecolor")));
+    }
+
+    #[test]
+    fn truecolor_supported_when_colorterm_is_24bit() {
+        assert!(truecolor_supported(Some("24bit")));
+    }
+
+    #[test]
+    fn truecolor_supported_is_case_insensitive() {
+        // Some terminals export uppercase or mixed-case values. Treat them
+        // as equivalent so we don't accidentally fall back on, say, gnome's
+        // "Truecolor".
+        assert!(truecolor_supported(Some("TrueColor")));
+        assert!(truecolor_supported(Some("TRUECOLOR")));
+        assert!(truecolor_supported(Some("24BIT")));
+    }
+
+    #[test]
+    fn truecolor_not_supported_when_colorterm_missing() {
+        // No COLORTERM at all — typical for old terminals or shells that
+        // strip it. Stay safe: assume 8-color until told otherwise.
+        assert!(!truecolor_supported(None));
+    }
+
+    #[test]
+    fn truecolor_not_supported_for_unknown_colorterm_value() {
+        // COLORTERM is set but to something we don't recognize (some
+        // terminals export "1" or vendor-specific strings). Don't guess —
+        // fall back to the 8-color path.
+        assert!(!truecolor_supported(Some("1")));
+        assert!(!truecolor_supported(Some("xterm-256color")));
+        assert!(!truecolor_supported(Some("")));
+    }
+
+    // --- --truecolor / --no-truecolor override --------------------------
+
+    #[test]
+    fn truecolor_flag_forces_on_when_env_unset() {
+        // The escape hatch: some terminals support 24-bit color but don't
+        // export COLORTERM (or strip it through wrappers like cargo run /
+        // viddy). `--truecolor` lets the user assert capability directly.
+        assert!(effective_truecolor(false, true, false, false, None));
+    }
+
+    #[test]
+    fn truecolor_flag_forces_on_when_env_unrecognized() {
+        // Same escape hatch when COLORTERM is set to something we don't
+        // know how to interpret.
+        assert!(effective_truecolor(false, true, false, false, Some("1")));
+    }
+
+    #[test]
+    fn no_truecolor_flag_forces_off_even_with_colorterm() {
+        // Symmetric escape hatch: users on truecolor terminals can opt
+        // back to the legacy 8-color path (e.g. screen-recording, or just
+        // preferring the look).
+        assert!(!effective_truecolor(false, false, true, false, Some("truecolor")));
+    }
+
+    #[test]
+    fn no_color_beats_truecolor_flag() {
+        // `--no-color` / `$NO_COLOR` mean "no colors at all" — overriding
+        // them with `--truecolor` would re-enable the very thing the user
+        // opted out of. Honor the opt-out.
+        assert!(!effective_truecolor(true, true, false, false, Some("truecolor")));
+        assert!(!effective_truecolor(false, true, false, true, Some("truecolor")));
+    }
+
+    #[test]
+    fn truecolor_auto_uses_colorterm_when_no_flags() {
+        // No CLI overrides → fall back to the existing COLORTERM detection.
+        assert!(effective_truecolor(false, false, false, false, Some("truecolor")));
+        assert!(!effective_truecolor(false, false, false, false, None));
+        assert!(!effective_truecolor(false, false, false, false, Some("xterm-256color")));
     }
 }
