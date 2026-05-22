@@ -169,6 +169,21 @@ mod tests {
     }
 
     #[test]
+    fn fade_factor_is_pretty_dark_by_one_hour() {
+        // Commits past the 1h boundary should already look pretty dark — most
+        // of the gradient from base toward FADE_FLOOR is spent by then, so the
+        // long Aging tail is just the last bit of darkening rather than the
+        // bulk of it. Concretely: at 1h the factor should be >= 0.80, putting
+        // brightness at <= ~44% of base for the default 30% floor.
+        let one_hour = Duration::from_secs(60 * 60);
+        let factor = age_fade_factor(one_hour);
+        assert!(
+            factor >= 0.80,
+            "factor at 1h should be >= 0.80 so hour-old commits read as dim, was {factor}",
+        );
+    }
+
+    #[test]
     fn fade_factor_reaches_one_at_stale_boundary() {
         // At and beyond the 24h stale boundary the gradient should hit its
         // floor — i.e. factor = 1.0 — so further aging doesn't keep darkening.
