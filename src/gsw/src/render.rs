@@ -259,12 +259,12 @@ fn render_row(
     let dels_field = format!("{dels_raw:>width$}", width = DELS_FIELD);
 
     let adds_str = if entry.adds > 0 {
-        adds_field.green().to_string()
+        colorize_adds(&adds_field, 0.0, false).to_string()
     } else {
         adds_field
     };
     let dels_str = if entry.dels > 0 {
-        dels_field.red().to_string()
+        colorize_dels(&dels_field, 0.0, false).to_string()
     } else {
         dels_field
     };
@@ -446,6 +446,28 @@ fn colorize_age(
     }
 }
 
+/// Color the `+adds` field for a file row.
+///
+/// With `truecolor`, applies the age-driven fade starting from
+/// [`FILE_ADDS_RGB`]. Without, falls back to ANSI green.
+fn colorize_adds(text: &str, _factor: f32, truecolor: bool) -> ColoredString {
+    if truecolor {
+        return text.truecolor(50, 50, 50);
+    }
+    text.green()
+}
+
+/// Color the `-dels` field for a file row.
+///
+/// With `truecolor`, applies the age-driven fade starting from
+/// [`FILE_DELS_RGB`]. Without, falls back to ANSI red.
+fn colorize_dels(text: &str, _factor: f32, truecolor: bool) -> ColoredString {
+    if truecolor {
+        return text.truecolor(50, 50, 50);
+    }
+    text.red()
+}
+
 /// Base RGB for commit-log hashes when truecolor fading is on. Picked to
 /// match the perceptual feel of the legacy `yellow()` ANSI hash without
 /// depending on a specific terminal palette.
@@ -478,6 +500,8 @@ const FILE_LETTER_DEFAULT_RGB: (u8, u8, u8) = (230, 230, 230);
 const FILE_LETTER_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
 const FILE_LETTER_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
 const FILE_AGE_RGB: (u8, u8, u8) = (190, 190, 190);
+const FILE_ADDS_RGB: (u8, u8, u8) = (90, 220, 110);
+const FILE_DELS_RGB: (u8, u8, u8) = (255, 90, 90);
 
 /// Fade factor for a file row.
 ///
@@ -1827,5 +1851,51 @@ mod tests {
             (fresh.fgcolor, aged.fgcolor)
         else { panic!("both should be TrueColor") };
         assert!(ar < fr, "aged letter should be darker: fresh={fr} aged={ar}");
+    }
+
+    #[test]
+    fn file_adds_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let cs = colorize_adds("  +12", 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_dels_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let cs = colorize_dels(" -3", 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_adds_falls_back_to_green_without_truecolor() {
+        use colored::Color;
+        let cs = colorize_adds("  +12", 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Green));
+    }
+
+    #[test]
+    fn file_dels_falls_back_to_red_without_truecolor() {
+        use colored::Color;
+        let cs = colorize_dels(" -3", 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Red));
+    }
+
+    #[test]
+    fn file_adds_darkens_with_factor_under_truecolor() {
+        use colored::Color;
+        let fresh = colorize_adds("  +12", 0.0, true);
+        let aged = colorize_adds("  +12", 1.0, true);
+        let (Some(Color::TrueColor { r: fr, g: fg, .. }),
+             Some(Color::TrueColor { r: ar, g: ag, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else { panic!("both should be TrueColor") };
+        assert!(ar < fr || ag < fg, "aged +adds should be darker");
     }
 }
