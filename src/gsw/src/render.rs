@@ -399,6 +399,11 @@ fn colorize_bar_styled(
     truecolor: bool,
 ) -> Vec<ColoredString> {
     if entry.binary {
+        if truecolor {
+            // Wrong stub — returns constant grey so the gradient test
+            // fails on behavior, not on missing structure.
+            return bar.chars().map(|c| c.to_string().truecolor(50, 50, 50)).collect();
+        }
         return bar.chars().map(|c| c.to_string().dimmed()).collect();
     }
     let is_conflicted = matches!(entry.status, FileStatus::Conflicted);
@@ -535,6 +540,7 @@ const FILE_ADDS_RGB: (u8, u8, u8) = (90, 220, 110);
 const FILE_DELS_RGB: (u8, u8, u8) = (255, 90, 90);
 const FILE_BAR_RGB: (u8, u8, u8) = (60, 200, 200);
 const FILE_BAR_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
+const FILE_BIN_RGB: (u8, u8, u8) = (140, 140, 140);
 
 /// Fade factor for a file row.
 ///
@@ -2191,5 +2197,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn file_bar_binary_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        // Use the same "bin" string render_row builds for binary entries.
+        let cells = colorize_bar_styled("bin", &e, 0.0, true);
+        match cells[0].fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for binary marker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_bar_binary_falls_back_to_dimmed_without_truecolor() {
+        // Regression guard: 8-color path keeps the legacy `.dimmed()` styling.
+        use colored::Styles;
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        let cells = colorize_bar_styled("bin", &e, 0.0, false);
+        assert!(
+            cells[0].style.contains(Styles::Dimmed),
+            "8-color binary marker should still be .dimmed()",
+        );
+    }
+
+    #[test]
+    fn file_bar_binary_darkens_with_factor_under_truecolor() {
+        use colored::Color;
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        let fresh = colorize_bar_styled("bin", &e, 0.0, true);
+        let aged = colorize_bar_styled("bin", &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh[0].fgcolor, aged[0].fgcolor)
+        else { panic!("both should be TrueColor under truecolor=true") };
+        assert!(ar < fr, "aged binary marker should be darker: fresh={fr} aged={ar}");
     }
 }
