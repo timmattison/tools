@@ -219,7 +219,7 @@ fn render_row(
     let path_truncated = truncate_left(&path_display_raw, path_width);
     let path_padded = pad_right(&path_truncated, path_width);
 
-    let icon_str = colorize_icon(icon, entry);
+    let icon_str = colorize_icon(icon, entry, 0.0, false);
     let letter_str = colorize_letter(letter, entry);
     let path_str = colorize_path(&path_padded, entry, 0.0, false);
 
@@ -302,8 +302,17 @@ fn icon_and_letter(entry: &RenderEntry) -> (char, char) {
     (icon, letter)
 }
 
-fn colorize_icon(icon: char, entry: &RenderEntry) -> ColoredString {
+fn colorize_icon(
+    icon: char,
+    entry: &RenderEntry,
+    _factor: f32,
+    truecolor: bool,
+) -> ColoredString {
     let s = icon.to_string();
+    if truecolor {
+        // Wrong stub — constant grey breaks the gradient assertion only.
+        return s.truecolor(50, 50, 50);
+    }
     match entry.status {
         FileStatus::Conflicted => s.red().bold(),
         FileStatus::Untracked | FileStatus::UntrackedDir => s.cyan().dimmed(),
@@ -424,6 +433,11 @@ const FILE_PATH_UNSTAGED_RGB: (u8, u8, u8) = (220, 200, 100);
 const FILE_PATH_STAGED_RGB: (u8, u8, u8) = (200, 200, 200);
 const FILE_PATH_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
 const FILE_PATH_CONFLICT_RGB: (u8, u8, u8) = (255, 90, 90);
+
+const FILE_ICON_STAGED_RGB: (u8, u8, u8) = (90, 220, 110);
+const FILE_ICON_UNSTAGED_RGB: (u8, u8, u8) = (220, 200, 100);
+const FILE_ICON_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
+const FILE_ICON_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
 
 /// Fade factor for a file row.
 ///
@@ -1676,5 +1690,39 @@ mod tests {
                 && b >= floor_of(bb).saturating_sub(1),
             "channels must not drop below the floor: actual=({r},{g},{b}) base=({br},{bg},{bb})",
         );
+    }
+
+    #[test]
+    fn file_icon_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let cs = colorize_icon('●', &e, 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for icon under truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_icon_falls_back_to_ansi_without_truecolor() {
+        // Staged-modified icon today is plain green. Regression guard.
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let cs = colorize_icon('●', &e, 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Green));
+    }
+
+    #[test]
+    fn file_icon_darkens_with_age_under_truecolor() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let fresh = colorize_icon('●', &e, 0.0, true);
+        let aged = colorize_icon('●', &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else {
+            panic!("both should be TrueColor");
+        };
+        assert!(ar < fr, "aged icon should be darker: fresh={fr} aged={ar}");
     }
 }
