@@ -924,6 +924,38 @@ mod tests {
     }
 
     #[test]
+    fn partial_cell_gets_background_to_close_gap() {
+        // A partial-fill glyph like `▍` paints only the left portion of its
+        // cell — the right portion shows the terminal background (black),
+        // which reads as a dark gap between the bright bar and the dim `░`
+        // empty cells to its right. Paint a matching dim background under
+        // just the partial cell to bridge that gap.
+        //
+        // Force `colored` on so the test inspects the actual ANSI we would
+        // emit on a real terminal; without this the crate strips all codes
+        // in non-TTY test runs.
+        colored::control::set_override(true);
+        let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
+        let with_partial = colorize_bar("█████▍", &e).to_string();
+        let all_full = colorize_bar("██████", &e).to_string();
+        let all_empty = colorize_bar("░░░░░░", &e).to_string();
+        colored::control::unset_override();
+
+        assert!(
+            with_partial.contains("\x1b[48"),
+            "partial-fill cell should have a background color applied: {with_partial:?}",
+        );
+        assert!(
+            !all_full.contains("\x1b[48"),
+            "all-full bar needs no background color: {all_full:?}",
+        );
+        assert!(
+            !all_empty.contains("\x1b[48"),
+            "all-empty bar needs no background color: {all_empty:?}",
+        );
+    }
+
+    #[test]
     fn missing_age_renders_as_blank_not_emdash() {
         // The em-dash placeholder visually drifts past the terminal edge in
         // some font/terminal combos (zellij + certain fonts render em-dash
