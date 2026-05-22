@@ -736,22 +736,62 @@ pub fn plan_section_caps(
 mod tests {
     use super::*;
 
-    /// Drop ANSI CSI sequences so tests can match on the visible glyphs.
+    /// Serializes any test that toggles `colored::control::set_override` —
+    /// the override is process-global, so concurrent toggles race and
+    /// cause intermittent failures. Tests that need ANSI bytes (rather
+    /// than typed `ColoredString::fgcolor` inspection) hold this for the
+    /// duration of their body.
+    ///
+    /// `.unwrap_or_else(|p| p.into_inner())` handles a poisoned mutex
+    /// from a previous panicking test so it doesn't cascade-fail the
+    /// rest of the suite.
+    static COLORED_OVERRIDE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Drop ANSI escape sequences so tests can match on the visible glyphs.
+    ///
+    /// Handles the two common forms:
+    ///   - CSI sequences: `ESC [ <params…> <final>` where `<final>` is 0x40–0x7E.
+    ///   - Fe sequences:  `ESC <byte>` (single byte after ESC that isn't `[`).
+    ///
+    /// This is intentionally conservative — it only skips escape sequences,
+    /// never ordinary text.
     fn strip_ansi(s: &str) -> String {
+        #[derive(PartialEq)]
+        enum State {
+            Normal,
+            AfterEsc,
+            InCsi,
+        }
         let mut out = String::with_capacity(s.len());
-        let mut in_escape = false;
+        let mut state = State::Normal;
         for c in s.chars() {
-            if in_escape {
-                if (0x40..=0x7E).contains(&(c as u32)) {
-                    in_escape = false;
+            match state {
+                State::Normal => {
+                    if c == '\x1b' {
+                        state = State::AfterEsc;
+                    } else {
+                        out.push(c);
+                    }
                 }
-                continue;
+                State::AfterEsc => {
+                    if c == '[' {
+                        // CSI introducer — consume parameters until the final byte.
+                        state = State::InCsi;
+                    } else {
+                        // Fe-style single-byte escape (e.g. ESC M, ESC =).
+                        // The byte itself is the final byte; swallow it and resume.
+                        state = State::Normal;
+                    }
+                }
+                State::InCsi => {
+                    // Parameter bytes: 0x30–0x3F. Intermediate bytes: 0x20–0x2F.
+                    // Final byte: 0x40–0x7E — terminates the sequence.
+                    if (0x40..=0x7E).contains(&(c as u32)) {
+                        state = State::Normal;
+                    }
+                    // In all cases, keep consuming (don't push to output).
+                }
             }
-            if c == '\x1b' {
-                in_escape = true;
-                continue;
-            }
-            out.push(c);
         }
         out
     }
@@ -1126,6 +1166,9 @@ mod tests {
         // Force `colored` on so the test inspects the actual ANSI we would
         // emit on a real terminal; without this the crate strips all codes
         // in non-TTY test runs.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
         let with_partial = colorize_bar("█████▍", &e, 0.0, false);
@@ -1980,6 +2023,9 @@ mod tests {
         use colored::Color;
         // Force the colored crate to actually emit ANSI in the test process so
         // we can detect the truecolor codes from the rendered output.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
         let mut o = opts();
@@ -1997,6 +2043,9 @@ mod tests {
 
     #[test]
     fn file_row_no_truecolor_in_8_color_mode() {
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
         let out = render(&snap, &opts());
@@ -2011,6 +2060,9 @@ mod tests {
     fn file_row_darkens_with_mtime_under_truecolor() {
         // End-to-end: an older file's row should contain a darker (lower-channel)
         // truecolor sequence than a fresher row of the same status.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let mut fresh_entry = entry("src/foo.rs", FileStatus::Modified, false, 5, 2);
         fresh_entry.age = Some(Duration::from_secs(0));
@@ -2061,6 +2113,9 @@ mod tests {
         // Deleted file (age=None) should produce only sequences with channels
         // at or below the FADE_FLOOR fraction of their base.
         use crate::age::FADE_FLOOR;
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
         e.age = None;
