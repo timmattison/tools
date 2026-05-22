@@ -1109,7 +1109,10 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
             "-show_entries",
             "stream=width,height",
             "-of",
-            "csv=p=0",
+            // One value per line. Unlike `csv=p=0`, this writer does not append
+            // an empty trailing field for a stream's side-data section (e.g. a
+            // Dolby Vision configuration record), so the output stays clean.
+            "default=noprint_wrappers=1:nokey=1",
             file_path.to_str().unwrap(),
         ])
         .output()
@@ -1122,25 +1125,52 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
         );
     }
 
-    let dimensions_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-    // Parse "width,height" format using char-based splitting for UTF-8 safety
-    if let Some((width_str, height_str)) = dimensions_str.split_once(',') {
-        let width: u32 = width_str.parse().context("Failed to parse video width")?;
-        let height: u32 = height_str.parse().context("Failed to parse video height")?;
-        Ok((width, height))
-    } else {
-        anyhow::bail!("Invalid dimensions format from ffprobe: {}", dimensions_str);
-    }
+    let dimensions_str = String::from_utf8_lossy(&output.stdout);
+    parse_video_dimensions(&dimensions_str)
 }
+
+/// Parse video width and height out of ffprobe's `stream=width,height` output.
+///
+/// ffprobe can emit more than the two values we ask for. When a stream carries
+/// side data — for example a Dolby Vision configuration record on a 4K HDR HEVC
+/// stream — its CSV writer appends an empty trailing field, yielding output like
+/// `"3840,2160,"`. Rather than assume an exact `W,H` layout, we take the first
+/// two integer tokens, tolerating commas, whitespace, and newlines so the parse
+/// stays correct across ffprobe output formats.
+fn parse_video_dimensions(output: &str) -> Result<(u32, u32)> {
+    let mut tokens = output
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|token| !token.is_empty());
+
+    let width: u32 = tokens
+        .next()
+        .context("ffprobe returned no video width")?
+        .parse()
+        .context("Failed to parse video width")?;
+    let height: u32 = tokens
+        .next()
+        .context("ffprobe returned no video height")?
+        .parse()
+        .context("Failed to parse video height")?;
+
+    Ok((width, height))
+}
+
+/// Frame rate used when ffprobe is unavailable or its output is unparseable.
+const DEFAULT_FPS: f64 = 24.0;
 
 fn get_video_fps(file_path: &Path) -> Result<f64> {
     if ensure_ffprobe_available().is_err() {
         eprintln!("Warning: ffprobe not found, using default 24 fps");
-        return Ok(24.0);
+        return Ok(DEFAULT_FPS);
     }
 
-    // Use ffprobe to get video frame rate
+    // Use ffprobe to get both frame-rate fields. avg_frame_rate is the true
+    // average rate (total frames / duration) and is what playback timing must
+    // use; r_frame_rate is only the timebase tick and, for variable-frame-rate
+    // recordings, can be a large multiple of the real rate. We keep the keys
+    // (no `nokey=1`) because ffprobe emits these fields in its own internal
+    // order regardless of the requested order, so position alone is ambiguous.
     let output = std::process::Command::new("ffprobe")
         .args([
             "-v",
@@ -1148,29 +1178,73 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=r_frame_rate",
+            "stream=avg_frame_rate,r_frame_rate",
             "-of",
-            "csv=p=0",
+            "default=noprint_wrappers=1",
             file_path.to_str().unwrap(),
         ])
         .output()
         .context("Failed to run ffprobe")?;
 
     if !output.status.success() {
-        return Ok(24.0); // Default to 24 fps
+        return Ok(DEFAULT_FPS); // Default to 24 fps
     }
 
-    let fps_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let fps_str = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_video_fps(&fps_str))
+}
 
-    // Parse fraction like "24/1" or "30000/1001" using char-based splitting
-    // for UTF-8 safety (in practice ffprobe output is ASCII).
-    if let Some((num_str, denom_str)) = fps_str.split_once('/') {
-        let numerator: f64 = num_str.parse().unwrap_or(24.0);
-        let denominator: f64 = denom_str.parse().unwrap_or(1.0);
-        Ok(numerator / denominator)
+/// Choose a playback frame rate from ffprobe's `stream=avg_frame_rate,r_frame_rate`
+/// output (keyed `default` format, one `key=value` per line).
+///
+/// `avg_frame_rate` (total frames ÷ duration) is the true playback rate and is
+/// preferred. For variable-frame-rate recordings — screen captures, for example —
+/// `r_frame_rate` is only the timebase tick and can be a large multiple of the
+/// real rate, which would make playback run too fast. We fall back to
+/// `r_frame_rate` only when `avg_frame_rate` is unknown (ffprobe reports `"0/0"`),
+/// and to [`DEFAULT_FPS`] when neither field is usable.
+fn parse_video_fps(output: &str) -> f64 {
+    let mut avg = None;
+    let mut r = None;
+
+    for line in output.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "avg_frame_rate" => avg = parse_fps_fraction(value),
+            "r_frame_rate" => r = parse_fps_fraction(value),
+            _ => {}
+        }
+    }
+
+    avg.or(r).unwrap_or(DEFAULT_FPS)
+}
+
+/// Parse a single frame-rate field such as `"24000/1001"` into frames per second.
+///
+/// ffprobe reports rates as a `numerator/denominator` fraction. A stream's side
+/// data (e.g. a Dolby Vision configuration record) can make some output formats
+/// append an empty trailing field — `"24000/1001,"` — so we take the first
+/// whitespace/comma-delimited token before splitting the fraction. Returns
+/// [`None`] for an unknown rate (`"0/0"`), an empty field, or any value that does
+/// not parse to a finite, positive rate, so the caller can fall back rather than
+/// using NaN or a nonsensical rate.
+fn parse_fps_fraction(value: &str) -> Option<f64> {
+    let token = value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .find(|token| !token.is_empty())?;
+
+    // Parse fraction like "24/1" or "30000/1001"; the token is ASCII in practice.
+    let fps = if let Some((num_str, denom_str)) = token.split_once('/') {
+        let numerator: f64 = num_str.parse().ok()?;
+        let denominator: f64 = denom_str.parse().ok()?;
+        numerator / denominator
     } else {
-        Ok(fps_str.parse().unwrap_or(24.0))
-    }
+        token.parse().ok()?
+    };
+
+    (fps.is_finite() && fps > 0.0).then_some(fps)
 }
 
 fn get_video_duration(file_path: &Path) -> Result<f64> {
@@ -2791,5 +2865,115 @@ not_a_number  1 /bin/bash
         assert!(matches!(result, Cow::Owned(_)));
         assert!(result.width() <= max_w);
         assert!(result.height() <= max_h);
+    }
+
+    // =========================================================================
+    // Tests for parse_video_dimensions
+    // =========================================================================
+
+    #[test]
+    fn parse_dimensions_plain_csv() {
+        assert_eq!(parse_video_dimensions("1920,1080").unwrap(), (1920, 1080));
+    }
+
+    #[test]
+    fn parse_dimensions_trailing_newline() {
+        assert_eq!(parse_video_dimensions("1920,1080\n").unwrap(), (1920, 1080));
+    }
+
+    #[test]
+    fn parse_dimensions_handles_dolby_vision_trailing_comma() {
+        // A Dolby Vision HEVC stream carries a DoVi configuration record as side
+        // data. ffprobe's CSV writer appends an empty trailing field for that
+        // nested section, yielding "3840,2160," — splitting only on the first
+        // comma used to leave the height as "2160,", which failed to parse.
+        assert_eq!(
+            parse_video_dimensions("3840,2160,\n").unwrap(),
+            (3840, 2160)
+        );
+    }
+
+    #[test]
+    fn parse_dimensions_handles_newline_separated() {
+        // ffprobe's `default=noprint_wrappers=1:nokey=1` writer emits one value
+        // per line; the parser must accept that layout too.
+        assert_eq!(parse_video_dimensions("3840\n2160\n").unwrap(), (3840, 2160));
+    }
+
+    #[test]
+    fn parse_dimensions_errors_when_height_missing() {
+        assert!(parse_video_dimensions("3840").is_err());
+    }
+
+    // =========================================================================
+    // Tests for parse_fps_fraction (single frame-rate field)
+    // =========================================================================
+
+    #[test]
+    fn parse_fps_fraction_ntsc() {
+        assert!((parse_fps_fraction("30000/1001").unwrap() - 29.970_029_97).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_fps_fraction_integer() {
+        assert_eq!(parse_fps_fraction("25/1\n"), Some(25.0));
+    }
+
+    #[test]
+    fn parse_fps_fraction_handles_dolby_vision_trailing_comma() {
+        // Same DoVi side-data trailing comma as the dimension probe:
+        // "24000/1001,". Splitting the fraction left the denominator as
+        // "1001,", which silently fell back to 1.0 — yielding 24000 fps
+        // instead of 23.976.
+        let fps = parse_fps_fraction("24000/1001,\n").unwrap();
+        assert!((fps - 23.976_023_976).abs() < 1e-6, "got {fps}");
+    }
+
+    #[test]
+    fn parse_fps_fraction_zero_denominator_is_none() {
+        // ffprobe reports "0/0" for streams with an unknown frame rate; a naive
+        // divide produces NaN, so this must be None and let the caller fall back.
+        assert_eq!(parse_fps_fraction("0/0"), None);
+    }
+
+    #[test]
+    fn parse_fps_fraction_empty_is_none() {
+        assert_eq!(parse_fps_fraction(""), None);
+    }
+
+    // =========================================================================
+    // Tests for parse_video_fps (avg/r selection)
+    // =========================================================================
+
+    #[test]
+    fn parse_fps_empty_falls_back_to_default() {
+        assert_eq!(parse_video_fps(""), DEFAULT_FPS);
+    }
+
+    #[test]
+    fn parse_fps_both_unknown_falls_back_to_default() {
+        assert_eq!(
+            parse_video_fps("r_frame_rate=0/0\navg_frame_rate=0/0\n"),
+            DEFAULT_FPS
+        );
+    }
+
+    #[test]
+    fn parse_fps_prefers_avg_frame_rate_over_r_frame_rate() {
+        // A variable-frame-rate screen recording: r_frame_rate is the timebase
+        // tick (287/12 ≈ 23.92 fps) while avg_frame_rate is the true average
+        // (≈ 12.06 fps). Playback timing must use the average, or the video
+        // plays roughly 2× too fast.
+        let probe = "r_frame_rate=287/12\navg_frame_rate=60525000/5017157\n";
+        let fps = parse_video_fps(probe);
+        assert!((fps - 12.063).abs() < 0.01, "got {fps}");
+    }
+
+    #[test]
+    fn parse_fps_falls_back_to_r_frame_rate_when_avg_unknown() {
+        // Some containers report avg_frame_rate as "0/0" (unknown). Fall back to
+        // r_frame_rate rather than the hard-coded default.
+        let probe = "r_frame_rate=30/1\navg_frame_rate=0/0\n";
+        assert_eq!(parse_video_fps(probe), 30.0);
     }
 }
