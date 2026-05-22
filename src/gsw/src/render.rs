@@ -396,14 +396,14 @@ const BAR_PARTIAL_BG_RED: (u8, u8, u8) = (48, 0, 0);
 fn colorize_bar_styled(
     bar: &str,
     entry: &RenderEntry,
-    _factor: f32,
+    factor: f32,
     truecolor: bool,
 ) -> Vec<ColoredString> {
     if entry.binary {
         return bar.chars().map(|c| c.to_string().dimmed()).collect();
     }
     let is_conflicted = matches!(entry.status, FileStatus::Conflicted);
-    let (br, bg, bb) = if is_conflicted {
+    let (bg_br, bg_bg, bg_bb) = if is_conflicted {
         BAR_PARTIAL_BG_RED
     } else {
         BAR_PARTIAL_BG_CYAN
@@ -412,17 +412,23 @@ fn colorize_bar_styled(
         .map(|c| {
             let s = c.to_string();
             if truecolor {
-                // Wrong stub — constant grey breaks gradient + bg tests only.
-                if is_partial_block(c) {
-                    s.truecolor(50, 50, 50).on_truecolor(20, 20, 20)
+                let fg_base = if is_conflicted {
+                    FILE_BAR_CONFLICT_RGB
                 } else {
-                    s.truecolor(50, 50, 50)
+                    FILE_BAR_RGB
+                };
+                let (fr, fg, fb) = fade_rgb(fg_base, factor);
+                if is_partial_block(c) {
+                    let (pr, pg, pb) = fade_rgb((bg_br, bg_bg, bg_bb), factor);
+                    s.truecolor(fr, fg, fb).on_truecolor(pr, pg, pb)
+                } else {
+                    s.truecolor(fr, fg, fb)
                 }
             } else if is_partial_block(c) {
                 if is_conflicted {
-                    s.red().on_truecolor(br, bg, bb)
+                    s.red().on_truecolor(bg_br, bg_bg, bg_bb)
                 } else {
-                    s.cyan().on_truecolor(br, bg, bb)
+                    s.cyan().on_truecolor(bg_br, bg_bg, bg_bb)
                 }
             } else if is_conflicted {
                 s.red()
@@ -528,6 +534,8 @@ const FILE_LETTER_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
 const FILE_AGE_RGB: (u8, u8, u8) = (190, 190, 190);
 const FILE_ADDS_RGB: (u8, u8, u8) = (90, 220, 110);
 const FILE_DELS_RGB: (u8, u8, u8) = (255, 90, 90);
+const FILE_BAR_RGB: (u8, u8, u8) = (60, 200, 200);
+const FILE_BAR_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
 
 /// Fade factor for a file row.
 ///
@@ -1947,13 +1955,14 @@ mod tests {
     fn file_bar_partial_bg_fades_with_factor_under_truecolor() {
         use colored::Color;
         // Use a partial-fill glyph (▍ = U+258D) so a background color is set.
+        // BAR_PARTIAL_BG_CYAN = (0, 48, 48): r=0 so check g channel instead.
         let e = entry("foo.rs", FileStatus::Modified, true, 6, 0);
         let fresh = colorize_bar_styled("▍", &e, 0.0, true);
         let aged = colorize_bar_styled("▍", &e, 1.0, true);
-        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+        let (Some(Color::TrueColor { g: fg, .. }), Some(Color::TrueColor { g: ag, .. })) =
             (fresh[0].bgcolor, aged[0].bgcolor)
         else { panic!("partial cell should have a TrueColor background") };
-        assert!(ar < fr, "aged partial-cell bg should be darker: fresh={fr} aged={ar}");
+        assert!(ag < fg, "aged partial-cell bg should be darker: fresh={fg} aged={ag}");
     }
 
     #[test]
