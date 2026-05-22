@@ -211,6 +211,8 @@ fn render_row(
     path_width: usize,
 ) -> String {
     let (icon, letter) = icon_and_letter(entry);
+    let factor = file_fade_factor(entry.age);
+    let truecolor = opts.truecolor;
 
     let path_display_raw = match &entry.orig_path {
         Some(orig) => format!("{orig} → {new}", new = entry.path),
@@ -219,13 +221,10 @@ fn render_row(
     let path_truncated = truncate_left(&path_display_raw, path_width);
     let path_padded = pad_right(&path_truncated, path_width);
 
-    let icon_str = colorize_icon(icon, entry);
-    let letter_str = colorize_letter(letter, entry);
-    let path_str = colorize_path(&path_padded, entry);
+    let icon_str = colorize_icon(icon, entry, factor, truecolor);
+    let letter_str = colorize_letter(letter, entry, factor, truecolor);
+    let path_str = colorize_path(&path_padded, entry, factor, truecolor);
 
-    // Untracked files get a stripped-down row — no bar, no counts — but
-    // pad the gutter where bar/adds/dels would be so the age column still
-    // lines up with normal rows above and below it.
     if matches!(
         entry.status,
         FileStatus::Untracked | FileStatus::UntrackedDir
@@ -234,7 +233,7 @@ fn render_row(
         let gutter = " ".repeat(gutter_width);
         let age = entry.age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
-        let age_str = colorize_age(&age_field, entry.age);
+        let age_str = colorize_age(&age_field, entry.age, factor, truecolor);
         return format!("{icon_str} {letter_str} {path_str}{gutter}{age_str}");
     }
 
@@ -243,7 +242,7 @@ fn render_row(
     } else {
         render_bar(entry.adds.saturating_add(entry.dels), max_change, opts.bar_width)
     };
-    let bar_str = colorize_bar(&bar_raw, entry);
+    let bar_str = colorize_bar(&bar_raw, entry, factor, truecolor);
 
     let adds_raw = if entry.adds > 0 {
         format!("+{}", entry.adds)
@@ -259,19 +258,19 @@ fn render_row(
     let dels_field = format!("{dels_raw:>width$}", width = DELS_FIELD);
 
     let adds_str = if entry.adds > 0 {
-        adds_field.green().to_string()
+        colorize_adds(&adds_field, factor, truecolor).to_string()
     } else {
         adds_field
     };
     let dels_str = if entry.dels > 0 {
-        dels_field.red().to_string()
+        colorize_dels(&dels_field, factor, truecolor).to_string()
     } else {
         dels_field
     };
 
     let age_raw = entry.age.map(format_age_detailed).unwrap_or_default();
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
-    let age_str = colorize_age(&age_field, entry.age);
+    let age_str = colorize_age(&age_field, entry.age, factor, truecolor);
 
     let sep_bar_adds = " ".repeat(SEP_BAR_ADDS);
     let sep_adds_dels = " ".repeat(SEP_ADDS_DELS);
@@ -302,8 +301,23 @@ fn icon_and_letter(entry: &RenderEntry) -> (char, char) {
     (icon, letter)
 }
 
-fn colorize_icon(icon: char, entry: &RenderEntry) -> ColoredString {
+fn colorize_icon(
+    icon: char,
+    entry: &RenderEntry,
+    factor: f32,
+    truecolor: bool,
+) -> ColoredString {
     let s = icon.to_string();
+    if truecolor {
+        let base = match entry.status {
+            FileStatus::Conflicted => FILE_ICON_CONFLICT_RGB,
+            FileStatus::Untracked | FileStatus::UntrackedDir => FILE_ICON_UNTRACKED_RGB,
+            _ if entry.staged => FILE_ICON_STAGED_RGB,
+            _ => FILE_ICON_UNSTAGED_RGB,
+        };
+        let (r, g, b) = fade_rgb(base, factor);
+        return s.truecolor(r, g, b);
+    }
     match entry.status {
         FileStatus::Conflicted => s.red().bold(),
         FileStatus::Untracked | FileStatus::UntrackedDir => s.cyan().dimmed(),
@@ -312,8 +326,25 @@ fn colorize_icon(icon: char, entry: &RenderEntry) -> ColoredString {
     }
 }
 
-fn colorize_letter(letter: char, entry: &RenderEntry) -> ColoredString {
+fn colorize_letter(
+    letter: char,
+    entry: &RenderEntry,
+    factor: f32,
+    truecolor: bool,
+) -> ColoredString {
     let s = letter.to_string();
+    if truecolor {
+        let base = match entry.status {
+            FileStatus::Conflicted => FILE_LETTER_CONFLICT_RGB,
+            FileStatus::Untracked | FileStatus::UntrackedDir => FILE_LETTER_UNTRACKED_RGB,
+            FileStatus::Added => FILE_LETTER_ADDED_RGB,
+            FileStatus::Deleted => FILE_LETTER_DELETED_RGB,
+            FileStatus::Renamed | FileStatus::Copied => FILE_LETTER_RENAMED_RGB,
+            _ => FILE_LETTER_DEFAULT_RGB,
+        };
+        let (r, g, b) = fade_rgb(base, factor);
+        return s.truecolor(r, g, b);
+    }
     match entry.status {
         FileStatus::Conflicted => s.red().bold(),
         FileStatus::Untracked | FileStatus::UntrackedDir => s.cyan().dimmed(),
@@ -324,7 +355,22 @@ fn colorize_letter(letter: char, entry: &RenderEntry) -> ColoredString {
     }
 }
 
-fn colorize_path(path: &str, entry: &RenderEntry) -> ColoredString {
+fn colorize_path(
+    path: &str,
+    entry: &RenderEntry,
+    factor: f32,
+    truecolor: bool,
+) -> ColoredString {
+    if truecolor {
+        let base = match entry.status {
+            FileStatus::Conflicted => FILE_PATH_CONFLICT_RGB,
+            FileStatus::Untracked | FileStatus::UntrackedDir => FILE_PATH_UNTRACKED_RGB,
+            _ if entry.staged => FILE_PATH_STAGED_RGB,
+            _ => FILE_PATH_UNSTAGED_RGB,
+        };
+        let (r, g, b) = fade_rgb(base, factor);
+        return path.truecolor(r, g, b);
+    }
     match entry.status {
         FileStatus::Conflicted => path.red(),
         FileStatus::Untracked | FileStatus::UntrackedDir => path.cyan().dimmed(),
@@ -342,31 +388,69 @@ const BAR_PARTIAL_BG_CYAN: (u8, u8, u8) = (0, 48, 48);
 /// Same idea for the conflicted-file bar, which paints in red.
 const BAR_PARTIAL_BG_RED: (u8, u8, u8) = (48, 0, 0);
 
-fn colorize_bar(bar: &str, entry: &RenderEntry) -> String {
+/// Build one `ColoredString` per styling region of `bar`. For normal bars
+/// each visible cell needs its own region because partial-fill cells get a
+/// distinct background color; for binary bars there's no per-cell variation
+/// so the whole marker collapses to a single region (avoids paying 3× the
+/// ANSI overhead on the common "bin" string). The joined string returned
+/// by [`colorize_bar`] is just `colorize_bar_styled(...).join("")` with
+/// `.to_string()` applied to each region — sharing the builder lets tests
+/// inspect typed fg/bg colors instead of parsing ANSI.
+fn colorize_bar_styled(
+    bar: &str,
+    entry: &RenderEntry,
+    factor: f32,
+    truecolor: bool,
+) -> Vec<ColoredString> {
     if entry.binary {
-        return bar.dimmed().to_string();
+        if truecolor {
+            let (r, g, b) = fade_rgb(FILE_BIN_RGB, factor);
+            return vec![bar.to_string().truecolor(r, g, b)];
+        }
+        return vec![bar.to_string().dimmed()];
     }
     let is_conflicted = matches!(entry.status, FileStatus::Conflicted);
-    let (br, bg, bb) = if is_conflicted {
+    let (bg_br, bg_bg, bg_bb) = if is_conflicted {
         BAR_PARTIAL_BG_RED
     } else {
         BAR_PARTIAL_BG_CYAN
     };
-    let mut out = String::with_capacity(bar.len() * 2);
-    for c in bar.chars() {
-        let s = c.to_string();
-        let colored = if is_partial_block(c) {
-            if is_conflicted {
-                s.red().on_truecolor(br, bg, bb)
+    bar.chars()
+        .map(|c| {
+            let s = c.to_string();
+            if truecolor {
+                let fg_base = if is_conflicted {
+                    FILE_BAR_CONFLICT_RGB
+                } else {
+                    FILE_BAR_RGB
+                };
+                let (fr, fg, fb) = fade_rgb(fg_base, factor);
+                if is_partial_block(c) {
+                    let (pr, pg, pb) = fade_rgb((bg_br, bg_bg, bg_bb), factor);
+                    s.truecolor(fr, fg, fb).on_truecolor(pr, pg, pb)
+                } else {
+                    s.truecolor(fr, fg, fb)
+                }
+            } else if is_partial_block(c) {
+                if is_conflicted {
+                    s.red().on_truecolor(bg_br, bg_bg, bg_bb)
+                } else {
+                    s.cyan().on_truecolor(bg_br, bg_bg, bg_bb)
+                }
+            } else if is_conflicted {
+                s.red()
             } else {
-                s.cyan().on_truecolor(br, bg, bb)
+                s.cyan()
             }
-        } else if is_conflicted {
-            s.red()
-        } else {
-            s.cyan()
-        };
-        out.push_str(&colored.to_string());
+        })
+        .collect()
+}
+
+fn colorize_bar(bar: &str, entry: &RenderEntry, factor: f32, truecolor: bool) -> String {
+    let cells = colorize_bar_styled(bar, entry, factor, truecolor);
+    let mut out = String::with_capacity(bar.len() * 2);
+    for c in cells {
+        out.push_str(&c.to_string());
     }
     out
 }
@@ -378,7 +462,10 @@ fn is_partial_block(c: char) -> bool {
     matches!(c, '\u{2589}'..='\u{258F}')
 }
 
-fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
+/// 8-color (ANSI) styling for an age column. Shared by the file-row
+/// `colorize_age` 8-color branch and the log-row `colorize_log_age`
+/// 8-color fallback so the dim/bold/italic buckets live in one place.
+fn colorize_age_ansi(text: &str, age: Option<Duration>) -> ColoredString {
     let Some(age) = age else {
         return text.dimmed();
     };
@@ -390,6 +477,50 @@ fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
     }
 }
 
+/// Color the file-row age column.
+///
+/// Truecolor mode applies only the age-driven fade — the bucket-based
+/// `bold`/`italic`/`dimmed` styling from [`colorize_age_ansi`] is
+/// intentionally dropped because the gradient itself communicates
+/// freshness (no need to double-encode it with text decorations).
+/// Without truecolor, falls through to the legacy bucket styling.
+fn colorize_age(
+    text: &str,
+    age: Option<Duration>,
+    factor: f32,
+    truecolor: bool,
+) -> ColoredString {
+    if truecolor {
+        let (r, g, b) = fade_rgb(FILE_AGE_RGB, factor);
+        return text.truecolor(r, g, b);
+    }
+    colorize_age_ansi(text, age)
+}
+
+/// Color the `+adds` field for a file row.
+///
+/// With `truecolor`, applies the age-driven fade starting from
+/// [`FILE_ADDS_RGB`]. Without, falls back to ANSI green.
+fn colorize_adds(text: &str, factor: f32, truecolor: bool) -> ColoredString {
+    if truecolor {
+        let (r, g, b) = fade_rgb(FILE_ADDS_RGB, factor);
+        return text.truecolor(r, g, b);
+    }
+    text.green()
+}
+
+/// Color the `-dels` field for a file row.
+///
+/// With `truecolor`, applies the age-driven fade starting from
+/// [`FILE_DELS_RGB`]. Without, falls back to ANSI red.
+fn colorize_dels(text: &str, factor: f32, truecolor: bool) -> ColoredString {
+    if truecolor {
+        let (r, g, b) = fade_rgb(FILE_DELS_RGB, factor);
+        return text.truecolor(r, g, b);
+    }
+    text.red()
+}
+
 /// Base RGB for commit-log hashes when truecolor fading is on. Picked to
 /// match the perceptual feel of the legacy `yellow()` ANSI hash without
 /// depending on a specific terminal palette.
@@ -398,6 +529,45 @@ const LOG_HASH_BASE_RGB: (u8, u8, u8) = (255, 215, 0);
 const LOG_SUBJECT_BASE_RGB: (u8, u8, u8) = (220, 220, 220);
 /// Base RGB for the commit-log age column.
 const LOG_AGE_BASE_RGB: (u8, u8, u8) = (190, 190, 190);
+
+// --- File-row truecolor base palette ---------------------------------------
+//
+// Per-status base RGB values for the file list under truecolor mode. Each
+// base is tuned so factor=0 reads as the same hue family as the legacy
+// ANSI color, and factor=1 (× FADE_FLOOR) still keeps the hue visible.
+
+const FILE_PATH_UNSTAGED_RGB: (u8, u8, u8) = (220, 200, 100);
+const FILE_PATH_STAGED_RGB: (u8, u8, u8) = (200, 200, 200);
+const FILE_PATH_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
+const FILE_PATH_CONFLICT_RGB: (u8, u8, u8) = (255, 90, 90);
+
+const FILE_ICON_STAGED_RGB: (u8, u8, u8) = (90, 220, 110);
+const FILE_ICON_UNSTAGED_RGB: (u8, u8, u8) = (220, 200, 100);
+const FILE_ICON_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
+const FILE_ICON_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
+
+const FILE_LETTER_ADDED_RGB: (u8, u8, u8) = (90, 220, 110);
+const FILE_LETTER_DELETED_RGB: (u8, u8, u8) = (255, 80, 80);
+const FILE_LETTER_RENAMED_RGB: (u8, u8, u8) = (220, 120, 220);
+const FILE_LETTER_DEFAULT_RGB: (u8, u8, u8) = (230, 230, 230);
+const FILE_LETTER_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
+const FILE_LETTER_UNTRACKED_RGB: (u8, u8, u8) = (120, 200, 200);
+const FILE_AGE_RGB: (u8, u8, u8) = (190, 190, 190);
+const FILE_ADDS_RGB: (u8, u8, u8) = (90, 220, 110);
+const FILE_DELS_RGB: (u8, u8, u8) = (255, 90, 90);
+const FILE_BAR_RGB: (u8, u8, u8) = (60, 200, 200);
+const FILE_BAR_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
+const FILE_BIN_RGB: (u8, u8, u8) = (160, 160, 160);
+
+/// Fade factor for a file row.
+///
+/// `Some(age)` shares the commit-log ramp via [`age_fade_factor`] so the
+/// file list and log section darken in lockstep. `None` returns `1.0`
+/// so files we can't stat (deleted entries, skipped untracked dirs)
+/// render at the dark floor.
+fn file_fade_factor(age: Option<Duration>) -> f32 {
+    age.map_or(1.0, age_fade_factor)
+}
 
 /// Apply the age-driven truecolor fade to `s`, starting from `base`.
 ///
@@ -443,7 +613,7 @@ fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString
     if truecolor {
         fade_truecolor(text, age, LOG_AGE_BASE_RGB)
     } else {
-        colorize_age(text, Some(age))
+        colorize_age_ansi(text, Some(age))
     }
 }
 
@@ -589,22 +759,62 @@ pub fn plan_section_caps(
 mod tests {
     use super::*;
 
-    /// Drop ANSI CSI sequences so tests can match on the visible glyphs.
+    /// Serializes any test that toggles `colored::control::set_override` —
+    /// the override is process-global, so concurrent toggles race and
+    /// cause intermittent failures. Tests that need ANSI bytes (rather
+    /// than typed `ColoredString::fgcolor` inspection) hold this for the
+    /// duration of their body.
+    ///
+    /// `.unwrap_or_else(|p| p.into_inner())` handles a poisoned mutex
+    /// from a previous panicking test so it doesn't cascade-fail the
+    /// rest of the suite.
+    static COLORED_OVERRIDE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Drop ANSI escape sequences so tests can match on the visible glyphs.
+    ///
+    /// Handles the two common forms:
+    ///   - CSI sequences: `ESC [ <params…> <final>` where `<final>` is 0x40–0x7E.
+    ///   - Fe sequences:  `ESC <byte>` (single byte after ESC that isn't `[`).
+    ///
+    /// This is intentionally conservative — it only skips escape sequences,
+    /// never ordinary text.
     fn strip_ansi(s: &str) -> String {
+        #[derive(PartialEq)]
+        enum State {
+            Normal,
+            AfterEsc,
+            InCsi,
+        }
         let mut out = String::with_capacity(s.len());
-        let mut in_escape = false;
+        let mut state = State::Normal;
         for c in s.chars() {
-            if in_escape {
-                if (0x40..=0x7E).contains(&(c as u32)) {
-                    in_escape = false;
+            match state {
+                State::Normal => {
+                    if c == '\x1b' {
+                        state = State::AfterEsc;
+                    } else {
+                        out.push(c);
+                    }
                 }
-                continue;
+                State::AfterEsc => {
+                    if c == '[' {
+                        // CSI introducer — consume parameters until the final byte.
+                        state = State::InCsi;
+                    } else {
+                        // Fe-style single-byte escape (e.g. ESC M, ESC =).
+                        // The byte itself is the final byte; swallow it and resume.
+                        state = State::Normal;
+                    }
+                }
+                State::InCsi => {
+                    // Parameter bytes: 0x30–0x3F. Intermediate bytes: 0x20–0x2F.
+                    // Final byte: 0x40–0x7E — terminates the sequence.
+                    if (0x40..=0x7E).contains(&(c as u32)) {
+                        state = State::Normal;
+                    }
+                    // In all cases, keep consuming (don't push to output).
+                }
             }
-            if c == '\x1b' {
-                in_escape = true;
-                continue;
-            }
-            out.push(c);
         }
         out
     }
@@ -979,11 +1189,14 @@ mod tests {
         // Force `colored` on so the test inspects the actual ANSI we would
         // emit on a real terminal; without this the crate strips all codes
         // in non-TTY test runs.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
-        let with_partial = colorize_bar("█████▍", &e);
-        let all_full = colorize_bar("██████", &e);
-        let all_empty = colorize_bar("░░░░░░", &e);
+        let with_partial = colorize_bar("█████▍", &e, 0.0, false);
+        let all_full = colorize_bar("██████", &e, 0.0, false);
+        let all_empty = colorize_bar("░░░░░░", &e, 0.0, false);
         colored::control::unset_override();
 
         assert!(
@@ -1281,8 +1494,8 @@ mod tests {
         // `colored::control::set_override`, which is process-global and would
         // race with other tests in parallel.
         use colored::Styles;
-        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)));
-        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)));
+        let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)), 0.0, false);
+        let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)), 0.0, false);
         assert!(
             stale.style.contains(Styles::Italic),
             "Stale should be italicized",
@@ -1517,6 +1730,38 @@ mod tests {
     }
 
     #[test]
+    fn file_age_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let cs = colorize_age("5m23s", Some(Duration::from_secs(5 * 60 + 23)), 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for file age, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_age_falls_back_to_dim_buckets_without_truecolor() {
+        // 8-color fallback must still bold a fresh row's age, matching today.
+        use colored::Styles;
+        let fresh = colorize_age("30s", Some(Duration::from_secs(30)), 0.0, false);
+        assert!(
+            fresh.style.contains(Styles::Bold),
+            "fresh age should still be bolded in the 8-color path",
+        );
+    }
+
+    #[test]
+    fn file_age_darkens_with_factor_under_truecolor() {
+        use colored::Color;
+        let fresh = colorize_age("30s", Some(Duration::from_secs(30)), 0.0, true);
+        let aged = colorize_age("3d0h", Some(Duration::from_secs(3 * 86400)), 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else { panic!("both should be TrueColor") };
+        assert!(ar < fr, "aged file-age column should be darker: fresh={fr} aged={ar}");
+    }
+
+    #[test]
     fn fallback_stale_subject_is_not_italic() {
         // User feedback: italics on old subjects looks weird and out of
         // place. The fallback path should still dim stale subjects (so
@@ -1530,6 +1775,541 @@ mod tests {
         assert!(
             !stale.style.contains(Styles::Italic),
             "stale subjects should be dimmed but not italicized in fallback mode",
+        );
+    }
+
+    #[test]
+    fn file_fade_factor_is_zero_for_fresh_age() {
+        // A file modified moments ago must render at full base brightness,
+        // which means factor=0 — the no-fade end of the ramp.
+        assert!(
+            (file_fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
+            "fresh file should produce factor=0",
+        );
+    }
+
+    #[test]
+    fn file_fade_factor_floors_when_age_is_none() {
+        // Deleted files and unstat'd untracked dirs have no mtime. They must
+        // render at the dark floor (factor=1.0) so the row visually announces
+        // "this is an unusual state, not actively changing".
+        assert!(
+            (file_fade_factor(None) - 1.0).abs() < 1e-6,
+            "None age should clamp to factor=1.0 (the floor)",
+        );
+    }
+
+    #[test]
+    fn file_fade_factor_matches_commit_ramp_for_some_age() {
+        // The file fade must share the *same* ramp as commit rows so the two
+        // sections darken in lockstep under viddy. Spot-check the 1h midpoint.
+        let one_hour = Duration::from_secs(60 * 60);
+        let file = file_fade_factor(Some(one_hour));
+        let commit = age_fade_factor(one_hour);
+        assert!(
+            (file - commit).abs() < 1e-6,
+            "file fade must equal commit fade for matching Some(age): file={file}, commit={commit}",
+        );
+    }
+
+    #[test]
+    fn file_path_uses_truecolor_when_enabled() {
+        // With truecolor on, a fresh modified file's path must come back as a
+        // 24-bit color so the gradient has somewhere to fade from.
+        use colored::Color;
+        let mut e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        e.age = Some(Duration::from_secs(0));
+        let cs = colorize_path("src/foo.rs", &e, 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor under truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_path_falls_back_to_legacy_color_without_truecolor() {
+        // Without truecolor, the legacy ANSI yellow for unstaged-modified
+        // paths must still come through unchanged. Regression guard for the
+        // 8-color path.
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        let cs = colorize_path("src/foo.rs", &e, 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn file_path_darkens_with_age_under_truecolor() {
+        // Core gradient property: an older path is dimmer than a fresh one on
+        // every channel.
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        let fresh = colorize_path("src/foo.rs", &e, 0.0, true);
+        let aged = colorize_path("src/foo.rs", &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }),
+             Some(Color::TrueColor { r: ar, g: ag, b: ab })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else {
+            panic!("both should be TrueColor under truecolor=true");
+        };
+        assert!(
+            ar <= fr && ag <= fg && ab <= fb,
+            "aged path should not be brighter on any channel: fresh=({fr},{fg},{fb}) aged=({ar},{ag},{ab})",
+        );
+        assert!(
+            ar < fr || ag < fg || ab < fb,
+            "aged path should be strictly darker on at least one channel: fresh=({fr},{fg},{fb}) aged=({ar},{ag},{ab})",
+        );
+    }
+
+    #[test]
+    fn file_path_stays_above_floor_at_factor_one() {
+        // The fade must never reach pure black — at the floor, channels stay
+        // at FADE_FLOOR * base. Mirrors log_hash_stays_above_floor_when_very_old.
+        use crate::age::FADE_FLOOR;
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
+        let cs = colorize_path("src/foo.rs", &e, 1.0, true);
+        let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
+            panic!("expected TrueColor under truecolor=true");
+        };
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "u8 × FADE_FLOOR ∈ [0, 1] stays in [0, 255]"
+        )]
+        let floor_of = |c: u8| (f32::from(c) * FADE_FLOOR).round() as u8;
+        let (br, bg, bb) = FILE_PATH_UNSTAGED_RGB;
+        assert!(
+            r >= floor_of(br).saturating_sub(1)
+                && g >= floor_of(bg).saturating_sub(1)
+                && b >= floor_of(bb).saturating_sub(1),
+            "channels must not drop below the floor: actual=({r},{g},{b}) base=({br},{bg},{bb})",
+        );
+    }
+
+    #[test]
+    fn file_icon_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let cs = colorize_icon('●', &e, 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for icon under truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_icon_falls_back_to_ansi_without_truecolor() {
+        // Staged-modified icon today is plain green. Regression guard.
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let cs = colorize_icon('●', &e, 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Green));
+    }
+
+    #[test]
+    fn file_icon_darkens_with_age_under_truecolor() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let fresh = colorize_icon('●', &e, 0.0, true);
+        let aged = colorize_icon('●', &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else {
+            panic!("both should be TrueColor");
+        };
+        assert!(ar < fr, "aged icon should be darker: fresh={fr} aged={ar}");
+    }
+
+    #[test]
+    fn file_letter_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Added, true, 1, 0);
+        let cs = colorize_letter('A', &e, 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor under truecolor=true, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_letter_falls_back_to_ansi_without_truecolor() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Added, true, 1, 0);
+        let cs = colorize_letter('A', &e, 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Green));
+    }
+
+    #[test]
+    fn file_letter_darkens_with_age_under_truecolor() {
+        use colored::Color;
+        let e = entry("src/foo.rs", FileStatus::Deleted, true, 0, 1);
+        let fresh = colorize_letter('D', &e, 0.0, true);
+        let aged = colorize_letter('D', &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else { panic!("both should be TrueColor") };
+        assert!(ar < fr, "aged letter should be darker: fresh={fr} aged={ar}");
+    }
+
+    #[test]
+    fn file_adds_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let cs = colorize_adds("  +12", 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_dels_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let cs = colorize_dels(" -3", 0.0, true);
+        match cs.fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_adds_falls_back_to_green_without_truecolor() {
+        use colored::Color;
+        let cs = colorize_adds("  +12", 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Green));
+    }
+
+    #[test]
+    fn file_dels_falls_back_to_red_without_truecolor() {
+        use colored::Color;
+        let cs = colorize_dels(" -3", 0.0, false);
+        assert_eq!(cs.fgcolor, Some(Color::Red));
+    }
+
+    #[test]
+    fn file_adds_darkens_with_factor_under_truecolor() {
+        use colored::Color;
+        let fresh = colorize_adds("  +12", 0.0, true);
+        let aged = colorize_adds("  +12", 1.0, true);
+        let (Some(Color::TrueColor { r: fr, g: fg, .. }),
+             Some(Color::TrueColor { r: ar, g: ag, .. })) =
+            (fresh.fgcolor, aged.fgcolor)
+        else { panic!("both should be TrueColor") };
+        assert!(ar < fr || ag < fg, "aged +adds should be darker");
+    }
+
+    #[test]
+    fn file_bar_fill_fades_with_factor_under_truecolor() {
+        use colored::Color;
+        let e = entry("foo.rs", FileStatus::Modified, true, 6, 0);
+        let fresh = colorize_bar_styled("██████", &e, 0.0, true);
+        let aged = colorize_bar_styled("██████", &e, 1.0, true);
+        // We expect the first cell's fg to be TrueColor in both cases and
+        // the aged channel to be strictly lower.
+        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }),
+             Some(Color::TrueColor { r: ar, g: ag, b: ab })) =
+            (fresh[0].fgcolor, aged[0].fgcolor)
+        else { panic!("first cell should be TrueColor under truecolor=true") };
+        assert!(
+            ar < fr || ag < fg || ab < fb,
+            "aged bar fill should be darker on at least one channel",
+        );
+    }
+
+    #[test]
+    fn file_bar_partial_bg_fades_with_factor_under_truecolor() {
+        use colored::Color;
+        // Use a partial-fill glyph (▍ = U+258D) so a background color is set.
+        // BAR_PARTIAL_BG_CYAN = (0, 48, 48): r=0 so check g channel instead.
+        let e = entry("foo.rs", FileStatus::Modified, true, 6, 0);
+        let fresh = colorize_bar_styled("▍", &e, 0.0, true);
+        let aged = colorize_bar_styled("▍", &e, 1.0, true);
+        let (Some(Color::TrueColor { g: fg, .. }), Some(Color::TrueColor { g: ag, .. })) =
+            (fresh[0].bgcolor, aged[0].bgcolor)
+        else { panic!("partial cell should have a TrueColor background") };
+        assert!(ag < fg, "aged partial-cell bg should be darker: fresh={fg} aged={ag}");
+    }
+
+    #[test]
+    fn file_bar_fallback_unchanged_without_truecolor() {
+        // 8-color path returns the cyan-fill bytes today. Regression guard.
+        let e = entry("foo.rs", FileStatus::Modified, true, 6, 0);
+        let cells = colorize_bar_styled("█", &e, 0.0, false);
+        use colored::Color;
+        assert_eq!(cells[0].fgcolor, Some(Color::Cyan));
+    }
+
+    // --- Phase 8: end-to-end render() truecolor wiring ----------------------
+
+    #[test]
+    fn file_row_renders_with_truecolor_when_enabled() {
+        // Force the colored crate to actually emit ANSI in the test process so
+        // we can detect the truecolor codes from the rendered output.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
+        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+        let mut o = opts();
+        o.truecolor = true;
+        let out = render(&snap, &o);
+        colored::control::unset_override();
+        // Truecolor foreground sequences start with `\x1b[38;2;`.
+        assert!(
+            out.contains("\x1b[38;2;"),
+            "rendered file row should contain a truecolor ANSI sequence when truecolor=true",
+        );
+    }
+
+    #[test]
+    fn file_row_no_truecolor_in_8_color_mode() {
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
+        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+        let out = render(&snap, &opts());
+        colored::control::unset_override();
+        assert!(
+            !out.contains("\x1b[38;2;"),
+            "8-color mode must not emit any truecolor sequences for file rows",
+        );
+    }
+
+    #[test]
+    fn file_row_darkens_with_mtime_under_truecolor() {
+        // End-to-end: an older file's row should contain a darker (lower-channel)
+        // truecolor sequence than a fresher row of the same status.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
+        let mut fresh_entry = entry("src/foo.rs", FileStatus::Modified, false, 5, 2);
+        fresh_entry.age = Some(Duration::from_secs(0));
+        let mut aged_entry = entry("src/bar.rs", FileStatus::Modified, false, 5, 2);
+        aged_entry.age = Some(Duration::from_secs(60 * 60));
+
+        let fresh_snap = snap_with(vec![fresh_entry]);
+        let aged_snap = snap_with(vec![aged_entry]);
+        let mut o = opts();
+        o.truecolor = true;
+        let fresh_out = render(&fresh_snap, &o);
+        let aged_out = render(&aged_snap, &o);
+        colored::control::unset_override();
+
+        let max_r = |s: &str| {
+            // Extract the largest r-channel from any 38;2;r;g;b foreground sequence.
+            let mut best: Option<u8> = None;
+            let bytes = s.as_bytes();
+            let needle = b"\x1b[38;2;";
+            let mut i = 0;
+            while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
+                let start = i + pos + needle.len();
+                // Read r digits.
+                let mut j = start;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > start {
+                    if let Ok(r) = std::str::from_utf8(&bytes[start..j]).unwrap().parse::<u8>() {
+                        best = Some(best.map_or(r, |b| b.max(r)));
+                    }
+                }
+                i = j;
+            }
+            best.expect("at least one truecolor sequence")
+        };
+
+        let fresh_max = max_r(&fresh_out);
+        let aged_max = max_r(&aged_out);
+        assert!(
+            aged_max < fresh_max,
+            "aged row's brightest channel should be lower than fresh row's: fresh={fresh_max} aged={aged_max}",
+        );
+    }
+
+    #[test]
+    fn file_row_no_age_renders_at_floor_under_truecolor() {
+        // Deleted file (age=None) should produce only sequences with channels
+        // at or below the FADE_FLOOR fraction of their base.
+        use crate::age::FADE_FLOOR;
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
+        let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
+        e.age = None;
+        let snap = snap_with(vec![e]);
+        let mut o = opts();
+        o.truecolor = true;
+        let out = render(&snap, &o);
+        colored::control::unset_override();
+
+        // The brightest channel allowed at the floor is `255 × FADE_FLOOR`
+        // (a base channel of 255 hits the highest floor). Use that as the
+        // conservative upper bound for any column, plus a small slack for
+        // rounding. Any row column emitting a channel above this means a
+        // colorize_* fn forgot to apply the fade.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "255.0 × FADE_FLOOR ∈ [0, 255]"
+        )]
+        let upper = ((255.0_f32 * FADE_FLOOR).round() as u8).saturating_add(2);
+
+        // Parse every r-channel and assert all are <= upper.
+        let bytes = out.as_bytes();
+        let needle = b"\x1b[38;2;";
+        let mut i = 0;
+        let mut saw_any = false;
+        while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
+            let start = i + pos + needle.len();
+            let mut j = start;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > start {
+                let r: u8 = std::str::from_utf8(&bytes[start..j]).unwrap().parse().unwrap();
+                assert!(
+                    r <= upper,
+                    "every channel on a no-age row should sit at or below the floor (got {r}, upper {upper})",
+                );
+                saw_any = true;
+            }
+            i = j;
+        }
+        assert!(saw_any, "should have emitted at least one truecolor sequence");
+    }
+
+    /// Shared invariant: every pair of *distinct* base RGBs in `palette`
+    /// must still differ by ≥ 10 units of Manhattan distance after fading
+    /// to the floor. Pairs that share the exact same base RGB (e.g. the
+    /// Deleted and Conflicted letters, both danger-red by design) are
+    /// skipped — fading can't separate what was equal to start with, and
+    /// merging those is the intent.
+    fn assert_palette_distinct_at_floor(palette_name: &str, palette: &[(&str, (u8, u8, u8))]) {
+        for i in 0..palette.len() {
+            for j in (i + 1)..palette.len() {
+                let (aname, abase) = palette[i];
+                let (bname, bbase) = palette[j];
+                if abase == bbase {
+                    continue;
+                }
+                let (ar, ag, ab) = fade_rgb(abase, 1.0);
+                let (br, bg, bb) = fade_rgb(bbase, 1.0);
+                let dist = (i32::from(ar) - i32::from(br)).abs()
+                    + (i32::from(ag) - i32::from(bg)).abs()
+                    + (i32::from(ab) - i32::from(bb)).abs();
+                assert!(
+                    dist >= 10,
+                    "{palette_name}: {aname} and {bname} floored RGBs too close: \
+                     ({ar},{ag},{ab}) vs ({br},{bg},{bb}) (dist {dist})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn file_row_status_hues_remain_distinct_at_floor() {
+        // At the dark floor, fading must not collapse different statuses
+        // into the same RGB. Guard each palette that varies by status so a
+        // future palette tweak can't silently merge two visually-distinct
+        // states (e.g. staged vs unstaged paths).
+        assert_palette_distinct_at_floor(
+            "icon",
+            &[
+                ("staged", FILE_ICON_STAGED_RGB),
+                ("unstaged", FILE_ICON_UNSTAGED_RGB),
+                ("untracked", FILE_ICON_UNTRACKED_RGB),
+                ("conflict", FILE_ICON_CONFLICT_RGB),
+            ],
+        );
+        assert_palette_distinct_at_floor(
+            "path",
+            &[
+                ("staged", FILE_PATH_STAGED_RGB),
+                ("unstaged", FILE_PATH_UNSTAGED_RGB),
+                ("untracked", FILE_PATH_UNTRACKED_RGB),
+                ("conflict", FILE_PATH_CONFLICT_RGB),
+            ],
+        );
+        assert_palette_distinct_at_floor(
+            "letter",
+            &[
+                ("added", FILE_LETTER_ADDED_RGB),
+                ("deleted", FILE_LETTER_DELETED_RGB),
+                ("renamed", FILE_LETTER_RENAMED_RGB),
+                ("default", FILE_LETTER_DEFAULT_RGB),
+                ("conflict", FILE_LETTER_CONFLICT_RGB),
+                ("untracked", FILE_LETTER_UNTRACKED_RGB),
+            ],
+        );
+    }
+
+    #[test]
+    fn file_bar_binary_uses_truecolor_when_enabled() {
+        use colored::Color;
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        // Use the same "bin" string render_row builds for binary entries.
+        let cells = colorize_bar_styled("bin", &e, 0.0, true);
+        match cells[0].fgcolor {
+            Some(Color::TrueColor { .. }) => {}
+            other => panic!("expected TrueColor for binary marker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_bar_binary_falls_back_to_dimmed_without_truecolor() {
+        // Regression guard: 8-color path keeps the legacy `.dimmed()` styling.
+        use colored::Styles;
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        let cells = colorize_bar_styled("bin", &e, 0.0, false);
+        assert!(
+            cells[0].style.contains(Styles::Dimmed),
+            "8-color binary marker should still be .dimmed()",
+        );
+    }
+
+    #[test]
+    fn file_bar_binary_darkens_with_factor_under_truecolor() {
+        use colored::Color;
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        let fresh = colorize_bar_styled("bin", &e, 0.0, true);
+        let aged = colorize_bar_styled("bin", &e, 1.0, true);
+        let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
+            (fresh[0].fgcolor, aged[0].fgcolor)
+        else { panic!("both should be TrueColor under truecolor=true") };
+        assert!(ar < fr, "aged binary marker should be darker: fresh={fr} aged={ar}");
+    }
+
+    #[test]
+    fn file_bar_binary_emits_single_ansi_wrapper() {
+        // Binary bars have no per-cell variation (no partial-fill bg, no
+        // status-varying fill), so the rendered string should wrap the whole
+        // marker in one fg sequence + one reset — not pay 3× the ANSI overhead
+        // by re-emitting the sequence for every char of "bin". Holds for both
+        // 8-color and truecolor paths.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
+        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+        e.binary = true;
+        let out_ansi = colorize_bar("bin", &e, 0.0, false);
+        let out_tc = colorize_bar("bin", &e, 0.0, true);
+        colored::control::unset_override();
+        assert_eq!(
+            out_ansi.matches("\x1b[").count(),
+            2,
+            "8-color binary bar should emit exactly one ANSI fg + one reset: {out_ansi:?}",
+        );
+        assert_eq!(
+            out_tc.matches("\x1b[").count(),
+            2,
+            "truecolor binary bar should emit exactly one ANSI fg + one reset: {out_tc:?}",
         );
     }
 }
