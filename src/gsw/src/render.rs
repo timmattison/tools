@@ -333,14 +333,49 @@ fn colorize_path(path: &str, entry: &RenderEntry) -> ColoredString {
     }
 }
 
-fn colorize_bar(bar: &str, entry: &RenderEntry) -> ColoredString {
+/// Dim cyan used as the background under a partial-fill cell so the
+/// unpainted right portion of glyphs like `▍` blends into the dim `░`
+/// empty cells beside them instead of showing through as terminal black.
+/// `░` is the LIGHT SHADE character (~25% pixel coverage), so this is
+/// roughly a quarter of typical ANSI cyan's brightness.
+const BAR_PARTIAL_BG_CYAN: (u8, u8, u8) = (0, 48, 48);
+/// Same idea for the conflicted-file bar, which paints in red.
+const BAR_PARTIAL_BG_RED: (u8, u8, u8) = (48, 0, 0);
+
+fn colorize_bar(bar: &str, entry: &RenderEntry) -> String {
     if entry.binary {
-        bar.dimmed()
-    } else if matches!(entry.status, FileStatus::Conflicted) {
-        bar.red()
-    } else {
-        bar.cyan()
+        return bar.dimmed().to_string();
     }
+    let is_conflicted = matches!(entry.status, FileStatus::Conflicted);
+    let (br, bg, bb) = if is_conflicted {
+        BAR_PARTIAL_BG_RED
+    } else {
+        BAR_PARTIAL_BG_CYAN
+    };
+    let mut out = String::with_capacity(bar.len() * 2);
+    for c in bar.chars() {
+        let s = c.to_string();
+        let colored = if is_partial_block(c) {
+            if is_conflicted {
+                s.red().on_truecolor(br, bg, bb)
+            } else {
+                s.cyan().on_truecolor(br, bg, bb)
+            }
+        } else if is_conflicted {
+            s.red()
+        } else {
+            s.cyan()
+        };
+        out.push_str(&colored.to_string());
+    }
+    out
+}
+
+/// True for the eighth-block partial-fill glyphs `▏▎▍▌▋▊▉`, which only
+/// paint a fraction of their cell width and need a background fill so
+/// they don't leave a black gap.
+fn is_partial_block(c: char) -> bool {
+    matches!(c, '\u{2589}'..='\u{258F}')
 }
 
 fn colorize_age(text: &str, age: Option<Duration>) -> ColoredString {
@@ -931,6 +966,38 @@ mod tests {
             "big-change row should have more full cells than small: big={big_filled}, small={small_filled}",
         );
         assert!(big_filled >= 6, "biggest change should fill the bar: {big_row}");
+    }
+
+    #[test]
+    fn partial_cell_gets_background_to_close_gap() {
+        // A partial-fill glyph like `▍` paints only the left portion of its
+        // cell — the right portion shows the terminal background (black),
+        // which reads as a dark gap between the bright bar and the dim `░`
+        // empty cells to its right. Paint a matching dim background under
+        // just the partial cell to bridge that gap.
+        //
+        // Force `colored` on so the test inspects the actual ANSI we would
+        // emit on a real terminal; without this the crate strips all codes
+        // in non-TTY test runs.
+        colored::control::set_override(true);
+        let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
+        let with_partial = colorize_bar("█████▍", &e);
+        let all_full = colorize_bar("██████", &e);
+        let all_empty = colorize_bar("░░░░░░", &e);
+        colored::control::unset_override();
+
+        assert!(
+            with_partial.contains("\x1b[48"),
+            "partial-fill cell should have a background color applied: {with_partial:?}",
+        );
+        assert!(
+            !all_full.contains("\x1b[48"),
+            "all-full bar needs no background color: {all_full:?}",
+        );
+        assert!(
+            !all_empty.contains("\x1b[48"),
+            "all-empty bar needs no background color: {all_empty:?}",
+        );
     }
 
     #[test]
