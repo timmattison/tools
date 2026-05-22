@@ -460,6 +460,21 @@ fn is_partial_block(c: char) -> bool {
     matches!(c, '\u{2589}'..='\u{258F}')
 }
 
+/// 8-color (ANSI) styling for an age column. Shared by the file-row
+/// `colorize_age` 8-color branch and the log-row `colorize_log_age`
+/// 8-color fallback so the dim/bold/italic buckets live in one place.
+fn colorize_age_ansi(text: &str, age: Option<Duration>) -> ColoredString {
+    let Some(age) = age else {
+        return text.dimmed();
+    };
+    match age_dim_level(age) {
+        AgeDim::Fresh => text.bold(),
+        AgeDim::Recent => text.normal(),
+        AgeDim::Aging => text.dimmed(),
+        AgeDim::Stale => text.dimmed().italic(),
+    }
+}
+
 fn colorize_age(
     text: &str,
     age: Option<Duration>,
@@ -470,15 +485,7 @@ fn colorize_age(
         let (r, g, b) = fade_rgb(FILE_AGE_RGB, factor);
         return text.truecolor(r, g, b);
     }
-    let Some(age) = age else {
-        return text.dimmed();
-    };
-    match age_dim_level(age) {
-        AgeDim::Fresh => text.bold(),
-        AgeDim::Recent => text.normal(),
-        AgeDim::Aging => text.dimmed(),
-        AgeDim::Stale => text.dimmed().italic(),
-    }
+    colorize_age_ansi(text, age)
 }
 
 /// Color the `+adds` field for a file row.
@@ -597,7 +604,7 @@ fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString
     if truecolor {
         fade_truecolor(text, age, LOG_AGE_BASE_RGB)
     } else {
-        colorize_age(text, Some(age), 0.0, false)
+        colorize_age_ansi(text, Some(age))
     }
 }
 
