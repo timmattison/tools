@@ -722,11 +722,17 @@ const LOG_FLOOR_ROWS: usize = 5;
 /// separator, and a reserved row for a possible `+N more files` footer).
 ///
 /// When everything fits, both sections are rendered in full. When the
-/// combined demand exceeds the available rows, rows are split
-/// proportionally to each section's demand — except the log section is
-/// floored at `min(LOG_FLOOR_ROWS, log_demand)` rows so recent commits
-/// stay readable even with a very long file list. Each non-empty
-/// section is guaranteed at least one row of its own.
+/// combined demand exceeds the available rows, the **file list wins**: it is
+/// the primary content (it shows what you're actively changing) and renders
+/// at the bottom, so it must stay fully on-screen rather than being clipped.
+/// Files get their full demand (leaving at least one row for a non-empty
+/// log), and the log takes whatever remains.
+///
+/// The one exception is a genuinely long file list that can't all fit: once
+/// the file section is itself being truncated (a `+N more files` footer would
+/// show), the log is floored at `min(LOG_FLOOR_ROWS, log_demand)` rows so
+/// recent-commit context doesn't collapse to a sliver. A short file list
+/// never gives up rows to that floor.
 ///
 /// Returns `(file_cap, log_cap)`. Each cap never exceeds the corresponding
 /// demand.
@@ -748,17 +754,25 @@ pub fn plan_section_caps(
         return (available_rows.min(file_demand), 0);
     }
 
-    // Both sections want rows and the total overflows. Compute the log
-    // section's proportional share, then lift it to the floor so a
-    // dominant file list can't squeeze the recent-commit context away.
-    // The cap on log_share preserves the existing invariant that the
-    // file section keeps at least one row when it has content.
-    let total_demand = file_demand + log_demand;
-    let raw_log = (log_demand * available_rows + total_demand / 2) / total_demand;
-    let log_ceiling = available_rows.saturating_sub(1).min(log_demand);
-    let log_floor = LOG_FLOOR_ROWS.min(log_demand).min(log_ceiling);
-    let log_share = raw_log.max(log_floor).min(log_ceiling);
-    let file_share = available_rows.saturating_sub(log_share).min(file_demand);
+    // Both sections want rows and the total overflows. Give the file list its
+    // full demand first, leaving at least one row for the log, then hand the
+    // log whatever remains. `.max(1)` keeps the file section visible even in a
+    // pathologically short budget.
+    let mut file_share = file_demand.min(available_rows.saturating_sub(1)).max(1);
+    let mut log_share = available_rows.saturating_sub(file_share);
+
+    // Only when the file list is itself truncated (a long list that can't all
+    // fit) do we floor the log, clawing rows back from the file section so
+    // recent-commit context survives a file-dominated frame.
+    if file_share < file_demand {
+        let log_floor = LOG_FLOOR_ROWS
+            .min(log_demand)
+            .min(available_rows.saturating_sub(1));
+        if log_share < log_floor {
+            log_share = log_floor;
+            file_share = available_rows.saturating_sub(log_share);
+        }
+    }
     (file_share, log_share)
 }
 
@@ -1268,12 +1282,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_section_caps_splits_proportionally_when_overflowing() {
-        // 5 files vs 20 log rows competing for 10 rows: file share is
-        // round(5*10/25) = 2, log gets the remaining 8. This is the case
-        // that motivated the change — today the file list gets squeezed
-        // to 1 or 2 rows regardless of how few files the user actually has.
-        assert_eq!(plan_section_caps(5, 20, 10), (2, 8));
+    fn plan_section_caps_gives_files_full_demand_then_log_takes_rest() {
+        // 5 files vs a 20-commit log competing for 10 rows. Files are the
+        // primary content and fit entirely, so all 5 render; the log takes
+        // the remaining 5 rows. (The file list is never truncated here, so
+        // the log floor doesn't claw rows back from it.)
+        assert_eq!(plan_section_caps(5, 20, 10), (5, 5));
     }
 
     #[test]
