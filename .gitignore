@@ -12,3 +12,4 @@ target
 .env.local
 .claude/
 .op-cache.json
+node_modules

@@ -107,28 +107,35 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         .max(1);
     let path_width = compute_path_width(opts);
 
-    for entry in snapshot.files.iter().take(display_count) {
-        lines.push(render_row(entry, opts, max_change, path_width));
-    }
-
-    let hidden = snapshot.files.len().saturating_sub(display_count);
-    if hidden > 0 {
-        lines.push(
-            format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
-                .dimmed()
-                .to_string(),
-        );
-    }
-
-    if opts.log_lines > 0 && !snapshot.log.is_empty() {
-        // When there are no file rows above us, the post-header separator
-        // already sits directly above the log section; adding another would
-        // produce a double rule with nothing between them.
-        if !snapshot.files.is_empty() {
-            lines.push(render_separator(header_width));
-        }
+    // The recent-commit log renders first, directly under the header, so it
+    // stays anchored in place. The file list renders at the bottom: as files
+    // appear and disappear during work, they grow and shrink downward without
+    // shoving the log around.
+    let log_rendered = opts.log_lines > 0 && !snapshot.log.is_empty();
+    if log_rendered {
         for entry in snapshot.log.iter().take(opts.log_lines) {
             lines.push(render_log_row(entry, opts.terminal_width, opts.truecolor));
+        }
+    }
+
+    if !snapshot.files.is_empty() {
+        // Separate the file list from the log above it. When there's no log,
+        // the post-header separator already sits directly above the files, so
+        // adding another would produce a double rule with nothing between them.
+        if log_rendered {
+            lines.push(render_separator(header_width));
+        }
+        for entry in snapshot.files.iter().take(display_count) {
+            lines.push(render_row(entry, opts, max_change, path_width));
+        }
+
+        let hidden = snapshot.files.len().saturating_sub(display_count);
+        if hidden > 0 {
+            lines.push(
+                format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
+                    .dimmed()
+                    .to_string(),
+            );
         }
     }
 
@@ -715,11 +722,17 @@ const LOG_FLOOR_ROWS: usize = 5;
 /// separator, and a reserved row for a possible `+N more files` footer).
 ///
 /// When everything fits, both sections are rendered in full. When the
-/// combined demand exceeds the available rows, rows are split
-/// proportionally to each section's demand — except the log section is
-/// floored at `min(LOG_FLOOR_ROWS, log_demand)` rows so recent commits
-/// stay readable even with a very long file list. Each non-empty
-/// section is guaranteed at least one row of its own.
+/// combined demand exceeds the available rows, the **file list wins**: it is
+/// the primary content (it shows what you're actively changing) and renders
+/// at the bottom, so it must stay fully on-screen rather than being clipped.
+/// Files get their full demand (leaving at least one row for a non-empty
+/// log), and the log takes whatever remains.
+///
+/// The one exception is a genuinely long file list that can't all fit: once
+/// the file section is itself being truncated (a `+N more files` footer would
+/// show), the log is floored at `min(LOG_FLOOR_ROWS, log_demand)` rows so
+/// recent-commit context doesn't collapse to a sliver. A short file list
+/// never gives up rows to that floor.
 ///
 /// Returns `(file_cap, log_cap)`. Each cap never exceeds the corresponding
 /// demand.
@@ -741,17 +754,25 @@ pub fn plan_section_caps(
         return (available_rows.min(file_demand), 0);
     }
 
-    // Both sections want rows and the total overflows. Compute the log
-    // section's proportional share, then lift it to the floor so a
-    // dominant file list can't squeeze the recent-commit context away.
-    // The cap on log_share preserves the existing invariant that the
-    // file section keeps at least one row when it has content.
-    let total_demand = file_demand + log_demand;
-    let raw_log = (log_demand * available_rows + total_demand / 2) / total_demand;
-    let log_ceiling = available_rows.saturating_sub(1).min(log_demand);
-    let log_floor = LOG_FLOOR_ROWS.min(log_demand).min(log_ceiling);
-    let log_share = raw_log.max(log_floor).min(log_ceiling);
-    let file_share = available_rows.saturating_sub(log_share).min(file_demand);
+    // Both sections want rows and the total overflows. Give the file list its
+    // full demand first, leaving at least one row for the log, then hand the
+    // log whatever remains. `.max(1)` keeps the file section visible even in a
+    // pathologically short budget.
+    let mut file_share = file_demand.min(available_rows.saturating_sub(1)).max(1);
+    let mut log_share = available_rows.saturating_sub(file_share);
+
+    // Only when the file list is itself truncated (a long list that can't all
+    // fit) do we floor the log, clawing rows back from the file section so
+    // recent-commit context survives a file-dominated frame.
+    if file_share < file_demand {
+        let log_floor = LOG_FLOOR_ROWS
+            .min(log_demand)
+            .min(available_rows.saturating_sub(1));
+        if log_share < log_floor {
+            log_share = log_floor;
+            file_share = available_rows.saturating_sub(log_share);
+        }
+    }
     (file_share, log_share)
 }
 
@@ -1232,18 +1253,41 @@ mod tests {
     }
 
     #[test]
+    fn plan_section_caps_shows_all_files_before_flooring_log() {
+        // The file list is the primary content and now renders at the bottom,
+        // so a short list must render in full rather than being squeezed to a
+        // single row by the log's floor. With 2 files competing against a
+        // 12-commit log for 6 rows, both files show and the log takes the
+        // remaining 4 rows — the user is never "limited to one file".
+        assert_eq!(plan_section_caps(2, 12, 6), (2, 4));
+    }
+
+    #[test]
+    fn plan_section_caps_does_not_squeeze_short_file_list_for_log_floor() {
+        // A 3-file list against a long log in a tight 8-row budget: all three
+        // files must show. The log yields rows to the file list because the
+        // files fit; the floor only protects the log when files genuinely
+        // can't all fit (see the "files dominate" case below).
+        let (f, _l) = plan_section_caps(3, 50, 8);
+        assert_eq!(
+            f, 3,
+            "all 3 files should render; the log floor must not steal rows from a short file list",
+        );
+    }
+
+    #[test]
     fn plan_section_caps_returns_full_demand_when_room_is_plenty() {
         // No contention: 5 files + 20 log rows easily fit in 100 rows.
         assert_eq!(plan_section_caps(5, 20, 100), (5, 20));
     }
 
     #[test]
-    fn plan_section_caps_splits_proportionally_when_overflowing() {
-        // 5 files vs 20 log rows competing for 10 rows: file share is
-        // round(5*10/25) = 2, log gets the remaining 8. This is the case
-        // that motivated the change — today the file list gets squeezed
-        // to 1 or 2 rows regardless of how few files the user actually has.
-        assert_eq!(plan_section_caps(5, 20, 10), (2, 8));
+    fn plan_section_caps_gives_files_full_demand_then_log_takes_rest() {
+        // 5 files vs a 20-commit log competing for 10 rows. Files are the
+        // primary content and fit entirely, so all 5 render; the log takes
+        // the remaining 5 rows. (The file list is never truncated here, so
+        // the log floor doesn't claw rows back from it.)
+        assert_eq!(plan_section_caps(5, 20, 10), (5, 5));
     }
 
     #[test]
@@ -1567,6 +1611,33 @@ mod tests {
         assert!(
             !header.contains('↑') && !header.contains('↓'),
             "header should not show upstream arrows without an upstream: {header}",
+        );
+    }
+
+    #[test]
+    fn log_section_renders_above_file_list() {
+        // Files render at the bottom so the recent-commit log stays anchored
+        // directly under the header. As files appear and disappear during
+        // work, the log keeps its position instead of being shoved around by
+        // a file list that grows and shrinks beneath it.
+        let file = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let mut snap = snap_with(vec![file]);
+        snap.log = vec![log_entry("abc1234", "recent commit", 30)];
+        let mut o = opts();
+        o.log_lines = 5;
+        let out = strip_ansi(&render(&snap, &o));
+        let lines: Vec<&str> = out.lines().collect();
+        let log_idx = lines
+            .iter()
+            .position(|l| l.contains("abc1234"))
+            .expect("log row should appear");
+        let file_idx = lines
+            .iter()
+            .position(|l| l.contains("src/foo.rs"))
+            .expect("file row should appear");
+        assert!(
+            log_idx < file_idx,
+            "log section should render above the file list so files sit at the bottom:\n{out}",
         );
     }
 

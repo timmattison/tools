@@ -458,3 +458,77 @@ fn width_offset_flag_narrows_render() {
         "--width-offset 30 should narrow render enough to truncate path: {offset_str}",
     );
 }
+
+#[test]
+fn lines_env_under_watch_wrapper_keeps_output_within_content_area() {
+    // viddy/watch capture stdout (no TTY) and export the terminal height via
+    // LINES. But the wrapper paints its own chrome and only hands the command
+    // a smaller content area: viddy 1.3.0 reserves 4 rows (measured — a
+    // 30-row terminal shows 26 lines of output). gsw must fit its whole frame
+    // within LINES minus that chrome, or the file list — which renders at the
+    // bottom — scrolls off the fold and the user can't see their own changes.
+    const VIDDY_CHROME_ROWS: usize = 4;
+    let dir = setup_repo();
+    // Many changed files so the frame *wants* far more than a short terminal.
+    for i in 0..40 {
+        fs::write(dir.path().join(format!("file_{i:02}.txt")), "x\n").unwrap();
+    }
+    let lines = 15_usize;
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .env("COLUMNS", "80")
+        .env("LINES", lines.to_string())
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let count = raw.lines().count();
+    let budget = lines - VIDDY_CHROME_ROWS;
+    assert!(
+        count <= budget,
+        "gsw emitted {count} lines but viddy's content area is only LINES-{VIDDY_CHROME_ROWS}={budget}; the bottom file list would be clipped:\n{raw}",
+    );
+}
+
+#[test]
+fn short_file_list_renders_in_full_in_a_short_terminal() {
+    // The user's report: with a couple of changed files and a long commit
+    // log in a short terminal, the file list at the bottom was squeezed to a
+    // single row with a "+N more file" footer (and clipped off-screen). Files
+    // are the primary content, so a short list must render in full and the
+    // log must yield rows — no truncation footer, every file visible.
+    let dir = setup_repo();
+    // Build a long log so it competes hard for rows.
+    for i in 0..12 {
+        fs::write(dir.path().join("a.txt"), format!("rev {i}\n")).unwrap();
+        run_git(dir.path(), &["add", "a.txt"]);
+        run_git(dir.path(), &["commit", "-q", "-m", &format!("log-subject-{i}")]);
+    }
+    // Exactly two changed files.
+    fs::write(dir.path().join("f1.txt"), "one\n").unwrap();
+    fs::write(dir.path().join("f2.txt"), "two\n").unwrap();
+    run_git(dir.path(), &["add", "f1.txt", "f2.txt"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .env("COLUMNS", "80")
+        .env("LINES", "12")
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(output.status.success(), "gsw exited non-zero");
+    let raw = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        raw.contains("f1.txt") && raw.contains("f2.txt"),
+        "both files should be visible, not squeezed behind a '+N more' footer:\n{raw}",
+    );
+    assert!(
+        !raw.contains("more file"),
+        "a 2-file list must not show a truncation footer in a 12-row terminal:\n{raw}",
+    );
+}
