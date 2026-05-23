@@ -103,6 +103,38 @@ fn effective_terminal_width(
         .max(1)
 }
 
+/// Rows a watch-like wrapper paints for its own chrome (title line, and on
+/// `watch(1)` a blank separator beneath it) before our output begins. We
+/// reserve these out of the wrapper-reported `LINES` so the bottom of our
+/// frame — the file list — isn't clipped below the fold. Reserving one row
+/// too many under wrappers with a single-line header (e.g. viddy) only leaves
+/// a harmless blank row; reserving too few clips real content, so we round up.
+const WRAPPER_TITLE_ROWS: usize = 2;
+
+/// Height assumed when no terminal-size signal is available at all (stdout is
+/// piped and the wrapper didn't export `LINES`). Matches the classic VT100
+/// default and the width fallback's spirit.
+const DEFAULT_TERMINAL_HEIGHT: usize = 24;
+
+/// Decide how many terminal rows gsw should fit its output within.
+///
+/// Mirrors [`effective_terminal_width`]: when stdout is captured by a
+/// watch-like wrapper (not a TTY) that exports `LINES`, trust that height —
+/// minus [`WRAPPER_TITLE_ROWS`] for the wrapper's own header — because
+/// `terminal_size()` can't see through the pipe. With a direct TTY, use the
+/// queried height. With no signal at all, fall back to
+/// [`DEFAULT_TERMINAL_HEIGHT`].
+fn effective_terminal_height(
+    tty_height: Option<usize>,
+    lines_env: Option<usize>,
+    stdout_is_tty: bool,
+) -> usize {
+    match (stdout_is_tty, lines_env) {
+        (false, Some(lines)) => lines.saturating_sub(WRAPPER_TITLE_ROWS).max(1),
+        _ => tty_height.unwrap_or(DEFAULT_TERMINAL_HEIGHT),
+    }
+}
+
 /// Should `colored::control::set_override(true)` be called?
 ///
 /// True only when output is captured by a watch-like wrapper (stdout is not
@@ -229,9 +261,11 @@ fn main() -> Result<()> {
 
     snapshot.upstream = detect_upstream();
 
-    let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), h.0));
+    let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
     let tty_width = tty_size.map(|(w, _)| w);
-    let terminal_height = tty_size.map_or(24, |(_, h)| h);
+    let tty_height = tty_size.map(|(_, h)| h);
+    let lines_env: Option<usize> = std::env::var("LINES").ok().and_then(|s| s.parse().ok());
+    let terminal_height = effective_terminal_height(tty_height, lines_env, stdout_is_tty);
     let terminal_width =
         effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
 
@@ -247,11 +281,11 @@ fn main() -> Result<()> {
     // squeezed to one or two rows because `--log-lines` defaults to 20.
     let file_count = snapshot.files.len();
     let log_count = snapshot.log.len();
-    let header_chrome: u16 = 2;
-    let inter_chrome: u16 = if file_count > 0 && log_count > 0 { 1 } else { 0 };
-    let footer_chrome: u16 = if file_count > 0 { 1 } else { 0 };
+    let header_chrome: usize = 2;
+    let inter_chrome: usize = if file_count > 0 && log_count > 0 { 1 } else { 0 };
+    let footer_chrome: usize = if file_count > 0 { 1 } else { 0 };
     let chrome = header_chrome + inter_chrome + footer_chrome;
-    let available_rows = usize::from(terminal_height.saturating_sub(chrome)).max(1);
+    let available_rows = terminal_height.saturating_sub(chrome).max(1);
     let (planned_file_cap, planned_log_cap) =
         plan_section_caps(file_count, log_count, available_rows);
 
@@ -451,6 +485,41 @@ mod tests {
     fn width_uses_columns_minus_one_when_stdout_not_tty() {
         // viddy case: pipes captured, COLUMNS exported.
         assert_eq!(effective_terminal_width(None, Some(120), false, 0), 119);
+    }
+
+    #[test]
+    fn height_uses_lines_env_minus_wrapper_chrome_when_stdout_not_tty() {
+        // viddy/watch case: stdout piped, LINES exported. We budget to the
+        // wrapper's height minus its title chrome so the bottom file list
+        // isn't clipped below the wrapper's header.
+        assert_eq!(
+            effective_terminal_height(None, Some(40), false),
+            40 - WRAPPER_TITLE_ROWS,
+        );
+    }
+
+    #[test]
+    fn height_uses_tty_height_when_stdout_is_tty() {
+        // Interactive: trust the ioctl-reported height and ignore any stale
+        // inherited LINES value.
+        assert_eq!(effective_terminal_height(Some(50), Some(9999), true), 50);
+    }
+
+    #[test]
+    fn height_falls_back_to_default_when_no_signal() {
+        // Piped with no LINES exported: nothing to go on, so assume the
+        // classic 24-row terminal.
+        assert_eq!(
+            effective_terminal_height(None, None, false),
+            DEFAULT_TERMINAL_HEIGHT,
+        );
+    }
+
+    #[test]
+    fn height_never_collapses_to_zero_under_tiny_wrapper() {
+        // A pathologically short wrapper height must still leave at least one
+        // row rather than underflowing to zero.
+        assert_eq!(effective_terminal_height(None, Some(1), false), 1);
     }
 
     #[test]
