@@ -458,3 +458,36 @@ fn width_offset_flag_narrows_render() {
         "--width-offset 30 should narrow render enough to truncate path: {offset_str}",
     );
 }
+
+#[test]
+fn lines_env_under_watch_wrapper_keeps_output_within_terminal_height() {
+    // viddy/watch capture stdout (no TTY) and export the terminal height via
+    // LINES. gsw must fit its whole frame within that height — otherwise the
+    // file list, which renders at the bottom, scrolls off the fold and the
+    // user can't see their own changes. Without honoring LINES, gsw falls
+    // back to a 24-row budget and overflows a short terminal.
+    let dir = setup_repo();
+    // Many changed files so the frame *wants* far more than a short terminal.
+    for i in 0..40 {
+        fs::write(dir.path().join(format!("file_{i:02}.txt")), "x\n").unwrap();
+    }
+    let lines = 15usize;
+    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+        .arg("--no-color")
+        .env("COLUMNS", "80")
+        .env("LINES", lines.to_string())
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(
+        output.status.success(),
+        "gsw exited non-zero: stderr = {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let count = raw.lines().count();
+    assert!(
+        count <= lines,
+        "gsw emitted {count} lines but LINES={lines}; bottom rows (the file list) would be clipped:\n{raw}",
+    );
+}
