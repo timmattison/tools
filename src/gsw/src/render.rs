@@ -1571,6 +1571,33 @@ mod tests {
     }
 
     #[test]
+    fn log_section_renders_above_file_list() {
+        // Files render at the bottom so the recent-commit log stays anchored
+        // directly under the header. As files appear and disappear during
+        // work, the log keeps its position instead of being shoved around by
+        // a file list that grows and shrinks beneath it.
+        let file = entry("src/foo.rs", FileStatus::Modified, true, 1, 0);
+        let mut snap = snap_with(vec![file]);
+        snap.log = vec![log_entry("abc1234", "recent commit", 30)];
+        let mut o = opts();
+        o.log_lines = 5;
+        let out = strip_ansi(&render(&snap, &o));
+        let lines: Vec<&str> = out.lines().collect();
+        let log_idx = lines
+            .iter()
+            .position(|l| l.contains("abc1234"))
+            .expect("log row should appear");
+        let file_idx = lines
+            .iter()
+            .position(|l| l.contains("src/foo.rs"))
+            .expect("file row should appear");
+        assert!(
+            log_idx < file_idx,
+            "log section should render above the file list so files sit at the bottom:\n{out}",
+        );
+    }
+
+    #[test]
     fn log_section_has_separator_before_entries() {
         let mut snap = snap_with(vec![]);
         snap.log = vec![log_entry("abc1234", "first", 0)];
