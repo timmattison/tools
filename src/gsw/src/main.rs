@@ -281,9 +281,12 @@ fn main() -> Result<()> {
     //   post-header separator                                            1
     //   inter-section separator (only when both sections render)         0 or 1
     //   reserved row for a `+N more files` footer (only when files > 0)  0 or 1
-    // Whatever's left is split proportionally — so a short file list
-    // paired with a long log gets a fair share rather than being
-    // squeezed to one or two rows because `--log-lines` defaults to 20.
+    // Whatever's left goes to the file list first — it's the primary
+    // content and renders at the bottom, so it must stay fully on-screen
+    // rather than being squeezed by a long log (`--log-lines` defaults to
+    // 20). The log takes the remaining rows; only when the file list is
+    // itself truncated does a floor claw rows back to it. See
+    // `plan_section_caps`.
     let file_count = snapshot.files.len();
     let log_count = snapshot.log.len();
     let header_chrome: usize = 2;
