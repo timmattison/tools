@@ -107,28 +107,35 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         .max(1);
     let path_width = compute_path_width(opts);
 
-    for entry in snapshot.files.iter().take(display_count) {
-        lines.push(render_row(entry, opts, max_change, path_width));
-    }
-
-    let hidden = snapshot.files.len().saturating_sub(display_count);
-    if hidden > 0 {
-        lines.push(
-            format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
-                .dimmed()
-                .to_string(),
-        );
-    }
-
-    if opts.log_lines > 0 && !snapshot.log.is_empty() {
-        // When there are no file rows above us, the post-header separator
-        // already sits directly above the log section; adding another would
-        // produce a double rule with nothing between them.
-        if !snapshot.files.is_empty() {
-            lines.push(render_separator(header_width));
-        }
+    // The recent-commit log renders first, directly under the header, so it
+    // stays anchored in place. The file list renders at the bottom: as files
+    // appear and disappear during work, they grow and shrink downward without
+    // shoving the log around.
+    let log_rendered = opts.log_lines > 0 && !snapshot.log.is_empty();
+    if log_rendered {
         for entry in snapshot.log.iter().take(opts.log_lines) {
             lines.push(render_log_row(entry, opts.terminal_width, opts.truecolor));
+        }
+    }
+
+    if !snapshot.files.is_empty() {
+        // Separate the file list from the log above it. When there's no log,
+        // the post-header separator already sits directly above the files, so
+        // adding another would produce a double rule with nothing between them.
+        if log_rendered {
+            lines.push(render_separator(header_width));
+        }
+        for entry in snapshot.files.iter().take(display_count) {
+            lines.push(render_row(entry, opts, max_change, path_width));
+        }
+
+        let hidden = snapshot.files.len().saturating_sub(display_count);
+        if hidden > 0 {
+            lines.push(
+                format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
+                    .dimmed()
+                    .to_string(),
+            );
         }
     }
 
