@@ -1,0 +1,12 @@
+{
+  "name": "buffalo-tools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Tooling-only package: hosts the husky-managed git hooks for this Rust/Go monorepo.",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}
