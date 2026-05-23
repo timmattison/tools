@@ -28,8 +28,8 @@ futures = "0.3"
 # AWS SDK
 aws-config = "1.8"
 aws-credential-types = "1.2"
-aws-sdk-s3 = "1"
-aws-sdk-sts = "1.80"
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+aws-sdk-sts = { version = "1.80", default-features = false, features = ["sigv4a", "default-https-client", "rt-tokio"] }
 
 # File system
 walkdir = "2.5"
@@ -40,7 +40,7 @@ notify = "8.2"
 
 # Git
 git2 = "0.20"
-gix = "0.78"
+gix = "0.83"
 
 # Hashing
 blake3 = "1.8"
