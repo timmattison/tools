@@ -1239,6 +1239,29 @@ mod tests {
     }
 
     #[test]
+    fn plan_section_caps_shows_all_files_before_flooring_log() {
+        // The file list is the primary content and now renders at the bottom,
+        // so a short list must render in full rather than being squeezed to a
+        // single row by the log's floor. With 2 files competing against a
+        // 12-commit log for 6 rows, both files show and the log takes the
+        // remaining 4 rows — the user is never "limited to one file".
+        assert_eq!(plan_section_caps(2, 12, 6), (2, 4));
+    }
+
+    #[test]
+    fn plan_section_caps_does_not_squeeze_short_file_list_for_log_floor() {
+        // A 3-file list against a long log in a tight 8-row budget: all three
+        // files must show. The log yields rows to the file list because the
+        // files fit; the floor only protects the log when files genuinely
+        // can't all fit (see the "files dominate" case below).
+        let (f, _l) = plan_section_caps(3, 50, 8);
+        assert_eq!(
+            f, 3,
+            "all 3 files should render; the log floor must not steal rows from a short file list",
+        );
+    }
+
+    #[test]
     fn plan_section_caps_returns_full_demand_when_room_is_plenty() {
         // No contention: 5 files + 20 log rows easily fit in 100 rows.
         assert_eq!(plan_section_caps(5, 20, 100), (5, 20));
