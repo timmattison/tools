@@ -103,13 +103,18 @@ fn effective_terminal_width(
         .max(1)
 }
 
-/// Rows a watch-like wrapper paints for its own chrome (title line, and on
-/// `watch(1)` a blank separator beneath it) before our output begins. We
-/// reserve these out of the wrapper-reported `LINES` so the bottom of our
-/// frame — the file list — isn't clipped below the fold. Reserving one row
-/// too many under wrappers with a single-line header (e.g. viddy) only leaves
-/// a harmless blank row; reserving too few clips real content, so we round up.
-const WRAPPER_TITLE_ROWS: usize = 2;
+/// Rows a watch-like wrapper paints for its own chrome (header, status/help
+/// bar, surrounding padding) before and after our output. The wrapper exports
+/// the *full* terminal height via `LINES` but only hands the command a smaller
+/// content area, so we reserve these rows or the bottom of our frame — the
+/// file list — gets clipped below the fold.
+///
+/// Measured empirically for viddy 1.3.0 (gsw's primary wrapper, per Cargo.toml):
+/// a 30-row terminal shows exactly 26 lines of command output, i.e. 4 rows of
+/// chrome, and this holds constant across terminal heights (20→16, 40→36).
+/// `watch(1)` uses fewer (~2); reserving the larger value only leaves a couple
+/// of harmless blank rows there, whereas reserving too few clips real content.
+const WRAPPER_CHROME_ROWS: usize = 4;
 
 /// Height assumed when no terminal-size signal is available at all (stdout is
 /// piped and the wrapper didn't export `LINES`). Matches the classic VT100
@@ -120,7 +125,7 @@ const DEFAULT_TERMINAL_HEIGHT: usize = 24;
 ///
 /// Mirrors [`effective_terminal_width`]: when stdout is captured by a
 /// watch-like wrapper (not a TTY) that exports `LINES`, trust that height —
-/// minus [`WRAPPER_TITLE_ROWS`] for the wrapper's own header — because
+/// minus [`WRAPPER_CHROME_ROWS`] for the wrapper's own header — because
 /// `terminal_size()` can't see through the pipe. With a direct TTY, use the
 /// queried height. With no signal at all, fall back to
 /// [`DEFAULT_TERMINAL_HEIGHT`].
@@ -130,7 +135,7 @@ fn effective_terminal_height(
     stdout_is_tty: bool,
 ) -> usize {
     match (stdout_is_tty, lines_env) {
-        (false, Some(lines)) => lines.saturating_sub(WRAPPER_TITLE_ROWS).max(1),
+        (false, Some(lines)) => lines.saturating_sub(WRAPPER_CHROME_ROWS).max(1),
         _ => tty_height.unwrap_or(DEFAULT_TERMINAL_HEIGHT),
     }
 }
@@ -494,7 +499,7 @@ mod tests {
         // isn't clipped below the wrapper's header.
         assert_eq!(
             effective_terminal_height(None, Some(40), false),
-            40 - WRAPPER_TITLE_ROWS,
+            40 - WRAPPER_CHROME_ROWS,
         );
     }
 
