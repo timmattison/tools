@@ -460,12 +460,14 @@ fn width_offset_flag_narrows_render() {
 }
 
 #[test]
-fn lines_env_under_watch_wrapper_keeps_output_within_terminal_height() {
+fn lines_env_under_watch_wrapper_keeps_output_within_content_area() {
     // viddy/watch capture stdout (no TTY) and export the terminal height via
-    // LINES. gsw must fit its whole frame within that height — otherwise the
-    // file list, which renders at the bottom, scrolls off the fold and the
-    // user can't see their own changes. Without honoring LINES, gsw falls
-    // back to a 24-row budget and overflows a short terminal.
+    // LINES. But the wrapper paints its own chrome and only hands the command
+    // a smaller content area: viddy 1.3.0 reserves 4 rows (measured — a
+    // 30-row terminal shows 26 lines of output). gsw must fit its whole frame
+    // within LINES minus that chrome, or the file list — which renders at the
+    // bottom — scrolls off the fold and the user can't see their own changes.
+    const VIDDY_CHROME_ROWS: usize = 4;
     let dir = setup_repo();
     // Many changed files so the frame *wants* far more than a short terminal.
     for i in 0..40 {
@@ -486,9 +488,10 @@ fn lines_env_under_watch_wrapper_keeps_output_within_terminal_height() {
     );
     let raw = String::from_utf8_lossy(&output.stdout);
     let count = raw.lines().count();
+    let budget = lines - VIDDY_CHROME_ROWS;
     assert!(
-        count <= lines,
-        "gsw emitted {count} lines but LINES={lines}; bottom rows (the file list) would be clipped:\n{raw}",
+        count <= budget,
+        "gsw emitted {count} lines but viddy's content area is only LINES-{VIDDY_CHROME_ROWS}={budget}; the bottom file list would be clipped:\n{raw}",
     );
 }
 
