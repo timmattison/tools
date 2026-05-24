@@ -155,6 +155,7 @@ fn main() -> Result<()> {
         display_image_from_stdin(&args)?;
     } else if !args.files.is_empty() {
         for file_path in &args.files {
+            ensure_file_exists(file_path)?;
             if is_video_file(file_path) {
                 display_video_from_file(file_path, &args)?;
             } else if is_image_file(file_path) {
@@ -231,6 +232,34 @@ fn validate_environment() -> Result<()> {
     // Environment validation that applies to all file types
     // tmux check moved to validate_terminal_for_graphics() since it only affects image/video display
     Ok(())
+}
+
+/// Verify that a path the user asked us to display actually points at a readable
+/// file before we hand it off to a decoder or to `ffprobe`.
+///
+/// Without this check a missing path is routed by extension to whichever handler
+/// matches — and for video files that means `ffprobe`, which we invoke with
+/// `-v error`. A non-existent file then surfaces as a cryptic
+/// "ffprobe failed to get video dimensions" instead of a plain "file not found".
+/// Checking here gives every file type the same clear, actionable error.
+fn ensure_file_exists(file_path: &Path) -> Result<()> {
+    match fs::metadata(file_path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                anyhow::bail!(
+                    "{} is a directory, not a file",
+                    file_path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("File not found: {}", file_path.display());
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!("Failed to access file: {}", file_path.display())
+        }),
+    }
 }
 
 fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
@@ -1102,8 +1131,10 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
     // Use ffprobe to get video dimensions
     let output = std::process::Command::new("ffprobe")
         .args([
+            // `error` (not `quiet`) so a genuinely unprobeable file still emits a
+            // real diagnostic on stderr instead of an empty failure message.
             "-v",
-            "quiet",
+            "error",
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -1173,8 +1204,10 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
     // order regardless of the requested order, so position alone is ambiguous.
     let output = std::process::Command::new("ffprobe")
         .args([
+            // `error` (not `quiet`) so a genuinely unprobeable file still emits a
+            // real diagnostic on stderr instead of an empty failure message.
             "-v",
-            "quiet",
+            "error",
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -1256,8 +1289,10 @@ fn get_video_duration(file_path: &Path) -> Result<f64> {
     // Use ffprobe to get video duration in seconds
     let output = std::process::Command::new("ffprobe")
         .args([
+            // `error` (not `quiet`) so a genuinely unprobeable file still emits a
+            // real diagnostic on stderr instead of an empty failure message.
             "-v",
-            "quiet",
+            "error",
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -2975,5 +3010,57 @@ not_a_number  1 /bin/bash
         // r_frame_rate rather than the hard-coded default.
         let probe = "r_frame_rate=30/1\navg_frame_rate=0/0\n";
         assert_eq!(parse_video_fps(probe), 30.0);
+    }
+
+    // =========================================================================
+    // Tests for ensure_file_exists
+    // =========================================================================
+
+    /// Build a path that is guaranteed not to exist, keyed on pid + nanos so
+    /// concurrent test runs never collide on it (see CLAUDE.md parallel-safety).
+    fn nonexistent_path() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "ic-does-not-exist-{}-{nanos}.mp4",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn ensure_file_exists_errors_on_missing_file() {
+        let missing = nonexistent_path();
+        let err = ensure_file_exists(&missing).expect_err("missing file should error");
+        let message = err.to_string();
+        assert!(
+            message.contains("File not found"),
+            "error should clearly say the file was not found, got: {message}"
+        );
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "error should name the missing path, got: {message}"
+        );
+    }
+
+    #[test]
+    fn ensure_file_exists_errors_on_directory() {
+        // A directory exists but cannot be displayed as a file. temp_dir() is
+        // always present, so this is a stable, parallel-safe directory to test.
+        let dir = std::env::temp_dir();
+        let err = ensure_file_exists(&dir).expect_err("directory should error");
+        let message = err.to_string();
+        assert!(
+            message.contains("directory"),
+            "error should explain the path is a directory, got: {message}"
+        );
+    }
+
+    #[test]
+    fn ensure_file_exists_accepts_regular_file() {
+        // The running test binary is a regular file that is guaranteed to exist.
+        let real_file = std::env::current_exe().expect("current exe path");
+        assert!(ensure_file_exists(&real_file).is_ok());
     }
 }
