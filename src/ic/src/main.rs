@@ -155,6 +155,7 @@ fn main() -> Result<()> {
         display_image_from_stdin(&args)?;
     } else if !args.files.is_empty() {
         for file_path in &args.files {
+            ensure_file_exists(file_path)?;
             if is_video_file(file_path) {
                 display_video_from_file(file_path, &args)?;
             } else if is_image_file(file_path) {
@@ -241,8 +242,24 @@ fn validate_environment() -> Result<()> {
 /// `-v error`. A non-existent file then surfaces as a cryptic
 /// "ffprobe failed to get video dimensions" instead of a plain "file not found".
 /// Checking here gives every file type the same clear, actionable error.
-fn ensure_file_exists(_file_path: &Path) -> Result<()> {
-    Ok(())
+fn ensure_file_exists(file_path: &Path) -> Result<()> {
+    match fs::metadata(file_path) {
+        Ok(metadata) => {
+            if metadata.is_dir() {
+                anyhow::bail!(
+                    "{} is a directory, not a file",
+                    file_path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("File not found: {}", file_path.display());
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!("Failed to access file: {}", file_path.display())
+        }),
+    }
 }
 
 fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
@@ -1114,8 +1131,10 @@ fn get_video_dimensions(file_path: &Path) -> Result<(u32, u32)> {
     // Use ffprobe to get video dimensions
     let output = std::process::Command::new("ffprobe")
         .args([
+            // `error` (not `quiet`) so a genuinely unprobeable file still emits a
+            // real diagnostic on stderr instead of an empty failure message.
             "-v",
-            "quiet",
+            "error",
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -1185,8 +1204,10 @@ fn get_video_fps(file_path: &Path) -> Result<f64> {
     // order regardless of the requested order, so position alone is ambiguous.
     let output = std::process::Command::new("ffprobe")
         .args([
+            // `error` (not `quiet`) so a genuinely unprobeable file still emits a
+            // real diagnostic on stderr instead of an empty failure message.
             "-v",
-            "quiet",
+            "error",
             "-select_streams",
             "v:0",
             "-show_entries",
@@ -1268,8 +1289,10 @@ fn get_video_duration(file_path: &Path) -> Result<f64> {
     // Use ffprobe to get video duration in seconds
     let output = std::process::Command::new("ffprobe")
         .args([
+            // `error` (not `quiet`) so a genuinely unprobeable file still emits a
+            // real diagnostic on stderr instead of an empty failure message.
             "-v",
-            "quiet",
+            "error",
             "-select_streams",
             "v:0",
             "-show_entries",
