@@ -1241,7 +1241,9 @@ Sometimes you don't want to go back to where a session started — you want to b
 crap --here 57570685-2d64-4431-8ab6-c021a12fa1af   # resume it right here
 ```
 
-Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified. When the session ends, `crap` removes the symlink it created.
+Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified.
+
+The symlink is only needed while Claude reads the transcript at startup. A background watcher removes it the moment the forked session file appears — typically within a second — so it doesn't linger for the whole session, and a final `rm` after the session ends serves as a safety net.
 
 A couple of things to know:
 
@@ -1289,16 +1291,34 @@ function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
     if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
-        local __crap_rest __crap_session __crap_link
+        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
         __crap_rest=${__crap_out#*$'\n'}
         __crap_session=${__crap_rest%%$'\n'*}
         __crap_link=${__crap_rest#*$'\n'}
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            __crap_folder=$(dirname -- "$__crap_link")
+            __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
+            (
+                __crap_i=0
+                while [ "$__crap_i" -lt 600 ]; do
+                    if [ "$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')" -gt "$__crap_n0" ]; then
+                        rm -f -- "$__crap_link"
+                        exit 0
+                    fi
+                    __crap_i=$((__crap_i + 1))
+                    sleep 0.1
+                done
+            ) &
+            __crap_watcher=$!
+            disown 2>/dev/null
+        fi
         if command -v clauded >/dev/null 2>&1; then
             eval 'clauded --resume "$__crap_session" --fork-session'
         else
             claude --resume "$__crap_session" --fork-session
         fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
         fi
         return
@@ -1315,7 +1335,7 @@ function crap() {
 }
 ```
 
-The binary speaks one of two output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already symlinked the session into the current directory's project folder — so the function stays put, resumes with `--fork-session`, and finally removes that symlink (unless the link field is `__CRAP_NO_LINK__`, meaning none was needed). Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+The binary speaks one of two output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already symlinked the session into the current directory's project folder — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes the symlink as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
 
 ### Exit Codes
 
