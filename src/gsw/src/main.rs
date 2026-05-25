@@ -404,6 +404,11 @@ impl Drop for IndexSnapshot {
 /// Returns a guard that deletes the snapshot on drop, or `None` when there's no
 /// index to copy yet (e.g. a freshly `git init`'d repo) — in which case there's
 /// nothing to contend over anyway.
+///
+/// Cost: this copies the whole index once per gsw invocation, so under a tight
+/// `viddy gsw` loop a large repo re-copies its (potentially multi-MB) index
+/// every tick. That's a deliberate trade — a cheap, bounded copy in exchange
+/// for never racing the real index lock — but it is not free.
 fn redirect_index_to_snapshot() -> Option<IndexSnapshot> {
     let real_index = run_git(&["rev-parse", "--path-format=absolute", "--git-path", "index"]).ok()?;
     let real_index = PathBuf::from(real_index.trim());

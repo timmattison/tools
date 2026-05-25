@@ -84,7 +84,9 @@ fn does_not_rewrite_the_index_so_a_concurrent_rebase_keeps_the_lock() {
     assert_eq!(
         before, after,
         "gsw rewrote .git/index, which means it took the index lock; that races \
-         with a concurrent rebase. gsw must run git with GIT_OPTIONAL_LOCKS=0.",
+         with a concurrent rebase. GIT_OPTIONAL_LOCKS=0 silences `git status` but \
+         not `git diff`, so gsw must redirect git at a private index snapshot via \
+         GIT_INDEX_FILE and leave the repo's real .git/index untouched.",
     );
 }
 
