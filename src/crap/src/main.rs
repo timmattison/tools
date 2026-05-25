@@ -367,7 +367,11 @@ const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
     allow(dead_code, reason = "called by the --here path in main (Cycle 4)")
 )]
 fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> String {
-    String::new()
+    let link = match link_to_cleanup {
+        Some(path) => path.display().to_string(),
+        None => NO_LINK_SENTINEL.to_string(),
+    };
+    format!("{HERE_SENTINEL}\n{session_id}\n{link}\n")
 }
 
 /// The shell function installed by `crap --shell-setup`.
