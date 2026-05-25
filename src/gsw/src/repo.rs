@@ -41,6 +41,19 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
+/// Author/commit time of HEAD as unix seconds, or `None` (no commits, etc.).
+pub fn head_commit_secs(repo: &gix::Repository) -> Option<i64> {
+    let _ = repo;
+    None // STUB
+}
+
+/// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`.
+/// Empty when `n == 0` or there are no commits.
+pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)> {
+    let _ = (repo, n);
+    Vec::new() // STUB
+}
+
 /// Count commits reachable from HEAD but not from `base`
 /// (`git rev-list --count base..HEAD`). Returns 0 on any failure.
 pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
@@ -165,5 +178,35 @@ mod tests {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
         assert_eq!(super::commits_ahead(&repo, "main"), 0);
+    }
+
+    #[test]
+    fn head_commit_secs_is_some_for_a_repo_with_a_commit() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        let secs = super::head_commit_secs(&repo).expect("a commit exists");
+        assert!(secs > 1_000_000_000, "looks like a unix timestamp: {secs}");
+    }
+
+    #[test]
+    fn recent_log_returns_newest_first_with_summaries() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("b.txt"), "two\n").unwrap();
+        git(p, &["add", "b.txt"]);
+        git(p, &["commit", "-q", "-m", "second commit"]);
+        let repo = open_at(p).unwrap();
+        let log = super::recent_log(&repo, 10);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].2, "second commit");
+        assert_eq!(log[1].2, "initial");
+        assert!(!log[0].0.is_empty(), "short hash present");
+    }
+
+    #[test]
+    fn recent_log_zero_is_empty() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert!(super::recent_log(&repo, 0).is_empty());
     }
 }
