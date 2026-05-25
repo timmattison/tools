@@ -371,6 +371,41 @@ fn pid_is_alive(pid: u32) -> bool {
         .contains("claude")
 }
 
+/// Why `crap --status` could not report a session's state.
+#[derive(Debug)]
+enum StatusError {
+    /// The session id was not a valid UUID.
+    InvalidSessionId,
+    /// No `<session_id>.jsonl` file was found under any project directory.
+    SessionNotFound,
+}
+
+/// Resolves the one-line status `crap --status <id>` prints to stdout.
+///
+/// A live session takes precedence: while a `claude` process is attached, its
+/// own reported status (`busy`/`idle`) is more authoritative than anything
+/// inferred from the transcript, so the line is `"<status> (live, pid <pid>)"`.
+/// Otherwise the transcript is classified and the [`SessionState`] token is
+/// returned. `is_alive` is injected so liveness can be tested without spawning
+/// processes.
+///
+/// # Errors
+///
+/// Returns [`StatusError::InvalidSessionId`] for a malformed id, or
+/// [`StatusError::SessionNotFound`] when the id is not live and no transcript
+/// exists for it.
+fn resolve_status<F>(
+    projects_dir: &Path,
+    sessions_dir: &Path,
+    session_id: &str,
+    is_alive: F,
+) -> Result<String, StatusError>
+where
+    F: Fn(u32) -> bool,
+{
+    todo!()
+}
+
 /// Formats the binary's success output for the shell function to read back.
 ///
 /// The session id (a validated UUID) is emitted first, on its own line; the
@@ -1213,6 +1248,80 @@ mod tests {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("no-sessions-here");
         assert_eq!(find_live_session(&missing, "anything", |_| true), None);
+    }
+
+    /// The session id recorded in [`SESSION_JSON`].
+    const LIVE_ID: &str = "3eafa9f8-9d1f-43cf-b417-eb9efcb8ed4d";
+
+    /// Writes a transcript whose single assistant turn ended cleanly (so the
+    /// classifier reports `waiting-for-user`) into a project subfolder.
+    fn write_waiting_transcript(projects: &Path, session_id: &str) {
+        let proj = projects.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(
+            proj.join(format!("{session_id}.jsonl")),
+            assistant_line(block("text"), serde_json::json!("end_turn")),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_status_rejects_invalid_id() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_status(dir.path(), dir.path(), "../escape", |_| true),
+            Err(StatusError::InvalidSessionId)
+        ));
+    }
+
+    #[test]
+    fn resolve_status_errors_when_session_missing() {
+        let dir = tempdir().unwrap();
+        // Not live, and no transcript on disk.
+        assert!(matches!(
+            resolve_status(dir.path(), dir.path(), SAMPLE_ID, |_| false),
+            Err(StatusError::SessionNotFound)
+        ));
+    }
+
+    #[test]
+    fn resolve_status_reports_transcript_state_when_not_live() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        write_waiting_transcript(projects.path(), SAMPLE_ID);
+
+        assert_eq!(
+            resolve_status(projects.path(), sessions.path(), SAMPLE_ID, |_| false).unwrap(),
+            "waiting-for-user"
+        );
+    }
+
+    #[test]
+    fn resolve_status_reports_live_session_with_pid() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        // The live record's own status (busy) and pid are reported.
+        assert_eq!(
+            resolve_status(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041).unwrap(),
+            "busy (live, pid 17041)"
+        );
+    }
+
+    #[test]
+    fn resolve_status_prefers_live_session_over_transcript() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        // A transcript that would classify as waiting-for-user...
+        write_waiting_transcript(projects.path(), LIVE_ID);
+        // ...but the session is live, so the live status wins.
+        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        assert_eq!(
+            resolve_status(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041).unwrap(),
+            "busy (live, pid 17041)"
+        );
     }
 
     #[test]
