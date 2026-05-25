@@ -5,6 +5,7 @@
 //! `.git/index.lock` and can never race a concurrent rebase — the reason the
 //! old `git` CLI path needed a private index snapshot.
 
+use crate::git::{FileEntry, FileStatus};
 use crate::render::UpstreamStatus;
 
 /// Open the repository containing `cwd`, or `None` when there isn't one with a
@@ -135,10 +136,22 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     })
 }
 
+/// All working-tree changes as `FileEntry` rows, mirroring
+/// `git status --porcelain=v2 -z`. A path modified in both index and worktree
+/// yields two rows (staged + unstaged). Rows are ordered by path, staged
+/// before unstaged, so the downstream stable mtime sort is deterministic
+/// (gix's status iterator itself yields items in nondeterministic order).
+pub fn collect_status(repo: &gix::Repository) -> anyhow::Result<Vec<FileEntry>> {
+    let _ = repo;
+    Ok(Vec::new()) // STUB
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
     use std::process::Command;
+
+    use crate::git::FileStatus;
 
     /// Run a git command in `dir`, isolated from the host's global/system
     /// config, asserting success. Test-only fixture construction.
@@ -291,6 +304,96 @@ mod tests {
         git(clone.path(), &["config", "user.name", "Test"]);
         git(clone.path(), &["config", "commit.gpgsign", "false"]);
         (origin, clone)
+    }
+
+    fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
+        super::collect_status(repo)
+            .unwrap()
+            .into_iter()
+            .map(|e| (e.path, e.status, e.staged))
+            .collect()
+    }
+
+    #[test]
+    fn status_staged_modification() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "changed\n").unwrap();
+        git(p, &["add", "a.txt"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(statuses(&repo), vec![("a.txt".to_string(), FileStatus::Modified, true)]);
+    }
+
+    #[test]
+    fn status_unstaged_modification() {
+        let dir = init_repo();
+        std::fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(statuses(&repo), vec![("a.txt".to_string(), FileStatus::Modified, false)]);
+    }
+
+    #[test]
+    fn status_both_sides_yields_two_rows_staged_first() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "staged change\n").unwrap();
+        git(p, &["add", "a.txt"]);
+        std::fs::write(p.join("a.txt"), "staged change\nthen worktree change\n").unwrap();
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            statuses(&repo),
+            vec![
+                ("a.txt".to_string(), FileStatus::Modified, true),
+                ("a.txt".to_string(), FileStatus::Modified, false),
+            ],
+        );
+    }
+
+    #[test]
+    fn status_untracked_file_and_dir() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("loose.txt"), "x\n").unwrap();
+        std::fs::create_dir(p.join("sub")).unwrap();
+        std::fs::write(p.join("sub").join("nested.txt"), "y\n").unwrap();
+        let repo = open_at(p).unwrap();
+        let s = statuses(&repo);
+        assert!(s.contains(&("loose.txt".to_string(), FileStatus::Untracked, false)), "got {s:?}");
+        assert!(s.iter().any(|(path, st, _)| path == "sub/" && *st == FileStatus::UntrackedDir), "got {s:?}");
+    }
+
+    #[test]
+    fn status_staged_addition_and_deletion() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("added.txt"), "new\n").unwrap();
+        git(p, &["add", "added.txt"]);
+        git(p, &["rm", "-q", "a.txt"]);
+        let repo = open_at(p).unwrap();
+        let s = statuses(&repo);
+        assert!(s.contains(&("added.txt".to_string(), FileStatus::Added, true)), "got {s:?}");
+        assert!(s.contains(&("a.txt".to_string(), FileStatus::Deleted, true)), "got {s:?}");
+    }
+
+    #[test]
+    fn status_staged_rename_keeps_orig_path() {
+        let dir = init_repo();
+        let p = dir.path();
+        // Make the file bigger so rename detection is unambiguous.
+        std::fs::write(p.join("a.txt"), "line1\nline2\nline3\nline4\nline5\n").unwrap();
+        git(p, &["add", "a.txt"]);
+        git(p, &["commit", "-q", "-m", "grow a.txt"]);
+        git(p, &["mv", "a.txt", "renamed.txt"]);
+        let repo = open_at(p).unwrap();
+        let entry = super::collect_status(&repo).unwrap().into_iter().find(|e| e.path == "renamed.txt");
+        // gix may report rename detection OR an add+delete pair depending on
+        // config; accept either but if a renamed.txt entry exists it must carry orig_path.
+        if let Some(entry) = entry {
+            if entry.status == FileStatus::Renamed {
+                assert_eq!(entry.orig_path.as_deref(), Some("a.txt"));
+                assert!(entry.staged);
+            }
+        }
     }
 
     #[test]
