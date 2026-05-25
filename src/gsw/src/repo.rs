@@ -41,17 +41,35 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
-/// Author/commit time of HEAD as unix seconds, or `None` (no commits, etc.).
+/// Committer timestamp of HEAD as unix seconds, or `None` (no commits, etc.).
+/// Matches `git log -1 --format=%ct` (committer date, not author date).
 pub fn head_commit_secs(repo: &gix::Repository) -> Option<i64> {
-    let _ = repo;
-    None // STUB
+    let commit = repo.head_commit().ok()?;
+    Some(commit.time().ok()?.seconds)
 }
 
 /// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`.
 /// Empty when `n == 0` or there are no commits.
 pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)> {
-    let _ = (repo, n);
-    Vec::new() // STUB
+    if n == 0 {
+        return Vec::new();
+    }
+    let Ok(head) = repo.head_commit() else {
+        return Vec::new();
+    };
+    let Ok(walk) = head.ancestors().all() else {
+        return Vec::new();
+    };
+    walk.take(n)
+        .filter_map(|info| {
+            let info = info.ok()?;
+            let commit = info.object().ok()?;
+            let hash = info.id().shorten_or_id().to_string();
+            let secs = commit.time().ok()?.seconds;
+            let summary = commit.message().ok()?.summary().to_string();
+            Some((hash, secs, summary))
+        })
+        .collect()
 }
 
 /// Count commits reachable from HEAD but not from `base`

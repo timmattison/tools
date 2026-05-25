@@ -232,7 +232,7 @@ fn main() -> Result<()> {
     let base = cli.base.unwrap_or_else(|| repo::resolve_base(&repo));
     let commits_ahead = repo::commits_ahead(&repo, &base);
 
-    let last_commit_age = last_commit_age();
+    let last_commit_age = last_commit_age(&repo);
 
     let status_raw = run_git(&["status", "--porcelain=v2", "-z"])?;
     let entries = parse_status(&status_raw);
@@ -261,7 +261,7 @@ fn main() -> Result<()> {
     );
 
     let log_lines = if cli.no_log { 0 } else { cli.log_lines };
-    snapshot.log = fetch_log(log_lines);
+    snapshot.log = fetch_log(&repo, log_lines);
 
     snapshot.upstream = detect_upstream();
 
@@ -501,49 +501,28 @@ fn detect_upstream() -> Option<UpstreamStatus> {
     })
 }
 
-/// Fetch the `n` most recent commits as (short-hash, age, subject) records.
+/// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
-/// Returns an empty list when `n == 0` or git fails (e.g. no commits yet).
-/// Uses `%h %ct %s` and splits on the first two spaces — the hash never
-/// contains spaces and `%ct` is a bare unix timestamp, so the splits are
-/// unambiguous. The subject keeps any internal spaces.
-fn fetch_log(n: usize) -> Vec<LogEntry> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let n_arg = format!("-n{n}");
-    let Ok(out) = run_git(&["log", &n_arg, "--pretty=format:%h %ct %s"]) else {
-        return Vec::new();
-    };
+/// Returns an empty list when `n == 0` or the repo has no commits.
+fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
     let now = SystemTime::now();
-    out.lines().filter_map(|line| parse_log_line(line, now)).collect()
+    repo::recent_log(repo, n)
+        .into_iter()
+        .map(|(hash, secs, subject)| {
+            let age = u64::try_from(secs)
+                .ok()
+                .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
+                .and_then(|when| now.duration_since(when).ok())
+                .unwrap_or(Duration::ZERO);
+            LogEntry { hash, subject, age }
+        })
+        .collect()
 }
 
-fn parse_log_line(line: &str, now: SystemTime) -> Option<LogEntry> {
-    if line.is_empty() {
-        return None;
-    }
-    let (hash, rest) = line.split_once(' ').unwrap_or((line, ""));
-    let (ct_str, subject) = rest.split_once(' ').unwrap_or((rest, ""));
-    let age = ct_str
-        .parse::<u64>()
-        .ok()
-        .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-        .and_then(|when| now.duration_since(when).ok())
-        .unwrap_or(Duration::ZERO);
-    Some(LogEntry {
-        hash: hash.to_string(),
-        subject: subject.to_string(),
-        age,
-    })
-}
-
-/// How long ago the current HEAD commit was authored, or `None` when that
-/// can't be determined (no commits yet, malformed git output, clock skew
-/// putting the commit in the future).
-fn last_commit_age() -> Option<Duration> {
-    let raw = run_git(&["log", "-1", "--format=%ct"]).ok()?;
-    let secs: u64 = raw.trim().parse().ok()?;
+/// How long ago HEAD was committed, or `None` when undeterminable.
+fn last_commit_age(repo: &gix::Repository) -> Option<Duration> {
+    let secs = repo::head_commit_secs(repo)?;
+    let secs = u64::try_from(secs).ok()?;
     let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
     SystemTime::now().duration_since(when).ok()
 }
@@ -691,22 +670,6 @@ mod tests {
     fn no_force_colors_when_no_color_env_set() {
         // Honor https://no-color.org even when under viddy.
         assert!(!should_force_colors(false, true, true));
-    }
-
-    #[test]
-    fn parse_log_line_keeps_entry_when_line_has_no_space() {
-        // Defensive: don't silently drop a log line just because it lacks
-        // the expected `%h SP %s` shape. Preserve the whole line as the hash
-        // with an empty subject so the row still surfaces.
-        let entry = parse_log_line("abc1234", SystemTime::now())
-            .expect("hash-only line should parse");
-        assert_eq!(entry.hash, "abc1234");
-        assert_eq!(entry.subject, "");
-    }
-
-    #[test]
-    fn parse_log_line_drops_empty_lines() {
-        assert!(parse_log_line("", SystemTime::now()).is_none());
     }
 
     #[test]
