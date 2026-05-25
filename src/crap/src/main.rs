@@ -441,6 +441,25 @@ mod tests {
     }
 
     #[test]
+    fn valid_session_id_requires_uuid_shape() {
+        // Anything that isn't a canonical 8-4-4-4-12 UUID is rejected, so a
+        // typo'd id fails fast and shell metacharacters never reach the binary.
+        assert!(!is_valid_session_id("not-a-uuid"));
+        assert!(!is_valid_session_id("4733ee2a-1ad6-4619-a01a-11840b8e190")); // too short
+        assert!(!is_valid_session_id("4733ee2a-1ad6-4619-a01a-11840b8e19011")); // too long
+        assert!(!is_valid_session_id("4733ee2a1ad64619a01a11840b8e1901")); // no hyphens
+        assert!(!is_valid_session_id("4733ee2g-1ad6-4619-a01a-11840b8e1901")); // 'g' not hex
+        assert!(!is_valid_session_id("4733ee2a-1ad6-4619-a01a-11840b8e1901 ; rm -rf ~"));
+        assert!(!is_valid_session_id("4733ee2a 1ad6 4619 a01a 11840b8e1901")); // spaces
+    }
+
+    #[test]
+    fn valid_session_id_accepts_uppercase_hex() {
+        // Hex is case-insensitive even though Claude writes lowercase ids.
+        assert!(is_valid_session_id("4733EE2A-1AD6-4619-A01A-11840B8E1901"));
+    }
+
+    #[test]
     fn find_session_file_locates_jsonl_in_project_subdir() {
         let dir = tempdir().unwrap();
         let projects = dir.path();
