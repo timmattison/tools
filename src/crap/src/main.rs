@@ -53,8 +53,12 @@ enum ResolveError {
 /// Rejects empty strings, anything containing a path separator (`/` or `\`),
 /// and any traversal sequence (`..`) so a crafted id cannot escape the
 /// projects directory.
-fn is_valid_session_id(_id: &str) -> bool {
-    todo!("implemented in the green commit")
+fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != ".."
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains("..")
 }
 
 /// Extracts the first non-empty `cwd` value from Claude session JSONL contents.
@@ -62,14 +66,37 @@ fn is_valid_session_id(_id: &str) -> bool {
 /// Each line is an independent JSON object; the early bookkeeping lines often
 /// carry `"cwd": null`, so the first line with a non-empty string `cwd` wins.
 /// Non-JSON lines are skipped. Returns `None` if no usable `cwd` is present.
-fn extract_cwd(_contents: &str) -> Option<String> {
-    todo!("implemented in the green commit")
+fn extract_cwd(contents: &str) -> Option<String> {
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if let Some(cwd) = value.get("cwd").and_then(serde_json::Value::as_str) {
+            if !cwd.is_empty() {
+                return Some(cwd.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Locates `<session_id>.jsonl` inside any immediate subdirectory of
 /// `projects_dir`, returning its full path if found.
-fn find_session_file(_projects_dir: &Path, _session_id: &str) -> Option<PathBuf> {
-    todo!("implemented in the green commit")
+fn find_session_file(projects_dir: &Path, session_id: &str) -> Option<PathBuf> {
+    let file_name = format!("{session_id}.jsonl");
+    for entry in std::fs::read_dir(projects_dir).ok()?.flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let candidate = entry.path().join(&file_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Resolves a session id to the existing directory the session ran in.
@@ -79,11 +106,18 @@ fn find_session_file(_projects_dir: &Path, _session_id: &str) -> Option<PathBuf>
 /// Returns a [`ResolveError`] when the id is invalid, no session file matches,
 /// the session records no working directory, or that directory no longer
 /// exists.
-fn resolve_session_dir(
-    _projects_dir: &Path,
-    _session_id: &str,
-) -> Result<PathBuf, ResolveError> {
-    todo!("implemented in the green commit")
+fn resolve_session_dir(projects_dir: &Path, session_id: &str) -> Result<PathBuf, ResolveError> {
+    if !is_valid_session_id(session_id) {
+        return Err(ResolveError::InvalidSessionId);
+    }
+    let file = find_session_file(projects_dir, session_id).ok_or(ResolveError::SessionNotFound)?;
+    let contents = std::fs::read_to_string(&file).map_err(|_| ResolveError::SessionNotFound)?;
+    let cwd = extract_cwd(&contents).ok_or(ResolveError::NoCwdInSession)?;
+    let path = PathBuf::from(cwd);
+    if !path.is_dir() {
+        return Err(ResolveError::DirectoryMissing(path));
+    }
+    Ok(path)
 }
 
 /// Returns the `~/.claude/projects` directory, or `None` if the home directory
