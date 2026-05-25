@@ -18,8 +18,10 @@ pub fn open() -> Option<gix::Repository> {
 /// The short current-branch name (e.g. `main`), or `"HEAD"` when detached —
 /// matching what `git rev-parse --abbrev-ref HEAD` prints.
 pub fn branch_name(repo: &gix::Repository) -> String {
-    let _ = repo;
-    String::new() // STUB
+    match repo.head_name() {
+        Ok(Some(full)) => full.shorten().to_string(),
+        _ => "HEAD".to_string(),
+    }
 }
 
 #[cfg(test)]

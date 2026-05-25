@@ -218,19 +218,16 @@ fn main() -> Result<()> {
         colored::control::set_override(true);
     }
 
-    if repo::open().is_none() {
+    let Some(repo) = repo::open() else {
         println!("{}", "gsw • not a git repository".dimmed());
         return Ok(());
-    }
+    };
 
     // gsw still shells out for status/diff during the migration, so keep the
     // private-index guard until those calls move to gix (removed in Task 8).
     let _index_snapshot = redirect_index_to_snapshot();
 
-    let branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .context("failed to read HEAD ref")?
-        .trim()
-        .to_string();
+    let branch = repo::branch_name(&repo);
 
     let base = cli.base.unwrap_or_else(resolve_base_ref);
 
