@@ -50,17 +50,28 @@ enum ResolveError {
     DirectoryMissing(PathBuf),
 }
 
-/// Returns `true` if `id` is safe to use as a `.jsonl` filename component.
+/// Returns `true` if `id` is a canonical UUID (`8-4-4-4-12` hex digits).
 ///
-/// Rejects empty strings, anything containing a path separator (`/` or `\`),
-/// and any traversal sequence (`..`) so a crafted id cannot escape the
-/// projects directory.
+/// Claude session ids are always UUIDs and the id only ever names a `.jsonl`
+/// file under `~/.claude/projects`. Requiring this exact shape rejects typo'd
+/// ids up front and, as a side effect, guarantees no path separator, traversal
+/// sequence, or shell metacharacter can ride through to the filesystem lookup
+/// or the shell function. Hex is matched case-insensitively.
 fn is_valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id != ".."
-        && !id.contains('/')
-        && !id.contains('\\')
-        && !id.contains("..")
+    /// Hyphen positions in a canonical UUID, and its total length.
+    const HYPHEN_POSITIONS: [usize; 4] = [8, 13, 18, 23];
+    const UUID_LEN: usize = 36;
+
+    if id.len() != UUID_LEN {
+        return false;
+    }
+    id.bytes().enumerate().all(|(i, b)| {
+        if HYPHEN_POSITIONS.contains(&i) {
+            b == b'-'
+        } else {
+            b.is_ascii_hexdigit()
+        }
+    })
 }
 
 /// Extracts the first non-empty `cwd` value from Claude session JSONL contents.
