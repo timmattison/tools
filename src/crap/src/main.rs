@@ -15,6 +15,9 @@
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
 //! from the last conversational turn in the transcript (or the live process's
 //! own status when one is attached) — and prints that one scriptable token.
+//! Given no id, `--status` instead lists every session recorded for the current
+//! directory, each with its state and the times its transcript was started and
+//! last written (read from the transcript's own timestamps, not file mtimes).
 //!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
@@ -500,13 +503,26 @@ where
     if !is_valid_session_id(session_id) {
         return Err(StatusError::InvalidSessionId);
     }
-    if let Some(live) = find_live_session(sessions_dir, session_id, is_alive) {
-        let status = live.status.as_deref().unwrap_or("running");
-        return Ok(format!("{status} (live, pid {})", live.pid));
+    if let Some(line) = live_state_string(sessions_dir, session_id, is_alive) {
+        return Ok(line);
     }
     let file = find_session_file(projects_dir, session_id).ok_or(StatusError::SessionNotFound)?;
     let contents = std::fs::read_to_string(&file).map_err(|_| StatusError::SessionNotFound)?;
     Ok(classify_session_state(&contents).as_token().to_string())
+}
+
+/// Returns the state line for a session that is open in a live `claude`
+/// process — `"<status> (live, pid <pid>)"` — or `None` when no such process is
+/// attached. A live process's own reported status is more authoritative than
+/// anything inferred from the transcript, so callers prefer it.
+fn live_state_string<F>(sessions_dir: &Path, session_id: &str, is_alive: F) -> Option<String>
+where
+    F: Fn(u32) -> bool,
+{
+    find_live_session(sessions_dir, session_id, is_alive).map(|live| {
+        let status = live.status.as_deref().unwrap_or("running");
+        format!("{status} (live, pid {})", live.pid)
+    })
 }
 
 /// One session's status for the per-directory listing `crap --status` prints
@@ -535,7 +551,27 @@ struct SessionStatusReport {
 /// parsing, and the result is independent of line order. Returns `(None, None)`
 /// when no line carries a timestamp.
 fn transcript_time_span(contents: &str) -> (Option<String>, Option<String>) {
-    todo!()
+    let mut earliest: Option<String> = None;
+    let mut latest: Option<String> = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(ts) = value.get("timestamp").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if earliest.as_deref().is_none_or(|e| ts < e) {
+            earliest = Some(ts.to_string());
+        }
+        if latest.as_deref().is_none_or(|l| ts > l) {
+            latest = Some(ts.to_string());
+        }
+    }
+    (earliest, latest)
 }
 
 /// Prettifies an ISO 8601 UTC timestamp (`2026-05-25T18:43:05.109Z`) into a
@@ -543,7 +579,14 @@ fn transcript_time_span(contents: &str) -> (Option<String>, Option<String>) {
 ///
 /// Input that does not match the expected shape is returned unchanged.
 fn format_timestamp(raw: &str) -> String {
-    todo!()
+    let Some((date, rest)) = raw.split_once('T') else {
+        return raw.to_string();
+    };
+    let time = rest.split(['.', 'Z']).next().unwrap_or(rest);
+    if date.is_empty() || time.is_empty() {
+        return raw.to_string();
+    }
+    format!("{date} {time}")
 }
 
 /// Lists the status of every session whose transcript lives in `pwd`'s project
@@ -563,12 +606,77 @@ fn resolve_dir_statuses<F>(
 where
     F: Fn(u32) -> bool + Copy,
 {
-    todo!()
+    let folder = projects_dir.join(encode_project_dir(pwd));
+    let mut reports = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return reports;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_valid_session_id(session_id) {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let state = live_state_string(sessions_dir, session_id, is_alive)
+            .unwrap_or_else(|| classify_session_state(&contents).as_token().to_string());
+        let (started, last) = transcript_time_span(&contents);
+        reports.push(SessionStatusReport {
+            session_id: session_id.to_string(),
+            state,
+            started,
+            last,
+        });
+    }
+    // Most-recently-active first; ties (and timestamp-less sessions) break by id
+    // so the listing is deterministic regardless of directory iteration order.
+    reports.sort_by(|a, b| {
+        b.last
+            .cmp(&a.last)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    reports
 }
 
 /// Renders the per-directory `crap --status` listing for `pwd`.
+///
+/// The state column is padded to a common width so the timestamps line up, and
+/// a session with no recorded activity shows an em-dash placeholder. An empty
+/// listing reports that nothing was found.
 fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
-    todo!()
+    if reports.is_empty() {
+        return format!("No Claude sessions found for {}\n", pwd.display());
+    }
+    let count = reports.len();
+    let noun = if count == 1 { "session" } else { "sessions" };
+    let mut out = format!("{count} {noun} for {}\n\n", pwd.display());
+    let state_width = reports
+        .iter()
+        .map(|r| r.state.chars().count())
+        .max()
+        .unwrap_or(0);
+    for report in reports {
+        let started = report
+            .started
+            .as_deref()
+            .map_or_else(|| "—".to_string(), format_timestamp);
+        let last = report
+            .last
+            .as_deref()
+            .map_or_else(|| "—".to_string(), format_timestamp);
+        out.push_str(&format!(
+            "  {}  {:<state_width$}  started {started}  ·  last {last}\n",
+            report.session_id, report.state,
+        ));
+    }
+    out
 }
 
 /// Formats the binary's success output for the shell function to read back.
@@ -628,6 +736,12 @@ fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> Strin
 ///   was created because this already is the session's own directory.
 const SHELL_CODE: &str = r#"
 function crap() {
+    # --status only queries; it never changes the parent shell. Run it straight
+    # through so its output (a token, or a multi-line listing) reaches the
+    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    case " $* " in
+        *" --status "*) command crap "$@"; return $? ;;
+    esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
     if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
@@ -700,7 +814,13 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 struct Cli {
     /// The Claude session id to resume (the `.jsonl` filename under
     /// `~/.claude/projects`).
-    #[arg(value_name = "SESSION_ID", required_unless_present = "shell_setup")]
+    ///
+    /// Optional with `--status`: given no id, `--status` lists every session
+    /// recorded for the current directory instead of resolving one.
+    #[arg(
+        value_name = "SESSION_ID",
+        required_unless_present_any = ["shell_setup", "status"]
+    )]
     session_id: Option<String>,
 
     /// Resume even if the session appears to be running in another process.
@@ -722,11 +842,16 @@ struct Cli {
 
     /// Print the session's conversational state and exit, without resuming.
     ///
-    /// Emits one scriptable token: `waiting-for-user` (Claude finished and is
-    /// waiting on you), `busy` (a tool call or reply is in flight),
-    /// `awaiting-assistant` (you spoke last and Claude hasn't replied), or
-    /// `empty`. If the session is currently open in a live `claude` process, its
-    /// own status is reported instead, as `<status> (live, pid <pid>)`.
+    /// With a session id, emits one scriptable token: `waiting-for-user`
+    /// (Claude finished and is waiting on you), `busy` (a tool call or reply is
+    /// in flight), `awaiting-assistant` (you spoke last and Claude hasn't
+    /// replied), or `empty`. If the session is currently open in a live `claude`
+    /// process, its own status is reported instead, as
+    /// `<status> (live, pid <pid>)`.
+    ///
+    /// With no id, lists every session recorded for the current directory —
+    /// each with its state and the times its transcript was started and last
+    /// written.
     #[arg(long)]
     status: bool,
 
@@ -837,6 +962,22 @@ fn run_status(projects_dir: &Path, session_id: &str) -> ! {
     }
 }
 
+/// Handles `crap --status` with no id: list every session recorded for the
+/// current directory, then exit.
+fn run_dir_status(projects_dir: &Path) -> ! {
+    let Ok(pwd) = std::env::current_dir() else {
+        eprintln!(
+            "{} could not determine the current directory",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::HERE_PWD_UNAVAILABLE);
+    };
+    let sessions_dir = claude_sessions_dir().unwrap_or_default();
+    let reports = resolve_dir_statuses(projects_dir, &sessions_dir, &pwd, pid_is_alive);
+    print!("{}", format_dir_statuses(&pwd, &reports));
+    exit(0);
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -850,9 +991,6 @@ fn main() {
         }
     }
 
-    // `required_unless_present = "shell_setup"` guarantees this is present here.
-    let session_id = cli.session_id.expect("session id is required without --shell-setup");
-
     let Some(projects_dir) = claude_projects_dir() else {
         eprintln!(
             "{} could not determine your home directory",
@@ -862,8 +1000,17 @@ fn main() {
     };
 
     if cli.status {
-        run_status(&projects_dir, &session_id);
+        match cli.session_id.as_deref() {
+            Some(id) => run_status(&projects_dir, id),
+            None => run_dir_status(&projects_dir),
+        }
     }
+
+    // The clap `required_unless_present_any` guarantees an id is present once we
+    // are past the `--shell-setup` and `--status` paths above.
+    let session_id = cli
+        .session_id
+        .expect("session id is required without --shell-setup or --status");
 
     if cli.here {
         run_here(&projects_dir, &session_id, cli.force);
