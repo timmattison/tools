@@ -320,8 +320,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     and stops, and it refuses to resume a session that's already open in another running process
     (pass `--force` to override) so two processes can't corrupt the same session log. With
     `--here` it brings the session into the *current* directory instead, resuming it as a forked
-    (new-id) session so you can carry its context into a different working tree. Run
-    `crap --shell-setup` once to install the shell function.
+    (new-id) session so you can carry its context into a different working tree. `--status <id>`
+    reports where a session left off (`waiting-for-user`, `busy`, `awaiting-assistant`, …) without
+    resuming. Run `crap --shell-setup` once to install the shell function.
   - To install: `cargo install --git https://github.com/timmattison/tools crap`
 - ng (navel-gaze)
   - Watches JS/TS source files in the current directory and re-runs `pnpm lint` on change. Pass
@@ -1263,11 +1264,43 @@ Error: session '4d1637ec-…' is already running (pid 62043, idle)
 
 This prevents two processes from appending to the same session log at once. The check verifies the recorded pid is still a live `claude` process (so a stale file left by a crash — or a pid since reused by something else — won't trigger a false alarm). Pass `--force` to resume anyway.
 
+### Check a session's state: `--status`
+
+Before resuming — or when scripting over many sessions — you can ask where a session left off without launching anything:
+
+```bash
+crap --status 57570685-2d64-4431-8ab6-c021a12fa1af
+```
+
+It prints exactly one of these tokens on stdout:
+
+- `waiting-for-user` — Claude finished its turn and is waiting for your input.
+- `busy` — work is in flight: the assistant has a pending tool call, or a tool result was just delivered and the reply hasn't landed yet.
+- `awaiting-assistant` — you sent the last message and Claude hasn't replied (an active turn, or a session abandoned mid-reply).
+- `empty` — the transcript has no conversational turns yet.
+
+Claude Code never writes an explicit "waiting for input" marker, so `crap` infers the state from the last real turn in the transcript — skipping subagent (`isSidechain`) turns, injected (`isMeta`) entries, and trailing bookkeeping lines, and trusting each turn's `stop_reason` over the per-line content shape.
+
+If the session is **currently open** in a live `claude` process, that process's own status is more authoritative than transcript inference, so it's reported instead:
+
+```text
+busy (live, pid 17041)
+```
+
+The tokens are stable and newline-terminated, so they script cleanly:
+
+```bash
+[ "$(crap --status "$id")" = waiting-for-user ] && echo "ready for you"
+```
+
+`--status` exits non-zero for a malformed id or a session that is neither live nor on disk.
+
 ### Options
 
 - `[SESSION_ID]`: The Claude session id to resume
 - `-f, --force`: Resume even if the session appears to be running in another process
 - `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one
+- `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
 
 ### Shell Integration

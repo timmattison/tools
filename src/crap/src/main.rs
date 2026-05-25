@@ -11,6 +11,11 @@
 //! folder and resumes it as a `--fork-session` (a fresh id), leaving the
 //! original transcript untouched. The symlink is removed once the session ends.
 //!
+//! With `--status`, it resumes nothing: it classifies where the session left
+//! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
+//! from the last conversational turn in the transcript (or the live process's
+//! own status when one is attached) — and prints that one scriptable token.
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
