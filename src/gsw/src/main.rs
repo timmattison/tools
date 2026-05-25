@@ -11,7 +11,7 @@ use clap::Parser;
 use colored::Colorize;
 
 use crate::git::{parse_numstat, parse_status, FileEntry};
-use crate::render::{plan_section_caps, render, LogEntry, RenderOptions, UpstreamStatus};
+use crate::render::{plan_section_caps, render, LogEntry, RenderOptions};
 use crate::snapshot::build_snapshot;
 
 mod age;
@@ -263,7 +263,7 @@ fn main() -> Result<()> {
     let log_lines = if cli.no_log { 0 } else { cli.log_lines };
     snapshot.log = fetch_log(&repo, log_lines);
 
-    snapshot.upstream = detect_upstream();
+    snapshot.upstream = repo::upstream_status(&repo);
 
     let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
     let tty_width = tty_size.map(|(w, _)| w);
@@ -464,41 +464,6 @@ fn resolve_base_ref() -> String {
         }
     }
     "HEAD".to_string()
-}
-
-/// Resolve the current branch's upstream tracking ref and count how many
-/// commits HEAD is ahead of and behind it.
-///
-/// Returns `None` when the branch has no upstream configured (a brand-new
-/// local branch that's never been pushed, a detached HEAD, etc.) — gsw
-/// hides the upstream field entirely in that case rather than fabricating
-/// a zero count for a tracking branch that doesn't exist.
-///
-/// Counts use `git rev-list --left-right --count <upstream>...HEAD`,
-/// which emits `<behind>\t<ahead>` in a single git invocation. The
-/// three-dot range produces the symmetric difference, so the left side
-/// is "in upstream but not HEAD" (i.e. how far behind we are) and the
-/// right side is "in HEAD but not upstream" (how far ahead).
-fn detect_upstream() -> Option<UpstreamStatus> {
-    let name = run_git(&["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .ok()?
-        .trim()
-        .to_string();
-    let counts = run_git(&[
-        "rev-list",
-        "--left-right",
-        "--count",
-        &format!("{name}...HEAD"),
-    ])
-    .ok()?;
-    let mut parts = counts.split_whitespace();
-    let behind: u32 = parts.next()?.parse().ok()?;
-    let ahead: u32 = parts.next()?.parse().ok()?;
-    Some(UpstreamStatus {
-        name,
-        ahead,
-        behind,
-    })
 }
 
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.

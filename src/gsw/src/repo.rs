@@ -93,13 +93,46 @@ pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
     resolve().unwrap_or(0)
 }
 
-/// The current branch's upstream tracking status, or `None` when there's no
-/// upstream configured / HEAD is detached. `name` is the short tracking-ref
-/// name like `origin/main`; ahead/behind match
+/// The current branch's upstream tracking status. `name` is the short
+/// tracking-ref name like `origin/main`; ahead/behind match
 /// `git rev-list --left-right --count <upstream>...HEAD`.
+///
+/// Returns `None` when HEAD is detached/unborn, the branch has no upstream
+/// configured, or the upstream tracking ref hasn't been fetched yet (i.e.
+/// `origin/main` exists in config but not under `.git/refs/`) — the same cases
+/// where `git rev-parse @{upstream}` fails, so this matches the old CLI path.
 pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
-    let _ = repo;
-    None // STUB
+    use gix::bstr::ByteSlice;
+    use gix::remote::Direction;
+
+    let head_ref = repo.head_ref().ok()??; // None => detached/unborn
+    let full = match head_ref.remote_tracking_ref_name(Direction::Fetch) {
+        Some(Ok(full)) => full,
+        _ => return None, // no upstream configured (or name error)
+    };
+    let name = full.shorten().to_str().ok()?.to_owned();
+
+    let head_id = repo.head_id().ok()?.detach();
+    let upstream_id = repo.rev_parse_single("@{upstream}").ok()?.detach();
+
+    let ahead = repo
+        .rev_walk(std::iter::once(head_id))
+        .with_hidden(std::iter::once(upstream_id))
+        .all()
+        .ok()?
+        .count();
+    let behind = repo
+        .rev_walk(std::iter::once(upstream_id))
+        .with_hidden(std::iter::once(head_id))
+        .all()
+        .ok()?
+        .count();
+
+    Some(UpstreamStatus {
+        name,
+        ahead: u32::try_from(ahead).unwrap_or(u32::MAX),
+        behind: u32::try_from(behind).unwrap_or(u32::MAX),
+    })
 }
 
 #[cfg(test)]
