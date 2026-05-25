@@ -133,6 +133,23 @@ fn resolve_session_dir(projects_dir: &Path, session_id: &str) -> Result<PathBuf,
     Ok(path)
 }
 
+/// Encodes a working directory into the project-folder name Claude Code uses
+/// under `~/.claude/projects`.
+///
+/// Claude derives the folder name by replacing every character of the absolute
+/// path that is not an ASCII letter or digit with `-`. So `/` and `.` both
+/// become `-` (and a `/.` run becomes `--`), while existing hyphens are kept.
+/// This is the lookup `claude --resume` performs against the *current*
+/// directory, so reproducing it exactly is what lets `--here` drop a session
+/// where Claude will find it.
+///
+/// The mapping is per Unicode scalar, which matches Claude for the ASCII paths
+/// that real project directories use; non-ASCII characters each collapse to a
+/// single `-`.
+fn encode_project_dir(path: &Path) -> String {
+    String::new()
+}
+
 /// Returns the `~/.claude/projects` directory, or `None` if the home directory
 /// cannot be determined.
 fn claude_projects_dir() -> Option<PathBuf> {
@@ -473,6 +490,29 @@ mod tests {
     fn valid_session_id_accepts_uppercase_hex() {
         // Hex is case-insensitive even though Claude writes lowercase ids.
         assert!(is_valid_session_id("4733EE2A-1AD6-4619-A01A-11840B8E1901"));
+    }
+
+    #[test]
+    fn encode_project_dir_matches_claude_folder_naming() {
+        // Plain path: every separator becomes a dash, the leading slash too.
+        assert_eq!(
+            encode_project_dir(Path::new("/Volumes/SamsungSSDs/code/claude-vibecoding")),
+            "-Volumes-SamsungSSDs-code-claude-vibecoding"
+        );
+        // A `/.` run (hidden directory) collapses to a double dash, and the
+        // hyphen already in the final component is preserved verbatim. This is
+        // a real example observed under ~/.claude/projects.
+        assert_eq!(
+            encode_project_dir(Path::new("/Users/timmattison/.config/qbittorrent-vpn")),
+            "-Users-timmattison--config-qbittorrent-vpn"
+        );
+        // Digits survive; only non-alphanumerics are rewritten.
+        assert_eq!(
+            encode_project_dir(Path::new("/a/day-3-planning")),
+            "-a-day-3-planning"
+        );
+        // Non-ASCII characters each collapse to a single dash.
+        assert_eq!(encode_project_dir(Path::new("/x/café")), "-x-caf-");
     }
 
     #[test]
