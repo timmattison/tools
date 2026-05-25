@@ -1,22 +1,22 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::{parse_numstat, parse_status, FileEntry};
-use crate::render::{plan_section_caps, render, LogEntry, RenderOptions, UpstreamStatus};
+use crate::git::FileEntry;
+use crate::render::{plan_section_caps, render, LogEntry, RenderOptions};
 use crate::snapshot::build_snapshot;
 
 mod age;
 mod bar;
 mod git;
 mod render;
+mod repo;
 mod snapshot;
 
 #[derive(Parser)]
@@ -216,39 +216,25 @@ fn main() -> Result<()> {
         colored::control::set_override(true);
     }
 
-    if !inside_git_repo() {
+    let Some(repo) = repo::open() else {
         println!("{}", "gsw • not a git repository".dimmed());
         return Ok(());
-    }
+    };
 
-    let branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
-        .context("failed to read HEAD ref")?
-        .trim()
-        .to_string();
+    let branch = repo::branch_name(&repo);
 
-    let base = cli.base.unwrap_or_else(resolve_base_ref);
+    let base = cli.base.unwrap_or_else(|| repo::resolve_base(&repo));
+    let commits_ahead = repo::commits_ahead(&repo, &base);
 
-    let commits_ahead = run_git(&["rev-list", "--count", &format!("{base}..HEAD")])
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let last_commit_age = last_commit_age(&repo);
 
-    let last_commit_age = last_commit_age();
+    let repo::Changes {
+        entries,
+        staged_numstat,
+        unstaged_numstat,
+    } = repo::collect_changes(&repo)?;
 
-    let status_raw = run_git(&["status", "--porcelain=v2", "-z"])?;
-    let entries = parse_status(&status_raw);
-
-    let staged_numstat = run_git(&["diff", "--cached", "--numstat", "-z"])
-        .map(|s| parse_numstat(&s))
-        .unwrap_or_default();
-    let unstaged_numstat = run_git(&["diff", "--numstat", "-z"])
-        .map(|s| parse_numstat(&s))
-        .unwrap_or_default();
-
-    let repo_root = run_git(&["rev-parse", "--show-toplevel"])
-        .ok()
-        .map(|s| PathBuf::from(s.trim()));
-    let ages = collect_ages(&entries, repo_root.as_deref());
+    let ages = collect_ages(&entries, repo.workdir());
 
     let mut snapshot = build_snapshot(
         branch,
@@ -262,9 +248,9 @@ fn main() -> Result<()> {
     );
 
     let log_lines = if cli.no_log { 0 } else { cli.log_lines };
-    snapshot.log = fetch_log(log_lines);
+    snapshot.log = fetch_log(&repo, log_lines);
 
-    snapshot.upstream = detect_upstream();
+    snapshot.upstream = repo::upstream_status(&repo);
 
     let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
     let tty_width = tty_size.map(|(w, _)| w);
@@ -321,147 +307,38 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// True if the current working directory is inside a git work tree.
+/// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
-/// `git rev-parse --is-inside-work-tree` returns status 0 with stdout
-/// `false` for bare repos, so we have to inspect the output, not just
-/// the exit code.
-fn inside_git_repo() -> bool {
-    let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    String::from_utf8_lossy(&output.stdout).trim() == "true"
-}
-
-/// Run `git` with the given args and return captured stdout as UTF-8.
-fn run_git(args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .output()
-        .with_context(|| format!("invoking `git {}`", args.join(" ")))?;
-    if !output.status.success() {
-        bail!(
-            "`git {}` exited with status {}: {}",
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Pick the first base ref that actually resolves: `main`, then `master`,
-/// then whatever `origin/HEAD` points to. Falls back to `HEAD` so the
-/// commits-ahead count degrades gracefully to zero.
-fn resolve_base_ref() -> String {
-    for candidate in ["main", "master"] {
-        if run_git(&["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
-            return candidate.to_string();
-        }
-    }
-    if let Ok(out) = run_git(&["symbolic-ref", "refs/remotes/origin/HEAD"]) {
-        let trimmed = out.trim();
-        if let Some(name) = trimmed.strip_prefix("refs/remotes/origin/") {
-            return format!("origin/{name}");
-        }
-    }
-    "HEAD".to_string()
-}
-
-/// Resolve the current branch's upstream tracking ref and count how many
-/// commits HEAD is ahead of and behind it.
-///
-/// Returns `None` when the branch has no upstream configured (a brand-new
-/// local branch that's never been pushed, a detached HEAD, etc.) — gsw
-/// hides the upstream field entirely in that case rather than fabricating
-/// a zero count for a tracking branch that doesn't exist.
-///
-/// Counts use `git rev-list --left-right --count <upstream>...HEAD`,
-/// which emits `<behind>\t<ahead>` in a single git invocation. The
-/// three-dot range produces the symmetric difference, so the left side
-/// is "in upstream but not HEAD" (i.e. how far behind we are) and the
-/// right side is "in HEAD but not upstream" (how far ahead).
-fn detect_upstream() -> Option<UpstreamStatus> {
-    let name = run_git(&["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .ok()?
-        .trim()
-        .to_string();
-    let counts = run_git(&[
-        "rev-list",
-        "--left-right",
-        "--count",
-        &format!("{name}...HEAD"),
-    ])
-    .ok()?;
-    let mut parts = counts.split_whitespace();
-    let behind: u32 = parts.next()?.parse().ok()?;
-    let ahead: u32 = parts.next()?.parse().ok()?;
-    Some(UpstreamStatus {
-        name,
-        ahead,
-        behind,
-    })
-}
-
-/// Fetch the `n` most recent commits as (short-hash, age, subject) records.
-///
-/// Returns an empty list when `n == 0` or git fails (e.g. no commits yet).
-/// Uses `%h %ct %s` and splits on the first two spaces — the hash never
-/// contains spaces and `%ct` is a bare unix timestamp, so the splits are
-/// unambiguous. The subject keeps any internal spaces.
-fn fetch_log(n: usize) -> Vec<LogEntry> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let n_arg = format!("-n{n}");
-    let Ok(out) = run_git(&["log", &n_arg, "--pretty=format:%h %ct %s"]) else {
-        return Vec::new();
-    };
+/// Returns an empty list when `n == 0` or the repo has no commits.
+fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
     let now = SystemTime::now();
-    out.lines().filter_map(|line| parse_log_line(line, now)).collect()
+    repo::recent_log(repo, n)
+        .into_iter()
+        .map(|(hash, secs, subject)| {
+            let age = u64::try_from(secs)
+                .ok()
+                .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
+                .and_then(|when| now.duration_since(when).ok())
+                .unwrap_or(Duration::ZERO);
+            LogEntry { hash, subject, age }
+        })
+        .collect()
 }
 
-fn parse_log_line(line: &str, now: SystemTime) -> Option<LogEntry> {
-    if line.is_empty() {
-        return None;
-    }
-    let (hash, rest) = line.split_once(' ').unwrap_or((line, ""));
-    let (ct_str, subject) = rest.split_once(' ').unwrap_or((rest, ""));
-    let age = ct_str
-        .parse::<u64>()
-        .ok()
-        .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-        .and_then(|when| now.duration_since(when).ok())
-        .unwrap_or(Duration::ZERO);
-    Some(LogEntry {
-        hash: hash.to_string(),
-        subject: subject.to_string(),
-        age,
-    })
-}
-
-/// How long ago the current HEAD commit was authored, or `None` when that
-/// can't be determined (no commits yet, malformed git output, clock skew
-/// putting the commit in the future).
-fn last_commit_age() -> Option<Duration> {
-    let raw = run_git(&["log", "-1", "--format=%ct"]).ok()?;
-    let secs: u64 = raw.trim().parse().ok()?;
+/// How long ago HEAD was committed, or `None` when undeterminable.
+fn last_commit_age(repo: &gix::Repository) -> Option<Duration> {
+    let secs = repo::head_commit_secs(repo)?;
+    let secs = u64::try_from(secs).ok()?;
     let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
     SystemTime::now().duration_since(when).ok()
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
 ///
-/// `repo_root` anchors the lookup: `git status --porcelain=v2 -z` reports
-/// paths relative to the repo root, not the cwd, so resolving against the
-/// cwd misses every file when gsw runs from a subdirectory. Falls back to
-/// cwd-relative resolution when the root can't be determined.
+/// `repo_root` anchors the lookup: gix status reports paths relative to the
+/// repo root, not the cwd, so resolving against the cwd misses every file
+/// when gsw runs from a subdirectory. Falls back to cwd-relative resolution
+/// when the root can't be determined.
 fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<String, Duration> {
     let now = SystemTime::now();
     let mut out = HashMap::with_capacity(entries.len());
@@ -599,22 +476,6 @@ mod tests {
     fn no_force_colors_when_no_color_env_set() {
         // Honor https://no-color.org even when under viddy.
         assert!(!should_force_colors(false, true, true));
-    }
-
-    #[test]
-    fn parse_log_line_keeps_entry_when_line_has_no_space() {
-        // Defensive: don't silently drop a log line just because it lacks
-        // the expected `%h SP %s` shape. Preserve the whole line as the hash
-        // with an empty subject so the row still surfaces.
-        let entry = parse_log_line("abc1234", SystemTime::now())
-            .expect("hash-only line should parse");
-        assert_eq!(entry.hash, "abc1234");
-        assert_eq!(entry.subject, "");
-    }
-
-    #[test]
-    fn parse_log_line_drops_empty_lines() {
-        assert!(parse_log_line("", SystemTime::now()).is_none());
     }
 
     #[test]

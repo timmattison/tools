@@ -46,6 +46,51 @@ fn setup_repo() -> TempDir {
 }
 
 #[test]
+fn does_not_rewrite_the_index_so_a_concurrent_rebase_keeps_the_lock() {
+    // Regression: under `viddy gsw`, gsw fires every couple of seconds. Any
+    // code path that refreshes the index's cached stat data writes `.git/index`
+    // back — taking `.git/index.lock` for the duration. A rebase running at
+    // that instant loses the race for the lock and aborts with a "another git
+    // process seems to be running" / index.lock error. gsw is a read-only
+    // monitor and must never take the index lock. All git operations now go
+    // through gix in-process, which reads the index but never writes it.
+    let dir = setup_repo();
+    let index_path = dir.path().join(".git").join("index");
+
+    // Make the index's cached stat data unambiguously stale: backdate the
+    // tracked file's mtime to a fixed time in the distant past — well before
+    // the commit, so it sits *outside* git's "racy" window (which only kicks in
+    // when a file's mtime is at or after the index's own timestamp). A plain
+    // `git status` then re-stats a.txt, sees the mtime no longer matches the
+    // index, re-hashes it, finds the content unchanged, and rewrites
+    // `.git/index` to refresh the cached stat — taking `.git/index.lock` to do
+    // so. If gsw ever regresses to shelling out to git for status/diff, the
+    // stale mtime will trigger that write and this test will catch it. A fixed
+    // backdate (rather than touch-with-now) keeps the trigger deterministic:
+    // inside the racy window the refresh write is timing-dependent and the test
+    // flakes.
+    let stale = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(dir.path().join("a.txt"))
+        .expect("open a.txt to backdate mtime");
+    file.set_times(std::fs::FileTimes::new().set_modified(stale))
+        .expect("backdate a.txt mtime");
+    drop(file);
+
+    let before = fs::read(&index_path).expect("read .git/index before gsw");
+    let _ = run_gsw(dir.path());
+    let after = fs::read(&index_path).expect("read .git/index after gsw");
+
+    assert_eq!(
+        before, after,
+        "gsw rewrote .git/index. gsw reads the repo in-process via gix and must \
+         never write the index — writing it takes .git/index.lock, which races a \
+         concurrent rebase. A gix status/diff read must never touch .git/index.",
+    );
+}
+
+#[test]
 fn shows_branch_and_header() {
     let dir = setup_repo();
     let out = run_gsw(dir.path());

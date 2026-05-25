@@ -13,6 +13,7 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true
+gix.workspace = true
 terminal_size.workspace = true
 unicode-width.workspace = true
 
