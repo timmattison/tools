@@ -24,6 +24,20 @@ pub fn branch_name(repo: &gix::Repository) -> String {
     }
 }
 
+/// Pick the first base ref that resolves: `main`, then `master`, then
+/// `origin/HEAD`'s target, else `"HEAD"` (so commits-ahead degrades to 0).
+pub fn resolve_base(repo: &gix::Repository) -> String {
+    let _ = repo;
+    "HEAD".to_string() // STUB
+}
+
+/// Count commits reachable from HEAD but not from `base`
+/// (`git rev-list --count base..HEAD`). Returns 0 on any failure.
+pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
+    let _ = (repo, base);
+    u32::MAX // STUB (deliberately wrong so `== N` assertions fail)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -92,5 +106,42 @@ mod tests {
             open_at(dir.path()).is_none(),
             "a bare repo has no work tree; gsw must treat it like no repo",
         );
+    }
+
+    #[test]
+    fn resolve_base_prefers_main() {
+        let dir = init_repo(); // already on main
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::resolve_base(&repo), "main");
+    }
+
+    #[test]
+    fn resolve_base_falls_back_to_master() {
+        let dir = init_repo();
+        git(dir.path(), &["branch", "-m", "main", "master"]);
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::resolve_base(&repo), "master");
+    }
+
+    #[test]
+    fn commits_ahead_counts_commits_past_base() {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("b.txt"), "two\n").unwrap();
+        git(p, &["add", "b.txt"]);
+        git(p, &["commit", "-q", "-m", "second"]);
+        std::fs::write(p.join("c.txt"), "three\n").unwrap();
+        git(p, &["add", "c.txt"]);
+        git(p, &["commit", "-q", "-m", "third"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(super::commits_ahead(&repo, "main"), 2);
+    }
+
+    #[test]
+    fn commits_ahead_is_zero_when_base_equals_head() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::commits_ahead(&repo, "main"), 0);
     }
 }
