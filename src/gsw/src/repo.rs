@@ -5,7 +5,9 @@
 //! `.git/index.lock` and can never race a concurrent rebase — the reason the
 //! old `git` CLI path needed a private index snapshot.
 
-use crate::git::{FileEntry, FileStatus};
+use std::collections::HashMap;
+
+use crate::git::{FileEntry, FileStatus, NumStat};
 use crate::render::UpstreamStatus;
 
 /// Open the repository containing `cwd`, or `None` when there isn't one with a
@@ -225,6 +227,24 @@ fn push_staged(change: gix::diff::index::Change, out: &mut Vec<FileEntry>) {
             });
         }
     }
+}
+
+/// Per-path line counts for the staged side (HEAD-tree vs index) and the
+/// unstaged side (index vs worktree), keyed on the post-rename path — the gix
+/// equivalent of `git diff --cached --numstat` and `git diff --numstat`.
+/// Untracked files are excluded (git's numstat ignores them). Binary blobs
+/// (NUL in the first 8 KiB) are flagged `binary` with zero counts.
+///
+/// This is a raw byte-line diff with no clean/smudge or autocrlf filtering;
+/// for gsw's magnitude bars that matches git's counts in the common case.
+///
+/// # Errors
+/// Returns an error when the gix status platform can't be created or iteration fails.
+pub fn collect_numstats(
+    repo: &gix::Repository,
+) -> anyhow::Result<(HashMap<String, NumStat>, HashMap<String, NumStat>)> {
+    let _ = repo;
+    Ok((HashMap::new(), HashMap::new())) // STUB
 }
 
 /// Map an index→worktree item to zero or more unstaged `FileEntry`s pushed onto `out`.
@@ -555,6 +575,65 @@ mod tests {
             s.iter().any(|(path, st, _)| path == "nested/" && *st == FileStatus::UntrackedDir),
             "untracked nested repo should surface as UntrackedDir 'nested/': {s:?}",
         );
+    }
+
+    #[test]
+    fn numstat_staged_modification_counts_lines() {
+        let dir = init_repo(); // a.txt = "initial\n"
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "initial\nadded one\nadded two\n").unwrap();
+        git(p, &["add", "a.txt"]);
+        let repo = open_at(p).unwrap();
+        let (staged, _unstaged) = super::collect_numstats(&repo).unwrap();
+        let ns = staged.get("a.txt").expect("staged numstat for a.txt");
+        assert_eq!((ns.adds, ns.dels, ns.binary), (2, 0, false));
+    }
+
+    #[test]
+    fn numstat_unstaged_modification_counts_lines() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("a.txt"), "rewritten\n").unwrap();
+        let repo = open_at(p).unwrap();
+        let (_staged, unstaged) = super::collect_numstats(&repo).unwrap();
+        let ns = unstaged.get("a.txt").expect("unstaged numstat");
+        assert_eq!((ns.adds, ns.dels, ns.binary), (1, 1, false));
+    }
+
+    #[test]
+    fn numstat_staged_addition_counts_all_lines() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("new.txt"), "l1\nl2\nl3\n").unwrap();
+        git(p, &["add", "new.txt"]);
+        let repo = open_at(p).unwrap();
+        let (staged, _) = super::collect_numstats(&repo).unwrap();
+        let ns = staged.get("new.txt").expect("staged add numstat");
+        assert_eq!((ns.adds, ns.dels), (3, 0));
+    }
+
+    #[test]
+    fn numstat_staged_binary_file_is_flagged() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("blob.bin"), [0u8, 1, 2, 0, 3, 4]).unwrap();
+        git(p, &["add", "blob.bin"]);
+        let repo = open_at(p).unwrap();
+        let (staged, _) = super::collect_numstats(&repo).unwrap();
+        let ns = staged.get("blob.bin").expect("binary numstat");
+        assert!(ns.binary, "NUL-containing blob must be flagged binary");
+        assert_eq!((ns.adds, ns.dels), (0, 0));
+    }
+
+    #[test]
+    fn numstat_excludes_untracked_files() {
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::write(p.join("loose.txt"), "x\ny\n").unwrap();
+        let repo = open_at(p).unwrap();
+        let (staged, unstaged) = super::collect_numstats(&repo).unwrap();
+        assert!(!staged.contains_key("loose.txt"));
+        assert!(!unstaged.contains_key("loose.txt"));
     }
 
     #[test]
