@@ -312,6 +312,13 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     `-p` (previous). Can also jump directly to a worktree by directory name or branch name.
     Use `--shell-setup` to automatically add shell integration to your config.
   - To install: `cargo install --git https://github.com/timmattison/tools cwt`
+- crap (Claude, Resume Anywhere Please)
+  - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
+    session up under `~/.claude/projects`, recovers the directory it originally ran in, `cd`s
+    there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
+    have one, otherwise plain `claude`. If the original directory no longer exists it tells you
+    and stops. Run `crap --shell-setup` once to install the shell function.
+  - To install: `cargo install --git https://github.com/timmattison/tools crap`
 - ng (navel-gaze)
   - Watches JS/TS source files in the current directory and re-runs `pnpm lint` on change. Pass
     `-t` / `--typecheck` to run `pnpm typecheck` instead. Events are debounced (300ms), and common
@@ -1207,6 +1214,71 @@ wtm               # Quick alias for main worktree
 - `3`: Worktree not found
 - `4`: Could not determine current worktree (for -f/-p)
 - `5`: Shell setup failed
+
+## crap (Claude, Resume Anywhere Please)
+
+Resume a Claude Code session from any directory. You give `crap` a session id; it finds that session under `~/.claude/projects`, recovers the directory the session originally ran in, changes into it, and re-launches Claude with `--resume <id>` from there.
+
+### Basic Usage
+
+```bash
+crap 57570685-2d64-4431-8ab6-c021a12fa1af   # cd into that session's dir and resume it
+```
+
+The session id is the name of the `.jsonl` file under `~/.claude/projects/<project>/`. `crap` reads the directory from the session log itself (the sanitized project folder name is lossy), so it always lands in the real original path.
+
+If you have a `clauded` alias or command (e.g. `claude --dangerously-skip-permissions`), `crap` uses it; otherwise it falls back to plain `claude`. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
+
+### Options
+
+- `[SESSION_ID]`: The Claude session id to resume
+- `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
+
+### Shell Integration
+
+Because a program can't change its parent shell's working directory — and can't see shell aliases such as `clauded` — `crap` ships as a shell function. Install it once:
+
+```bash
+crap --shell-setup
+```
+
+Then run `source ~/.zshrc` (or `~/.bashrc`), or open a new terminal. After that, `crap <session-id>` will `cd` into the session's directory and resume it.
+
+> **Note:** `--shell-setup` supports bash and zsh. The bare `crap` binary still works without the function — it just prints the session's directory to stdout instead of changing into it.
+
+#### Manual Setup
+
+If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+function crap() {
+    if [ "$#" -eq 0 ]; then
+        command crap
+        return $?
+    fi
+    local __crap_session="$1"
+    local __crap_dir
+    __crap_dir=$(command crap "$__crap_session") || return $?
+    cd "$__crap_dir" || return 1
+    if command -v clauded >/dev/null 2>&1; then
+        eval 'clauded --resume "$__crap_session"'
+    else
+        claude --resume "$__crap_session"
+    fi
+}
+```
+
+The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+
+### Exit Codes
+
+- `0`: Success
+- `1`: No session found with that id
+- `2`: Session has no recorded working directory
+- `3`: The session's original directory no longer exists
+- `4`: Invalid session id
+- `5`: Shell setup failed
+- `6`: Could not determine your home directory
 
 ## bm (bulk move)
 
