@@ -126,6 +126,62 @@ fn claude_projects_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("projects"))
 }
 
+/// Returns the `~/.claude/sessions` directory, or `None` if the home directory
+/// cannot be determined.
+///
+/// Claude Code writes one `<pid>.json` file here per live CLI session and
+/// removes it on clean exit, so it serves as a registry of running sessions.
+fn claude_sessions_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".claude").join("sessions"))
+}
+
+/// A running Claude CLI session, as recorded under `~/.claude/sessions`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionRecord {
+    /// The process id of the running `claude` process.
+    pid: u32,
+    /// The session id this process is attached to.
+    session_id: String,
+    /// The directory the session is running in.
+    cwd: String,
+    /// The reported activity status (e.g. `"busy"` or `"idle"`), if present.
+    status: Option<String>,
+}
+
+/// Parses a `~/.claude/sessions/<pid>.json` record.
+///
+/// Returns `None` if the JSON is malformed or is missing the `pid`/`sessionId`
+/// fields that uniquely identify a running session.
+fn parse_session_record(_json: &str) -> Option<SessionRecord> {
+    todo!("implemented in the green commit")
+}
+
+/// Finds a currently-running session attached to `session_id`.
+///
+/// Scans every `<pid>.json` under `sessions_dir` and returns the first record
+/// whose `session_id` matches and whose pid `is_alive` reports as still
+/// running. The `is_alive` predicate is injected so this logic is testable
+/// without spawning real processes.
+fn find_live_session<F>(
+    _sessions_dir: &Path,
+    _session_id: &str,
+    _is_alive: F,
+) -> Option<SessionRecord>
+where
+    F: Fn(u32) -> bool,
+{
+    todo!("implemented in the green commit")
+}
+
+/// Reports whether `pid` is a currently-running Claude CLI process.
+///
+/// Uses `ps -p <pid> -o command=`: a non-empty, successful result means the pid
+/// exists, and requiring `claude` in the command line guards against a stale
+/// session file whose pid has since been reused by an unrelated process.
+fn pid_is_alive(_pid: u32) -> bool {
+    todo!("implemented in the green commit")
+}
+
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
@@ -386,6 +442,67 @@ mod tests {
         .unwrap();
 
         assert_eq!(resolve_session_dir(dir.path(), SAMPLE_ID).unwrap(), cwd);
+    }
+
+    /// A real session record as written by Claude Code.
+    const SESSION_JSON: &str = r#"{"pid":17041,"sessionId":"3eafa9f8-9d1f-43cf-b417-eb9efcb8ed4d","cwd":"/Volumes/code/crap","startedAt":1779730239473,"version":"2.1.150","kind":"interactive","entrypoint":"cli","status":"busy","updatedAt":1779730460209}"#;
+
+    #[test]
+    fn parse_session_record_extracts_fields() {
+        let rec = parse_session_record(SESSION_JSON).expect("should parse");
+        assert_eq!(rec.pid, 17041);
+        assert_eq!(rec.session_id, "3eafa9f8-9d1f-43cf-b417-eb9efcb8ed4d");
+        assert_eq!(rec.cwd, "/Volumes/code/crap");
+        assert_eq!(rec.status.as_deref(), Some("busy"));
+    }
+
+    #[test]
+    fn parse_session_record_rejects_malformed_or_incomplete() {
+        assert_eq!(parse_session_record("not json"), None);
+        assert_eq!(parse_session_record("{\"pid\":1}"), None); // no sessionId
+        assert_eq!(parse_session_record("{\"sessionId\":\"x\"}"), None); // no pid
+    }
+
+    #[test]
+    fn find_live_session_matches_only_alive_pid_for_id() {
+        let dir = tempdir().unwrap();
+        let target = "3eafa9f8-9d1f-43cf-b417-eb9efcb8ed4d";
+
+        // A different session, alive — must be ignored.
+        fs::write(
+            dir.path().join("100.json"),
+            serde_json::json!({"pid":100,"sessionId":"other","cwd":"/x"}).to_string(),
+        )
+        .unwrap();
+        // The target session — written with pid 17041.
+        fs::write(dir.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        // Nothing alive -> no live session.
+        assert_eq!(find_live_session(dir.path(), target, |_| false), None);
+
+        // Only the target pid alive -> found.
+        let found = find_live_session(dir.path(), target, |pid| pid == 17041)
+            .expect("target session should be found");
+        assert_eq!(found.pid, 17041);
+        assert_eq!(found.cwd, "/Volumes/code/crap");
+    }
+
+    #[test]
+    fn find_live_session_ignores_stale_record_for_target() {
+        let dir = tempdir().unwrap();
+        let target = "3eafa9f8-9d1f-43cf-b417-eb9efcb8ed4d";
+        fs::write(dir.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        // The matching record exists but its pid is dead (process exited
+        // uncleanly leaving the file behind) -> not a live session.
+        assert_eq!(find_live_session(dir.path(), target, |_| false), None);
+    }
+
+    #[test]
+    fn find_live_session_missing_dir_is_none() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("no-sessions-here");
+        assert_eq!(find_live_session(&missing, "anything", |_| true), None);
     }
 
     #[test]
