@@ -339,6 +339,37 @@ fn format_output(dir: &Path, session_id: &str) -> String {
     format!("{session_id}\n{}\n", dir.display())
 }
 
+/// Leading token marking `--here` output, distinguishing it from the default
+/// `<session-id>\n<dir>` resume output the shell function otherwise expects.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "emitted by the --here path in main (Cycle 4)")
+)]
+const HERE_SENTINEL: &str = "__CRAP_HERE__";
+
+/// Placeholder used in the link field when `--here` created no symlink (because
+/// the current directory already is the session's own folder), so the shell
+/// function can tell "nothing to clean up" apart from a real path.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "emitted by the --here path in main (Cycle 4)")
+)]
+const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
+
+/// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
+/// the session id, then the symlink to remove once the session ends (or
+/// [`NO_LINK_SENTINEL`] when none was created).
+///
+/// The cleanup path is emitted last so that — like [`format_output`] — a path
+/// containing a newline survives intact as "everything after the second line".
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "called by the --here path in main (Cycle 4)")
+)]
+fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> String {
+    String::new()
+}
+
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
@@ -841,6 +872,39 @@ mod tests {
         // Everything after the first newline is the directory, intact.
         let rest = out.split_once('\n').map(|(_, rest)| rest).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), weird_dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn here_output_carries_sentinel_session_and_link() {
+        let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
+        let out = format_here_output(SAMPLE_ID, Some(link));
+
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(HERE_SENTINEL));
+        assert_eq!(lines.next(), Some(SAMPLE_ID));
+        // Everything after the second newline is the link path, intact.
+        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
+    }
+
+    #[test]
+    fn here_output_uses_no_link_sentinel_when_nothing_to_clean() {
+        let out = format_here_output(SAMPLE_ID, None);
+
+        assert_eq!(out.lines().next(), Some(HERE_SENTINEL));
+        let link_field = out.splitn(3, '\n').nth(2).unwrap();
+        assert_eq!(link_field.trim_end_matches('\n'), NO_LINK_SENTINEL);
+    }
+
+    #[test]
+    fn here_output_preserves_newline_in_link_path() {
+        // The link lives last in the output, so a newline inside the path can't
+        // be mistaken for a field boundary.
+        let link = Path::new("/Users/tim/od\ndd/abc.jsonl");
+        let out = format_here_output(SAMPLE_ID, Some(link));
+
+        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
     }
 
     #[test]
