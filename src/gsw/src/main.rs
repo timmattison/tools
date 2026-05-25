@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
@@ -221,6 +222,12 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Route every subsequent git call at a private copy of the index so gsw
+    // never writes the repo's real index or takes `.git/index.lock` — which
+    // would race with a rebase running in the same repo. Held until `main`
+    // returns, then the snapshot is cleaned up. See [`git_command`].
+    let _index_snapshot = redirect_index_to_snapshot();
+
     let branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
         .context("failed to read HEAD ref")?
         .trim()
@@ -327,7 +334,7 @@ fn main() -> Result<()> {
 /// `false` for bare repos, so we have to inspect the output, not just
 /// the exit code.
 fn inside_git_repo() -> bool {
-    let Ok(output) = Command::new("git")
+    let Ok(output) = git_command()
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
     else {
@@ -339,9 +346,95 @@ fn inside_git_repo() -> bool {
     String::from_utf8_lossy(&output.stdout).trim() == "true"
 }
 
+/// Absolute path of gsw's private index snapshot, once [`redirect_index_to_snapshot`]
+/// has set it up. [`git_command`] points `GIT_INDEX_FILE` here so git's index
+/// refresh writes land on the throwaway copy instead of the repo's real index.
+static GSW_INDEX_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+/// A `git` command configured so gsw can never contend for the repo's index lock.
+///
+/// gsw is a read-only monitor, typically run in a tight `viddy gsw` loop. Two
+/// settings keep it from ever taking `.git/index.lock` — which, if it happened,
+/// would race with and abort a rebase running in the same repo:
+///
+/// - `GIT_OPTIONAL_LOCKS=0` tells `git status` to skip refreshing (and thus
+///   rewriting) the index as a side effect. It is necessary but **not
+///   sufficient**: `git diff` ignores this flag and still rewrites the index
+///   whenever a tracked file's cached stat data is stale.
+/// - `GIT_INDEX_FILE`, once [`redirect_index_to_snapshot`] has run, points at a
+///   per-process *copy* of the index. Any refresh write `git diff` insists on
+///   doing then lands on that copy (and a `<copy>.lock`), leaving the repo's
+///   real `.git/index` and `.git/index.lock` untouched.
+///
+/// Every gsw git invocation goes through this so no call site can reintroduce
+/// the contention.
+fn git_command() -> Command {
+    let mut cmd = Command::new("git");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    if let Some(index_file) = GSW_INDEX_FILE.get() {
+        cmd.env("GIT_INDEX_FILE", index_file);
+    }
+    cmd
+}
+
+/// Owns gsw's private index snapshot and removes it (and any leftover lock file)
+/// when dropped, so no temp file survives even if `main` returns early.
+struct IndexSnapshot {
+    path: PathBuf,
+}
+
+impl Drop for IndexSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let mut lock = self.path.clone().into_os_string();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(PathBuf::from(lock));
+    }
+}
+
+/// Copy the repo's index to a private per-process file and route gsw's git
+/// invocations at it via [`GSW_INDEX_FILE`].
+///
+/// See [`git_command`] for why: `GIT_OPTIONAL_LOCKS=0` alone can't stop
+/// `git diff` from rewriting the index, so gsw operates on a throwaway snapshot
+/// and never touches the real `.git/index` or `.git/index.lock`. The snapshot
+/// is a faithful copy taken at startup, so `git status`/`git diff` still report
+/// the true working-tree state.
+///
+/// Returns a guard that deletes the snapshot on drop, or `None` when there's no
+/// index to copy yet (e.g. a freshly `git init`'d repo) — in which case there's
+/// nothing to contend over anyway.
+fn redirect_index_to_snapshot() -> Option<IndexSnapshot> {
+    let real_index = run_git(&["rev-parse", "--path-format=absolute", "--git-path", "index"]).ok()?;
+    let real_index = PathBuf::from(real_index.trim());
+    if !real_index.is_file() {
+        return None;
+    }
+
+    // Key the snapshot on pid + nanos so concurrent gsw runs never clobber each
+    // other's copy (matches the repo's parallel-safe-temp-file convention).
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let snapshot = std::env::temp_dir().join(format!(
+        "gsw-index-{}-{nanos}",
+        std::process::id(),
+    ));
+    std::fs::copy(&real_index, &snapshot).ok()?;
+
+    let guard = IndexSnapshot {
+        path: snapshot.clone(),
+    };
+    // If another thread somehow set this first, fall back to its path; we only
+    // ever have one in practice (set once, early in `main`).
+    let _ = GSW_INDEX_FILE.set(snapshot);
+    Some(guard)
+}
+
 /// Run `git` with the given args and return captured stdout as UTF-8.
 fn run_git(args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .output()
         .with_context(|| format!("invoking `git {}`", args.join(" ")))?;
