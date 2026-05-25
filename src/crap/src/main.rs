@@ -245,7 +245,7 @@ function crap() {
     } <<EOF
 $__crap_out
 EOF
-    cd "$__crap_dir" || return 1
+    cd -- "$__crap_dir" || return 1
     if command -v clauded >/dev/null 2>&1; then
         eval 'clauded --resume "$__crap_session"'
     else
