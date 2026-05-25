@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
@@ -223,10 +221,6 @@ fn main() -> Result<()> {
         return Ok(());
     };
 
-    // gsw still shells out for status/diff during the migration, so keep the
-    // private-index guard until those calls move to gix (removed in Task 8).
-    let _index_snapshot = redirect_index_to_snapshot();
-
     let branch = repo::branch_name(&repo);
 
     let base = cli.base.unwrap_or_else(|| repo::resolve_base(&repo));
@@ -238,9 +232,7 @@ fn main() -> Result<()> {
 
     let (staged_numstat, unstaged_numstat) = repo::collect_numstats(&repo).unwrap_or_default();
 
-    let repo_root = run_git(&["rev-parse", "--show-toplevel"])
-        .ok()
-        .map(|s| PathBuf::from(s.trim()));
+    let repo_root = repo.workdir().map(|p| p.to_path_buf());
     let ages = collect_ages(&entries, repo_root.as_deref());
 
     let mut snapshot = build_snapshot(
@@ -312,152 +304,6 @@ fn main() -> Result<()> {
 
     println!("{}", render(&snapshot, &opts));
     Ok(())
-}
-
-/// True if the current working directory is inside a git work tree.
-///
-/// `git rev-parse --is-inside-work-tree` returns status 0 with stdout
-/// `false` for bare repos, so we have to inspect the output, not just
-/// the exit code.
-#[allow(dead_code, reason = "removed in Task 8 of the gix migration")]
-fn inside_git_repo() -> bool {
-    let Ok(output) = git_command()
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    String::from_utf8_lossy(&output.stdout).trim() == "true"
-}
-
-/// Absolute path of gsw's private index snapshot, once [`redirect_index_to_snapshot`]
-/// has set it up. [`git_command`] points `GIT_INDEX_FILE` here so git's index
-/// refresh writes land on the throwaway copy instead of the repo's real index.
-static GSW_INDEX_FILE: OnceLock<PathBuf> = OnceLock::new();
-
-/// A `git` command configured so gsw can never contend for the repo's index lock.
-///
-/// gsw is a read-only monitor, typically run in a tight `viddy gsw` loop. Two
-/// settings keep it from ever taking `.git/index.lock` — which, if it happened,
-/// would race with and abort a rebase running in the same repo:
-///
-/// - `GIT_OPTIONAL_LOCKS=0` tells `git status` to skip refreshing (and thus
-///   rewriting) the index as a side effect. It is necessary but **not
-///   sufficient**: `git diff` ignores this flag and still rewrites the index
-///   whenever a tracked file's cached stat data is stale.
-/// - `GIT_INDEX_FILE`, once [`redirect_index_to_snapshot`] has run, points at a
-///   per-process *copy* of the index. Any refresh write `git diff` insists on
-///   doing then lands on that copy (and a `<copy>.lock`), leaving the repo's
-///   real `.git/index` and `.git/index.lock` untouched.
-///
-/// Every gsw git invocation goes through this so no call site can reintroduce
-/// the contention.
-fn git_command() -> Command {
-    let mut cmd = Command::new("git");
-    cmd.env("GIT_OPTIONAL_LOCKS", "0");
-    if let Some(index_file) = GSW_INDEX_FILE.get() {
-        cmd.env("GIT_INDEX_FILE", index_file);
-    }
-    cmd
-}
-
-/// Owns gsw's private index snapshot and removes it (and any leftover lock file)
-/// when dropped, so no temp file survives even if `main` returns early.
-struct IndexSnapshot {
-    path: PathBuf,
-}
-
-impl Drop for IndexSnapshot {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-        let mut lock = self.path.clone().into_os_string();
-        lock.push(".lock");
-        let _ = std::fs::remove_file(PathBuf::from(lock));
-    }
-}
-
-/// Copy the repo's index to a private per-process file and route gsw's git
-/// invocations at it via [`GSW_INDEX_FILE`].
-///
-/// See [`git_command`] for why: `GIT_OPTIONAL_LOCKS=0` alone can't stop
-/// `git diff` from rewriting the index, so gsw operates on a throwaway snapshot
-/// and never touches the real `.git/index` or `.git/index.lock`. The snapshot
-/// is a faithful copy taken at startup, so `git status`/`git diff` still report
-/// the true working-tree state.
-///
-/// Returns a guard that deletes the snapshot on drop, or `None` when there's no
-/// index to copy yet (e.g. a freshly `git init`'d repo) — in which case there's
-/// nothing to contend over anyway.
-///
-/// Cost: this copies the whole index once per gsw invocation, so under a tight
-/// `viddy gsw` loop a large repo re-copies its (potentially multi-MB) index
-/// every tick. That's a deliberate trade — a cheap, bounded copy in exchange
-/// for never racing the real index lock — but it is not free.
-fn redirect_index_to_snapshot() -> Option<IndexSnapshot> {
-    let real_index = run_git(&["rev-parse", "--path-format=absolute", "--git-path", "index"]).ok()?;
-    let real_index = PathBuf::from(real_index.trim());
-    if !real_index.is_file() {
-        return None;
-    }
-
-    // Key the snapshot on pid + nanos so concurrent gsw runs never clobber each
-    // other's copy (matches the repo's parallel-safe-temp-file convention).
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let snapshot = std::env::temp_dir().join(format!(
-        "gsw-index-{}-{nanos}",
-        std::process::id(),
-    ));
-    std::fs::copy(&real_index, &snapshot).ok()?;
-
-    let guard = IndexSnapshot {
-        path: snapshot.clone(),
-    };
-    // If another thread somehow set this first, fall back to its path; we only
-    // ever have one in practice (set once, early in `main`).
-    let _ = GSW_INDEX_FILE.set(snapshot);
-    Some(guard)
-}
-
-/// Run `git` with the given args and return captured stdout as UTF-8.
-fn run_git(args: &[&str]) -> Result<String> {
-    let output = git_command()
-        .args(args)
-        .output()
-        .with_context(|| format!("invoking `git {}`", args.join(" ")))?;
-    if !output.status.success() {
-        bail!(
-            "`git {}` exited with status {}: {}",
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Pick the first base ref that actually resolves: `main`, then `master`,
-/// then whatever `origin/HEAD` points to. Falls back to `HEAD` so the
-/// commits-ahead count degrades gracefully to zero.
-#[allow(dead_code, reason = "removed in Task 8 of the gix migration")]
-fn resolve_base_ref() -> String {
-    for candidate in ["main", "master"] {
-        if run_git(&["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
-            return candidate.to_string();
-        }
-    }
-    if let Ok(out) = run_git(&["symbolic-ref", "refs/remotes/origin/HEAD"]) {
-        let trimmed = out.trim();
-        if let Some(name) = trimmed.strip_prefix("refs/remotes/origin/") {
-            return format!("origin/{name}");
-        }
-    }
-    "HEAD".to_string()
 }
 
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.

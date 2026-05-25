@@ -47,13 +47,13 @@ fn setup_repo() -> TempDir {
 
 #[test]
 fn does_not_rewrite_the_index_so_a_concurrent_rebase_keeps_the_lock() {
-    // Regression: under `viddy gsw`, gsw fires `git status`/`git diff` every
-    // couple of seconds. Those commands refresh the index's cached stat data
-    // and write `.git/index` back — taking `.git/index.lock` for the duration.
-    // A rebase running at that instant loses the race for the lock and aborts
-    // with a "another git process seems to be running" / index.lock error.
-    // gsw is a read-only monitor and must never take the index lock, so it
-    // runs git with GIT_OPTIONAL_LOCKS=0, which skips the refresh write.
+    // Regression: under `viddy gsw`, gsw fires every couple of seconds. Any
+    // code path that refreshes the index's cached stat data writes `.git/index`
+    // back — taking `.git/index.lock` for the duration. A rebase running at
+    // that instant loses the race for the lock and aborts with a "another git
+    // process seems to be running" / index.lock error. gsw is a read-only
+    // monitor and must never take the index lock. All git operations now go
+    // through gix in-process, which reads the index but never writes it.
     let dir = setup_repo();
     let index_path = dir.path().join(".git").join("index");
 
@@ -64,10 +64,11 @@ fn does_not_rewrite_the_index_so_a_concurrent_rebase_keeps_the_lock() {
     // `git status` then re-stats a.txt, sees the mtime no longer matches the
     // index, re-hashes it, finds the content unchanged, and rewrites
     // `.git/index` to refresh the cached stat — taking `.git/index.lock` to do
-    // so. GIT_OPTIONAL_LOCKS=0 makes git skip that optional refresh write. A
-    // fixed backdate (rather than touch-with-now) keeps the trigger
-    // deterministic: inside the racy window the refresh write is timing-
-    // dependent and the test flakes.
+    // so. If gsw ever regresses to shelling out to git for status/diff, the
+    // stale mtime will trigger that write and this test will catch it. A fixed
+    // backdate (rather than touch-with-now) keeps the trigger deterministic:
+    // inside the racy window the refresh write is timing-dependent and the test
+    // flakes.
     let stale = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800);
     let file = std::fs::File::options()
         .write(true)
@@ -83,10 +84,9 @@ fn does_not_rewrite_the_index_so_a_concurrent_rebase_keeps_the_lock() {
 
     assert_eq!(
         before, after,
-        "gsw rewrote .git/index, which means it took the index lock; that races \
-         with a concurrent rebase. GIT_OPTIONAL_LOCKS=0 silences `git status` but \
-         not `git diff`, so gsw must redirect git at a private index snapshot via \
-         GIT_INDEX_FILE and leave the repo's real .git/index untouched.",
+        "gsw rewrote .git/index. gsw reads the repo in-process via gix and must \
+         never write the index — writing it takes .git/index.lock, which races a \
+         concurrent rebase. A gix status/diff read must never touch .git/index.",
     );
 }
 
