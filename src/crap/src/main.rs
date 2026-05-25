@@ -620,6 +620,20 @@ mod tests {
     }
 
     #[test]
+    fn output_emits_session_id_before_directory() {
+        // The session id (a validated UUID) goes on the first line; the
+        // directory comes last so any newline inside a path can't be mistaken
+        // for the end of the session-id field.
+        let weird_dir = Path::new("/Users/tim/od\nd\u{2009}dir");
+        let out = format_output(weird_dir, SAMPLE_ID);
+
+        assert_eq!(out.lines().next(), Some(SAMPLE_ID));
+        // Everything after the first newline is the directory, intact.
+        let rest = out.split_once('\n').map(|(_, rest)| rest).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), weird_dir.to_str().unwrap());
+    }
+
+    #[test]
     fn shell_code_guards_cd_against_dash_prefixed_dirs() {
         // `cd -- "$dir"` stops option parsing, so a directory whose name begins
         // with '-' is treated as a path rather than a flag.
