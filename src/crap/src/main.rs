@@ -233,6 +233,36 @@ fn prepare_here_link(
     Ok(Some(link_path))
 }
 
+/// Why `--here` could not place a session under the current directory.
+#[derive(Debug)]
+enum HereResolveError {
+    /// The session id was not a valid UUID.
+    InvalidSessionId,
+    /// No `<session_id>.jsonl` file was found under any project directory.
+    SessionNotFound,
+    /// A real session file already occupies the target name in this directory.
+    Occupied(PathBuf),
+    /// Creating the project folder or the symlink failed.
+    Io(std::io::Error),
+}
+
+/// Validates `session_id`, locates its transcript, and symlinks it into `pwd`'s
+/// project folder so `claude --resume` will find it from there.
+///
+/// Returns the path of the symlink to clean up afterwards, or `None` when `pwd`
+/// already is the session's own directory (no symlink needed).
+///
+/// # Errors
+///
+/// See [`HereResolveError`].
+fn resolve_here_link(
+    projects_dir: &Path,
+    pwd: &Path,
+    session_id: &str,
+) -> Result<Option<PathBuf>, HereResolveError> {
+    unimplemented!()
+}
+
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
 /// cannot be determined.
 ///
@@ -876,6 +906,82 @@ mod tests {
         // Everything after the first newline is the directory, intact.
         let rest = out.split_once('\n').map(|(_, rest)| rest).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), weird_dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn resolve_here_link_rejects_invalid_id() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_here_link(dir.path(), Path::new("/x"), "../escape"),
+            Err(HereResolveError::InvalidSessionId)
+        ));
+    }
+
+    #[test]
+    fn resolve_here_link_errors_when_session_missing() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_here_link(dir.path(), Path::new("/x"), SAMPLE_ID),
+            Err(HereResolveError::SessionNotFound)
+        ));
+    }
+
+    #[test]
+    fn resolve_here_link_links_an_existing_session_into_pwd() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let link = resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID)
+            .expect("ok")
+            .expect("a symlink should be created");
+        assert_eq!(
+            link,
+            projects
+                .join("-Volumes-x-here")
+                .join(format!("{SAMPLE_ID}.jsonl"))
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), original);
+    }
+
+    #[test]
+    fn resolve_here_link_reports_occupied_real_file() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let folder = projects.join("-Volumes-x-here");
+        fs::create_dir_all(&folder).unwrap();
+        let real = folder.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&real, "a real session").unwrap();
+
+        match resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID) {
+            Err(HereResolveError::Occupied(p)) => assert_eq!(p, real),
+            other => panic!("expected Occupied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn shell_code_detects_here_sentinel_from_the_binary() {
+        // The shell function branches on the exact sentinel the binary emits.
+        assert!(SHELL_CODE.contains(HERE_SENTINEL));
+    }
+
+    #[test]
+    fn shell_code_forks_and_cleans_up_in_here_mode() {
+        // here-mode forks a fresh session instead of appending to the original
+        // transcript...
+        assert!(SHELL_CODE.contains("--fork-session"));
+        // ...and removes the temporary symlink afterwards, unless there was
+        // none to remove.
+        assert!(SHELL_CODE.contains(r#"rm -f -- "$__crap_link""#));
+        assert!(SHELL_CODE.contains(NO_LINK_SENTINEL));
     }
 
     #[test]
