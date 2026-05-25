@@ -756,4 +756,50 @@ mod tests {
         assert_eq!(up.ahead, 1);
         assert_eq!(up.behind, 0);
     }
+
+    #[test]
+    fn status_staged_typechange_file_to_symlink() {
+        // Replace a tracked regular file with a symlink and stage it; git/gix
+        // report this as a type change, not a plain modification.
+        let dir = init_repo();
+        let p = dir.path();
+        std::fs::remove_file(p.join("a.txt")).unwrap();
+        std::os::unix::fs::symlink("target", p.join("a.txt")).unwrap();
+        git(p, &["add", "a.txt"]);
+        let repo = open_at(p).unwrap();
+        let s = statuses(&repo);
+        assert!(
+            s.contains(&("a.txt".to_string(), FileStatus::TypeChange, true)),
+            "file→symlink should be a staged TypeChange: {s:?}",
+        );
+    }
+
+    #[test]
+    fn status_merge_conflict_is_conflicted() {
+        // Build a real merge conflict: two branches edit the same line, merge fails.
+        let dir = init_repo();
+        let p = dir.path();
+        // base already has a.txt = "initial\n"
+        git(p, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(p.join("a.txt"), "from other\n").unwrap();
+        git(p, &["commit", "-q", "-am", "other edit"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("a.txt"), "from main\n").unwrap();
+        git(p, &["commit", "-q", "-am", "main edit"]);
+        // Merge 'other' into main → conflict on a.txt. The merge command exits
+        // non-zero on conflict, so don't assert success here.
+        let _ = std::process::Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(p)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("invoke git merge");
+        let repo = open_at(p).unwrap();
+        let s = statuses(&repo);
+        assert!(
+            s.iter().any(|(path, st, _)| path == "a.txt" && *st == FileStatus::Conflicted),
+            "a.txt should be Conflicted after a failed merge: {s:?}",
+        );
+    }
 }
