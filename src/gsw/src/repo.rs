@@ -541,6 +541,23 @@ mod tests {
     }
 
     #[test]
+    fn status_untracked_nested_repo_is_a_dir() {
+        let dir = init_repo();
+        let p = dir.path();
+        // An untracked nested git repo: a subdir with its own .git, not a submodule.
+        let nested = p.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        git(&nested, &["init", "-q", "-b", "main"]);
+        let repo = open_at(p).unwrap();
+        let s = statuses(&repo);
+        // git status shows this as a directory ("?? nested/"); match that.
+        assert!(
+            s.iter().any(|(path, st, _)| path == "nested/" && *st == FileStatus::UntrackedDir),
+            "untracked nested repo should surface as UntrackedDir 'nested/': {s:?}",
+        );
+    }
+
+    #[test]
     fn upstream_none_for_branch_without_upstream() {
         let dir = init_repo(); // local-only main, never pushed
         let repo = open_at(dir.path()).unwrap();
