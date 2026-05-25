@@ -122,6 +122,40 @@ fn find_session_file(projects_dir: &Path, session_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// The conversational state of a session, inferred from its transcript.
+///
+/// Claude Code never writes an explicit "turn finished, waiting for input"
+/// marker, so the state is derived from the shape of the last *conversational*
+/// turn (subagent/`isSidechain` and injected `isMeta` entries, and trailing
+/// bookkeeping lines, are not turns and are ignored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    /// The transcript records no conversational turns yet.
+    Empty,
+    /// Claude finished its turn and is waiting for the user: the last turn is
+    /// an assistant message that ended with prose, with no pending tool call.
+    WaitingForUser,
+    /// Work is in flight — the assistant has an unanswered tool call, or a tool
+    /// result was just delivered and the assistant has yet to respond.
+    Busy,
+    /// The user sent the last message and Claude has not replied yet (an active
+    /// turn, or a session abandoned before the reply).
+    AwaitingAssistant,
+}
+
+impl SessionState {
+    /// The stable lowercase token printed by `crap --status`, suitable for
+    /// scripting.
+    fn as_token(self) -> &'static str {
+        todo!()
+    }
+}
+
+/// Infers the [`SessionState`] from the raw contents of a session transcript.
+fn classify_session_state(contents: &str) -> SessionState {
+    todo!()
+}
+
 /// Resolves a session id to the existing directory the session ran in.
 ///
 /// # Errors
@@ -679,6 +713,209 @@ mod tests {
         assert_eq!(
             extract_cwd(&contents).as_deref(),
             Some("/Users/tim/コード/café")
+        );
+    }
+
+    /// Builds an `assistant` transcript line with the given content blocks and
+    /// `stop_reason` (pass `serde_json::Value::Null` for an interrupted turn).
+    fn assistant_line(content: serde_json::Value, stop_reason: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "stop_reason": stop_reason, "content": content },
+            })
+        )
+    }
+
+    /// Builds a `user` transcript line carrying the given content.
+    fn user_line(content: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({ "type": "user", "message": { "content": content } })
+        )
+    }
+
+    /// A single content block of the given `type`.
+    fn block(kind: &str) -> serde_json::Value {
+        serde_json::json!([{ "type": kind }])
+    }
+
+    #[test]
+    fn classify_empty_input_is_empty() {
+        assert_eq!(classify_session_state(""), SessionState::Empty);
+    }
+
+    #[test]
+    fn classify_only_bookkeeping_is_empty() {
+        // Lines that are not conversational turns never establish a state.
+        let contents = format!(
+            "{}{}{}",
+            "{\"type\":\"file-history-snapshot\"}\n",
+            "{\"type\":\"last-prompt\"}\n",
+            "{\"type\":\"ai-title\"}\n",
+        );
+        assert_eq!(classify_session_state(&contents), SessionState::Empty);
+    }
+
+    #[test]
+    fn classify_assistant_end_turn_waits_for_user() {
+        let contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_assistant_stop_sequence_waits_for_user() {
+        let contents = assistant_line(block("text"), serde_json::json!("stop_sequence"));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_assistant_pending_tool_use_is_busy() {
+        let contents = assistant_line(block("tool_use"), serde_json::json!("tool_use"));
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_uses_stop_reason_over_block_type() {
+        // `stop_reason` is replicated onto every line of a message, so a line
+        // holding only a `thinking` block still carries the turn's real
+        // `stop_reason`. A tool_use stop means a tool call is pending → busy,
+        // even though this line's block is not itself a tool_use.
+        let contents = assistant_line(block("thinking"), serde_json::json!("tool_use"));
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_interrupted_text_turn_waits_for_user() {
+        // A null stop_reason means the turn was cut off mid-stream; with no
+        // pending tool call (last block is text) the user is still up next.
+        let contents = assistant_line(block("text"), serde_json::Value::Null);
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_interrupted_tool_use_is_busy() {
+        // Interrupted, but the last block is a tool_use awaiting a result → busy.
+        let contents = assistant_line(block("tool_use"), serde_json::Value::Null);
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_tool_result_is_busy() {
+        // A tool result was just delivered; the assistant has yet to respond.
+        let contents = format!(
+            "{}{}",
+            assistant_line(block("tool_use"), serde_json::json!("tool_use")),
+            user_line(block("tool_result")),
+        );
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_user_prompt_string_awaits_assistant() {
+        // A real user prompt (string content) with no assistant reply yet.
+        let contents = user_line(serde_json::json!("please continue"));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::AwaitingAssistant
+        );
+    }
+
+    #[test]
+    fn classify_user_prompt_text_block_awaits_assistant() {
+        let contents = user_line(serde_json::json!([{ "type": "text", "text": "hi" }]));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::AwaitingAssistant
+        );
+    }
+
+    #[test]
+    fn classify_ignores_meta_user_entries() {
+        // An injected `isMeta` user entry (system reminder, command output) is
+        // not the user speaking, so the prior assistant end-of-turn wins.
+        let mut contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        contents.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "user",
+                "isMeta": true,
+                "message": { "content": [{ "type": "text", "text": "<reminder>" }] },
+            })
+        ));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_ignores_sidechain_turns() {
+        // Subagent (`isSidechain`) turns are interleaved in the same file but
+        // belong to a different thread, so they never set the main-thread state.
+        let mut contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        contents.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "isSidechain": true,
+                "message": { "stop_reason": "tool_use", "content": [{ "type": "tool_use" }] },
+            })
+        ));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_ignores_trailing_bookkeeping() {
+        // Bookkeeping lines are appended after the conversation; they must not
+        // override the last real turn's state.
+        let mut contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        contents.push_str("{\"type\":\"file-history-snapshot\"}\n");
+        contents.push_str("{\"type\":\"last-prompt\"}\n");
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_follows_a_realistic_sequence() {
+        // user prompt → assistant tool_use → tool_result → assistant end_turn:
+        // Claude has finished and is waiting for the user.
+        let contents = format!(
+            "{}{}{}{}",
+            user_line(serde_json::json!("do the thing")),
+            assistant_line(block("tool_use"), serde_json::json!("tool_use")),
+            user_line(block("tool_result")),
+            assistant_line(block("text"), serde_json::json!("end_turn")),
+        );
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn session_state_tokens_are_stable() {
+        assert_eq!(SessionState::Empty.as_token(), "empty");
+        assert_eq!(SessionState::WaitingForUser.as_token(), "waiting-for-user");
+        assert_eq!(SessionState::Busy.as_token(), "busy");
+        assert_eq!(
+            SessionState::AwaitingAssistant.as_token(),
+            "awaiting-assistant"
         );
     }
 
