@@ -509,6 +509,68 @@ where
     Ok(classify_session_state(&contents).as_token().to_string())
 }
 
+/// One session's status for the per-directory listing `crap --status` prints
+/// when given no id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionStatusReport {
+    /// The session id (the `.jsonl` filename stem under the project folder).
+    session_id: String,
+    /// The state line: a [`SessionState`] token, or `"<status> (live, pid N)"`
+    /// when a `claude` process is attached.
+    state: String,
+    /// The earliest `timestamp` recorded in the transcript (ISO 8601 UTC), or
+    /// `None` if no line carries one.
+    started: Option<String>,
+    /// The latest `timestamp` recorded in the transcript (ISO 8601 UTC), or
+    /// `None` if no line carries one.
+    last: Option<String>,
+}
+
+/// Returns the earliest and latest `timestamp` values found in a transcript.
+///
+/// Claude writes ISO 8601 UTC timestamps (`…Z`, fixed width) on conversational
+/// and system entries, but not on bookkeeping lines. Because the format is
+/// fixed-width and always UTC, lexicographic ordering matches chronological
+/// ordering, so the earliest/latest are just the string min/max — no date
+/// parsing, and the result is independent of line order. Returns `(None, None)`
+/// when no line carries a timestamp.
+fn transcript_time_span(contents: &str) -> (Option<String>, Option<String>) {
+    todo!()
+}
+
+/// Prettifies an ISO 8601 UTC timestamp (`2026-05-25T18:43:05.109Z`) into a
+/// human `2026-05-25 18:43:05`, dropping the sub-second fraction and zone.
+///
+/// Input that does not match the expected shape is returned unchanged.
+fn format_timestamp(raw: &str) -> String {
+    todo!()
+}
+
+/// Lists the status of every session whose transcript lives in `pwd`'s project
+/// folder under `projects_dir`.
+///
+/// This backs `crap --status` with no id: it enumerates `<uuid>.jsonl` files in
+/// the folder Claude would use for `pwd`, classifying each (live process status
+/// taking precedence over transcript inference) and recording its time span.
+/// Results are ordered most-recently-active first. `is_alive` is injected so
+/// liveness can be tested without spawning processes.
+fn resolve_dir_statuses<F>(
+    projects_dir: &Path,
+    sessions_dir: &Path,
+    pwd: &Path,
+    is_alive: F,
+) -> Vec<SessionStatusReport>
+where
+    F: Fn(u32) -> bool + Copy,
+{
+    todo!()
+}
+
+/// Renders the per-directory `crap --status` listing for `pwd`.
+fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
+    todo!()
+}
+
 /// Formats the binary's success output for the shell function to read back.
 ///
 /// The session id (a validated UUID) is emitted first, on its own line; the
@@ -1619,5 +1681,236 @@ mod tests {
         assert!(SHELL_CODE.contains("__crap_dir=${__crap_out#*$'\\n'}"));
         assert!(SHELL_CODE.contains("clauded --resume"));
         assert!(SHELL_CODE.contains("claude --resume"));
+    }
+
+    #[test]
+    fn shell_code_passes_status_through_untouched() {
+        // `--status` only queries; it never changes the parent shell, and its
+        // output (a token or a multi-line listing) must reach the terminal
+        // rather than being parsed as a "<session-id>\n<dir>" resume target.
+        assert!(SHELL_CODE.contains(r#"*" --status "*) command crap "$@"; return $?"#));
+    }
+
+    // Two distinct session ids for the per-directory listing tests.
+    const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+    const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+
+    /// Builds a transcript line of `kind` carrying a top-level `timestamp`.
+    fn timestamped_line(kind: &str, timestamp: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({ "type": kind, "timestamp": timestamp, "message": {} })
+        )
+    }
+
+    #[test]
+    fn transcript_time_span_returns_earliest_and_latest() {
+        let contents = format!(
+            "{}{}{}",
+            timestamped_line("user", "2026-05-25T18:43:05.109Z"),
+            timestamped_line("assistant", "2026-05-25T19:00:00.000Z"),
+            timestamped_line("assistant", "2026-05-25T20:17:39.732Z"),
+        );
+        assert_eq!(
+            transcript_time_span(&contents),
+            (
+                Some("2026-05-25T18:43:05.109Z".to_string()),
+                Some("2026-05-25T20:17:39.732Z".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn transcript_time_span_ignores_lines_without_timestamps() {
+        // Bookkeeping lines carry no timestamp and must not affect the span.
+        let contents = format!(
+            "{}{}{}",
+            "{\"type\":\"last-prompt\"}\n",
+            timestamped_line("user", "2026-05-25T18:43:05.109Z"),
+            "{\"type\":\"ai-title\"}\n",
+        );
+        assert_eq!(
+            transcript_time_span(&contents),
+            (
+                Some("2026-05-25T18:43:05.109Z".to_string()),
+                Some("2026-05-25T18:43:05.109Z".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn transcript_time_span_is_order_independent() {
+        // A line written later may bear an earlier instant; min/max still hold.
+        let contents = format!(
+            "{}{}",
+            timestamped_line("assistant", "2026-05-25T20:00:00.000Z"),
+            timestamped_line("user", "2026-05-25T08:00:00.000Z"),
+        );
+        assert_eq!(
+            transcript_time_span(&contents),
+            (
+                Some("2026-05-25T08:00:00.000Z".to_string()),
+                Some("2026-05-25T20:00:00.000Z".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn transcript_time_span_none_when_no_timestamps() {
+        assert_eq!(
+            transcript_time_span("{\"type\":\"last-prompt\"}\n"),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn format_timestamp_prettifies_iso8601() {
+        assert_eq!(format_timestamp("2026-05-25T18:43:05.109Z"), "2026-05-25 18:43:05");
+    }
+
+    #[test]
+    fn format_timestamp_handles_missing_subseconds() {
+        assert_eq!(format_timestamp("2026-05-25T18:43:05Z"), "2026-05-25 18:43:05");
+    }
+
+    #[test]
+    fn format_timestamp_passes_through_unexpected_input() {
+        assert_eq!(format_timestamp("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    /// Writes a single-turn transcript (classifies as `waiting-for-user`) with
+    /// one `timestamp` into `folder`.
+    fn write_session_in(folder: &Path, session_id: &str, timestamp: &str) {
+        fs::create_dir_all(folder).unwrap();
+        let line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": timestamp,
+                "message": { "stop_reason": "end_turn", "content": [{ "type": "text" }] },
+            })
+        );
+        fs::write(folder.join(format!("{session_id}.jsonl")), line).unwrap();
+    }
+
+    #[test]
+    fn resolve_dir_statuses_lists_all_sessions_in_pwd_folder() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let pwd = Path::new("/Volumes/x/proj");
+        let folder = projects.path().join(encode_project_dir(pwd));
+        write_session_in(&folder, ID_A, "2026-05-25T10:00:00.000Z");
+        write_session_in(&folder, ID_B, "2026-05-25T11:00:00.000Z");
+
+        let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |_| false);
+        assert_eq!(reports.len(), 2);
+        // Most-recently-active first.
+        assert_eq!(reports[0].session_id, ID_B);
+        assert_eq!(reports[1].session_id, ID_A);
+        assert!(reports.iter().all(|r| r.state == "waiting-for-user"));
+        assert_eq!(reports[0].started.as_deref(), Some("2026-05-25T11:00:00.000Z"));
+        assert_eq!(reports[0].last.as_deref(), Some("2026-05-25T11:00:00.000Z"));
+    }
+
+    #[test]
+    fn resolve_dir_statuses_ignores_non_session_files() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let pwd = Path::new("/Volumes/x/proj");
+        let folder = projects.path().join(encode_project_dir(pwd));
+        write_session_in(&folder, ID_A, "2026-05-25T10:00:00.000Z");
+        fs::write(folder.join("notes.txt"), "hi").unwrap();
+        fs::write(folder.join("not-a-uuid.jsonl"), "{}\n").unwrap();
+
+        let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |_| false);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].session_id, ID_A);
+    }
+
+    #[test]
+    fn resolve_dir_statuses_empty_when_folder_absent() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let reports =
+            resolve_dir_statuses(projects.path(), sessions.path(), Path::new("/no/such/dir"), |_| {
+                false
+            });
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn resolve_dir_statuses_marks_live_session() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        // The cwd's project folder holds the live session's transcript, but the
+        // live process's own status wins over transcript inference.
+        let pwd = Path::new("/Volumes/code/crap");
+        let folder = projects.path().join(encode_project_dir(pwd));
+        write_session_in(&folder, LIVE_ID, "2026-05-25T10:00:00.000Z");
+        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |pid| pid == 17041);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, "busy (live, pid 17041)");
+    }
+
+    #[test]
+    fn format_dir_statuses_reports_none_found_for_empty() {
+        let out = format_dir_statuses(Path::new("/Volumes/x/proj"), &[]);
+        assert!(out.contains("No Claude sessions found"));
+        assert!(out.contains("/Volumes/x/proj"));
+    }
+
+    #[test]
+    fn format_dir_statuses_lists_each_session_with_times() {
+        let reports = vec![SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "waiting-for-user".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: Some("2026-05-25T12:30:45.000Z".to_string()),
+        }];
+        let out = format_dir_statuses(Path::new("/Volumes/x/proj"), &reports);
+        assert!(out.contains("1 session for /Volumes/x/proj"));
+        assert!(out.contains(ID_A));
+        assert!(out.contains("waiting-for-user"));
+        assert!(out.contains("started 2026-05-25 10:00:00"));
+        assert!(out.contains("last 2026-05-25 12:30:45"));
+    }
+
+    #[test]
+    fn format_dir_statuses_uses_plural_and_dash_for_missing_times() {
+        let reports = vec![
+            SessionStatusReport {
+                session_id: ID_A.to_string(),
+                state: "empty".to_string(),
+                started: None,
+                last: None,
+            },
+            SessionStatusReport {
+                session_id: ID_B.to_string(),
+                state: "busy".to_string(),
+                started: Some("2026-05-25T10:00:00.000Z".to_string()),
+                last: Some("2026-05-25T10:05:00.000Z".to_string()),
+            },
+        ];
+        let out = format_dir_statuses(Path::new("/x"), &reports);
+        assert!(out.contains("2 sessions for /x"));
+        // The session with no recorded activity shows an em dash placeholder.
+        assert!(out.contains("—"));
+    }
+
+    #[test]
+    fn cli_allows_status_without_session_id() {
+        use clap::Parser;
+        let cli =
+            Cli::try_parse_from(["crap", "--status"]).expect("--status with no id should parse");
+        assert!(cli.status);
+        assert!(cli.session_id.is_none());
+    }
+
+    #[test]
+    fn cli_still_requires_session_id_without_flags() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["crap"]).is_err());
     }
 }
