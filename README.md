@@ -1270,13 +1270,9 @@ If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
-    local __crap_dir __crap_session
-    {
-        IFS= read -r __crap_dir
-        IFS= read -r __crap_session
-    } <<EOF
-$__crap_out
-EOF
+    local __crap_session __crap_dir
+    __crap_session=${__crap_out%%$'\n'*}
+    __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
     if command -v clauded >/dev/null 2>&1; then
         eval 'clauded --resume "$__crap_session"'
@@ -1286,7 +1282,7 @@ EOF
 }
 ```
 
-The binary prints two lines on success — the directory to enter and the session id to resume — which the function reads back; forwarding `"$@"` lets flags like `--force` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+The binary prints the session id on the first line and the directory on the rest; the function takes the first line as the session id and everything after it as the directory, so a path containing a newline stays intact. Forwarding `"$@"` lets flags like `--force` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
 
 ### Exit Codes
 

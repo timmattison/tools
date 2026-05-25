@@ -236,19 +236,23 @@ fn pid_is_alive(pid: u32) -> bool {
 
 /// Formats the binary's success output for the shell function to read back.
 ///
-/// Emits two parts separated by a newline. The shell function `cd`s into the
-/// directory and resumes the session id.
+/// The session id (a validated UUID) is emitted first, on its own line; the
+/// directory comes last. Putting the variable-content directory last means a
+/// path that itself contains a newline can't be mistaken for the end of the
+/// session-id field — the shell function takes the first line as the session id
+/// and everything after it as the directory.
 fn format_output(dir: &Path, session_id: &str) -> String {
-    format!("{}\n{}\n", dir.display(), session_id)
+    format!("{session_id}\n{}\n", dir.display())
 }
 
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
 /// `command crap`, forwarding all arguments (so flags like `--force` work). The
-/// binary prints two lines on success — the resolved directory and the session
-/// id — which the function reads back; it then `cd`s there and re-launches
-/// Claude. `clauded` is resolved through `eval` so that an alias of that name is
+/// binary prints the session id on the first line and the resolved directory on
+/// the rest; the function splits on the first newline (so a directory
+/// containing newlines survives intact), `cd`s there, and re-launches Claude.
+/// `clauded` is resolved through `eval` so that an alias of that name is
 /// expanded at call time (shell aliases are otherwise not expanded inside
 /// function bodies); if no `clauded` exists, plain `claude` is used. If the
 /// binary exits non-zero (session not found, already running, …) its message is
@@ -257,13 +261,9 @@ const SHELL_CODE: &str = r#"
 function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
-    local __crap_dir __crap_session
-    {
-        IFS= read -r __crap_dir
-        IFS= read -r __crap_session
-    } <<EOF
-$__crap_out
-EOF
+    local __crap_session __crap_dir
+    __crap_session=${__crap_out%%$'\n'*}
+    __crap_dir=${__crap_out#*$'\n'}
     cd -- "$__crap_dir" || return 1
     if command -v clauded >/dev/null 2>&1; then
         eval 'clauded --resume "$__crap_session"'
@@ -643,11 +643,12 @@ mod tests {
     #[test]
     fn shell_code_defines_function_and_dispatches_to_claude() {
         assert!(SHELL_CODE.contains("function crap()"));
-        // Forwards all args (so --force reaches the binary) and reads back the
-        // two-line output (directory, then session id).
+        // Forwards all args so --force reaches the binary.
         assert!(SHELL_CODE.contains("command crap \"$@\""));
-        assert!(SHELL_CODE.contains("read -r __crap_dir"));
-        assert!(SHELL_CODE.contains("read -r __crap_session"));
+        // Splits the output on the first newline: session id leads, directory
+        // is the remainder (so a path with embedded newlines stays whole).
+        assert!(SHELL_CODE.contains("__crap_session=${__crap_out%%$'\\n'*}"));
+        assert!(SHELL_CODE.contains("__crap_dir=${__crap_out#*$'\\n'}"));
         assert!(SHELL_CODE.contains("clauded --resume"));
         assert!(SHELL_CODE.contains("claude --resume"));
     }
