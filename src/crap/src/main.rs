@@ -397,16 +397,38 @@ function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
     if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
-        local __crap_rest __crap_session __crap_link
+        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
         __crap_rest=${__crap_out#*$'\n'}
         __crap_session=${__crap_rest%%$'\n'*}
         __crap_link=${__crap_rest#*$'\n'}
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            # Claude only needs the symlink while it reads the transcript at
+            # startup; once it writes the forked session file the symlink is
+            # vestigial. Watch the folder and drop it the moment a new .jsonl
+            # appears, rather than letting it linger for the whole session.
+            __crap_folder=$(dirname -- "$__crap_link")
+            __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
+            (
+                __crap_i=0
+                while [ "$__crap_i" -lt 600 ]; do
+                    if [ "$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')" -gt "$__crap_n0" ]; then
+                        rm -f -- "$__crap_link"
+                        exit 0
+                    fi
+                    __crap_i=$((__crap_i + 1))
+                    sleep 0.1
+                done
+            ) &
+            __crap_watcher=$!
+            disown 2>/dev/null
+        fi
         if command -v clauded >/dev/null 2>&1; then
             eval 'clauded --resume "$__crap_session" --fork-session'
         else
             claude --resume "$__crap_session" --fork-session
         fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            kill "$__crap_watcher" 2>/dev/null
             rm -f -- "$__crap_link"
         fi
         return
