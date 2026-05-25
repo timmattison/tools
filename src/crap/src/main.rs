@@ -33,6 +33,8 @@ mod exit_codes {
     pub const SHELL_SETUP_ERROR: i32 = 5;
     /// The user's home directory could not be determined.
     pub const NO_HOME_DIR: i32 = 6;
+    /// The session is already running in another process.
+    pub const SESSION_ALREADY_RUNNING: i32 = 7;
 }
 
 /// Why a session id could not be resolved to an existing directory.
@@ -152,8 +154,25 @@ struct SessionRecord {
 ///
 /// Returns `None` if the JSON is malformed or is missing the `pid`/`sessionId`
 /// fields that uniquely identify a running session.
-fn parse_session_record(_json: &str) -> Option<SessionRecord> {
-    todo!("implemented in the green commit")
+fn parse_session_record(json: &str) -> Option<SessionRecord> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let pid = u32::try_from(value.get("pid")?.as_u64()?).ok()?;
+    let session_id = value.get("sessionId")?.as_str()?.to_string();
+    let cwd = value
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let status = value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    Some(SessionRecord {
+        pid,
+        session_id,
+        cwd,
+        status,
+    })
 }
 
 /// Finds a currently-running session attached to `session_id`.
@@ -162,15 +181,26 @@ fn parse_session_record(_json: &str) -> Option<SessionRecord> {
 /// whose `session_id` matches and whose pid `is_alive` reports as still
 /// running. The `is_alive` predicate is injected so this logic is testable
 /// without spawning real processes.
-fn find_live_session<F>(
-    _sessions_dir: &Path,
-    _session_id: &str,
-    _is_alive: F,
-) -> Option<SessionRecord>
+fn find_live_session<F>(sessions_dir: &Path, session_id: &str, is_alive: F) -> Option<SessionRecord>
 where
     F: Fn(u32) -> bool,
 {
-    todo!("implemented in the green commit")
+    for entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Some(record) = parse_session_record(&contents) else {
+            continue;
+        };
+        if record.session_id == session_id && is_alive(record.pid) {
+            return Some(record);
+        }
+    }
+    None
 }
 
 /// Reports whether `pid` is a currently-running Claude CLI process.
@@ -178,26 +208,43 @@ where
 /// Uses `ps -p <pid> -o command=`: a non-empty, successful result means the pid
 /// exists, and requiring `claude` in the command line guards against a stale
 /// session file whose pid has since been reused by an unrelated process.
-fn pid_is_alive(_pid: u32) -> bool {
-    todo!("implemented in the green commit")
+fn pid_is_alive(pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .to_lowercase()
+        .contains("claude")
 }
 
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
-/// `command crap` to resolve the session's directory. It then `cd`s there and
-/// re-launches Claude. `clauded` is resolved through `eval` so that an alias of
-/// that name is expanded at call time (shell aliases are otherwise not expanded
-/// inside function bodies); if no `clauded` exists, plain `claude` is used.
+/// `command crap`, forwarding all arguments (so flags like `--force` work). The
+/// binary prints two lines on success — the resolved directory and the session
+/// id — which the function reads back; it then `cd`s there and re-launches
+/// Claude. `clauded` is resolved through `eval` so that an alias of that name is
+/// expanded at call time (shell aliases are otherwise not expanded inside
+/// function bodies); if no `clauded` exists, plain `claude` is used. If the
+/// binary exits non-zero (session not found, already running, …) its message is
+/// shown and the function stops without changing directory.
 const SHELL_CODE: &str = r#"
 function crap() {
-    if [ "$#" -eq 0 ]; then
-        command crap
-        return $?
-    fi
-    local __crap_session="$1"
-    local __crap_dir
-    __crap_dir=$(command crap "$__crap_session") || return $?
+    local __crap_out
+    __crap_out=$(command crap "$@") || return $?
+    local __crap_dir __crap_session
+    {
+        IFS= read -r __crap_dir
+        IFS= read -r __crap_session
+    } <<EOF
+$__crap_out
+EOF
     cd "$__crap_dir" || return 1
     if command -v clauded >/dev/null 2>&1; then
         eval 'clauded --resume "$__crap_session"'
@@ -230,6 +277,14 @@ struct Cli {
     /// `~/.claude/projects`).
     #[arg(value_name = "SESSION_ID", required_unless_present = "shell_setup")]
     session_id: Option<String>,
+
+    /// Resume even if the session appears to be running in another process.
+    ///
+    /// By default `crap` refuses to resume a session that is already open
+    /// elsewhere, because two processes writing the same session log can
+    /// corrupt it.
+    #[arg(short, long)]
+    force: bool,
 
     /// Install the `crap` shell function into your shell config, then exit.
     ///
@@ -264,7 +319,31 @@ fn main() {
     };
 
     match resolve_session_dir(&projects_dir, &session_id) {
-        Ok(dir) => println!("{}", dir.display()),
+        Ok(dir) => {
+            if !cli.force {
+                if let Some(live) = claude_sessions_dir()
+                    .and_then(|s| find_live_session(&s, &session_id, pid_is_alive))
+                {
+                    let status = live.status.as_deref().unwrap_or("running");
+                    eprintln!(
+                        "{} session '{session_id}' is already running (pid {}, {status})",
+                        "Error:".red().bold(),
+                        live.pid
+                    );
+                    eprintln!("       in {}", live.cwd);
+                    eprintln!("       resuming it again can corrupt the session log.");
+                    eprintln!(
+                        "       re-run with {} to resume anyway.",
+                        "--force".yellow()
+                    );
+                    exit(exit_codes::SESSION_ALREADY_RUNNING);
+                }
+            }
+            // Two machine-readable lines for the shell function: the directory
+            // to cd into, then the session id to pass to `--resume`.
+            println!("{}", dir.display());
+            println!("{session_id}");
+        }
         Err(ResolveError::InvalidSessionId) => {
             eprintln!(
                 "{} '{session_id}' is not a valid session id",
@@ -508,7 +587,11 @@ mod tests {
     #[test]
     fn shell_code_defines_function_and_dispatches_to_claude() {
         assert!(SHELL_CODE.contains("function crap()"));
-        assert!(SHELL_CODE.contains("command crap"));
+        // Forwards all args (so --force reaches the binary) and reads back the
+        // two-line output (directory, then session id).
+        assert!(SHELL_CODE.contains("command crap \"$@\""));
+        assert!(SHELL_CODE.contains("read -r __crap_dir"));
+        assert!(SHELL_CODE.contains("read -r __crap_session"));
         assert!(SHELL_CODE.contains("clauded --resume"));
         assert!(SHELL_CODE.contains("claude --resume"));
     }
