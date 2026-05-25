@@ -15,6 +15,13 @@ pub fn open() -> Option<gix::Repository> {
     if repo.workdir().is_some() { Some(repo) } else { None }
 }
 
+/// The short current-branch name (e.g. `main`), or `"HEAD"` when detached —
+/// matching what `git rev-parse --abbrev-ref HEAD` prints.
+pub fn branch_name(repo: &gix::Repository) -> String {
+    let _ = repo;
+    String::new() // STUB
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -52,6 +59,21 @@ mod tests {
     fn open_at(path: &Path) -> Option<gix::Repository> {
         let repo = gix::discover(path).ok()?;
         if repo.workdir().is_some() { Some(repo) } else { None }
+    }
+
+    #[test]
+    fn branch_name_reports_current_branch() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::branch_name(&repo), "main");
+    }
+
+    #[test]
+    fn branch_name_reports_head_when_detached() {
+        let dir = init_repo();
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::branch_name(&repo), "HEAD");
     }
 
     #[test]
