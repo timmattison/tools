@@ -645,11 +645,44 @@ where
     reports
 }
 
-/// Renders the per-directory `crap --status` listing for `pwd`.
+/// Resolves the full [`SessionStatusReport`] for a single session id.
 ///
-/// The state column is padded to a common width so the timestamps line up, and
-/// a session with no recorded activity shows an em-dash placeholder. An empty
-/// listing reports that nothing was found.
+/// Unlike the bare token, this also carries the transcript's time span, so the
+/// JSON form of `crap --status <id>` can include start/last times. A live
+/// process's status still takes precedence for the `state` field; the
+/// transcript is read (best-effort) for the times either way.
+///
+/// # Errors
+///
+/// Returns [`StatusError::InvalidSessionId`] for a malformed id, or
+/// [`StatusError::SessionNotFound`] when the id is neither live nor on disk.
+fn resolve_status_report<F>(
+    projects_dir: &Path,
+    sessions_dir: &Path,
+    session_id: &str,
+    is_alive: F,
+) -> Result<SessionStatusReport, StatusError>
+where
+    F: Fn(u32) -> bool,
+{
+    todo!()
+}
+
+/// Serializes a single session's status report as pretty JSON.
+fn format_status_json(report: &SessionStatusReport) -> String {
+    todo!()
+}
+
+/// Serializes a directory's session status reports as a pretty JSON array.
+fn format_dir_statuses_json(reports: &[SessionStatusReport]) -> String {
+    todo!()
+}
+
+/// Renders the per-directory `crap --status` listing for `pwd` as a table.
+///
+/// An empty listing reports that nothing was found; otherwise a heading line is
+/// followed by a table with one row per session. A session with no recorded
+/// activity shows an em-dash in its time columns.
 fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
     if reports.is_empty() {
         return format!("No Claude sessions found for {}\n", pwd.display());
@@ -854,6 +887,14 @@ struct Cli {
     /// written.
     #[arg(long)]
     status: bool,
+
+    /// Emit machine-readable JSON instead of human-formatted text.
+    ///
+    /// Only valid with `--status`. With a session id it prints one object;
+    /// with no id it prints an array of one object per session. Timestamps are
+    /// the raw ISO 8601 values from the transcript.
+    #[arg(long, requires = "status")]
+    json: bool,
 
     /// Install the `crap` shell function into your shell config, then exit.
     ///
@@ -2009,7 +2050,7 @@ mod tests {
     }
 
     #[test]
-    fn format_dir_statuses_lists_each_session_with_times() {
+    fn format_dir_statuses_tabulates_each_session_with_times() {
         let reports = vec![SessionStatusReport {
             session_id: ID_A.to_string(),
             state: "waiting-for-user".to_string(),
@@ -2017,11 +2058,18 @@ mod tests {
             last: Some("2026-05-25T12:30:45.000Z".to_string()),
         }];
         let out = format_dir_statuses(Path::new("/Volumes/x/proj"), &reports);
+        // A heading line, then a table with column headers.
         assert!(out.contains("1 session for /Volumes/x/proj"));
+        assert!(out.contains("SESSION"));
+        assert!(out.contains("STATE"));
+        assert!(out.contains("STARTED"));
+        assert!(out.contains("LAST"));
         assert!(out.contains(ID_A));
         assert!(out.contains("waiting-for-user"));
-        assert!(out.contains("started 2026-05-25 10:00:00"));
-        assert!(out.contains("last 2026-05-25 12:30:45"));
+        // Times are prettified in the cells (no raw `T`/`Z`, no `started`/`last`
+        // labels — those are column headers now).
+        assert!(out.contains("2026-05-25 10:00:00"));
+        assert!(out.contains("2026-05-25 12:30:45"));
     }
 
     #[test]
@@ -2044,6 +2092,116 @@ mod tests {
         assert!(out.contains("2 sessions for /x"));
         // The session with no recorded activity shows an em dash placeholder.
         assert!(out.contains("—"));
+    }
+
+    #[test]
+    fn format_dir_statuses_json_emits_array_with_raw_timestamps() {
+        let reports = vec![SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "busy (live, pid 17041)".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: Some("2026-05-25T12:30:45.000Z".to_string()),
+        }];
+        let out = format_dir_statuses_json(&reports);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let arr = parsed.as_array().expect("a JSON array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["sessionId"], ID_A);
+        assert_eq!(arr[0]["state"], "busy (live, pid 17041)");
+        // Raw ISO 8601 is preserved for machine consumers, not prettified.
+        assert_eq!(arr[0]["started"], "2026-05-25T10:00:00.000Z");
+        assert_eq!(arr[0]["last"], "2026-05-25T12:30:45.000Z");
+    }
+
+    #[test]
+    fn format_dir_statuses_json_empty_is_empty_array() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_dir_statuses_json(&[])).expect("valid JSON");
+        assert_eq!(parsed.as_array().expect("a JSON array").len(), 0);
+    }
+
+    #[test]
+    fn format_status_json_emits_single_object() {
+        let report = SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "waiting-for-user".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: None,
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_status_json(&report)).expect("valid JSON");
+        assert_eq!(parsed["sessionId"], ID_A);
+        assert_eq!(parsed["state"], "waiting-for-user");
+        assert_eq!(parsed["started"], "2026-05-25T10:00:00.000Z");
+        assert!(parsed["last"].is_null());
+    }
+
+    #[test]
+    fn resolve_status_report_carries_state_and_time_span() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let proj = projects.path().join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        let line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-05-25T10:00:00.000Z",
+                "message": { "stop_reason": "end_turn", "content": [{ "type": "text" }] },
+            })
+        );
+        fs::write(proj.join(format!("{SAMPLE_ID}.jsonl")), line).unwrap();
+
+        let report =
+            resolve_status_report(projects.path(), sessions.path(), SAMPLE_ID, |_| false).unwrap();
+        assert_eq!(report.session_id, SAMPLE_ID);
+        assert_eq!(report.state, "waiting-for-user");
+        assert_eq!(report.started.as_deref(), Some("2026-05-25T10:00:00.000Z"));
+        assert_eq!(report.last.as_deref(), Some("2026-05-25T10:00:00.000Z"));
+    }
+
+    #[test]
+    fn resolve_status_report_uses_live_state_for_the_state_field() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        let report =
+            resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041)
+                .unwrap();
+        assert_eq!(report.state, "busy (live, pid 17041)");
+    }
+
+    #[test]
+    fn resolve_status_report_rejects_invalid_id() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_status_report(dir.path(), dir.path(), "../escape", |_| true),
+            Err(StatusError::InvalidSessionId)
+        ));
+    }
+
+    #[test]
+    fn resolve_status_report_errors_when_session_missing() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_status_report(dir.path(), dir.path(), SAMPLE_ID, |_| false),
+            Err(StatusError::SessionNotFound)
+        ));
+    }
+
+    #[test]
+    fn cli_json_requires_status() {
+        use clap::Parser;
+        // --json without --status is rejected.
+        assert!(Cli::try_parse_from(["crap", "--json", SAMPLE_ID]).is_err());
+    }
+
+    #[test]
+    fn cli_status_json_parses() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["crap", "--status", "--json"]).expect("should parse");
+        assert!(cli.status && cli.json);
     }
 
     #[test]
