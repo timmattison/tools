@@ -74,8 +74,9 @@ This logic is centralized in `resolve_config_target`, so every consumer (`crap`,
 ### Tools Currently Using shellsetup
 
 - `cwt` - Change Worktree (provides `wt`, `wtf`, `wtb`, `wtm` commands)
-- `prcp` - Progress Copy (provides `prmv` command)
+- `nwt` - New Worktree (provides the worktree-creation cd function)
 - `crap` - Claude, Resume Anywhere Please (provides the `crap` cd-and-resume function)
+- `prcp` - Progress Copy (provides `prmv` command) — **slated for removal**, see issue #265; this is cosmetic shell integration, not load-bearing
 
 ## Progress Bar Display
 
