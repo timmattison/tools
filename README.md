@@ -318,7 +318,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
     have one, otherwise plain `claude`. If the original directory no longer exists it tells you
     and stops, and it refuses to resume a session that's already open in another running process
-    (pass `--force` to override) so two processes can't corrupt the same session log. Run
+    (pass `--force` to override) so two processes can't corrupt the same session log. With
+    `--here` it brings the session into the *current* directory instead, resuming it as a forked
+    (new-id) session so you can carry its context into a different working tree. Run
     `crap --shell-setup` once to install the shell function.
   - To install: `cargo install --git https://github.com/timmattison/tools crap`
 - ng (navel-gaze)
@@ -1231,6 +1233,21 @@ The session id is the name of the `.jsonl` file under `~/.claude/projects/<proje
 
 If you have a `clauded` alias or command (e.g. `claude --dangerously-skip-permissions`), `crap` uses it; otherwise it falls back to plain `claude`. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
 
+### Resume in the current directory: `--here`
+
+Sometimes you don't want to go back to where a session started — you want to bring its context to where you *are* now (a different worktree, a fresh checkout, a scratch dir):
+
+```bash
+crap --here 57570685-2d64-4431-8ab6-c021a12fa1af   # resume it right here
+```
+
+Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified. When the session ends, `crap` removes the symlink it created.
+
+A couple of things to know:
+
+- The replayed history still references the *original* directory's paths. Claude works in your current directory from here on, but the conversation it inherits talks about the old one.
+- It still won't resume a session that's open elsewhere unless you pass `--force` (forking reads the live transcript, which can be mid-write).
+
 ### Don't attach twice
 
 Claude Code records every live CLI session under `~/.claude/sessions/<pid>.json` and removes it on clean exit. Before resuming, `crap` checks that registry: if the session you asked for is already open in another running `claude` process, it refuses and tells you where:
@@ -1248,6 +1265,7 @@ This prevents two processes from appending to the same session log at once. The 
 
 - `[SESSION_ID]`: The Claude session id to resume
 - `-f, --force`: Resume even if the session appears to be running in another process
+- `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
 
 ### Shell Integration
@@ -1270,6 +1288,21 @@ If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
+    if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
+        local __crap_rest __crap_session __crap_link
+        __crap_rest=${__crap_out#*$'\n'}
+        __crap_session=${__crap_rest%%$'\n'*}
+        __crap_link=${__crap_rest#*$'\n'}
+        if command -v clauded >/dev/null 2>&1; then
+            eval 'clauded --resume "$__crap_session" --fork-session'
+        else
+            claude --resume "$__crap_session" --fork-session
+        fi
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            rm -f -- "$__crap_link"
+        fi
+        return
+    fi
     local __crap_session __crap_dir
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
@@ -1282,7 +1315,7 @@ function crap() {
 }
 ```
 
-The binary prints the session id on the first line and the directory on the rest; the function takes the first line as the session id and everything after it as the directory, so a path containing a newline stays intact. Forwarding `"$@"` lets flags like `--force` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+The binary speaks one of two output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already symlinked the session into the current directory's project folder — so the function stays put, resumes with `--fork-session`, and finally removes that symlink (unless the link field is `__CRAP_NO_LINK__`, meaning none was needed). Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
 
 ### Exit Codes
 
@@ -1294,6 +1327,8 @@ The binary prints the session id on the first line and the directory on the rest
 - `5`: Shell setup failed
 - `6`: Could not determine your home directory
 - `7`: The session is already running in another process (use `--force` to override)
+- `8`: `--here`: could not create the project folder or symlink
+- `9`: `--here`: could not determine the current working directory
 
 ## bm (bulk move)
 

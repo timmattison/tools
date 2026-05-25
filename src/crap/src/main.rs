@@ -5,11 +5,17 @@
 //! up that session under `~/.claude/projects`, recovers the directory it ran
 //! in, changes into it, and re-launches Claude with `--resume <id>`.
 //!
+//! With `--here`, it instead brings the session to *you*: Claude resolves a
+//! `--resume <id>` only against the project folder matching the current working
+//! directory, so `crap --here` symlinks the session's transcript into that
+//! folder and resumes it as a `--fork-session` (a fresh id), leaving the
+//! original transcript untouched. The symlink is removed once the session ends.
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
-//! function installed via `crap --shell-setup`. This binary's job is to resolve
-//! a session id to its original directory and print that path to stdout; the
-//! shell function performs the `cd` and runs `clauded`/`claude` from there.
+//! function installed via `crap --shell-setup`. This binary resolves the session
+//! id — printing the original directory to resume from, or (for `--here`)
+//! preparing the symlink and printing what the function should run and clean up.
 
 use std::path::{Path, PathBuf};
 use std::process::exit;
