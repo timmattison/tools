@@ -322,7 +322,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     `--here` it brings the session into the *current* directory instead, resuming it as a forked
     (new-id) session so you can carry its context into a different working tree. `--status <id>`
     reports where a session left off (`waiting-for-user`, `busy`, `awaiting-assistant`, …) without
-    resuming. Run `crap --shell-setup` once to install the shell function.
+    resuming; `--status` with no id lists every session for the current directory (as a table, or
+    JSON with `--json`) showing each one's state and start/last times. Run `crap --shell-setup`
+    once to install the shell function.
   - To install: `cargo install --git https://github.com/timmattison/tools crap`
 - ng (navel-gaze)
   - Watches JS/TS source files in the current directory and re-runs `pnpm lint` on change. Pass
@@ -1295,12 +1297,52 @@ The tokens are stable and newline-terminated, so they script cleanly:
 
 `--status` exits non-zero for a malformed id or a session that is neither live nor on disk.
 
+#### List every session for the current directory
+
+Give `--status` **no id** and it lists every session recorded for the directory you're in — handy when a single project has several conversations going. Each row shows the state plus when the transcript was *started* and *last written*, read from the transcript's own timestamps (not file mtimes), so they reflect real activity:
+
+```text
+4 sessions for /Volumes/code/crap
+
+┌──────────────────────────────────────┬────────────────────────┬─────────────────────┬─────────────────────┐
+│ SESSION                              ┆ STATE                  ┆ STARTED             ┆ LAST                │
+╞══════════════════════════════════════╪════════════════════════╪═════════════════════╪═════════════════════╡
+│ 1c8aad51-26aa-416d-8da9-a0b586fd0632 ┆ busy (live, pid 98519) ┆ 2026-05-25 18:43:05 ┆ 2026-05-25 20:29:44 │
+│ c43eb4df-1ba3-4c42-84f2-ab76319a860c ┆ waiting-for-user       ┆ 2026-05-25 20:02:29 ┆ 2026-05-25 20:11:21 │
+└──────────────────────────────────────┴────────────────────────┴─────────────────────┴─────────────────────┘
+```
+
+Rows are ordered most-recently-active first. Live sessions show their own status and pid; the rest show the inferred state. A session with no recorded activity shows `—` for its times.
+
+#### JSON output: `--json`
+
+Add `--json` (only valid with `--status`) for machine-readable output instead of text — a single object for one id, an array for the directory listing. Keys are camelCase and timestamps are the raw ISO 8601 values, so it pipes straight into `jq`:
+
+```bash
+# Which sessions here are waiting on me?
+crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sessionId'
+```
+
+```json
+[
+  {
+    "sessionId": "c43eb4df-1ba3-4c42-84f2-ab76319a860c",
+    "state": "waiting-for-user",
+    "started": "2026-05-25T20:02:29.035Z",
+    "last": "2026-05-25T20:11:21.375Z"
+  }
+]
+```
+
+`started` and `last` are `null` when the transcript records no timestamps.
+
 ### Options
 
-- `[SESSION_ID]`: The Claude session id to resume
+- `[SESSION_ID]`: The Claude session id to resume (optional with `--status`, which then lists every session for the current directory)
 - `-f, --force`: Resume even if the session appears to be running in another process
 - `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one
-- `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming
+- `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
+- `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
 
 ### Shell Integration
