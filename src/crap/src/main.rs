@@ -146,8 +146,18 @@ fn resolve_session_dir(projects_dir: &Path, session_id: &str) -> Result<PathBuf,
 /// The mapping is per Unicode scalar, which matches Claude for the ASCII paths
 /// that real project directories use; non-ASCII characters each collapse to a
 /// single `-`.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "exercised only by tests until the --here path in main calls it"
+    )
+)]
 fn encode_project_dir(path: &Path) -> String {
-    String::new()
+    path.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 /// Returns the `~/.claude/projects` directory, or `None` if the home directory
