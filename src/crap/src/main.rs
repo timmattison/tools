@@ -35,6 +35,10 @@ mod exit_codes {
     pub const NO_HOME_DIR: i32 = 6;
     /// The session is already running in another process.
     pub const SESSION_ALREADY_RUNNING: i32 = 7;
+    /// `--here`: the project folder or symlink could not be created.
+    pub const HERE_LINK_ERROR: i32 = 8;
+    /// `--here`: the current working directory could not be determined.
+    pub const HERE_PWD_UNAVAILABLE: i32 = 9;
 }
 
 /// Why a session id could not be resolved to an existing directory.
@@ -146,13 +150,6 @@ fn resolve_session_dir(projects_dir: &Path, session_id: &str) -> Result<PathBuf,
 /// The mapping is per Unicode scalar, which matches Claude for the ASCII paths
 /// that real project directories use; non-ASCII characters each collapse to a
 /// single `-`.
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "exercised only by tests until the --here path in main calls it"
-    )
-)]
 fn encode_project_dir(path: &Path) -> String {
     path.to_string_lossy()
         .chars()
@@ -166,69 +163,42 @@ fn claude_projects_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("projects"))
 }
 
-/// Why dropping a `--here` symlink failed.
-#[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "variant payloads are read by the --here path in main (Cycle 4)"
-)]
-enum HereError {
-    /// The current directory's project folder already holds a *real* session
-    /// file at this id; refusing to clobber it.
-    Occupied(PathBuf),
-    /// A filesystem operation (creating the folder or the symlink) failed.
-    Io(std::io::Error),
-}
-
 /// Makes the session `original_jsonl` resolvable by `claude --resume` from
 /// `pwd`, by symlinking it into `pwd`'s project folder under `projects_dir`.
 ///
-/// Returns the path of the symlink that was created (so the caller can remove
-/// it once the session ends), or `None` when `pwd` *is* the session's original
-/// directory and no symlink is needed. An existing symlink at the target is
-/// treated as stale and replaced; an existing real file is left alone and
-/// reported as [`HereError::Occupied`].
+/// Returns the path of the symlink that was created (so the caller can remove it
+/// once the session ends), or `None` when the session is *already* resolvable
+/// from `pwd` — because `pwd` is its own directory, or an earlier `--here`
+/// already linked it. Anything already at the target name is left untouched: a
+/// session id is a UUID, so a file there can only be this very session, and
+/// clobbering it would never be correct.
 ///
 /// # Errors
 ///
-/// Returns [`HereError::Occupied`] if a non-symlink file already occupies the
-/// target name, or [`HereError::Io`] if the folder or symlink cannot be created.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "called by the --here path in main (Cycle 4)")
-)]
+/// Returns the underlying [`std::io::Error`] if the project folder or the
+/// symlink cannot be created.
 fn prepare_here_link(
     projects_dir: &Path,
     original_jsonl: &Path,
     pwd: &Path,
     session_id: &str,
-) -> Result<Option<PathBuf>, HereError> {
+) -> std::io::Result<Option<PathBuf>> {
     let folder = projects_dir.join(encode_project_dir(pwd));
     let link_path = folder.join(format!("{session_id}.jsonl"));
 
-    // Already sitting in the session's own folder: `claude --resume` would find
-    // it unaided, so there is nothing to drop and nothing to clean up.
-    if link_path == original_jsonl {
+    // Anything already at this name means the session resolves from here
+    // already. `symlink_metadata` does not follow links, so even a dangling
+    // symlink left by an earlier `--here` counts as "present".
+    if link_path.symlink_metadata().is_ok() {
         return Ok(None);
     }
 
-    std::fs::create_dir_all(&folder).map_err(HereError::Io)?;
-
-    match std::fs::symlink_metadata(&link_path) {
-        // A leftover symlink from an earlier `--here`: replace it.
-        Ok(meta) if meta.file_type().is_symlink() => {
-            std::fs::remove_file(&link_path).map_err(HereError::Io)?;
-        }
-        // A real file (or directory) already owns this name: never clobber it.
-        Ok(_) => return Err(HereError::Occupied(link_path)),
-        // Nothing there yet.
-        Err(_) => {}
-    }
+    std::fs::create_dir_all(&folder)?;
 
     #[cfg(unix)]
-    std::os::unix::fs::symlink(original_jsonl, &link_path).map_err(HereError::Io)?;
+    std::os::unix::fs::symlink(original_jsonl, &link_path)?;
     #[cfg(not(unix))]
-    std::os::windows::fs::symlink_file(original_jsonl, &link_path).map_err(HereError::Io)?;
+    std::os::windows::fs::symlink_file(original_jsonl, &link_path)?;
 
     Ok(Some(link_path))
 }
@@ -240,8 +210,6 @@ enum HereResolveError {
     InvalidSessionId,
     /// No `<session_id>.jsonl` file was found under any project directory.
     SessionNotFound,
-    /// A real session file already occupies the target name in this directory.
-    Occupied(PathBuf),
     /// Creating the project folder or the symlink failed.
     Io(std::io::Error),
 }
@@ -249,8 +217,8 @@ enum HereResolveError {
 /// Validates `session_id`, locates its transcript, and symlinks it into `pwd`'s
 /// project folder so `claude --resume` will find it from there.
 ///
-/// Returns the path of the symlink to clean up afterwards, or `None` when `pwd`
-/// already is the session's own directory (no symlink needed).
+/// Returns the path of the symlink to clean up afterwards, or `None` when the
+/// session is already resolvable from `pwd` (no symlink needed).
 ///
 /// # Errors
 ///
@@ -260,7 +228,12 @@ fn resolve_here_link(
     pwd: &Path,
     session_id: &str,
 ) -> Result<Option<PathBuf>, HereResolveError> {
-    unimplemented!()
+    if !is_valid_session_id(session_id) {
+        return Err(HereResolveError::InvalidSessionId);
+    }
+    let original = find_session_file(projects_dir, session_id)
+        .ok_or(HereResolveError::SessionNotFound)?;
+    prepare_here_link(projects_dir, &original, pwd, session_id).map_err(HereResolveError::Io)
 }
 
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
@@ -371,19 +344,11 @@ fn format_output(dir: &Path, session_id: &str) -> String {
 
 /// Leading token marking `--here` output, distinguishing it from the default
 /// `<session-id>\n<dir>` resume output the shell function otherwise expects.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "emitted by the --here path in main (Cycle 4)")
-)]
 const HERE_SENTINEL: &str = "__CRAP_HERE__";
 
 /// Placeholder used in the link field when `--here` created no symlink (because
 /// the current directory already is the session's own folder), so the shell
 /// function can tell "nothing to clean up" apart from a real path.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "emitted by the --here path in main (Cycle 4)")
-)]
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
@@ -392,10 +357,6 @@ const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 ///
 /// The cleanup path is emitted last so that — like [`format_output`] — a path
 /// containing a newline survives intact as "everything after the second line".
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "called by the --here path in main (Cycle 4)")
-)]
 fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> String {
     let link = match link_to_cleanup {
         Some(path) => path.display().to_string(),
@@ -407,19 +368,43 @@ fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> Strin
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
-/// `command crap`, forwarding all arguments (so flags like `--force` work). The
-/// binary prints the session id on the first line and the resolved directory on
-/// the rest; the function splits on the first newline (so a directory
-/// containing newlines survives intact), `cd`s there, and re-launches Claude.
-/// `clauded` is resolved through `eval` so that an alias of that name is
-/// expanded at call time (shell aliases are otherwise not expanded inside
-/// function bodies); if no `clauded` exists, plain `claude` is used. If the
-/// binary exits non-zero (session not found, already running, …) its message is
-/// shown and the function stops without changing directory.
+/// `command crap`, forwarding all arguments (so flags like `--force` and
+/// `--here` work). `clauded` is resolved through `eval` so that an alias of that
+/// name is expanded at call time (shell aliases are otherwise not expanded
+/// inside function bodies); if no `clauded` exists, plain `claude` is used. If
+/// the binary exits non-zero (session not found, already running, …) its message
+/// is shown and the function does nothing further.
+///
+/// The binary speaks one of two output shapes:
+///
+/// * **default** — `<session-id>\n<dir>`: the function `cd`s into the original
+///   directory (splitting on the first newline so a path containing newlines
+///   survives intact) and resumes.
+/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<link-or-sentinel>`: the binary
+///   has already symlinked the session into the *current* directory's project
+///   folder, so the function stays put, resumes with `--fork-session` (a fresh
+///   session id, leaving the original transcript untouched), and finally removes
+///   that symlink — unless the link field is `__CRAP_NO_LINK__`, meaning none
+///   was created because this already is the session's own directory.
 const SHELL_CODE: &str = r#"
 function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
+    if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
+        local __crap_rest __crap_session __crap_link
+        __crap_rest=${__crap_out#*$'\n'}
+        __crap_session=${__crap_rest%%$'\n'*}
+        __crap_link=${__crap_rest#*$'\n'}
+        if command -v clauded >/dev/null 2>&1; then
+            eval 'clauded --resume "$__crap_session" --fork-session'
+        else
+            claude --resume "$__crap_session" --fork-session
+        fi
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            rm -f -- "$__crap_link"
+        fi
+        return
+    fi
     local __crap_session __crap_dir
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
@@ -464,12 +449,94 @@ struct Cli {
     #[arg(short, long)]
     force: bool,
 
+    /// Resume the session in the *current* directory instead of its original.
+    ///
+    /// `crap` symlinks the session into the current directory's project folder
+    /// so `claude --resume` can find it here, then resumes it as a forked
+    /// (new-id) session — the original transcript is left untouched. Use this to
+    /// carry a conversation's context into a different working directory.
+    #[arg(long)]
+    here: bool,
+
     /// Install the `crap` shell function into your shell config, then exit.
     ///
     /// Run this once: `crap --shell-setup`. After re-sourcing your shell,
     /// `crap <session-id>` will cd into the session's directory and resume it.
     #[arg(long)]
     shell_setup: bool,
+}
+
+/// Aborts with a clear message if `session_id` is already open in another live
+/// process, unless `force` overrides the check.
+///
+/// Both resume modes call this: two processes writing one session log can
+/// corrupt it, and even `--here`'s fork reads the live transcript while it is
+/// being written. `--force` bypasses the guard.
+fn abort_if_session_live(session_id: &str, force: bool) {
+    if force {
+        return;
+    }
+    if let Some(live) =
+        claude_sessions_dir().and_then(|s| find_live_session(&s, session_id, pid_is_alive))
+    {
+        let status = live.status.as_deref().unwrap_or("running");
+        eprintln!(
+            "{} session '{session_id}' is already running (pid {}, {status})",
+            "Error:".red().bold(),
+            live.pid
+        );
+        eprintln!("       in {}", live.cwd);
+        eprintln!("       resuming it again can corrupt the session log.");
+        eprintln!(
+            "       re-run with {} to resume anyway.",
+            "--force".yellow()
+        );
+        exit(exit_codes::SESSION_ALREADY_RUNNING);
+    }
+}
+
+/// Handles `crap --here <id>`: symlink the session into the current directory's
+/// project folder and emit the here-mode output the shell function consumes.
+fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
+    let Ok(pwd) = std::env::current_dir() else {
+        eprintln!(
+            "{} could not determine the current directory",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::HERE_PWD_UNAVAILABLE);
+    };
+
+    // Guard before creating anything, so an aborted resume leaves no stray link.
+    abort_if_session_live(session_id, force);
+
+    match resolve_here_link(projects_dir, &pwd, session_id) {
+        Ok(link) => {
+            print!("{}", format_here_output(session_id, link.as_deref()));
+            exit(0);
+        }
+        Err(HereResolveError::InvalidSessionId) => {
+            eprintln!(
+                "{} '{session_id}' is not a valid session id",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::INVALID_SESSION_ID);
+        }
+        Err(HereResolveError::SessionNotFound) => {
+            eprintln!(
+                "{} no Claude session found with id '{session_id}'",
+                "Error:".red().bold()
+            );
+            eprintln!("       looked under {}", projects_dir.display());
+            exit(exit_codes::SESSION_NOT_FOUND);
+        }
+        Err(HereResolveError::Io(err)) => {
+            eprintln!(
+                "{} could not prepare this directory for '{session_id}': {err}",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::HERE_LINK_ERROR);
+        }
+    }
 }
 
 fn main() {
@@ -496,27 +563,13 @@ fn main() {
         exit(exit_codes::NO_HOME_DIR);
     };
 
+    if cli.here {
+        run_here(&projects_dir, &session_id, cli.force);
+    }
+
     match resolve_session_dir(&projects_dir, &session_id) {
         Ok(dir) => {
-            if !cli.force {
-                if let Some(live) = claude_sessions_dir()
-                    .and_then(|s| find_live_session(&s, &session_id, pid_is_alive))
-                {
-                    let status = live.status.as_deref().unwrap_or("running");
-                    eprintln!(
-                        "{} session '{session_id}' is already running (pid {}, {status})",
-                        "Error:".red().bold(),
-                        live.pid
-                    );
-                    eprintln!("       in {}", live.cwd);
-                    eprintln!("       resuming it again can corrupt the session log.");
-                    eprintln!(
-                        "       re-run with {} to resume anyway.",
-                        "--force".yellow()
-                    );
-                    exit(exit_codes::SESSION_ALREADY_RUNNING);
-                }
-            }
+            abort_if_session_live(&session_id, cli.force);
             print!("{}", format_output(&dir, &session_id));
         }
         Err(ResolveError::InvalidSessionId) => {
@@ -701,7 +754,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn prepare_here_link_replaces_stale_symlink() {
+    fn prepare_here_link_leaves_an_existing_link_in_place() {
+        // A symlink dropped by an earlier `--here` already makes the session
+        // resolvable here, so a repeat returns `None` (nothing to clean up) and
+        // does not disturb the existing link.
         let dir = tempdir().unwrap();
         let projects = dir.path();
         let orig = projects.join("-orig");
@@ -713,19 +769,19 @@ mod tests {
         let folder = projects.join("-Volumes-x-here");
         fs::create_dir_all(&folder).unwrap();
         let link = folder.join(format!("{SAMPLE_ID}.jsonl"));
-        let stale_target = dir.path().join("old.jsonl");
-        fs::write(&stale_target, "old").unwrap();
-        std::os::unix::fs::symlink(&stale_target, &link).unwrap();
+        std::os::unix::fs::symlink(&original, &link).unwrap();
 
-        let returned = prepare_here_link(projects, &original, pwd, SAMPLE_ID)
-            .expect("ok")
-            .expect("symlink path");
-        assert_eq!(returned, link);
+        assert_eq!(
+            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            None
+        );
         assert_eq!(fs::read_link(&link).unwrap(), original);
     }
 
     #[test]
-    fn prepare_here_link_refuses_to_clobber_real_file() {
+    fn prepare_here_link_returns_none_when_a_real_file_is_already_present() {
+        // A session id is a UUID, so a real file at the target name can only be
+        // this very session living here already: resolve it in place, untouched.
         let dir = tempdir().unwrap();
         let projects = dir.path();
         let orig = projects.join("-orig");
@@ -739,10 +795,10 @@ mod tests {
         let real = folder.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&real, "a real session").unwrap();
 
-        match prepare_here_link(projects, &original, pwd, SAMPLE_ID) {
-            Err(HereError::Occupied(p)) => assert_eq!(p, real),
-            other => panic!("expected Occupied, got {other:?}"),
-        }
+        assert_eq!(
+            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            None
+        );
         assert_eq!(
             fs::read_to_string(&real).unwrap(),
             "a real session",
@@ -948,23 +1004,19 @@ mod tests {
     }
 
     #[test]
-    fn resolve_here_link_reports_occupied_real_file() {
+    fn resolve_here_link_returns_none_when_session_already_here() {
+        // The session already lives in the current directory's folder, so no
+        // symlink is needed and there is nothing to clean up afterwards.
         let dir = tempdir().unwrap();
         let projects = dir.path();
-        let orig = projects.join("-orig");
-        fs::create_dir_all(&orig).unwrap();
-        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
-        fs::write(&original, "{}\n").unwrap();
-
         let folder = projects.join("-Volumes-x-here");
         fs::create_dir_all(&folder).unwrap();
-        let real = folder.join(format!("{SAMPLE_ID}.jsonl"));
-        fs::write(&real, "a real session").unwrap();
+        fs::write(folder.join(format!("{SAMPLE_ID}.jsonl")), "{}\n").unwrap();
 
-        match resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID) {
-            Err(HereResolveError::Occupied(p)) => assert_eq!(p, real),
-            other => panic!("expected Occupied, got {other:?}"),
-        }
+        assert_eq!(
+            resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID).expect("ok"),
+            None
+        );
     }
 
     #[test]
