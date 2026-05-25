@@ -228,9 +228,11 @@ fn main() -> Result<()> {
 
     let last_commit_age = last_commit_age(&repo);
 
-    let entries = repo::collect_status(&repo)?;
-
-    let (staged_numstat, unstaged_numstat) = repo::collect_numstats(&repo).unwrap_or_default();
+    let repo::Changes {
+        entries,
+        staged_numstat,
+        unstaged_numstat,
+    } = repo::collect_changes(&repo)?;
 
     let ages = collect_ages(&entries, repo.workdir());
 

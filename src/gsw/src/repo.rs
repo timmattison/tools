@@ -138,119 +138,53 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     })
 }
 
-/// All working-tree changes as `FileEntry` rows, mirroring
-/// `git status --porcelain=v2 -z`. A path modified in both index and worktree
-/// yields two rows (staged + unstaged). Rows are ordered by path, staged
-/// before unstaged, so the downstream stable mtime sort is deterministic
-/// (gix's status iterator itself yields items in nondeterministic order).
+/// Everything one working-tree status walk produces: the `FileEntry` rows plus
+/// the staged and unstaged per-path line counts. See [`collect_changes`].
+pub struct Changes {
+    /// `FileEntry` rows mirroring `git status --porcelain=v2 -z`, sorted by
+    /// path with the staged row before the unstaged row for the same path.
+    pub entries: Vec<FileEntry>,
+    /// Staged (HEAD-tree vs index) per-path line counts, mirroring
+    /// `git diff --cached --numstat`.
+    pub staged_numstat: HashMap<String, NumStat>,
+    /// Unstaged (index vs worktree) per-path line counts, mirroring
+    /// `git diff --numstat`.
+    pub unstaged_numstat: HashMap<String, NumStat>,
+}
+
+/// All working-tree changes in a single status walk: the `FileEntry` rows
+/// (mirroring `git status --porcelain=v2 -z`) plus the staged (HEAD-tree vs
+/// index) and unstaged (index vs worktree) per-path line counts (mirroring
+/// `git diff [--cached] --numstat`).
+///
+/// gsw is typically polled every couple of seconds under `viddy`/`watch`, so
+/// the entries and both numstat maps are produced from one traversal rather
+/// than three: creating a fresh status platform re-reads the index and re-walks
+/// the working tree each time, and doing that work once per tick instead of
+/// twice is the whole point of sharing the loop.
+///
+/// A path modified in both index and worktree yields two entry rows (staged +
+/// unstaged). Entry rows are sorted by path, staged before unstaged, so the
+/// downstream stable mtime sort is deterministic (gix's status iterator yields
+/// items in nondeterministic order); the numstat maps are order-independent.
+///
+/// Numstat details: untracked files are excluded (git's numstat ignores them);
+/// binary blobs (NUL in the first 8 KiB) are flagged `binary` with zero counts;
+/// counts are a raw byte-line diff with no clean/smudge or autocrlf filtering,
+/// which matches git's counts in the common case. Worktree-side renames produce
+/// an entry row but no numstat (rare, and git numstat handles them specially;
+/// skipping is a conservative undercount for the monitor use case).
 ///
 /// # Errors
 ///
-/// Returns an error when the gix status platform cannot be created or iteration fails.
-pub fn collect_status(repo: &gix::Repository) -> anyhow::Result<Vec<FileEntry>> {
-    let mut out: Vec<FileEntry> = Vec::new();
-
-    let iter = repo
-        .status(gix::progress::Discard)
-        .map_err(|e| anyhow::anyhow!("status platform: {e}"))?
-        .untracked_files(gix::status::UntrackedFiles::Collapsed)
-        .into_iter(Vec::<gix::bstr::BString>::new())
-        .map_err(|e| anyhow::anyhow!("status iter: {e}"))?;
-
-    for item in iter {
-        let item = item.map_err(|e| anyhow::anyhow!("status item: {e}"))?;
-        match item {
-            gix::status::Item::TreeIndex(change) => push_staged(change, &mut out),
-            gix::status::Item::IndexWorktree(iw_item) => push_unstaged(iw_item, &mut out),
-        }
-    }
-
-    // Sort deterministically: by path, staged before unstaged for the same path.
-    out.sort_by(|a, b| a.path.cmp(&b.path).then(b.staged.cmp(&a.staged)));
-    Ok(out)
-}
-
-/// Map a tree→index change to a staged `FileEntry` and push it onto `out`.
-fn push_staged(change: gix::diff::index::Change, out: &mut Vec<FileEntry>) {
-    use gix::diff::index::Change;
-
-    match change {
-        Change::Addition { location, .. } => {
-            out.push(FileEntry {
-                path: location.to_string(),
-                orig_path: None,
-                status: FileStatus::Added,
-                staged: true,
-            });
-        }
-        Change::Deletion { location, .. } => {
-            out.push(FileEntry {
-                path: location.to_string(),
-                orig_path: None,
-                status: FileStatus::Deleted,
-                staged: true,
-            });
-        }
-        Change::Modification {
-            location,
-            previous_entry_mode,
-            entry_mode,
-            ..
-        } => {
-            // Detect a type change by comparing the type bits of the mode.
-            // gix_index::entry::Mode is a bitflags struct; mask out permission bits.
-            const TYPE_MASK: u32 = 0o170_000_u32;
-            let status = if (previous_entry_mode.bits() & TYPE_MASK) != (entry_mode.bits() & TYPE_MASK) {
-                FileStatus::TypeChange
-            } else {
-                FileStatus::Modified
-            };
-            out.push(FileEntry {
-                path: location.to_string(),
-                orig_path: None,
-                status,
-                staged: true,
-            });
-        }
-        Change::Rewrite {
-            location,
-            source_location,
-            copy,
-            ..
-        } => {
-            let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
-            out.push(FileEntry {
-                path: location.to_string(),
-                orig_path: Some(source_location.to_string()),
-                status,
-                staged: true,
-            });
-        }
-    }
-}
-
-/// Per-path line counts for the staged side (HEAD-tree vs index) and the
-/// unstaged side (index vs worktree), keyed on the post-rename path — the gix
-/// equivalent of `git diff --cached --numstat` and `git diff --numstat`.
-/// Untracked files are excluded (git's numstat ignores them). Binary blobs
-/// (NUL in the first 8 KiB) are flagged `binary` with zero counts.
-///
-/// This is a raw byte-line diff with no clean/smudge or autocrlf filtering;
-/// for gsw's magnitude bars that matches git's counts in the common case.
-///
-/// Worktree-side renames are skipped (they are rare and git numstat handles
-/// them specially; skipping produces a conservative undercount rather than
-/// incorrect data for the monitor use case).
-///
-/// # Errors
-/// Returns an error when the gix status platform can't be created or iteration fails.
-pub fn collect_numstats(
-    repo: &gix::Repository,
-) -> anyhow::Result<(HashMap<String, NumStat>, HashMap<String, NumStat>)> {
+/// Returns an error when the gix status platform cannot be created or iteration
+/// fails.
+pub fn collect_changes(repo: &gix::Repository) -> anyhow::Result<Changes> {
     use gix::diff::index::Change;
     use gix::status::index_worktree::Item as IwItem;
     use gix::status::plumbing::index_as_worktree::{Change as IwChange, EntryStatus};
 
+    let mut entries: Vec<FileEntry> = Vec::new();
     let mut staged: HashMap<String, NumStat> = HashMap::new();
     let mut unstaged: HashMap<String, NumStat> = HashMap::new();
 
@@ -264,34 +198,111 @@ pub fn collect_numstats(
     for item in iter {
         let item = item.map_err(|e| anyhow::anyhow!("status item: {e}"))?;
         match item {
-            gix::status::Item::TreeIndex(change) => {
-                let (key, old, new) = match change {
-                    Change::Addition { location, id, .. } => {
-                        let new = blob_bytes(repo, id.as_ref());
-                        (location.to_string(), Vec::new(), new)
-                    }
-                    Change::Deletion { location, id, .. } => {
-                        let old = blob_bytes(repo, id.as_ref());
-                        (location.to_string(), old, Vec::new())
-                    }
-                    Change::Modification { location, previous_id, id, .. } => {
-                        let old = blob_bytes(repo, previous_id.as_ref());
-                        let new = blob_bytes(repo, id.as_ref());
-                        (location.to_string(), old, new)
-                    }
-                    Change::Rewrite { location, source_id, id, .. } => {
-                        let old = blob_bytes(repo, source_id.as_ref());
-                        let new = blob_bytes(repo, id.as_ref());
-                        (location.to_string(), old, new)
-                    }
+            // Staged side: HEAD-tree vs index. Each change yields one entry row
+            // and one staged numstat keyed on the (post-rename) path.
+            gix::status::Item::TreeIndex(change) => match change {
+                Change::Addition { location, id, .. } => {
+                    let key = location.to_string();
+                    let new = blob_bytes(repo, id.as_ref());
+                    staged.insert(key.clone(), line_counts(&[], &new));
+                    entries.push(FileEntry {
+                        path: key,
+                        orig_path: None,
+                        status: FileStatus::Added,
+                        staged: true,
+                    });
+                }
+                Change::Deletion { location, id, .. } => {
+                    let key = location.to_string();
+                    let old = blob_bytes(repo, id.as_ref());
+                    staged.insert(key.clone(), line_counts(&old, &[]));
+                    entries.push(FileEntry {
+                        path: key,
+                        orig_path: None,
+                        status: FileStatus::Deleted,
+                        staged: true,
+                    });
+                }
+                Change::Modification {
+                    location,
+                    previous_id,
+                    id,
+                    previous_entry_mode,
+                    entry_mode,
+                    ..
+                } => {
+                    let key = location.to_string();
+                    let old = blob_bytes(repo, previous_id.as_ref());
+                    let new = blob_bytes(repo, id.as_ref());
+                    staged.insert(key.clone(), line_counts(&old, &new));
+                    // Detect a type change by comparing the type bits of the mode.
+                    // gix_index::entry::Mode is a bitflags struct; mask out permission bits.
+                    const TYPE_MASK: u32 = 0o170_000_u32;
+                    let status = if (previous_entry_mode.bits() & TYPE_MASK)
+                        != (entry_mode.bits() & TYPE_MASK)
+                    {
+                        FileStatus::TypeChange
+                    } else {
+                        FileStatus::Modified
+                    };
+                    entries.push(FileEntry {
+                        path: key,
+                        orig_path: None,
+                        status,
+                        staged: true,
+                    });
+                }
+                Change::Rewrite {
+                    location,
+                    source_location,
+                    source_id,
+                    id,
+                    copy,
+                    ..
+                } => {
+                    let key = location.to_string();
+                    let old = blob_bytes(repo, source_id.as_ref());
+                    let new = blob_bytes(repo, id.as_ref());
+                    staged.insert(key.clone(), line_counts(&old, &new));
+                    let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
+                    entries.push(FileEntry {
+                        path: key,
+                        orig_path: Some(source_location.to_string()),
+                        status,
+                        staged: true,
+                    });
+                }
+            },
+            // Unstaged side: index vs worktree. A modification yields one entry
+            // row, and a content-bearing change also yields an unstaged numstat.
+            gix::status::Item::IndexWorktree(IwItem::Modification {
+                rela_path,
+                entry,
+                status,
+                ..
+            }) => {
+                // Classify for the entry row first. NeedsUpdate means the stat
+                // cache is stale but the content is identical — no visible
+                // change, so skip the whole item (no row, no numstat).
+                let file_status = match &status {
+                    EntryStatus::Conflict { .. } => FileStatus::Conflicted,
+                    EntryStatus::IntentToAdd => FileStatus::Added,
+                    EntryStatus::Change(change) => match change {
+                        IwChange::Removed => FileStatus::Deleted,
+                        IwChange::Type { .. } => FileStatus::TypeChange,
+                        IwChange::Modification { .. } | IwChange::SubmoduleModification(_) => {
+                            FileStatus::Modified
+                        }
+                    },
+                    EntryStatus::NeedsUpdate(_) => continue,
                 };
-                staged.insert(key, line_counts(&old, &new));
-            }
-            gix::status::Item::IndexWorktree(IwItem::Modification { rela_path, entry, status, .. }) => {
-                let (old, new) = match status {
+                let key = rela_path.to_string();
+                // Numstat only for content-bearing changes; conflicts, intent-to-add
+                // and submodule modifications produce a row but no line counts.
+                match &status {
                     EntryStatus::Change(IwChange::Removed) => {
                         let old = blob_bytes(repo, entry.id.as_ref());
-                        (old, Vec::new())
+                        unstaged.insert(key.clone(), line_counts(&old, &[]));
                     }
                     EntryStatus::Change(IwChange::Modification { .. } | IwChange::Type { .. }) => {
                         let old = blob_bytes(repo, entry.id.as_ref());
@@ -303,20 +314,65 @@ pub fn collect_numstats(
                             })
                             .and_then(|path| std::fs::read(path).ok())
                             .unwrap_or_default();
-                        (old, new)
+                        unstaged.insert(key.clone(), line_counts(&old, &new));
                     }
-                    // Conflict/IntentToAdd/SubmoduleModification/NeedsUpdate — no numstat entry.
-                    _ => continue,
-                };
-                unstaged.insert(rela_path.to_string(), line_counts(&old, &new));
+                    _ => {}
+                }
+                entries.push(FileEntry {
+                    path: key,
+                    orig_path: None,
+                    status: file_status,
+                    staged: false,
+                });
             }
-            // DirectoryContents covers untracked/ignored — not counted by numstat.
-            // IndexWorktree::Rewrite is skipped (rare; see doc comment).
-            _ => {}
+            // Untracked (and ignored) directory walk. Only surface Untracked
+            // entries; numstat never counts these.
+            gix::status::Item::IndexWorktree(IwItem::DirectoryContents { entry, .. }) => {
+                if entry.status != gix::dir::entry::Status::Untracked {
+                    continue;
+                }
+                let is_dir = entry.disk_kind.is_some_and(|k| k.is_dir());
+                let mut path = entry.rela_path.to_string();
+                let status = if is_dir {
+                    if !path.ends_with('/') {
+                        path.push('/');
+                    }
+                    FileStatus::UntrackedDir
+                } else {
+                    FileStatus::Untracked
+                };
+                entries.push(FileEntry {
+                    path,
+                    orig_path: None,
+                    status,
+                    staged: false,
+                });
+            }
+            // Worktree-side rename/copy: an entry row but no numstat (see doc).
+            gix::status::Item::IndexWorktree(IwItem::Rewrite {
+                source,
+                dirwalk_entry,
+                copy,
+                ..
+            }) => {
+                let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
+                entries.push(FileEntry {
+                    path: dirwalk_entry.rela_path.to_string(),
+                    orig_path: Some(source.rela_path().to_string()),
+                    status,
+                    staged: false,
+                });
+            }
         }
     }
 
-    Ok((staged, unstaged))
+    // Sort entries deterministically: by path, staged before unstaged for the same path.
+    entries.sort_by(|a, b| a.path.cmp(&b.path).then(b.staged.cmp(&a.staged)));
+    Ok(Changes {
+        entries,
+        staged_numstat: staged,
+        unstaged_numstat: unstaged,
+    })
 }
 
 /// Count added/removed lines between two blobs; flag binaries (NUL in first 8 KiB).
@@ -345,69 +401,6 @@ fn blob_bytes(repo: &gix::Repository, id: &gix::hash::oid) -> Vec<u8> {
         .and_then(|o| o.try_into_blob().ok())
         .map(|mut b| b.take_data())
         .unwrap_or_default()
-}
-
-/// Map an index→worktree item to zero or more unstaged `FileEntry`s pushed onto `out`.
-fn push_unstaged(item: gix::status::index_worktree::Item, out: &mut Vec<FileEntry>) {
-    use gix::status::plumbing::index_as_worktree::{Change, EntryStatus};
-
-    match item {
-        gix::status::index_worktree::Item::Modification { rela_path, status, .. } => {
-            let file_status = match status {
-                EntryStatus::Conflict { .. } => FileStatus::Conflicted,
-                EntryStatus::IntentToAdd => FileStatus::Added,
-                EntryStatus::Change(change) => match change {
-                    Change::Removed => FileStatus::Deleted,
-                    Change::Type { .. } => FileStatus::TypeChange,
-                    Change::Modification { .. } | Change::SubmoduleModification(_) => FileStatus::Modified,
-                },
-                // NeedsUpdate means the stat cache is stale but content is identical — no visible change.
-                EntryStatus::NeedsUpdate(_) => return,
-            };
-            out.push(FileEntry {
-                path: rela_path.to_string(),
-                orig_path: None,
-                status: file_status,
-                staged: false,
-            });
-        }
-        gix::status::index_worktree::Item::DirectoryContents { entry, .. } => {
-            // Only surface Untracked entries; ignore anything else (tracked, ignored).
-            if entry.status != gix::dir::entry::Status::Untracked {
-                return;
-            }
-            let is_dir = entry.disk_kind.is_some_and(|k| k.is_dir());
-            let mut path = entry.rela_path.to_string();
-            let status = if is_dir {
-                if !path.ends_with('/') {
-                    path.push('/');
-                }
-                FileStatus::UntrackedDir
-            } else {
-                FileStatus::Untracked
-            };
-            out.push(FileEntry {
-                path,
-                orig_path: None,
-                status,
-                staged: false,
-            });
-        }
-        gix::status::index_worktree::Item::Rewrite {
-            source,
-            dirwalk_entry,
-            copy,
-            ..
-        } => {
-            let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
-            out.push(FileEntry {
-                path: dirwalk_entry.rela_path.to_string(),
-                orig_path: Some(source.rela_path().to_string()),
-                status,
-                staged: false,
-            });
-        }
-    }
 }
 
 #[cfg(test)]
@@ -571,8 +564,9 @@ mod tests {
     }
 
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
-        super::collect_status(repo)
+        super::collect_changes(repo)
             .unwrap()
+            .entries
             .into_iter()
             .map(|e| (e.path, e.status, e.staged))
             .collect()
@@ -649,7 +643,7 @@ mod tests {
         git(p, &["commit", "-q", "-m", "grow a.txt"]);
         git(p, &["mv", "a.txt", "renamed.txt"]);
         let repo = open_at(p).unwrap();
-        let entry = super::collect_status(&repo).unwrap().into_iter().find(|e| e.path == "renamed.txt");
+        let entry = super::collect_changes(&repo).unwrap().entries.into_iter().find(|e| e.path == "renamed.txt");
         // gix may report rename detection OR an add+delete pair depending on
         // config; accept either but if a renamed.txt entry exists it must carry orig_path.
         if let Some(entry) = entry {
@@ -684,7 +678,7 @@ mod tests {
         std::fs::write(p.join("a.txt"), "initial\nadded one\nadded two\n").unwrap();
         git(p, &["add", "a.txt"]);
         let repo = open_at(p).unwrap();
-        let (staged, _unstaged) = super::collect_numstats(&repo).unwrap();
+        let staged = super::collect_changes(&repo).unwrap().staged_numstat;
         let ns = staged.get("a.txt").expect("staged numstat for a.txt");
         assert_eq!((ns.adds, ns.dels, ns.binary), (2, 0, false));
     }
@@ -695,7 +689,7 @@ mod tests {
         let p = dir.path();
         std::fs::write(p.join("a.txt"), "rewritten\n").unwrap();
         let repo = open_at(p).unwrap();
-        let (_staged, unstaged) = super::collect_numstats(&repo).unwrap();
+        let unstaged = super::collect_changes(&repo).unwrap().unstaged_numstat;
         let ns = unstaged.get("a.txt").expect("unstaged numstat");
         assert_eq!((ns.adds, ns.dels, ns.binary), (1, 1, false));
     }
@@ -707,7 +701,7 @@ mod tests {
         std::fs::write(p.join("new.txt"), "l1\nl2\nl3\n").unwrap();
         git(p, &["add", "new.txt"]);
         let repo = open_at(p).unwrap();
-        let (staged, _) = super::collect_numstats(&repo).unwrap();
+        let staged = super::collect_changes(&repo).unwrap().staged_numstat;
         let ns = staged.get("new.txt").expect("staged add numstat");
         assert_eq!((ns.adds, ns.dels), (3, 0));
     }
@@ -719,7 +713,7 @@ mod tests {
         std::fs::write(p.join("blob.bin"), [0_u8, 1, 2, 0, 3, 4]).unwrap();
         git(p, &["add", "blob.bin"]);
         let repo = open_at(p).unwrap();
-        let (staged, _) = super::collect_numstats(&repo).unwrap();
+        let staged = super::collect_changes(&repo).unwrap().staged_numstat;
         let ns = staged.get("blob.bin").expect("binary numstat");
         assert!(ns.binary, "NUL-containing blob must be flagged binary");
         assert_eq!((ns.adds, ns.dels), (0, 0));
@@ -731,9 +725,9 @@ mod tests {
         let p = dir.path();
         std::fs::write(p.join("loose.txt"), "x\ny\n").unwrap();
         let repo = open_at(p).unwrap();
-        let (staged, unstaged) = super::collect_numstats(&repo).unwrap();
-        assert!(!staged.contains_key("loose.txt"));
-        assert!(!unstaged.contains_key("loose.txt"));
+        let changes = super::collect_changes(&repo).unwrap();
+        assert!(!changes.staged_numstat.contains_key("loose.txt"));
+        assert!(!changes.unstaged_numstat.contains_key("loose.txt"));
     }
 
     #[test]
