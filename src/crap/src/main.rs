@@ -31,6 +31,8 @@ use std::process::exit;
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
+use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
+use serde::Serialize;
 use shellsetup::ShellIntegration;
 
 /// Exit codes for the different failure conditions.
@@ -477,40 +479,6 @@ enum StatusError {
     SessionNotFound,
 }
 
-/// Resolves the one-line status `crap --status <id>` prints to stdout.
-///
-/// A live session takes precedence: while a `claude` process is attached, its
-/// own reported status (`busy`/`idle`) is more authoritative than anything
-/// inferred from the transcript, so the line is `"<status> (live, pid <pid>)"`.
-/// Otherwise the transcript is classified and the [`SessionState`] token is
-/// returned. `is_alive` is injected so liveness can be tested without spawning
-/// processes.
-///
-/// # Errors
-///
-/// Returns [`StatusError::InvalidSessionId`] for a malformed id, or
-/// [`StatusError::SessionNotFound`] when the id is not live and no transcript
-/// exists for it.
-fn resolve_status<F>(
-    projects_dir: &Path,
-    sessions_dir: &Path,
-    session_id: &str,
-    is_alive: F,
-) -> Result<String, StatusError>
-where
-    F: Fn(u32) -> bool,
-{
-    if !is_valid_session_id(session_id) {
-        return Err(StatusError::InvalidSessionId);
-    }
-    if let Some(line) = live_state_string(sessions_dir, session_id, is_alive) {
-        return Ok(line);
-    }
-    let file = find_session_file(projects_dir, session_id).ok_or(StatusError::SessionNotFound)?;
-    let contents = std::fs::read_to_string(&file).map_err(|_| StatusError::SessionNotFound)?;
-    Ok(classify_session_state(&contents).as_token().to_string())
-}
-
 /// Returns the state line for a session that is open in a live `claude`
 /// process — `"<status> (live, pid <pid>)"` — or `None` when no such process is
 /// attached. A live process's own reported status is more authoritative than
@@ -527,7 +495,11 @@ where
 
 /// One session's status for the per-directory listing `crap --status` prints
 /// when given no id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serializes to camelCase JSON (`sessionId`, …) for the `--json` form;
+/// `started`/`last` become `null` when no timestamp was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SessionStatusReport {
     /// The session id (the `.jsonl` filename stem under the project folder).
     session_id: String,
@@ -665,17 +637,39 @@ fn resolve_status_report<F>(
 where
     F: Fn(u32) -> bool,
 {
-    todo!()
+    if !is_valid_session_id(session_id) {
+        return Err(StatusError::InvalidSessionId);
+    }
+    let live = live_state_string(sessions_dir, session_id, is_alive);
+    let contents =
+        find_session_file(projects_dir, session_id).and_then(|f| std::fs::read_to_string(f).ok());
+    let (started, last) = contents
+        .as_deref()
+        .map_or((None, None), transcript_time_span);
+    let state = match live {
+        Some(line) => line,
+        None => {
+            // Not live: the transcript is the only evidence, so it must exist.
+            let contents = contents.ok_or(StatusError::SessionNotFound)?;
+            classify_session_state(&contents).as_token().to_string()
+        }
+    };
+    Ok(SessionStatusReport {
+        session_id: session_id.to_string(),
+        state,
+        started,
+        last,
+    })
 }
 
 /// Serializes a single session's status report as pretty JSON.
 fn format_status_json(report: &SessionStatusReport) -> String {
-    todo!()
+    serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Serializes a directory's session status reports as a pretty JSON array.
 fn format_dir_statuses_json(reports: &[SessionStatusReport]) -> String {
-    todo!()
+    serde_json::to_string_pretty(reports).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Renders the per-directory `crap --status` listing for `pwd` as a table.
@@ -689,12 +683,11 @@ fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
     }
     let count = reports.len();
     let noun = if count == 1 { "session" } else { "sessions" };
-    let mut out = format!("{count} {noun} for {}\n\n", pwd.display());
-    let state_width = reports
-        .iter()
-        .map(|r| r.state.chars().count())
-        .max()
-        .unwrap_or(0);
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["SESSION", "STATE", "STARTED", "LAST"]);
     for report in reports {
         let started = report
             .started
@@ -704,12 +697,14 @@ fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
             .last
             .as_deref()
             .map_or_else(|| "—".to_string(), format_timestamp);
-        out.push_str(&format!(
-            "  {}  {:<state_width$}  started {started}  ·  last {last}\n",
-            report.session_id, report.state,
-        ));
+        table.add_row(vec![
+            report.session_id.clone(),
+            report.state.clone(),
+            started,
+            last,
+        ]);
     }
-    out
+    format!("{count} {noun} for {}\n\n{table}\n", pwd.display())
 }
 
 /// Formats the binary's success output for the shell function to read back.
@@ -978,11 +973,18 @@ fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
 }
 
 /// Handles `crap --status <id>`: print the session's state to stdout and exit.
-fn run_status(projects_dir: &Path, session_id: &str) -> ! {
+///
+/// Prints the bare state token by default, or the full report as JSON when
+/// `json` is set.
+fn run_status(projects_dir: &Path, session_id: &str, json: bool) -> ! {
     let sessions_dir = claude_sessions_dir().unwrap_or_default();
-    match resolve_status(projects_dir, &sessions_dir, session_id, pid_is_alive) {
-        Ok(line) => {
-            println!("{line}");
+    match resolve_status_report(projects_dir, &sessions_dir, session_id, pid_is_alive) {
+        Ok(report) => {
+            if json {
+                println!("{}", format_status_json(&report));
+            } else {
+                println!("{}", report.state);
+            }
             exit(0);
         }
         Err(StatusError::InvalidSessionId) => {
@@ -1005,7 +1007,9 @@ fn run_status(projects_dir: &Path, session_id: &str) -> ! {
 
 /// Handles `crap --status` with no id: list every session recorded for the
 /// current directory, then exit.
-fn run_dir_status(projects_dir: &Path) -> ! {
+///
+/// Prints a table by default, or a JSON array when `json` is set.
+fn run_dir_status(projects_dir: &Path, json: bool) -> ! {
     let Ok(pwd) = std::env::current_dir() else {
         eprintln!(
             "{} could not determine the current directory",
@@ -1015,7 +1019,11 @@ fn run_dir_status(projects_dir: &Path) -> ! {
     };
     let sessions_dir = claude_sessions_dir().unwrap_or_default();
     let reports = resolve_dir_statuses(projects_dir, &sessions_dir, &pwd, pid_is_alive);
-    print!("{}", format_dir_statuses(&pwd, &reports));
+    if json {
+        println!("{}", format_dir_statuses_json(&reports));
+    } else {
+        print!("{}", format_dir_statuses(&pwd, &reports));
+    }
     exit(0);
 }
 
@@ -1042,8 +1050,8 @@ fn main() {
 
     if cli.status {
         match cli.session_id.as_deref() {
-            Some(id) => run_status(&projects_dir, id),
-            None => run_dir_status(&projects_dir),
+            Some(id) => run_status(&projects_dir, id, cli.json),
+            None => run_dir_status(&projects_dir, cli.json),
         }
     }
 
@@ -1659,62 +1667,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_status_rejects_invalid_id() {
-        let dir = tempdir().unwrap();
-        assert!(matches!(
-            resolve_status(dir.path(), dir.path(), "../escape", |_| true),
-            Err(StatusError::InvalidSessionId)
-        ));
-    }
-
-    #[test]
-    fn resolve_status_errors_when_session_missing() {
-        let dir = tempdir().unwrap();
-        // Not live, and no transcript on disk.
-        assert!(matches!(
-            resolve_status(dir.path(), dir.path(), SAMPLE_ID, |_| false),
-            Err(StatusError::SessionNotFound)
-        ));
-    }
-
-    #[test]
-    fn resolve_status_reports_transcript_state_when_not_live() {
-        let projects = tempdir().unwrap();
-        let sessions = tempdir().unwrap();
-        write_waiting_transcript(projects.path(), SAMPLE_ID);
-
-        assert_eq!(
-            resolve_status(projects.path(), sessions.path(), SAMPLE_ID, |_| false).unwrap(),
-            "waiting-for-user"
-        );
-    }
-
-    #[test]
-    fn resolve_status_reports_live_session_with_pid() {
-        let projects = tempdir().unwrap();
-        let sessions = tempdir().unwrap();
-        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
-
-        // The live record's own status (busy) and pid are reported.
-        assert_eq!(
-            resolve_status(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041).unwrap(),
-            "busy (live, pid 17041)"
-        );
-    }
-
-    #[test]
-    fn resolve_status_prefers_live_session_over_transcript() {
+    fn resolve_status_report_prefers_live_session_over_transcript() {
         let projects = tempdir().unwrap();
         let sessions = tempdir().unwrap();
         // A transcript that would classify as waiting-for-user...
         write_waiting_transcript(projects.path(), LIVE_ID);
-        // ...but the session is live, so the live status wins.
+        // ...but the session is live, so the live status wins for `state`.
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        assert_eq!(
-            resolve_status(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041).unwrap(),
-            "busy (live, pid 17041)"
-        );
+        let report =
+            resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041)
+                .unwrap();
+        assert_eq!(report.state, "busy (live, pid 17041)");
     }
 
     #[test]
