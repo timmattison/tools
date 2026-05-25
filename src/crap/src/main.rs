@@ -234,6 +234,14 @@ fn pid_is_alive(pid: u32) -> bool {
         .contains("claude")
 }
 
+/// Formats the binary's success output for the shell function to read back.
+///
+/// Emits two parts separated by a newline. The shell function `cd`s into the
+/// directory and resumes the session id.
+fn format_output(dir: &Path, session_id: &str) -> String {
+    format!("{}\n{}\n", dir.display(), session_id)
+}
+
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
@@ -350,10 +358,7 @@ fn main() {
                     exit(exit_codes::SESSION_ALREADY_RUNNING);
                 }
             }
-            // Two machine-readable lines for the shell function: the directory
-            // to cd into, then the session id to pass to `--resume`.
-            println!("{}", dir.display());
-            println!("{session_id}");
+            print!("{}", format_output(&dir, &session_id));
         }
         Err(ResolveError::InvalidSessionId) => {
             eprintln!(
