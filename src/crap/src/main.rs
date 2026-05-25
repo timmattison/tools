@@ -585,6 +585,13 @@ mod tests {
     }
 
     #[test]
+    fn shell_code_guards_cd_against_dash_prefixed_dirs() {
+        // `cd -- "$dir"` stops option parsing, so a directory whose name begins
+        // with '-' is treated as a path rather than a flag.
+        assert!(SHELL_CODE.contains("cd -- \"$__crap_dir\""));
+    }
+
+    #[test]
     fn shell_code_defines_function_and_dispatches_to_claude() {
         assert!(SHELL_CODE.contains("function crap()"));
         // Forwards all args (so --force reaches the binary) and reads back the
