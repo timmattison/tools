@@ -1043,6 +1043,21 @@ mod tests {
     }
 
     #[test]
+    fn shell_code_removes_here_symlink_early_via_background_watcher() {
+        // A backgrounded watcher polls the project folder and removes the
+        // symlink as soon as a new (forked) session file appears — Claude no
+        // longer needs the symlink once it has read the transcript — instead of
+        // letting it linger for the whole session.
+        assert!(SHELL_CODE.contains(r#"find "$__crap_folder""#));
+        assert!(SHELL_CODE.contains(r#"-gt "$__crap_n0""#));
+        assert!(SHELL_CODE.contains(") &"));
+        assert!(SHELL_CODE.contains("sleep 0.1"));
+        // The watcher is stopped once claude exits, and the post-exit `rm`
+        // remains as a safety net in case the fork file never appeared.
+        assert!(SHELL_CODE.contains(r#"kill "$__crap_watcher""#));
+    }
+
+    #[test]
     fn here_output_carries_sentinel_session_and_link() {
         let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
         let out = format_here_output(SAMPLE_ID, Some(link));
