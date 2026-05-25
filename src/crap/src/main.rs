@@ -1956,12 +1956,13 @@ mod tests {
 
         let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |_| false);
         assert_eq!(reports.len(), 2);
-        // Most-recently-active first.
-        assert_eq!(reports[0].session_id, ID_B);
-        assert_eq!(reports[1].session_id, ID_A);
+        // Ascending by last-activity: the most recently used session is last,
+        // so it lands at the bottom of the printed table.
+        assert_eq!(reports[0].session_id, ID_A);
+        assert_eq!(reports[1].session_id, ID_B);
         assert!(reports.iter().all(|r| r.state == "waiting-for-user"));
-        assert_eq!(reports[0].started.as_deref(), Some("2026-05-25T11:00:00.000Z"));
-        assert_eq!(reports[0].last.as_deref(), Some("2026-05-25T11:00:00.000Z"));
+        assert_eq!(reports[1].started.as_deref(), Some("2026-05-25T11:00:00.000Z"));
+        assert_eq!(reports[1].last.as_deref(), Some("2026-05-25T11:00:00.000Z"));
     }
 
     #[test]
