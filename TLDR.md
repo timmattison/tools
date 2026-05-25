@@ -12,6 +12,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `cf` | Count Files — recursively counts files, with optional suffix/prefix/substring filters. |
 | `claude-usage` | Parses an Anthropic API usage CSV and computes per-model costs. |
 | `clipboard-random` | Generates random binary or Zalgo text data and copies it to the clipboard. |
+| `crap` | Claude, Resume Anywhere Please — resume a Claude Code session from its original directory (refuses if it's already running). |
 | `cwt` | Change Worktree — navigate, cycle, or jump between git worktrees. |
 | `dirc` | Copies the current directory to the clipboard, or emits a `cd` from a clipboard path. |
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
