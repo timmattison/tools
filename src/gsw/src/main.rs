@@ -10,7 +10,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::{parse_numstat, FileEntry};
+use crate::git::FileEntry;
 use crate::render::{plan_section_caps, render, LogEntry, RenderOptions};
 use crate::snapshot::build_snapshot;
 
@@ -236,12 +236,7 @@ fn main() -> Result<()> {
 
     let entries = repo::collect_status(&repo)?;
 
-    let staged_numstat = run_git(&["diff", "--cached", "--numstat", "-z"])
-        .map(|s| parse_numstat(&s))
-        .unwrap_or_default();
-    let unstaged_numstat = run_git(&["diff", "--numstat", "-z"])
-        .map(|s| parse_numstat(&s))
-        .unwrap_or_default();
+    let (staged_numstat, unstaged_numstat) = repo::collect_numstats(&repo).unwrap_or_default();
 
     let repo_root = run_git(&["rev-parse", "--show-toplevel"])
         .ok()

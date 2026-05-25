@@ -238,13 +238,113 @@ fn push_staged(change: gix::diff::index::Change, out: &mut Vec<FileEntry>) {
 /// This is a raw byte-line diff with no clean/smudge or autocrlf filtering;
 /// for gsw's magnitude bars that matches git's counts in the common case.
 ///
+/// Worktree-side renames are skipped (they are rare and git numstat handles
+/// them specially; skipping produces a conservative undercount rather than
+/// incorrect data for the monitor use case).
+///
 /// # Errors
 /// Returns an error when the gix status platform can't be created or iteration fails.
 pub fn collect_numstats(
     repo: &gix::Repository,
 ) -> anyhow::Result<(HashMap<String, NumStat>, HashMap<String, NumStat>)> {
-    let _ = repo;
-    Ok((HashMap::new(), HashMap::new())) // STUB
+    use gix::diff::index::Change;
+    use gix::status::index_worktree::Item as IwItem;
+    use gix::status::plumbing::index_as_worktree::{Change as IwChange, EntryStatus};
+
+    let mut staged: HashMap<String, NumStat> = HashMap::new();
+    let mut unstaged: HashMap<String, NumStat> = HashMap::new();
+
+    let iter = repo
+        .status(gix::progress::Discard)
+        .map_err(|e| anyhow::anyhow!("status platform: {e}"))?
+        .untracked_files(gix::status::UntrackedFiles::Collapsed)
+        .into_iter(Vec::<gix::bstr::BString>::new())
+        .map_err(|e| anyhow::anyhow!("status iter: {e}"))?;
+
+    for item in iter {
+        let item = item.map_err(|e| anyhow::anyhow!("status item: {e}"))?;
+        match item {
+            gix::status::Item::TreeIndex(change) => {
+                let (key, old, new) = match change {
+                    Change::Addition { location, id, .. } => {
+                        let new = blob_bytes(repo, id.as_ref());
+                        (location.to_string(), Vec::new(), new)
+                    }
+                    Change::Deletion { location, id, .. } => {
+                        let old = blob_bytes(repo, id.as_ref());
+                        (location.to_string(), old, Vec::new())
+                    }
+                    Change::Modification { location, previous_id, id, .. } => {
+                        let old = blob_bytes(repo, previous_id.as_ref());
+                        let new = blob_bytes(repo, id.as_ref());
+                        (location.to_string(), old, new)
+                    }
+                    Change::Rewrite { location, source_id, id, .. } => {
+                        let old = blob_bytes(repo, source_id.as_ref());
+                        let new = blob_bytes(repo, id.as_ref());
+                        (location.to_string(), old, new)
+                    }
+                };
+                staged.insert(key, line_counts(&old, &new));
+            }
+            gix::status::Item::IndexWorktree(IwItem::Modification { rela_path, entry, status, .. }) => {
+                let (old, new) = match status {
+                    EntryStatus::Change(IwChange::Removed) => {
+                        let old = blob_bytes(repo, entry.id.as_ref());
+                        (old, Vec::new())
+                    }
+                    EntryStatus::Change(IwChange::Modification { .. } | IwChange::Type { .. }) => {
+                        let old = blob_bytes(repo, entry.id.as_ref());
+                        let new = repo
+                            .workdir()
+                            .and_then(|wd| {
+                                use gix::bstr::ByteSlice;
+                                rela_path.to_str().ok().map(|p| wd.join(p))
+                            })
+                            .and_then(|path| std::fs::read(path).ok())
+                            .unwrap_or_default();
+                        (old, new)
+                    }
+                    // Conflict/IntentToAdd/SubmoduleModification/NeedsUpdate — no numstat entry.
+                    _ => continue,
+                };
+                unstaged.insert(rela_path.to_string(), line_counts(&old, &new));
+            }
+            // DirectoryContents covers untracked/ignored — not counted by numstat.
+            // IndexWorktree::Rewrite is skipped (rare; see doc comment).
+            _ => {}
+        }
+    }
+
+    Ok((staged, unstaged))
+}
+
+/// Count added/removed lines between two blobs; flag binaries (NUL in first 8 KiB).
+fn line_counts(old: &[u8], new: &[u8]) -> NumStat {
+    if is_binary(old) || is_binary(new) {
+        return NumStat { adds: 0, dels: 0, binary: true };
+    }
+    use gix::diff::blob::{sources::byte_lines, Algorithm, Diff, InternedInput};
+    let input = InternedInput::new(byte_lines(old), byte_lines(new));
+    let diff = Diff::compute(Algorithm::Histogram, &input);
+    NumStat { adds: diff.count_additions(), dels: diff.count_removals(), binary: false }
+}
+
+fn is_binary(buf: &[u8]) -> bool {
+    buf[..buf.len().min(8000)].contains(&0)
+}
+
+/// Read a blob's bytes from the object DB (empty vec on failure).
+///
+/// Uses `try_into_blob` so a non-blob object (e.g. a submodule commit that
+/// happens to be reachable in the parent ODB) degrades to empty rather than
+/// panicking, and `take_data` to move the bytes out without a second copy.
+fn blob_bytes(repo: &gix::Repository, id: &gix::hash::oid) -> Vec<u8> {
+    repo.find_object(id)
+        .ok()
+        .and_then(|o| o.try_into_blob().ok())
+        .map(|mut b| b.take_data())
+        .unwrap_or_default()
 }
 
 /// Map an index→worktree item to zero or more unstaged `FileEntry`s pushed onto `out`.
@@ -616,7 +716,7 @@ mod tests {
     fn numstat_staged_binary_file_is_flagged() {
         let dir = init_repo();
         let p = dir.path();
-        std::fs::write(p.join("blob.bin"), [0u8, 1, 2, 0, 3, 4]).unwrap();
+        std::fs::write(p.join("blob.bin"), [0_u8, 1, 2, 0, 3, 4]).unwrap();
         git(p, &["add", "blob.bin"]);
         let repo = open_at(p).unwrap();
         let (staged, _) = super::collect_numstats(&repo).unwrap();

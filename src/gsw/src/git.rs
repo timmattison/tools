@@ -187,6 +187,7 @@ fn char_to_status(c: char) -> Option<FileStatus> {
 /// Returns a map from path to its [`NumStat`]. Renames in `-z` numstat
 /// emit three NUL-separated tokens: `adds\tdels\t\0origPath\0newPath`,
 /// and we key the result on the new path.
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 pub fn parse_numstat(input: &str) -> HashMap<String, NumStat> {
     let pieces: Vec<&str> = input.split('\0').filter(|s| !s.is_empty()).collect();
     let mut out = HashMap::new();
