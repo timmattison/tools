@@ -168,9 +168,9 @@ fn claude_projects_dir() -> Option<PathBuf> {
 
 /// Why dropping a `--here` symlink failed.
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "constructed/handled by the --here path in main (Cycle 4)")
+#[allow(
+    dead_code,
+    reason = "variant payloads are read by the --here path in main (Cycle 4)"
 )]
 enum HereError {
     /// The current directory's project folder already holds a *real* session
@@ -203,7 +203,34 @@ fn prepare_here_link(
     pwd: &Path,
     session_id: &str,
 ) -> Result<Option<PathBuf>, HereError> {
-    unimplemented!()
+    let folder = projects_dir.join(encode_project_dir(pwd));
+    let link_path = folder.join(format!("{session_id}.jsonl"));
+
+    // Already sitting in the session's own folder: `claude --resume` would find
+    // it unaided, so there is nothing to drop and nothing to clean up.
+    if link_path == original_jsonl {
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(&folder).map_err(HereError::Io)?;
+
+    match std::fs::symlink_metadata(&link_path) {
+        // A leftover symlink from an earlier `--here`: replace it.
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::remove_file(&link_path).map_err(HereError::Io)?;
+        }
+        // A real file (or directory) already owns this name: never clobber it.
+        Ok(_) => return Err(HereError::Occupied(link_path)),
+        // Nothing there yet.
+        Err(_) => {}
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(original_jsonl, &link_path).map_err(HereError::Io)?;
+    #[cfg(not(unix))]
+    std::os::windows::fs::symlink_file(original_jsonl, &link_path).map_err(HereError::Io)?;
+
+    Ok(Some(link_path))
 }
 
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
