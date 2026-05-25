@@ -232,8 +232,7 @@ fn main() -> Result<()> {
 
     let (staged_numstat, unstaged_numstat) = repo::collect_numstats(&repo).unwrap_or_default();
 
-    let repo_root = repo.workdir().map(|p| p.to_path_buf());
-    let ages = collect_ages(&entries, repo_root.as_deref());
+    let ages = collect_ages(&entries, repo.workdir());
 
     let mut snapshot = build_snapshot(
         branch,
@@ -334,10 +333,10 @@ fn last_commit_age(repo: &gix::Repository) -> Option<Duration> {
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
 ///
-/// `repo_root` anchors the lookup: `git status --porcelain=v2 -z` reports
-/// paths relative to the repo root, not the cwd, so resolving against the
-/// cwd misses every file when gsw runs from a subdirectory. Falls back to
-/// cwd-relative resolution when the root can't be determined.
+/// `repo_root` anchors the lookup: gix status reports paths relative to the
+/// repo root, not the cwd, so resolving against the cwd misses every file
+/// when gsw runs from a subdirectory. Falls back to cwd-relative resolution
+/// when the root can't be determined.
 fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<String, Duration> {
     let now = SystemTime::now();
     let mut out = HashMap::with_capacity(entries.len());
