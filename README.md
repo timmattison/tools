@@ -317,7 +317,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     session up under `~/.claude/projects`, recovers the directory it originally ran in, `cd`s
     there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
     have one, otherwise plain `claude`. If the original directory no longer exists it tells you
-    and stops. Run `crap --shell-setup` once to install the shell function.
+    and stops, and it refuses to resume a session that's already open in another running process
+    (pass `--force` to override) so two processes can't corrupt the same session log. Run
+    `crap --shell-setup` once to install the shell function.
   - To install: `cargo install --git https://github.com/timmattison/tools crap`
 - ng (navel-gaze)
   - Watches JS/TS source files in the current directory and re-runs `pnpm lint` on change. Pass
@@ -1229,9 +1231,23 @@ The session id is the name of the `.jsonl` file under `~/.claude/projects/<proje
 
 If you have a `clauded` alias or command (e.g. `claude --dangerously-skip-permissions`), `crap` uses it; otherwise it falls back to plain `claude`. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
 
+### Don't attach twice
+
+Claude Code records every live CLI session under `~/.claude/sessions/<pid>.json` and removes it on clean exit. Before resuming, `crap` checks that registry: if the session you asked for is already open in another running `claude` process, it refuses and tells you where:
+
+```text
+Error: session '4d1637ec-…' is already running (pid 62043, idle)
+       in /Volumes/code/muxiavelli
+       resuming it again can corrupt the session log.
+       re-run with --force to resume anyway.
+```
+
+This prevents two processes from appending to the same session log at once. The check verifies the recorded pid is still a live `claude` process (so a stale file left by a crash — or a pid since reused by something else — won't trigger a false alarm). Pass `--force` to resume anyway.
+
 ### Options
 
 - `[SESSION_ID]`: The Claude session id to resume
+- `-f, --force`: Resume even if the session appears to be running in another process
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
 
 ### Shell Integration
@@ -1252,13 +1268,15 @@ If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 function crap() {
-    if [ "$#" -eq 0 ]; then
-        command crap
-        return $?
-    fi
-    local __crap_session="$1"
-    local __crap_dir
-    __crap_dir=$(command crap "$__crap_session") || return $?
+    local __crap_out
+    __crap_out=$(command crap "$@") || return $?
+    local __crap_dir __crap_session
+    {
+        IFS= read -r __crap_dir
+        IFS= read -r __crap_session
+    } <<EOF
+$__crap_out
+EOF
     cd "$__crap_dir" || return 1
     if command -v clauded >/dev/null 2>&1; then
         eval 'clauded --resume "$__crap_session"'
@@ -1268,7 +1286,7 @@ function crap() {
 }
 ```
 
-The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+The binary prints two lines on success — the directory to enter and the session id to resume — which the function reads back; forwarding `"$@"` lets flags like `--force` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
 
 ### Exit Codes
 
@@ -1279,6 +1297,7 @@ The `eval` is intentional: shell aliases aren't expanded inside function bodies,
 - `4`: Invalid session id
 - `5`: Shell setup failed
 - `6`: Could not determine your home directory
+- `7`: The session is already running in another process (use `--force` to override)
 
 ## bm (bulk move)
 
