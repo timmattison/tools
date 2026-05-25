@@ -229,12 +229,8 @@ fn main() -> Result<()> {
 
     let branch = repo::branch_name(&repo);
 
-    let base = cli.base.unwrap_or_else(resolve_base_ref);
-
-    let commits_ahead = run_git(&["rev-list", "--count", &format!("{base}..HEAD")])
-        .ok()
-        .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(0);
+    let base = cli.base.unwrap_or_else(|| repo::resolve_base(&repo));
+    let commits_ahead = repo::commits_ahead(&repo, &base);
 
     let last_commit_age = last_commit_age();
 
@@ -454,6 +450,7 @@ fn run_git(args: &[&str]) -> Result<String> {
 /// Pick the first base ref that actually resolves: `main`, then `master`,
 /// then whatever `origin/HEAD` points to. Falls back to `HEAD` so the
 /// commits-ahead count degrades gracefully to zero.
+#[allow(dead_code, reason = "removed in Task 8 of the gix migration")]
 fn resolve_base_ref() -> String {
     for candidate in ["main", "master"] {
         if run_git(&["rev-parse", "--verify", "--quiet", candidate]).is_ok() {

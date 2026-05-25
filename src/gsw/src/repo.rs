@@ -27,15 +27,37 @@ pub fn branch_name(repo: &gix::Repository) -> String {
 /// Pick the first base ref that resolves: `main`, then `master`, then
 /// `origin/HEAD`'s target, else `"HEAD"` (so commits-ahead degrades to 0).
 pub fn resolve_base(repo: &gix::Repository) -> String {
-    let _ = repo;
-    "HEAD".to_string() // STUB
+    for candidate in ["main", "master"] {
+        if repo.rev_parse_single(candidate).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD") {
+        if let Some(target) = reference.target().try_name() {
+            // target is e.g. refs/remotes/origin/main → shorten to origin/main
+            return target.shorten().to_string();
+        }
+    }
+    "HEAD".to_string()
 }
 
 /// Count commits reachable from HEAD but not from `base`
 /// (`git rev-list --count base..HEAD`). Returns 0 on any failure.
 pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
-    let _ = (repo, base);
-    u32::MAX // STUB (deliberately wrong so `== N` assertions fail)
+    let resolve = || -> anyhow::Result<u32> {
+        let head = repo.head_id()?.detach();
+        let base_id = repo.rev_parse_single(base)?.detach();
+        if head == base_id {
+            return Ok(0);
+        }
+        let count = repo
+            .rev_walk(std::iter::once(head))
+            .with_hidden(std::iter::once(base_id))
+            .all()?
+            .count();
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    };
+    resolve().unwrap_or(0)
 }
 
 #[cfg(test)]
