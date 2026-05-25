@@ -147,13 +147,102 @@ impl SessionState {
     /// The stable lowercase token printed by `crap --status`, suitable for
     /// scripting.
     fn as_token(self) -> &'static str {
-        todo!()
+        match self {
+            SessionState::Empty => "empty",
+            SessionState::WaitingForUser => "waiting-for-user",
+            SessionState::Busy => "busy",
+            SessionState::AwaitingAssistant => "awaiting-assistant",
+        }
     }
 }
 
+/// Reports whether an assistant turn has ended (it is now the user's turn)
+/// rather than leaving a tool call pending.
+///
+/// `stop_reason` is authoritative when present and is replicated onto every
+/// JSONL line of a message, so the message's last line carries it even when
+/// that line holds only a `thinking` or `text` block. When the field is absent
+/// or null — which happens when a turn was interrupted mid-stream — the type of
+/// the last content block is used as a fallback: a trailing `tool_use` block
+/// means a tool call is still pending.
+fn assistant_turn_ended(message: &serde_json::Value) -> bool {
+    match message
+        .get("stop_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("tool_use") => false,
+        Some("end_turn" | "stop_sequence") => true,
+        _ => {
+            let last_block = message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|blocks| blocks.last())
+                .and_then(|block| block.get("type"))
+                .and_then(serde_json::Value::as_str);
+            last_block != Some("tool_use")
+        }
+    }
+}
+
+/// Reports whether a `user` turn carries a tool result (the model is expected
+/// to respond next) rather than a genuine user prompt.
+fn user_turn_is_tool_result(message: &serde_json::Value) -> bool {
+    message
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            })
+        })
+}
+
 /// Infers the [`SessionState`] from the raw contents of a session transcript.
+///
+/// Each line is an independent JSON object. Subagent turns (`isSidechain`) and
+/// injected entries (`isMeta`) belong to other threads, and bookkeeping lines
+/// (`last-prompt`, `ai-title`, `file-history-snapshot`, …) are not turns at
+/// all; all are skipped. The state is decided by the last surviving
+/// conversational turn — there is no explicit "waiting for input" marker in the
+/// transcript to read directly.
 fn classify_session_state(contents: &str) -> SessionState {
-    todo!()
+    let mut state = SessionState::Empty;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("isSidechain").and_then(serde_json::Value::as_bool) == Some(true)
+            || value.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        state = match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("assistant") => {
+                if assistant_turn_ended(message) {
+                    SessionState::WaitingForUser
+                } else {
+                    SessionState::Busy
+                }
+            }
+            Some("user") => {
+                if user_turn_is_tool_result(message) {
+                    SessionState::Busy
+                } else {
+                    SessionState::AwaitingAssistant
+                }
+            }
+            // Any other entry type is bookkeeping, not a turn: leave the state.
+            _ => continue,
+        };
+    }
+    state
 }
 
 /// Resolves a session id to the existing directory the session ran in.
@@ -403,7 +492,16 @@ fn resolve_status<F>(
 where
     F: Fn(u32) -> bool,
 {
-    todo!()
+    if !is_valid_session_id(session_id) {
+        return Err(StatusError::InvalidSessionId);
+    }
+    if let Some(live) = find_live_session(sessions_dir, session_id, is_alive) {
+        let status = live.status.as_deref().unwrap_or("running");
+        return Ok(format!("{status} (live, pid {})", live.pid));
+    }
+    let file = find_session_file(projects_dir, session_id).ok_or(StatusError::SessionNotFound)?;
+    let contents = std::fs::read_to_string(&file).map_err(|_| StatusError::SessionNotFound)?;
+    Ok(classify_session_state(&contents).as_token().to_string())
 }
 
 /// Formats the binary's success output for the shell function to read back.
@@ -555,6 +653,16 @@ struct Cli {
     #[arg(long)]
     here: bool,
 
+    /// Print the session's conversational state and exit, without resuming.
+    ///
+    /// Emits one scriptable token: `waiting-for-user` (Claude finished and is
+    /// waiting on you), `busy` (a tool call or reply is in flight),
+    /// `awaiting-assistant` (you spoke last and Claude hasn't replied), or
+    /// `empty`. If the session is currently open in a live `claude` process, its
+    /// own status is reported instead, as `<status> (live, pid <pid>)`.
+    #[arg(long)]
+    status: bool,
+
     /// Install the `crap` shell function into your shell config, then exit.
     ///
     /// Run this once: `crap --shell-setup`. After re-sourcing your shell,
@@ -636,6 +744,32 @@ fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
     }
 }
 
+/// Handles `crap --status <id>`: print the session's state to stdout and exit.
+fn run_status(projects_dir: &Path, session_id: &str) -> ! {
+    let sessions_dir = claude_sessions_dir().unwrap_or_default();
+    match resolve_status(projects_dir, &sessions_dir, session_id, pid_is_alive) {
+        Ok(line) => {
+            println!("{line}");
+            exit(0);
+        }
+        Err(StatusError::InvalidSessionId) => {
+            eprintln!(
+                "{} '{session_id}' is not a valid session id",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::INVALID_SESSION_ID);
+        }
+        Err(StatusError::SessionNotFound) => {
+            eprintln!(
+                "{} no Claude session found with id '{session_id}'",
+                "Error:".red().bold()
+            );
+            eprintln!("       looked under {}", projects_dir.display());
+            exit(exit_codes::SESSION_NOT_FOUND);
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -659,6 +793,10 @@ fn main() {
         );
         exit(exit_codes::NO_HOME_DIR);
     };
+
+    if cli.status {
+        run_status(&projects_dir, &session_id);
+    }
 
     if cli.here {
         run_here(&projects_dir, &session_id, cli.force);
