@@ -3432,6 +3432,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "colored",
+ "gix",
  "tempfile",
  "terminal_size",
  "unicode-width",

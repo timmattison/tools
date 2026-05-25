@@ -18,6 +18,7 @@ mod age;
 mod bar;
 mod git;
 mod render;
+mod repo;
 mod snapshot;
 
 #[derive(Parser)]
@@ -217,15 +218,13 @@ fn main() -> Result<()> {
         colored::control::set_override(true);
     }
 
-    if !inside_git_repo() {
+    if repo::open().is_none() {
         println!("{}", "gsw • not a git repository".dimmed());
         return Ok(());
     }
 
-    // Route every subsequent git call at a private copy of the index so gsw
-    // never writes the repo's real index or takes `.git/index.lock` — which
-    // would race with a rebase running in the same repo. Held until `main`
-    // returns, then the snapshot is cleaned up. See [`git_command`].
+    // gsw still shells out for status/diff during the migration, so keep the
+    // private-index guard until those calls move to gix (removed in Task 8).
     let _index_snapshot = redirect_index_to_snapshot();
 
     let branch = run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
@@ -333,6 +332,7 @@ fn main() -> Result<()> {
 /// `git rev-parse --is-inside-work-tree` returns status 0 with stdout
 /// `false` for bare repos, so we have to inspect the output, not just
 /// the exit code.
+#[allow(dead_code, reason = "removed in Task 8 of the gix migration")]
 fn inside_git_repo() -> bool {
     let Ok(output) = git_command()
         .args(["rev-parse", "--is-inside-work-tree"])
