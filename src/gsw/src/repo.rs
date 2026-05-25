@@ -256,7 +256,7 @@ fn push_unstaged(item: gix::status::index_worktree::Item, out: &mut Vec<FileEntr
             if entry.status != gix::dir::entry::Status::Untracked {
                 return;
             }
-            let is_dir = entry.disk_kind == Some(gix::dir::entry::Kind::Directory);
+            let is_dir = entry.disk_kind.is_some_and(|k| k.is_dir());
             let mut path = entry.rela_path.to_string();
             let status = if is_dir {
                 if !path.ends_with('/') {
