@@ -166,6 +166,46 @@ fn claude_projects_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("projects"))
 }
 
+/// Why dropping a `--here` symlink failed.
+#[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "constructed/handled by the --here path in main (Cycle 4)")
+)]
+enum HereError {
+    /// The current directory's project folder already holds a *real* session
+    /// file at this id; refusing to clobber it.
+    Occupied(PathBuf),
+    /// A filesystem operation (creating the folder or the symlink) failed.
+    Io(std::io::Error),
+}
+
+/// Makes the session `original_jsonl` resolvable by `claude --resume` from
+/// `pwd`, by symlinking it into `pwd`'s project folder under `projects_dir`.
+///
+/// Returns the path of the symlink that was created (so the caller can remove
+/// it once the session ends), or `None` when `pwd` *is* the session's original
+/// directory and no symlink is needed. An existing symlink at the target is
+/// treated as stale and replaced; an existing real file is left alone and
+/// reported as [`HereError::Occupied`].
+///
+/// # Errors
+///
+/// Returns [`HereError::Occupied`] if a non-symlink file already occupies the
+/// target name, or [`HereError::Io`] if the folder or symlink cannot be created.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "called by the --here path in main (Cycle 4)")
+)]
+fn prepare_here_link(
+    projects_dir: &Path,
+    original_jsonl: &Path,
+    pwd: &Path,
+    session_id: &str,
+) -> Result<Option<PathBuf>, HereError> {
+    unimplemented!()
+}
+
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
 /// cannot be determined.
 ///
@@ -523,6 +563,99 @@ mod tests {
         );
         // Non-ASCII characters each collapse to a single dash.
         assert_eq!(encode_project_dir(Path::new("/x/café")), "-x-caf-");
+    }
+
+    #[test]
+    fn prepare_here_link_creates_symlink_in_pwd_project_folder() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        // A pwd whose encoded project folder does not exist yet.
+        let pwd = Path::new("/Volumes/x/here-cwd");
+        let link = prepare_here_link(projects, &original, pwd, SAMPLE_ID)
+            .expect("should succeed")
+            .expect("a symlink should be created");
+
+        assert_eq!(
+            link,
+            projects
+                .join("-Volumes-x-here-cwd")
+                .join(format!("{SAMPLE_ID}.jsonl"))
+        );
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&link).unwrap(), original);
+    }
+
+    #[test]
+    fn prepare_here_link_returns_none_when_already_in_session_folder() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        // encode_project_dir("/orig") == "-orig", so pwd resolves to the folder
+        // the session already lives in: no symlink is needed.
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let result =
+            prepare_here_link(projects, &original, Path::new("/orig"), SAMPLE_ID).expect("ok");
+        assert_eq!(result, None);
+        assert!(original.is_file(), "original must be left untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_here_link_replaces_stale_symlink() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let pwd = Path::new("/Volumes/x/here");
+        let folder = projects.join("-Volumes-x-here");
+        fs::create_dir_all(&folder).unwrap();
+        let link = folder.join(format!("{SAMPLE_ID}.jsonl"));
+        let stale_target = dir.path().join("old.jsonl");
+        fs::write(&stale_target, "old").unwrap();
+        std::os::unix::fs::symlink(&stale_target, &link).unwrap();
+
+        let returned = prepare_here_link(projects, &original, pwd, SAMPLE_ID)
+            .expect("ok")
+            .expect("symlink path");
+        assert_eq!(returned, link);
+        assert_eq!(fs::read_link(&link).unwrap(), original);
+    }
+
+    #[test]
+    fn prepare_here_link_refuses_to_clobber_real_file() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let pwd = Path::new("/Volumes/x/here");
+        let folder = projects.join("-Volumes-x-here");
+        fs::create_dir_all(&folder).unwrap();
+        let real = folder.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&real, "a real session").unwrap();
+
+        match prepare_here_link(projects, &original, pwd, SAMPLE_ID) {
+            Err(HereError::Occupied(p)) => assert_eq!(p, real),
+            other => panic!("expected Occupied, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "a real session",
+            "the real file must be left untouched"
+        );
     }
 
     #[test]
