@@ -5,6 +5,8 @@
 //! `.git/index.lock` and can never race a concurrent rebase — the reason the
 //! old `git` CLI path needed a private index snapshot.
 
+use crate::render::UpstreamStatus;
+
 /// Open the repository containing `cwd`, or `None` when there isn't one with a
 /// working tree (outside any repo, or a bare repo — gsw has nothing per-file to
 /// render in either case).
@@ -89,6 +91,15 @@ pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
     };
     resolve().unwrap_or(0)
+}
+
+/// The current branch's upstream tracking status, or `None` when there's no
+/// upstream configured / HEAD is detached. `name` is the short tracking-ref
+/// name like `origin/main`; ahead/behind match
+/// `git rev-list --left-right --count <upstream>...HEAD`.
+pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
+    let _ = repo;
+    None // STUB
 }
 
 #[cfg(test)]
@@ -226,5 +237,47 @@ mod tests {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
         assert!(super::recent_log(&repo, 0).is_empty());
+    }
+
+    /// Clone `init_repo()`'s repo so the clone has a real `origin/main` upstream.
+    fn init_repo_with_upstream() -> (tempfile::TempDir, tempfile::TempDir) {
+        let origin = init_repo();
+        let clone = tempfile::tempdir().expect("tempdir");
+        let status = std::process::Command::new("git")
+            .args([
+                "clone", "-q",
+                origin.path().to_str().unwrap(),
+                clone.path().to_str().unwrap(),
+            ])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .status()
+            .expect("git clone");
+        assert!(status.success(), "git clone failed");
+        git(clone.path(), &["config", "user.email", "t@example.com"]);
+        git(clone.path(), &["config", "user.name", "Test"]);
+        git(clone.path(), &["config", "commit.gpgsign", "false"]);
+        (origin, clone)
+    }
+
+    #[test]
+    fn upstream_none_for_branch_without_upstream() {
+        let dir = init_repo(); // local-only main, never pushed
+        let repo = open_at(dir.path()).unwrap();
+        assert!(super::upstream_status(&repo).is_none());
+    }
+
+    #[test]
+    fn upstream_reports_name_and_ahead_count() {
+        let (_origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        std::fs::write(p.join("local.txt"), "x\n").unwrap();
+        git(p, &["add", "local.txt"]);
+        git(p, &["commit", "-q", "-m", "local only"]);
+        let repo = open_at(p).unwrap();
+        let up = super::upstream_status(&repo).expect("clone has an upstream");
+        assert_eq!(up.name, "origin/main");
+        assert_eq!(up.ahead, 1);
+        assert_eq!(up.behind, 0);
     }
 }
