@@ -4,6 +4,23 @@
 
 All tools in this repository that provide shell integration (shell functions, aliases, etc.) **must** use the `shellsetup` library crate located at `src/shellsetup/`.
 
+### When to add `--shell-setup` at all (read this first)
+
+**Only add `--shell-setup` when it is absolutely necessary — when the tool genuinely cannot do its job from a normal child process.** Writing into a user's shell rc file is intrusive, has to be maintained across upgrades, and is the kind of thing users reasonably distrust. Default to *not* shipping shell integration.
+
+A shell function is only **load-bearing** when the tool must affect the *parent shell's* state — something a child process physically cannot do. The legitimate cases:
+
+- **Changing the parent shell's working directory** (`cd`). A child process cannot change its parent's cwd, so a `cd`-ing tool *must* be a shell function. Examples: `crap` (cd-and-resume), `cwt`/`nwt` (switch/create worktree and land you there).
+- **Exporting environment variables into the current session**, modifying shell options, or otherwise mutating live shell state.
+
+If the tool does **not** need to mutate the parent shell, **do not add `--shell-setup`.** Before adding it, exhaust the native alternatives:
+
+1. **A direct invocation or flag** — if `mytool --rm` already does the job, ship that as the interface. Don't wrap it.
+2. **A subcommand or second binary** for the variant behavior.
+3. **Documentation** telling users to add their own `alias` if they want a shorthand. A convenience alias is the user's choice to make, not something we install into their rc file.
+
+A shell function that merely forwards arguments to the binary (`function prmv() { prcp --rm "$@"; }`) is **cosmetic, not load-bearing** — it adds no capability the binary lacks. That is not a sufficient reason to touch the user's shell config.
+
 ### Why
 
 The `shellsetup` library provides:
