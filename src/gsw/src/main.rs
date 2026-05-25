@@ -10,7 +10,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::{parse_numstat, parse_status, FileEntry};
+use crate::git::{parse_numstat, FileEntry};
 use crate::render::{plan_section_caps, render, LogEntry, RenderOptions};
 use crate::snapshot::build_snapshot;
 
@@ -234,8 +234,7 @@ fn main() -> Result<()> {
 
     let last_commit_age = last_commit_age(&repo);
 
-    let status_raw = run_git(&["status", "--porcelain=v2", "-z"])?;
-    let entries = parse_status(&status_raw);
+    let entries = repo::collect_status(&repo)?;
 
     let staged_numstat = run_git(&["diff", "--cached", "--numstat", "-z"])
         .map(|s| parse_numstat(&s))

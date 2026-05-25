@@ -141,9 +141,153 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
 /// yields two rows (staged + unstaged). Rows are ordered by path, staged
 /// before unstaged, so the downstream stable mtime sort is deterministic
 /// (gix's status iterator itself yields items in nondeterministic order).
+///
+/// # Errors
+///
+/// Returns an error when the gix status platform cannot be created or iteration fails.
 pub fn collect_status(repo: &gix::Repository) -> anyhow::Result<Vec<FileEntry>> {
-    let _ = repo;
-    Ok(Vec::new()) // STUB
+    let mut out: Vec<FileEntry> = Vec::new();
+
+    let iter = repo
+        .status(gix::progress::Discard)
+        .map_err(|e| anyhow::anyhow!("status platform: {e}"))?
+        .untracked_files(gix::status::UntrackedFiles::Collapsed)
+        .into_iter(Vec::<gix::bstr::BString>::new())
+        .map_err(|e| anyhow::anyhow!("status iter: {e}"))?;
+
+    for item in iter {
+        let item = item.map_err(|e| anyhow::anyhow!("status item: {e}"))?;
+        match item {
+            gix::status::Item::TreeIndex(change) => push_staged(change, &mut out),
+            gix::status::Item::IndexWorktree(iw_item) => push_unstaged(iw_item, &mut out),
+        }
+    }
+
+    // Sort deterministically: by path, staged before unstaged for the same path.
+    out.sort_by(|a, b| a.path.cmp(&b.path).then(b.staged.cmp(&a.staged)));
+    Ok(out)
+}
+
+/// Map a tree→index change to a staged `FileEntry` and push it onto `out`.
+fn push_staged(change: gix::diff::index::Change, out: &mut Vec<FileEntry>) {
+    use gix::diff::index::Change;
+
+    match change {
+        Change::Addition { location, .. } => {
+            out.push(FileEntry {
+                path: location.to_string(),
+                orig_path: None,
+                status: FileStatus::Added,
+                staged: true,
+            });
+        }
+        Change::Deletion { location, .. } => {
+            out.push(FileEntry {
+                path: location.to_string(),
+                orig_path: None,
+                status: FileStatus::Deleted,
+                staged: true,
+            });
+        }
+        Change::Modification {
+            location,
+            previous_entry_mode,
+            entry_mode,
+            ..
+        } => {
+            // Detect a type change by comparing the type bits of the mode.
+            // gix_index::entry::Mode is a bitflags struct; mask out permission bits.
+            const TYPE_MASK: u32 = 0o170_000_u32;
+            let status = if (previous_entry_mode.bits() & TYPE_MASK) != (entry_mode.bits() & TYPE_MASK) {
+                FileStatus::TypeChange
+            } else {
+                FileStatus::Modified
+            };
+            out.push(FileEntry {
+                path: location.to_string(),
+                orig_path: None,
+                status,
+                staged: true,
+            });
+        }
+        Change::Rewrite {
+            location,
+            source_location,
+            copy,
+            ..
+        } => {
+            let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
+            out.push(FileEntry {
+                path: location.to_string(),
+                orig_path: Some(source_location.to_string()),
+                status,
+                staged: true,
+            });
+        }
+    }
+}
+
+/// Map an index→worktree item to zero or more unstaged `FileEntry`s pushed onto `out`.
+fn push_unstaged(item: gix::status::index_worktree::Item, out: &mut Vec<FileEntry>) {
+    use gix::status::plumbing::index_as_worktree::{Change, EntryStatus};
+
+    match item {
+        gix::status::index_worktree::Item::Modification { rela_path, status, .. } => {
+            let file_status = match status {
+                EntryStatus::Conflict { .. } => FileStatus::Conflicted,
+                EntryStatus::IntentToAdd => FileStatus::Added,
+                EntryStatus::Change(change) => match change {
+                    Change::Removed => FileStatus::Deleted,
+                    Change::Type { .. } => FileStatus::TypeChange,
+                    Change::Modification { .. } | Change::SubmoduleModification(_) => FileStatus::Modified,
+                },
+                // NeedsUpdate means the stat cache is stale but content is identical — no visible change.
+                EntryStatus::NeedsUpdate(_) => return,
+            };
+            out.push(FileEntry {
+                path: rela_path.to_string(),
+                orig_path: None,
+                status: file_status,
+                staged: false,
+            });
+        }
+        gix::status::index_worktree::Item::DirectoryContents { entry, .. } => {
+            // Only surface Untracked entries; ignore anything else (tracked, ignored).
+            if entry.status != gix::dir::entry::Status::Untracked {
+                return;
+            }
+            let is_dir = entry.disk_kind == Some(gix::dir::entry::Kind::Directory);
+            let mut path = entry.rela_path.to_string();
+            let status = if is_dir {
+                if !path.ends_with('/') {
+                    path.push('/');
+                }
+                FileStatus::UntrackedDir
+            } else {
+                FileStatus::Untracked
+            };
+            out.push(FileEntry {
+                path,
+                orig_path: None,
+                status,
+                staged: false,
+            });
+        }
+        gix::status::index_worktree::Item::Rewrite {
+            source,
+            dirwalk_entry,
+            copy,
+            ..
+        } => {
+            let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
+            out.push(FileEntry {
+                path: dirwalk_entry.rela_path.to_string(),
+                orig_path: Some(source.rela_path().to_string()),
+                status,
+                staged: false,
+            });
+        }
+    }
 }
 
 #[cfg(test)]

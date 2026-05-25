@@ -45,6 +45,7 @@ pub struct NumStat {
 /// Input is a single string with `\0`-separated records (the `-z` form).
 /// For renames/copies the new path and original path are split by `\0`
 /// within the entry, which is why we consume two records for a type-2 entry.
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 pub fn parse_status(input: &str) -> Vec<FileEntry> {
     let pieces: Vec<&str> = input.split('\0').filter(|s| !s.is_empty()).collect();
     let mut out = Vec::new();
@@ -94,12 +95,14 @@ pub fn parse_status(input: &str) -> Vec<FileEntry> {
     out
 }
 
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 fn split_first(s: &str) -> (Option<char>, &str) {
     let mut chars = s.chars();
     let first = chars.next();
     (first, chars.as_str())
 }
 
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 fn parse_ordinary_entry(rest: &str, orig: Option<String>, out: &mut Vec<FileEntry>) {
     // <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
     let parts: Vec<&str> = rest.splitn(8, ' ').collect();
@@ -109,6 +112,7 @@ fn parse_ordinary_entry(rest: &str, orig: Option<String>, out: &mut Vec<FileEntr
     emit_xy(parts[0], parts[7], orig, out);
 }
 
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 fn parse_rename_entry(rest: &str, orig: Option<String>, out: &mut Vec<FileEntry>) {
     // <XY> <sub> <mH> <mI> <mW> <hH> <hI> <Xscore> <path>
     let parts: Vec<&str> = rest.splitn(9, ' ').collect();
@@ -118,6 +122,7 @@ fn parse_rename_entry(rest: &str, orig: Option<String>, out: &mut Vec<FileEntry>
     emit_xy(parts[0], parts[8], orig, out);
 }
 
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 fn parse_unmerged_entry(rest: &str, out: &mut Vec<FileEntry>) {
     // <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>
     let parts: Vec<&str> = rest.splitn(10, ' ').collect();
@@ -132,6 +137,7 @@ fn parse_unmerged_entry(rest: &str, out: &mut Vec<FileEntry>) {
     });
 }
 
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 fn emit_xy(xy: &str, path: &str, orig: Option<String>, out: &mut Vec<FileEntry>) {
     let mut xy_chars = xy.chars();
     let x_status = char_to_status(xy_chars.next().unwrap_or('.'));
@@ -163,6 +169,7 @@ fn emit_xy(xy: &str, path: &str, orig: Option<String>, out: &mut Vec<FileEntry>)
     }
 }
 
+#[allow(dead_code, reason = "retained until Task 9 removes all git-CLI parsers")]
 fn char_to_status(c: char) -> Option<FileStatus> {
     match c {
         'M' => Some(FileStatus::Modified),
