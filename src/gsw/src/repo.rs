@@ -306,14 +306,7 @@ pub fn collect_changes(repo: &gix::Repository) -> anyhow::Result<Changes> {
                     }
                     EntryStatus::Change(IwChange::Modification { .. } | IwChange::Type { .. }) => {
                         let old = blob_bytes(repo, entry.id.as_ref());
-                        let new = repo
-                            .workdir()
-                            .and_then(|wd| {
-                                use gix::bstr::ByteSlice;
-                                rela_path.to_str().ok().map(|p| wd.join(p))
-                            })
-                            .and_then(|path| std::fs::read(path).ok())
-                            .unwrap_or_default();
+                        let new = worktree_bytes(repo, &rela_path);
                         unstaged.insert(key.clone(), line_counts(&old, &new));
                     }
                     _ => {}
@@ -401,6 +394,25 @@ fn blob_bytes(repo: &gix::Repository, id: &gix::hash::oid) -> Vec<u8> {
         .and_then(|o| o.try_into_blob().ok())
         .map(|mut b| b.take_data())
         .unwrap_or_default()
+}
+
+/// Read a worktree file's bytes by repo-relative path (empty vec when there's
+/// no workdir or the read fails).
+///
+/// Resolves `rela_path` through gix's byte→path conversion rather than a strict
+/// UTF-8 `to_str()`. On Unix a path is arbitrary bytes, so a non-UTF-8 name must
+/// still map to the real file; a strict conversion would silently fail and leave
+/// the numstat empty — a phantom all-deletions entry — under the lossy
+/// `to_string()` key that the caller already uses (and that matches the row's
+/// `FileEntry.path`). Converting the same bytes keeps the read and the key
+/// consistent.
+fn worktree_bytes(repo: &gix::Repository, rela_path: &gix::bstr::BString) -> Vec<u8> {
+    use gix::bstr::ByteSlice;
+    let Some(wd) = repo.workdir() else {
+        return Vec::new();
+    };
+    let rel = gix::path::from_bstr(rela_path.as_bstr());
+    std::fs::read(wd.join(&*rel)).unwrap_or_default()
 }
 
 #[cfg(test)]
