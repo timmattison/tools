@@ -567,8 +567,9 @@ fn format_timestamp(raw: &str) -> String {
 /// This backs `crap --status` with no id: it enumerates `<uuid>.jsonl` files in
 /// the folder Claude would use for `pwd`, classifying each (live process status
 /// taking precedence over transcript inference) and recording its time span.
-/// Results are ordered most-recently-active first. `is_alive` is injected so
-/// liveness can be tested without spawning processes.
+/// Results are ordered ascending by last-activity, so the most recently used
+/// session is last. `is_alive` is injected so liveness can be tested without
+/// spawning processes.
 fn resolve_dir_statuses<F>(
     projects_dir: &Path,
     sessions_dir: &Path,
@@ -607,11 +608,13 @@ where
             last,
         });
     }
-    // Most-recently-active first; ties (and timestamp-less sessions) break by id
-    // so the listing is deterministic regardless of directory iteration order.
+    // Ascending by last-activity, so the most recently used session sits at the
+    // bottom of the printed table; timestamp-less sessions (which sort first)
+    // and ties break by id, keeping the order deterministic regardless of
+    // directory iteration order.
     reports.sort_by(|a, b| {
-        b.last
-            .cmp(&a.last)
+        a.last
+            .cmp(&b.last)
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
     reports
