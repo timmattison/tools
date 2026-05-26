@@ -1302,17 +1302,17 @@ The tokens are stable and newline-terminated, so they script cleanly:
 Give `--status` **no id** and it lists every session recorded for the directory you're in — handy when a single project has several conversations going. Each row shows the state plus when the transcript was *started* and *last written*, read from the transcript's own timestamps (not file mtimes), so they reflect real activity:
 
 ```text
-4 sessions for /Volumes/code/crap
+2 sessions for /Volumes/code/crap
 
 ┌──────────────────────────────────────┬────────────────────────┬─────────────────────┬─────────────────────┐
 │ SESSION                              ┆ STATE                  ┆ STARTED             ┆ LAST                │
 ╞══════════════════════════════════════╪════════════════════════╪═════════════════════╪═════════════════════╡
-│ 1c8aad51-26aa-416d-8da9-a0b586fd0632 ┆ busy (live, pid 98519) ┆ 2026-05-25 18:43:05 ┆ 2026-05-25 20:29:44 │
 │ c43eb4df-1ba3-4c42-84f2-ab76319a860c ┆ waiting-for-user       ┆ 2026-05-25 20:02:29 ┆ 2026-05-25 20:11:21 │
+│ 1c8aad51-26aa-416d-8da9-a0b586fd0632 ┆ busy (live, pid 98519) ┆ 2026-05-25 18:43:05 ┆ 2026-05-25 20:29:44 │
 └──────────────────────────────────────┴────────────────────────┴─────────────────────┴─────────────────────┘
 ```
 
-Rows are ordered most-recently-active first. Live sessions show their own status and pid; the rest show the inferred state. A session with no recorded activity shows `—` for its times.
+Rows are ordered oldest-activity first, so the most recently used session sits at the bottom. Live sessions show their own status and pid; the rest show the inferred state. A session with no recorded activity shows `—` for its times.
 
 #### JSON output: `--json`
 
@@ -1363,6 +1363,12 @@ If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 function crap() {
+    # --status only queries; it never changes the parent shell. Run it straight
+    # through so its output (a token, or a multi-line listing) reaches the
+    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    case " $* " in
+        *" --status "*) command crap "$@"; return $? ;;
+    esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
     if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
