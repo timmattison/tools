@@ -27,10 +27,21 @@ pub fn rerun_if_changed_paths(
     git_common_dir: &Path,
     head_contents: &str,
 ) -> Vec<PathBuf> {
-    // NOTE: this only watches HEAD and index. A symbolic-ref HEAD never changes
-    // when the branch moves, so this fails to rebuild on new commits. Fixed in
-    // the follow-up commit.
-    vec![git_dir.join("HEAD"), git_dir.join("index")]
+    let mut paths = vec![git_dir.join("HEAD"), git_dir.join("index")];
+
+    // When HEAD is a symbolic ref, the commit it points at changes via the
+    // branch ref (loose under refs/, or rolled into packed-refs), never via
+    // HEAD itself. Watch both so a moved branch forces a rebuild. These live in
+    // the shared common dir, which differs from `git_dir` inside a worktree.
+    if let Some(reference) = head_contents.strip_prefix("ref:") {
+        let reference = reference.trim();
+        if !reference.is_empty() {
+            paths.push(git_common_dir.join(reference));
+            paths.push(git_common_dir.join("packed-refs"));
+        }
+    }
+
+    paths
 }
 
 #[cfg(test)]
