@@ -767,13 +767,16 @@ fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> Strin
 ///   was created because this already is the session's own directory.
 const SHELL_CODE: &str = r#"
 function crap() {
-    # These flags make the binary print to stdout and exit 0 without changing
-    # the parent shell: --status only queries, and --help/-h/--version/-V emit
-    # informational text. Run them straight through so their output reaches the
-    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target
-    # (which would otherwise `cd` into the help/listing text and mangle it).
+    # These flags make the binary print to stdout and exit 0 without mutating
+    # the parent shell: --status queries, --help/-h/--version/-V emit
+    # informational text, and --shell-setup writes the rc file (not the live
+    # shell) and prints activation instructions. Run them straight through so
+    # their output reaches the terminal instead of being parsed as a
+    # "<session-id>\n<dir>" resume target (which would otherwise `cd` into that
+    # text and mangle it). --shell-setup matters on upgrades, when this very
+    # function is already loaded and would otherwise swallow its instructions.
     case " $* " in
-        *" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*)
+        *" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
             command crap "$@"; return $? ;;
     esac
     local __crap_out
@@ -1843,11 +1846,12 @@ mod tests {
 
     #[test]
     fn shell_code_passes_informational_flags_through_untouched() {
-        // `--status` queries, and --help/-h/--version/-V print informational
-        // text; none change the parent shell, and each must reach the terminal
-        // rather than being parsed as a "<session-id>\n<dir>" resume target.
+        // `--status` queries, --help/-h/--version/-V print informational text,
+        // and --shell-setup writes the rc file (not the live shell); none mutate
+        // the parent shell, and each must reach the terminal rather than being
+        // parsed as a "<session-id>\n<dir>" resume target.
         assert!(SHELL_CODE.contains(
-            r#"*" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*)"#
+            r#"*" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)"#
         ));
         assert!(SHELL_CODE.contains(r#"command crap "$@"; return $?"#));
     }
