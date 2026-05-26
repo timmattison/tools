@@ -1883,6 +1883,7 @@ mod tests {
             case \" $* \" in\n\
             \x20 *\" --help \"*|*\" -h \"*) printf 'CRAP_HELP_MARKER\\nUsage: crap\\nmore\\n'; exit 0 ;;\n\
             \x20 *\" --version \"*|*\" -V \"*) printf 'CRAP_VERSION_MARKER 0.1.0\\n'; exit 0 ;;\n\
+            \x20 *\" --shell-setup \"*) printf 'CRAP_SETUP_MARKER\\nTo activate, run:\\n  source ~/.zshrc\\n'; exit 0 ;;\n\
             esac\n\
             printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
 
@@ -1918,16 +1919,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn shell_function_passes_help_and_version_through() {
-        // These flags make the binary print to stdout and exit 0. Without a
-        // pass-through, the function captures that text and tries to `cd` into
-        // it as a resume directory. Each must reach the terminal verbatim and
-        // never trigger a resume.
+    fn shell_function_passes_informational_flags_through() {
+        // These flags make the binary print to stdout and exit 0 without
+        // mutating the parent shell. Without a pass-through, the function
+        // captures that text and tries to `cd` into it as a resume directory.
+        // Each must reach the terminal verbatim and never trigger a resume.
+        // `--shell-setup` is included because, on an upgrade, the already-loaded
+        // function would otherwise swallow its activation instructions.
         for (args, marker) in [
             ("--help", "CRAP_HELP_MARKER"),
             ("-h", "CRAP_HELP_MARKER"),
             ("--version", "CRAP_VERSION_MARKER"),
             ("-V", "CRAP_VERSION_MARKER"),
+            ("--shell-setup", "CRAP_SETUP_MARKER"),
         ] {
             let (stdout, claude_called) = run_shell_function(args);
             assert!(
