@@ -1846,6 +1846,95 @@ mod tests {
         assert!(SHELL_CODE.contains(r#"*" --status "*) command crap "$@"; return $?"#));
     }
 
+    /// Sources `SHELL_CODE` in a real `bash`, with a fake `crap` binary (and
+    /// fake `claude`/`clauded`) ahead of it on `PATH`, then runs `crap <args>`.
+    ///
+    /// The fake binary mimics clap: informational flags print a recognizable
+    /// marker to stdout and exit 0; anything else emits a `<session>\n<dir>`
+    /// resume target. Returns the captured stdout plus whether the `claude`
+    /// stub was invoked (it drops a marker file when called).
+    ///
+    /// All paths are keyed on the pid + a nanosecond timestamp so concurrent
+    /// runs of this test never share a temp dir.
+    #[cfg(unix)]
+    fn run_shell_function(args: &str) -> (String, bool) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("crap-shell-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let claude_marker = dir.join("claude_called");
+
+        // Fake `crap`: informational flags print a marker and exit 0, exactly
+        // as clap does; the default path prints a resume target.
+        let fake_crap = "#!/bin/sh\n\
+            case \" $* \" in\n\
+            \x20 *\" --help \"*|*\" -h \"*) printf 'CRAP_HELP_MARKER\\nUsage: crap\\nmore\\n'; exit 0 ;;\n\
+            \x20 *\" --version \"*|*\" -V \"*) printf 'CRAP_VERSION_MARKER 0.1.0\\n'; exit 0 ;;\n\
+            esac\n\
+            printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
+
+        // Fake `claude`/`clauded`: record that a resume was attempted.
+        let fake_claude = format!("#!/bin/sh\n: > {:?}\n", claude_marker);
+
+        for (name, body) in [
+            ("crap", fake_crap.to_string()),
+            ("claude", fake_claude.clone()),
+            ("clauded", fake_claude.clone()),
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{base_path}", dir.display());
+        let script = format!("{SHELL_CODE}\ncrap {args}\n");
+
+        let output = Command::new("bash")
+            .env("PATH", new_path)
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash should be available");
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let claude_called = claude_marker.exists();
+        let _ = fs::remove_dir_all(&dir);
+        (stdout, claude_called)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_passes_help_and_version_through() {
+        // These flags make the binary print to stdout and exit 0. Without a
+        // pass-through, the function captures that text and tries to `cd` into
+        // it as a resume directory. Each must reach the terminal verbatim and
+        // never trigger a resume.
+        for (args, marker) in [
+            ("--help", "CRAP_HELP_MARKER"),
+            ("-h", "CRAP_HELP_MARKER"),
+            ("--version", "CRAP_VERSION_MARKER"),
+            ("-V", "CRAP_VERSION_MARKER"),
+        ] {
+            let (stdout, claude_called) = run_shell_function(args);
+            assert!(
+                stdout.contains(marker),
+                "`crap {args}` should print the binary's output verbatim, got: {stdout:?}"
+            );
+            assert!(
+                !claude_called,
+                "`crap {args}` must not attempt a resume"
+            );
+        }
+    }
+
     // Two distinct session ids for the per-directory listing tests.
     const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
     const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
