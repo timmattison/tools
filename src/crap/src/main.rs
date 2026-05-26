@@ -767,11 +767,14 @@ fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> Strin
 ///   was created because this already is the session's own directory.
 const SHELL_CODE: &str = r#"
 function crap() {
-    # --status only queries; it never changes the parent shell. Run it straight
-    # through so its output (a token, or a multi-line listing) reaches the
-    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    # These flags make the binary print to stdout and exit 0 without changing
+    # the parent shell: --status only queries, and --help/-h/--version/-V emit
+    # informational text. Run them straight through so their output reaches the
+    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target
+    # (which would otherwise `cd` into the help/listing text and mangle it).
     case " $* " in
-        *" --status "*) command crap "$@"; return $? ;;
+        *" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*)
+            command crap "$@"; return $? ;;
     esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
@@ -1839,11 +1842,14 @@ mod tests {
     }
 
     #[test]
-    fn shell_code_passes_status_through_untouched() {
-        // `--status` only queries; it never changes the parent shell, and its
-        // output (a token or a multi-line listing) must reach the terminal
+    fn shell_code_passes_informational_flags_through_untouched() {
+        // `--status` queries, and --help/-h/--version/-V print informational
+        // text; none change the parent shell, and each must reach the terminal
         // rather than being parsed as a "<session-id>\n<dir>" resume target.
-        assert!(SHELL_CODE.contains(r#"*" --status "*) command crap "$@"; return $?"#));
+        assert!(SHELL_CODE.contains(
+            r#"*" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*)"#
+        ));
+        assert!(SHELL_CODE.contains(r#"command crap "$@"; return $?"#));
     }
 
     /// Sources `SHELL_CODE` in a real `bash`, with a fake `crap` binary (and
@@ -1886,7 +1892,7 @@ mod tests {
         for (name, body) in [
             ("crap", fake_crap.to_string()),
             ("claude", fake_claude.clone()),
-            ("clauded", fake_claude.clone()),
+            ("clauded", fake_claude),
         ] {
             let path = dir.join(name);
             fs::write(&path, body).unwrap();
