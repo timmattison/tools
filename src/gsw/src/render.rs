@@ -90,9 +90,8 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     let mut lines = Vec::new();
 
     let header_plain = header_text(snapshot);
-    let header_width = UnicodeWidthStr::width(header_plain.as_str());
     lines.push(header_plain.bold().to_string());
-    lines.push(render_separator(header_width));
+    lines.push(render_separator(opts.terminal_width));
 
     let display_count = match opts.max_files {
         Some(0) | None => snapshot.files.len(),
@@ -123,7 +122,7 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         // the post-header separator already sits directly above the files, so
         // adding another would produce a double rule with nothing between them.
         if log_rendered {
-            lines.push(render_separator(header_width));
+            lines.push(render_separator(opts.terminal_width));
         }
         for entry in snapshot.files.iter().take(display_count) {
             lines.push(render_row(entry, opts, max_change, path_width));
