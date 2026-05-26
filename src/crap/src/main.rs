@@ -5,11 +5,25 @@
 //! up that session under `~/.claude/projects`, recovers the directory it ran
 //! in, changes into it, and re-launches Claude with `--resume <id>`.
 //!
+//! With `--here`, it instead brings the session to *you*: Claude resolves a
+//! `--resume <id>` only against the project folder matching the current working
+//! directory, so `crap --here` symlinks the session's transcript into that
+//! folder and resumes it as a `--fork-session` (a fresh id), leaving the
+//! original transcript untouched. The symlink is removed once the session ends.
+//!
+//! With `--status`, it resumes nothing: it classifies where the session left
+//! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
+//! from the last conversational turn in the transcript (or the live process's
+//! own status when one is attached) — and prints that one scriptable token.
+//! Given no id, `--status` instead lists every session recorded for the current
+//! directory, each with its state and the times its transcript was started and
+//! last written (read from the transcript's own timestamps, not file mtimes).
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
-//! function installed via `crap --shell-setup`. This binary's job is to resolve
-//! a session id to its original directory and print that path to stdout; the
-//! shell function performs the `cd` and runs `clauded`/`claude` from there.
+//! function installed via `crap --shell-setup`. This binary resolves the session
+//! id — printing the original directory to resume from, or (for `--here`)
+//! preparing the symlink and printing what the function should run and clean up.
 
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -17,6 +31,8 @@ use std::process::exit;
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
+use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
+use serde::Serialize;
 use shellsetup::ShellIntegration;
 
 /// Exit codes for the different failure conditions.
@@ -35,6 +51,10 @@ mod exit_codes {
     pub const NO_HOME_DIR: i32 = 6;
     /// The session is already running in another process.
     pub const SESSION_ALREADY_RUNNING: i32 = 7;
+    /// `--here`: the project folder or symlink could not be created.
+    pub const HERE_LINK_ERROR: i32 = 8;
+    /// `--here`: the current working directory could not be determined.
+    pub const HERE_PWD_UNAVAILABLE: i32 = 9;
 }
 
 /// Why a session id could not be resolved to an existing directory.
@@ -112,6 +132,129 @@ fn find_session_file(projects_dir: &Path, session_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// The conversational state of a session, inferred from its transcript.
+///
+/// Claude Code never writes an explicit "turn finished, waiting for input"
+/// marker, so the state is derived from the shape of the last *conversational*
+/// turn (subagent/`isSidechain` and injected `isMeta` entries, and trailing
+/// bookkeeping lines, are not turns and are ignored).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    /// The transcript records no conversational turns yet.
+    Empty,
+    /// Claude finished its turn and is waiting for the user: the last turn is
+    /// an assistant message that ended with prose, with no pending tool call.
+    WaitingForUser,
+    /// Work is in flight — the assistant has an unanswered tool call, or a tool
+    /// result was just delivered and the assistant has yet to respond.
+    Busy,
+    /// The user sent the last message and Claude has not replied yet (an active
+    /// turn, or a session abandoned before the reply).
+    AwaitingAssistant,
+}
+
+impl SessionState {
+    /// The stable lowercase token printed by `crap --status`, suitable for
+    /// scripting.
+    fn as_token(self) -> &'static str {
+        match self {
+            SessionState::Empty => "empty",
+            SessionState::WaitingForUser => "waiting-for-user",
+            SessionState::Busy => "busy",
+            SessionState::AwaitingAssistant => "awaiting-assistant",
+        }
+    }
+}
+
+/// Reports whether an assistant turn has ended (it is now the user's turn)
+/// rather than leaving a tool call pending.
+///
+/// `stop_reason` is authoritative when present and is replicated onto every
+/// JSONL line of a message, so the message's last line carries it even when
+/// that line holds only a `thinking` or `text` block. When the field is absent
+/// or null — which happens when a turn was interrupted mid-stream — the type of
+/// the last content block is used as a fallback: a trailing `tool_use` block
+/// means a tool call is still pending.
+fn assistant_turn_ended(message: &serde_json::Value) -> bool {
+    match message
+        .get("stop_reason")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("tool_use") => false,
+        Some("end_turn" | "stop_sequence") => true,
+        _ => {
+            let last_block = message
+                .get("content")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|blocks| blocks.last())
+                .and_then(|block| block.get("type"))
+                .and_then(serde_json::Value::as_str);
+            last_block != Some("tool_use")
+        }
+    }
+}
+
+/// Reports whether a `user` turn carries a tool result (the model is expected
+/// to respond next) rather than a genuine user prompt.
+fn user_turn_is_tool_result(message: &serde_json::Value) -> bool {
+    message
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|blocks| {
+            blocks.iter().any(|block| {
+                block.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+            })
+        })
+}
+
+/// Infers the [`SessionState`] from the raw contents of a session transcript.
+///
+/// Each line is an independent JSON object. Subagent turns (`isSidechain`) and
+/// injected entries (`isMeta`) belong to other threads, and bookkeeping lines
+/// (`last-prompt`, `ai-title`, `file-history-snapshot`, …) are not turns at
+/// all; all are skipped. The state is decided by the last surviving
+/// conversational turn — there is no explicit "waiting for input" marker in the
+/// transcript to read directly.
+fn classify_session_state(contents: &str) -> SessionState {
+    let mut state = SessionState::Empty;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("isSidechain").and_then(serde_json::Value::as_bool) == Some(true)
+            || value.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            continue;
+        }
+        let Some(message) = value.get("message") else {
+            continue;
+        };
+        state = match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("assistant") => {
+                if assistant_turn_ended(message) {
+                    SessionState::WaitingForUser
+                } else {
+                    SessionState::Busy
+                }
+            }
+            Some("user") => {
+                if user_turn_is_tool_result(message) {
+                    SessionState::Busy
+                } else {
+                    SessionState::AwaitingAssistant
+                }
+            }
+            // Any other entry type is bookkeeping, not a turn: leave the state.
+            _ => continue,
+        };
+    }
+    state
+}
+
 /// Resolves a session id to the existing directory the session ran in.
 ///
 /// # Errors
@@ -133,10 +276,103 @@ fn resolve_session_dir(projects_dir: &Path, session_id: &str) -> Result<PathBuf,
     Ok(path)
 }
 
+/// Encodes a working directory into the project-folder name Claude Code uses
+/// under `~/.claude/projects`.
+///
+/// Claude derives the folder name by replacing every character of the absolute
+/// path that is not an ASCII letter or digit with `-`. So `/` and `.` both
+/// become `-` (and a `/.` run becomes `--`), while existing hyphens are kept.
+/// This is the lookup `claude --resume` performs against the *current*
+/// directory, so reproducing it exactly is what lets `--here` drop a session
+/// where Claude will find it.
+///
+/// The mapping is per Unicode scalar, which matches Claude for the ASCII paths
+/// that real project directories use; non-ASCII characters each collapse to a
+/// single `-`.
+fn encode_project_dir(path: &Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 /// Returns the `~/.claude/projects` directory, or `None` if the home directory
 /// cannot be determined.
 fn claude_projects_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("projects"))
+}
+
+/// Makes the session `original_jsonl` resolvable by `claude --resume` from
+/// `pwd`, by symlinking it into `pwd`'s project folder under `projects_dir`.
+///
+/// Returns the path of the symlink that was created (so the caller can remove it
+/// once the session ends), or `None` when the session is *already* resolvable
+/// from `pwd` — because `pwd` is its own directory, or an earlier `--here`
+/// already linked it. Anything already at the target name is left untouched: a
+/// session id is a UUID, so a file there can only be this very session, and
+/// clobbering it would never be correct.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if the project folder or the
+/// symlink cannot be created.
+fn prepare_here_link(
+    projects_dir: &Path,
+    original_jsonl: &Path,
+    pwd: &Path,
+    session_id: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    let folder = projects_dir.join(encode_project_dir(pwd));
+    let link_path = folder.join(format!("{session_id}.jsonl"));
+
+    // Anything already at this name means the session resolves from here
+    // already. `symlink_metadata` does not follow links, so even a dangling
+    // symlink left by an earlier `--here` counts as "present".
+    if link_path.symlink_metadata().is_ok() {
+        return Ok(None);
+    }
+
+    std::fs::create_dir_all(&folder)?;
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(original_jsonl, &link_path)?;
+    #[cfg(not(unix))]
+    std::os::windows::fs::symlink_file(original_jsonl, &link_path)?;
+
+    Ok(Some(link_path))
+}
+
+/// Why `--here` could not place a session under the current directory.
+#[derive(Debug)]
+enum HereResolveError {
+    /// The session id was not a valid UUID.
+    InvalidSessionId,
+    /// No `<session_id>.jsonl` file was found under any project directory.
+    SessionNotFound,
+    /// Creating the project folder or the symlink failed.
+    Io(std::io::Error),
+}
+
+/// Validates `session_id`, locates its transcript, and symlinks it into `pwd`'s
+/// project folder so `claude --resume` will find it from there.
+///
+/// Returns the path of the symlink to clean up afterwards, or `None` when the
+/// session is already resolvable from `pwd` (no symlink needed).
+///
+/// # Errors
+///
+/// See [`HereResolveError`].
+fn resolve_here_link(
+    projects_dir: &Path,
+    pwd: &Path,
+    session_id: &str,
+) -> Result<Option<PathBuf>, HereResolveError> {
+    if !is_valid_session_id(session_id) {
+        return Err(HereResolveError::InvalidSessionId);
+    }
+    let original = find_session_file(projects_dir, session_id)
+        .ok_or(HereResolveError::SessionNotFound)?;
+    prepare_here_link(projects_dir, &original, pwd, session_id).map_err(HereResolveError::Io)
 }
 
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
@@ -234,6 +470,246 @@ fn pid_is_alive(pid: u32) -> bool {
         .contains("claude")
 }
 
+/// Why `crap --status` could not report a session's state.
+#[derive(Debug)]
+enum StatusError {
+    /// The session id was not a valid UUID.
+    InvalidSessionId,
+    /// No `<session_id>.jsonl` file was found under any project directory.
+    SessionNotFound,
+}
+
+/// Returns the state line for a session that is open in a live `claude`
+/// process — `"<status> (live, pid <pid>)"` — or `None` when no such process is
+/// attached. A live process's own reported status is more authoritative than
+/// anything inferred from the transcript, so callers prefer it.
+fn live_state_string<F>(sessions_dir: &Path, session_id: &str, is_alive: F) -> Option<String>
+where
+    F: Fn(u32) -> bool,
+{
+    find_live_session(sessions_dir, session_id, is_alive).map(|live| {
+        let status = live.status.as_deref().unwrap_or("running");
+        format!("{status} (live, pid {})", live.pid)
+    })
+}
+
+/// One session's status for the per-directory listing `crap --status` prints
+/// when given no id.
+///
+/// Serializes to camelCase JSON (`sessionId`, …) for the `--json` form;
+/// `started`/`last` become `null` when no timestamp was recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionStatusReport {
+    /// The session id (the `.jsonl` filename stem under the project folder).
+    session_id: String,
+    /// The state line: a [`SessionState`] token, or `"<status> (live, pid N)"`
+    /// when a `claude` process is attached.
+    state: String,
+    /// The earliest `timestamp` recorded in the transcript (ISO 8601 UTC), or
+    /// `None` if no line carries one.
+    started: Option<String>,
+    /// The latest `timestamp` recorded in the transcript (ISO 8601 UTC), or
+    /// `None` if no line carries one.
+    last: Option<String>,
+}
+
+/// Returns the earliest and latest `timestamp` values found in a transcript.
+///
+/// Claude writes ISO 8601 UTC timestamps (`…Z`, fixed width) on conversational
+/// and system entries, but not on bookkeeping lines. Because the format is
+/// fixed-width and always UTC, lexicographic ordering matches chronological
+/// ordering, so the earliest/latest are just the string min/max — no date
+/// parsing, and the result is independent of line order. Returns `(None, None)`
+/// when no line carries a timestamp.
+fn transcript_time_span(contents: &str) -> (Option<String>, Option<String>) {
+    let mut earliest: Option<String> = None;
+    let mut latest: Option<String> = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(ts) = value.get("timestamp").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if earliest.as_deref().is_none_or(|e| ts < e) {
+            earliest = Some(ts.to_string());
+        }
+        if latest.as_deref().is_none_or(|l| ts > l) {
+            latest = Some(ts.to_string());
+        }
+    }
+    (earliest, latest)
+}
+
+/// Prettifies an ISO 8601 UTC timestamp (`2026-05-25T18:43:05.109Z`) into a
+/// human `2026-05-25 18:43:05`, dropping the sub-second fraction and zone.
+///
+/// Input that does not match the expected shape is returned unchanged.
+fn format_timestamp(raw: &str) -> String {
+    let Some((date, rest)) = raw.split_once('T') else {
+        return raw.to_string();
+    };
+    let time = rest.split(['.', 'Z']).next().unwrap_or(rest);
+    if date.is_empty() || time.is_empty() {
+        return raw.to_string();
+    }
+    format!("{date} {time}")
+}
+
+/// Lists the status of every session whose transcript lives in `pwd`'s project
+/// folder under `projects_dir`.
+///
+/// This backs `crap --status` with no id: it enumerates `<uuid>.jsonl` files in
+/// the folder Claude would use for `pwd`, classifying each (live process status
+/// taking precedence over transcript inference) and recording its time span.
+/// Results are ordered ascending by last-activity, so the most recently used
+/// session is last. `is_alive` is injected so liveness can be tested without
+/// spawning processes.
+fn resolve_dir_statuses<F>(
+    projects_dir: &Path,
+    sessions_dir: &Path,
+    pwd: &Path,
+    is_alive: F,
+) -> Vec<SessionStatusReport>
+where
+    F: Fn(u32) -> bool + Copy,
+{
+    let folder = projects_dir.join(encode_project_dir(pwd));
+    let mut reports = Vec::new();
+    let Ok(entries) = std::fs::read_dir(&folder) else {
+        return reports;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_valid_session_id(session_id) {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let state = live_state_string(sessions_dir, session_id, is_alive)
+            .unwrap_or_else(|| classify_session_state(&contents).as_token().to_string());
+        let (started, last) = transcript_time_span(&contents);
+        reports.push(SessionStatusReport {
+            session_id: session_id.to_string(),
+            state,
+            started,
+            last,
+        });
+    }
+    // Ascending by last-activity, so the most recently used session sits at the
+    // bottom of the printed table; timestamp-less sessions (which sort first)
+    // and ties break by id, keeping the order deterministic regardless of
+    // directory iteration order.
+    reports.sort_by(|a, b| {
+        a.last
+            .cmp(&b.last)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+    reports
+}
+
+/// Resolves the full [`SessionStatusReport`] for a single session id.
+///
+/// Unlike the bare token, this also carries the transcript's time span, so the
+/// JSON form of `crap --status <id>` can include start/last times. A live
+/// process's status still takes precedence for the `state` field; the
+/// transcript is read (best-effort) for the times either way.
+///
+/// # Errors
+///
+/// Returns [`StatusError::InvalidSessionId`] for a malformed id, or
+/// [`StatusError::SessionNotFound`] when the id is neither live nor on disk.
+fn resolve_status_report<F>(
+    projects_dir: &Path,
+    sessions_dir: &Path,
+    session_id: &str,
+    is_alive: F,
+) -> Result<SessionStatusReport, StatusError>
+where
+    F: Fn(u32) -> bool,
+{
+    if !is_valid_session_id(session_id) {
+        return Err(StatusError::InvalidSessionId);
+    }
+    let live = live_state_string(sessions_dir, session_id, is_alive);
+    let contents =
+        find_session_file(projects_dir, session_id).and_then(|f| std::fs::read_to_string(f).ok());
+    let (started, last) = contents
+        .as_deref()
+        .map_or((None, None), transcript_time_span);
+    let state = match live {
+        Some(line) => line,
+        None => {
+            // Not live: the transcript is the only evidence, so it must exist.
+            let contents = contents.ok_or(StatusError::SessionNotFound)?;
+            classify_session_state(&contents).as_token().to_string()
+        }
+    };
+    Ok(SessionStatusReport {
+        session_id: session_id.to_string(),
+        state,
+        started,
+        last,
+    })
+}
+
+/// Serializes a single session's status report as pretty JSON.
+fn format_status_json(report: &SessionStatusReport) -> String {
+    serde_json::to_string_pretty(report).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Serializes a directory's session status reports as a pretty JSON array.
+fn format_dir_statuses_json(reports: &[SessionStatusReport]) -> String {
+    serde_json::to_string_pretty(reports).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Renders the per-directory `crap --status` listing for `pwd` as a table.
+///
+/// An empty listing reports that nothing was found; otherwise a heading line is
+/// followed by a table with one row per session. A session with no recorded
+/// activity shows an em-dash in its time columns.
+fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
+    if reports.is_empty() {
+        return format!("No Claude sessions found for {}\n", pwd.display());
+    }
+    let count = reports.len();
+    let noun = if count == 1 { "session" } else { "sessions" };
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["SESSION", "STATE", "STARTED", "LAST"]);
+    for report in reports {
+        let started = report
+            .started
+            .as_deref()
+            .map_or_else(|| "—".to_string(), format_timestamp);
+        let last = report
+            .last
+            .as_deref()
+            .map_or_else(|| "—".to_string(), format_timestamp);
+        table.add_row(vec![
+            report.session_id.clone(),
+            report.state.clone(),
+            started,
+            last,
+        ]);
+    }
+    format!("{count} {noun} for {}\n\n{table}\n", pwd.display())
+}
+
 /// Formats the binary's success output for the shell function to read back.
 ///
 /// The session id (a validated UUID) is emitted first, on its own line; the
@@ -245,22 +721,97 @@ fn format_output(dir: &Path, session_id: &str) -> String {
     format!("{session_id}\n{}\n", dir.display())
 }
 
+/// Leading token marking `--here` output, distinguishing it from the default
+/// `<session-id>\n<dir>` resume output the shell function otherwise expects.
+const HERE_SENTINEL: &str = "__CRAP_HERE__";
+
+/// Placeholder used in the link field when `--here` created no symlink (because
+/// the current directory already is the session's own folder), so the shell
+/// function can tell "nothing to clean up" apart from a real path.
+const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
+
+/// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
+/// the session id, then the symlink to remove once the session ends (or
+/// [`NO_LINK_SENTINEL`] when none was created).
+///
+/// The cleanup path is emitted last so that — like [`format_output`] — a path
+/// containing a newline survives intact as "everything after the second line".
+fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> String {
+    let link = match link_to_cleanup {
+        Some(path) => path.display().to_string(),
+        None => NO_LINK_SENTINEL.to_string(),
+    };
+    format!("{HERE_SENTINEL}\n{session_id}\n{link}\n")
+}
+
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
-/// `command crap`, forwarding all arguments (so flags like `--force` work). The
-/// binary prints the session id on the first line and the resolved directory on
-/// the rest; the function splits on the first newline (so a directory
-/// containing newlines survives intact), `cd`s there, and re-launches Claude.
-/// `clauded` is resolved through `eval` so that an alias of that name is
-/// expanded at call time (shell aliases are otherwise not expanded inside
-/// function bodies); if no `clauded` exists, plain `claude` is used. If the
-/// binary exits non-zero (session not found, already running, …) its message is
-/// shown and the function stops without changing directory.
+/// `command crap`, forwarding all arguments (so flags like `--force` and
+/// `--here` work). `clauded` is resolved through `eval` so that an alias of that
+/// name is expanded at call time (shell aliases are otherwise not expanded
+/// inside function bodies); if no `clauded` exists, plain `claude` is used. If
+/// the binary exits non-zero (session not found, already running, …) its message
+/// is shown and the function does nothing further.
+///
+/// The binary speaks one of two output shapes:
+///
+/// * **default** — `<session-id>\n<dir>`: the function `cd`s into the original
+///   directory (splitting on the first newline so a path containing newlines
+///   survives intact) and resumes.
+/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<link-or-sentinel>`: the binary
+///   has already symlinked the session into the *current* directory's project
+///   folder, so the function stays put, resumes with `--fork-session` (a fresh
+///   session id, leaving the original transcript untouched), and finally removes
+///   that symlink — unless the link field is `__CRAP_NO_LINK__`, meaning none
+///   was created because this already is the session's own directory.
 const SHELL_CODE: &str = r#"
 function crap() {
+    # --status only queries; it never changes the parent shell. Run it straight
+    # through so its output (a token, or a multi-line listing) reaches the
+    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    case " $* " in
+        *" --status "*) command crap "$@"; return $? ;;
+    esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
+    if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
+        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
+        __crap_rest=${__crap_out#*$'\n'}
+        __crap_session=${__crap_rest%%$'\n'*}
+        __crap_link=${__crap_rest#*$'\n'}
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            # Claude only needs the symlink while it reads the transcript at
+            # startup; once it writes the forked session file the symlink is
+            # vestigial. Watch the folder and drop it the moment a new .jsonl
+            # appears, rather than letting it linger for the whole session.
+            __crap_folder=$(dirname -- "$__crap_link")
+            __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
+            (
+                __crap_i=0
+                while [ "$__crap_i" -lt 600 ]; do
+                    if [ "$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')" -gt "$__crap_n0" ]; then
+                        rm -f -- "$__crap_link"
+                        exit 0
+                    fi
+                    __crap_i=$((__crap_i + 1))
+                    sleep 0.1
+                done
+            ) &
+            __crap_watcher=$!
+            disown 2>/dev/null
+        fi
+        if command -v clauded >/dev/null 2>&1; then
+            eval 'clauded --resume "$__crap_session" --fork-session'
+        else
+            claude --resume "$__crap_session" --fork-session
+        fi
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            kill "$__crap_watcher" 2>/dev/null
+            rm -f -- "$__crap_link"
+        fi
+        return
+    fi
     local __crap_session __crap_dir
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
@@ -294,7 +845,13 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
 struct Cli {
     /// The Claude session id to resume (the `.jsonl` filename under
     /// `~/.claude/projects`).
-    #[arg(value_name = "SESSION_ID", required_unless_present = "shell_setup")]
+    ///
+    /// Optional with `--status`: given no id, `--status` lists every session
+    /// recorded for the current directory instead of resolving one.
+    #[arg(
+        value_name = "SESSION_ID",
+        required_unless_present_any = ["shell_setup", "status"]
+    )]
     session_id: Option<String>,
 
     /// Resume even if the session appears to be running in another process.
@@ -305,12 +862,172 @@ struct Cli {
     #[arg(short, long)]
     force: bool,
 
+    /// Resume the session in the *current* directory instead of its original.
+    ///
+    /// `crap` symlinks the session into the current directory's project folder
+    /// so `claude --resume` can find it here, then resumes it as a forked
+    /// (new-id) session — the original transcript is left untouched. Use this to
+    /// carry a conversation's context into a different working directory.
+    #[arg(long)]
+    here: bool,
+
+    /// Print the session's conversational state and exit, without resuming.
+    ///
+    /// With a session id, emits one scriptable token: `waiting-for-user`
+    /// (Claude finished and is waiting on you), `busy` (a tool call or reply is
+    /// in flight), `awaiting-assistant` (you spoke last and Claude hasn't
+    /// replied), or `empty`. If the session is currently open in a live `claude`
+    /// process, its own status is reported instead, as
+    /// `<status> (live, pid <pid>)`.
+    ///
+    /// With no id, lists every session recorded for the current directory —
+    /// each with its state and the times its transcript was started and last
+    /// written.
+    #[arg(long)]
+    status: bool,
+
+    /// Emit machine-readable JSON instead of human-formatted text.
+    ///
+    /// Only valid with `--status`. With a session id it prints one object;
+    /// with no id it prints an array of one object per session. Timestamps are
+    /// the raw ISO 8601 values from the transcript.
+    #[arg(long, requires = "status")]
+    json: bool,
+
     /// Install the `crap` shell function into your shell config, then exit.
     ///
     /// Run this once: `crap --shell-setup`. After re-sourcing your shell,
     /// `crap <session-id>` will cd into the session's directory and resume it.
     #[arg(long)]
     shell_setup: bool,
+}
+
+/// Aborts with a clear message if `session_id` is already open in another live
+/// process, unless `force` overrides the check.
+///
+/// Both resume modes call this: two processes writing one session log can
+/// corrupt it, and even `--here`'s fork reads the live transcript while it is
+/// being written. `--force` bypasses the guard.
+fn abort_if_session_live(session_id: &str, force: bool) {
+    if force {
+        return;
+    }
+    if let Some(live) =
+        claude_sessions_dir().and_then(|s| find_live_session(&s, session_id, pid_is_alive))
+    {
+        let status = live.status.as_deref().unwrap_or("running");
+        eprintln!(
+            "{} session '{session_id}' is already running (pid {}, {status})",
+            "Error:".red().bold(),
+            live.pid
+        );
+        eprintln!("       in {}", live.cwd);
+        eprintln!("       resuming it again can corrupt the session log.");
+        eprintln!(
+            "       re-run with {} to resume anyway.",
+            "--force".yellow()
+        );
+        exit(exit_codes::SESSION_ALREADY_RUNNING);
+    }
+}
+
+/// Handles `crap --here <id>`: symlink the session into the current directory's
+/// project folder and emit the here-mode output the shell function consumes.
+fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
+    let Ok(pwd) = std::env::current_dir() else {
+        eprintln!(
+            "{} could not determine the current directory",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::HERE_PWD_UNAVAILABLE);
+    };
+
+    // Guard before creating anything, so an aborted resume leaves no stray link.
+    abort_if_session_live(session_id, force);
+
+    match resolve_here_link(projects_dir, &pwd, session_id) {
+        Ok(link) => {
+            print!("{}", format_here_output(session_id, link.as_deref()));
+            exit(0);
+        }
+        Err(HereResolveError::InvalidSessionId) => {
+            eprintln!(
+                "{} '{session_id}' is not a valid session id",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::INVALID_SESSION_ID);
+        }
+        Err(HereResolveError::SessionNotFound) => {
+            eprintln!(
+                "{} no Claude session found with id '{session_id}'",
+                "Error:".red().bold()
+            );
+            eprintln!("       looked under {}", projects_dir.display());
+            exit(exit_codes::SESSION_NOT_FOUND);
+        }
+        Err(HereResolveError::Io(err)) => {
+            eprintln!(
+                "{} could not prepare this directory for '{session_id}': {err}",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::HERE_LINK_ERROR);
+        }
+    }
+}
+
+/// Handles `crap --status <id>`: print the session's state to stdout and exit.
+///
+/// Prints the bare state token by default, or the full report as JSON when
+/// `json` is set.
+fn run_status(projects_dir: &Path, session_id: &str, json: bool) -> ! {
+    let sessions_dir = claude_sessions_dir().unwrap_or_default();
+    match resolve_status_report(projects_dir, &sessions_dir, session_id, pid_is_alive) {
+        Ok(report) => {
+            if json {
+                println!("{}", format_status_json(&report));
+            } else {
+                println!("{}", report.state);
+            }
+            exit(0);
+        }
+        Err(StatusError::InvalidSessionId) => {
+            eprintln!(
+                "{} '{session_id}' is not a valid session id",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::INVALID_SESSION_ID);
+        }
+        Err(StatusError::SessionNotFound) => {
+            eprintln!(
+                "{} no Claude session found with id '{session_id}'",
+                "Error:".red().bold()
+            );
+            eprintln!("       looked under {}", projects_dir.display());
+            exit(exit_codes::SESSION_NOT_FOUND);
+        }
+    }
+}
+
+/// Handles `crap --status` with no id: list every session recorded for the
+/// current directory, then exit.
+///
+/// Prints a table by default, or a JSON array when `json` is set.
+fn run_dir_status(projects_dir: &Path, json: bool) -> ! {
+    let Ok(pwd) = std::env::current_dir() else {
+        eprintln!(
+            "{} could not determine the current directory",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::HERE_PWD_UNAVAILABLE);
+    };
+    let sessions_dir = claude_sessions_dir().unwrap_or_default();
+    let reports = resolve_dir_statuses(projects_dir, &sessions_dir, &pwd, pid_is_alive);
+    if json {
+        println!("{}", format_dir_statuses_json(&reports));
+    } else {
+        print!("{}", format_dir_statuses(&pwd, &reports));
+    }
+    exit(0);
 }
 
 fn main() {
@@ -326,9 +1043,6 @@ fn main() {
         }
     }
 
-    // `required_unless_present = "shell_setup"` guarantees this is present here.
-    let session_id = cli.session_id.expect("session id is required without --shell-setup");
-
     let Some(projects_dir) = claude_projects_dir() else {
         eprintln!(
             "{} could not determine your home directory",
@@ -337,27 +1051,26 @@ fn main() {
         exit(exit_codes::NO_HOME_DIR);
     };
 
+    if cli.status {
+        match cli.session_id.as_deref() {
+            Some(id) => run_status(&projects_dir, id, cli.json),
+            None => run_dir_status(&projects_dir, cli.json),
+        }
+    }
+
+    // The clap `required_unless_present_any` guarantees an id is present once we
+    // are past the `--shell-setup` and `--status` paths above.
+    let session_id = cli
+        .session_id
+        .expect("session id is required without --shell-setup or --status");
+
+    if cli.here {
+        run_here(&projects_dir, &session_id, cli.force);
+    }
+
     match resolve_session_dir(&projects_dir, &session_id) {
         Ok(dir) => {
-            if !cli.force {
-                if let Some(live) = claude_sessions_dir()
-                    .and_then(|s| find_live_session(&s, &session_id, pid_is_alive))
-                {
-                    let status = live.status.as_deref().unwrap_or("running");
-                    eprintln!(
-                        "{} session '{session_id}' is already running (pid {}, {status})",
-                        "Error:".red().bold(),
-                        live.pid
-                    );
-                    eprintln!("       in {}", live.cwd);
-                    eprintln!("       resuming it again can corrupt the session log.");
-                    eprintln!(
-                        "       re-run with {} to resume anyway.",
-                        "--force".yellow()
-                    );
-                    exit(exit_codes::SESSION_ALREADY_RUNNING);
-                }
-            }
+            abort_if_session_live(&session_id, cli.force);
             print!("{}", format_output(&dir, &session_id));
         }
         Err(ResolveError::InvalidSessionId) => {
@@ -442,6 +1155,209 @@ mod tests {
         );
     }
 
+    /// Builds an `assistant` transcript line with the given content blocks and
+    /// `stop_reason` (pass `serde_json::Value::Null` for an interrupted turn).
+    fn assistant_line(content: serde_json::Value, stop_reason: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "stop_reason": stop_reason, "content": content },
+            })
+        )
+    }
+
+    /// Builds a `user` transcript line carrying the given content.
+    fn user_line(content: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({ "type": "user", "message": { "content": content } })
+        )
+    }
+
+    /// A single content block of the given `type`.
+    fn block(kind: &str) -> serde_json::Value {
+        serde_json::json!([{ "type": kind }])
+    }
+
+    #[test]
+    fn classify_empty_input_is_empty() {
+        assert_eq!(classify_session_state(""), SessionState::Empty);
+    }
+
+    #[test]
+    fn classify_only_bookkeeping_is_empty() {
+        // Lines that are not conversational turns never establish a state.
+        let contents = format!(
+            "{}{}{}",
+            "{\"type\":\"file-history-snapshot\"}\n",
+            "{\"type\":\"last-prompt\"}\n",
+            "{\"type\":\"ai-title\"}\n",
+        );
+        assert_eq!(classify_session_state(&contents), SessionState::Empty);
+    }
+
+    #[test]
+    fn classify_assistant_end_turn_waits_for_user() {
+        let contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_assistant_stop_sequence_waits_for_user() {
+        let contents = assistant_line(block("text"), serde_json::json!("stop_sequence"));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_assistant_pending_tool_use_is_busy() {
+        let contents = assistant_line(block("tool_use"), serde_json::json!("tool_use"));
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_uses_stop_reason_over_block_type() {
+        // `stop_reason` is replicated onto every line of a message, so a line
+        // holding only a `thinking` block still carries the turn's real
+        // `stop_reason`. A tool_use stop means a tool call is pending → busy,
+        // even though this line's block is not itself a tool_use.
+        let contents = assistant_line(block("thinking"), serde_json::json!("tool_use"));
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_interrupted_text_turn_waits_for_user() {
+        // A null stop_reason means the turn was cut off mid-stream; with no
+        // pending tool call (last block is text) the user is still up next.
+        let contents = assistant_line(block("text"), serde_json::Value::Null);
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_interrupted_tool_use_is_busy() {
+        // Interrupted, but the last block is a tool_use awaiting a result → busy.
+        let contents = assistant_line(block("tool_use"), serde_json::Value::Null);
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_tool_result_is_busy() {
+        // A tool result was just delivered; the assistant has yet to respond.
+        let contents = format!(
+            "{}{}",
+            assistant_line(block("tool_use"), serde_json::json!("tool_use")),
+            user_line(block("tool_result")),
+        );
+        assert_eq!(classify_session_state(&contents), SessionState::Busy);
+    }
+
+    #[test]
+    fn classify_user_prompt_string_awaits_assistant() {
+        // A real user prompt (string content) with no assistant reply yet.
+        let contents = user_line(serde_json::json!("please continue"));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::AwaitingAssistant
+        );
+    }
+
+    #[test]
+    fn classify_user_prompt_text_block_awaits_assistant() {
+        let contents = user_line(serde_json::json!([{ "type": "text", "text": "hi" }]));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::AwaitingAssistant
+        );
+    }
+
+    #[test]
+    fn classify_ignores_meta_user_entries() {
+        // An injected `isMeta` user entry (system reminder, command output) is
+        // not the user speaking, so the prior assistant end-of-turn wins.
+        let mut contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        contents.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "user",
+                "isMeta": true,
+                "message": { "content": [{ "type": "text", "text": "<reminder>" }] },
+            })
+        ));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_ignores_sidechain_turns() {
+        // Subagent (`isSidechain`) turns are interleaved in the same file but
+        // belong to a different thread, so they never set the main-thread state.
+        let mut contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        contents.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "isSidechain": true,
+                "message": { "stop_reason": "tool_use", "content": [{ "type": "tool_use" }] },
+            })
+        ));
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_ignores_trailing_bookkeeping() {
+        // Bookkeeping lines are appended after the conversation; they must not
+        // override the last real turn's state.
+        let mut contents = assistant_line(block("text"), serde_json::json!("end_turn"));
+        contents.push_str("{\"type\":\"file-history-snapshot\"}\n");
+        contents.push_str("{\"type\":\"last-prompt\"}\n");
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn classify_follows_a_realistic_sequence() {
+        // user prompt → assistant tool_use → tool_result → assistant end_turn:
+        // Claude has finished and is waiting for the user.
+        let contents = format!(
+            "{}{}{}{}",
+            user_line(serde_json::json!("do the thing")),
+            assistant_line(block("tool_use"), serde_json::json!("tool_use")),
+            user_line(block("tool_result")),
+            assistant_line(block("text"), serde_json::json!("end_turn")),
+        );
+        assert_eq!(
+            classify_session_state(&contents),
+            SessionState::WaitingForUser
+        );
+    }
+
+    #[test]
+    fn session_state_tokens_are_stable() {
+        assert_eq!(SessionState::Empty.as_token(), "empty");
+        assert_eq!(SessionState::WaitingForUser.as_token(), "waiting-for-user");
+        assert_eq!(SessionState::Busy.as_token(), "busy");
+        assert_eq!(
+            SessionState::AwaitingAssistant.as_token(),
+            "awaiting-assistant"
+        );
+    }
+
     #[test]
     fn valid_session_id_accepts_uuid() {
         assert!(is_valid_session_id("4733ee2a-1ad6-4619-a01a-11840b8e1901"));
@@ -473,6 +1389,125 @@ mod tests {
     fn valid_session_id_accepts_uppercase_hex() {
         // Hex is case-insensitive even though Claude writes lowercase ids.
         assert!(is_valid_session_id("4733EE2A-1AD6-4619-A01A-11840B8E1901"));
+    }
+
+    #[test]
+    fn encode_project_dir_matches_claude_folder_naming() {
+        // Plain path: every separator becomes a dash, the leading slash too.
+        assert_eq!(
+            encode_project_dir(Path::new("/Volumes/SamsungSSDs/code/claude-vibecoding")),
+            "-Volumes-SamsungSSDs-code-claude-vibecoding"
+        );
+        // A `/.` run (hidden directory) collapses to a double dash, and the
+        // hyphen already in the final component is preserved verbatim. This is
+        // a real example observed under ~/.claude/projects.
+        assert_eq!(
+            encode_project_dir(Path::new("/Users/timmattison/.config/qbittorrent-vpn")),
+            "-Users-timmattison--config-qbittorrent-vpn"
+        );
+        // Digits survive; only non-alphanumerics are rewritten.
+        assert_eq!(
+            encode_project_dir(Path::new("/a/day-3-planning")),
+            "-a-day-3-planning"
+        );
+        // Non-ASCII characters each collapse to a single dash.
+        assert_eq!(encode_project_dir(Path::new("/x/café")), "-x-caf-");
+    }
+
+    #[test]
+    fn prepare_here_link_creates_symlink_in_pwd_project_folder() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        // A pwd whose encoded project folder does not exist yet.
+        let pwd = Path::new("/Volumes/x/here-cwd");
+        let link = prepare_here_link(projects, &original, pwd, SAMPLE_ID)
+            .expect("should succeed")
+            .expect("a symlink should be created");
+
+        assert_eq!(
+            link,
+            projects
+                .join("-Volumes-x-here-cwd")
+                .join(format!("{SAMPLE_ID}.jsonl"))
+        );
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&link).unwrap(), original);
+    }
+
+    #[test]
+    fn prepare_here_link_returns_none_when_already_in_session_folder() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        // encode_project_dir("/orig") == "-orig", so pwd resolves to the folder
+        // the session already lives in: no symlink is needed.
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let result =
+            prepare_here_link(projects, &original, Path::new("/orig"), SAMPLE_ID).expect("ok");
+        assert_eq!(result, None);
+        assert!(original.is_file(), "original must be left untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prepare_here_link_leaves_an_existing_link_in_place() {
+        // A symlink dropped by an earlier `--here` already makes the session
+        // resolvable here, so a repeat returns `None` (nothing to clean up) and
+        // does not disturb the existing link.
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let pwd = Path::new("/Volumes/x/here");
+        let folder = projects.join("-Volumes-x-here");
+        fs::create_dir_all(&folder).unwrap();
+        let link = folder.join(format!("{SAMPLE_ID}.jsonl"));
+        std::os::unix::fs::symlink(&original, &link).unwrap();
+
+        assert_eq!(
+            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            None
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), original);
+    }
+
+    #[test]
+    fn prepare_here_link_returns_none_when_a_real_file_is_already_present() {
+        // A session id is a UUID, so a real file at the target name can only be
+        // this very session living here already: resolve it in place, untouched.
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let pwd = Path::new("/Volumes/x/here");
+        let folder = projects.join("-Volumes-x-here");
+        fs::create_dir_all(&folder).unwrap();
+        let real = folder.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&real, "a real session").unwrap();
+
+        assert_eq!(
+            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            None
+        );
+        assert_eq!(
+            fs::read_to_string(&real).unwrap(),
+            "a real session",
+            "the real file must be left untouched"
+        );
     }
 
     #[test]
@@ -619,6 +1654,36 @@ mod tests {
         assert_eq!(find_live_session(&missing, "anything", |_| true), None);
     }
 
+    /// The session id recorded in [`SESSION_JSON`].
+    const LIVE_ID: &str = "3eafa9f8-9d1f-43cf-b417-eb9efcb8ed4d";
+
+    /// Writes a transcript whose single assistant turn ended cleanly (so the
+    /// classifier reports `waiting-for-user`) into a project subfolder.
+    fn write_waiting_transcript(projects: &Path, session_id: &str) {
+        let proj = projects.join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        fs::write(
+            proj.join(format!("{session_id}.jsonl")),
+            assistant_line(block("text"), serde_json::json!("end_turn")),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn resolve_status_report_prefers_live_session_over_transcript() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        // A transcript that would classify as waiting-for-user...
+        write_waiting_transcript(projects.path(), LIVE_ID);
+        // ...but the session is live, so the live status wins for `state`.
+        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        let report =
+            resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041)
+                .unwrap();
+        assert_eq!(report.state, "busy (live, pid 17041)");
+    }
+
     #[test]
     fn output_emits_session_id_before_directory() {
         // The session id (a validated UUID) goes on the first line; the
@@ -631,6 +1696,126 @@ mod tests {
         // Everything after the first newline is the directory, intact.
         let rest = out.split_once('\n').map(|(_, rest)| rest).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), weird_dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn resolve_here_link_rejects_invalid_id() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_here_link(dir.path(), Path::new("/x"), "../escape"),
+            Err(HereResolveError::InvalidSessionId)
+        ));
+    }
+
+    #[test]
+    fn resolve_here_link_errors_when_session_missing() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_here_link(dir.path(), Path::new("/x"), SAMPLE_ID),
+            Err(HereResolveError::SessionNotFound)
+        ));
+    }
+
+    #[test]
+    fn resolve_here_link_links_an_existing_session_into_pwd() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let orig = projects.join("-orig");
+        fs::create_dir_all(&orig).unwrap();
+        let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&original, "{}\n").unwrap();
+
+        let link = resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID)
+            .expect("ok")
+            .expect("a symlink should be created");
+        assert_eq!(
+            link,
+            projects
+                .join("-Volumes-x-here")
+                .join(format!("{SAMPLE_ID}.jsonl"))
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), original);
+    }
+
+    #[test]
+    fn resolve_here_link_returns_none_when_session_already_here() {
+        // The session already lives in the current directory's folder, so no
+        // symlink is needed and there is nothing to clean up afterwards.
+        let dir = tempdir().unwrap();
+        let projects = dir.path();
+        let folder = projects.join("-Volumes-x-here");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join(format!("{SAMPLE_ID}.jsonl")), "{}\n").unwrap();
+
+        assert_eq!(
+            resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID).expect("ok"),
+            None
+        );
+    }
+
+    #[test]
+    fn shell_code_detects_here_sentinel_from_the_binary() {
+        // The shell function branches on the exact sentinel the binary emits.
+        assert!(SHELL_CODE.contains(HERE_SENTINEL));
+    }
+
+    #[test]
+    fn shell_code_forks_and_cleans_up_in_here_mode() {
+        // here-mode forks a fresh session instead of appending to the original
+        // transcript...
+        assert!(SHELL_CODE.contains("--fork-session"));
+        // ...and removes the temporary symlink afterwards, unless there was
+        // none to remove.
+        assert!(SHELL_CODE.contains(r#"rm -f -- "$__crap_link""#));
+        assert!(SHELL_CODE.contains(NO_LINK_SENTINEL));
+    }
+
+    #[test]
+    fn shell_code_removes_here_symlink_early_via_background_watcher() {
+        // A backgrounded watcher polls the project folder and removes the
+        // symlink as soon as a new (forked) session file appears — Claude no
+        // longer needs the symlink once it has read the transcript — instead of
+        // letting it linger for the whole session.
+        assert!(SHELL_CODE.contains(r#"find "$__crap_folder""#));
+        assert!(SHELL_CODE.contains(r#"-gt "$__crap_n0""#));
+        assert!(SHELL_CODE.contains(") &"));
+        assert!(SHELL_CODE.contains("sleep 0.1"));
+        // The watcher is stopped once claude exits, and the post-exit `rm`
+        // remains as a safety net in case the fork file never appeared.
+        assert!(SHELL_CODE.contains(r#"kill "$__crap_watcher""#));
+    }
+
+    #[test]
+    fn here_output_carries_sentinel_session_and_link() {
+        let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
+        let out = format_here_output(SAMPLE_ID, Some(link));
+
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(HERE_SENTINEL));
+        assert_eq!(lines.next(), Some(SAMPLE_ID));
+        // Everything after the second newline is the link path, intact.
+        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
+    }
+
+    #[test]
+    fn here_output_uses_no_link_sentinel_when_nothing_to_clean() {
+        let out = format_here_output(SAMPLE_ID, None);
+
+        assert_eq!(out.lines().next(), Some(HERE_SENTINEL));
+        let link_field = out.splitn(3, '\n').nth(2).unwrap();
+        assert_eq!(link_field.trim_end_matches('\n'), NO_LINK_SENTINEL);
+    }
+
+    #[test]
+    fn here_output_preserves_newline_in_link_path() {
+        // The link lives last in the output, so a newline inside the path can't
+        // be mistaken for a field boundary.
+        let link = Path::new("/Users/tim/od\ndd/abc.jsonl");
+        let out = format_here_output(SAMPLE_ID, Some(link));
+
+        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
     }
 
     #[test]
@@ -651,5 +1836,354 @@ mod tests {
         assert!(SHELL_CODE.contains("__crap_dir=${__crap_out#*$'\\n'}"));
         assert!(SHELL_CODE.contains("clauded --resume"));
         assert!(SHELL_CODE.contains("claude --resume"));
+    }
+
+    #[test]
+    fn shell_code_passes_status_through_untouched() {
+        // `--status` only queries; it never changes the parent shell, and its
+        // output (a token or a multi-line listing) must reach the terminal
+        // rather than being parsed as a "<session-id>\n<dir>" resume target.
+        assert!(SHELL_CODE.contains(r#"*" --status "*) command crap "$@"; return $?"#));
+    }
+
+    // Two distinct session ids for the per-directory listing tests.
+    const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+    const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+
+    /// Builds a transcript line of `kind` carrying a top-level `timestamp`.
+    fn timestamped_line(kind: &str, timestamp: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({ "type": kind, "timestamp": timestamp, "message": {} })
+        )
+    }
+
+    #[test]
+    fn transcript_time_span_returns_earliest_and_latest() {
+        let contents = format!(
+            "{}{}{}",
+            timestamped_line("user", "2026-05-25T18:43:05.109Z"),
+            timestamped_line("assistant", "2026-05-25T19:00:00.000Z"),
+            timestamped_line("assistant", "2026-05-25T20:17:39.732Z"),
+        );
+        assert_eq!(
+            transcript_time_span(&contents),
+            (
+                Some("2026-05-25T18:43:05.109Z".to_string()),
+                Some("2026-05-25T20:17:39.732Z".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn transcript_time_span_ignores_lines_without_timestamps() {
+        // Bookkeeping lines carry no timestamp and must not affect the span.
+        let contents = format!(
+            "{}{}{}",
+            "{\"type\":\"last-prompt\"}\n",
+            timestamped_line("user", "2026-05-25T18:43:05.109Z"),
+            "{\"type\":\"ai-title\"}\n",
+        );
+        assert_eq!(
+            transcript_time_span(&contents),
+            (
+                Some("2026-05-25T18:43:05.109Z".to_string()),
+                Some("2026-05-25T18:43:05.109Z".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn transcript_time_span_is_order_independent() {
+        // A line written later may bear an earlier instant; min/max still hold.
+        let contents = format!(
+            "{}{}",
+            timestamped_line("assistant", "2026-05-25T20:00:00.000Z"),
+            timestamped_line("user", "2026-05-25T08:00:00.000Z"),
+        );
+        assert_eq!(
+            transcript_time_span(&contents),
+            (
+                Some("2026-05-25T08:00:00.000Z".to_string()),
+                Some("2026-05-25T20:00:00.000Z".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn transcript_time_span_none_when_no_timestamps() {
+        assert_eq!(
+            transcript_time_span("{\"type\":\"last-prompt\"}\n"),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn format_timestamp_prettifies_iso8601() {
+        assert_eq!(format_timestamp("2026-05-25T18:43:05.109Z"), "2026-05-25 18:43:05");
+    }
+
+    #[test]
+    fn format_timestamp_handles_missing_subseconds() {
+        assert_eq!(format_timestamp("2026-05-25T18:43:05Z"), "2026-05-25 18:43:05");
+    }
+
+    #[test]
+    fn format_timestamp_passes_through_unexpected_input() {
+        assert_eq!(format_timestamp("not-a-timestamp"), "not-a-timestamp");
+    }
+
+    /// Writes a single-turn transcript (classifies as `waiting-for-user`) with
+    /// one `timestamp` into `folder`.
+    fn write_session_in(folder: &Path, session_id: &str, timestamp: &str) {
+        fs::create_dir_all(folder).unwrap();
+        let line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": timestamp,
+                "message": { "stop_reason": "end_turn", "content": [{ "type": "text" }] },
+            })
+        );
+        fs::write(folder.join(format!("{session_id}.jsonl")), line).unwrap();
+    }
+
+    #[test]
+    fn resolve_dir_statuses_lists_all_sessions_in_pwd_folder() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let pwd = Path::new("/Volumes/x/proj");
+        let folder = projects.path().join(encode_project_dir(pwd));
+        write_session_in(&folder, ID_A, "2026-05-25T10:00:00.000Z");
+        write_session_in(&folder, ID_B, "2026-05-25T11:00:00.000Z");
+
+        let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |_| false);
+        assert_eq!(reports.len(), 2);
+        // Ascending by last-activity: the most recently used session is last,
+        // so it lands at the bottom of the printed table.
+        assert_eq!(reports[0].session_id, ID_A);
+        assert_eq!(reports[1].session_id, ID_B);
+        assert!(reports.iter().all(|r| r.state == "waiting-for-user"));
+        assert_eq!(reports[1].started.as_deref(), Some("2026-05-25T11:00:00.000Z"));
+        assert_eq!(reports[1].last.as_deref(), Some("2026-05-25T11:00:00.000Z"));
+    }
+
+    #[test]
+    fn resolve_dir_statuses_ignores_non_session_files() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let pwd = Path::new("/Volumes/x/proj");
+        let folder = projects.path().join(encode_project_dir(pwd));
+        write_session_in(&folder, ID_A, "2026-05-25T10:00:00.000Z");
+        fs::write(folder.join("notes.txt"), "hi").unwrap();
+        fs::write(folder.join("not-a-uuid.jsonl"), "{}\n").unwrap();
+
+        let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |_| false);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].session_id, ID_A);
+    }
+
+    #[test]
+    fn resolve_dir_statuses_empty_when_folder_absent() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let reports =
+            resolve_dir_statuses(projects.path(), sessions.path(), Path::new("/no/such/dir"), |_| {
+                false
+            });
+        assert!(reports.is_empty());
+    }
+
+    #[test]
+    fn resolve_dir_statuses_marks_live_session() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        // The cwd's project folder holds the live session's transcript, but the
+        // live process's own status wins over transcript inference.
+        let pwd = Path::new("/Volumes/code/crap");
+        let folder = projects.path().join(encode_project_dir(pwd));
+        write_session_in(&folder, LIVE_ID, "2026-05-25T10:00:00.000Z");
+        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |pid| pid == 17041);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].state, "busy (live, pid 17041)");
+    }
+
+    #[test]
+    fn format_dir_statuses_reports_none_found_for_empty() {
+        let out = format_dir_statuses(Path::new("/Volumes/x/proj"), &[]);
+        assert!(out.contains("No Claude sessions found"));
+        assert!(out.contains("/Volumes/x/proj"));
+    }
+
+    #[test]
+    fn format_dir_statuses_tabulates_each_session_with_times() {
+        let reports = vec![SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "waiting-for-user".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: Some("2026-05-25T12:30:45.000Z".to_string()),
+        }];
+        let out = format_dir_statuses(Path::new("/Volumes/x/proj"), &reports);
+        // A heading line, then a table with column headers.
+        assert!(out.contains("1 session for /Volumes/x/proj"));
+        assert!(out.contains("SESSION"));
+        assert!(out.contains("STATE"));
+        assert!(out.contains("STARTED"));
+        assert!(out.contains("LAST"));
+        assert!(out.contains(ID_A));
+        assert!(out.contains("waiting-for-user"));
+        // Times are prettified in the cells (no raw `T`/`Z`, no `started`/`last`
+        // labels — those are column headers now).
+        assert!(out.contains("2026-05-25 10:00:00"));
+        assert!(out.contains("2026-05-25 12:30:45"));
+    }
+
+    #[test]
+    fn format_dir_statuses_uses_plural_and_dash_for_missing_times() {
+        let reports = vec![
+            SessionStatusReport {
+                session_id: ID_A.to_string(),
+                state: "empty".to_string(),
+                started: None,
+                last: None,
+            },
+            SessionStatusReport {
+                session_id: ID_B.to_string(),
+                state: "busy".to_string(),
+                started: Some("2026-05-25T10:00:00.000Z".to_string()),
+                last: Some("2026-05-25T10:05:00.000Z".to_string()),
+            },
+        ];
+        let out = format_dir_statuses(Path::new("/x"), &reports);
+        assert!(out.contains("2 sessions for /x"));
+        // The session with no recorded activity shows an em dash placeholder.
+        assert!(out.contains("—"));
+    }
+
+    #[test]
+    fn format_dir_statuses_json_emits_array_with_raw_timestamps() {
+        let reports = vec![SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "busy (live, pid 17041)".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: Some("2026-05-25T12:30:45.000Z".to_string()),
+        }];
+        let out = format_dir_statuses_json(&reports);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        let arr = parsed.as_array().expect("a JSON array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["sessionId"], ID_A);
+        assert_eq!(arr[0]["state"], "busy (live, pid 17041)");
+        // Raw ISO 8601 is preserved for machine consumers, not prettified.
+        assert_eq!(arr[0]["started"], "2026-05-25T10:00:00.000Z");
+        assert_eq!(arr[0]["last"], "2026-05-25T12:30:45.000Z");
+    }
+
+    #[test]
+    fn format_dir_statuses_json_empty_is_empty_array() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_dir_statuses_json(&[])).expect("valid JSON");
+        assert_eq!(parsed.as_array().expect("a JSON array").len(), 0);
+    }
+
+    #[test]
+    fn format_status_json_emits_single_object() {
+        let report = SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "waiting-for-user".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: None,
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&format_status_json(&report)).expect("valid JSON");
+        assert_eq!(parsed["sessionId"], ID_A);
+        assert_eq!(parsed["state"], "waiting-for-user");
+        assert_eq!(parsed["started"], "2026-05-25T10:00:00.000Z");
+        assert!(parsed["last"].is_null());
+    }
+
+    #[test]
+    fn resolve_status_report_carries_state_and_time_span() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let proj = projects.path().join("proj");
+        fs::create_dir_all(&proj).unwrap();
+        let line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-05-25T10:00:00.000Z",
+                "message": { "stop_reason": "end_turn", "content": [{ "type": "text" }] },
+            })
+        );
+        fs::write(proj.join(format!("{SAMPLE_ID}.jsonl")), line).unwrap();
+
+        let report =
+            resolve_status_report(projects.path(), sessions.path(), SAMPLE_ID, |_| false).unwrap();
+        assert_eq!(report.session_id, SAMPLE_ID);
+        assert_eq!(report.state, "waiting-for-user");
+        assert_eq!(report.started.as_deref(), Some("2026-05-25T10:00:00.000Z"));
+        assert_eq!(report.last.as_deref(), Some("2026-05-25T10:00:00.000Z"));
+    }
+
+    #[test]
+    fn resolve_status_report_uses_live_state_for_the_state_field() {
+        let projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
+
+        let report =
+            resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041)
+                .unwrap();
+        assert_eq!(report.state, "busy (live, pid 17041)");
+    }
+
+    #[test]
+    fn resolve_status_report_rejects_invalid_id() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_status_report(dir.path(), dir.path(), "../escape", |_| true),
+            Err(StatusError::InvalidSessionId)
+        ));
+    }
+
+    #[test]
+    fn resolve_status_report_errors_when_session_missing() {
+        let dir = tempdir().unwrap();
+        assert!(matches!(
+            resolve_status_report(dir.path(), dir.path(), SAMPLE_ID, |_| false),
+            Err(StatusError::SessionNotFound)
+        ));
+    }
+
+    #[test]
+    fn cli_json_requires_status() {
+        use clap::Parser;
+        // --json without --status is rejected.
+        assert!(Cli::try_parse_from(["crap", "--json", SAMPLE_ID]).is_err());
+    }
+
+    #[test]
+    fn cli_status_json_parses() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["crap", "--status", "--json"]).expect("should parse");
+        assert!(cli.status && cli.json);
+    }
+
+    #[test]
+    fn cli_allows_status_without_session_id() {
+        use clap::Parser;
+        let cli =
+            Cli::try_parse_from(["crap", "--status"]).expect("--status with no id should parse");
+        assert!(cli.status);
+        assert!(cli.session_id.is_none());
+    }
+
+    #[test]
+    fn cli_still_requires_session_id_without_flags() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["crap"]).is_err());
     }
 }

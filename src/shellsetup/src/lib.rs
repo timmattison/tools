@@ -59,6 +59,18 @@ pub enum ShellSetupError {
         path: PathBuf,
         source: std::io::Error,
     },
+
+    /// The shell config is yadm-managed with ambiguous alternates, so we can't
+    /// safely choose which template to edit. Editing the rendered file would be
+    /// silently discarded on the next render.
+    #[error(
+        "{rendered} is yadm-managed and cannot be safely auto-edited \
+         (ambiguous alternates). Edit the correct template by hand and re-render.\n{manual_instructions}"
+    )]
+    YadmAmbiguousConfig {
+        rendered: PathBuf,
+        manual_instructions: String,
+    },
 }
 
 /// Result type for shell setup operations.
@@ -238,11 +250,50 @@ impl ShellIntegration {
             }
         };
 
+        // Redirect away from yadm-rendered files: writing to them is silently
+        // discarded on the next `yadm alt`, so target the template instead (or
+        // refuse when we can't tell which template applies).
+        match resolve_config_target(&config_file) {
+            ConfigTarget::Direct(path) => self.install_into(&path, false),
+            ConfigTarget::YadmTemplate(template) => {
+                println!(
+                    "{} Detected yadm-managed shell config. Writing to the template \
+                     instead of the rendered file (which yadm would overwrite).",
+                    "ℹ".cyan()
+                );
+                self.install_into(&template, true)
+            }
+            ConfigTarget::YadmAmbiguous {
+                rendered,
+                candidates,
+            } => {
+                let listed = candidates
+                    .iter()
+                    .map(|p| format!("  - {}", p.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Err(ShellSetupError::YadmAmbiguousConfig {
+                    rendered,
+                    manual_instructions: format!(
+                        "Found multiple yadm alternates:\n{listed}\n\nAdd this block to the \
+                         correct template, then re-render (e.g. `yadm alt`):\n{}",
+                        self.full_block()
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Installs (or upgrades) the integration block into `config_file`.
+    ///
+    /// `yadm_template` selects activation instructions: a real shell config can
+    /// be `source`d directly, but a yadm template must be re-rendered first.
+    fn install_into(&self, config_file: &Path, yadm_template: bool) -> Result<()> {
         // Check if already installed and handle upgrades
         if config_file.exists() {
             let contents =
-                fs::read_to_string(&config_file).map_err(|e| ShellSetupError::ReadError {
-                    path: config_file.clone(),
+                fs::read_to_string(config_file).map_err(|e| ShellSetupError::ReadError {
+                    path: config_file.to_path_buf(),
                     source: e,
                 })?;
 
@@ -260,9 +311,9 @@ impl ShellIntegration {
                     (self.upgrade_old_installation(&contents), "upgraded")
                 };
 
-                fs::write(&config_file, &result.content).map_err(|e| {
+                fs::write(config_file, &result.content).map_err(|e| {
                     ShellSetupError::WriteError {
-                        path: config_file.clone(),
+                        path: config_file.to_path_buf(),
                         source: e,
                     }
                 })?;
@@ -285,7 +336,7 @@ impl ShellIntegration {
                     action,
                     config_file.display()
                 );
-                self.print_activation_instructions(&config_file);
+                self.print_activation_instructions(config_file, yadm_template);
                 return Ok(());
             }
         }
@@ -294,15 +345,15 @@ impl ShellIntegration {
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&config_file)
+            .open(config_file)
             .map_err(|e| ShellSetupError::WriteError {
-                path: config_file.clone(),
+                path: config_file.to_path_buf(),
                 source: e,
             })?;
 
         file.write_all(self.full_block().as_bytes())
             .map_err(|e| ShellSetupError::WriteError {
-                path: config_file.clone(),
+                path: config_file.to_path_buf(),
                 source: e,
             })?;
 
@@ -311,7 +362,7 @@ impl ShellIntegration {
             "✓".green(),
             config_file.display()
         );
-        self.print_activation_instructions(&config_file);
+        self.print_activation_instructions(config_file, yadm_template);
 
         Ok(())
     }
@@ -419,8 +470,26 @@ impl ShellIntegration {
     }
 
     /// Prints activation instructions after shell integration is added or updated.
-    fn print_activation_instructions(&self, config_file: &Path) {
+    ///
+    /// For a yadm template the rendered config must be regenerated first — you
+    /// cannot `source` the template directly (it may contain template syntax).
+    fn print_activation_instructions(&self, config_file: &Path, yadm_template: bool) {
         println!();
+        if yadm_template {
+            println!("This is a yadm template. To activate, render and reload:");
+            println!("  {}", "yadm alt".cyan());
+            println!("  {} ~/<your rendered shell config>", "source".cyan());
+            println!();
+            println!("Or open a new terminal window after rendering.");
+            if !self.commands.is_empty() {
+                println!();
+                println!("Available commands:");
+                for cmd in &self.commands {
+                    println!("  {} - {}", cmd.name.yellow(), cmd.description);
+                }
+            }
+            return;
+        }
         println!("To activate, run:");
         println!("  {} {}", "source".cyan(), config_file.display());
         println!();
@@ -433,6 +502,90 @@ impl ShellIntegration {
                 println!("  {} - {}", cmd.name.yellow(), cmd.description);
             }
         }
+    }
+}
+
+/// Where shell integration should actually be written for a given rendered
+/// config path, accounting for [yadm](https://yadm.io)-managed dotfiles.
+///
+/// yadm renders files like `~/.zshrc` from alternates/templates named
+/// `~/.zshrc##template.default` (and similar). Writing to the *rendered* file
+/// is a footgun: the next `yadm alt` overwrites it, silently discarding the
+/// shell integration. This enum lets [`resolve_config_target`] redirect writes
+/// to the template instead, or refuse when the right target is ambiguous.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigTarget {
+    /// Not yadm-managed: write directly to this file (the normal case).
+    Direct(PathBuf),
+    /// yadm-managed via a single template: write the integration here, then
+    /// the user re-renders to apply it to the rendered config.
+    YadmTemplate(PathBuf),
+    /// yadm-managed but with ambiguous alternates (multiple templates, or a
+    /// non-template alternate whose applicability depends on yadm's class/OS
+    /// logic). We can't safely guess which file to edit.
+    YadmAmbiguous {
+        /// The rendered config path that would normally be written.
+        rendered: PathBuf,
+        /// The yadm alternate files found alongside it.
+        candidates: Vec<PathBuf>,
+    },
+}
+
+/// Resolves where to write shell integration for `rendered_path`, detecting
+/// yadm alternate files (`<name>##...`) in the same directory.
+///
+/// Rules:
+/// - No alternates → [`ConfigTarget::Direct`].
+/// - Exactly one alternate and it is a `##template*` file →
+///   [`ConfigTarget::YadmTemplate`].
+/// - Any other combination of alternates → [`ConfigTarget::YadmAmbiguous`].
+fn resolve_config_target(rendered_path: &Path) -> ConfigTarget {
+    let direct = || ConfigTarget::Direct(rendered_path.to_path_buf());
+
+    let (Some(parent), Some(file_name)) =
+        (rendered_path.parent(), rendered_path.file_name())
+    else {
+        return direct();
+    };
+    let prefix = format!("{}##", file_name.to_string_lossy());
+
+    // Collect yadm alternates (`<name>##...`) sitting next to the rendered file,
+    // tracking which ones are `##template*` files we could edit in place.
+    let mut alternates: Vec<PathBuf> = Vec::new();
+    let mut templates: Vec<PathBuf> = Vec::new();
+    let Ok(entries) = fs::read_dir(parent) else {
+        return direct();
+    };
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        let Some(suffix) = entry_name.to_string_lossy().strip_prefix(&prefix).map(str::to_owned)
+        else {
+            continue;
+        };
+        let path = entry.path();
+        // yadm reserves `template` as the alternate keyword (e.g.
+        // `##template`, `##template.default`, `##template.j2`).
+        if suffix.split('.').next() == Some("template") {
+            templates.push(path.clone());
+        }
+        alternates.push(path);
+    }
+
+    if alternates.is_empty() {
+        return direct();
+    }
+
+    // Only auto-edit when there is exactly one alternate and it is a template;
+    // anything else (multiple templates, or a host/OS/class alternate yadm
+    // selects by rules we don't evaluate) is ambiguous.
+    if alternates.len() == 1 && templates.len() == 1 {
+        return ConfigTarget::YadmTemplate(templates.into_iter().next().expect("len checked"));
+    }
+
+    alternates.sort();
+    ConfigTarget::YadmAmbiguous {
+        rendered: rendered_path.to_path_buf(),
+        candidates: alternates,
     }
 }
 
@@ -1140,5 +1293,96 @@ function prmv() { OLD_PRCP; }
             .content
             .contains("function prmv() { prcp --rm; }"));
         assert!(!after_prcp_replace.content.contains("OLD_PRCP"));
+    }
+
+    // ========== yadm-aware config target resolution ==========
+
+    /// Creates a process-unique temp dir so parallel test runs don't clobber
+    /// each other (a `bacon` loop runs the same tests concurrently).
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "shellsetup-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create unique temp dir");
+        dir
+    }
+
+    #[test]
+    fn resolve_target_is_direct_without_yadm_alternates() {
+        let dir = unique_temp_dir("direct");
+        let rc = dir.join(".zshrc");
+        fs::write(&rc, "# config\n").unwrap();
+
+        assert_eq!(
+            resolve_config_target(&rc),
+            ConfigTarget::Direct(rc.clone())
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_target_uses_template_when_single_yadm_template_present() {
+        let dir = unique_temp_dir("template");
+        let rc = dir.join(".zshrc");
+        let template = dir.join(".zshrc##template.default");
+        fs::write(&rc, "# rendered\n").unwrap();
+        fs::write(&template, "# template\n").unwrap();
+
+        assert_eq!(
+            resolve_config_target(&rc),
+            ConfigTarget::YadmTemplate(template.clone())
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_target_is_ambiguous_with_multiple_templates() {
+        let dir = unique_temp_dir("multi");
+        let rc = dir.join(".zshrc");
+        let default = dir.join(".zshrc##template.default");
+        let work = dir.join(".zshrc##template.work");
+        fs::write(&rc, "x").unwrap();
+        fs::write(&default, "x").unwrap();
+        fs::write(&work, "x").unwrap();
+
+        match resolve_config_target(&rc) {
+            ConfigTarget::YadmAmbiguous {
+                rendered,
+                candidates,
+            } => {
+                assert_eq!(rendered, rc);
+                assert_eq!(candidates.len(), 2);
+            }
+            other => panic!("expected YadmAmbiguous, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_target_is_ambiguous_with_nontemplate_alternate() {
+        // e.g. `.zshrc##os.Darwin`: yadm selects it by host/class, so we can't
+        // know it applies here. Refuse rather than guess.
+        let dir = unique_temp_dir("alt");
+        let rc = dir.join(".zshrc");
+        let alt = dir.join(".zshrc##os.Darwin");
+        fs::write(&rc, "x").unwrap();
+        fs::write(&alt, "x").unwrap();
+
+        match resolve_config_target(&rc) {
+            ConfigTarget::YadmAmbiguous { rendered, .. } => {
+                assert_eq!(rendered, rc);
+            }
+            other => panic!("expected YadmAmbiguous, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&dir).ok();
     }
 }

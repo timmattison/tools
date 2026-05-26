@@ -4,6 +4,23 @@
 
 All tools in this repository that provide shell integration (shell functions, aliases, etc.) **must** use the `shellsetup` library crate located at `src/shellsetup/`.
 
+### When to add `--shell-setup` at all (read this first)
+
+**Only add `--shell-setup` when it is absolutely necessary — when the tool genuinely cannot do its job from a normal child process.** Writing into a user's shell rc file is intrusive, has to be maintained across upgrades, and is the kind of thing users reasonably distrust. Default to *not* shipping shell integration.
+
+A shell function is only **load-bearing** when the tool must affect the *parent shell's* state — something a child process physically cannot do. The legitimate cases:
+
+- **Changing the parent shell's working directory** (`cd`). A child process cannot change its parent's cwd, so a `cd`-ing tool *must* be a shell function. Examples: `crap` (cd-and-resume), `cwt`/`nwt` (switch/create worktree and land you there).
+- **Exporting environment variables into the current session**, modifying shell options, or otherwise mutating live shell state.
+
+If the tool does **not** need to mutate the parent shell, **do not add `--shell-setup`.** Before adding it, exhaust the native alternatives:
+
+1. **A direct invocation or flag** — if `mytool --rm` already does the job, ship that as the interface. Don't wrap it.
+2. **A subcommand or second binary** for the variant behavior.
+3. **Documentation** telling users to add their own `alias` if they want a shorthand. A convenience alias is the user's choice to make, not something we install into their rc file.
+
+A shell function that merely forwards arguments to the binary (`function prmv() { prcp --rm "$@"; }`) is **cosmetic, not load-bearing** — it adds no capability the binary lacks. That is not a sufficient reason to touch the user's shell config.
+
 ### Why
 
 The `shellsetup` library provides:
@@ -44,10 +61,22 @@ fn setup_shell_integration() -> Result<()> {
 
 **Why this matters:** Without an old end marker, upgrading from an old installation may lose user config that appears after the old shell integration block. The library will warn users if this happens, but it's better to prevent it.
 
+### yadm-Managed Shell Configs
+
+`ShellIntegration::setup()` is **yadm-aware**. Before writing, it inspects the directory next to the target rc file (e.g. `~/.zshrc`) for yadm alternates named `<file>##...`:
+
+- **No alternates** → writes the rc file directly (normal case).
+- **Exactly one `##template*` alternate** (e.g. `~/.zshrc##template.default`) → writes the integration block to the **template** instead of the rendered file, and prints `yadm alt` re-render instructions. This prevents the block from being silently discarded on the next render.
+- **Multiple templates, or a non-template alternate** (`##os.Darwin`, `##class.work`, …) → refuses with `ShellSetupError::YadmAmbiguousConfig`, listing the candidates and the block to add by hand. Choosing the right alternate requires yadm's class/OS rules, which the library does not evaluate.
+
+This logic is centralized in `resolve_config_target`, so every consumer (`crap`, `cwt`, `prcp`) benefits without code changes.
+
 ### Tools Currently Using shellsetup
 
 - `cwt` - Change Worktree (provides `wt`, `wtf`, `wtb`, `wtm` commands)
-- `prcp` - Progress Copy (provides `prmv` command)
+- `nwt` - New Worktree (provides the worktree-creation cd function)
+- `crap` - Claude, Resume Anywhere Please (provides the `crap` cd-and-resume function)
+- `prcp` - Progress Copy (provides `prmv` command) — **slated for removal**, see issue #265; this is cosmetic shell integration, not load-bearing
 
 ## Progress Bar Display
 

@@ -318,8 +318,13 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
     have one, otherwise plain `claude`. If the original directory no longer exists it tells you
     and stops, and it refuses to resume a session that's already open in another running process
-    (pass `--force` to override) so two processes can't corrupt the same session log. Run
-    `crap --shell-setup` once to install the shell function.
+    (pass `--force` to override) so two processes can't corrupt the same session log. With
+    `--here` it brings the session into the *current* directory instead, resuming it as a forked
+    (new-id) session so you can carry its context into a different working tree. `--status <id>`
+    reports where a session left off (`waiting-for-user`, `busy`, `awaiting-assistant`, …) without
+    resuming; `--status` with no id lists every session for the current directory (as a table, or
+    JSON with `--json`) showing each one's state and start/last times. Run `crap --shell-setup`
+    once to install the shell function.
   - To install: `cargo install --git https://github.com/timmattison/tools crap`
 - ng (navel-gaze)
   - Watches JS/TS source files in the current directory and re-runs `pnpm lint` on change. Pass
@@ -1231,6 +1236,23 @@ The session id is the name of the `.jsonl` file under `~/.claude/projects/<proje
 
 If you have a `clauded` alias or command (e.g. `claude --dangerously-skip-permissions`), `crap` uses it; otherwise it falls back to plain `claude`. If the session's original directory no longer exists, `crap` prints an error and stops without launching anything.
 
+### Resume in the current directory: `--here`
+
+Sometimes you don't want to go back to where a session started — you want to bring its context to where you *are* now (a different worktree, a fresh checkout, a scratch dir):
+
+```bash
+crap --here 57570685-2d64-4431-8ab6-c021a12fa1af   # resume it right here
+```
+
+Claude resolves `--resume <id>` only against the project folder that matches your current directory, so a plain `claude --resume <id>` from anywhere else fails with *"No conversation found with session ID"*. `crap --here` gets around that: it symlinks the session's transcript into the current directory's project folder so Claude can find it, then resumes it with `--fork-session`. Forking means Claude continues with the **full prior context under a brand-new session id**, so the original transcript is never modified.
+
+The symlink is only needed while Claude reads the transcript at startup. A background watcher removes it the moment the forked session file appears — typically within a second — so it doesn't linger for the whole session, and a final `rm` after the session ends serves as a safety net.
+
+A couple of things to know:
+
+- The replayed history still references the *original* directory's paths. Claude works in your current directory from here on, but the conversation it inherits talks about the old one.
+- It still won't resume a session that's open elsewhere unless you pass `--force` (forking reads the live transcript, which can be mid-write).
+
 ### Don't attach twice
 
 Claude Code records every live CLI session under `~/.claude/sessions/<pid>.json` and removes it on clean exit. Before resuming, `crap` checks that registry: if the session you asked for is already open in another running `claude` process, it refuses and tells you where:
@@ -1244,10 +1266,83 @@ Error: session '4d1637ec-…' is already running (pid 62043, idle)
 
 This prevents two processes from appending to the same session log at once. The check verifies the recorded pid is still a live `claude` process (so a stale file left by a crash — or a pid since reused by something else — won't trigger a false alarm). Pass `--force` to resume anyway.
 
+### Check a session's state: `--status`
+
+Before resuming — or when scripting over many sessions — you can ask where a session left off without launching anything:
+
+```bash
+crap --status 57570685-2d64-4431-8ab6-c021a12fa1af
+```
+
+It prints exactly one of these tokens on stdout:
+
+- `waiting-for-user` — Claude finished its turn and is waiting for your input.
+- `busy` — work is in flight: the assistant has a pending tool call, or a tool result was just delivered and the reply hasn't landed yet.
+- `awaiting-assistant` — you sent the last message and Claude hasn't replied (an active turn, or a session abandoned mid-reply).
+- `empty` — the transcript has no conversational turns yet.
+
+Claude Code never writes an explicit "waiting for input" marker, so `crap` infers the state from the last real turn in the transcript — skipping subagent (`isSidechain`) turns, injected (`isMeta`) entries, and trailing bookkeeping lines, and trusting each turn's `stop_reason` over the per-line content shape.
+
+If the session is **currently open** in a live `claude` process, that process's own status is more authoritative than transcript inference, so it's reported instead:
+
+```text
+busy (live, pid 17041)
+```
+
+The tokens are stable and newline-terminated, so they script cleanly:
+
+```bash
+[ "$(crap --status "$id")" = waiting-for-user ] && echo "ready for you"
+```
+
+`--status` exits non-zero for a malformed id or a session that is neither live nor on disk.
+
+#### List every session for the current directory
+
+Give `--status` **no id** and it lists every session recorded for the directory you're in — handy when a single project has several conversations going. Each row shows the state plus when the transcript was *started* and *last written*, read from the transcript's own timestamps (not file mtimes), so they reflect real activity:
+
+```text
+2 sessions for /Volumes/code/crap
+
+┌──────────────────────────────────────┬────────────────────────┬─────────────────────┬─────────────────────┐
+│ SESSION                              ┆ STATE                  ┆ STARTED             ┆ LAST                │
+╞══════════════════════════════════════╪════════════════════════╪═════════════════════╪═════════════════════╡
+│ c43eb4df-1ba3-4c42-84f2-ab76319a860c ┆ waiting-for-user       ┆ 2026-05-25 20:02:29 ┆ 2026-05-25 20:11:21 │
+│ 1c8aad51-26aa-416d-8da9-a0b586fd0632 ┆ busy (live, pid 98519) ┆ 2026-05-25 18:43:05 ┆ 2026-05-25 20:29:44 │
+└──────────────────────────────────────┴────────────────────────┴─────────────────────┴─────────────────────┘
+```
+
+Rows are ordered oldest-activity first, so the most recently used session sits at the bottom. Live sessions show their own status and pid; the rest show the inferred state. A session with no recorded activity shows `—` for its times.
+
+#### JSON output: `--json`
+
+Add `--json` (only valid with `--status`) for machine-readable output instead of text — a single object for one id, an array for the directory listing. Keys are camelCase and timestamps are the raw ISO 8601 values, so it pipes straight into `jq`:
+
+```bash
+# Which sessions here are waiting on me?
+crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sessionId'
+```
+
+```json
+[
+  {
+    "sessionId": "c43eb4df-1ba3-4c42-84f2-ab76319a860c",
+    "state": "waiting-for-user",
+    "started": "2026-05-25T20:02:29.035Z",
+    "last": "2026-05-25T20:11:21.375Z"
+  }
+]
+```
+
+`started` and `last` are `null` when the transcript records no timestamps.
+
 ### Options
 
-- `[SESSION_ID]`: The Claude session id to resume
+- `[SESSION_ID]`: The Claude session id to resume (optional with `--status`, which then lists every session for the current directory)
 - `-f, --force`: Resume even if the session appears to be running in another process
+- `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one
+- `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
+- `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
 
 ### Shell Integration
@@ -1268,8 +1363,47 @@ If you prefer to add it manually, add this to your `~/.bashrc` or `~/.zshrc`:
 
 ```bash
 function crap() {
+    # --status only queries; it never changes the parent shell. Run it straight
+    # through so its output (a token, or a multi-line listing) reaches the
+    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    case " $* " in
+        *" --status "*) command crap "$@"; return $? ;;
+    esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
+    if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
+        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
+        __crap_rest=${__crap_out#*$'\n'}
+        __crap_session=${__crap_rest%%$'\n'*}
+        __crap_link=${__crap_rest#*$'\n'}
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            __crap_folder=$(dirname -- "$__crap_link")
+            __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
+            (
+                __crap_i=0
+                while [ "$__crap_i" -lt 600 ]; do
+                    if [ "$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')" -gt "$__crap_n0" ]; then
+                        rm -f -- "$__crap_link"
+                        exit 0
+                    fi
+                    __crap_i=$((__crap_i + 1))
+                    sleep 0.1
+                done
+            ) &
+            __crap_watcher=$!
+            disown 2>/dev/null
+        fi
+        if command -v clauded >/dev/null 2>&1; then
+            eval 'clauded --resume "$__crap_session" --fork-session'
+        else
+            claude --resume "$__crap_session" --fork-session
+        fi
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            kill "$__crap_watcher" 2>/dev/null
+            rm -f -- "$__crap_link"
+        fi
+        return
+    fi
     local __crap_session __crap_dir
     __crap_session=${__crap_out%%$'\n'*}
     __crap_dir=${__crap_out#*$'\n'}
@@ -1282,7 +1416,7 @@ function crap() {
 }
 ```
 
-The binary prints the session id on the first line and the directory on the rest; the function takes the first line as the session id and everything after it as the directory, so a path containing a newline stays intact. Forwarding `"$@"` lets flags like `--force` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+The binary speaks one of two output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already symlinked the session into the current directory's project folder — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes the symlink as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
 
 ### Exit Codes
 
@@ -1294,6 +1428,8 @@ The binary prints the session id on the first line and the directory on the rest
 - `5`: Shell setup failed
 - `6`: Could not determine your home directory
 - `7`: The session is already running in another process (use `--force` to override)
+- `8`: `--here`: could not create the project folder or symlink
+- `9`: `--here`: could not determine the current working directory
 
 ## bm (bulk move)
 
