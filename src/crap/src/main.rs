@@ -767,11 +767,17 @@ fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> Strin
 ///   was created because this already is the session's own directory.
 const SHELL_CODE: &str = r#"
 function crap() {
-    # --status only queries; it never changes the parent shell. Run it straight
-    # through so its output (a token, or a multi-line listing) reaches the
-    # terminal instead of being parsed as a "<session-id>\n<dir>" resume target.
+    # These flags make the binary print to stdout and exit 0 without mutating
+    # the parent shell: --status queries, --help/-h/--version/-V emit
+    # informational text, and --shell-setup writes the rc file (not the live
+    # shell) and prints activation instructions. Run them straight through so
+    # their output reaches the terminal instead of being parsed as a
+    # "<session-id>\n<dir>" resume target (which would otherwise `cd` into that
+    # text and mangle it). --shell-setup matters on upgrades, when this very
+    # function is already loaded and would otherwise swallow its instructions.
     case " $* " in
-        *" --status "*) command crap "$@"; return $? ;;
+        *" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)
+            command crap "$@"; return $? ;;
     esac
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
@@ -1839,11 +1845,108 @@ mod tests {
     }
 
     #[test]
-    fn shell_code_passes_status_through_untouched() {
-        // `--status` only queries; it never changes the parent shell, and its
-        // output (a token or a multi-line listing) must reach the terminal
-        // rather than being parsed as a "<session-id>\n<dir>" resume target.
-        assert!(SHELL_CODE.contains(r#"*" --status "*) command crap "$@"; return $?"#));
+    fn shell_code_passes_informational_flags_through_untouched() {
+        // `--status` queries, --help/-h/--version/-V print informational text,
+        // and --shell-setup writes the rc file (not the live shell); none mutate
+        // the parent shell, and each must reach the terminal rather than being
+        // parsed as a "<session-id>\n<dir>" resume target.
+        assert!(SHELL_CODE.contains(
+            r#"*" --status "*|*" --help "*|*" -h "*|*" --version "*|*" -V "*|*" --shell-setup "*)"#
+        ));
+        assert!(SHELL_CODE.contains(r#"command crap "$@"; return $?"#));
+    }
+
+    /// Sources `SHELL_CODE` in a real `bash`, with a fake `crap` binary (and
+    /// fake `claude`/`clauded`) ahead of it on `PATH`, then runs `crap <args>`.
+    ///
+    /// The fake binary mimics clap: informational flags print a recognizable
+    /// marker to stdout and exit 0; anything else emits a `<session>\n<dir>`
+    /// resume target. Returns the captured stdout plus whether the `claude`
+    /// stub was invoked (it drops a marker file when called).
+    ///
+    /// All paths are keyed on the pid + a nanosecond timestamp so concurrent
+    /// runs of this test never share a temp dir.
+    #[cfg(unix)]
+    fn run_shell_function(args: &str) -> (String, bool) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("crap-shell-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let claude_marker = dir.join("claude_called");
+
+        // Fake `crap`: informational flags print a marker and exit 0, exactly
+        // as clap does; the default path prints a resume target.
+        let fake_crap = "#!/bin/sh\n\
+            case \" $* \" in\n\
+            \x20 *\" --help \"*|*\" -h \"*) printf 'CRAP_HELP_MARKER\\nUsage: crap\\nmore\\n'; exit 0 ;;\n\
+            \x20 *\" --version \"*|*\" -V \"*) printf 'CRAP_VERSION_MARKER 0.1.0\\n'; exit 0 ;;\n\
+            \x20 *\" --shell-setup \"*) printf 'CRAP_SETUP_MARKER\\nTo activate, run:\\n  source ~/.zshrc\\n'; exit 0 ;;\n\
+            esac\n\
+            printf 'session-xyz\\n/tmp/crap-resume-dir\\n'\n";
+
+        // Fake `claude`/`clauded`: record that a resume was attempted.
+        let fake_claude = format!("#!/bin/sh\n: > {:?}\n", claude_marker);
+
+        for (name, body) in [
+            ("crap", fake_crap.to_string()),
+            ("claude", fake_claude.clone()),
+            ("clauded", fake_claude),
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{base_path}", dir.display());
+        let script = format!("{SHELL_CODE}\ncrap {args}\n");
+
+        let output = Command::new("bash")
+            .env("PATH", new_path)
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash should be available");
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let claude_called = claude_marker.exists();
+        let _ = fs::remove_dir_all(&dir);
+        (stdout, claude_called)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_passes_informational_flags_through() {
+        // These flags make the binary print to stdout and exit 0 without
+        // mutating the parent shell. Without a pass-through, the function
+        // captures that text and tries to `cd` into it as a resume directory.
+        // Each must reach the terminal verbatim and never trigger a resume.
+        // `--shell-setup` is included because, on an upgrade, the already-loaded
+        // function would otherwise swallow its activation instructions.
+        for (args, marker) in [
+            ("--help", "CRAP_HELP_MARKER"),
+            ("-h", "CRAP_HELP_MARKER"),
+            ("--version", "CRAP_VERSION_MARKER"),
+            ("-V", "CRAP_VERSION_MARKER"),
+            ("--shell-setup", "CRAP_SETUP_MARKER"),
+        ] {
+            let (stdout, claude_called) = run_shell_function(args);
+            assert!(
+                stdout.contains(marker),
+                "`crap {args}` should print the binary's output verbatim, got: {stdout:?}"
+            );
+            assert!(
+                !claude_called,
+                "`crap {args}` must not attempt a resume"
+            );
+        }
     }
 
     // Two distinct session ids for the per-directory listing tests.
