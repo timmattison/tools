@@ -882,18 +882,20 @@ mod tests {
     }
 
     #[test]
-    fn separator_matches_header_visible_width() {
-        // If the separator is wider than the header line, resizing the
-        // terminal smaller wraps it onto the next line. Size it to match.
+    fn separator_spans_terminal_width() {
+        // The separator should fill exactly the terminal width — not the
+        // width of the header above it. A long header used to size the rule
+        // to match, which wrapped it onto a second line on narrower
+        // terminals. Sizing to the terminal keeps it to a single line.
+        let opts = opts();
         let snap = snap_with(vec![]);
-        let out = strip_ansi(&render(&snap, &opts()));
-        let mut lines = out.lines();
-        let header = lines.next().expect("header line");
-        let sep = lines.next().expect("separator line");
+        let out = strip_ansi(&render(&snap, &opts));
+        let sep = out.lines().nth(1).expect("separator line");
         assert_eq!(
-            UnicodeWidthStr::width(header),
             UnicodeWidthStr::width(sep),
-            "separator width should match header width\n  header: {header:?}\n  sep:    {sep:?}",
+            opts.terminal_width,
+            "separator width should match terminal width ({})\n  sep: {sep:?}",
+            opts.terminal_width,
         );
     }
 
