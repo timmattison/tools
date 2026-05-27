@@ -166,8 +166,8 @@ pub(crate) fn should_react(
 /// `.git/` (and reacting to any accepted event) cheap: object/pack/log churn
 /// that doesn't change the visible state costs at most one status walk — never
 /// a repaint, never a flicker.
-fn should_repaint(_new: &str, _displayed: &str) -> bool {
-    true
+fn should_repaint(new: &str, displayed: &str) -> bool {
+    new != displayed
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
