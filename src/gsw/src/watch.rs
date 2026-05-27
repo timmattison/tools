@@ -11,6 +11,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -527,32 +528,51 @@ fn spawn_event_reader(tx: Sender<Event>) {
     });
 }
 
+/// A panic hook, matching what [`std::panic::take_hook`] returns. Held in an
+/// [`Arc`] so the installed wrapper and [`TerminalGuard::drop`] can both reach
+/// the same pre-watch hook — the wrapper to chain to it, `Drop` to reinstate it.
+type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
+
 /// RAII guard for the alternate screen, hidden cursor, and raw mode. Restores
 /// the main screen and cursor on drop *and* via a panic hook, so no exit path
 /// — normal return, propagated error, or panic — can leave the terminal in a
 /// wedged state. The panic hook restores *before* the default handler prints,
 /// so the panic message lands on the main screen rather than the torn-down
-/// alternate one.
-struct TerminalGuard;
+/// alternate one. On drop the pre-watch panic hook is reinstated, so our
+/// terminal-restoring wrapper never lingers as global process state once the
+/// guard is gone.
+struct TerminalGuard {
+    /// The panic hook in effect before [`TerminalGuard::enter`] wrapped it,
+    /// reinstated on drop. `Option` only so `Drop` can move it back out.
+    previous_hook: Option<PanicHook>,
+}
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
         execute!(io::stdout(), EnterAlternateScreen, Hide)?;
 
-        let previous = std::panic::take_hook();
+        let previous: PanicHook = Arc::from(std::panic::take_hook());
+        let chained = Arc::clone(&previous);
         std::panic::set_hook(Box::new(move |info| {
             restore_terminal();
-            previous(info);
+            (*chained)(info);
         }));
 
-        Ok(TerminalGuard)
+        Ok(TerminalGuard {
+            previous_hook: Some(previous),
+        })
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         restore_terminal();
+        // Reinstate the pre-watch panic hook so our terminal-restoring wrapper
+        // doesn't outlive the guard as global process state.
+        if let Some(previous) = self.previous_hook.take() {
+            std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+        }
     }
 }
 
