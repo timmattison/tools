@@ -2,9 +2,10 @@
 //! refresh decisions.
 //!
 //! The watch loop owns all rendering on a single thread and is fed by a
-//! `std::sync::mpsc` channel. Every *decision* (which terminal dimensions to
-//! render for, and — in later phases — which filesystem events matter and how
-//! fast to tick) lives in a pure, terminal-free function here so it can be
+//! `std::sync::mpsc` channel. Every *decision* — which terminal dimensions to
+//! render for, which filesystem events matter, and how fast the decay timer
+//! should tick — lives in a pure, terminal-free function here
+//! ([`resolve_dimensions`], [`should_react`], [`next_tick`]) so it can be
 //! unit-tested without a pty.
 
 use std::io::{self, Write};
@@ -885,8 +886,14 @@ mod tests {
         )
         .expect("loop");
 
-        assert_eq!(computes, 1, "a decay tick must trigger exactly one recompute");
-        assert_eq!(paints, 1, "the tick-driven render must repaint the new frame");
+        assert_eq!(
+            computes, 1,
+            "a decay tick must trigger exactly one recompute"
+        );
+        assert_eq!(
+            paints, 1,
+            "the tick-driven render must repaint the new frame"
+        );
     }
 
     #[test]
