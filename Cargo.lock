@@ -3447,6 +3447,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "colored",
+ "crossterm",
  "gix",
  "tempfile",
  "terminal_size",

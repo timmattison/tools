@@ -24,13 +24,21 @@ mod watch;
 #[command(name = "gsw")]
 #[command(version = version_string!())]
 #[command(
-    about = "Compact git status watch — one-shot pretty output for use with viddy",
+    about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
                   commits ahead of the base branch, last-commit age, and a per-file \
-                  list showing a magnitude bar, +/- counts, and recency. Designed to \
-                  be run repeatedly under `viddy`."
+                  list showing a magnitude bar, +/- counts, and recency. On a TTY it \
+                  runs as a self-refreshing watch that repaints on filesystem changes; \
+                  with `--one-shot` (or when its output is piped) it renders once and \
+                  exits."
 )]
 struct Cli {
+    /// Render once and exit instead of entering the live watch loop. This is
+    /// the classic behavior; on a TTY, watch mode is the default. Output that
+    /// is piped/captured (not a TTY) always falls back to this single render.
+    #[arg(long)]
+    one_shot: bool,
+
     /// Strip ANSI color codes from output.
     #[arg(long)]
     no_color: bool,
@@ -216,18 +224,97 @@ fn main() -> Result<()> {
         return Ok(());
     };
 
-    let branch = repo::branch_name(&repo);
+    // Everything the renderer needs that doesn't depend on the live terminal
+    // size. In watch mode this is computed once and reused for every repaint.
+    let cfg = RenderConfig {
+        base: cli.base,
+        max_files: cli.max_files,
+        bar_width: cli.bar_width,
+        log_lines: if cli.no_log { 0 } else { cli.log_lines },
+        truecolor,
+        width_offset: cli.width_offset,
+    };
 
-    let base = cli.base.unwrap_or_else(|| repo::resolve_base(&repo));
-    let commits_ahead = repo::commits_ahead(&repo, &base);
+    match decide_mode(cli.one_shot, stdout_is_tty) {
+        watch::Mode::OneShot => {
+            // Preserve the viddy-aware env sizing and the trailing newline of
+            // the historical one-shot output exactly.
+            let tty_size =
+                terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
+            let lines_env: Option<usize> = std::env::var("LINES").ok().and_then(|s| s.parse().ok());
+            let dims = watch::resolve_dimensions(
+                watch::Mode::OneShot,
+                &watch::SizeInputs {
+                    tty_width: tty_size.map(|(w, _)| w),
+                    tty_height: tty_size.map(|(_, h)| h),
+                    columns_env,
+                    lines_env,
+                    stdout_is_tty,
+                    width_offset: cfg.width_offset,
+                },
+            );
+            println!("{}", build_output(&repo, &cfg, dims)?);
+            Ok(())
+        }
+        watch::Mode::Watch => watch::run(&repo, &cfg),
+    }
+}
 
-    let last_commit_age = last_commit_age(&repo);
+/// Which rendering mode to run in once a working-tree repo is in hand.
+///
+/// Watch mode is the default, but it only makes sense when there is a live
+/// terminal to take over: `--one-shot` and any non-TTY stdout (a pipe, a file,
+/// a stale `viddy gsw` wrapper) fall back to a single render. The not-a-repo
+/// case is handled earlier and never reaches here.
+fn decide_mode(force_one_shot: bool, stdout_is_tty: bool) -> watch::Mode {
+    if force_one_shot || !stdout_is_tty {
+        watch::Mode::OneShot
+    } else {
+        watch::Mode::Watch
+    }
+}
+
+/// Per-render tunables derived from the CLI, independent of the live terminal
+/// size. Watch mode recomputes the output on every repaint from this plus the
+/// current [`watch::Dimensions`]; one-shot uses it once.
+pub(crate) struct RenderConfig {
+    /// Explicit base ref, or `None` to auto-resolve (main → master → origin/HEAD).
+    pub base: Option<String>,
+    /// User-set file-row cap (`--max-files`), or `None` for the adaptive split.
+    pub max_files: Option<usize>,
+    /// Magnitude-bar width in cells.
+    pub bar_width: usize,
+    /// Recent-commit rows to request; `0` when `--no-log` suppressed the section.
+    pub log_lines: usize,
+    /// Whether the 24-bit truecolor commit-log gradient is in effect.
+    pub truecolor: bool,
+    /// Columns to subtract from the detected width (`--width-offset`).
+    pub width_offset: usize,
+}
+
+/// Walk the repository and render the full status output for `dims`.
+///
+/// Pure with respect to the terminal: it returns the rendered string and never
+/// touches stdout, so callers decide how to display it — one-shot prints it,
+/// watch mode paints it into the alternate screen. The row-budget split
+/// (file list vs. log section) is computed here from `dims.height`.
+pub(crate) fn build_output(
+    repo: &gix::Repository,
+    cfg: &RenderConfig,
+    dims: watch::Dimensions,
+) -> Result<String> {
+    let branch = repo::branch_name(repo);
+
+    let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
+    let commits_ahead = repo::commits_ahead(repo, &base);
+
+    let last_commit_age = last_commit_age(repo);
 
     let repo::Changes {
         entries,
         staged_numstat,
         unstaged_numstat,
-    } = repo::collect_changes(&repo)?;
+    } = repo::collect_changes(repo)?;
 
     let ages = collect_ages(&entries, repo.workdir());
 
@@ -242,28 +329,12 @@ fn main() -> Result<()> {
         &ages,
     );
 
-    let log_lines = if cli.no_log { 0 } else { cli.log_lines };
-    snapshot.log = fetch_log(&repo, log_lines);
+    snapshot.log = fetch_log(repo, cfg.log_lines);
 
-    snapshot.upstream = repo::upstream_status(&repo);
+    snapshot.upstream = repo::upstream_status(repo);
 
-    let tty_size =
-        terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
-    let lines_env: Option<usize> = std::env::var("LINES").ok().and_then(|s| s.parse().ok());
-    let watch::Dimensions {
-        width: terminal_width,
-        height: terminal_height,
-    } = watch::resolve_dimensions(
-        watch::Mode::OneShot,
-        &watch::SizeInputs {
-            tty_width: tty_size.map(|(w, _)| w),
-            tty_height: tty_size.map(|(_, h)| h),
-            columns_env,
-            lines_env,
-            stdout_is_tty,
-            width_offset: cli.width_offset,
-        },
-    );
+    let terminal_width = dims.width;
+    let terminal_height = dims.height;
 
     // Split available terminal rows between the file list and the log
     // section based on what each actually needs to show. Chrome we
@@ -295,7 +366,7 @@ fn main() -> Result<()> {
     // `--max-files` always wins when the user has set it (including 0,
     // which means unlimited). When the user pinned a file cap, the log
     // section just takes whatever rows are left over up to its demand.
-    let (file_cap_opt, log_cap) = match cli.max_files {
+    let (file_cap_opt, log_cap) = match cfg.max_files {
         Some(n) => {
             let consumed_by_files = if n == 0 {
                 file_count
@@ -310,14 +381,13 @@ fn main() -> Result<()> {
 
     let opts = RenderOptions {
         terminal_width,
-        bar_width: cli.bar_width,
+        bar_width: cfg.bar_width,
         max_files: file_cap_opt,
         log_lines: log_cap,
-        truecolor,
+        truecolor: cfg.truecolor,
     };
 
-    println!("{}", render(&snapshot, &opts));
-    Ok(())
+    Ok(render(&snapshot, &opts))
 }
 
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
@@ -378,6 +448,19 @@ fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decide_mode_truth_table() {
+        // Watch mode only when nothing forces a single render: no --one-shot
+        // and a real TTY to take over.
+        assert_eq!(decide_mode(false, true), watch::Mode::Watch);
+        // --one-shot always wins, even on a TTY.
+        assert_eq!(decide_mode(true, true), watch::Mode::OneShot);
+        // Non-TTY (piped/captured) always falls back to one-shot, regardless
+        // of the flag — this keeps `gsw | …` and stale `viddy gsw` working.
+        assert_eq!(decide_mode(false, false), watch::Mode::OneShot);
+        assert_eq!(decide_mode(true, false), watch::Mode::OneShot);
+    }
 
     #[test]
     fn width_uses_columns_minus_one_when_stdout_not_tty() {

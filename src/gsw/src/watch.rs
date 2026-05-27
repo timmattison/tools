@@ -7,7 +7,22 @@
 //! fast to tick) lives in a pure, terminal-free function here so it can be
 //! unit-tested without a pty.
 
-use crate::{effective_terminal_height, effective_terminal_width, DEFAULT_TERMINAL_HEIGHT};
+use std::io::{self, Write};
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+
+use anyhow::Result;
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+};
+
+use crate::{
+    build_output, effective_terminal_height, effective_terminal_width, RenderConfig,
+    DEFAULT_TERMINAL_HEIGHT,
+};
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
 /// detection — decides where terminal dimensions come from (see
@@ -18,11 +33,6 @@ pub(crate) enum Mode {
     /// logic so `gsw | …` and `viddy gsw` keep working unchanged.
     OneShot,
     /// Long-lived watch loop that owns the whole pane.
-    #[allow(
-        dead_code,
-        reason = "constructed once the watch loop is wired later in this phase; \
-                  until then only resolve_dimensions' unit test exercises this arm"
-    )]
     Watch,
 }
 
@@ -90,6 +100,157 @@ pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions 
             height: inputs.tty_height.unwrap_or(DEFAULT_TERMINAL_HEIGHT).max(1),
         },
     }
+}
+
+/// Events the watch loop reacts to. The main thread owns all rendering and
+/// blocks on a single channel carrying these. Phase 1 produces only terminal
+/// events; later phases add filesystem-change and timer-tick variants.
+enum Event {
+    /// The terminal was resized — repaint at the new dimensions.
+    Resize,
+    /// The user asked to quit (`q` or Ctrl-C).
+    Quit,
+}
+
+/// Run the live watch loop: take over the alternate screen, render once, then
+/// repaint on terminal resize until the user quits with `q` or Ctrl-C.
+///
+/// The [`TerminalGuard`] restores the main screen and cursor on every exit
+/// path (normal return, error, or panic), so the terminal can never be left
+/// wedged. In this phase the only event producer is the crossterm reader
+/// thread; filesystem watching and the decay timer arrive in later phases.
+pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
+    let _guard = TerminalGuard::enter()?;
+
+    let mut displayed = String::new();
+    render_now(repo, cfg, &mut displayed)?;
+
+    let (tx, rx) = mpsc::channel();
+    spawn_event_reader(tx);
+
+    // `recv` errors only once every sender has hung up (the reader thread
+    // ended), which we treat as a clean shutdown just like an explicit Quit.
+    while let Ok(event) = rx.recv() {
+        match event {
+            Event::Quit => break,
+            Event::Resize => render_now(repo, cfg, &mut displayed)?,
+        }
+    }
+
+    Ok(())
+}
+
+/// Recompute the output for the current terminal size and paint it, unless it
+/// is byte-identical to what is already on screen (suppression — cheap here,
+/// load-bearing once filesystem and timer events arrive).
+fn render_now(repo: &gix::Repository, cfg: &RenderConfig, displayed: &mut String) -> Result<()> {
+    let dims = current_dimensions(cfg.width_offset);
+    let output = build_output(repo, cfg, dims)?;
+    if output == *displayed {
+        return Ok(());
+    }
+
+    let mut out = io::stdout();
+    // In raw mode a bare '\n' moves down without returning to column 0, which
+    // would stair-step the output; translate to CRLF. Clear first so a shorter
+    // render can't leave stale glyphs from a taller previous frame.
+    let painted = output.replace('\n', "\r\n");
+    execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+    write!(out, "{painted}")?;
+    out.flush()?;
+
+    *displayed = output;
+    Ok(())
+}
+
+/// Query the live terminal size and resolve watch-mode dimensions from it.
+fn current_dimensions(width_offset: usize) -> Dimensions {
+    let tty = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
+    resolve_dimensions(
+        Mode::Watch,
+        &SizeInputs {
+            tty_width: tty.map(|(w, _)| w),
+            tty_height: tty.map(|(_, h)| h),
+            columns_env: None,
+            lines_env: None,
+            stdout_is_tty: true,
+            width_offset,
+        },
+    )
+}
+
+/// Spawn the crossterm event-reader thread. It blocks on `event::read`,
+/// translating `q`/Ctrl-C into [`Event::Quit`] and terminal resizes into
+/// [`Event::Resize`], and exits when the receiver is gone or reading fails.
+fn spawn_event_reader(tx: Sender<Event>) {
+    thread::spawn(move || loop {
+        match event::read() {
+            Ok(CtEvent::Key(KeyEvent {
+                code,
+                modifiers,
+                kind,
+                ..
+            })) => {
+                // Ignore key-release events (kitty/Windows report them); only
+                // a press should quit.
+                if kind == KeyEventKind::Release {
+                    continue;
+                }
+                let quit = matches!(code, KeyCode::Char('q'))
+                    || (modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(code, KeyCode::Char('c')));
+                if quit && tx.send(Event::Quit).is_err() {
+                    break;
+                }
+            }
+            Ok(CtEvent::Resize(_, _)) => {
+                if tx.send(Event::Resize).is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            // The terminal closed or reading failed: nothing more to read.
+            Err(_) => break,
+        }
+    });
+}
+
+/// RAII guard for the alternate screen, hidden cursor, and raw mode. Restores
+/// the main screen and cursor on drop *and* via a panic hook, so no exit path
+/// — normal return, propagated error, or panic — can leave the terminal in a
+/// wedged state. The panic hook restores *before* the default handler prints,
+/// so the panic message lands on the main screen rather than the torn-down
+/// alternate one.
+struct TerminalGuard;
+
+impl TerminalGuard {
+    fn enter() -> Result<Self> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            previous(info);
+        }));
+
+        Ok(TerminalGuard)
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+/// Best-effort restore of the terminal to its pre-watch state. Idempotent and
+/// failure-tolerant: both the panic hook and `Drop` may call it (a panic runs
+/// the hook, then unwinding runs `Drop`), and a partially-entered terminal
+/// must still be cleaned up, so every step is independently ignored on error.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
 }
 
 #[cfg(test)]

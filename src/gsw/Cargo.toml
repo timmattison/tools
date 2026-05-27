@@ -2,7 +2,7 @@
 name = "gsw"
 version = "0.1.0"
 edition.workspace = true
-description = "Compact git status watch — one-shot pretty output of branch state for viddy"
+description = "Compact git status watch — event-driven, self-refreshing branch-state view"
 
 [[bin]]
 name = "gsw"
@@ -13,6 +13,7 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true
+crossterm.workspace = true
 gix.workspace = true
 terminal_size.workspace = true
 unicode-width.workspace = true
