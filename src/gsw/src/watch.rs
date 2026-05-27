@@ -9,8 +9,9 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use ignore::gitignore::Gitignore;
@@ -170,10 +171,21 @@ fn should_repaint(new: &str, displayed: &str) -> bool {
     new != displayed
 }
 
+/// How long the loop keeps draining the channel after the first event before
+/// it renders — the debounce / coalescing window. A burst of writes (a `git
+/// commit` touching many `.git/` files, an editor's save-and-rename dance)
+/// arrives inside this window and collapses into a single repaint.
+const DEBOUNCE: Duration = Duration::from_millis(150);
+
 /// Events the watch loop reacts to. The main thread owns all rendering and
-/// blocks on a single channel carrying these. Phase 1 produces only terminal
-/// events; later phases add filesystem-change and timer-tick variants.
+/// blocks on a single channel carrying these. The decay-timer `Tick` variant
+/// arrives in a later phase.
 enum Event {
+    /// A non-ignored filesystem path under the worktree or git dir changed.
+    /// The path was already classified by [`should_react`] before the event
+    /// was sent, so the loop only needs to know that *something* relevant
+    /// moved — it recomputes the whole render regardless of which path it was.
+    FsChanged,
     /// The terminal was resized — repaint at the new dimensions.
     Resize,
     /// The user asked to quit (`q` or Ctrl-C).
@@ -190,34 +202,69 @@ enum Event {
 pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
 
-    let mut displayed = String::new();
-    render_now(repo, cfg, &mut displayed)?;
+    // Paint the first frame unconditionally (nothing is displayed yet).
+    let mut displayed = compute_output(repo, cfg)?;
+    paint_output(&displayed)?;
 
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx);
 
-    // `recv` errors only once every sender has hung up (the reader thread
-    // ended), which we treat as a clean shutdown just like an explicit Quit.
-    while let Ok(event) = rx.recv() {
-        match event {
-            Event::Quit => break,
-            Event::Resize => render_now(repo, cfg, &mut displayed)?,
-        }
-    }
+    event_loop(
+        &rx,
+        DEBOUNCE,
+        &mut displayed,
+        || compute_output(repo, cfg),
+        |output| paint_output(output),
+    )
+}
 
+/// The render loop's terminal-free core: block for an event, coalesce the burst
+/// that follows it within the `debounce` window, then recompute once and
+/// repaint only if the output actually changed.
+///
+/// `compute` produces the current render string (a status walk); `paint`
+/// displays it. Pulling these out as closures keeps the loop testable without a
+/// TTY or real filesystem events — a test feeds a pre-loaded channel and
+/// asserts how many times each ran. The contract verified there:
+///
+/// - a burst of events between renders collapses into **one** `compute` and at
+///   most one `paint` (coalescing);
+/// - a recompute whose output is byte-identical to what's displayed does the
+///   `compute` (the status walk happened) but **no** `paint` (suppression);
+/// - [`Event::Quit`] ends the loop, as does every sender hanging up
+///   (`recv` / `recv_timeout` returning disconnected).
+fn event_loop<C, P>(
+    rx: &Receiver<Event>,
+    debounce: Duration,
+    displayed: &mut String,
+    mut compute: C,
+    mut paint: P,
+) -> Result<()>
+where
+    C: FnMut() -> Result<String>,
+    P: FnMut(&str) -> Result<()>,
+{
+    // Stub: render once per event, no coalescing and no suppression.
+    while let Ok(event) = rx.recv() {
+        if matches!(event, Event::Quit) {
+            break;
+        }
+        let _ = debounce;
+        let output = compute()?;
+        paint(&output)?;
+        *displayed = output;
+    }
     Ok(())
 }
 
-/// Recompute the output for the current terminal size and paint it, unless it
-/// is byte-identical to what is already on screen (suppression — cheap here,
-/// load-bearing once filesystem and timer events arrive).
-fn render_now(repo: &gix::Repository, cfg: &RenderConfig, displayed: &mut String) -> Result<()> {
+/// Recompute the full render for the current terminal size.
+fn compute_output(repo: &gix::Repository, cfg: &RenderConfig) -> Result<String> {
     let dims = current_dimensions(cfg.width_offset);
-    let output = build_output(repo, cfg, dims)?;
-    if !should_repaint(&output, displayed) {
-        return Ok(());
-    }
+    build_output(repo, cfg, dims)
+}
 
+/// Paint `output` into the alternate screen, replacing whatever frame is there.
+fn paint_output(output: &str) -> Result<()> {
     let mut out = io::stdout();
     // In raw mode a bare '\n' moves down without returning to column 0, which
     // would stair-step the output; translate to CRLF. Clear first so a shorter
@@ -226,8 +273,6 @@ fn render_now(repo: &gix::Repository, cfg: &RenderConfig, displayed: &mut String
     execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
     write!(out, "{painted}")?;
     out.flush()?;
-
-    *displayed = output;
     Ok(())
 }
 
@@ -432,6 +477,107 @@ mod tests {
             Path::new("/main/wt"),
             &git_dirs,
         ));
+    }
+
+    /// A short debounce keeps the loop tests fast. The events are pre-queued
+    /// before the loop runs, so they drain immediately and never actually wait
+    /// out the window — only the final disconnect costs nothing — which makes
+    /// these tests deterministic regardless of the exact value here.
+    const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
+
+    #[test]
+    fn event_loop_coalesces_a_burst_into_one_repaint() {
+        // A `git commit` is a storm of `.git/` writes; an editor save is a
+        // write+rename. Either way the burst must collapse into a single
+        // status walk and a single repaint, not one per event.
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..5 {
+            tx.send(Event::FsChanged).expect("queue event");
+        }
+        drop(tx); // loop ends once the coalesced batch is rendered
+
+        let mut displayed = String::new();
+        let mut computes = 0usize;
+        let mut paints = 0usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            || {
+                computes += 1;
+                Ok("frame".to_string())
+            },
+            |_output| {
+                paints += 1;
+                Ok(())
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(computes, 1, "a coalesced burst must walk status once");
+        assert_eq!(paints, 1, "a coalesced burst must repaint once");
+        assert_eq!(displayed, "frame");
+    }
+
+    #[test]
+    fn event_loop_suppresses_when_recompute_is_unchanged() {
+        // FS churn that doesn't change the visible state (e.g. `.git/objects`
+        // writes during a commit that we already reflect) must still do the
+        // status walk but produce no repaint.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue event");
+        drop(tx);
+
+        let mut displayed = "unchanged".to_string();
+        let mut computes = 0usize;
+        let mut paints = 0usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            || {
+                computes += 1;
+                Ok("unchanged".to_string())
+            },
+            |_output| {
+                paints += 1;
+                Ok(())
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(computes, 1, "a wake-up still does the status walk");
+        assert_eq!(paints, 0, "byte-identical output must not repaint");
+    }
+
+    #[test]
+    fn event_loop_quit_as_first_event_exits_without_rendering() {
+        // `q` / Ctrl-C before anything else changes must exit cleanly without
+        // a stray recompute or repaint.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Quit).expect("queue quit");
+        drop(tx);
+
+        let mut displayed = String::new();
+        let mut computes = 0usize;
+        let mut paints = 0usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            || {
+                computes += 1;
+                Ok("frame".to_string())
+            },
+            |_output| {
+                paints += 1;
+                Ok(())
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(computes, 0, "Quit must not trigger a recompute");
+        assert_eq!(paints, 0, "Quit must not trigger a repaint");
     }
 
     #[test]
