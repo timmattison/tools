@@ -3449,6 +3449,8 @@ dependencies = [
  "colored",
  "crossterm",
  "gix",
+ "ignore",
+ "notify",
  "tempfile",
  "terminal_size",
  "unicode-width",
