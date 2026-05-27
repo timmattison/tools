@@ -16,6 +16,7 @@ colored.workspace = true
 crossterm.workspace = true
 gix.workspace = true
 ignore.workspace = true
+notify.workspace = true
 terminal_size.workspace = true
 unicode-width.workspace = true
 

@@ -14,13 +14,14 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use ignore::gitignore::Gitignore;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{
     build_output, effective_terminal_height, effective_terminal_width, RenderConfig,
@@ -207,15 +208,115 @@ pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
     paint_output(&displayed)?;
 
     let (tx, rx) = mpsc::channel();
-    spawn_event_reader(tx);
+    spawn_event_reader(tx.clone());
+
+    // The filesystem watcher must outlive the loop — dropping it stops
+    // watching — so keep it bound here. `None` only when there is no worktree
+    // to watch, which `repo::open` already rules out for watch mode.
+    let _watcher = spawn_fs_watcher(repo, tx)?;
 
     event_loop(
         &rx,
         DEBOUNCE,
         &mut displayed,
         || compute_output(repo, cfg),
-        |output| paint_output(output),
+        paint_output,
     )
+}
+
+/// Start the recursive filesystem watcher that feeds [`Event::FsChanged`] into
+/// the loop. Returns the live watcher, which the caller must keep in scope: a
+/// dropped watcher stops delivering events.
+///
+/// The watcher covers the worktree root and — for a linked worktree, whose
+/// `.git` lives outside the worktree — the git dir and shared common dir too,
+/// so commits (which write only under those) still register. Every event path
+/// is run through [`should_react`] *before* a wake-up is sent, so ignored
+/// build churn (`target/`, `node_modules/`) never even reaches the channel.
+fn spawn_fs_watcher(
+    repo: &gix::Repository,
+    tx: Sender<Event>,
+) -> Result<Option<RecommendedWatcher>> {
+    let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
+        return Ok(None);
+    };
+
+    // `git_dir()` is the per-worktree dir; `common_dir()` is the shared store
+    // (they're equal for a normal repo). Both carry state we render.
+    let mut git_dirs = vec![repo.git_dir().to_path_buf()];
+    let common = repo.common_dir().to_path_buf();
+    if !git_dirs.contains(&common) {
+        git_dirs.push(common);
+    }
+
+    let ignore = build_ignore_matcher(repo, &workdir);
+
+    let filter_workdir = workdir.clone();
+    let filter_git_dirs = git_dirs.clone();
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(event) = res else {
+            return;
+        };
+        // One wake-up per relevant event; the loop coalesces bursts anyway, so
+        // there's no value in sending once per path. A send error means the
+        // receiver is gone (loop ended) — nothing left to do.
+        let relevant = event
+            .paths
+            .iter()
+            .any(|path| should_react(path, &ignore, &filter_workdir, &filter_git_dirs));
+        if relevant {
+            let _ = tx.send(Event::FsChanged);
+        }
+    })?;
+
+    // Watch the worktree, plus any git dir that isn't already inside it (a
+    // normal repo's `.git` is covered by the recursive worktree watch; a linked
+    // worktree's dirs are not). A failed watch on one root is non-fatal — the
+    // others still drive refreshes.
+    let _ = watcher.watch(&workdir, RecursiveMode::Recursive);
+    for git_dir in &git_dirs {
+        if !git_dir.starts_with(&workdir) {
+            let _ = watcher.watch(git_dir, RecursiveMode::Recursive);
+        }
+    }
+
+    Ok(Some(watcher))
+}
+
+/// Build the ignore matcher the watcher uses to drop build/dependency churn,
+/// assembled from the repo's ignore sources the way `gix status` honors them:
+/// the worktree-root `.gitignore`, `$GIT_COMMON_DIR/info/exclude`, and the
+/// user's global excludes (`core.excludesFile`, else `~/.config/git/ignore`).
+///
+/// Nested `.gitignore` files deeper in the tree are deliberately *not*
+/// enumerated here: anything they would newly ignore still triggers at most one
+/// *suppressed* status walk, so the byte-identical-output backstop keeps the
+/// rendered view correct, while the high-volume top-level churn this is meant
+/// to filter (`target/`, `node_modules/`) is matched up front.
+fn build_ignore_matcher(repo: &gix::Repository, workdir: &Path) -> Gitignore {
+    let mut builder = GitignoreBuilder::new(workdir);
+    // `add` returns `Some(err)` when a file is missing or unreadable; a repo
+    // without a `.gitignore` is normal, so these are intentionally ignored.
+    let _ = builder.add(workdir.join(".gitignore"));
+    let _ = builder.add(repo.common_dir().join("info").join("exclude"));
+    if let Some(global) = global_excludes_path(repo) {
+        let _ = builder.add(global);
+    }
+    builder.build().unwrap_or_else(|_| Gitignore::empty())
+}
+
+/// Resolve git's global excludes file: an explicit `core.excludesFile` config
+/// value wins, otherwise git's default of `$XDG_CONFIG_HOME/git/ignore`
+/// (falling back to `~/.config/git/ignore`). `None` when neither is locatable.
+fn global_excludes_path(repo: &gix::Repository) -> Option<PathBuf> {
+    if let Some(Ok(path)) = repo.config_snapshot().trusted_path("core.excludesFile") {
+        return Some(path.into_owned());
+    }
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config_home.join("git").join("ignore"))
 }
 
 /// The render loop's terminal-free core: block for an event, coalesce the burst
@@ -526,8 +627,8 @@ mod tests {
         drop(tx); // loop ends once the coalesced batch is rendered
 
         let mut displayed = String::new();
-        let mut computes = 0usize;
-        let mut paints = 0usize;
+        let mut computes = 0_usize;
+        let mut paints = 0_usize;
         event_loop(
             &rx,
             TEST_DEBOUNCE,
@@ -558,8 +659,8 @@ mod tests {
         drop(tx);
 
         let mut displayed = "unchanged".to_string();
-        let mut computes = 0usize;
-        let mut paints = 0usize;
+        let mut computes = 0_usize;
+        let mut paints = 0_usize;
         event_loop(
             &rx,
             TEST_DEBOUNCE,
@@ -588,8 +689,8 @@ mod tests {
         drop(tx);
 
         let mut displayed = String::new();
-        let mut computes = 0usize;
-        let mut paints = 0usize;
+        let mut computes = 0_usize;
+        let mut paints = 0_usize;
         event_loop(
             &rx,
             TEST_DEBOUNCE,
