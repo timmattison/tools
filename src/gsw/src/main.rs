@@ -18,6 +18,7 @@ mod git;
 mod render;
 mod repo;
 mod snapshot;
+mod watch;
 
 #[derive(Parser)]
 #[command(name = "gsw")]
@@ -87,7 +88,7 @@ struct Cli {
 ///   way for consistency.
 ///
 /// `width_offset` always stacks on top, and the result is at least 1.
-fn effective_terminal_width(
+pub(crate) fn effective_terminal_width(
     tty_width: Option<usize>,
     columns_env: Option<usize>,
     stdout_is_tty: bool,
@@ -114,12 +115,12 @@ fn effective_terminal_width(
 /// chrome, and this holds constant across terminal heights (20→16, 40→36).
 /// `watch(1)` uses fewer (~2); reserving the larger value only leaves a couple
 /// of harmless blank rows there, whereas reserving too few clips real content.
-const WRAPPER_CHROME_ROWS: usize = 4;
+pub(crate) const WRAPPER_CHROME_ROWS: usize = 4;
 
 /// Height assumed when no terminal-size signal is available at all (stdout is
 /// piped and the wrapper didn't export `LINES`). Matches the classic VT100
 /// default and the width fallback's spirit.
-const DEFAULT_TERMINAL_HEIGHT: usize = 24;
+pub(crate) const DEFAULT_TERMINAL_HEIGHT: usize = 24;
 
 /// Decide how many terminal rows gsw should fit its output within.
 ///
@@ -129,7 +130,7 @@ const DEFAULT_TERMINAL_HEIGHT: usize = 24;
 /// `terminal_size()` can't see through the pipe. With a direct TTY, use the
 /// queried height. With no signal at all, fall back to
 /// [`DEFAULT_TERMINAL_HEIGHT`].
-fn effective_terminal_height(
+pub(crate) fn effective_terminal_height(
     tty_height: Option<usize>,
     lines_env: Option<usize>,
     stdout_is_tty: bool,
