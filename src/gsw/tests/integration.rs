@@ -605,6 +605,36 @@ fn one_shot_flag_matches_default_piped_output() {
     let dir = setup_repo();
     fs::write(dir.path().join("b.txt"), "untracked\n").unwrap();
 
+    // The two invocations run back-to-back but a fraction of a second apart, so
+    // any age rendered at second granularity ("last commit 0s ago", a file row
+    // ending in "0s") can tick over between them and make the byte comparison
+    // flake. Backdate every age source — the HEAD commit's committer time and
+    // the untracked file's mtime — to a fixed instant over a day in the past so
+    // the formatter renders them as `XdYh` (smallest shown unit is hours);
+    // sub-second drift between the runs then cannot change the bytes.
+    const FIXED_PAST: &str = "2020-01-01T12:34:56 +0000";
+    let amend = Command::new("git")
+        .args(["commit", "--amend", "--no-edit", "--date", FIXED_PAST])
+        .env("GIT_COMMITTER_DATE", FIXED_PAST)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .current_dir(dir.path())
+        .status()
+        .expect("failed to backdate commit");
+    assert!(amend.success(), "git commit --amend (backdate) failed");
+
+    // 2020-01-01T12:34:56 UTC in unix seconds — matches FIXED_PAST so the file
+    // row and the commit age land in the same day-granular bucket.
+    let fixed_mtime =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_577_882_096);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(dir.path().join("b.txt"))
+        .expect("open b.txt to backdate mtime");
+    file.set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
+        .expect("backdate b.txt mtime");
+    drop(file);
+
     let default_piped = run_gsw_args(dir.path(), &[]);
     let explicit_one_shot = run_gsw_args(dir.path(), &["--one-shot"]);
 
