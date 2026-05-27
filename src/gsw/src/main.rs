@@ -314,9 +314,13 @@ pub(crate) struct Render {
 /// the timer". Files with no recorded mtime (deleted files, untracked dirs)
 /// contribute nothing.
 fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
-    // Stub: real "min of commit age and freshest change" arrives with green.
-    let _ = snapshot;
-    None
+    // The youngest item wins, so the timer ticks fast enough for whatever is
+    // freshest. Files with no recorded mtime contribute nothing.
+    let freshest_change = snapshot.files.iter().filter_map(|f| f.age).min();
+    [snapshot.last_commit_age, freshest_change]
+        .into_iter()
+        .flatten()
+        .min()
 }
 
 /// Walk the repository and render the full status output for `dims`.

@@ -190,9 +190,13 @@ fn should_repaint(new: &str, displayed: &str) -> bool {
 ///
 /// [`FADE_DARKEST_AT`]: crate::age::FADE_DARKEST_AT
 pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
-    // Stub: the real fade-model cadence arrives with the green commit.
-    let _ = freshest_age;
-    None
+    if freshest_age < Duration::from_secs(60) {
+        Some(Duration::from_secs(1))
+    } else if freshest_age < crate::age::FADE_DARKEST_AT {
+        Some(Duration::from_secs(60))
+    } else {
+        None
+    }
 }
 
 /// How long the loop keeps draining the channel after the first event before
@@ -396,38 +400,39 @@ where
         // after `interval` of quiet for a tick. `recv` / `recv_timeout` error
         // only once every sender has hung up, which — like an explicit Quit —
         // means we're done.
-        match next_tick(freshest) {
+        let woke_for_tick = match next_tick(freshest) {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
-                Ok(_) => {}
-                // STUB: a decay tick should re-render here; the green commit
-                // replaces this `break` with a tick-driven render.
-                Err(RecvTimeoutError::Timeout) => break,
+                Ok(_) => false,
+                Err(RecvTimeoutError::Timeout) => true, // the interval elapsed: a decay tick
                 Err(RecvTimeoutError::Disconnected) => break,
             },
             None => match rx.recv() {
                 Ok(Event::Quit) => break,
-                Ok(_) => {}
+                Ok(_) => false,
                 Err(_) => break,
             },
-        }
+        };
 
-        // Coalesce the burst: keep draining until the channel stays quiet for a
-        // full `debounce`, folding every further wake-up into this one batch.
-        // A Quit seen mid-drain still renders the pending batch, then exits; a
-        // disconnect (all senders gone) does the same.
+        // Coalesce a filesystem burst: keep draining until the channel stays
+        // quiet for a full `debounce`, folding every further wake-up into this
+        // one batch. A Quit seen mid-drain still renders the pending batch,
+        // then exits; a disconnect (all senders gone) does the same. A decay
+        // tick has no burst behind it, so it skips coalescing and renders now.
         let mut quitting = false;
-        loop {
-            match rx.recv_timeout(debounce) {
-                Ok(Event::Quit) => {
-                    quitting = true;
-                    break;
-                }
-                Ok(_) => {} // another change — fold it in and keep draining
-                Err(RecvTimeoutError::Timeout) => break, // window elapsed
-                Err(RecvTimeoutError::Disconnected) => {
-                    quitting = true;
-                    break;
+        if !woke_for_tick {
+            loop {
+                match rx.recv_timeout(debounce) {
+                    Ok(Event::Quit) => {
+                        quitting = true;
+                        break;
+                    }
+                    Ok(_) => {} // another change — fold it in and keep draining
+                    Err(RecvTimeoutError::Timeout) => break, // window elapsed
+                    Err(RecvTimeoutError::Disconnected) => {
+                        quitting = true;
+                        break;
+                    }
                 }
             }
         }
