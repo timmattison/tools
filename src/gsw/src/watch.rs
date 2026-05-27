@@ -8,10 +8,12 @@
 //! unit-tested without a pty.
 
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use anyhow::Result;
+use ignore::gitignore::Gitignore;
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -100,6 +102,42 @@ pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions 
             height: inputs.tty_height.unwrap_or(DEFAULT_TERMINAL_HEIGHT).max(1),
         },
     }
+}
+
+/// Whether a filesystem event at `path` should wake the render loop.
+///
+/// `gsw` watches the worktree root *and* the git directory recursively — a
+/// linked worktree splits the two (its `.git` is a file pointing at
+/// `<common>/.git/worktrees/<name>`, outside the worktree), so events for
+/// commits arrive from a path the worktree subtree never covers. Both sources
+/// feed this classifier:
+///
+/// - **Git-dir paths are accepted wholesale.** Anything under `git_dirs` (just
+///   `<workdir>/.git` for a normal repo; the worktree git dir *and* the shared
+///   common dir for a linked worktree) reflects a ref / HEAD / index / commit
+///   change that can move the rendered view. The noisy object/pack/log churn
+///   riding along is absorbed downstream by the debounce window and
+///   byte-identical suppression, never by a curated allowlist here — so the
+///   watch filter and `gix status` agree by construction.
+/// - **Ignored worktree paths are dropped.** A change under a path matched by
+///   the repo's ignore set (`target/`, `node_modules/`, …) can never alter what
+///   `gix status` renders, so reacting would only burn a status walk.
+/// - **Every other worktree path is accepted** (tracked, or untracked but not
+///   ignored).
+/// - A path under neither the worktree nor a git dir is accepted defensively;
+///   suppression makes a spurious wake-up free.
+///
+/// `workdir` roots the ignore matcher. [`Gitignore::matched_path_or_any_parents`]
+/// panics on a path outside its root, so the matcher is only consulted for
+/// paths confirmed to be under `workdir` (git-dir paths, which may live outside
+/// the worktree, are classified before it is ever called).
+pub(crate) fn should_react(
+    _path: &Path,
+    _ignore: &Gitignore,
+    _workdir: &Path,
+    _git_dirs: &[PathBuf],
+) -> bool {
+    false
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
@@ -257,6 +295,114 @@ fn restore_terminal() {
 mod tests {
     use super::*;
     use crate::WRAPPER_CHROME_ROWS;
+    use ignore::gitignore::GitignoreBuilder;
+
+    /// Build an ignore matcher rooted at `root` from raw gitignore lines, the
+    /// way the production matcher is assembled from the repo's ignore files.
+    fn matcher(root: &str, patterns: &[&str]) -> Gitignore {
+        let mut builder = GitignoreBuilder::new(root);
+        for pattern in patterns {
+            builder.add_line(None, pattern).expect("valid glob");
+        }
+        builder.build().expect("build matcher")
+    }
+
+    #[test]
+    fn should_react_accepts_a_tracked_or_untracked_non_ignored_worktree_path() {
+        // An edit to a normal source file under the worktree must wake the
+        // loop — it's exactly what gsw exists to show.
+        let ignore = matcher("/repo", &["target/", "*.log"]);
+        let git_dirs = [PathBuf::from("/repo/.git")];
+        assert!(should_react(
+            Path::new("/repo/src/main.rs"),
+            &ignore,
+            Path::new("/repo"),
+            &git_dirs,
+        ));
+    }
+
+    #[test]
+    fn should_react_drops_an_ignored_worktree_file() {
+        // A path matched directly by the ignore set can't change gix status,
+        // so reacting would only burn a status walk.
+        let ignore = matcher("/repo", &["*.log"]);
+        let git_dirs = [PathBuf::from("/repo/.git")];
+        assert!(!should_react(
+            Path::new("/repo/build.log"),
+            &ignore,
+            Path::new("/repo"),
+            &git_dirs,
+        ));
+    }
+
+    #[test]
+    fn should_react_drops_paths_under_an_ignored_directory() {
+        // `target/` ignores the whole subtree: a write to target/debug/app is
+        // build churn gsw must not chase (the cargo-build storm this avoids is
+        // the whole point of the filter).
+        let ignore = matcher("/repo", &["target/"]);
+        let git_dirs = [PathBuf::from("/repo/.git")];
+        assert!(!should_react(
+            Path::new("/repo/target/debug/app"),
+            &ignore,
+            Path::new("/repo"),
+            &git_dirs,
+        ));
+    }
+
+    #[test]
+    fn should_react_accepts_git_head_writes() {
+        // `.git/HEAD` moves on checkout/commit — always visible state.
+        let ignore = matcher("/repo", &["target/"]);
+        let git_dirs = [PathBuf::from("/repo/.git")];
+        assert!(should_react(
+            Path::new("/repo/.git/HEAD"),
+            &ignore,
+            Path::new("/repo"),
+            &git_dirs,
+        ));
+    }
+
+    #[test]
+    fn should_react_accepts_git_object_writes_for_suppression_to_filter() {
+        // `.git/objects/...` churn is accepted at classification time even
+        // though it usually changes nothing visible; byte-identical
+        // suppression — a separate concern — absorbs it downstream.
+        let ignore = matcher("/repo", &["target/"]);
+        let git_dirs = [PathBuf::from("/repo/.git")];
+        assert!(should_react(
+            Path::new("/repo/.git/objects/ab/cdef0123456789"),
+            &ignore,
+            Path::new("/repo"),
+            &git_dirs,
+        ));
+    }
+
+    #[test]
+    fn should_react_accepts_linked_worktree_git_dir_and_common_dir_paths() {
+        // gsw runs inside worktrees: a commit there writes under the worktree
+        // git dir (HEAD/logs) and the shared common dir (objects/refs), both
+        // *outside* the worktree subtree. The ignore matcher must never be
+        // consulted for them (it would panic on an out-of-root path), so they
+        // are accepted purely by git-dir containment.
+        let ignore = matcher("/main/wt", &["target/"]);
+        let git_dirs = [
+            PathBuf::from("/main/.git/worktrees/wt"),
+            PathBuf::from("/main/.git"),
+        ];
+        assert!(should_react(
+            Path::new("/main/.git/worktrees/wt/HEAD"),
+            &ignore,
+            Path::new("/main/wt"),
+            &git_dirs,
+        ));
+        assert!(should_react(
+            Path::new("/main/.git/refs/heads/main"),
+            &ignore,
+            Path::new("/main/wt"),
+            &git_dirs,
+        ));
+    }
 
     #[test]
     fn one_shot_uses_env_dimensions_watch_uses_terminal_size() {
