@@ -132,12 +132,31 @@ pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions 
 /// paths confirmed to be under `workdir` (git-dir paths, which may live outside
 /// the worktree, are classified before it is ever called).
 pub(crate) fn should_react(
-    _path: &Path,
-    _ignore: &Gitignore,
-    _workdir: &Path,
-    _git_dirs: &[PathBuf],
+    path: &Path,
+    ignore: &Gitignore,
+    workdir: &Path,
+    git_dirs: &[PathBuf],
 ) -> bool {
-    false
+    // Git-dir paths win first: they may live outside the worktree (linked
+    // worktree) and so must never reach the worktree-rooted ignore matcher,
+    // which would panic on an out-of-root path.
+    if git_dirs.iter().any(|git_dir| path.starts_with(git_dir)) {
+        return true;
+    }
+
+    if path.starts_with(workdir) {
+        // `matched_path_or_any_parents` walks up to the root, so a write deep
+        // inside an ignored directory (`target/debug/app`) is matched by the
+        // `target/` rule on the parent. Drop the event only when the ignore
+        // set actually claims the path.
+        return !ignore
+            .matched_path_or_any_parents(path, path.is_dir())
+            .is_ignore();
+    }
+
+    // Outside both the worktree and every git dir: unexpected, but cheap to
+    // honor — a redundant wake-up is swallowed by suppression.
+    true
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
