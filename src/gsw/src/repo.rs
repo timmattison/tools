@@ -17,7 +17,11 @@ pub fn open() -> Option<gix::Repository> {
     let repo = gix::discover(".").ok()?;
     // Bare repos have no work tree; gsw renders a per-file working-tree view,
     // so there's nothing to show. Treat them like "not a repo".
-    if repo.workdir().is_some() { Some(repo) } else { None }
+    if repo.workdir().is_some() {
+        Some(repo)
+    } else {
+        None
+    }
 }
 
 /// The short current-branch name (e.g. `main`), or `"HEAD"` when detached —
@@ -264,7 +268,11 @@ pub fn collect_changes(repo: &gix::Repository) -> anyhow::Result<Changes> {
                     let old = blob_bytes(repo, source_id.as_ref());
                     let new = blob_bytes(repo, id.as_ref());
                     staged.insert(key.clone(), line_counts(&old, &new));
-                    let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
+                    let status = if copy {
+                        FileStatus::Copied
+                    } else {
+                        FileStatus::Renamed
+                    };
                     entries.push(FileEntry {
                         path: key,
                         orig_path: Some(source_location.to_string()),
@@ -348,7 +356,11 @@ pub fn collect_changes(repo: &gix::Repository) -> anyhow::Result<Changes> {
                 copy,
                 ..
             }) => {
-                let status = if copy { FileStatus::Copied } else { FileStatus::Renamed };
+                let status = if copy {
+                    FileStatus::Copied
+                } else {
+                    FileStatus::Renamed
+                };
                 entries.push(FileEntry {
                     path: dirwalk_entry.rela_path.to_string(),
                     orig_path: Some(source.rela_path().to_string()),
@@ -371,12 +383,20 @@ pub fn collect_changes(repo: &gix::Repository) -> anyhow::Result<Changes> {
 /// Count added/removed lines between two blobs; flag binaries (NUL in first 8 KiB).
 fn line_counts(old: &[u8], new: &[u8]) -> NumStat {
     if is_binary(old) || is_binary(new) {
-        return NumStat { adds: 0, dels: 0, binary: true };
+        return NumStat {
+            adds: 0,
+            dels: 0,
+            binary: true,
+        };
     }
     use gix::diff::blob::{sources::byte_lines, Algorithm, Diff, InternedInput};
     let input = InternedInput::new(byte_lines(old), byte_lines(new));
     let diff = Diff::compute(Algorithm::Histogram, &input);
-    NumStat { adds: diff.count_additions(), dels: diff.count_removals(), binary: false }
+    NumStat {
+        adds: diff.count_additions(),
+        dels: diff.count_removals(),
+        binary: false,
+    }
 }
 
 fn is_binary(buf: &[u8]) -> bool {
@@ -453,7 +473,11 @@ mod tests {
     /// parallel test runner). Mirrors `open()`'s logic but takes a path.
     fn open_at(path: &Path) -> Option<gix::Repository> {
         let repo = gix::discover(path).ok()?;
-        if repo.workdir().is_some() { Some(repo) } else { None }
+        if repo.workdir().is_some() {
+            Some(repo)
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -560,7 +584,8 @@ mod tests {
         let clone = tempfile::tempdir().expect("tempdir");
         let status = std::process::Command::new("git")
             .args([
-                "clone", "-q",
+                "clone",
+                "-q",
                 origin.path().to_str().unwrap(),
                 clone.path().to_str().unwrap(),
             ])
@@ -591,7 +616,10 @@ mod tests {
         std::fs::write(p.join("a.txt"), "changed\n").unwrap();
         git(p, &["add", "a.txt"]);
         let repo = open_at(p).unwrap();
-        assert_eq!(statuses(&repo), vec![("a.txt".to_string(), FileStatus::Modified, true)]);
+        assert_eq!(
+            statuses(&repo),
+            vec![("a.txt".to_string(), FileStatus::Modified, true)]
+        );
     }
 
     #[test]
@@ -599,7 +627,10 @@ mod tests {
         let dir = init_repo();
         std::fs::write(dir.path().join("a.txt"), "edited\n").unwrap();
         let repo = open_at(dir.path()).unwrap();
-        assert_eq!(statuses(&repo), vec![("a.txt".to_string(), FileStatus::Modified, false)]);
+        assert_eq!(
+            statuses(&repo),
+            vec![("a.txt".to_string(), FileStatus::Modified, false)]
+        );
     }
 
     #[test]
@@ -628,8 +659,15 @@ mod tests {
         std::fs::write(p.join("sub").join("nested.txt"), "y\n").unwrap();
         let repo = open_at(p).unwrap();
         let s = statuses(&repo);
-        assert!(s.contains(&("loose.txt".to_string(), FileStatus::Untracked, false)), "got {s:?}");
-        assert!(s.iter().any(|(path, st, _)| path == "sub/" && *st == FileStatus::UntrackedDir), "got {s:?}");
+        assert!(
+            s.contains(&("loose.txt".to_string(), FileStatus::Untracked, false)),
+            "got {s:?}"
+        );
+        assert!(
+            s.iter()
+                .any(|(path, st, _)| path == "sub/" && *st == FileStatus::UntrackedDir),
+            "got {s:?}"
+        );
     }
 
     #[test]
@@ -641,8 +679,14 @@ mod tests {
         git(p, &["rm", "-q", "a.txt"]);
         let repo = open_at(p).unwrap();
         let s = statuses(&repo);
-        assert!(s.contains(&("added.txt".to_string(), FileStatus::Added, true)), "got {s:?}");
-        assert!(s.contains(&("a.txt".to_string(), FileStatus::Deleted, true)), "got {s:?}");
+        assert!(
+            s.contains(&("added.txt".to_string(), FileStatus::Added, true)),
+            "got {s:?}"
+        );
+        assert!(
+            s.contains(&("a.txt".to_string(), FileStatus::Deleted, true)),
+            "got {s:?}"
+        );
     }
 
     #[test]
@@ -655,7 +699,11 @@ mod tests {
         git(p, &["commit", "-q", "-m", "grow a.txt"]);
         git(p, &["mv", "a.txt", "renamed.txt"]);
         let repo = open_at(p).unwrap();
-        let entry = super::collect_changes(&repo).unwrap().entries.into_iter().find(|e| e.path == "renamed.txt");
+        let entry = super::collect_changes(&repo)
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.path == "renamed.txt");
         // gix may report rename detection OR an add+delete pair depending on
         // config; accept either but if a renamed.txt entry exists it must carry orig_path.
         if let Some(entry) = entry {
@@ -678,7 +726,8 @@ mod tests {
         let s = statuses(&repo);
         // git status shows this as a directory ("?? nested/"); match that.
         assert!(
-            s.iter().any(|(path, st, _)| path == "nested/" && *st == FileStatus::UntrackedDir),
+            s.iter()
+                .any(|(path, st, _)| path == "nested/" && *st == FileStatus::UntrackedDir),
             "untracked nested repo should surface as UntrackedDir 'nested/': {s:?}",
         );
     }
@@ -804,7 +853,8 @@ mod tests {
         let repo = open_at(p).unwrap();
         let s = statuses(&repo);
         assert!(
-            s.iter().any(|(path, st, _)| path == "a.txt" && *st == FileStatus::Conflicted),
+            s.iter()
+                .any(|(path, st, _)| path == "a.txt" && *st == FileStatus::Conflicted),
             "a.txt should be Conflicted after a failed merge: {s:?}",
         );
     }

@@ -19,8 +19,16 @@ fn run_git(dir: &Path, args: &[&str]) {
 }
 
 fn run_gsw(dir: &Path) -> String {
+    run_gsw_args(dir, &[])
+}
+
+/// Run `gsw --no-color <extra…>` in `dir` with stdout captured (not a TTY) and
+/// return its stdout. Capturing the output makes stdout a pipe, which is the
+/// non-TTY path: watch mode auto-falls-back to a single one-shot render.
+fn run_gsw_args(dir: &Path, extra: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
         .arg("--no-color")
+        .args(extra)
         .current_dir(dir)
         .output()
         .expect("failed to invoke gsw");
@@ -107,7 +115,11 @@ fn shows_branch_and_header() {
 #[test]
 fn shows_staged_modification() {
     let dir = setup_repo();
-    fs::write(dir.path().join("a.txt"), "changed line one\nchanged line two\n").unwrap();
+    fs::write(
+        dir.path().join("a.txt"),
+        "changed line one\nchanged line two\n",
+    )
+    .unwrap();
     run_git(dir.path(), &["add", "a.txt"]);
 
     let out = run_gsw(dir.path());
@@ -409,7 +421,10 @@ fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
     let remote = remote_dir.path();
     run_git(remote, &["init", "--bare", "-q", "-b", "main"]);
 
-    run_git(local, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    run_git(
+        local,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
     run_git(local, &["push", "-q", "-u", "origin", "main"]);
 
     // Land a "remote" commit by cloning the bare repo, committing there,
@@ -552,7 +567,10 @@ fn short_file_list_renders_in_full_in_a_short_terminal() {
     for i in 0..12 {
         fs::write(dir.path().join("a.txt"), format!("rev {i}\n")).unwrap();
         run_git(dir.path(), &["add", "a.txt"]);
-        run_git(dir.path(), &["commit", "-q", "-m", &format!("log-subject-{i}")]);
+        run_git(
+            dir.path(),
+            &["commit", "-q", "-m", &format!("log-subject-{i}")],
+        );
     }
     // Exactly two changed files.
     fs::write(dir.path().join("f1.txt"), "one\n").unwrap();
@@ -575,5 +593,67 @@ fn short_file_list_renders_in_full_in_a_short_terminal() {
     assert!(
         !raw.contains("more file"),
         "a 2-file list must not show a truncation footer in a 12-row terminal:\n{raw}",
+    );
+}
+
+#[test]
+fn one_shot_flag_matches_default_piped_output() {
+    // Acceptance: `gsw --one-shot` must be byte-identical to the existing
+    // one-shot render. With stdout captured (non-TTY), the default `gsw`
+    // auto-falls-back to one-shot, so the two invocations must agree exactly.
+    // This pins that adding watch mode did not perturb the one-shot bytes.
+    let dir = setup_repo();
+    fs::write(dir.path().join("b.txt"), "untracked\n").unwrap();
+
+    // The two invocations run back-to-back but a fraction of a second apart, so
+    // any age rendered at second granularity ("last commit 0s ago", a file row
+    // ending in "0s") can tick over between them and make the byte comparison
+    // flake. Backdate every age source — the HEAD commit's committer time and
+    // the untracked file's mtime — to a fixed instant over a day in the past so
+    // the formatter renders them as `XdYh` (smallest shown unit is hours);
+    // sub-second drift between the runs then cannot change the bytes.
+    const FIXED_PAST: &str = "2020-01-01T12:34:56 +0000";
+    let amend = Command::new("git")
+        .args(["commit", "--amend", "--no-edit", "--date", FIXED_PAST])
+        .env("GIT_COMMITTER_DATE", FIXED_PAST)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .current_dir(dir.path())
+        .status()
+        .expect("failed to backdate commit");
+    assert!(amend.success(), "git commit --amend (backdate) failed");
+
+    // 2020-01-01T12:34:56 UTC in unix seconds — matches FIXED_PAST so the file
+    // row and the commit age land in the same day-granular bucket.
+    let fixed_mtime =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_577_882_096);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(dir.path().join("b.txt"))
+        .expect("open b.txt to backdate mtime");
+    file.set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
+        .expect("backdate b.txt mtime");
+    drop(file);
+
+    let default_piped = run_gsw_args(dir.path(), &[]);
+    let explicit_one_shot = run_gsw_args(dir.path(), &["--one-shot"]);
+
+    assert_eq!(
+        default_piped, explicit_one_shot,
+        "`gsw --one-shot` must be byte-identical to default piped `gsw`",
+    );
+}
+
+#[test]
+fn non_tty_renders_once_and_exits() {
+    // Acceptance: with stdout not a TTY, watch mode behaves exactly like
+    // one-shot — it renders the status once and exits zero, never entering the
+    // event loop (which would block forever and hang this captured `output()`
+    // call). Reaching the assertions at all proves it exited.
+    let dir = setup_repo();
+    let out = run_gsw_args(dir.path(), &[]);
+    assert!(
+        out.contains("main"),
+        "a single render should still include the branch name: {out}",
     );
 }
