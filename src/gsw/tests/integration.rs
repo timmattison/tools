@@ -19,8 +19,16 @@ fn run_git(dir: &Path, args: &[&str]) {
 }
 
 fn run_gsw(dir: &Path) -> String {
+    run_gsw_args(dir, &[])
+}
+
+/// Run `gsw --no-color <extra…>` in `dir` with stdout captured (not a TTY) and
+/// return its stdout. Capturing the output makes stdout a pipe, which is the
+/// non-TTY path: watch mode auto-falls-back to a single one-shot render.
+fn run_gsw_args(dir: &Path, extra: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
         .arg("--no-color")
+        .args(extra)
         .current_dir(dir)
         .output()
         .expect("failed to invoke gsw");
@@ -585,5 +593,37 @@ fn short_file_list_renders_in_full_in_a_short_terminal() {
     assert!(
         !raw.contains("more file"),
         "a 2-file list must not show a truncation footer in a 12-row terminal:\n{raw}",
+    );
+}
+
+#[test]
+fn one_shot_flag_matches_default_piped_output() {
+    // Acceptance: `gsw --one-shot` must be byte-identical to the existing
+    // one-shot render. With stdout captured (non-TTY), the default `gsw`
+    // auto-falls-back to one-shot, so the two invocations must agree exactly.
+    // This pins that adding watch mode did not perturb the one-shot bytes.
+    let dir = setup_repo();
+    fs::write(dir.path().join("b.txt"), "untracked\n").unwrap();
+
+    let default_piped = run_gsw_args(dir.path(), &[]);
+    let explicit_one_shot = run_gsw_args(dir.path(), &["--one-shot"]);
+
+    assert_eq!(
+        default_piped, explicit_one_shot,
+        "`gsw --one-shot` must be byte-identical to default piped `gsw`",
+    );
+}
+
+#[test]
+fn non_tty_renders_once_and_exits() {
+    // Acceptance: with stdout not a TTY, watch mode behaves exactly like
+    // one-shot — it renders the status once and exits zero, never entering the
+    // event loop (which would block forever and hang this captured `output()`
+    // call). Reaching the assertions at all proves it exited.
+    let dir = setup_repo();
+    let out = run_gsw_args(dir.path(), &[]);
+    assert!(
+        out.contains("main"),
+        "a single render should still include the branch name: {out}",
     );
 }
