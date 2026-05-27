@@ -104,7 +104,7 @@ pub(crate) fn effective_terminal_width(
 ) -> usize {
     let detected = match (stdout_is_tty, columns_env) {
         (false, Some(cols)) => cols,
-        _ => tty_width.unwrap_or(80),
+        _ => tty_width.unwrap_or(DEFAULT_TERMINAL_WIDTH),
     };
     detected
         .saturating_sub(1)
@@ -124,6 +124,11 @@ pub(crate) fn effective_terminal_width(
 /// `watch(1)` uses fewer (~2); reserving the larger value only leaves a couple
 /// of harmless blank rows there, whereas reserving too few clips real content.
 pub(crate) const WRAPPER_CHROME_ROWS: usize = 4;
+
+/// Width assumed when no terminal-size signal is available at all (stdout is
+/// piped and the wrapper didn't export `COLUMNS`). The classic 80-column
+/// default; the one-cell DECAWM safety margin still applies on top.
+pub(crate) const DEFAULT_TERMINAL_WIDTH: usize = 80;
 
 /// Height assumed when no terminal-size signal is available at all (stdout is
 /// piped and the wrapper didn't export `LINES`). Matches the classic VT100

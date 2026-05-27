@@ -26,7 +26,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{
     build_output, effective_terminal_height, effective_terminal_width, Render, RenderConfig,
-    DEFAULT_TERMINAL_HEIGHT,
+    DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
 };
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
@@ -98,7 +98,7 @@ pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions 
             // width, matching the one-shot path's right-edge behavior.
             width: inputs
                 .tty_width
-                .unwrap_or(80)
+                .unwrap_or(DEFAULT_TERMINAL_WIDTH)
                 .saturating_sub(1)
                 .saturating_sub(inputs.width_offset)
                 .max(1),
