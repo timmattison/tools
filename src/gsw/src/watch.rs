@@ -244,15 +244,44 @@ where
     C: FnMut() -> Result<String>,
     P: FnMut(&str) -> Result<()>,
 {
-    // Stub: render once per event, no coalescing and no suppression.
-    while let Ok(event) = rx.recv() {
-        if matches!(event, Event::Quit) {
+    // Block until something happens. `recv` only errors once every sender has
+    // hung up, which — like an explicit Quit — means we're done.
+    while let Ok(first) = rx.recv() {
+        if matches!(first, Event::Quit) {
             break;
         }
-        let _ = debounce;
+
+        // Coalesce the burst: keep draining until the channel stays quiet for a
+        // full `debounce`, folding every further wake-up into this one batch.
+        // A Quit seen mid-drain still renders the pending batch, then exits; a
+        // disconnect (all senders gone) does the same.
+        let mut quitting = false;
+        loop {
+            match rx.recv_timeout(debounce) {
+                Ok(Event::Quit) => {
+                    quitting = true;
+                    break;
+                }
+                Ok(_) => {} // another change — fold it in and keep draining
+                Err(RecvTimeoutError::Timeout) => break, // window elapsed
+                Err(RecvTimeoutError::Disconnected) => {
+                    quitting = true;
+                    break;
+                }
+            }
+        }
+
+        // One status walk per coalesced batch, and a repaint only when the
+        // result actually differs from what's on screen.
         let output = compute()?;
-        paint(&output)?;
-        *displayed = output;
+        if should_repaint(&output, displayed) {
+            paint(&output)?;
+            *displayed = output;
+        }
+
+        if quitting {
+            break;
+        }
     }
     Ok(())
 }
