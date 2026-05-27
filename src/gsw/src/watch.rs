@@ -24,7 +24,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{
-    build_output, effective_terminal_height, effective_terminal_width, RenderConfig,
+    build_output, effective_terminal_height, effective_terminal_width, Render, RenderConfig,
     DEFAULT_TERMINAL_HEIGHT,
 };
 
@@ -172,6 +172,29 @@ fn should_repaint(new: &str, displayed: &str) -> bool {
     new != displayed
 }
 
+/// Adaptive decay-timer cadence as a pure function of the freshest displayed
+/// item's age (newest commit or working-tree change). Returns how long to wait
+/// before the next time-driven re-render, or `None` when the timer should be
+/// disabled entirely (the freshest item is old enough that nothing visible
+/// changes with the passage of time).
+///
+/// The cadence mirrors the [`crate::age`] fade model — a linear ramp from age 0
+/// to [`FADE_DARKEST_AT`] (2 h), then frozen at the floor — so the timer stops
+/// ticking exactly when the fade stops moving:
+///
+/// | Freshest item age | Tick interval | Why |
+/// | --- | --- | --- |
+/// | `< 1 min` | 1 s | live seconds in the age text; fade moving fast |
+/// | `1 min – 2 h` | 60 s | minute text ticks over; fade moves ~1 RGB unit/min |
+/// | `≥ 2 h` | `None` | fade frozen at the floor — FS events only, idle ≈ 0 |
+///
+/// [`FADE_DARKEST_AT`]: crate::age::FADE_DARKEST_AT
+pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
+    // Stub: the real fade-model cadence arrives with the green commit.
+    let _ = freshest_age;
+    None
+}
+
 /// How long the loop keeps draining the channel after the first event before
 /// it renders — the debounce / coalescing window. A burst of writes (a `git
 /// commit` touching many `.git/` files, an editor's save-and-rename dance)
@@ -179,8 +202,12 @@ fn should_repaint(new: &str, displayed: &str) -> bool {
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
-/// blocks on a single channel carrying these. The decay-timer `Tick` variant
-/// arrives in a later phase.
+/// blocks on a single channel carrying these.
+///
+/// There is deliberately no `Tick` variant: the decay timer is driven by the
+/// loop's own `recv_timeout` window — a timeout *is* a tick — so the cadence is
+/// recomputed after every render with no extra thread to reconfigure (see
+/// [`event_loop`] and [`next_tick`]).
 enum Event {
     /// A non-ignored filesystem path under the worktree or git dir changed.
     /// The path was already classified by [`should_react`] before the event
@@ -203,9 +230,12 @@ enum Event {
 pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
 
-    // Paint the first frame unconditionally (nothing is displayed yet).
-    let mut displayed = compute_output(repo, cfg)?;
-    paint_output(&displayed)?;
+    // Paint the first frame unconditionally (nothing is displayed yet) and seed
+    // the decay-timer cadence from how fresh that frame is.
+    let first = compute_output(repo, cfg)?;
+    paint_output(&first.output)?;
+    let mut displayed = first.output;
+    let initial_freshest = first.freshest_age;
 
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx.clone());
@@ -219,8 +249,11 @@ pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
         &rx,
         DEBOUNCE,
         &mut displayed,
+        initial_freshest,
         || compute_output(repo, cfg),
         paint_output,
+        // No freshest item (empty/clean repo) → disable the timer entirely.
+        |freshest| freshest.and_then(next_tick),
     )
 }
 
@@ -319,37 +352,64 @@ fn global_excludes_path(repo: &gix::Repository) -> Option<PathBuf> {
     Some(config_home.join("git").join("ignore"))
 }
 
-/// The render loop's terminal-free core: block for an event, coalesce the burst
-/// that follows it within the `debounce` window, then recompute once and
-/// repaint only if the output actually changed.
+/// The render loop's terminal-free core: wait for a filesystem event *or* a
+/// decay-timer tick, coalesce any burst within the `debounce` window, then
+/// recompute once and repaint only if the output actually changed.
 ///
-/// `compute` produces the current render string (a status walk); `paint`
-/// displays it. Pulling these out as closures keeps the loop testable without a
-/// TTY or real filesystem events — a test feeds a pre-loaded channel and
-/// asserts how many times each ran. The contract verified there:
+/// The decay timer needs no thread of its own: `next_tick` turns the freshest
+/// displayed-item age (`initial_freshest`, then refreshed from every render's
+/// [`Render::freshest_age`]) into the `recv_timeout` window, so a timeout *is*
+/// a tick and the cadence is recomputed after every render. `None` from
+/// `next_tick` disables the timer — the loop blocks indefinitely on events.
+///
+/// `compute` produces the current [`Render`] (a status walk plus its freshest
+/// age); `paint` displays the frame. Pulling these out as closures keeps the
+/// loop testable without a TTY, real filesystem events, or real time — a test
+/// feeds a pre-loaded channel and an injected `next_tick`, and asserts how many
+/// times each ran. The contract verified there:
 ///
 /// - a burst of events between renders collapses into **one** `compute` and at
 ///   most one `paint` (coalescing);
+/// - a decay tick (a `recv_timeout` timeout) drives a `compute` with no
+///   coalescing, and repaints only if the frame changed;
 /// - a recompute whose output is byte-identical to what's displayed does the
 ///   `compute` (the status walk happened) but **no** `paint` (suppression);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up
 ///   (`recv` / `recv_timeout` returning disconnected).
-fn event_loop<C, P>(
+fn event_loop<C, P, T>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
+    initial_freshest: Option<Duration>,
     mut compute: C,
     mut paint: P,
+    next_tick: T,
 ) -> Result<()>
 where
-    C: FnMut() -> Result<String>,
+    C: FnMut() -> Result<Render>,
     P: FnMut(&str) -> Result<()>,
+    T: Fn(Option<Duration>) -> Option<Duration>,
 {
-    // Block until something happens. `recv` only errors once every sender has
-    // hung up, which — like an explicit Quit — means we're done.
-    while let Ok(first) = rx.recv() {
-        if matches!(first, Event::Quit) {
-            break;
+    let mut freshest = initial_freshest;
+    loop {
+        // Wait for the first event, or — when the decay timer is enabled — wake
+        // after `interval` of quiet for a tick. `recv` / `recv_timeout` error
+        // only once every sender has hung up, which — like an explicit Quit —
+        // means we're done.
+        match next_tick(freshest) {
+            Some(interval) => match rx.recv_timeout(interval) {
+                Ok(Event::Quit) => break,
+                Ok(_) => {}
+                // STUB: a decay tick should re-render here; the green commit
+                // replaces this `break` with a tick-driven render.
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            },
+            None => match rx.recv() {
+                Ok(Event::Quit) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            },
         }
 
         // Coalesce the burst: keep draining until the channel stays quiet for a
@@ -373,12 +433,14 @@ where
         }
 
         // One status walk per coalesced batch, and a repaint only when the
-        // result actually differs from what's on screen.
-        let output = compute()?;
-        if should_repaint(&output, displayed) {
-            paint(&output)?;
-            *displayed = output;
+        // result actually differs from what's on screen. The fresh age feeds
+        // the next iteration's tick cadence.
+        let render = compute()?;
+        if should_repaint(&render.output, displayed) {
+            paint(&render.output)?;
+            *displayed = render.output;
         }
+        freshest = render.freshest_age;
 
         if quitting {
             break;
@@ -387,8 +449,9 @@ where
     Ok(())
 }
 
-/// Recompute the full render for the current terminal size.
-fn compute_output(repo: &gix::Repository, cfg: &RenderConfig) -> Result<String> {
+/// Recompute the full render (frame plus its freshest displayed-item age) for
+/// the current terminal size.
+fn compute_output(repo: &gix::Repository, cfg: &RenderConfig) -> Result<Render> {
     let dims = current_dimensions(cfg.width_offset);
     build_output(repo, cfg, dims)
 }
@@ -513,6 +576,56 @@ mod tests {
     }
 
     #[test]
+    fn next_tick_boundaries_follow_the_fade_model() {
+        use crate::age::FADE_DARKEST_AT;
+
+        // `< 1 min`: tick every second so the live seconds in the age text and
+        // the fast early fade both stay current.
+        assert_eq!(next_tick(Duration::ZERO), Some(Duration::from_secs(1)));
+        assert_eq!(
+            next_tick(Duration::from_secs(59)),
+            Some(Duration::from_secs(1)),
+            "just under a minute is still in the 1 s band",
+        );
+
+        // At and past 1 min, drop to the ~60 s cadence: the minute text changes
+        // only once a minute and the fade moves ~1 RGB unit/min.
+        assert_eq!(
+            next_tick(Duration::from_secs(60)),
+            Some(Duration::from_secs(60)),
+            "exactly one minute crosses into the 60 s band",
+        );
+        assert_eq!(
+            next_tick(Duration::from_secs(60 * 60)),
+            Some(Duration::from_secs(60)),
+            "an hour old still ticks every 60 s",
+        );
+        assert_eq!(
+            next_tick(FADE_DARKEST_AT - Duration::from_secs(1)),
+            Some(Duration::from_secs(60)),
+            "just under 2 h is still in the 60 s band",
+        );
+
+        // At [`FADE_DARKEST_AT`] (2 h) and beyond the fade is frozen at the
+        // floor: nothing visible changes with time, so the timer is disabled.
+        assert_eq!(
+            next_tick(FADE_DARKEST_AT),
+            None,
+            "the fade-floor boundary disables the timer",
+        );
+        assert_eq!(
+            next_tick(FADE_DARKEST_AT + Duration::from_secs(1)),
+            None,
+            "past the floor the timer stays disabled",
+        );
+        assert_eq!(
+            next_tick(Duration::from_secs(60 * 60 * 24 * 30)),
+            None,
+            "a month-old freshest item produces no ticks",
+        );
+    }
+
+    #[test]
     fn should_react_accepts_a_tracked_or_untracked_non_ignored_worktree_path() {
         // An edit to a normal source file under the worktree must wake the
         // loop — it's exactly what gsw exists to show.
@@ -615,6 +728,22 @@ mod tests {
     /// these tests deterministic regardless of the exact value here.
     const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
 
+    /// A `next_tick` that always disables the timer, so the loop blocks purely
+    /// on channel events. The event-driven tests use this to stay independent
+    /// of the decay-timer behavior, which has its own dedicated tests.
+    fn timer_off(_freshest: Option<Duration>) -> Option<Duration> {
+        None
+    }
+
+    /// Build a [`Render`] with the given frame and no freshest age — enough for
+    /// the event-driven loop tests, which don't exercise the cadence.
+    fn frame(output: &str) -> Render {
+        Render {
+            output: output.to_string(),
+            freshest_age: None,
+        }
+    }
+
     #[test]
     fn event_loop_coalesces_a_burst_into_one_repaint() {
         // A `git commit` is a storm of `.git/` writes; an editor save is a
@@ -633,14 +762,16 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            None,
             || {
                 computes += 1;
-                Ok("frame".to_string())
+                Ok(frame("frame"))
             },
             |_output| {
                 paints += 1;
                 Ok(())
             },
+            timer_off,
         )
         .expect("loop");
 
@@ -665,14 +796,16 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            None,
             || {
                 computes += 1;
-                Ok("unchanged".to_string())
+                Ok(frame("unchanged"))
             },
             |_output| {
                 paints += 1;
                 Ok(())
             },
+            timer_off,
         )
         .expect("loop");
 
@@ -695,19 +828,95 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            None,
             || {
                 computes += 1;
-                Ok("frame".to_string())
+                Ok(frame("frame"))
             },
             |_output| {
                 paints += 1;
                 Ok(())
             },
+            timer_off,
         )
         .expect("loop");
 
         assert_eq!(computes, 0, "Quit must not trigger a recompute");
         assert_eq!(paints, 0, "Quit must not trigger a repaint");
+    }
+
+    #[test]
+    fn event_loop_tick_triggers_a_render() {
+        // With no filesystem events at all, the decay timer must still wake the
+        // loop and re-render so the age text and color fade stay current. We
+        // model a tick with a tiny injected interval; the compute closure
+        // queues a Quit so the loop ends right after the tick-driven render.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut computes = 0_usize;
+        let mut paints = 0_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            Some(Duration::ZERO),
+            || {
+                computes += 1;
+                // End the loop right after this first tick-driven render. `tx`
+                // outlives the call, so the channel stays open across the tick.
+                let _ = tx.send(Event::Quit);
+                Ok(Render {
+                    output: format!("tick {computes}"),
+                    freshest_age: Some(Duration::ZERO),
+                })
+            },
+            |_output| {
+                paints += 1;
+                Ok(())
+            },
+            // Tiny interval so the tick fires fast instead of waiting a real
+            // second; the cadence-vs-age mapping is covered by next_tick tests.
+            |_freshest| Some(Duration::from_millis(5)),
+        )
+        .expect("loop");
+
+        assert_eq!(computes, 1, "a decay tick must trigger exactly one recompute");
+        assert_eq!(paints, 1, "the tick-driven render must repaint the new frame");
+    }
+
+    #[test]
+    fn event_loop_tick_with_unchanged_render_does_not_repaint() {
+        // A decay tick recomputes, but if the freshly-rendered frame is
+        // byte-identical to what's displayed (the age text hasn't ticked over
+        // yet), it must do the status walk and skip the repaint — the same
+        // suppression that absorbs no-op filesystem churn.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = "steady".to_string();
+        let mut computes = 0_usize;
+        let mut paints = 0_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            Some(Duration::from_secs(30)),
+            || {
+                computes += 1;
+                let _ = tx.send(Event::Quit);
+                Ok(Render {
+                    output: "steady".to_string(),
+                    freshest_age: Some(Duration::from_secs(30)),
+                })
+            },
+            |_output| {
+                paints += 1;
+                Ok(())
+            },
+            |_freshest| Some(Duration::from_millis(5)),
+        )
+        .expect("loop");
+
+        assert_eq!(computes, 1, "the tick still does the status walk");
+        assert_eq!(paints, 0, "an unchanged tick render must not repaint");
     }
 
     #[test]

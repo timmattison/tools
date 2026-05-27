@@ -9,7 +9,7 @@ use clap::Parser;
 use colored::Colorize;
 
 use crate::git::FileEntry;
-use crate::render::{plan_section_caps, render, LogEntry, RenderOptions};
+use crate::render::{plan_section_caps, render, LogEntry, RenderOptions, Snapshot};
 use crate::snapshot::build_snapshot;
 
 mod age;
@@ -253,7 +253,7 @@ fn main() -> Result<()> {
                     width_offset: cfg.width_offset,
                 },
             );
-            println!("{}", build_output(&repo, &cfg, dims)?);
+            println!("{}", build_output(&repo, &cfg, dims)?.output);
             Ok(())
         }
         watch::Mode::Watch => watch::run(&repo, &cfg),
@@ -292,17 +292,45 @@ pub(crate) struct RenderConfig {
     pub width_offset: usize,
 }
 
+/// A rendered frame plus the metadata watch mode needs to schedule its next
+/// time-driven refresh. One-shot mode reads only [`Render::output`]; watch mode
+/// also uses [`Render::freshest_age`] to pick the decay-timer cadence.
+pub(crate) struct Render {
+    /// The colored, multi-line frame, ready to print or paint.
+    pub output: String,
+    /// Age of the freshest displayed item (newest commit or working-tree
+    /// change), or `None` when nothing aging is on screen. Drives the adaptive
+    /// decay-timer cadence via [`watch::next_tick`].
+    pub freshest_age: Option<Duration>,
+}
+
+/// Age of the freshest item the frame displays — the newest commit or the most
+/// recent working-tree change, whichever is younger.
+///
+/// This is what the watch-mode decay timer keys its cadence off: a young frame
+/// ticks fast to keep the live seconds/minutes text and the color fade current,
+/// while an old one lets the timer idle. `None` means nothing aging is on
+/// screen (no commits *and* a clean tree), which the caller reads as "disable
+/// the timer". Files with no recorded mtime (deleted files, untracked dirs)
+/// contribute nothing.
+fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
+    // Stub: real "min of commit age and freshest change" arrives with green.
+    let _ = snapshot;
+    None
+}
+
 /// Walk the repository and render the full status output for `dims`.
 ///
-/// Pure with respect to the terminal: it returns the rendered string and never
-/// touches stdout, so callers decide how to display it — one-shot prints it,
-/// watch mode paints it into the alternate screen. The row-budget split
-/// (file list vs. log section) is computed here from `dims.height`.
+/// Pure with respect to the terminal: it returns the rendered frame (and the
+/// freshest displayed-item age for the decay timer) and never touches stdout,
+/// so callers decide how to display it — one-shot prints it, watch mode paints
+/// it into the alternate screen. The row-budget split (file list vs. log
+/// section) is computed here from `dims.height`.
 pub(crate) fn build_output(
     repo: &gix::Repository,
     cfg: &RenderConfig,
     dims: watch::Dimensions,
-) -> Result<String> {
+) -> Result<Render> {
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
@@ -387,7 +415,12 @@ pub(crate) fn build_output(
         truecolor: cfg.truecolor,
     };
 
-    Ok(render(&snapshot, &opts))
+    let output = render(&snapshot, &opts);
+    let freshest_age = snapshot_freshest_age(&snapshot);
+    Ok(Render {
+        output,
+        freshest_age,
+    })
 }
 
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
@@ -448,6 +481,102 @@ fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::FileStatus;
+    use crate::render::RenderEntry;
+
+    /// Build a minimal [`Snapshot`] with the given HEAD-commit age and a file
+    /// row per supplied mtime age, so the freshest-age tests can exercise the
+    /// commit-vs-change comparison without walking a real repo.
+    fn snapshot_with(
+        last_commit_age: Option<Duration>,
+        file_ages: &[Option<Duration>],
+    ) -> Snapshot {
+        let files = file_ages
+            .iter()
+            .enumerate()
+            .map(|(i, age)| RenderEntry {
+                path: format!("f{i}.rs"),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: false,
+                adds: 0,
+                dels: 0,
+                binary: false,
+                age: *age,
+            })
+            .collect();
+        Snapshot {
+            branch: "b".into(),
+            base: "main".into(),
+            commits_ahead: 0,
+            last_commit_age,
+            files,
+            log: Vec::new(),
+            upstream: None,
+        }
+    }
+
+    #[test]
+    fn freshest_age_picks_the_younger_of_commit_and_change() {
+        // Both a recent commit and a recent edit are on screen; the timer must
+        // key off whichever is younger so it ticks fast enough for both.
+        let snap = snapshot_with(
+            Some(Duration::from_secs(100)),
+            &[Some(Duration::from_secs(30))],
+        );
+        assert_eq!(
+            snapshot_freshest_age(&snap),
+            Some(Duration::from_secs(30)),
+            "the freshest change (30s) is younger than the commit (100s)",
+        );
+
+        let snap = snapshot_with(
+            Some(Duration::from_secs(30)),
+            &[Some(Duration::from_secs(100))],
+        );
+        assert_eq!(
+            snapshot_freshest_age(&snap),
+            Some(Duration::from_secs(30)),
+            "the commit (30s) is younger than the freshest change (100s)",
+        );
+    }
+
+    #[test]
+    fn freshest_age_uses_commit_when_tree_is_clean() {
+        // No working-tree changes: the newest commit is the only aging item.
+        let snap = snapshot_with(Some(Duration::from_secs(42)), &[]);
+        assert_eq!(snapshot_freshest_age(&snap), Some(Duration::from_secs(42)));
+    }
+
+    #[test]
+    fn freshest_age_uses_change_when_there_is_no_commit() {
+        // Fresh repo with no commits but a staged/edited file: the change ages.
+        let snap = snapshot_with(None, &[Some(Duration::from_secs(45))]);
+        assert_eq!(snapshot_freshest_age(&snap), Some(Duration::from_secs(45)));
+    }
+
+    #[test]
+    fn freshest_age_ignores_files_without_an_mtime() {
+        // Deleted files / untracked dirs carry no mtime; they must not drag the
+        // freshest age toward zero or otherwise distort the cadence.
+        let snap = snapshot_with(
+            Some(Duration::from_secs(90)),
+            &[None, Some(Duration::from_secs(50)), None],
+        );
+        assert_eq!(
+            snapshot_freshest_age(&snap),
+            Some(Duration::from_secs(50)),
+            "the only file with an mtime (50s) wins over the 90s commit",
+        );
+    }
+
+    #[test]
+    fn freshest_age_is_none_for_an_empty_clean_repo() {
+        // Nothing aging on screen (no commits, clean tree) → the timer should
+        // be disabled, which the caller infers from `None`.
+        let snap = snapshot_with(None, &[None, None]);
+        assert_eq!(snapshot_freshest_age(&snap), None);
+    }
 
     #[test]
     fn decide_mode_truth_table() {
