@@ -22,7 +22,7 @@ pub fn render_bar(value: u32, max: u32, width: usize) -> String {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "ratio is clamped to [0,1], so the result fits in usize for any sensible width",
+        reason = "ratio is clamped to [0,1], so the result fits in usize for any sensible width"
     )]
     let total_eighths = (ratio * (width as f64) * 8.0).round() as usize;
     let full_cells = (total_eighths / 8).min(width);

@@ -131,9 +131,12 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
         let hidden = snapshot.files.len().saturating_sub(display_count);
         if hidden > 0 {
             lines.push(
-                format!("  +{hidden} more file{}", if hidden == 1 { "" } else { "s" })
-                    .dimmed()
-                    .to_string(),
+                format!(
+                    "  +{hidden} more file{}",
+                    if hidden == 1 { "" } else { "s" }
+                )
+                .dimmed()
+                .to_string(),
             );
         }
     }
@@ -172,13 +175,7 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool) -> String {
 /// path column and for padding the gutter on untracked rows that skip the
 /// bar/adds/dels so the age column still aligns.
 fn right_block_width(bar_width: usize) -> usize {
-    bar_width
-        + SEP_BAR_ADDS
-        + ADDS_FIELD
-        + SEP_ADDS_DELS
-        + DELS_FIELD
-        + SEP_DELS_AGE
-        + AGE_FIELD
+    bar_width + SEP_BAR_ADDS + ADDS_FIELD + SEP_ADDS_DELS + DELS_FIELD + SEP_DELS_AGE + AGE_FIELD
 }
 
 fn compute_path_width(opts: &RenderOptions) -> usize {
@@ -188,7 +185,11 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
 }
 
 fn header_text(snap: &Snapshot) -> String {
-    let commit_word = if snap.commits_ahead == 1 { "commit" } else { "commits" };
+    let commit_word = if snap.commits_ahead == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
     let age = snap
         .last_commit_age
         .map_or_else(|| "?".to_string(), format_age_detailed);
@@ -246,7 +247,11 @@ fn render_row(
     let bar_raw = if entry.binary {
         center("bin", opts.bar_width)
     } else {
-        render_bar(entry.adds.saturating_add(entry.dels), max_change, opts.bar_width)
+        render_bar(
+            entry.adds.saturating_add(entry.dels),
+            max_change,
+            opts.bar_width,
+        )
     };
     let bar_str = colorize_bar(&bar_raw, entry, factor, truecolor);
 
@@ -307,12 +312,7 @@ fn icon_and_letter(entry: &RenderEntry) -> (char, char) {
     (icon, letter)
 }
 
-fn colorize_icon(
-    icon: char,
-    entry: &RenderEntry,
-    factor: f32,
-    truecolor: bool,
-) -> ColoredString {
+fn colorize_icon(icon: char, entry: &RenderEntry, factor: f32, truecolor: bool) -> ColoredString {
     let s = icon.to_string();
     if truecolor {
         let base = match entry.status {
@@ -361,12 +361,7 @@ fn colorize_letter(
     }
 }
 
-fn colorize_path(
-    path: &str,
-    entry: &RenderEntry,
-    factor: f32,
-    truecolor: bool,
-) -> ColoredString {
+fn colorize_path(path: &str, entry: &RenderEntry, factor: f32, truecolor: bool) -> ColoredString {
     if truecolor {
         let base = match entry.status {
             FileStatus::Conflicted => FILE_PATH_CONFLICT_RGB,
@@ -490,12 +485,7 @@ fn colorize_age_ansi(text: &str, age: Option<Duration>) -> ColoredString {
 /// intentionally dropped because the gradient itself communicates
 /// freshness (no need to double-encode it with text decorations).
 /// Without truecolor, falls through to the legacy bucket styling.
-fn colorize_age(
-    text: &str,
-    age: Option<Duration>,
-    factor: f32,
-    truecolor: bool,
-) -> ColoredString {
+fn colorize_age(text: &str, age: Option<Duration>, factor: f32, truecolor: bool) -> ColoredString {
     if truecolor {
         let (r, g, b) = fade_rgb(FILE_AGE_RGB, factor);
         return text.truecolor(r, g, b);
@@ -861,13 +851,7 @@ mod tests {
         }
     }
 
-    fn entry(
-        path: &str,
-        status: FileStatus,
-        staged: bool,
-        adds: u32,
-        dels: u32,
-    ) -> RenderEntry {
+    fn entry(path: &str, status: FileStatus, staged: bool, adds: u32, dels: u32) -> RenderEntry {
         RenderEntry {
             path: path.into(),
             orig_path: None,
@@ -1065,8 +1049,14 @@ mod tests {
         let snap = snap_with(vec![e]);
         let out = strip_ansi(&render(&snap, &opts()));
         let row = out.lines().nth(2).unwrap_or("");
-        assert!(row.contains("src/old.rs"), "rename should show old path: {row}");
-        assert!(row.contains("src/new.rs"), "rename should show new path: {row}");
+        assert!(
+            row.contains("src/old.rs"),
+            "rename should show old path: {row}"
+        );
+        assert!(
+            row.contains("src/new.rs"),
+            "rename should show new path: {row}"
+        );
         assert!(row.contains('→'), "rename should use arrow: {row}");
     }
 
@@ -1142,7 +1132,10 @@ mod tests {
         ));
         assert!(out.contains("f0.rs"));
         assert!(out.contains("f2.rs"));
-        assert!(!out.contains("f3.rs"), "files past the limit should be hidden");
+        assert!(
+            !out.contains("f3.rs"),
+            "files past the limit should be hidden"
+        );
         assert!(
             out.contains("7 more"),
             "footer should report hidden count: {out}",
@@ -1197,7 +1190,10 @@ mod tests {
             big_filled > small_filled,
             "big-change row should have more full cells than small: big={big_filled}, small={small_filled}",
         );
-        assert!(big_filled >= 6, "biggest change should fill the bar: {big_row}");
+        assert!(
+            big_filled >= 6,
+            "biggest change should fill the bar: {big_row}"
+        );
     }
 
     #[test]
@@ -1297,7 +1293,10 @@ mod tests {
         // down). Each non-empty section must keep at least one row so we
         // never silently hide a section that has content.
         let (f, l) = plan_section_caps(1, 100, 10);
-        assert!(f >= 1, "non-empty file section must get at least 1 row, got {f}");
+        assert!(
+            f >= 1,
+            "non-empty file section must get at least 1 row, got {f}"
+        );
         assert_eq!(f + l, 10, "all rows should be allocated when overflowing");
     }
 
@@ -1349,7 +1348,10 @@ mod tests {
         // the log section should get exactly those 3 rows rather than 5
         // rows with two empty lines at the bottom.
         let (f, l) = plan_section_caps(100, 3, 20);
-        assert_eq!(l, 3, "log cap should equal demand when demand < floor, got {l}");
+        assert_eq!(
+            l, 3,
+            "log cap should equal demand when demand < floor, got {l}"
+        );
         assert_eq!(f, 17, "file section should get the remaining rows, got {f}");
     }
 
@@ -1701,8 +1703,18 @@ mod tests {
         use colored::Color;
         let fresh = colorize_log_hash("abc1234", Duration::from_secs(0), true);
         let hour = colorize_log_hash("abc1234", Duration::from_secs(60 * 60), true);
-        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }), Some(Color::TrueColor { r: hr, g: hg, b: hb })) =
-            (fresh.fgcolor, hour.fgcolor)
+        let (
+            Some(Color::TrueColor {
+                r: fr,
+                g: fg,
+                b: fb,
+            }),
+            Some(Color::TrueColor {
+                r: hr,
+                g: hg,
+                b: hb,
+            }),
+        ) = (fresh.fgcolor, hour.fgcolor)
         else {
             panic!("both should be TrueColor under truecolor=true");
         };
@@ -1719,11 +1731,7 @@ mod tests {
         // the FADE_FLOOR fraction of its base value.
         use crate::age::FADE_FLOOR;
         use colored::Color;
-        let cs = colorize_log_hash(
-            "abc1234",
-            Duration::from_secs(60 * 60 * 24 * 7),
-            true,
-        );
+        let cs = colorize_log_hash("abc1234", Duration::from_secs(60 * 60 * 24 * 7), true);
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
@@ -1775,7 +1783,10 @@ mod tests {
         else {
             panic!("both should be TrueColor under truecolor=true");
         };
-        assert!(hr < fr, "hour-old subject should be darker than fresh: {fr} -> {hr}");
+        assert!(
+            hr < fr,
+            "hour-old subject should be darker than fresh: {fr} -> {hr}"
+        );
     }
 
     #[test]
@@ -1798,7 +1809,10 @@ mod tests {
         else {
             panic!("both should be TrueColor under truecolor=true");
         };
-        assert!(hr < fr, "hour-old age column should be darker than fresh: {fr} -> {hr}");
+        assert!(
+            hr < fr,
+            "hour-old age column should be darker than fresh: {fr} -> {hr}"
+        );
     }
 
     #[test]
@@ -1829,8 +1843,13 @@ mod tests {
         let aged = colorize_age("3d0h", Some(Duration::from_secs(3 * 86400)), 1.0, true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
             (fresh.fgcolor, aged.fgcolor)
-        else { panic!("both should be TrueColor") };
-        assert!(ar < fr, "aged file-age column should be darker: fresh={fr} aged={ar}");
+        else {
+            panic!("both should be TrueColor")
+        };
+        assert!(
+            ar < fr,
+            "aged file-age column should be darker: fresh={fr} aged={ar}"
+        );
     }
 
     #[test]
@@ -1917,9 +1936,18 @@ mod tests {
         let e = entry("src/foo.rs", FileStatus::Modified, false, 1, 0);
         let fresh = colorize_path("src/foo.rs", &e, 0.0, true);
         let aged = colorize_path("src/foo.rs", &e, 1.0, true);
-        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }),
-             Some(Color::TrueColor { r: ar, g: ag, b: ab })) =
-            (fresh.fgcolor, aged.fgcolor)
+        let (
+            Some(Color::TrueColor {
+                r: fr,
+                g: fg,
+                b: fb,
+            }),
+            Some(Color::TrueColor {
+                r: ar,
+                g: ag,
+                b: ab,
+            }),
+        ) = (fresh.fgcolor, aged.fgcolor)
         else {
             panic!("both should be TrueColor under truecolor=true");
         };
@@ -2020,8 +2048,13 @@ mod tests {
         let aged = colorize_letter('D', &e, 1.0, true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
             (fresh.fgcolor, aged.fgcolor)
-        else { panic!("both should be TrueColor") };
-        assert!(ar < fr, "aged letter should be darker: fresh={fr} aged={ar}");
+        else {
+            panic!("both should be TrueColor")
+        };
+        assert!(
+            ar < fr,
+            "aged letter should be darker: fresh={fr} aged={ar}"
+        );
     }
 
     #[test]
@@ -2063,10 +2096,13 @@ mod tests {
         use colored::Color;
         let fresh = colorize_adds("  +12", 0.0, true);
         let aged = colorize_adds("  +12", 1.0, true);
-        let (Some(Color::TrueColor { r: fr, g: fg, .. }),
-             Some(Color::TrueColor { r: ar, g: ag, .. })) =
-            (fresh.fgcolor, aged.fgcolor)
-        else { panic!("both should be TrueColor") };
+        let (
+            Some(Color::TrueColor { r: fr, g: fg, .. }),
+            Some(Color::TrueColor { r: ar, g: ag, .. }),
+        ) = (fresh.fgcolor, aged.fgcolor)
+        else {
+            panic!("both should be TrueColor")
+        };
         assert!(ar < fr || ag < fg, "aged +adds should be darker");
     }
 
@@ -2078,10 +2114,21 @@ mod tests {
         let aged = colorize_bar_styled("██████", &e, 1.0, true);
         // We expect the first cell's fg to be TrueColor in both cases and
         // the aged channel to be strictly lower.
-        let (Some(Color::TrueColor { r: fr, g: fg, b: fb }),
-             Some(Color::TrueColor { r: ar, g: ag, b: ab })) =
-            (fresh[0].fgcolor, aged[0].fgcolor)
-        else { panic!("first cell should be TrueColor under truecolor=true") };
+        let (
+            Some(Color::TrueColor {
+                r: fr,
+                g: fg,
+                b: fb,
+            }),
+            Some(Color::TrueColor {
+                r: ar,
+                g: ag,
+                b: ab,
+            }),
+        ) = (fresh[0].fgcolor, aged[0].fgcolor)
+        else {
+            panic!("first cell should be TrueColor under truecolor=true")
+        };
         assert!(
             ar < fr || ag < fg || ab < fb,
             "aged bar fill should be darker on at least one channel",
@@ -2098,8 +2145,13 @@ mod tests {
         let aged = colorize_bar_styled("▍", &e, 1.0, true);
         let (Some(Color::TrueColor { g: fg, .. }), Some(Color::TrueColor { g: ag, .. })) =
             (fresh[0].bgcolor, aged[0].bgcolor)
-        else { panic!("partial cell should have a TrueColor background") };
-        assert!(ag < fg, "aged partial-cell bg should be darker: fresh={fg} aged={ag}");
+        else {
+            panic!("partial cell should have a TrueColor background")
+        };
+        assert!(
+            ag < fg,
+            "aged partial-cell bg should be darker: fresh={fg} aged={ag}"
+        );
     }
 
     #[test]
@@ -2241,7 +2293,10 @@ mod tests {
                 j += 1;
             }
             if j > start {
-                let r: u8 = std::str::from_utf8(&bytes[start..j]).unwrap().parse().unwrap();
+                let r: u8 = std::str::from_utf8(&bytes[start..j])
+                    .unwrap()
+                    .parse()
+                    .unwrap();
                 assert!(
                     r <= upper,
                     "every channel on a no-age row should sit at or below the floor (got {r}, upper {upper})",
@@ -2250,7 +2305,10 @@ mod tests {
             }
             i = j;
         }
-        assert!(saw_any, "should have emitted at least one truecolor sequence");
+        assert!(
+            saw_any,
+            "should have emitted at least one truecolor sequence"
+        );
     }
 
     /// Shared invariant: every pair of *distinct* base RGBs in `palette`
@@ -2353,8 +2411,13 @@ mod tests {
         let aged = colorize_bar_styled("bin", &e, 1.0, true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: ar, .. })) =
             (fresh[0].fgcolor, aged[0].fgcolor)
-        else { panic!("both should be TrueColor under truecolor=true") };
-        assert!(ar < fr, "aged binary marker should be darker: fresh={fr} aged={ar}");
+        else {
+            panic!("both should be TrueColor under truecolor=true")
+        };
+        assert!(
+            ar < fr,
+            "aged binary marker should be darker: fresh={fr} aged={ar}"
+        );
     }
 
     #[test]

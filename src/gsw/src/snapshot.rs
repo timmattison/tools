@@ -13,7 +13,7 @@ use crate::render::{RenderEntry, Snapshot};
 /// `ages` maps file path → mtime age; missing entries become `None`.
 #[allow(
     clippy::too_many_arguments,
-    reason = "build_snapshot fans in five distinct inputs; grouping them obscures rather than clarifies",
+    reason = "build_snapshot fans in five distinct inputs; grouping them obscures rather than clarifies"
 )]
 pub fn build_snapshot(
     branch: String,
@@ -417,4 +417,3 @@ mod tests {
         assert_eq!(snap.files[0].dels, 0);
     }
 }
-

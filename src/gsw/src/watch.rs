@@ -18,6 +18,11 @@ pub(crate) enum Mode {
     /// logic so `gsw | …` and `viddy gsw` keep working unchanged.
     OneShot,
     /// Long-lived watch loop that owns the whole pane.
+    #[allow(
+        dead_code,
+        reason = "constructed once the watch loop is wired later in this phase; \
+                  until then only resolve_dimensions' unit test exercises this arm"
+    )]
     Watch,
 }
 
@@ -57,8 +62,34 @@ pub(crate) struct SizeInputs {
 ///   **no** wrapper chrome rows. The one-cell width safety margin (DECAWM) and
 ///   the user's `width_offset` still apply.
 pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions {
-    let _ = (mode, inputs);
-    todo!("resolve_dimensions not yet implemented")
+    match mode {
+        Mode::OneShot => Dimensions {
+            width: effective_terminal_width(
+                inputs.tty_width,
+                inputs.columns_env,
+                inputs.stdout_is_tty,
+                inputs.width_offset,
+            ),
+            height: effective_terminal_height(
+                inputs.tty_height,
+                inputs.lines_env,
+                inputs.stdout_is_tty,
+            ),
+        },
+        Mode::Watch => Dimensions {
+            // Watch owns the whole pane: ignore COLUMNS/LINES, take the size
+            // from terminal_size, and reserve no wrapper chrome. The one-cell
+            // DECAWM safety margin and the user's width_offset still apply to
+            // width, matching the one-shot path's right-edge behavior.
+            width: inputs
+                .tty_width
+                .unwrap_or(80)
+                .saturating_sub(1)
+                .saturating_sub(inputs.width_offset)
+                .max(1),
+            height: inputs.tty_height.unwrap_or(DEFAULT_TERMINAL_HEIGHT).max(1),
+        },
+    }
 }
 
 #[cfg(test)]

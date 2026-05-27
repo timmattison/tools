@@ -147,11 +147,7 @@ pub(crate) fn effective_terminal_height(
 /// a TTY *and* `COLUMNS` is set in env), and the user has not asked to
 /// suppress colors via `NO_COLOR`. The wrapper renders the captured bytes
 /// inside its own TTY-backed UI, so colors should pass through.
-fn should_force_colors(
-    stdout_is_tty: bool,
-    columns_env_present: bool,
-    no_color_env: bool,
-) -> bool {
+fn should_force_colors(stdout_is_tty: bool, columns_env_present: bool, no_color_env: bool) -> bool {
     !stdout_is_tty && columns_env_present && !no_color_env
 }
 
@@ -195,9 +191,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let columns_env: Option<usize> = std::env::var("COLUMNS")
-        .ok()
-        .and_then(|s| s.parse().ok());
+    let columns_env: Option<usize> = std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok());
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
     let colorterm_env = std::env::var("COLORTERM").ok();
     let truecolor = effective_truecolor(
@@ -253,13 +247,23 @@ fn main() -> Result<()> {
 
     snapshot.upstream = repo::upstream_status(&repo);
 
-    let tty_size = terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
-    let tty_width = tty_size.map(|(w, _)| w);
-    let tty_height = tty_size.map(|(_, h)| h);
+    let tty_size =
+        terminal_size::terminal_size().map(|(w, h)| (usize::from(w.0), usize::from(h.0)));
     let lines_env: Option<usize> = std::env::var("LINES").ok().and_then(|s| s.parse().ok());
-    let terminal_height = effective_terminal_height(tty_height, lines_env, stdout_is_tty);
-    let terminal_width =
-        effective_terminal_width(tty_width, columns_env, stdout_is_tty, cli.width_offset);
+    let watch::Dimensions {
+        width: terminal_width,
+        height: terminal_height,
+    } = watch::resolve_dimensions(
+        watch::Mode::OneShot,
+        &watch::SizeInputs {
+            tty_width: tty_size.map(|(w, _)| w),
+            tty_height: tty_size.map(|(_, h)| h),
+            columns_env,
+            lines_env,
+            stdout_is_tty,
+            width_offset: cli.width_offset,
+        },
+    );
 
     // Split available terminal rows between the file list and the log
     // section based on what each actually needs to show. Chrome we
@@ -277,7 +281,11 @@ fn main() -> Result<()> {
     let file_count = snapshot.files.len();
     let log_count = snapshot.log.len();
     let header_chrome: usize = 2;
-    let inter_chrome: usize = if file_count > 0 && log_count > 0 { 1 } else { 0 };
+    let inter_chrome: usize = if file_count > 0 && log_count > 0 {
+        1
+    } else {
+        0
+    };
     let footer_chrome: usize = if file_count > 0 { 1 } else { 0 };
     let chrome = header_chrome + inter_chrome + footer_chrome;
     let available_rows = terminal_height.saturating_sub(chrome).max(1);
@@ -289,7 +297,11 @@ fn main() -> Result<()> {
     // section just takes whatever rows are left over up to its demand.
     let (file_cap_opt, log_cap) = match cli.max_files {
         Some(n) => {
-            let consumed_by_files = if n == 0 { file_count } else { n.min(file_count) };
+            let consumed_by_files = if n == 0 {
+                file_count
+            } else {
+                n.min(file_count)
+            };
             let log_budget = available_rows.saturating_sub(consumed_by_files);
             (Some(n), log_count.min(log_budget))
         }
@@ -538,7 +550,13 @@ mod tests {
         // Symmetric escape hatch: users on truecolor terminals can opt
         // back to the legacy 8-color path (e.g. screen-recording, or just
         // preferring the look).
-        assert!(!effective_truecolor(false, false, true, false, Some("truecolor")));
+        assert!(!effective_truecolor(
+            false,
+            false,
+            true,
+            false,
+            Some("truecolor")
+        ));
     }
 
     #[test]
@@ -546,15 +564,39 @@ mod tests {
         // `--no-color` / `$NO_COLOR` mean "no colors at all" — overriding
         // them with `--truecolor` would re-enable the very thing the user
         // opted out of. Honor the opt-out.
-        assert!(!effective_truecolor(true, true, false, false, Some("truecolor")));
-        assert!(!effective_truecolor(false, true, false, true, Some("truecolor")));
+        assert!(!effective_truecolor(
+            true,
+            true,
+            false,
+            false,
+            Some("truecolor")
+        ));
+        assert!(!effective_truecolor(
+            false,
+            true,
+            false,
+            true,
+            Some("truecolor")
+        ));
     }
 
     #[test]
     fn truecolor_auto_uses_colorterm_when_no_flags() {
         // No CLI overrides → fall back to the existing COLORTERM detection.
-        assert!(effective_truecolor(false, false, false, false, Some("truecolor")));
+        assert!(effective_truecolor(
+            false,
+            false,
+            false,
+            false,
+            Some("truecolor")
+        ));
         assert!(!effective_truecolor(false, false, false, false, None));
-        assert!(!effective_truecolor(false, false, false, false, Some("xterm-256color")));
+        assert!(!effective_truecolor(
+            false,
+            false,
+            false,
+            false,
+            Some("xterm-256color")
+        ));
     }
 }

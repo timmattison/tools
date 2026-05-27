@@ -107,7 +107,11 @@ fn shows_branch_and_header() {
 #[test]
 fn shows_staged_modification() {
     let dir = setup_repo();
-    fs::write(dir.path().join("a.txt"), "changed line one\nchanged line two\n").unwrap();
+    fs::write(
+        dir.path().join("a.txt"),
+        "changed line one\nchanged line two\n",
+    )
+    .unwrap();
     run_git(dir.path(), &["add", "a.txt"]);
 
     let out = run_gsw(dir.path());
@@ -409,7 +413,10 @@ fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
     let remote = remote_dir.path();
     run_git(remote, &["init", "--bare", "-q", "-b", "main"]);
 
-    run_git(local, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    run_git(
+        local,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
     run_git(local, &["push", "-q", "-u", "origin", "main"]);
 
     // Land a "remote" commit by cloning the bare repo, committing there,
@@ -552,7 +559,10 @@ fn short_file_list_renders_in_full_in_a_short_terminal() {
     for i in 0..12 {
         fs::write(dir.path().join("a.txt"), format!("rev {i}\n")).unwrap();
         run_git(dir.path(), &["add", "a.txt"]);
-        run_git(dir.path(), &["commit", "-q", "-m", &format!("log-subject-{i}")]);
+        run_git(
+            dir.path(),
+            &["commit", "-q", "-m", &format!("log-subject-{i}")],
+        );
     }
     // Exactly two changed files.
     fs::write(dir.path().join("f1.txt"), "one\n").unwrap();
