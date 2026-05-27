@@ -159,6 +159,17 @@ pub(crate) fn should_react(
     true
 }
 
+/// Whether freshly-computed output warrants a repaint, i.e. it differs from
+/// what is already on screen.
+///
+/// Byte-identical output is suppressed. This is what makes watching all of
+/// `.git/` (and reacting to any accepted event) cheap: object/pack/log churn
+/// that doesn't change the visible state costs at most one status walk — never
+/// a repaint, never a flicker.
+fn should_repaint(_new: &str, _displayed: &str) -> bool {
+    true
+}
+
 /// Events the watch loop reacts to. The main thread owns all rendering and
 /// blocks on a single channel carrying these. Phase 1 produces only terminal
 /// events; later phases add filesystem-change and timer-tick variants.
@@ -203,7 +214,7 @@ pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
 fn render_now(repo: &gix::Repository, cfg: &RenderConfig, displayed: &mut String) -> Result<()> {
     let dims = current_dimensions(cfg.width_offset);
     let output = build_output(repo, cfg, dims)?;
-    if output == *displayed {
+    if !should_repaint(&output, displayed) {
         return Ok(());
     }
 
@@ -421,6 +432,21 @@ mod tests {
             Path::new("/main/wt"),
             &git_dirs,
         ));
+    }
+
+    #[test]
+    fn should_repaint_suppresses_byte_identical_output() {
+        // The suppression backstop: an unchanged snapshot must not trigger a
+        // repaint, no matter how many accepted events drove the recompute.
+        assert!(
+            !should_repaint("branch • 0 commits", "branch • 0 commits"),
+            "identical output must be suppressed",
+        );
+        // A genuine change must still paint.
+        assert!(
+            should_repaint("branch • 1 commit", "branch • 0 commits"),
+            "changed output must repaint",
+        );
     }
 
     #[test]
