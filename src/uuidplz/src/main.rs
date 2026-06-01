@@ -121,8 +121,11 @@ fn generate_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
 /// v5 name. To deliberately get the v5 of an empty value, pass an explicit empty
 /// argument (`uuidplz ""`) instead.
 fn uuid_for_stdin(namespace: &Uuid, stdin_bytes: &[u8]) -> Uuid {
-    let _ = (namespace, stdin_bytes);
-    todo!()
+    if stdin_bytes.is_empty() {
+        generate_v4()
+    } else {
+        generate_v5(namespace, stdin_bytes)
+    }
 }
 
 /// Read a file's raw bytes for hashing.
