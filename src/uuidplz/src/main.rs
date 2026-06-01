@@ -113,6 +113,18 @@ fn generate_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
     Uuid::new_v5(namespace, name)
 }
 
+/// Produce a UUID from bytes read on stdin.
+///
+/// Empty input means nothing was actually piped (e.g. running non-interactively
+/// with no redirect), so fall back to a random v4 UUID rather than hashing the
+/// empty string into a surprising constant. Any non-empty input is hashed as a
+/// v5 name. To deliberately get the v5 of an empty value, pass an explicit empty
+/// argument (`uuidplz ""`) instead.
+fn uuid_for_stdin(namespace: &Uuid, stdin_bytes: &[u8]) -> Uuid {
+    let _ = (namespace, stdin_bytes);
+    todo!()
+}
+
 /// Read a file's raw bytes for hashing.
 ///
 /// # Errors
@@ -159,7 +171,11 @@ fn main() -> anyhow::Result<()> {
         }
     })?;
 
-    let uuid = match &resolution {
+    // Some resolutions are refined after I/O (empty stdin falls back to random),
+    // so track the effective resolution for the --verbose description.
+    let mut effective = resolution;
+    let mut stdin_was_empty = false;
+    let uuid = match &effective {
         Resolution::Random => generate_v4(),
         Resolution::FromString(s) => generate_v5(&namespace, s.as_bytes()),
         Resolution::FromFile(path) => generate_v5(&namespace, &read_file_bytes(path)?),
@@ -169,12 +185,16 @@ fn main() -> anyhow::Result<()> {
                 .lock()
                 .read_to_end(&mut buf)
                 .context("failed to read stdin")?;
-            generate_v5(&namespace, &buf)
+            stdin_was_empty = buf.is_empty();
+            uuid_for_stdin(&namespace, &buf)
         }
     };
+    if stdin_was_empty {
+        effective = Resolution::Random;
+    }
 
     if cli.verbose {
-        eprintln!("uuidplz: {}", describe(&resolution, &namespace));
+        eprintln!("uuidplz: {}", describe(&effective, &namespace));
     }
     println!("{uuid}");
 
@@ -239,6 +259,27 @@ mod tests {
             assert_eq!(a, b);
             assert_eq!(a.get_version(), Some(Version::Sha1));
         }
+    }
+
+    // --- stdin handling ---
+
+    #[test]
+    fn stdin_empty_yields_random_v4() {
+        // Empty stdin means nothing was piped, so we must NOT hash the empty
+        // string into a constant — fall back to random, and two calls differ.
+        let a = uuid_for_stdin(&DEFAULT_NAMESPACE, b"");
+        let b = uuid_for_stdin(&DEFAULT_NAMESPACE, b"");
+        assert_eq!(a.get_version(), Some(Version::Random));
+        assert_eq!(b.get_version(), Some(Version::Random));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn stdin_nonempty_yields_matching_v5() {
+        let bytes = b"piped data";
+        let u = uuid_for_stdin(&DEFAULT_NAMESPACE, bytes);
+        assert_eq!(u, generate_v5(&DEFAULT_NAMESPACE, bytes));
+        assert_eq!(u.get_version(), Some(Version::Sha1));
     }
 
     // --- v4 generation ---
