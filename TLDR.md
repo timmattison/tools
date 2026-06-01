@@ -62,6 +62,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `tubeboard` | Extracts the video ID from a YouTube URL on the clipboard. |
 | `unescapeboard` | Unescapes one level of `\"`-style escaping in clipboard text. |
 | `update-aws-credentials` | Writes AWS SSO clipboard credentials into your AWS config file. |
+| `uuidplz` | Prints a random v4 UUID, or a repeatable v5 UUID seeded from a string, a file's contents, or stdin. |
 | `vpn-tunnel` | Generates Docker-based gluetun + ProtonVPN + WireGuard tunnels with helper scripts. |
 | `wifiqr` | Generates WiFi QR codes (with optional logo) for automatic device connection. |
 | `wl` | Shows which process is listening on a given port. |

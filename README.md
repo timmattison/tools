@@ -102,6 +102,15 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
       separate instances/VMs.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
+- uuidplz
+    - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
+      v5 (SHA-1) UUID, so the same input always produces the same UUID — handy for stable, reproducible IDs. The
+      argument is auto-detected as a file when it names one (override with `--string`/`--file`), and piped stdin
+      is hashed too (empty stdin falls back to random). The namespace defaults to the RFC 4122 URL namespace and
+      can be overridden with `--namespace <uuid>`. The bare UUID goes to stdout (pipe-friendly); `-v/--verbose`
+      explains the derivation on stderr. Examples: `uuidplz`, `uuidplz "my-key"`, `uuidplz config.json`,
+      `cat data.bin | uuidplz`, `uuidplz --namespace 6ba7b810-9dad-11d1-80b4-00c04fd430c8 example.com`.
+    - To install: `cargo install --git https://github.com/timmattison/tools uuidplz`
 - tubeboard
     - Waits for text that looks like a YouTube video URL to be put on the clipboard and then extracts the video ID from
       it.
