@@ -7,7 +7,7 @@ use uuid::Uuid;
 /// Default RFC 4122 namespace used for v5 generation when `--namespace` is not
 /// given. The URL namespace is a well-known constant, so output is reproducible
 /// and interoperable with other UUIDv5 implementations.
-const DEFAULT_NAMESPACE: Uuid = Uuid::nil();
+const DEFAULT_NAMESPACE: Uuid = Uuid::NAMESPACE_URL;
 
 #[derive(Parser)]
 #[command(name = "uuidplz")]
@@ -23,11 +23,11 @@ struct Cli {
     input: Option<String>,
 
     /// Treat INPUT as a literal string, even if a file by that name exists.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "file")]
     string: bool,
 
     /// Treat INPUT as a file path and hash its contents.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "string")]
     file: bool,
 
     /// Namespace UUID for v5 generation (defaults to the RFC 4122 URL namespace).
@@ -76,8 +76,19 @@ fn resolve(
     file_exists: bool,
     stdin_is_tty: bool,
 ) -> Result<Resolution, ResolveError> {
-    let _ = (input, force_string, force_file, file_exists, stdin_is_tty);
-    todo!()
+    match input {
+        Some(value) => {
+            let from_file = force_file || (!force_string && file_exists);
+            if from_file {
+                Ok(Resolution::FromFile(value.to_string()))
+            } else {
+                Ok(Resolution::FromString(value.to_string()))
+            }
+        }
+        None if force_string || force_file => Err(ResolveError::FlagWithoutInput),
+        None if stdin_is_tty => Ok(Resolution::Random),
+        None => Ok(Resolution::FromStdin),
+    }
 }
 
 /// Parse the optional `--namespace` value, falling back to [`DEFAULT_NAMESPACE`].
@@ -86,19 +97,20 @@ fn resolve(
 ///
 /// Returns an error if `arg` is `Some` but not a valid UUID.
 fn parse_namespace(arg: Option<&str>) -> Result<Uuid, uuid::Error> {
-    let _ = arg;
-    todo!()
+    match arg {
+        Some(s) => Uuid::parse_str(s),
+        None => Ok(DEFAULT_NAMESPACE),
+    }
 }
 
 /// Generate a random version-4 UUID.
 fn generate_v4() -> Uuid {
-    todo!()
+    Uuid::new_v4()
 }
 
 /// Generate a name-based version-5 (SHA-1) UUID from a namespace and name bytes.
 fn generate_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
-    let _ = (namespace, name);
-    todo!()
+    Uuid::new_v5(namespace, name)
 }
 
 /// Read a file's raw bytes for hashing.
@@ -107,14 +119,19 @@ fn generate_v5(namespace: &Uuid, name: &[u8]) -> Uuid {
 ///
 /// Returns an error (with the path attached) if the file cannot be read.
 fn read_file_bytes(path: &str) -> anyhow::Result<Vec<u8>> {
-    let _ = path;
-    todo!()
+    std::fs::read(path).with_context(|| format!("failed to read file '{path}'"))
 }
 
 /// Render a human-readable description of how the UUID was derived, for `--verbose`.
 fn describe(resolution: &Resolution, namespace: &Uuid) -> String {
-    let _ = (resolution, namespace);
-    todo!()
+    match resolution {
+        Resolution::Random => "generated a random v4 UUID".to_string(),
+        Resolution::FromString(_) => format!("v5 UUID from string (namespace {namespace})"),
+        Resolution::FromFile(path) => {
+            format!("v5 UUID from file '{path}' (namespace {namespace})")
+        }
+        Resolution::FromStdin => format!("v5 UUID from stdin (namespace {namespace})"),
+    }
 }
 
 fn main() -> anyhow::Result<()> {
