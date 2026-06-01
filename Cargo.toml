@@ -84,6 +84,7 @@ icy_sixel = "0.5"
 # Random
 rand = "0.9"
 names = { version = "0.14", default-features = false }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 # System info
 sysinfo = "0.36"
