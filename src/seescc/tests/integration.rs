@@ -219,7 +219,11 @@ fn write_default_config_roundtrip() {
     // No sccache stub on PATH: the write path must run before the which() check.
     let bare_path = iso.path().display().to_string();
 
-    let first = run_seescc_iso(&bare_path, iso.path(), &["--write-default-config", "--config", &target_arg]);
+    let first = run_seescc_iso(
+        &bare_path,
+        iso.path(),
+        &["--write-default-config", "--config", &target_arg],
+    );
     assert!(
         first.status.success(),
         "first --write-default-config must succeed: {}",
@@ -233,7 +237,11 @@ fn write_default_config_roundtrip() {
     );
 
     // Without --force, a second write must refuse and say so.
-    let second = run_seescc_iso(&bare_path, iso.path(), &["--write-default-config", "--config", &target_arg]);
+    let second = run_seescc_iso(
+        &bare_path,
+        iso.path(),
+        &["--write-default-config", "--config", &target_arg],
+    );
     assert!(
         !second.status.success(),
         "second --write-default-config without --force must fail"

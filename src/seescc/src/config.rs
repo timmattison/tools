@@ -560,8 +560,17 @@ pub(crate) fn write_default_config(path: &std::path::Path, force: bool) -> Resul
 /// [`ConfigError::Toml`] / [`ConfigError::InvalidDuration`] /
 /// [`ConfigError::UnknownMetricKey`] when the chosen file fails to parse.
 pub(crate) fn load(explicit: Option<&std::path::Path>) -> Result<Config, ConfigError> {
-    let xdg = dirs::config_dir().map(|d| d.join(APP_CONFIG_SUBDIR).join(CONFIG_FILE_NAME));
-    load_from(explicit, xdg.as_deref())
+    load_from(explicit, default_config_path().as_deref())
+}
+
+/// The per-user XDG/platform config path `seescc` reads by default and writes
+/// when `--write-default-config` is given without an explicit `--config`.
+///
+/// Resolves to `<config_dir>/seescc/config.toml`, where `<config_dir>` is the
+/// platform config directory from [`dirs::config_dir`]. Returns `None` when the
+/// platform exposes no config directory (rare; e.g. `$HOME` unset on Unix).
+pub(crate) fn default_config_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join(APP_CONFIG_SUBDIR).join(CONFIG_FILE_NAME))
 }
 
 /// The testable core of [`load`]: apply config-file precedence given an

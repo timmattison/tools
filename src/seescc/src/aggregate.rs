@@ -15,10 +15,6 @@ use crate::stats;
 /// both wrap a `u64` but format differently (thousands separators vs.
 /// human-readable bytes), while `Rate` carries the already-computed percentage.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "consumed when the CLI wiring lands in the final Phase 2 slice"
-)]
 pub(crate) enum MetricValue {
     /// A plain tally, formatted with thousands separators.
     Count(u64),
@@ -34,10 +30,6 @@ impl MetricValue {
     /// `Count` uses thousands separators (`4786 -> "4,786"`), `Size` uses
     /// human-readable byte units (`809_212_237 -> "771.7 MiB"`), and `Rate` is
     /// formatted to one decimal place with a trailing `%` (`64.08 -> "64.1%"`).
-    #[allow(
-        dead_code,
-        reason = "consumed when the CLI wiring lands in the final Phase 2 slice"
-    )]
     pub(crate) fn format(&self) -> String {
         use num_format::{Locale, ToFormattedString};
         match *self {
@@ -53,10 +45,6 @@ impl MetricValue {
 /// Per-language metrics (`cache_hits`, `cache_misses`, `cache_errors`,
 /// `hit_rate`) are filtered by `languages`; an empty `languages` slice sums
 /// across all languages. Global counts and sizes ignore `languages`.
-#[allow(
-    dead_code,
-    reason = "consumed when the CLI wiring lands in the final Phase 2 slice"
-)]
 pub(crate) fn metric_value(
     key: MetricKey,
     stats: &stats::Stats,
