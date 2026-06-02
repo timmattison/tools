@@ -2,6 +2,7 @@
 //! wall-clock) and a right-aligned table of metric rows. Time is injected as a
 //! preformatted string so this module stays pure and deterministic under test.
 
+use serde::ser::SerializeMap;
 use unicode_width::UnicodeWidthStr;
 
 /// One display row: a label and its already-formatted value string.
@@ -87,8 +88,27 @@ pub(crate) struct JsonField {
     reason = "consumed by the --format json one-shot wiring in the next slice"
 )]
 pub(crate) fn build_json(fields: &[JsonField]) -> String {
-    let _ = fields;
-    String::new()
+    /// Serializes a slice of fields as a JSON map in slice order. `serialize_map`
+    /// preserves feed order, so keys are emitted exactly as given (not sorted).
+    struct OrderedMap<'a>(&'a [JsonField]);
+
+    impl serde::Serialize for OrderedMap<'_> {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut map = serializer.serialize_map(Some(self.0.len()))?;
+            for field in self.0 {
+                match field.value {
+                    JsonValue::Int(n) => map.serialize_entry(field.key, &n)?,
+                    JsonValue::Float(x) => map.serialize_entry(field.key, &x)?,
+                }
+            }
+            map.end()
+        }
+    }
+
+    serde_json::to_string(&OrderedMap(fields)).expect("serializing finite JSON numbers cannot fail")
 }
 
 #[cfg(test)]
