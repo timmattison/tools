@@ -10,6 +10,11 @@ use clap::Parser;
 use num_format::{Locale, ToFormattedString};
 
 mod aggregate;
+#[allow(
+    dead_code,
+    reason = "config API is consumed when the CLI wiring lands in the final Phase 2 slice"
+)]
+mod config;
 mod render;
 #[allow(
     dead_code,
