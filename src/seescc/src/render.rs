@@ -58,6 +58,39 @@ pub(crate) fn build_human(
     out
 }
 
+/// A JSON number for one field of the one-shot JSON report.
+#[allow(
+    dead_code,
+    reason = "consumed by the --format json one-shot wiring in the next slice"
+)]
+pub(crate) enum JsonValue {
+    /// An integer count or byte size, emitted as a JSON integer.
+    Int(u64),
+    /// A rate/percentage, emitted as a JSON floating-point number.
+    Float(f64),
+}
+
+/// One key/value field of the one-shot JSON object, in display order.
+#[allow(
+    dead_code,
+    reason = "consumed by the --format json one-shot wiring in the next slice"
+)]
+pub(crate) struct JsonField {
+    pub key: &'static str,
+    pub value: JsonValue,
+}
+
+/// Serialize `fields` as a compact single-line JSON object, preserving the
+/// given order (NOT sorted). Suitable for piping into `jq`.
+#[allow(
+    dead_code,
+    reason = "consumed by the --format json one-shot wiring in the next slice"
+)]
+pub(crate) fn build_json(fields: &[JsonField]) -> String {
+    let _ = fields;
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +212,78 @@ mod tests {
         }];
         let out = build_human("Rust", "12:00:00", 20, &single);
         assert!(out.lines().nth(2).unwrap().ends_with('1'));
+    }
+
+    #[test]
+    fn build_json_empty_is_braces() {
+        assert_eq!(build_json(&[]), "{}");
+    }
+
+    #[test]
+    fn build_json_preserves_order_and_types() {
+        let fields = [
+            JsonField {
+                key: "compile_requests",
+                value: JsonValue::Int(4786),
+            },
+            JsonField {
+                key: "requests_executed",
+                value: JsonValue::Int(3880),
+            },
+            JsonField {
+                key: "cache_hits",
+                value: JsonValue::Int(1718),
+            },
+            JsonField {
+                key: "hit_rate",
+                value: JsonValue::Float(64.08),
+            },
+        ];
+        assert_eq!(
+            build_json(&fields),
+            r#"{"compile_requests":4786,"requests_executed":3880,"cache_hits":1718,"hit_rate":64.08}"#
+        );
+    }
+
+    #[test]
+    fn build_json_is_valid_parseable_json() {
+        let fields = [
+            JsonField {
+                key: "cache_hits",
+                value: JsonValue::Int(1718),
+            },
+            JsonField {
+                key: "hit_rate",
+                value: JsonValue::Float(64.08),
+            },
+        ];
+        let v: serde_json::Value =
+            serde_json::from_str(&build_json(&fields)).expect("build_json must emit valid JSON");
+        assert_eq!(v["cache_hits"], 1718);
+        assert!((v["hit_rate"].as_f64().unwrap() - 64.08).abs() < 1e-9);
+    }
+
+    #[test]
+    fn build_json_float_keeps_decimal() {
+        let zero = [JsonField {
+            key: "x",
+            value: JsonValue::Float(0.0),
+        }];
+        assert_eq!(build_json(&zero), r#"{"x":0.0}"#);
+
+        let hundred = [JsonField {
+            key: "x",
+            value: JsonValue::Float(100.0),
+        }];
+        assert_eq!(build_json(&hundred), r#"{"x":100.0}"#);
+    }
+
+    #[test]
+    fn build_json_single_int_field() {
+        let fields = [JsonField {
+            key: "k",
+            value: JsonValue::Int(42),
+        }];
+        assert_eq!(build_json(&fields), r#"{"k":42}"#);
     }
 }
