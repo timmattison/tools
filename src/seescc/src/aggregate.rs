@@ -6,14 +6,14 @@
 
 use std::collections::HashMap;
 
-use crate::config::{MetricKey, MetricKind};
+use crate::config::MetricKey;
 use crate::stats;
 
 /// A single metric's extracted value, tagged with how it should be rendered.
 ///
-/// The three variants mirror [`MetricKind`]: `Count` and `Size` both wrap a
-/// `u64` but format differently (thousands separators vs. human-readable
-/// bytes), while `Rate` carries the already-computed percentage.
+/// The three variants mirror [`crate::config::MetricKind`]: `Count` and `Size`
+/// both wrap a `u64` but format differently (thousands separators vs.
+/// human-readable bytes), while `Rate` carries the already-computed percentage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(
     dead_code,
@@ -32,14 +32,19 @@ impl MetricValue {
     /// Render this value as the user-facing display string.
     ///
     /// `Count` uses thousands separators (`4786 -> "4,786"`), `Size` uses
-    /// human-readable byte units (`809_212_237 -> "809 MB"`), and `Rate` is
+    /// human-readable byte units (`809_212_237 -> "771.7 MiB"`), and `Rate` is
     /// formatted to one decimal place with a trailing `%` (`64.08 -> "64.1%"`).
     #[allow(
         dead_code,
         reason = "consumed when the CLI wiring lands in the final Phase 2 slice"
     )]
     pub(crate) fn format(&self) -> String {
-        todo!("Slice 3 green implements MetricValue::format")
+        use num_format::{Locale, ToFormattedString};
+        match *self {
+            MetricValue::Count(n) => n.to_formatted_string(&Locale::en),
+            MetricValue::Size(n) => human_bytes::human_bytes(n as f64),
+            MetricValue::Rate(r) => format!("{r:.1}%"),
+        }
     }
 }
 
@@ -57,8 +62,35 @@ pub(crate) fn metric_value(
     stats: &stats::Stats,
     languages: &[String],
 ) -> MetricValue {
-    let _ = (key, stats, languages, MetricKind::Count);
-    todo!("Slice 3 green implements metric_value")
+    let counters = &stats.stats;
+    match key {
+        MetricKey::CacheHits => {
+            MetricValue::Count(lang_sum(&counters.cache_hits.counts, languages))
+        }
+        MetricKey::CacheMisses => {
+            MetricValue::Count(lang_sum(&counters.cache_misses.counts, languages))
+        }
+        MetricKey::CacheErrors => {
+            MetricValue::Count(lang_sum(&counters.cache_errors.counts, languages))
+        }
+        MetricKey::HitRate => MetricValue::Rate(hit_rate(
+            lang_sum(&counters.cache_hits.counts, languages),
+            lang_sum(&counters.cache_misses.counts, languages),
+        )),
+        MetricKey::CompileRequests => MetricValue::Count(counters.compile_requests),
+        MetricKey::RequestsExecuted => MetricValue::Count(counters.requests_executed),
+        MetricKey::RequestsNotCacheable => MetricValue::Count(counters.requests_not_cacheable),
+        MetricKey::RequestsNotCompile => MetricValue::Count(counters.requests_not_compile),
+        MetricKey::RequestsUnsupportedCompiler => {
+            MetricValue::Count(counters.requests_unsupported_compiler)
+        }
+        MetricKey::CacheWrites => MetricValue::Count(counters.cache_writes),
+        MetricKey::Compilations => MetricValue::Count(counters.compilations),
+        MetricKey::CompileFails => MetricValue::Count(counters.compile_fails),
+        MetricKey::ForcedRecaches => MetricValue::Count(counters.forced_recaches),
+        MetricKey::CacheSize => MetricValue::Size(stats.cache_size),
+        MetricKey::MaxCacheSize => MetricValue::Size(stats.max_cache_size),
+    }
 }
 
 /// Sum the counter values for the selected `languages`.
@@ -105,6 +137,72 @@ mod tests {
             metric_value(MetricKey::CacheHits, &fixture, &["Rust".to_string()]),
             MetricValue::Count(1718)
         );
+    }
+
+    #[test]
+    fn metric_value_cache_hits_all_languages() {
+        // Empty `languages` sums every bucket: Assembler 196 + Rust 1718 +
+        // C/C++ 516 = 2430.
+        let fixture = fixture_stats();
+        assert_eq!(
+            metric_value(MetricKey::CacheHits, &fixture, &[]),
+            MetricValue::Count(196 + 1718 + 516)
+        );
+    }
+
+    #[test]
+    fn metric_value_global_count_ignores_languages() {
+        // `compile_requests` is global: the `languages` filter must not change it.
+        let fixture = fixture_stats();
+        assert_eq!(
+            metric_value(MetricKey::CompileRequests, &fixture, &["Rust".to_string()]),
+            MetricValue::Count(4786)
+        );
+        assert_eq!(
+            metric_value(MetricKey::CompileRequests, &fixture, &[]),
+            MetricValue::Count(4786)
+        );
+    }
+
+    #[test]
+    fn metric_value_cache_size_is_size() {
+        let fixture = fixture_stats();
+        assert_eq!(
+            metric_value(MetricKey::CacheSize, &fixture, &[]),
+            MetricValue::Size(809_212_237)
+        );
+    }
+
+    #[test]
+    fn metric_value_hit_rate_rust_only() {
+        // Rust hits 1718, Rust misses 963 -> 1718 / 2681 * 100 = 64.0805...%.
+        let fixture = fixture_stats();
+        let value = metric_value(MetricKey::HitRate, &fixture, &["Rust".to_string()]);
+        let MetricValue::Rate(rate) = value else {
+            panic!("HitRate must extract to MetricValue::Rate, got {value:?}");
+        };
+        assert!((rate - 64.080_567).abs() < 1e-3, "rate was {rate}");
+        assert_eq!(value.format(), "64.1%");
+    }
+
+    #[test]
+    fn format_count_uses_thousands_separators() {
+        assert_eq!(MetricValue::Count(4786).format(), "4,786");
+        assert!(MetricValue::Count(4786).format().contains(','));
+    }
+
+    #[test]
+    fn format_size_matches_human_bytes() {
+        // The exact string `human_bytes` 0.4 returns for this byte count; later
+        // slices assert against it, so pin it here.
+        assert_eq!(MetricValue::Size(809_212_237).format(), "771.7 MiB");
+    }
+
+    #[test]
+    fn format_rate_one_decimal_with_percent() {
+        assert_eq!(MetricValue::Rate(64.080_567).format(), "64.1%");
+        assert_eq!(MetricValue::Rate(0.0).format(), "0.0%");
+        assert_eq!(MetricValue::Rate(100.0).format(), "100.0%");
     }
 
     /// Build the realistic per-language count map from the captured fixture.
