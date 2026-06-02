@@ -44,6 +44,18 @@ pub(crate) enum ConfigError {
     /// match the expected shape (wrong types, missing required fields).
     #[error("invalid config TOML: {0}")]
     Toml(#[from] toml::de::Error),
+
+    /// A config file could not be read from disk — for example, an explicit
+    /// `--config` path that does not exist or is not readable. The `path` is
+    /// echoed so the user can see exactly which file failed.
+    #[error("failed to read config file {path}: {source}")]
+    Io {
+        /// The path that failed to read, as a display string.
+        path: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// The classification of a metric's value, which controls how it renders.
@@ -259,6 +271,13 @@ const DEFAULT_WINDOW: &str = "15m";
 /// The default language filter applied when `languages` is absent.
 const DEFAULT_LANGUAGE: &str = "Rust";
 
+/// The application subdirectory under the platform config directory in which
+/// `seescc` looks for its config file (i.e. `<config_dir>/seescc/`).
+const APP_CONFIG_SUBDIR: &str = "seescc";
+
+/// The config file name `seescc` reads from the XDG/platform config directory.
+const CONFIG_FILE_NAME: &str = "config.toml";
+
 /// The built-in default configuration, expressed as an annotated TOML document.
 ///
 /// This is the single source of truth for `seescc`'s defaults: [`Config::default`]
@@ -436,9 +455,101 @@ impl Default for Config {
     }
 }
 
+/// Read a config file from disk, wrapping any I/O failure into a
+/// [`ConfigError::Io`] that names the offending path.
+///
+/// # Errors
+/// Returns [`ConfigError::Io`] when `path` cannot be read (missing, permission
+/// denied, etc.), with the path rendered into the message.
+fn read_config_file(path: &std::path::Path) -> Result<String, ConfigError> {
+    std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+/// Resolve the effective `seescc` configuration, honoring config-file
+/// precedence: an explicit `--config` path wins; otherwise the per-user XDG
+/// config file is used if it exists; otherwise the built-in defaults apply.
+///
+/// This is the real-world entry point. It locates the platform config directory
+/// via [`dirs::config_dir`], joins on `seescc/config.toml`, and delegates the
+/// precedence logic to [`load_from`] (which is what tests exercise, so the real
+/// `dirs` lookup never participates in tests).
+///
+/// # Errors
+/// Returns [`ConfigError::Io`] when an explicit path cannot be read, and
+/// [`ConfigError::Toml`] / [`ConfigError::InvalidDuration`] /
+/// [`ConfigError::UnknownMetricKey`] when the chosen file fails to parse.
+pub(crate) fn load(explicit: Option<&std::path::Path>) -> Result<Config, ConfigError> {
+    let xdg = dirs::config_dir().map(|d| d.join(APP_CONFIG_SUBDIR).join(CONFIG_FILE_NAME));
+    load_from(explicit, xdg.as_deref())
+}
+
+/// The testable core of [`load`]: apply config-file precedence given an
+/// already-resolved XDG candidate path.
+///
+/// - If `explicit` is `Some(path)`, read it (a missing explicit path is an
+///   error, since the user asked for that file specifically) and parse it.
+/// - Else if `xdg_candidate` is `Some(path)` and the file exists, read and parse
+///   it (read/parse errors propagate).
+/// - Else fall back to [`Config::default`].
+///
+/// Keeping the XDG candidate injectable lets tests drive every branch without
+/// touching the developer's real `dirs::config_dir()`.
+///
+/// # Errors
+/// Returns [`ConfigError::Io`] when the explicit path cannot be read, and the
+/// parse-related [`ConfigError`] variants when the chosen file is not valid.
+fn load_from(
+    explicit: Option<&std::path::Path>,
+    xdg_candidate: Option<&std::path::Path>,
+) -> Result<Config, ConfigError> {
+    let _ = (explicit, xdg_candidate);
+    todo!("Slice 5: resolve config-file precedence")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    /// A minimal explicit config: no language filter, a single `cache_writes`
+    /// row. Distinguishable from the XDG fixture below.
+    const EXPLICIT_TOML: &str = r#"
+languages = []
+metrics = [ { key = "cache_writes" } ]
+"#;
+
+    /// A distinguishable XDG config: a single `forced_recaches` row. Different
+    /// from both the explicit fixture and the built-in defaults.
+    const XDG_TOML: &str = r#"
+metrics = [ { key = "forced_recaches" } ]
+"#;
+
+    #[test]
+    fn explicit_config_wins_over_xdg() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let explicit_path = dir.path().join("explicit.toml");
+        let xdg_path = dir.path().join("xdg.toml");
+        fs::write(&explicit_path, EXPLICIT_TOML).expect("write explicit");
+        fs::write(&xdg_path, XDG_TOML).expect("write xdg");
+
+        let loaded =
+            load_from(Some(&explicit_path), Some(&xdg_path)).expect("explicit config should load");
+
+        let expected_explicit = Config::from_toml(EXPLICIT_TOML).expect("explicit fixture parses");
+        let xdg_config = Config::from_toml(XDG_TOML).expect("xdg fixture parses");
+
+        assert_eq!(
+            loaded, expected_explicit,
+            "explicit --config must win over the XDG file"
+        );
+        assert_ne!(
+            loaded, xdg_config,
+            "explicit win must not silently use the XDG config"
+        );
+    }
 
     #[test]
     fn default_config_has_phase_one_five_metrics_in_order() {
