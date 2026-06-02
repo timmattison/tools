@@ -9,13 +9,13 @@ use buildinfo::version_string;
 use clap::Parser;
 use num_format::{Locale, ToFormattedString};
 
+mod aggregate;
+mod render;
 #[allow(
     dead_code,
     reason = "Counters/Stats carry fields (cache_size, compilations, …) consumed by later phases"
 )]
 mod stats;
-mod aggregate;
-mod render;
 
 /// Command-line arguments for `seescc`.
 #[derive(Parser)]
@@ -69,7 +69,9 @@ fn poll_sccache() -> Result<stats::Stats> {
     let output = std::process::Command::new(SCCACHE_BIN)
         .args(["--show-stats", "--stats-format=json"])
         .output()
-        .with_context(|| format!("failed to run `{SCCACHE_BIN} --show-stats --stats-format=json`"))?;
+        .with_context(|| {
+            format!("failed to run `{SCCACHE_BIN} --show-stats --stats-format=json`")
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

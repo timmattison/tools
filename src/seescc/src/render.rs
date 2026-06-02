@@ -122,8 +122,14 @@ mod tests {
             let body = line
                 .strip_prefix(' ')
                 .expect("each data line starts with one leading space");
-            assert!(body.starts_with(lbl), "line {line:?} should start with label {lbl}");
-            assert!(line.ends_with(val), "line {line:?} should end with value {val}");
+            assert!(
+                body.starts_with(lbl),
+                "line {line:?} should start with label {lbl}"
+            );
+            assert!(
+                line.ends_with(val),
+                "line {line:?} should end with value {val}"
+            );
         }
         // Right alignment ⇒ all data lines share the same display width.
         let widths: Vec<usize> = data.iter().map(|l| UnicodeWidthStr::width(*l)).collect();

@@ -15,10 +15,7 @@ pub(crate) fn lang_sum(counts: &HashMap<String, u64>, languages: &[String]) -> u
     if languages.is_empty() {
         counts.values().sum()
     } else {
-        languages
-            .iter()
-            .filter_map(|lang| counts.get(lang))
-            .sum()
+        languages.iter().filter_map(|lang| counts.get(lang)).sum()
     }
 }
 

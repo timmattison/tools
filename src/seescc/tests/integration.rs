@@ -52,7 +52,10 @@ fn happy_path_shows_rust_only_metrics() {
     );
 
     // Header + the five default metrics with formatted Rust values.
-    assert!(stdout.contains("sccache · Rust"), "missing header: {stdout}");
+    assert!(
+        stdout.contains("sccache · Rust"),
+        "missing header: {stdout}"
+    );
     assert!(stdout.contains("Compile requests"));
     assert!(stdout.contains("4,786"));
     assert!(stdout.contains("Requests executed"));
@@ -67,7 +70,10 @@ fn happy_path_shows_rust_only_metrics() {
     // Rust-only: C/C++ and Assembler numbers must NOT leak in, and we must not
     // be summing across languages.
     assert!(!stdout.contains("516"), "C/C++ hits leaked: {stdout}");
-    assert!(!stdout.contains("2,430"), "summed across all languages: {stdout}");
+    assert!(
+        !stdout.contains("2,430"),
+        "summed across all languages: {stdout}"
+    );
     assert!(!stdout.contains("C/C++"));
     assert!(!stdout.contains("Assembler"));
 }
@@ -107,8 +113,17 @@ fn sccache_nonzero_exit_is_reported() {
 fn missing_sccache_exits_nonzero_with_clear_error() {
     let empty = tempfile::tempdir().expect("tempdir"); // empty dir, no sccache
     let out = run_seescc(&empty.path().display().to_string());
-    assert!(!out.status.success(), "expected failure when sccache absent");
+    assert!(
+        !out.status.success(),
+        "expected failure when sccache absent"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("sccache"), "stderr should name sccache: {stderr}");
-    assert!(stderr.contains("not found"), "stderr should say not found: {stderr}");
+    assert!(
+        stderr.contains("sccache"),
+        "stderr should name sccache: {stderr}"
+    );
+    assert!(
+        stderr.contains("not found"),
+        "stderr should say not found: {stderr}"
+    );
 }
