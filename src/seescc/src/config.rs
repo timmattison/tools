@@ -505,8 +505,19 @@ fn load_from(
     explicit: Option<&std::path::Path>,
     xdg_candidate: Option<&std::path::Path>,
 ) -> Result<Config, ConfigError> {
-    let _ = (explicit, xdg_candidate);
-    todo!("Slice 5: resolve config-file precedence")
+    if let Some(path) = explicit {
+        let contents = read_config_file(path)?;
+        return Config::from_toml(&contents);
+    }
+
+    if let Some(path) = xdg_candidate {
+        if path.exists() {
+            let contents = read_config_file(path)?;
+            return Config::from_toml(&contents);
+        }
+    }
+
+    Ok(Config::default())
 }
 
 #[cfg(test)]
@@ -548,6 +559,80 @@ metrics = [ { key = "forced_recaches" } ]
         assert_ne!(
             loaded, xdg_config,
             "explicit win must not silently use the XDG config"
+        );
+    }
+
+    #[test]
+    fn xdg_config_is_used_when_no_explicit_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let xdg_path = dir.path().join("xdg.toml");
+        fs::write(&xdg_path, XDG_TOML).expect("write xdg");
+
+        let loaded = load_from(None, Some(&xdg_path)).expect("xdg config should load");
+
+        assert_eq!(
+            loaded,
+            Config::from_toml(XDG_TOML).expect("xdg fixture parses"),
+            "with no explicit path, an existing XDG file must be used"
+        );
+    }
+
+    #[test]
+    fn defaults_used_when_xdg_candidate_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A path inside the tempdir that is never created.
+        let missing = dir.path().join("does-not-exist.toml");
+        assert!(!missing.exists(), "precondition: file must not exist");
+
+        let loaded = load_from(None, Some(&missing)).expect("missing XDG file falls back");
+
+        assert_eq!(
+            loaded,
+            Config::default(),
+            "a non-existent XDG candidate must fall back to defaults"
+        );
+    }
+
+    #[test]
+    fn defaults_used_when_no_xdg_candidate_at_all() {
+        let loaded = load_from(None, None).expect("no candidate falls back to defaults");
+        assert_eq!(
+            loaded,
+            Config::default(),
+            "with no explicit path and no XDG candidate, defaults apply"
+        );
+    }
+
+    #[test]
+    fn explicit_missing_path_is_an_io_error_naming_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("nope.toml");
+        assert!(!missing.exists(), "precondition: file must not exist");
+
+        let err = load_from(Some(&missing), None)
+            .expect_err("an explicit path that does not exist must error");
+        assert!(
+            matches!(err, ConfigError::Io { .. }),
+            "expected ConfigError::Io, got: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "error must name the failing path; message was: {message}"
+        );
+    }
+
+    #[test]
+    fn invalid_toml_in_a_real_file_propagates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bad.toml");
+        fs::write(&path, r#"poll_interval = "nope""#).expect("write bad config");
+
+        let err = load_from(Some(&path), None)
+            .expect_err("an unparseable duration in a real file must error");
+        assert!(
+            matches!(err, ConfigError::InvalidDuration { .. }),
+            "expected InvalidDuration to propagate, got: {err:?}"
         );
     }
 
