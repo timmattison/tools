@@ -360,9 +360,74 @@ impl Config {
     /// or `window` cannot be parsed, and [`ConfigError::UnknownMetricKey`] when a
     /// metric names a key that is not in the catalog.
     pub(crate) fn from_toml(s: &str) -> Result<Config, ConfigError> {
-        let _ = s;
-        todo!("from_toml is implemented in the green commit")
+        let raw: RawConfig = toml::from_str(s)?;
+
+        let poll_interval = match raw.poll_interval {
+            Some(value) => parse_duration(&value)?,
+            None => parse_duration(DEFAULT_POLL_INTERVAL)?,
+        };
+        let window = match raw.window {
+            Some(value) => parse_duration(&value)?,
+            None => parse_duration(DEFAULT_WINDOW)?,
+        };
+        let languages = raw
+            .languages
+            .unwrap_or_else(|| vec![DEFAULT_LANGUAGE.to_string()]);
+
+        // An *absent* `metrics` key falls back to the default set; an explicit
+        // empty `metrics = []` is honored as an empty list.
+        let metrics = match raw.metrics {
+            Some(raw_metrics) => raw_metrics
+                .into_iter()
+                .map(MetricSpec::from_raw)
+                .collect::<Result<Vec<_>, _>>()?,
+            None => default_metrics()?,
+        };
+
+        Ok(Config {
+            poll_interval,
+            window,
+            languages,
+            metrics,
+        })
     }
+}
+
+impl MetricSpec {
+    /// Validate and resolve a single raw metric row into a [`MetricSpec`].
+    ///
+    /// The key is checked against the catalog and the label resolves to the
+    /// user's `label` when present, otherwise [`MetricKey::default_label`].
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::UnknownMetricKey`] when `raw.key` is not a catalog key.
+    fn from_raw(raw: RawMetric) -> Result<MetricSpec, ConfigError> {
+        let key = MetricKey::parse(&raw.key)?;
+        let label = raw.label.unwrap_or_else(|| key.default_label().to_string());
+        Ok(MetricSpec {
+            key,
+            label,
+            spark: raw.spark,
+        })
+    }
+}
+
+/// The built-in default metric rows, derived from [`DEFAULT_CONFIG_TOML`].
+///
+/// Used as the fallback when a config omits `metrics` entirely. Parsing the
+/// default document's `metrics` table here (rather than hand-coding the list)
+/// keeps [`DEFAULT_CONFIG_TOML`] the single source of truth.
+///
+/// # Errors
+/// Returns a [`ConfigError`] only if the built-in document is malformed, which a
+/// test guards against.
+fn default_metrics() -> Result<Vec<MetricSpec>, ConfigError> {
+    let raw: RawConfig = toml::from_str(DEFAULT_CONFIG_TOML)?;
+    raw.metrics
+        .unwrap_or_default()
+        .into_iter()
+        .map(MetricSpec::from_raw)
+        .collect()
 }
 
 impl Default for Config {
@@ -389,6 +454,106 @@ mod tests {
                 MetricKey::HitRate,
             ]
         );
+    }
+
+    #[test]
+    fn default_config_matches_phase_one_exactly() {
+        let config = Config::default();
+
+        assert_eq!(config.languages, vec!["Rust".to_string()]);
+        assert_eq!(config.poll_interval, Duration::from_secs(1));
+        assert_eq!(config.window, Duration::from_secs(900));
+
+        let keys: Vec<MetricKey> = config.metrics.iter().map(|m| m.key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                MetricKey::CompileRequests,
+                MetricKey::RequestsExecuted,
+                MetricKey::CacheHits,
+                MetricKey::CacheMisses,
+                MetricKey::HitRate,
+            ]
+        );
+
+        let labels: Vec<&str> = config.metrics.iter().map(|m| m.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Compile requests",
+                "Requests executed",
+                "Cache hits",
+                "Cache misses",
+                "Hit rate",
+            ]
+        );
+
+        let sparks: Vec<bool> = config.metrics.iter().map(|m| m.spark).collect();
+        assert_eq!(sparks, vec![false, false, true, true, true]);
+    }
+
+    #[test]
+    fn custom_toml_resolves_labels_languages_and_spark() {
+        let toml = r#"
+languages = []
+metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spark = true } ]
+"#;
+        let config = Config::from_toml(toml).expect("custom config should parse");
+
+        assert_eq!(config.languages, Vec::<String>::new());
+        assert_eq!(config.metrics.len(), 2);
+
+        // `cache_writes` has no explicit label/spark: default label, spark off.
+        assert_eq!(config.metrics[0].key, MetricKey::CacheWrites);
+        assert_eq!(config.metrics[0].label, "Cache writes");
+        assert!(!config.metrics[0].spark);
+
+        // `cache_hits` overrides both label and spark.
+        assert_eq!(config.metrics[1].key, MetricKey::CacheHits);
+        assert_eq!(config.metrics[1].label, "Hits!");
+        assert!(config.metrics[1].spark);
+    }
+
+    #[test]
+    fn explicit_empty_metrics_list_is_honored() {
+        let config =
+            Config::from_toml("metrics = []").expect("explicit empty metrics should parse");
+        assert!(
+            config.metrics.is_empty(),
+            "an explicit `metrics = []` must stay empty, not fall back to defaults"
+        );
+    }
+
+    #[test]
+    fn unknown_metric_key_in_toml_errors_and_lists_catalog() {
+        let err = Config::from_toml(r#"metrics = [ { key = "bogus" } ]"#)
+            .expect_err("`bogus` is not a catalog key");
+        let message = err.to_string();
+        assert!(message.contains("bogus"), "message was: {message}");
+        assert!(message.contains("cache_hits"), "message was: {message}");
+    }
+
+    #[test]
+    fn invalid_duration_in_toml_errors() {
+        let err = Config::from_toml(r#"poll_interval = "nope""#)
+            .expect_err("`nope` is not a valid duration");
+        assert!(
+            matches!(err, ConfigError::InvalidDuration { .. }),
+            "expected InvalidDuration, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn default_config_toml_round_trips_to_default() {
+        let parsed =
+            Config::from_toml(DEFAULT_CONFIG_TOML).expect("DEFAULT_CONFIG_TOML must parse");
+        assert_eq!(parsed, Config::default());
+    }
+
+    #[test]
+    fn default_does_not_panic() {
+        // Guards the `expect` in `impl Default` — the built-in TOML must parse.
+        let _ = Config::default();
     }
 
     #[test]
