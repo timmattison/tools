@@ -499,12 +499,28 @@ fn read_config_file(path: &std::path::Path) -> Result<String, ConfigError> {
 /// Returns [`ConfigError::AlreadyExists`] when `path` already exists and `force`
 /// is `false`, and [`ConfigError::WriteFailed`] when creating the parent
 /// directories or writing the file fails.
-pub(crate) fn write_default_config(
-    path: &std::path::Path,
-    force: bool,
-) -> Result<(), ConfigError> {
-    let _ = (path, force);
-    todo!("write_default_config is not yet implemented")
+pub(crate) fn write_default_config(path: &std::path::Path, force: bool) -> Result<(), ConfigError> {
+    if path.exists() && !force {
+        return Err(ConfigError::AlreadyExists {
+            path: path.display().to_string(),
+        });
+    }
+
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::WriteFailed {
+                path: parent.display().to_string(),
+                source,
+            })?;
+        }
+    }
+
+    std::fs::write(path, DEFAULT_CONFIG_TOML).map_err(|source| ConfigError::WriteFailed {
+        path: path.display().to_string(),
+        source,
+    })?;
+
+    Ok(())
 }
 
 /// Resolve the effective `seescc` configuration, honoring config-file
@@ -968,6 +984,56 @@ metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spa
         assert_eq!(
             written, DEFAULT_CONFIG_TOML,
             "written contents must be DEFAULT_CONFIG_TOML verbatim"
+        );
+
+        // The artifact must round-trip back to the built-in defaults.
+        assert_eq!(
+            Config::from_toml(&written).expect("written config re-parses"),
+            Config::default(),
+            "the written config must re-parse to Config::default()"
+        );
+    }
+
+    /// Sentinel content for the overwrite-guard tests; distinct from the default.
+    const SENTINEL: &str = "# do not clobber\n";
+
+    #[test]
+    fn write_default_config_refuses_overwrite_without_force() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, SENTINEL).expect("pre-create sentinel file");
+
+        let err = write_default_config(&path, false)
+            .expect_err("must refuse to overwrite an existing file without force");
+        assert!(
+            matches!(err, ConfigError::AlreadyExists { .. }),
+            "expected AlreadyExists, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "error must name the existing path; message was: {err}"
+        );
+
+        // The existing file must be left completely untouched.
+        let after = fs::read_to_string(&path).expect("read back sentinel");
+        assert_eq!(
+            after, SENTINEL,
+            "the refused write must leave the existing file untouched"
+        );
+    }
+
+    #[test]
+    fn write_default_config_force_overwrites_existing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, SENTINEL).expect("pre-create sentinel file");
+
+        write_default_config(&path, true).expect("force must overwrite the existing file");
+
+        let after = fs::read_to_string(&path).expect("read back overwritten config");
+        assert_eq!(
+            after, DEFAULT_CONFIG_TOML,
+            "force must replace the existing file with DEFAULT_CONFIG_TOML"
         );
     }
 }
