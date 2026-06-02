@@ -14,6 +14,9 @@ use clap::Parser;
 )]
 mod stats;
 
+#[allow(dead_code, reason = "consumed by the Phase 1 main-wiring slice")]
+mod aggregate;
+
 /// Command-line arguments for `seescc`.
 #[derive(Parser)]
 #[command(name = "seescc", version = version_string!())]
