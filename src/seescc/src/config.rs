@@ -25,6 +25,132 @@ pub(crate) enum ConfigError {
         /// The rejected input, echoed back so the user can spot the typo.
         input: String,
     },
+
+    /// A config string did not name any known metric in the catalog.
+    ///
+    /// The message lists every valid key so the user can correct the typo
+    /// without consulting external documentation.
+    #[error("unknown metric key {key:?}; valid keys are: {valid}")]
+    UnknownMetricKey {
+        /// The rejected key, echoed back so the user can spot the typo.
+        key: String,
+        /// The full catalog of valid keys, joined with `", "`.
+        valid: String,
+    },
+}
+
+/// The classification of a metric's value, which controls how it renders.
+///
+/// `seescc` formats counts with thousands separators, sizes in human-friendly
+/// byte units, and rates as percentages — so each catalog key declares which
+/// presentation it expects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetricKind {
+    /// A plain integer tally (the common case).
+    Count,
+    /// A byte size (`cache_size`, `max_cache_size`).
+    Size,
+    /// A percentage rate (`hit_rate`).
+    Rate,
+}
+
+/// A single key in the metric catalog `seescc` knows how to surface.
+///
+/// Variants split into two families: *per-language* keys, whose values are
+/// filtered by the `languages` setting ([`MetricKey::is_per_language`] is
+/// `true`), and *global* keys that apply to the whole cache. Each variant maps
+/// to a canonical TOML string via [`MetricKey::as_config_key`] and a pretty
+/// display string via [`MetricKey::default_label`]. The [`MetricKey::ALL`]
+/// catalog and [`MetricKey::parse`] are kept in lock-step by a round-trip test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetricKey {
+    /// Total compile requests seen. Global.
+    CompileRequests,
+    /// Requests that dispatched actual compilation work. Global.
+    RequestsExecuted,
+    /// Cache hits, filtered by the selected languages. Per-language.
+    CacheHits,
+    /// Cache misses, filtered by the selected languages. Per-language.
+    CacheMisses,
+    /// Cache errors, filtered by the selected languages. Per-language.
+    CacheErrors,
+    /// Cache hit rate as a percentage. Per-language.
+    HitRate,
+    /// Requests rejected as not cacheable. Global.
+    RequestsNotCacheable,
+    /// Requests that were not compilation invocations. Global.
+    RequestsNotCompile,
+    /// Requests using a compiler sccache does not support. Global.
+    RequestsUnsupportedCompiler,
+    /// Cache writes performed. Global.
+    CacheWrites,
+    /// Compilations performed. Global.
+    Compilations,
+    /// Compilations that failed. Global.
+    CompileFails,
+    /// Forced recaches performed. Global.
+    ForcedRecaches,
+    /// Current on-disk cache size, in bytes. Global.
+    CacheSize,
+    /// Configured maximum cache size, in bytes. Global.
+    MaxCacheSize,
+}
+
+impl MetricKey {
+    /// The full catalog of metric keys, in stable display order.
+    ///
+    /// The four keys Phase 1 surfaces first (`compile_requests`,
+    /// `requests_executed`, `cache_hits`, `cache_misses`) lead the list; the
+    /// remaining keys follow. This ordering is the single source of truth for
+    /// the unknown-key error listing and is exercised by the round-trip test.
+    pub(crate) const ALL: [MetricKey; 15] = [
+        MetricKey::CompileRequests,
+        MetricKey::RequestsExecuted,
+        MetricKey::CacheHits,
+        MetricKey::CacheMisses,
+        MetricKey::HitRate,
+        MetricKey::CacheErrors,
+        MetricKey::RequestsNotCacheable,
+        MetricKey::RequestsNotCompile,
+        MetricKey::RequestsUnsupportedCompiler,
+        MetricKey::CacheWrites,
+        MetricKey::Compilations,
+        MetricKey::CompileFails,
+        MetricKey::ForcedRecaches,
+        MetricKey::CacheSize,
+        MetricKey::MaxCacheSize,
+    ];
+
+    /// The canonical TOML string key for this metric (e.g. `"compile_requests"`).
+    pub(crate) fn as_config_key(&self) -> &'static str {
+        todo!("MetricKey::as_config_key")
+    }
+
+    /// The pretty, human-facing label for this metric (e.g. `"Compile requests"`).
+    pub(crate) fn default_label(&self) -> &'static str {
+        todo!("MetricKey::default_label")
+    }
+
+    /// Whether this metric's value is filtered by the `languages` setting.
+    pub(crate) fn is_per_language(&self) -> bool {
+        todo!("MetricKey::is_per_language")
+    }
+
+    /// The presentation [`MetricKind`] for this metric.
+    pub(crate) fn kind(&self) -> MetricKind {
+        todo!("MetricKey::kind")
+    }
+
+    /// Parse a config string into a [`MetricKey`].
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::UnknownMetricKey`] when `s` does not exactly match
+    /// any catalog key's [`MetricKey::as_config_key`]; the error lists the full
+    /// catalog so the user can correct the typo.
+    pub(crate) fn parse(s: &str) -> Result<MetricKey, ConfigError> {
+        let _ = s;
+        todo!("MetricKey::parse")
+    }
 }
 
 /// Parse a human-friendly duration string into a [`Duration`].
@@ -66,6 +192,18 @@ pub(crate) fn parse_duration(s: &str) -> Result<Duration, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_maps_known_keys_to_variants() {
+        assert_eq!(
+            MetricKey::parse("cache_hits").expect("`cache_hits` is a known key"),
+            MetricKey::CacheHits
+        );
+        assert_eq!(
+            MetricKey::parse("compile_requests").expect("`compile_requests` is a known key"),
+            MetricKey::CompileRequests
+        );
+    }
 
     #[test]
     fn parses_each_unit_suffix() {
