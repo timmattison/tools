@@ -40,8 +40,27 @@ pub(crate) enum ConfigError {
 /// has a non-integer magnitude (`"1.5s"`), or whose magnitude overflows the
 /// internal `u64` second/millisecond arithmetic.
 pub(crate) fn parse_duration(s: &str) -> Result<Duration, ConfigError> {
-    let _ = s;
-    todo!()
+    let trimmed = s.trim();
+    let invalid = || ConfigError::InvalidDuration {
+        input: trimmed.to_string(),
+    };
+
+    // Match the longest suffix first so `ms` is not mistaken for `s`.
+    let (digits, build): (&str, fn(u64) -> Option<Duration>) =
+        if let Some(d) = trimmed.strip_suffix("ms") {
+            (d, |n| Some(Duration::from_millis(n)))
+        } else if let Some(d) = trimmed.strip_suffix('s') {
+            (d, |n| Some(Duration::from_secs(n)))
+        } else if let Some(d) = trimmed.strip_suffix('m') {
+            (d, |n| n.checked_mul(60).map(Duration::from_secs))
+        } else if let Some(d) = trimmed.strip_suffix('h') {
+            (d, |n| n.checked_mul(3600).map(Duration::from_secs))
+        } else {
+            return Err(invalid());
+        };
+
+    let magnitude: u64 = digits.parse().map_err(|_| invalid())?;
+    build(magnitude).ok_or_else(invalid)
 }
 
 #[cfg(test)]
@@ -66,5 +85,58 @@ mod tests {
             parse_duration("1h").expect("1h should parse"),
             Duration::from_secs(3600)
         );
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(
+            parse_duration("  250ms  ").expect("padded input should parse"),
+            Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn rejects_missing_magnitude() {
+        assert!(parse_duration("s").is_err());
+    }
+
+    #[test]
+    fn rejects_missing_suffix() {
+        assert!(parse_duration("10").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_suffix() {
+        assert!(parse_duration("10x").is_err());
+    }
+
+    #[test]
+    fn rejects_non_integer_magnitude() {
+        assert!(parse_duration("1.5s").is_err());
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_duration("garbage").is_err());
+    }
+
+    #[test]
+    fn rejects_overflowing_magnitude() {
+        // u64::MAX hours overflows the n * 3600 multiplication.
+        assert!(parse_duration("18446744073709551615h").is_err());
+    }
+
+    #[test]
+    fn error_message_names_input_and_units() {
+        let err = parse_duration("10x").expect_err("`10x` must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("\"10x\""), "message was: {message}");
+        assert!(message.contains("ms"), "message was: {message}");
+        assert!(message.contains('h'), "message was: {message}");
     }
 }
