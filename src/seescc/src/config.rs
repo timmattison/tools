@@ -8,6 +8,8 @@
 
 use std::time::Duration;
 
+use serde::Deserialize;
+
 /// Errors produced while interpreting `seescc` configuration values.
 ///
 /// Designed to grow: later slices add variants for malformed TOML, unknown
@@ -37,6 +39,11 @@ pub(crate) enum ConfigError {
         /// The full catalog of valid keys, joined with `", "`.
         valid: String,
     },
+
+    /// The supplied config string was not syntactically valid TOML, or did not
+    /// match the expected shape (wrong types, missing required fields).
+    #[error("invalid config TOML: {0}")]
+    Toml(#[from] toml::de::Error),
 }
 
 /// The classification of a metric's value, which controls how it renders.
@@ -241,9 +248,148 @@ pub(crate) fn parse_duration(s: &str) -> Result<Duration, ConfigError> {
     build(magnitude).ok_or_else(invalid)
 }
 
+/// The default poll interval literal, parsed by [`Config::from_toml`] when the
+/// `poll_interval` field is absent. Kept as a named const so the fallback and
+/// the annotated [`DEFAULT_CONFIG_TOML`] never drift.
+const DEFAULT_POLL_INTERVAL: &str = "1s";
+
+/// The default sparkline-history window literal, used as the `window` fallback.
+const DEFAULT_WINDOW: &str = "15m";
+
+/// The default language filter applied when `languages` is absent.
+const DEFAULT_LANGUAGE: &str = "Rust";
+
+/// The built-in default configuration, expressed as an annotated TOML document.
+///
+/// This is the single source of truth for `seescc`'s defaults: [`Config::default`]
+/// parses it, and a later slice writes it verbatim to disk when the user has no
+/// config file. The comments are intentional and survive the round trip because
+/// they are part of the on-disk artifact, not of the parsed [`Config`].
+///
+/// It must stay byte-for-byte parseable by [`Config::from_toml`]; a test asserts
+/// `Config::from_toml(DEFAULT_CONFIG_TOML) == Config::default()`.
+pub(crate) const DEFAULT_CONFIG_TOML: &str = r#"# seescc configuration
+# poll_interval / window accept an integer + unit suffix: ms, s, m, h
+poll_interval = "1s"      # how often to query sccache
+window        = "15m"     # sparkline history retention
+
+# Per-language metrics are filtered to these languages; [] means sum across all.
+languages = ["Rust"]
+
+# Rows to show, in order. `label` is optional (a sensible default per key is used).
+# `spark` defaults to false.
+metrics = [
+  { key = "compile_requests",  label = "Compile requests" },
+  { key = "requests_executed", label = "Requests executed" },
+  { key = "cache_hits",        label = "Cache hits",   spark = true },
+  { key = "cache_misses",      label = "Cache misses", spark = true },
+  { key = "hit_rate",          label = "Hit rate",     spark = true },
+]
+"#;
+
+/// A fully resolved `seescc` configuration.
+///
+/// Produced by [`Config::from_toml`] (and, for the built-in defaults, by
+/// [`Config::default`]). All durations are concrete, the language filter is a
+/// plain list (empty means "sum across all languages"), and every metric row has
+/// its label resolved — the user's explicit `label` when present, otherwise the
+/// metric's [`MetricKey::default_label`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Config {
+    /// How often the live watch loop re-queries sccache.
+    pub poll_interval: Duration,
+    /// How much sparkline history to retain.
+    pub window: Duration,
+    /// Languages whose per-language buckets are surfaced; empty sums across all.
+    pub languages: Vec<String>,
+    /// The rows to display, in order.
+    pub metrics: Vec<MetricSpec>,
+}
+
+/// A single resolved metric row in a [`Config`].
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MetricSpec {
+    /// Which catalog metric this row surfaces.
+    pub key: MetricKey,
+    /// The display label: the user's `label` if given, else [`MetricKey::default_label`].
+    pub label: String,
+    /// Whether to render a sparkline of this metric's history.
+    pub spark: bool,
+}
+
+/// The raw, untyped shape of a `seescc` config file, deserialized straight from
+/// TOML before validation/conversion into a [`Config`]. Every field is optional
+/// so absent keys can fall back to the built-in defaults.
+#[derive(Debug, Deserialize)]
+struct RawConfig {
+    /// Raw `poll_interval` duration string, still to be parsed.
+    poll_interval: Option<String>,
+    /// Raw `window` duration string, still to be parsed.
+    window: Option<String>,
+    /// Raw language filter; `None` means "use the default".
+    languages: Option<Vec<String>>,
+    /// Raw metric rows; `None` means "use the default set".
+    metrics: Option<Vec<RawMetric>>,
+}
+
+/// The raw, untyped shape of a single `[[metrics]]` entry.
+#[derive(Debug, Deserialize)]
+struct RawMetric {
+    /// The metric key string, validated against the catalog by [`MetricKey::parse`].
+    key: String,
+    /// The optional override label.
+    label: Option<String>,
+    /// Whether to render a sparkline; defaults to `false` when omitted.
+    #[serde(default)]
+    spark: bool,
+}
+
+impl Config {
+    /// Parse and validate a `seescc` config from a TOML string.
+    ///
+    /// Absent top-level fields fall back to the built-in defaults
+    /// (`poll_interval = "1s"`, `window = "15m"`, `languages = ["Rust"]`, and the
+    /// Phase-1 five-metric set). An explicit empty `metrics = []` is honored as an
+    /// empty row list rather than replaced by the defaults; only an *absent*
+    /// `metrics` key triggers the default set. Each metric's label resolves to the
+    /// user's `label` when present, otherwise [`MetricKey::default_label`].
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Toml`] when `s` is not valid TOML or does not match
+    /// the expected shape, [`ConfigError::InvalidDuration`] when `poll_interval`
+    /// or `window` cannot be parsed, and [`ConfigError::UnknownMetricKey`] when a
+    /// metric names a key that is not in the catalog.
+    pub(crate) fn from_toml(s: &str) -> Result<Config, ConfigError> {
+        let _ = s;
+        todo!("from_toml is implemented in the green commit")
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::from_toml(DEFAULT_CONFIG_TOML).expect("built-in DEFAULT_CONFIG_TOML must parse")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_config_has_phase_one_five_metrics_in_order() {
+        let config = Config::default();
+        let keys: Vec<MetricKey> = config.metrics.iter().map(|m| m.key).collect();
+        assert_eq!(
+            keys,
+            vec![
+                MetricKey::CompileRequests,
+                MetricKey::RequestsExecuted,
+                MetricKey::CacheHits,
+                MetricKey::CacheMisses,
+                MetricKey::HitRate,
+            ]
+        );
+    }
 
     #[test]
     fn parse_maps_known_keys_to_variants() {
