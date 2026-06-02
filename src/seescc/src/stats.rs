@@ -85,8 +85,9 @@ pub(crate) struct Stats {
 }
 
 /// Parse an sccache `--show-stats --stats-format=json` payload into [`Stats`].
-pub(crate) fn parse(_json: &str) -> anyhow::Result<Stats> {
-    Ok(Stats::default()) // STUB — replaced in GREEN step
+pub(crate) fn parse(json: &str) -> anyhow::Result<Stats> {
+    serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("failed to parse sccache --show-stats JSON: {e}"))
 }
 
 #[cfg(test)]
