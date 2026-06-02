@@ -11,16 +11,28 @@ use std::collections::HashMap;
 /// An empty `languages` slice means "sum across all languages". A requested
 /// language that is absent from `counts` contributes `0` rather than being an
 /// error.
-pub(crate) fn lang_sum(_counts: &HashMap<String, u64>, _languages: &[String]) -> u64 {
-    0 // STUB
+pub(crate) fn lang_sum(counts: &HashMap<String, u64>, languages: &[String]) -> u64 {
+    if languages.is_empty() {
+        counts.values().sum()
+    } else {
+        languages
+            .iter()
+            .filter_map(|lang| counts.get(lang))
+            .sum()
+    }
 }
 
 /// Compute the cache hit rate as a percentage in `0.0..=100.0`.
 ///
 /// Returns `hits / (hits + misses) * 100`. When `hits + misses == 0`, returns
 /// `0.0` (never `NaN`).
-pub(crate) fn hit_rate(_hits: u64, _misses: u64) -> f64 {
-    0.0 // STUB
+pub(crate) fn hit_rate(hits: u64, misses: u64) -> f64 {
+    let total = hits + misses;
+    if total == 0 {
+        0.0
+    } else {
+        hits as f64 / total as f64 * 100.0
+    }
 }
 
 #[cfg(test)]
