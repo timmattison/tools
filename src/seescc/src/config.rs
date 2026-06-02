@@ -123,22 +123,64 @@ impl MetricKey {
 
     /// The canonical TOML string key for this metric (e.g. `"compile_requests"`).
     pub(crate) fn as_config_key(&self) -> &'static str {
-        todo!("MetricKey::as_config_key")
+        match self {
+            MetricKey::CompileRequests => "compile_requests",
+            MetricKey::RequestsExecuted => "requests_executed",
+            MetricKey::CacheHits => "cache_hits",
+            MetricKey::CacheMisses => "cache_misses",
+            MetricKey::HitRate => "hit_rate",
+            MetricKey::CacheErrors => "cache_errors",
+            MetricKey::RequestsNotCacheable => "requests_not_cacheable",
+            MetricKey::RequestsNotCompile => "requests_not_compile",
+            MetricKey::RequestsUnsupportedCompiler => "requests_unsupported_compiler",
+            MetricKey::CacheWrites => "cache_writes",
+            MetricKey::Compilations => "compilations",
+            MetricKey::CompileFails => "compile_fails",
+            MetricKey::ForcedRecaches => "forced_recaches",
+            MetricKey::CacheSize => "cache_size",
+            MetricKey::MaxCacheSize => "max_cache_size",
+        }
     }
 
     /// The pretty, human-facing label for this metric (e.g. `"Compile requests"`).
     pub(crate) fn default_label(&self) -> &'static str {
-        todo!("MetricKey::default_label")
+        match self {
+            MetricKey::CompileRequests => "Compile requests",
+            MetricKey::RequestsExecuted => "Requests executed",
+            MetricKey::CacheHits => "Cache hits",
+            MetricKey::CacheMisses => "Cache misses",
+            MetricKey::HitRate => "Hit rate",
+            MetricKey::CacheErrors => "Cache errors",
+            MetricKey::RequestsNotCacheable => "Requests not cacheable",
+            MetricKey::RequestsNotCompile => "Requests not compile",
+            MetricKey::RequestsUnsupportedCompiler => "Unsupported compiler",
+            MetricKey::CacheWrites => "Cache writes",
+            MetricKey::Compilations => "Compilations",
+            MetricKey::CompileFails => "Compile fails",
+            MetricKey::ForcedRecaches => "Forced recaches",
+            MetricKey::CacheSize => "Cache size",
+            MetricKey::MaxCacheSize => "Max cache size",
+        }
     }
 
     /// Whether this metric's value is filtered by the `languages` setting.
     pub(crate) fn is_per_language(&self) -> bool {
-        todo!("MetricKey::is_per_language")
+        matches!(
+            self,
+            MetricKey::CacheHits
+                | MetricKey::CacheMisses
+                | MetricKey::CacheErrors
+                | MetricKey::HitRate
+        )
     }
 
     /// The presentation [`MetricKind`] for this metric.
     pub(crate) fn kind(&self) -> MetricKind {
-        todo!("MetricKey::kind")
+        match self {
+            MetricKey::CacheSize | MetricKey::MaxCacheSize => MetricKind::Size,
+            MetricKey::HitRate => MetricKind::Rate,
+            _ => MetricKind::Count,
+        }
     }
 
     /// Parse a config string into a [`MetricKey`].
@@ -148,8 +190,18 @@ impl MetricKey {
     /// any catalog key's [`MetricKey::as_config_key`]; the error lists the full
     /// catalog so the user can correct the typo.
     pub(crate) fn parse(s: &str) -> Result<MetricKey, ConfigError> {
-        let _ = s;
-        todo!("MetricKey::parse")
+        MetricKey::ALL
+            .iter()
+            .find(|key| key.as_config_key() == s)
+            .copied()
+            .ok_or_else(|| ConfigError::UnknownMetricKey {
+                key: s.to_string(),
+                valid: MetricKey::ALL
+                    .iter()
+                    .map(MetricKey::as_config_key)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })
     }
 }
 
@@ -203,6 +255,84 @@ mod tests {
             MetricKey::parse("compile_requests").expect("`compile_requests` is a known key"),
             MetricKey::CompileRequests
         );
+    }
+
+    #[test]
+    fn parse_round_trips_every_catalog_key() {
+        // The catalog and the parser must never drift: every key's canonical
+        // config string must parse back to that exact key.
+        for key in MetricKey::ALL {
+            let parsed = MetricKey::parse(key.as_config_key())
+                .unwrap_or_else(|e| panic!("round-trip failed for {key:?}: {e}"));
+            assert_eq!(
+                parsed,
+                key,
+                "round-trip mismatch for {key:?} ({:?})",
+                key.as_config_key()
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_key_and_lists_catalog() {
+        let err = MetricKey::parse("bogus").expect_err("`bogus` is not a catalog key");
+        let message = err.to_string();
+        assert!(message.contains("bogus"), "message was: {message}");
+        // The error must actually enumerate the catalog, not just fire.
+        assert!(message.contains("cache_hits"), "message was: {message}");
+        assert!(
+            message.contains("compile_requests"),
+            "message was: {message}"
+        );
+    }
+
+    #[test]
+    fn is_per_language_splits_the_two_families() {
+        assert!(MetricKey::CacheHits.is_per_language());
+        assert!(MetricKey::CacheMisses.is_per_language());
+        assert!(MetricKey::CacheErrors.is_per_language());
+        assert!(MetricKey::HitRate.is_per_language());
+
+        assert!(!MetricKey::CompileRequests.is_per_language());
+        assert!(!MetricKey::CacheSize.is_per_language());
+    }
+
+    #[test]
+    fn kind_classifies_size_rate_and_count() {
+        assert_eq!(MetricKey::CacheSize.kind(), MetricKind::Size);
+        assert_eq!(MetricKey::MaxCacheSize.kind(), MetricKind::Size);
+        assert_eq!(MetricKey::HitRate.kind(), MetricKind::Rate);
+        assert_eq!(MetricKey::CompileRequests.kind(), MetricKind::Count);
+        assert_eq!(MetricKey::CacheHits.kind(), MetricKind::Count);
+    }
+
+    #[test]
+    fn default_label_matches_phase_one_labels() {
+        assert_eq!(
+            MetricKey::CompileRequests.default_label(),
+            "Compile requests"
+        );
+        assert_eq!(
+            MetricKey::RequestsExecuted.default_label(),
+            "Requests executed"
+        );
+        assert_eq!(MetricKey::CacheHits.default_label(), "Cache hits");
+        assert_eq!(MetricKey::CacheMisses.default_label(), "Cache misses");
+        assert_eq!(MetricKey::HitRate.default_label(), "Hit rate");
+    }
+
+    #[test]
+    fn catalog_has_fifteen_unique_keys() {
+        assert_eq!(MetricKey::ALL.len(), 15);
+
+        let mut seen: Vec<&'static str> = MetricKey::ALL
+            .iter()
+            .map(MetricKey::as_config_key)
+            .collect();
+        seen.sort_unstable();
+        let unique = seen.len();
+        seen.dedup();
+        assert_eq!(seen.len(), unique, "duplicate as_config_key in catalog");
     }
 
     #[test]
