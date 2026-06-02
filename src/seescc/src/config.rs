@@ -445,8 +445,13 @@ impl Config {
         poll_interval: Option<&str>,
         window: Option<&str>,
     ) -> Result<Config, ConfigError> {
-        let _ = (&mut self, poll_interval, window);
-        todo!("with_overrides not yet implemented")
+        if let Some(value) = poll_interval {
+            self.poll_interval = parse_duration(value)?;
+        }
+        if let Some(value) = window {
+            self.window = parse_duration(value)?;
+        }
+        Ok(self)
     }
 }
 
@@ -839,6 +844,17 @@ metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spa
             config.window,
             Duration::from_secs(900),
             "an absent window override must leave the field unchanged"
+        );
+    }
+
+    #[test]
+    fn with_overrides_rejects_an_invalid_duration() {
+        let err = Config::default()
+            .with_overrides(Some("nope"), None)
+            .expect_err("an invalid poll_interval override must error");
+        assert!(
+            matches!(err, ConfigError::InvalidDuration { .. }),
+            "expected InvalidDuration, got: {err:?}"
         );
     }
 
