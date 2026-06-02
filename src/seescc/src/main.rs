@@ -8,6 +8,12 @@ use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 
+#[allow(
+    dead_code,
+    reason = "consumed by later Phase 1 slices (aggregate/main wiring)"
+)]
+mod stats;
+
 /// Command-line arguments for `seescc`.
 #[derive(Parser)]
 #[command(name = "seescc", version = version_string!())]
