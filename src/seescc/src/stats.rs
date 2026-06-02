@@ -10,6 +10,23 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+/// Deserialize helper mapping an explicit JSON `null` to the type's default.
+///
+/// `#[serde(default)]` only supplies a value when a field is *absent*; a field
+/// present with value `null` is still routed through the field type's
+/// `Deserialize`, which fails for non-`Option` types like `u64` (the source of
+/// "invalid type: null, expected u64"). sccache emits `null` for several
+/// numeric fields depending on the cache backend — `cache_size`/`max_cache_size`
+/// on non-local caches, unset counters — so every field is parsed through this
+/// helper, treating `null` the same as an absent key.
+fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// A per-language counter bucket (`cache_hits`, `cache_misses`,
 /// `cache_errors`).
 ///
@@ -19,7 +36,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct LangCounts {
     /// Per-language compilation counts keyed by sccache's language label.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub counts: HashMap<String, u64>,
 }
 
@@ -30,40 +47,40 @@ pub(crate) struct LangCounts {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Counters {
     /// Total number of compile requests seen.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub compile_requests: u64,
     /// Requests that resulted in actual compilation work being dispatched.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub requests_executed: u64,
     /// Requests rejected as not cacheable.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub requests_not_cacheable: u64,
     /// Requests that were not compilation invocations at all.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub requests_not_compile: u64,
     /// Requests using a compiler sccache does not support.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub requests_unsupported_compiler: u64,
     /// Cache hits, bucketed by language.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub cache_hits: LangCounts,
     /// Cache misses, bucketed by language.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub cache_misses: LangCounts,
     /// Cache errors, bucketed by language.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub cache_errors: LangCounts,
     /// Number of cache writes performed.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub cache_writes: u64,
     /// Number of compilations performed.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub compilations: u64,
     /// Number of compilations that failed.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub compile_fails: u64,
     /// Number of forced recaches.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub forced_recaches: u64,
 }
 
@@ -71,16 +88,16 @@ pub(crate) struct Counters {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct Stats {
     /// The nested counter object.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub stats: Counters,
     /// Current on-disk cache size, in bytes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub cache_size: u64,
     /// Configured maximum cache size, in bytes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub max_cache_size: u64,
     /// The reporting sccache version string (e.g. `"0.15.0"`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub version: String,
 }
 
