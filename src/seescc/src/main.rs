@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use buildinfo::version_string;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 mod aggregate;
 #[allow(
@@ -22,6 +22,20 @@ mod render;
     reason = "Counters/Stats carry fields (cache_size, compilations, …) consumed by later phases"
 )]
 mod stats;
+
+/// The one-shot output format selected by `--format`.
+///
+/// clap lowercases the variant names for its [`ValueEnum`] parsing, so the CLI
+/// accepts `--format human` and `--format json`. The watch loop always renders
+/// the human view regardless of this setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+enum OutputFormat {
+    /// Human-readable table (the default).
+    #[default]
+    Human,
+    /// Compact JSON object keyed by metric key, for scripting.
+    Json,
+}
 
 /// Command-line arguments for `seescc`.
 #[derive(Parser)]
@@ -63,6 +77,11 @@ struct Cli {
     /// Accepts an integer magnitude plus a `ms`/`s`/`m`/`h` unit suffix.
     #[arg(long)]
     window: Option<String>,
+
+    /// One-shot output format: `human` (default) or `json`. Ignored in the live
+    /// watch loop, which always renders the human view.
+    #[arg(long, value_enum, default_value = "human")]
+    format: OutputFormat,
 }
 
 /// The sccache binary we shell out to for stats.
@@ -106,7 +125,11 @@ fn main() -> Result<()> {
         .with_overrides(cli.poll_interval.as_deref(), cli.window.as_deref())?;
 
     let stats = poll_sccache()?;
-    println!("{}", render_oneshot(&config, &stats));
+    let output = match cli.format {
+        OutputFormat::Human => render_oneshot(&config, &stats),
+        OutputFormat::Json => render_oneshot_json(&config, &stats),
+    };
+    println!("{output}");
     Ok(())
 }
 
@@ -162,4 +185,123 @@ fn render_oneshot(config: &config::Config, stats: &stats::Stats) -> String {
 
     let clock = chrono::Local::now().format("%H:%M:%S").to_string();
     render::build_human(&languages_label, &clock, DEFAULT_WIDTH, &rows)
+}
+
+/// Build the one-shot JSON frame from a resolved [`config::Config`].
+///
+/// Emits a compact, single-line JSON object keyed by each metric's canonical
+/// config key, in the config's metric order. Counts and byte sizes serialize as
+/// raw integers (sizes are the underlying byte count, not the human "771.7 MiB"
+/// string — scripting wants the number); rates serialize as floats rounded to
+/// two decimals. The `languages` filter is applied exactly as in the human view.
+fn render_oneshot_json(config: &config::Config, stats: &stats::Stats) -> String {
+    let _ = (config, stats);
+    String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIXTURE: &str = include_str!("../tests/fixtures/sccache-0.15.0.json");
+
+    /// Parse the captured fixture into a [`stats::Stats`] for realistic data.
+    fn fixture_stats() -> stats::Stats {
+        stats::parse(FIXTURE).expect("fixture should parse")
+    }
+
+    /// Render the one-shot JSON and parse it back into a [`serde_json::Value`].
+    fn json_value(config: &config::Config) -> serde_json::Value {
+        let out = render_oneshot_json(config, &fixture_stats());
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{out}"))
+    }
+
+    #[test]
+    fn json_oneshot_default_config_is_rust_filtered() {
+        let config = config::Config::default();
+        let value = json_value(&config);
+        let object = value
+            .as_object()
+            .expect("JSON output must be an object");
+
+        // Exactly the five default keys, no more, no less.
+        assert_eq!(object.len(), 5, "object should have exactly 5 keys: {object:?}");
+        for key in [
+            "compile_requests",
+            "requests_executed",
+            "cache_hits",
+            "cache_misses",
+            "hit_rate",
+        ] {
+            assert!(object.contains_key(key), "missing expected key {key}: {object:?}");
+        }
+
+        assert_eq!(value["compile_requests"], 4786);
+        assert_eq!(value["requests_executed"], 3880);
+
+        // Rust-only per-language values, NOT the all-language sums (2430 / 1373).
+        assert_eq!(
+            value["cache_hits"], 1718,
+            "cache_hits must be Rust-only, not the all-language sum"
+        );
+        assert_eq!(
+            value["cache_misses"], 963,
+            "cache_misses must be Rust-only, not the all-language sum"
+        );
+
+        let hit_rate = value["hit_rate"]
+            .as_f64()
+            .expect("hit_rate must be a JSON number");
+        assert!(
+            (hit_rate - 64.08).abs() < 1e-9,
+            "hit_rate should round to 64.08, got {hit_rate}"
+        );
+    }
+
+    #[test]
+    fn json_oneshot_languages_empty_sums_all() {
+        let config = config::Config::from_toml(
+            r#"
+languages = []
+metrics = [ { key = "cache_hits" } ]
+"#,
+        )
+        .expect("config should parse");
+        let value = json_value(&config);
+        assert_eq!(
+            value["cache_hits"],
+            196 + 1718 + 516,
+            "empty languages must sum cache_hits across all languages"
+        );
+    }
+
+    #[test]
+    fn json_oneshot_size_metric_is_raw_bytes() {
+        let config = config::Config::from_toml(
+            r#"
+metrics = [ { key = "cache_size" } ]
+"#,
+        )
+        .expect("config should parse");
+        let value = json_value(&config);
+        assert_eq!(
+            value["cache_size"], 809_212_237,
+            "cache_size must be the raw byte count as an integer, not a human string"
+        );
+        assert!(
+            value["cache_size"].is_number(),
+            "cache_size must be a JSON number, not a string: {:?}",
+            value["cache_size"]
+        );
+    }
+
+    #[test]
+    fn json_oneshot_is_valid_parseable_json() {
+        let config = config::Config::default();
+        let out = render_oneshot_json(&config, &fixture_stats());
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&out).is_ok(),
+            "default-config JSON output must be valid (jq-pipeable): {out}"
+        );
+    }
 }
