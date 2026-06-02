@@ -6554,6 +6554,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "seescc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "chrono",
+ "clap",
+ "num-format",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-width",
+ "which",
+]
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
