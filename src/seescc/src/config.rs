@@ -430,6 +430,24 @@ impl Config {
             metrics,
         })
     }
+
+    /// Apply `--poll-interval` / `--window` CLI overrides (each an optional
+    /// duration string) on top of a loaded config, replacing the corresponding
+    /// field. An override of `None` leaves that field unchanged; a present
+    /// override is parsed via [`parse_duration`] and replaces the field.
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::InvalidDuration`] when a present override string is
+    /// not a valid duration (empty, missing magnitude, unknown unit suffix,
+    /// non-integer, or overflowing).
+    pub(crate) fn with_overrides(
+        mut self,
+        poll_interval: Option<&str>,
+        window: Option<&str>,
+    ) -> Result<Config, ConfigError> {
+        let _ = (&mut self, poll_interval, window);
+        todo!("with_overrides not yet implemented")
+    }
 }
 
 impl MetricSpec {
@@ -805,6 +823,23 @@ metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spa
     fn default_does_not_panic() {
         // Guards the `expect` in `impl Default` — the built-in TOML must parse.
         let _ = Config::default();
+    }
+
+    #[test]
+    fn with_overrides_replaces_poll_interval_and_leaves_window() {
+        let config = Config::default()
+            .with_overrides(Some("5s"), None)
+            .expect("a valid poll_interval override should apply");
+        assert_eq!(
+            config.poll_interval,
+            Duration::from_secs(5),
+            "a present poll_interval override must replace the field"
+        );
+        assert_eq!(
+            config.window,
+            Duration::from_secs(900),
+            "an absent window override must leave the field unchanged"
+        );
     }
 
     #[test]
