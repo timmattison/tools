@@ -17,12 +17,45 @@ pub(crate) struct Row {
 /// so multi-byte labels stay aligned.
 pub(crate) fn build_human(
     languages_label: &str,
-    _clock: &str,
-    _width: usize,
-    _rows: &[Row],
+    clock: &str,
+    width: usize,
+    rows: &[Row],
 ) -> String {
-    let _ = UnicodeWidthStr::width(languages_label); // touch import; STUB
-    String::new() // STUB — replaced in GREEN
+    let left = format!("sccache · {languages_label}");
+    let header_pad = width
+        .saturating_sub(UnicodeWidthStr::width(left.as_str()) + UnicodeWidthStr::width(clock))
+        .max(1);
+    let header = format!("{left}{}{clock}", " ".repeat(header_pad));
+
+    let max_label = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.label.as_str()))
+        .max()
+        .unwrap_or(0);
+    let max_value = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.value.as_str()))
+        .max()
+        .unwrap_or(0);
+
+    let mut out = String::new();
+    out.push_str(&header);
+    out.push('\n');
+    out.push('\n');
+    for (i, row) in rows.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let label_pad = max_label.saturating_sub(UnicodeWidthStr::width(row.label.as_str()));
+        let value_pad = max_value.saturating_sub(UnicodeWidthStr::width(row.value.as_str()));
+        out.push(' ');
+        out.push_str(&row.label);
+        out.push_str(&" ".repeat(label_pad));
+        out.push_str("  ");
+        out.push_str(&" ".repeat(value_pad));
+        out.push_str(&row.value);
+    }
+    out
 }
 
 #[cfg(test)]
