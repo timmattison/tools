@@ -152,4 +152,36 @@ mod tests {
         assert_eq!(stats.max_cache_size, 0);
         assert!(stats.version.is_empty());
     }
+
+    #[test]
+    fn tolerates_explicit_null_numeric_fields() {
+        // Real sccache emits an explicit `null` for some numeric fields depending
+        // on the cache backend — e.g. `cache_size`/`max_cache_size` are null for
+        // non-local caches (S3/GHA/redis), and some counters can be null when
+        // unset. `#[serde(default)]` only covers *absent* keys; a present `null`
+        // is still routed to `u64`'s deserializer and fails with
+        // "invalid type: null, expected u64". These must parse as the default.
+        let json = r#"{
+            "stats": {
+                "compile_requests": 10,
+                "requests_executed": null,
+                "cache_writes": null,
+                "cache_hits": { "counts": { "Rust": 5 }, "adv_counts": {} }
+            },
+            "cache_size": null,
+            "max_cache_size": null,
+            "version": "0.15.0",
+            "multi_level": null
+        }"#;
+
+        let stats = parse(json).expect("explicit null numeric fields should parse as defaults");
+
+        assert_eq!(stats.stats.compile_requests, 10);
+        assert_eq!(stats.stats.requests_executed, 0);
+        assert_eq!(stats.stats.cache_writes, 0);
+        assert_eq!(stats.stats.cache_hits.counts["Rust"], 5);
+        assert_eq!(stats.cache_size, 0);
+        assert_eq!(stats.max_cache_size, 0);
+        assert_eq!(stats.version, "0.15.0");
+    }
 }
