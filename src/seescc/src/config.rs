@@ -56,6 +56,26 @@ pub(crate) enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+
+    /// [`write_default_config`] was asked to write to a path that already exists
+    /// and `force` was not set, so the existing file was left untouched.
+    #[error("config file already exists at {path} (use --force to overwrite)")]
+    AlreadyExists {
+        /// The path that already exists, as a display string.
+        path: String,
+    },
+
+    /// A config file (or one of its parent directories) could not be written —
+    /// for example, a permission failure under [`write_default_config`]. The
+    /// `path` is echoed so the user can see exactly which write failed.
+    #[error("failed to write config file {path}: {source}")]
+    WriteFailed {
+        /// The path that failed to write, as a display string.
+        path: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// The classification of a metric's value, which controls how it renders.
@@ -466,6 +486,25 @@ fn read_config_file(path: &std::path::Path) -> Result<String, ConfigError> {
         path: path.display().to_string(),
         source,
     })
+}
+
+/// Write the annotated built-in default config to `path`, creating any missing
+/// parent directories.
+///
+/// Refuses to overwrite an existing file unless `force` is set; in that case the
+/// existing file is left untouched. The bytes written are [`DEFAULT_CONFIG_TOML`]
+/// verbatim, so the on-disk artifact keeps its explanatory comments.
+///
+/// # Errors
+/// Returns [`ConfigError::AlreadyExists`] when `path` already exists and `force`
+/// is `false`, and [`ConfigError::WriteFailed`] when creating the parent
+/// directories or writing the file fails.
+pub(crate) fn write_default_config(
+    path: &std::path::Path,
+    force: bool,
+) -> Result<(), ConfigError> {
+    let _ = (path, force);
+    todo!("write_default_config is not yet implemented")
 }
 
 /// Resolve the effective `seescc` configuration, honoring config-file
@@ -913,5 +952,22 @@ metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spa
         assert!(message.contains("\"10x\""), "message was: {message}");
         assert!(message.contains("ms"), "message was: {message}");
         assert!(message.contains('h'), "message was: {message}");
+    }
+
+    #[test]
+    fn write_default_config_writes_to_a_fresh_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A nested, not-yet-existing subpath: parent dirs must be created.
+        let path = dir.path().join("a").join("b").join("config.toml");
+        assert!(!path.exists(), "precondition: target must not exist");
+
+        write_default_config(&path, false).expect("writing to a fresh path should succeed");
+
+        assert!(path.exists(), "the config file must exist after writing");
+        let written = fs::read_to_string(&path).expect("read back written config");
+        assert_eq!(
+            written, DEFAULT_CONFIG_TOML,
+            "written contents must be DEFAULT_CONFIG_TOML verbatim"
+        );
     }
 }
