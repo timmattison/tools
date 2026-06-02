@@ -13,7 +13,7 @@ use clap::{Parser, ValueEnum};
 mod aggregate;
 #[allow(
     dead_code,
-    reason = "the MetricKind enum and the MetricKey::kind / MetricKey::is_per_language catalog accessors are consumed by later phases (Phase 3 JSON output, Phase 5 sparklines)"
+    reason = "the MetricKind enum and the MetricKey::kind / MetricKey::is_per_language catalog accessors are consumed by Phase 5 sparklines"
 )]
 mod config;
 mod render;
@@ -195,8 +195,28 @@ fn render_oneshot(config: &config::Config, stats: &stats::Stats) -> String {
 /// string — scripting wants the number); rates serialize as floats rounded to
 /// two decimals. The `languages` filter is applied exactly as in the human view.
 fn render_oneshot_json(config: &config::Config, stats: &stats::Stats) -> String {
-    let _ = (config, stats);
-    String::new()
+    let fields: Vec<render::JsonField> = config
+        .metrics
+        .iter()
+        .map(|spec| {
+            let value = match aggregate::metric_value(spec.key, stats, &config.languages) {
+                aggregate::MetricValue::Count(n) | aggregate::MetricValue::Size(n) => {
+                    render::JsonValue::Int(n)
+                }
+                aggregate::MetricValue::Rate(r) => render::JsonValue::Float(round_rate(r)),
+            };
+            render::JsonField {
+                key: spec.key.as_config_key(),
+                value,
+            }
+        })
+        .collect();
+    render::build_json(&fields)
+}
+
+/// Round a percentage to two decimals for stable, script-friendly JSON output.
+fn round_rate(rate: f64) -> f64 {
+    (rate * 100.0).round() / 100.0
 }
 
 #[cfg(test)]
@@ -213,19 +233,22 @@ mod tests {
     /// Render the one-shot JSON and parse it back into a [`serde_json::Value`].
     fn json_value(config: &config::Config) -> serde_json::Value {
         let out = render_oneshot_json(config, &fixture_stats());
-        serde_json::from_str(&out).unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{out}"))
+        serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{out}"))
     }
 
     #[test]
     fn json_oneshot_default_config_is_rust_filtered() {
         let config = config::Config::default();
         let value = json_value(&config);
-        let object = value
-            .as_object()
-            .expect("JSON output must be an object");
+        let object = value.as_object().expect("JSON output must be an object");
 
         // Exactly the five default keys, no more, no less.
-        assert_eq!(object.len(), 5, "object should have exactly 5 keys: {object:?}");
+        assert_eq!(
+            object.len(),
+            5,
+            "object should have exactly 5 keys: {object:?}"
+        );
         for key in [
             "compile_requests",
             "requests_executed",
@@ -233,7 +256,10 @@ mod tests {
             "cache_misses",
             "hit_rate",
         ] {
-            assert!(object.contains_key(key), "missing expected key {key}: {object:?}");
+            assert!(
+                object.contains_key(key),
+                "missing expected key {key}: {object:?}"
+            );
         }
 
         assert_eq!(value["compile_requests"], 4786);

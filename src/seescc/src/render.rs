@@ -60,10 +60,6 @@ pub(crate) fn build_human(
 }
 
 /// A JSON number for one field of the one-shot JSON report.
-#[allow(
-    dead_code,
-    reason = "consumed by the --format json one-shot wiring in the next slice"
-)]
 pub(crate) enum JsonValue {
     /// An integer count or byte size, emitted as a JSON integer.
     Int(u64),
@@ -72,10 +68,6 @@ pub(crate) enum JsonValue {
 }
 
 /// One key/value field of the one-shot JSON object, in display order.
-#[allow(
-    dead_code,
-    reason = "consumed by the --format json one-shot wiring in the next slice"
-)]
 pub(crate) struct JsonField {
     pub key: &'static str,
     pub value: JsonValue,
@@ -83,10 +75,6 @@ pub(crate) struct JsonField {
 
 /// Serialize `fields` as a compact single-line JSON object, preserving the
 /// given order (NOT sorted). Suitable for piping into `jq`.
-#[allow(
-    dead_code,
-    reason = "consumed by the --format json one-shot wiring in the next slice"
-)]
 pub(crate) fn build_json(fields: &[JsonField]) -> String {
     /// Serializes a slice of fields as a JSON map in slice order. `serialize_map`
     /// preserves feed order, so keys are emitted exactly as given (not sorted).
