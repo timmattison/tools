@@ -22,6 +22,11 @@ mod render;
     reason = "Counters/Stats carry fields (cache_size, compilations, …) consumed by later phases"
 )]
 mod stats;
+#[allow(
+    dead_code,
+    reason = "the watch-mode terminal shell wires these in later in this phase"
+)]
+mod watch;
 
 /// The one-shot output format selected by `--format`.
 ///
