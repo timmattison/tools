@@ -157,10 +157,16 @@ where
             Err(RecvTimeoutError::Timeout) => {
                 poll_once(state, &mut poll, &mut render, &mut paint, displayed, false)?;
             }
-            // Resize handling arrives in the next slice; for now a resize is
-            // ignored (the body is intentionally incomplete so the resize test
-            // fails for the right reason).
-            Ok(Event::Resize) => {}
+            // A resize re-renders from the *current* state at the new
+            // dimensions (no poll — only the geometry changed) and paints
+            // unconditionally: the previously-painted bytes are laid out for the
+            // old size and are visually stale, so suppression must be bypassed
+            // even when the new frame is byte-identical.
+            Ok(Event::Resize) => {
+                let frame = render(state);
+                paint(&frame)?;
+                *displayed = frame;
+            }
             // Quit, or every sender gone: clean shutdown.
             Ok(Event::Quit) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
         }
