@@ -262,6 +262,48 @@ pub(crate) fn should_force_colors(
     !stdout_is_tty && columns_env_present && !no_color_env
 }
 
+/// The header label used when the config selects no specific languages, meaning
+/// per-language metrics are summed across every language.
+///
+/// Shared by the one-shot and watch frames so a config with no `languages`
+/// filter renders the same `"all"` header in both views.
+pub(crate) const ALL_LANGUAGES_LABEL: &str = "all";
+
+/// The header language label for `config`: the configured languages joined with
+/// `", "`, or [`ALL_LANGUAGES_LABEL`] when the list is empty (per-language
+/// metrics summed across every language).
+///
+/// One source of truth for the header label so the one-shot and watch frames
+/// can never disagree about how a given config is summarized.
+pub(crate) fn languages_label(config: &crate::config::Config) -> String {
+    if config.languages.is_empty() {
+        ALL_LANGUAGES_LABEL.to_string()
+    } else {
+        config.languages.join(", ")
+    }
+}
+
+/// Build the display rows for `config` from `stats`: one [`crate::render::Row`]
+/// per configured metric, its value extracted via
+/// [`crate::aggregate::metric_value`] (honoring the language filter) and
+/// formatted for display.
+///
+/// Shared by the one-shot human frame and the watch frame so the two build their
+/// tables identically — the rows can never drift apart between the two views.
+pub(crate) fn build_rows(
+    config: &crate::config::Config,
+    stats: &crate::stats::Stats,
+) -> Vec<crate::render::Row> {
+    config
+        .metrics
+        .iter()
+        .map(|spec| crate::render::Row {
+            label: spec.label.clone(),
+            value: crate::aggregate::metric_value(spec.key, stats, &config.languages).format(),
+        })
+        .collect()
+}
+
 /// Compose the full watch frame from the loop's current [`WatchState`] and the
 /// resolved [`crate::config::Config`].
 ///
@@ -290,10 +332,21 @@ pub(crate) fn compose_watch_frame(
     width: usize,
     clock: &str,
 ) -> String {
-    // RED stub: returns an empty frame so the behavioral tests fail because the
-    // composition behavior is missing, not because the symbol is undefined.
-    let _ = (state, config, width, clock);
-    String::new()
+    let label = languages_label(config);
+    let banner = state.error();
+    match state.last_good() {
+        // We have trustworthy numbers: draw the table and the cache/window
+        // footer, with the banner shown only while the current poll is failing.
+        Some(stats) => {
+            let rows = build_rows(config, stats);
+            let footer =
+                crate::render::build_footer(stats.cache_size, stats.max_cache_size, config.window);
+            crate::render::build_watch(&label, clock, width, &rows, banner, Some(&footer))
+        }
+        // No good poll yet (first poll failed): header + banner only. Every
+        // number would be a fabrication, so draw no rows and no footer.
+        None => crate::render::build_watch(&label, clock, width, &[], banner, None),
+    }
 }
 
 #[cfg(test)]

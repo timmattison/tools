@@ -92,13 +92,10 @@ struct Cli {
 /// The sccache binary we shell out to for stats.
 const SCCACHE_BIN: &str = "sccache";
 
-/// Render width used when no terminal size is detected (one-shot / piped).
-/// Real terminal-size detection arrives with the live watch loop.
+/// Render width used for the one-shot human/JSON frame, which is emitted to a
+/// pipe or capture where no live terminal size applies. The watch loop queries
+/// the real terminal size per frame instead (see [`watch::run`]).
 const DEFAULT_WIDTH: usize = 80;
-
-/// The header label used when the config selects no specific languages, meaning
-/// per-language metrics are summed across every language.
-const ALL_LANGUAGES_LABEL: &str = "all";
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -167,27 +164,13 @@ fn poll_sccache() -> Result<stats::Stats> {
 
 /// Build the one-shot human frame from a resolved [`config::Config`].
 ///
-/// The header label is the config's languages joined with `", "`, or `"all"`
-/// when the list is empty (per-language metrics summed across all languages).
-/// Each configured metric row is extracted from `stats` via
-/// [`aggregate::metric_value`] and formatted for display, then handed to
-/// [`render::build_human`] with the current wall-clock time.
+/// The header label and the metric rows are built by the same shared helpers the
+/// watch frame uses ([`watch::languages_label`] and [`watch::build_rows`]) so the
+/// one-shot and watch tables can never drift apart. The resulting rows are handed
+/// to [`render::build_human`] with the current wall-clock time.
 fn render_oneshot(config: &config::Config, stats: &stats::Stats) -> String {
-    let languages_label = if config.languages.is_empty() {
-        ALL_LANGUAGES_LABEL.to_string()
-    } else {
-        config.languages.join(", ")
-    };
-
-    let rows: Vec<render::Row> = config
-        .metrics
-        .iter()
-        .map(|spec| render::Row {
-            label: spec.label.clone(),
-            value: aggregate::metric_value(spec.key, stats, &config.languages).format(),
-        })
-        .collect();
-
+    let languages_label = watch::languages_label(config);
+    let rows = watch::build_rows(config, stats);
     let clock = chrono::Local::now().format("%H:%M:%S").to_string();
     render::build_human(&languages_label, &clock, DEFAULT_WIDTH, &rows)
 }
