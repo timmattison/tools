@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use colored::{ColoredString, Colorize};
 use serde::ser::SerializeMap;
 use unicode_width::UnicodeWidthStr;
 
@@ -108,6 +109,33 @@ pub(crate) fn build_human(
         out.push_str(&row.value);
     }
     out
+}
+
+/// Style an error-banner message for the watch frame: red and bold.
+///
+/// Stub: returns the message unstyled until the behavior is implemented.
+#[allow(
+    dead_code,
+    reason = "consumed by build_watch, wired into the watch loop in a later slice"
+)]
+pub(crate) fn banner_text(message: &str) -> ColoredString {
+    message.normal()
+}
+
+/// Build the live watch frame: the [`build_human`] table plus an optional error
+/// `banner` (one line directly under the header) and an optional `footer` line.
+///
+/// Stub: delegates to [`build_human`], ignoring `banner` and `footer`.
+#[allow(dead_code, reason = "wired into the watch loop in a later slice")]
+pub(crate) fn build_watch(
+    languages_label: &str,
+    clock: &str,
+    width: usize,
+    rows: &[Row],
+    _banner: Option<&str>,
+    _footer: Option<&str>,
+) -> String {
+    build_human(languages_label, clock, width, rows)
 }
 
 /// A JSON number for one field of the one-shot JSON report.
@@ -393,5 +421,103 @@ mod tests {
             value: JsonValue::Int(42),
         }];
         assert_eq!(build_json(&fields), r#"{"k":42}"#);
+    }
+
+    // --- watch frame -----------------------------------------------------
+    //
+    // Banner styling is asserted on the typed `ColoredString` returned by
+    // `banner_text`, never via ANSI bytes. The `colored` crate gates ANSI
+    // emission on a process-global override (`set_override`) that races with
+    // parallel tests; reading the typed color/style avoids that entirely
+    // (same approach as `gsw`'s colorize_* tests).
+
+    #[test]
+    fn build_watch_with_no_extras_matches_build_human() {
+        // The watch builder must be a byte-identical superset of build_human
+        // when there is no banner and no footer — the one-shot frame is the
+        // banner-less, footer-less special case.
+        let rows = rows();
+        let human = build_human("Rust", "12:34:56", 40, &rows);
+        let watch = build_watch("Rust", "12:34:56", 40, &rows, None, None);
+        assert_eq!(watch, human);
+    }
+
+    #[test]
+    fn build_watch_appends_footer_after_blank_line() {
+        let rows = rows();
+        let footer = build_footer(809_212_237, 10_737_418_240, Duration::from_secs(900));
+        let out = build_watch("Rust", "12:34:56", 40, &rows, None, Some(&footer));
+        // Frame ends with a blank separator line then " <footer>".
+        assert!(
+            out.ends_with(&format!("\n\n {footer}")),
+            "watch frame should end with blank line + leading-space footer; got:\n{out}"
+        );
+        // The body before the footer is exactly the no-extras frame.
+        let body = build_watch("Rust", "12:34:56", 40, &rows, None, None);
+        assert_eq!(out, format!("{body}\n\n {footer}"));
+    }
+
+    #[test]
+    fn build_watch_banner_is_line_index_one_then_blank_then_rows() {
+        let rows = rows();
+        let banner = "poll failed: connection refused";
+        let out = build_watch("Rust", "12:34:56", 40, &rows, Some(banner), None);
+        let lines: Vec<&str> = out.lines().collect();
+        // Line 0 is the header (unchanged).
+        assert!(lines[0].starts_with("sccache · Rust"));
+        // Line 1 is the banner: one leading space, then the message.
+        assert!(
+            lines[1].starts_with(' '),
+            "banner line must start with one space: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains(banner),
+            "banner line must contain the message: {:?}",
+            lines[1]
+        );
+        // Line 2 is the blank separator, line 3 is the first data row.
+        assert_eq!(lines[2], "");
+        assert!(lines[3].trim_start().starts_with("Compile requests"));
+    }
+
+    #[test]
+    fn banner_text_is_red_and_bold() {
+        use colored::{Color, Styles};
+        let cs = banner_text("poll failed");
+        assert_eq!(cs.fgcolor(), Some(Color::Red), "banner must be red");
+        assert!(
+            cs.style().contains(Styles::Bold),
+            "banner must be bold; style was {:?}",
+            cs.style()
+        );
+    }
+
+    #[test]
+    fn build_watch_multibyte_banner_and_footer_do_not_panic_or_misalign() {
+        let rows = rows();
+        let banner = "失敗 café 🎉 poll error";
+        let footer = build_footer(809_212_237, 10_737_418_240, Duration::from_secs(900));
+        let out = build_watch("all", "00:00:00", 40, &rows, Some(banner), Some(&footer));
+        let lines: Vec<&str> = out.lines().collect();
+        // Banner present at index 1, multibyte content intact.
+        assert!(lines[1].contains("失敗"));
+        assert!(lines[1].contains('🎉'));
+        // Footer present at the end with a leading space.
+        assert!(out.ends_with(&format!("\n\n {footer}")));
+        // Data rows still share one display width (alignment preserved). Rows
+        // are between the post-banner blank line and the footer's blank line.
+        let data: Vec<&str> = lines
+            .iter()
+            .copied()
+            .skip(3) // header, banner, blank
+            .take(rows.len())
+            .collect();
+        assert_eq!(data.len(), rows.len());
+        let widths: Vec<usize> = data.iter().map(|l| UnicodeWidthStr::width(*l)).collect();
+        assert!(
+            widths.iter().all(|w| *w == widths[0]),
+            "data rows misaligned with multibyte banner/footer: {widths:?}"
+        );
     }
 }
