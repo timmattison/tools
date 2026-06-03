@@ -65,11 +65,7 @@ pub(crate) fn should_force_colors(
     columns_env_present: bool,
     no_color_env: bool,
 ) -> bool {
-    // Stub: deliberately always false so the red test fails on the one case
-    // that must return true, because the behavior is missing rather than the
-    // symbol being undefined.
-    let _ = (stdout_is_tty, columns_env_present, no_color_env);
-    false
+    !stdout_is_tty && columns_env_present && !no_color_env
 }
 
 #[cfg(test)]

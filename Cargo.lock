@@ -6561,6 +6561,7 @@ dependencies = [
  "buildinfo",
  "chrono",
  "clap",
+ "crossterm",
  "dirs",
  "human_bytes",
  "num-format",
