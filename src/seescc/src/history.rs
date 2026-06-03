@@ -47,8 +47,10 @@ impl History {
     /// fills in over the first `window` of runtime, matching the design's
     /// "in-memory only, empty at launch" rule.
     pub(crate) fn new(window: Duration) -> Self {
-        let _ = window;
-        todo!("implemented in the green commit")
+        History {
+            window,
+            samples: VecDeque::new(),
+        }
     }
 
     /// Append a sample observed at `at`, then prune everything older than the
@@ -62,8 +64,22 @@ impl History {
     /// than a separate "now") keeps the ring self-maintaining: it never grows
     /// without bound even if `bucket_last` is never called.
     pub(crate) fn push(&mut self, at: Instant, stats: Stats) {
-        let _ = (at, stats);
-        todo!("implemented in the green commit")
+        self.samples.push_back((at, stats));
+        // Prune the aged-out prefix: drop every front sample older than the
+        // trailing edge of the window relative to the just-pushed `at`. A
+        // saturating subtraction means a window larger than the elapsed runtime
+        // simply keeps everything (the cutoff floors at the epoch `at` itself
+        // isn't past), so early samples survive until real time advances.
+        let cutoff = at.checked_sub(self.window);
+        if let Some(cutoff) = cutoff {
+            while let Some(&(timestamp, _)) = self.samples.front() {
+                if timestamp < cutoff {
+                    self.samples.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Bucket the retained samples into `columns` equal time slices spanning
@@ -79,14 +95,75 @@ impl History {
     /// - samples strictly older than `now - window`, or (defensively) newer than
     ///   `now`, are excluded entirely.
     ///
-    /// The slice index is chosen by integer duration arithmetic —
-    /// `elapsed_since_window_start / slice_width`, clamped to `columns - 1` — so a
-    /// sample sitting exactly on the trailing edge can't round into a phantom
-    /// `columns`-th bucket. `columns == 0` yields an empty `Vec` (no room to draw
-    /// anything); an empty ring yields a `Vec` of `columns` `None`s.
+    /// The slice index is chosen by integer duration arithmetic in nanoseconds —
+    /// `elapsed_since_window_start * columns / window`, clamped to `columns - 1`
+    /// (see [`History::bucket_index`]) — so a sample sitting exactly on the
+    /// trailing edge can't round into a phantom `columns`-th bucket. `columns == 0`
+    /// yields an empty `Vec` (no room to draw anything); an empty ring yields a
+    /// `Vec` of `columns` `None`s.
     pub(crate) fn bucket_last(&self, now: Instant, columns: usize) -> Vec<Option<&Stats>> {
-        let _ = (now, columns);
-        todo!("implemented in the green commit")
+        // No columns ⇒ no room to draw anything; bail before any slice-width math
+        // so the division below can never see a zero divisor.
+        if columns == 0 {
+            return Vec::new();
+        }
+
+        let mut buckets: Vec<Option<&Stats>> = vec![None; columns];
+
+        // The retained samples are ordered oldest-first, so a forward scan visits
+        // each slice's candidates in increasing-time order; writing every in-range
+        // sample into its slot means the LAST write per slot — the most recent
+        // sample — is the one that survives. That is the "newest wins" rule.
+        for (timestamp, stats) in &self.samples {
+            if let Some(index) = self.bucket_index(now, *timestamp, columns) {
+                buckets[index] = Some(stats);
+            }
+        }
+
+        buckets
+    }
+
+    /// The bucket index a sample at `timestamp` belongs to within `columns`
+    /// slices spanning `[now - window, now]`, or `None` when it lies outside that
+    /// closed interval.
+    ///
+    /// Index is `elapsed_since_window_start * columns / window`, computed in
+    /// nanoseconds so no slice-width truncation accumulates, then clamped to
+    /// `columns - 1`. That clamp is what folds a sample sitting exactly on the
+    /// trailing edge (`timestamp == now`, where the raw quotient equals `columns`)
+    /// back into the final bucket instead of overflowing into a phantom
+    /// `columns`-th slot — pinning the "exactly at `now` ⇒ last bucket" boundary.
+    /// A sample exactly at `now - window` has zero elapsed time and so lands in
+    /// bucket `0`, making the lower edge inclusive. Samples newer than `now` (which
+    /// shouldn't happen with monotonic time, but are guarded defensively) are
+    /// rejected.
+    fn bucket_index(&self, now: Instant, timestamp: Instant, columns: usize) -> Option<usize> {
+        // Above the upper edge: a sample newer than `now` is out of range.
+        if timestamp > now {
+            return None;
+        }
+        // How far the sample sits *after* the window's leading edge. A `None` here
+        // means `timestamp` precedes `now - window`, i.e. it is below the lower
+        // edge and out of range. Computing it as `window - (now - timestamp)`
+        // keeps the arithmetic on `Duration`s without materializing the
+        // possibly-pre-epoch instant `now - window`.
+        let age = now.duration_since(timestamp);
+        let elapsed = self.window.checked_sub(age)?;
+
+        // index = elapsed * columns / window, in nanoseconds for an exact, slice
+        // -width-free mapping. `u128` headroom keeps `elapsed_ns * columns` from
+        // overflowing even for very long windows and wide terminals.
+        let window_ns = self.window.as_nanos();
+        if window_ns == 0 {
+            // A zero-length window degenerates to a single instant; everything in
+            // range collapses into the last bucket.
+            return Some(columns - 1);
+        }
+        let elapsed_ns = elapsed.as_nanos();
+        let raw = elapsed_ns * columns as u128 / window_ns;
+        // Clamp the trailing-edge sample (raw == columns) back into the last slot.
+        let index = (raw as usize).min(columns - 1);
+        Some(index)
     }
 }
 
@@ -153,7 +230,7 @@ mod tests {
         history.push(base + Duration::from_millis(0), tagged(10)); // slot 0
         history.push(base + Duration::from_millis(1200), tagged(20)); // slot 1 (older)
         history.push(base + Duration::from_millis(1800), tagged(21)); // slot 1 (newer — wins)
-        // slot 2 [2s,3s) intentionally left empty
+                                                                      // slot 2 [2s,3s) intentionally left empty
         history.push(base + Duration::from_secs(4), tagged(40)); // slot 3, exactly `now`
 
         let buckets = history.bucket_last(now, 4);

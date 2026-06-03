@@ -17,10 +17,7 @@ mod aggregate;
     reason = "the MetricKind enum and the MetricKey::kind / MetricKey::is_per_language catalog accessors are consumed by Phase 5 sparklines"
 )]
 mod config;
-#[allow(
-    dead_code,
-    reason = "consumed by the Phase 5 sparkline wiring slice"
-)]
+#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 mod history;
 mod render;
 #[allow(
