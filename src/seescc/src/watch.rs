@@ -595,6 +595,62 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_resize_forces_a_repaint_without_polling_even_when_bytes_match() {
+        // A resize must re-render from the *current* state at the new dimensions
+        // and repaint UNCONDITIONALLY — the on-screen layout is stale after a
+        // resize, so suppression must NOT skip the redraw even when the bytes
+        // are byte-identical to what's displayed. And a resize must NOT poll:
+        // the numbers haven't changed, only the geometry has.
+        let (tx, rx) = mpsc::channel();
+        // One resize, then quit so the loop ends right after handling it.
+        tx.send(Event::Resize).expect("queue resize");
+        tx.send(Event::Quit).expect("queue quit");
+        drop(tx);
+
+        let mut state = WatchState::default();
+        let mut displayed = String::new();
+        let mut polls = 0_usize;
+        let mut renders = 0_usize;
+        let mut paints = 0_usize;
+        event_loop(
+            &rx,
+            TEST_POLL_INTERVAL,
+            &mut state,
+            &mut displayed,
+            || {
+                polls += 1;
+                Ok(fixture_stats())
+            },
+            |_state| {
+                // Always identical bytes, so the resize's re-render matches what
+                // the immediate frame already painted — the perfect adversary
+                // for suppression. Only a forced repaint will paint again.
+                renders += 1;
+                "steady".to_string()
+            },
+            |_frame| {
+                paints += 1;
+                Ok(())
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            polls, 1,
+            "a resize must not poll — only the immediate frame polls",
+        );
+        assert_eq!(
+            renders, 2,
+            "a resize must re-render from current state (immediate + resize)",
+        );
+        assert_eq!(
+            paints, 2,
+            "a resize must paint unconditionally even when bytes are identical",
+        );
+        assert_eq!(displayed, "steady", "displayed holds the re-rendered frame");
+    }
+
+    #[test]
     fn decide_mode_watches_only_on_a_live_tty_without_force() {
         // A live terminal and no `--one-shot`: the default watch experience.
         assert_eq!(
