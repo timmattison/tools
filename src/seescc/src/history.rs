@@ -18,6 +18,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::config::{MetricKey, MetricKind};
 use crate::stats::Stats;
 
 /// A window-bounded ring of timestamped sccache samples.
@@ -165,6 +166,40 @@ impl History {
         let index = (raw as usize).min(columns - 1);
         Some(index)
     }
+}
+
+/// The per-bucket `f64` series for `key` over `buckets` (as produced by
+/// [`History::bucket_last`]), honoring the `languages` filter for per-language
+/// metrics. The output length always equals `buckets.len()`.
+///
+/// This is the bridge between the raw bucketed [`Stats`] snapshots and the
+/// pure [`crate::sparkline::sparkline`] renderer: it turns each `MetricKind`'s
+/// cumulative or absolute values into exactly the series the sparkline expects.
+/// The shaping rules come straight from the design's "Sparkline semantics" and
+/// differ by kind:
+///
+/// - [`MetricKind::Count`] → the **per-bucket delta** (activity in that slice),
+///   computed by [`count_deltas`]. Cumulative counters only ever increase, so
+///   the interesting signal is how much each slice added.
+/// - [`MetricKind::Rate`] → the **windowed hit rate** per bucket, computed from
+///   the same per-bucket hit/miss deltas via [`crate::aggregate::hit_rate`], so
+///   a zero-activity slice renders `0.0` (baseline, never `NaN`) and every value
+///   is inherently in `0.0..=100.0`.
+/// - [`MetricKind::Size`] → the **absolute value** per bucket (not a delta),
+///   computed by [`size_absolutes`]: a sample's own value, carried forward
+///   across gaps.
+///
+/// Per-language counters (`cache_hits`/`cache_misses`/`cache_errors`, and the
+/// hit/miss inputs to `hit_rate`) are filtered through
+/// [`crate::aggregate::lang_sum`] with `languages`; global counters and sizes
+/// ignore `languages` entirely.
+pub(crate) fn metric_series(
+    key: MetricKey,
+    buckets: &[Option<&Stats>],
+    languages: &[String],
+) -> Vec<f64> {
+    let _ = (key, buckets, languages);
+    todo!("implemented in the green commit")
 }
 
 #[cfg(test)]
@@ -336,5 +371,218 @@ mod tests {
             vec![Some(2)],
             "samples below `now - window` or above `now` must be excluded",
         );
+    }
+
+    // ---- metric_series ----
+
+    use crate::config::MetricKey;
+
+    /// The float epsilon used by series assertions involving rate math. Counter
+    /// deltas and sizes are exact integers stored as `f64`, but `hit_rate` does a
+    /// real division, so its expectations carry this tolerance.
+    const EPSILON: f64 = 1e-9;
+
+    /// A `Stats` whose only meaningful field is a global counter
+    /// (`compile_requests`), tagged with `value`. Used to distinguish buckets of
+    /// a global Count metric by giving each its own cumulative value.
+    fn global_counter(value: u64) -> Stats {
+        let mut stats = Stats::default();
+        stats.stats.compile_requests = value;
+        stats
+    }
+
+    /// A `Stats` whose `cache_hits`/`cache_misses` per-language maps are set from
+    /// the supplied `(lang, hits, misses)` triples. Everything else is default.
+    /// Used to craft per-language hit/miss cumulatives for windowed-rate and
+    /// language-filter tests.
+    fn lang_hits_misses(entries: &[(&str, u64, u64)]) -> Stats {
+        let mut stats = Stats::default();
+        for &(lang, hits, misses) in entries {
+            stats
+                .stats
+                .cache_hits
+                .counts
+                .insert(lang.to_string(), hits);
+            stats
+                .stats
+                .cache_misses
+                .counts
+                .insert(lang.to_string(), misses);
+        }
+        stats
+    }
+
+    /// A `Stats` whose top-level `cache_size` is `value`. Used to drive the
+    /// absolute-value Size series.
+    fn sized(value: u64) -> Stats {
+        Stats {
+            cache_size: value,
+            ..Default::default()
+        }
+    }
+
+    /// Assert two `f64` series are equal element-wise within [`EPSILON`], with a
+    /// length check first so a length mismatch fails loudly rather than panicking
+    /// on a zip.
+    fn assert_series_eq(actual: &[f64], expected: &[f64]) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "series length mismatch: {actual:?} vs {expected:?}",
+        );
+        for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (a - e).abs() < EPSILON,
+                "series[{i}] = {a}, expected {e} (full: {actual:?} vs {expected:?})",
+            );
+        }
+    }
+
+    #[test]
+    fn count_series_is_per_bucket_deltas_with_carry_forward() {
+        // Cumulative counter values [None, 10, 15, None, 18] over five buckets.
+        // The first OBSERVED bucket (10) deltas to 0 — its cumulative includes
+        // everything since launch, so sparking it as a delta would draw a giant
+        // spurious spike. 15 - 10 = 5. The None carries the previous cumulative
+        // (15) forward unchanged → delta 0. 18 - 15 = 3. The leading None is
+        // before any sample → baseline 0.
+        let b1 = global_counter(10);
+        let b2 = global_counter(15);
+        let b4 = global_counter(18);
+        let buckets = vec![None, Some(&b1), Some(&b2), None, Some(&b4)];
+
+        let series = metric_series(MetricKey::CompileRequests, &buckets, &[]);
+        assert_series_eq(&series, &[0.0, 0.0, 5.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn count_series_clamps_negative_deltas_on_reset() {
+        // A mid-run `sccache --zero-stats` makes the cumulative DROP: [100, 40,
+        // 45]. The first observed bucket (100) is 0. 40 - 100 would be negative —
+        // clamp to 0 (saturating_sub) and continue history from the new lower
+        // baseline (40). 45 - 40 = 5: the later real increase shows its true
+        // delta, proving the baseline reset rather than staying at 100.
+        let b0 = global_counter(100);
+        let b1 = global_counter(40);
+        let b2 = global_counter(45);
+        let buckets = vec![Some(&b0), Some(&b1), Some(&b2)];
+
+        let series = metric_series(MetricKey::CompileRequests, &buckets, &[]);
+        assert_series_eq(&series, &[0.0, 0.0, 5.0]);
+    }
+
+    #[test]
+    fn rate_series_is_windowed_hit_rate_per_bucket_never_nan() {
+        // hit_rate sparks the WINDOWED rate: per bucket, hits-delta and
+        // misses-delta computed exactly like Count, then hit_rate(h, m).
+        // Cumulatives so each bucket's delta is what we want to test:
+        //   b0: (10, 10)  — first observed, deltas are 0/0 → hit_rate(0,0) = 0.0
+        //   b1: (15, 25)  — +5 hits, +15 misses... but we want +5/+5 → use (15,15)
+        // Recompute deliberately: choose cumulatives so the deltas are the
+        // crafted (hits_delta, misses_delta) pairs:
+        //   b0 = (10, 10):  first observed → 0/0  → 0.0
+        //   b1 = (15, 15):  +5 / +5        → 50.0
+        //   b2 = (15, 15):  +0 / +0        → 0.0  (zero-activity slice, baseline)
+        //   b3 = (25, 15):  +10 / +0       → 100.0 (all-hits slice)
+        let b0 = lang_hits_misses(&[("Rust", 10, 10)]);
+        let b1 = lang_hits_misses(&[("Rust", 15, 15)]);
+        let b2 = lang_hits_misses(&[("Rust", 15, 15)]);
+        let b3 = lang_hits_misses(&[("Rust", 25, 15)]);
+        let buckets = vec![Some(&b0), Some(&b1), Some(&b2), Some(&b3)];
+
+        let series = metric_series(MetricKey::HitRate, &buckets, &[]);
+        assert_series_eq(&series, &[0.0, 50.0, 0.0, 100.0]);
+        assert!(
+            series.iter().all(|v| !v.is_nan()),
+            "no rate bucket may be NaN, got {series:?}",
+        );
+    }
+
+    #[test]
+    fn rate_series_respects_languages_filter() {
+        // Two languages with different per-bucket deltas. Cumulatives:
+        //   b0: Rust (10,10), C/C++ (10,10)  — first observed → all deltas 0
+        //   b1: Rust (20,10), C/C++ (10,20)  — Rust +10h/+0m, C/C++ +0h/+10m
+        // Rust-only window: hit_rate(10, 0) = 100.0.
+        // All-languages window: hits_delta = 10 (Rust) + 0 (C/C++) = 10,
+        //   misses_delta = 0 (Rust) + 10 (C/C++) = 10 → hit_rate(10, 10) = 50.0.
+        // The two filters MUST give different rates for the same buckets.
+        let b0 = lang_hits_misses(&[("Rust", 10, 10), ("C/C++", 10, 10)]);
+        let b1 = lang_hits_misses(&[("Rust", 20, 10), ("C/C++", 10, 20)]);
+        let buckets = vec![Some(&b0), Some(&b1)];
+
+        let rust_only = metric_series(MetricKey::HitRate, &buckets, &["Rust".to_string()]);
+        let all_langs = metric_series(MetricKey::HitRate, &buckets, &[]);
+
+        assert_series_eq(&rust_only, &[0.0, 100.0]);
+        assert_series_eq(&all_langs, &[0.0, 50.0]);
+        assert!(
+            (rust_only[1] - all_langs[1]).abs() > EPSILON,
+            "the language filter must change the windowed rate: {rust_only:?} vs {all_langs:?}",
+        );
+    }
+
+    #[test]
+    fn count_series_per_language_respects_languages_global_ignores_it() {
+        // Per-language cache_hits cumulatives: Rust climbs by 5/bucket while
+        // C/C++ climbs by 100/bucket.
+        //   b0: Rust 10, C/C++ 1000  — first observed → 0
+        //   b1: Rust 15, C/C++ 1100  — Rust +5, C/C++ +100, all +105
+        // Rust-only delta = 5; all-languages delta = 105. The filter MUST change
+        // a per-language counter's series.
+        let b0 = lang_hits_misses(&[("Rust", 10, 0), ("C/C++", 1000, 0)]);
+        let b1 = lang_hits_misses(&[("Rust", 15, 0), ("C/C++", 1100, 0)]);
+        let buckets = vec![Some(&b0), Some(&b1)];
+
+        let rust_only = metric_series(MetricKey::CacheHits, &buckets, &["Rust".to_string()]);
+        let all_langs = metric_series(MetricKey::CacheHits, &buckets, &[]);
+        assert_series_eq(&rust_only, &[0.0, 5.0]);
+        assert_series_eq(&all_langs, &[0.0, 105.0]);
+
+        // A global counter ignores `languages`: the per-bucket delta is identical
+        // whether a filter is supplied or not.
+        let g0 = global_counter(10);
+        let g1 = global_counter(15);
+        let globals = vec![Some(&g0), Some(&g1)];
+        let global_filtered =
+            metric_series(MetricKey::CompileRequests, &globals, &["Rust".to_string()]);
+        let global_unfiltered = metric_series(MetricKey::CompileRequests, &globals, &[]);
+        assert_series_eq(&global_filtered, &[0.0, 5.0]);
+        assert_series_eq(&global_unfiltered, &[0.0, 5.0]);
+    }
+
+    #[test]
+    fn size_series_is_absolute_values_with_carry_forward() {
+        // Size sparks the ABSOLUTE value per bucket, not a delta. A None bucket
+        // carries the previous value forward; a leading None is 0 (no data yet).
+        // [None, 100, 100(carried), 250, 250(carried)].
+        let b1 = sized(100);
+        let b3 = sized(250);
+        let buckets = vec![None, Some(&b1), None, Some(&b3), None];
+
+        let series = metric_series(MetricKey::CacheSize, &buckets, &[]);
+        assert_series_eq(&series, &[0.0, 100.0, 100.0, 250.0, 250.0]);
+    }
+
+    #[test]
+    fn all_none_buckets_are_all_zeros_and_empty_is_empty() {
+        // Every kind: a row of None buckets (nothing observed yet) must yield all
+        // zeros with the length preserved, and an empty buckets slice must yield
+        // an empty vec.
+        let all_none: Vec<Option<&Stats>> = vec![None, None, None];
+        for key in [
+            MetricKey::CompileRequests, // Count
+            MetricKey::HitRate,         // Rate
+            MetricKey::CacheSize,       // Size
+        ] {
+            let series = metric_series(key, &all_none, &[]);
+            assert_series_eq(&series, &[0.0, 0.0, 0.0]);
+
+            let empty = metric_series(key, &[], &[]);
+            assert!(
+                empty.is_empty(),
+                "an empty buckets slice must yield an empty series for {key:?}, got {empty:?}",
+            );
+        }
     }
 }
