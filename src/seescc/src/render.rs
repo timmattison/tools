@@ -39,13 +39,21 @@ pub(crate) fn format_window(window: Duration) -> String {
 /// Build the watch-mode footer line content (without the leading space the
 /// frame adds): `cache <size> / <max> · <window> window`.
 ///
-/// Stub: returns an empty string until the behavior is implemented.
+/// Both byte counts are formatted through [`crate::aggregate::format_size`] — the
+/// single source of truth for size formatting — so the footer's units always
+/// match the table's `cache size` / `max cache size` rows. The window segment is
+/// produced by [`format_window`]. For the captured fixture
+/// (`809_212_237` / `10_737_418_240` / 15m) this yields
+/// `cache 771.7 MiB / 10 GiB · 15m window`.
 #[allow(
     dead_code,
     reason = "consumed by build_watch, wired into the watch loop in a later slice"
 )]
-pub(crate) fn build_footer(_cache_size: u64, _max_cache_size: u64, _window: Duration) -> String {
-    String::new()
+pub(crate) fn build_footer(cache_size: u64, max_cache_size: u64, window: Duration) -> String {
+    let size = crate::aggregate::format_size(cache_size);
+    let max = crate::aggregate::format_size(max_cache_size);
+    let window = format_window(window);
+    format!("cache {size} / {max} · {window} window")
 }
 
 /// One display row: a label and its already-formatted value string.
