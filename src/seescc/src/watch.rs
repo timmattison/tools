@@ -53,6 +53,25 @@ pub(crate) fn is_quit_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEve
         || (modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c')))
 }
 
+/// Whether colors should be force-enabled despite stdout not being a TTY.
+///
+/// True only when output is captured by a watch-like wrapper (stdout is not a
+/// TTY *and* `COLUMNS` is set in env), and the user has not asked to suppress
+/// colors via `NO_COLOR`. The wrapper renders the captured bytes inside its own
+/// TTY-backed UI, so colors should pass through rather than be stripped as they
+/// normally would be for a pipe.
+pub(crate) fn should_force_colors(
+    stdout_is_tty: bool,
+    columns_env_present: bool,
+    no_color_env: bool,
+) -> bool {
+    // Stub: deliberately always false so the red test fails on the one case
+    // that must return true, because the behavior is missing rather than the
+    // symbol being undefined.
+    let _ = (stdout_is_tty, columns_env_present, no_color_env);
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +151,34 @@ mod tests {
         assert!(
             !is_quit_event(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
             "Enter must not quit",
+        );
+    }
+
+    #[test]
+    fn should_force_colors_only_when_captured_by_a_wrapper_without_no_color() {
+        // The one case that forces colors: a wrapper has captured stdout (not a
+        // TTY but COLUMNS is exported) and the user hasn't set NO_COLOR.
+        assert!(
+            should_force_colors(false, true, false),
+            "a watch wrapper (no TTY, COLUMNS set, no NO_COLOR) must force colors",
+        );
+
+        // A live TTY needs no override — the colored crate already emits color.
+        assert!(
+            !should_force_colors(true, true, false),
+            "a TTY must not force colors",
+        );
+
+        // No COLUMNS means a plain pipe, not a wrapper — leave colors stripped.
+        assert!(
+            !should_force_colors(false, false, false),
+            "a plain pipe (no COLUMNS) must not force colors",
+        );
+
+        // NO_COLOR is an explicit opt-out that wins even inside a wrapper.
+        assert!(
+            !should_force_colors(false, true, true),
+            "NO_COLOR must suppress colors even when captured by a wrapper",
         );
     }
 }
