@@ -44,10 +44,13 @@ pub(crate) fn decide_mode(force_one_shot: bool, stdout_is_tty: bool) -> Mode {
 /// `Esc`, or Ctrl-C. Every other key — a plain `c` without Control, an
 /// unrelated character, `Enter` — leaves the loop running.
 pub(crate) fn is_quit_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> bool {
-    // Stub: deliberately always false so the red test fails because the
-    // quit-detection behavior is missing, not because the symbol is undefined.
-    let _ = (code, modifiers, kind);
-    false
+    // Ignore key-release events (kitty/Windows report them); only a press
+    // should ever quit.
+    if kind == KeyEventKind::Release {
+        return false;
+    }
+    matches!(code, KeyCode::Char('q') | KeyCode::Esc)
+        || (modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c')))
 }
 
 #[cfg(test)]
