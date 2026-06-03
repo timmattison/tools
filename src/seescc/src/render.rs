@@ -48,7 +48,7 @@ pub(crate) fn format_window(window: Duration) -> String {
 /// `cache 771.7 MiB / 10 GiB · 15m window`.
 #[allow(
     dead_code,
-    reason = "consumed by build_watch, wired into the watch loop in a later slice"
+    reason = "passed as build_watch's footer arg by the watch loop, wired up in a later slice"
 )]
 pub(crate) fn build_footer(cache_size: u64, max_cache_size: u64, window: Duration) -> String {
     let size = crate::aggregate::format_size(cache_size);
@@ -68,11 +68,54 @@ pub(crate) struct Row {
 /// against `width`. Labels are left-aligned in a shared column; values are
 /// right-aligned in a shared column. Display widths come from `unicode-width`,
 /// so multi-byte labels stay aligned.
+///
+/// This is the banner-less, footer-less special case of [`build_watch`]; the two
+/// share one table-assembly core, so the one-shot and watch frames can never
+/// drift apart.
 pub(crate) fn build_human(
     languages_label: &str,
     clock: &str,
     width: usize,
     rows: &[Row],
+) -> String {
+    build_watch(languages_label, clock, width, rows, None, None)
+}
+
+/// Style an error-banner message for the watch frame: red and bold.
+///
+/// The styling decision lives here (not in [`build_watch`]) so it can be tested
+/// by inspecting the returned [`ColoredString`]'s typed color and style instead
+/// of the process-global ANSI override, which races under parallel tests.
+pub(crate) fn banner_text(message: &str) -> ColoredString {
+    message.red().bold()
+}
+
+/// Build the live watch frame: the metric table plus an optional error `banner`
+/// and an optional `footer` line.
+///
+/// Layout, top to bottom:
+/// - The header: `sccache · <languages_label>` left-aligned with `clock`
+///   right-justified against `width` (identical to the one-shot header).
+/// - The `banner`, when present: directly under the header on its own line, a
+///   single leading space then the message styled red + bold via
+///   [`banner_text`]. When absent the layout is byte-identical to the one-shot
+///   frame.
+/// - A blank separator line.
+/// - The metric `rows`: labels left-aligned in a shared column, values
+///   right-aligned in a shared column, all measured with `unicode-width` so
+///   multi-byte labels stay aligned.
+/// - The `footer`, when present: a blank separator line, then a single leading
+///   space and the footer text (typically from [`build_footer`]).
+///
+/// With `banner == None` and `footer == None` the output equals
+/// [`build_human`] for the same inputs.
+pub(crate) fn build_watch(
+    languages_label: &str,
+    clock: &str,
+    width: usize,
+    rows: &[Row],
+    banner: Option<&str>,
+    footer: Option<&str>,
 ) -> String {
     let left = format!("sccache · {languages_label}");
     let header_pad = width
@@ -94,6 +137,11 @@ pub(crate) fn build_human(
     let mut out = String::new();
     out.push_str(&header);
     out.push('\n');
+    if let Some(message) = banner {
+        out.push(' ');
+        out.push_str(&banner_text(message).to_string());
+        out.push('\n');
+    }
     out.push('\n');
     for (i, row) in rows.iter().enumerate() {
         if i > 0 {
@@ -108,34 +156,11 @@ pub(crate) fn build_human(
         out.push_str(&" ".repeat(value_pad));
         out.push_str(&row.value);
     }
+    if let Some(footer) = footer {
+        out.push_str("\n\n ");
+        out.push_str(footer);
+    }
     out
-}
-
-/// Style an error-banner message for the watch frame: red and bold.
-///
-/// Stub: returns the message unstyled until the behavior is implemented.
-#[allow(
-    dead_code,
-    reason = "consumed by build_watch, wired into the watch loop in a later slice"
-)]
-pub(crate) fn banner_text(message: &str) -> ColoredString {
-    message.normal()
-}
-
-/// Build the live watch frame: the [`build_human`] table plus an optional error
-/// `banner` (one line directly under the header) and an optional `footer` line.
-///
-/// Stub: delegates to [`build_human`], ignoring `banner` and `footer`.
-#[allow(dead_code, reason = "wired into the watch loop in a later slice")]
-pub(crate) fn build_watch(
-    languages_label: &str,
-    clock: &str,
-    width: usize,
-    rows: &[Row],
-    _banner: Option<&str>,
-    _footer: Option<&str>,
-) -> String {
-    build_human(languages_label, clock, width, rows)
 }
 
 /// A JSON number for one field of the one-shot JSON report.
@@ -483,13 +508,15 @@ mod tests {
 
     #[test]
     fn banner_text_is_red_and_bold() {
+        // Inspect the typed color/style fields directly (the `gsw` pattern) so
+        // the assertion never touches the process-global ANSI override.
         use colored::{Color, Styles};
         let cs = banner_text("poll failed");
-        assert_eq!(cs.fgcolor(), Some(Color::Red), "banner must be red");
+        assert_eq!(cs.fgcolor, Some(Color::Red), "banner must be red");
         assert!(
-            cs.style().contains(Styles::Bold),
+            cs.style.contains(Styles::Bold),
             "banner must be bold; style was {:?}",
-            cs.style()
+            cs.style
         );
     }
 
