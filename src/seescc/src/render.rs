@@ -7,12 +7,37 @@ use std::time::Duration;
 use serde::ser::SerializeMap;
 use unicode_width::UnicodeWidthStr;
 
-/// Format a history `window` as the shortest exact human string using the
-/// largest unit that divides it evenly.
+/// Format a history `window` as a compact human string using the largest unit
+/// that divides it *exactly*.
 ///
-/// Stub: returns an empty string until the behavior is implemented.
-pub(crate) fn format_window(_window: Duration) -> String {
-    String::new()
+/// The window is reported with the coarsest whole unit: `900s -> "15m"`,
+/// `3600s -> "1h"`, `5400s -> "90m"`. A duration that is not a whole number of
+/// the next coarser unit stays at the finer one, so `90s -> "90s"` (never
+/// `"1.5m"`) and `Duration::from_millis(500) -> "500ms"`. A zero window renders
+/// as `"0s"`.
+#[allow(
+    dead_code,
+    reason = "consumed by build_footer/build_watch, wired into the watch loop in a later slice"
+)]
+pub(crate) fn format_window(window: Duration) -> String {
+    let total_millis = window.as_millis();
+    if total_millis == 0 {
+        return "0s".to_string();
+    }
+
+    const MILLIS_PER_SECOND: u128 = 1_000;
+    const MILLIS_PER_MINUTE: u128 = 60 * MILLIS_PER_SECOND;
+    const MILLIS_PER_HOUR: u128 = 60 * MILLIS_PER_MINUTE;
+
+    if total_millis.is_multiple_of(MILLIS_PER_HOUR) {
+        format!("{}h", total_millis / MILLIS_PER_HOUR)
+    } else if total_millis.is_multiple_of(MILLIS_PER_MINUTE) {
+        format!("{}m", total_millis / MILLIS_PER_MINUTE)
+    } else if total_millis.is_multiple_of(MILLIS_PER_SECOND) {
+        format!("{}s", total_millis / MILLIS_PER_SECOND)
+    } else {
+        format!("{total_millis}ms")
+    }
 }
 
 /// One display row: a label and its already-formatted value string.
