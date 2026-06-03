@@ -28,10 +28,11 @@ pub(crate) enum Mode {
 /// terminal to take over: `--one-shot` and any non-TTY stdout (a pipe, a file,
 /// a watch-like wrapper) fall back to a single render.
 pub(crate) fn decide_mode(force_one_shot: bool, stdout_is_tty: bool) -> Mode {
-    // Stub: deliberately wrong so the red test fails because the behavior is
-    // missing, not because the symbol is undefined.
-    let _ = (force_one_shot, stdout_is_tty);
-    Mode::Watch
+    if force_one_shot || !stdout_is_tty {
+        Mode::OneShot
+    } else {
+        Mode::Watch
+    }
 }
 
 #[cfg(test)]
