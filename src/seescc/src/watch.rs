@@ -144,12 +144,57 @@ where
     R: FnMut(&WatchState) -> String,
     Pa: FnMut(&str) -> Result<()>,
 {
-    // Intentionally inert stub for the RED step: the real loop (immediate first
-    // frame, timeout-driven polling with suppression, forced repaint on resize,
-    // clean quit/disconnect) is implemented in the GREEN step. Touch the args so
-    // they aren't flagged unused while the body is still empty.
-    let _ = (rx, poll_interval, &mut *state, &mut *displayed);
-    let _ = (&mut poll, &mut render, &mut paint);
+    // The immediate first frame: poll, fold the outcome into state (a failure
+    // becomes a non-fatal banner here, never an early return), render, and paint
+    // unconditionally — there is nothing on screen yet to compare against. This
+    // is why the user sees data without waiting a full poll_interval.
+    poll_once(state, &mut poll, &mut render, &mut paint, displayed, true)?;
+
+    loop {
+        match rx.recv_timeout(poll_interval) {
+            // A timeout is a tick: re-poll and repaint only if the frame
+            // changed (suppression keeps an idle server from flickering).
+            Err(RecvTimeoutError::Timeout) => {
+                poll_once(state, &mut poll, &mut render, &mut paint, displayed, false)?;
+            }
+            // Resize handling arrives in the next slice; for now a resize is
+            // ignored (the body is intentionally incomplete so the resize test
+            // fails for the right reason).
+            Ok(Event::Resize) => {}
+            // Quit, or every sender gone: clean shutdown.
+            Ok(Event::Quit) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+/// Run one poll → apply → render → paint cycle, repainting either always
+/// (`force`) or only when the new frame differs from `displayed`.
+///
+/// Factoring this out keeps the immediate first frame (`force = true`, nothing
+/// on screen to compare) and each timeout-driven tick (`force = false`,
+/// byte-compare suppression) on one code path, so they can never drift apart. A
+/// failed poll is absorbed by [`WatchState::apply_poll`] into a non-fatal
+/// banner, so this returns `Err` only when `paint` itself fails — never for a
+/// poll error.
+fn poll_once<P, R, Pa>(
+    state: &mut WatchState,
+    poll: &mut P,
+    render: &mut R,
+    paint: &mut Pa,
+    displayed: &mut String,
+    force: bool,
+) -> Result<()>
+where
+    P: FnMut() -> Result<crate::stats::Stats>,
+    R: FnMut(&WatchState) -> String,
+    Pa: FnMut(&str) -> Result<()>,
+{
+    state.apply_poll(poll());
+    let frame = render(state);
+    if force || frame != *displayed {
+        paint(&frame)?;
+        *displayed = frame;
+    }
     Ok(())
 }
 
