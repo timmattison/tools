@@ -8,6 +8,8 @@
 //! lifecycle and event loop that consume these helpers are wired in later in
 //! this phase.
 
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
 /// Which rendering mode `seescc` runs in.
 ///
 /// Watch mode is the default, but it only makes sense when there is a live
@@ -33,6 +35,19 @@ pub(crate) fn decide_mode(force_one_shot: bool, stdout_is_tty: bool) -> Mode {
     } else {
         Mode::Watch
     }
+}
+
+/// Whether a key event should end the watch loop.
+///
+/// The watch loop quits on a **press** (never a key *release* — kitty and
+/// Windows report releases too) of any of the conventional quit keys: `q`,
+/// `Esc`, or Ctrl-C. Every other key — a plain `c` without Control, an
+/// unrelated character, `Enter` — leaves the loop running.
+pub(crate) fn is_quit_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEventKind) -> bool {
+    // Stub: deliberately always false so the red test fails because the
+    // quit-detection behavior is missing, not because the symbol is undefined.
+    let _ = (code, modifiers, kind);
+    false
 }
 
 #[cfg(test)]
@@ -66,6 +81,54 @@ mod tests {
             decide_mode(true, false),
             Mode::OneShot,
             "--one-shot on a non-TTY is still one-shot",
+        );
+    }
+
+    #[test]
+    fn is_quit_event_only_quits_on_a_press_of_q_esc_or_ctrl_c() {
+        // The three conventional quit keys, all as presses.
+        assert!(
+            is_quit_event(KeyCode::Char('q'), KeyModifiers::NONE, KeyEventKind::Press),
+            "pressing q must quit",
+        );
+        assert!(
+            is_quit_event(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press),
+            "pressing Esc must quit",
+        );
+        assert!(
+            is_quit_event(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+                KeyEventKind::Press
+            ),
+            "Ctrl-C must quit",
+        );
+
+        // A key *release* must never quit, even for a quit key — kitty and
+        // Windows report releases and the loop should ignore them.
+        assert!(
+            !is_quit_event(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release
+            ),
+            "releasing q must not quit",
+        );
+
+        // A plain 'c' without Control is just a character, not Ctrl-C.
+        assert!(
+            !is_quit_event(KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Press),
+            "plain c (no Control) must not quit",
+        );
+
+        // Unrelated keys leave the loop running.
+        assert!(
+            !is_quit_event(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press),
+            "an unrelated character must not quit",
+        );
+        assert!(
+            !is_quit_event(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
+            "Enter must not quit",
         );
     }
 }
