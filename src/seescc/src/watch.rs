@@ -8,7 +8,30 @@
 //! lifecycle and event loop that consume these helpers are wired in later in
 //! this phase.
 
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::Duration;
+
+use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+
+/// An external event the watch loop reacts to between polls.
+///
+/// Unlike `gsw` (which is filesystem-event driven), seescc's loop is
+/// **timer-driven**: sccache exposes nothing to subscribe to, so a fresh poll is
+/// triggered by a `recv_timeout` *timeout*, not by an event. The only events
+/// carried on the channel are the two things a poll can't produce on its own — a
+/// terminal resize and a user quit — both originating from the keyboard /
+/// resize reader thread wired in by a later slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Event {
+    /// The terminal was resized. The previously-painted bytes are now laid out
+    /// for the old dimensions and are visually stale, so the loop must
+    /// re-render at the new size and repaint **unconditionally**, bypassing the
+    /// byte-compare suppression that would otherwise swallow an identical frame.
+    Resize,
+    /// The user asked to quit (`q`, `Esc`, or Ctrl-C). The loop returns cleanly.
+    Quit,
+}
 
 /// The poll-outcome state machine that backs the watch loop's rendering.
 ///
@@ -75,6 +98,61 @@ impl WatchState {
     }
 }
 
+/// The terminal-free core of the watch loop, with every side effect injected.
+///
+/// seescc's loop is **timer-driven** (sccache has no events to subscribe to), so
+/// the structure differs from `gsw`'s fs-event loop in two ways: a poll is
+/// triggered by a `recv_timeout` *timeout* rather than an event, and the channel
+/// only ever carries [`Event::Resize`] / [`Event::Quit`]. Three closures keep
+/// the loop unit-testable with no TTY, no real sccache, and no real time:
+///
+/// - `poll` fetches fresh stats (production: shell out to sccache); its outcome
+///   is folded into `state` via [`WatchState::apply_poll`], so a failed poll is
+///   absorbed there as a non-fatal banner and **never** propagates out of the
+///   loop — a transient outage must not tear the watch view down.
+/// - `render` turns the current `state` into a frame string (production: query
+///   terminal size + wall clock, draw the table with banner/footer).
+/// - `paint` writes a frame to the screen.
+///
+/// Behavior:
+///
+/// - **First frame is immediate.** On entry the loop polls, applies, renders,
+///   and paints once *before* waiting, so the user sees data right away instead
+///   of staring at a blank pane for a full `poll_interval`.
+/// - **Timeout ⇒ poll.** Each `recv_timeout(poll_interval)` timeout is a tick:
+///   poll, apply, render, and repaint **only if the frame differs** from what's
+///   displayed. Byte-identical suppression is what stops an idle server from
+///   flickering — the poll still happens, but no paint.
+/// - **Resize ⇒ forced repaint.** A resize re-renders from the *current* state
+///   (no poll — the numbers haven't changed) and paints **unconditionally**,
+///   even when the bytes match `displayed`, because the on-screen layout is
+///   stale after the resize and suppression would wrongly skip the redraw.
+/// - **Quit / disconnect ⇒ clean return.** [`Event::Quit`] returns `Ok(())`
+///   with no further work; a disconnected channel (every sender dropped) is
+///   likewise a clean shutdown.
+fn event_loop<P, R, Pa>(
+    rx: &Receiver<Event>,
+    poll_interval: Duration,
+    state: &mut WatchState,
+    displayed: &mut String,
+    mut poll: P,
+    mut render: R,
+    mut paint: Pa,
+) -> Result<()>
+where
+    P: FnMut() -> Result<crate::stats::Stats>,
+    R: FnMut(&WatchState) -> String,
+    Pa: FnMut(&str) -> Result<()>,
+{
+    // Intentionally inert stub for the RED step: the real loop (immediate first
+    // frame, timeout-driven polling with suppression, forced repaint on resize,
+    // clean quit/disconnect) is implemented in the GREEN step. Touch the args so
+    // they aren't flagged unused while the body is still empty.
+    let _ = (rx, poll_interval, &mut *state, &mut *displayed);
+    let _ = (&mut poll, &mut render, &mut paint);
+    Ok(())
+}
+
 /// Which rendering mode `seescc` runs in.
 ///
 /// Watch mode is the default, but it only makes sense when there is a live
@@ -135,6 +213,9 @@ pub(crate) fn should_force_colors(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::sync::mpsc;
+
     use super::*;
 
     /// The captured real-sccache fixture, parsed into [`crate::stats::Stats`] —
@@ -221,6 +302,250 @@ mod tests {
         assert!(
             state.last_good().is_none(),
             "a first-poll failure has no good frame to keep: last_good stays None",
+        );
+    }
+
+    /// A tiny poll interval so the timeout-driven tests fire a tick almost
+    /// immediately instead of waiting a realistic second. The tick tests
+    /// terminate by having a closure send [`Event::Quit`], so this value only
+    /// affects how fast the first tick arrives, not correctness.
+    const TEST_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+    #[test]
+    fn event_loop_paints_first_frame_immediately_before_waiting() {
+        // The user must see data right away, not after a full poll_interval. On
+        // entry the loop polls once, renders, and paints — all before its first
+        // recv_timeout. A pre-queued Quit ends the loop right after that first
+        // frame so the test stays fast and deterministic.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Quit).expect("queue quit");
+        drop(tx);
+
+        let mut state = WatchState::default();
+        let mut displayed = String::new();
+        let mut polls = 0_usize;
+        let mut renders = 0_usize;
+        let mut paints = 0_usize;
+        event_loop(
+            &rx,
+            TEST_POLL_INTERVAL,
+            &mut state,
+            &mut displayed,
+            || {
+                polls += 1;
+                Ok(fixture_stats())
+            },
+            |_state| {
+                renders += 1;
+                "first".to_string()
+            },
+            |_frame| {
+                paints += 1;
+                Ok(())
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(polls, 1, "the immediate first frame must poll exactly once");
+        assert_eq!(renders, 1, "the immediate first frame must render once");
+        assert_eq!(paints, 1, "the immediate first frame must paint once");
+        assert_eq!(displayed, "first", "displayed must hold the first frame");
+    }
+
+    #[test]
+    fn event_loop_timeout_tick_repaints_a_changed_frame() {
+        // A poll_interval timeout is a tick: poll, render, and — because the new
+        // frame differs from what's displayed — repaint. The render closure
+        // sends Quit so the loop ends right after this one tick-driven frame.
+        // `polls` is a shared Cell so both the poll and render closures can read
+        // it without one's mutable borrow conflicting with the other's read.
+        let (tx, rx) = mpsc::channel();
+        let mut state = WatchState::default();
+        let mut displayed = String::new();
+        let polls = Cell::new(0_usize);
+        let mut paints = 0_usize;
+        event_loop(
+            &rx,
+            TEST_POLL_INTERVAL,
+            &mut state,
+            &mut displayed,
+            || {
+                polls.set(polls.get() + 1);
+                Ok(fixture_stats())
+            },
+            |_state| {
+                // Distinct frame per call so the immediate frame and the tick
+                // frame differ, and end the loop after the tick frame. `tx`
+                // outlives the call, so the channel stays open for the tick.
+                let n = polls.get();
+                let frame = format!("frame {n}");
+                if n >= 2 {
+                    let _ = tx.send(Event::Quit);
+                }
+                frame
+            },
+            |_frame| {
+                paints += 1;
+                Ok(())
+            },
+        )
+        .expect("loop");
+
+        // One immediate frame + one tick frame = two polls, two paints (both
+        // frames differ from the prior displayed bytes).
+        assert_eq!(polls.get(), 2, "immediate frame + one tick = two polls");
+        assert_eq!(paints, 2, "both the immediate and changed tick frame paint");
+        assert_eq!(displayed, "frame 2", "displayed holds the latest frame");
+    }
+
+    #[test]
+    fn event_loop_timeout_tick_with_identical_frame_polls_but_does_not_repaint() {
+        // An idle server: the tick still polls, but the rendered frame is
+        // byte-identical to what's displayed, so suppression skips the paint.
+        // The first (immediate) frame paints; the identical tick frame does not.
+        let (tx, rx) = mpsc::channel();
+        let mut state = WatchState::default();
+        let mut displayed = String::new();
+        let polls = Cell::new(0_usize);
+        let mut paints = 0_usize;
+        event_loop(
+            &rx,
+            TEST_POLL_INTERVAL,
+            &mut state,
+            &mut displayed,
+            || {
+                polls.set(polls.get() + 1);
+                Ok(fixture_stats())
+            },
+            |_state| {
+                // Always the same bytes, so the tick frame matches the immediate
+                // frame exactly. End after the tick.
+                if polls.get() >= 2 {
+                    let _ = tx.send(Event::Quit);
+                }
+                "steady".to_string()
+            },
+            |_frame| {
+                paints += 1;
+                Ok(())
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(polls.get(), 2, "the idle tick still polls");
+        assert_eq!(
+            paints, 1,
+            "only the immediate frame paints; the identical tick frame is suppressed",
+        );
+    }
+
+    #[test]
+    fn event_loop_quit_after_first_frame_returns_cleanly() {
+        // After the immediate first frame, a Quit must end the loop with no
+        // further poll/render/paint.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Quit).expect("queue quit");
+        drop(tx);
+
+        let mut state = WatchState::default();
+        let mut displayed = String::new();
+        let mut polls = 0_usize;
+        let mut paints = 0_usize;
+        let result = event_loop(
+            &rx,
+            TEST_POLL_INTERVAL,
+            &mut state,
+            &mut displayed,
+            || {
+                polls += 1;
+                Ok(fixture_stats())
+            },
+            |_state| "frame".to_string(),
+            |_frame| {
+                paints += 1;
+                Ok(())
+            },
+        );
+
+        assert!(result.is_ok(), "Quit must return Ok cleanly");
+        assert_eq!(polls, 1, "only the immediate frame polls; Quit adds none");
+        assert_eq!(paints, 1, "only the immediate frame paints; Quit adds none");
+    }
+
+    #[test]
+    fn event_loop_disconnected_channel_returns_cleanly() {
+        // Every sender dropped (e.g. the reader thread exited) is a clean
+        // shutdown: after the immediate frame, recv_timeout returns Disconnected
+        // and the loop returns Ok rather than erroring or spinning.
+        let (tx, rx) = mpsc::channel::<Event>();
+        drop(tx); // no events will ever arrive; channel is disconnected
+
+        let mut state = WatchState::default();
+        let mut displayed = String::new();
+        let mut polls = 0_usize;
+        let result = event_loop(
+            &rx,
+            TEST_POLL_INTERVAL,
+            &mut state,
+            &mut displayed,
+            || {
+                polls += 1;
+                Ok(fixture_stats())
+            },
+            |_state| "frame".to_string(),
+            |_frame| Ok(()),
+        );
+
+        assert!(result.is_ok(), "a disconnected channel is a clean shutdown");
+        assert_eq!(polls, 1, "only the immediate frame polls before disconnect");
+    }
+
+    #[test]
+    fn event_loop_absorbs_a_failed_poll_and_keeps_running() {
+        // A failed poll is non-fatal: the loop must NOT return Err, and render
+        // must still be called with the error visible in state (so the banner
+        // shows). We fail the very first poll, then end on the next tick.
+        let (tx, rx) = mpsc::channel();
+        let mut state = WatchState::default();
+        let mut displayed = String::new();
+        let polls = Cell::new(0_usize);
+        let saw_error_in_render = Cell::new(false);
+        let result = event_loop(
+            &rx,
+            TEST_POLL_INTERVAL,
+            &mut state,
+            &mut displayed,
+            || {
+                polls.set(polls.get() + 1);
+                // First poll fails; the loop must keep going regardless.
+                if polls.get() == 1 {
+                    Err(anyhow::anyhow!("connection refused"))
+                } else {
+                    Ok(fixture_stats())
+                }
+            },
+            |state| {
+                // The first (immediate) render runs after the failed poll, so
+                // the error must be visible in state here.
+                if state.error().is_some() {
+                    saw_error_in_render.set(true);
+                }
+                let n = polls.get();
+                if n >= 2 {
+                    let _ = tx.send(Event::Quit);
+                }
+                format!("frame {n}")
+            },
+            |_frame| Ok(()),
+        );
+
+        assert!(
+            result.is_ok(),
+            "a failed poll must be absorbed, not propagated as Err",
+        );
+        assert!(
+            saw_error_in_render.get(),
+            "render must be called with the failed-poll error visible in state",
         );
     }
 
