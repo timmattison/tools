@@ -34,10 +34,21 @@ impl MetricValue {
         use num_format::{Locale, ToFormattedString};
         match *self {
             MetricValue::Count(n) => n.to_formatted_string(&Locale::en),
-            MetricValue::Size(n) => human_bytes::human_bytes(n as f64),
+            MetricValue::Size(n) => format_size(n),
             MetricValue::Rate(r) => format!("{r:.1}%"),
         }
     }
+}
+
+/// Format `bytes` as a human-readable byte size string.
+///
+/// This is the single source of truth for size formatting in `seescc`:
+/// [`MetricValue::Size`] and the watch-mode footer both route through it so the
+/// cache-size display stays consistent (`809_212_237 -> "771.7 MiB"`). It wraps
+/// `human_bytes::human_bytes`, which selects binary units (KiB/MiB/GiB) and one
+/// decimal place.
+pub(crate) fn format_size(bytes: u64) -> String {
+    human_bytes::human_bytes(bytes as f64)
 }
 
 /// Extract the [`MetricValue`] for `key` from the parsed `stats`.

@@ -2,8 +2,18 @@
 //! wall-clock) and a right-aligned table of metric rows. Time is injected as a
 //! preformatted string so this module stays pure and deterministic under test.
 
+use std::time::Duration;
+
 use serde::ser::SerializeMap;
 use unicode_width::UnicodeWidthStr;
+
+/// Format a history `window` as the shortest exact human string using the
+/// largest unit that divides it evenly.
+///
+/// Stub: returns an empty string until the behavior is implemented.
+pub(crate) fn format_window(_window: Duration) -> String {
+    String::new()
+}
 
 /// One display row: a label and its already-formatted value string.
 pub(crate) struct Row {
@@ -220,6 +230,32 @@ mod tests {
         }];
         let out = build_human("Rust", "12:00:00", 20, &single);
         assert!(out.lines().nth(2).unwrap().ends_with('1'));
+    }
+
+    #[test]
+    fn format_window_uses_largest_exact_unit() {
+        // 900 s is an exact 15 minutes -> "15m", not "900s".
+        assert_eq!(format_window(Duration::from_secs(900)), "15m");
+        // 3600 s is an exact hour -> "1h".
+        assert_eq!(format_window(Duration::from_secs(3600)), "1h");
+        // 5400 s is 90 exact minutes but not a whole hour -> "90m".
+        assert_eq!(format_window(Duration::from_secs(5400)), "90m");
+    }
+
+    #[test]
+    fn format_window_falls_back_to_seconds_when_not_whole_minutes() {
+        // 90 s is not a whole number of minutes -> "90s", never "1.5m".
+        assert_eq!(format_window(Duration::from_secs(90)), "90s");
+    }
+
+    #[test]
+    fn format_window_sub_second_uses_milliseconds() {
+        assert_eq!(format_window(Duration::from_millis(500)), "500ms");
+    }
+
+    #[test]
+    fn format_window_zero_is_zero_seconds() {
+        assert_eq!(format_window(Duration::from_secs(0)), "0s");
     }
 
     #[test]
