@@ -59,9 +59,19 @@ impl WatchState {
     ///   display and leaves `last_good` untouched, so the table keeps showing
     ///   the last good numbers (design §6).
     pub(crate) fn apply_poll(&mut self, outcome: anyhow::Result<crate::stats::Stats>) {
-        // Intentionally inert stub for the RED step: the real behavior (store /
-        // clear / retain) is implemented in the GREEN step.
-        let _ = outcome;
+        match outcome {
+            Ok(stats) => {
+                // Success: adopt the fresh numbers and clear any banner — a
+                // recovered poll must not keep showing a stale error.
+                self.last_good = Some(stats);
+                self.error = None;
+            }
+            Err(e) => {
+                // Failure is non-fatal: raise the banner but leave `last_good`
+                // alone so the table keeps the last trustworthy numbers.
+                self.error = Some(e.to_string());
+            }
+        }
     }
 }
 
