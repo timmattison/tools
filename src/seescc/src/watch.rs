@@ -262,6 +262,40 @@ pub(crate) fn should_force_colors(
     !stdout_is_tty && columns_env_present && !no_color_env
 }
 
+/// Compose the full watch frame from the loop's current [`WatchState`] and the
+/// resolved [`crate::config::Config`].
+///
+/// This is the bridge between the poll-outcome state machine and the pure
+/// [`crate::render`] layer: it decides *what* to draw from `state` and hands the
+/// pieces to [`crate::render::build_watch`]. The behavior tracks design §6
+/// directly:
+///
+/// - **With last-good stats** (a healthy poll, or a failure that still has the
+///   prior good numbers to fall back on): draw the configured metric rows from
+///   those stats and a footer summarizing cache occupancy and the history
+///   window. The error banner is shown iff the *current* poll failed
+///   ([`WatchState::error`]) — so a recovered server has rows + footer + no
+///   banner, while a mid-outage server keeps the same rows + footer *plus* the
+///   banner.
+/// - **With no last-good stats** (the very first poll failed and we have nothing
+///   trustworthy to show): draw only the header and the banner — no rows, no
+///   footer — because every number would be a fabrication.
+///
+/// `width` is the terminal column count to lay the frame out for and `clock` is
+/// the preformatted wall-clock string; both are injected by the loop's render
+/// closure so this stays pure and testable without a TTY.
+pub(crate) fn compose_watch_frame(
+    state: &WatchState,
+    config: &crate::config::Config,
+    width: usize,
+    clock: &str,
+) -> String {
+    // RED stub: returns an empty frame so the behavioral tests fail because the
+    // composition behavior is missing, not because the symbol is undefined.
+    let _ = (state, config, width, clock);
+    String::new()
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -280,6 +314,120 @@ mod tests {
     /// parsed payload works.
     fn fixture_stats() -> crate::stats::Stats {
         crate::stats::parse(FIXTURE).expect("fixture should parse")
+    }
+
+    /// The default-config metric rows for `stats`, built exactly the way the
+    /// renderer builds them (label + formatted value per configured metric).
+    /// The frame tests assert these strings appear in the composed frame, so
+    /// they're derived from the live config rather than hardcoded.
+    fn expected_rows(
+        config: &crate::config::Config,
+        stats: &crate::stats::Stats,
+    ) -> Vec<(String, String)> {
+        config
+            .metrics
+            .iter()
+            .map(|spec| {
+                let value =
+                    crate::aggregate::metric_value(spec.key, stats, &config.languages).format();
+                (spec.label.clone(), value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compose_watch_frame_healthy_has_rows_and_footer_and_no_banner() {
+        // A healthy poll: the frame must carry every configured metric row
+        // (label + formatted value), the cache/window footer, and — crucially —
+        // no error banner, since the current poll succeeded.
+        let config = crate::config::Config::default();
+        let stats = fixture_stats();
+        let mut state = WatchState::default();
+        state.apply_poll(Ok(stats.clone()));
+
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56");
+
+        for (label, value) in expected_rows(&config, &stats) {
+            assert!(
+                frame.contains(&label),
+                "healthy frame must contain row label {label:?}; frame:\n{frame}",
+            );
+            assert!(
+                frame.contains(&value),
+                "healthy frame must contain row value {value:?}; frame:\n{frame}",
+            );
+        }
+
+        let footer =
+            crate::render::build_footer(stats.cache_size, stats.max_cache_size, config.window);
+        assert!(
+            frame.contains(&footer),
+            "healthy frame must contain the footer {footer:?}; frame:\n{frame}",
+        );
+
+        assert!(
+            !frame.contains("connection refused"),
+            "a healthy frame must carry no error banner; frame:\n{frame}",
+        );
+    }
+
+    #[test]
+    fn compose_watch_frame_error_after_good_keeps_last_numbers_and_shows_banner() {
+        // A poll failure after a good poll is non-fatal: the banner appears AND
+        // the last good numbers stay on screen (design §6 — never blank the
+        // table during a transient outage).
+        let config = crate::config::Config::default();
+        let stats = fixture_stats();
+        let mut state = WatchState::default();
+        state.apply_poll(Ok(stats.clone()));
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56");
+
+        assert!(
+            frame.contains("connection refused"),
+            "a failed poll after a good one must show the error banner; frame:\n{frame}",
+        );
+        for (label, value) in expected_rows(&config, &stats) {
+            assert!(
+                frame.contains(&label),
+                "the last good row label {label:?} must survive the outage; frame:\n{frame}",
+            );
+            assert!(
+                frame.contains(&value),
+                "the last good row value {value:?} must survive the outage; frame:\n{frame}",
+            );
+        }
+    }
+
+    #[test]
+    fn compose_watch_frame_error_with_no_good_has_banner_but_no_rows_or_footer() {
+        // A first-poll failure has no trustworthy numbers to show: the frame is
+        // header + banner only — no rows, no footer, since every number would be
+        // a fabrication.
+        let config = crate::config::Config::default();
+        let stats = fixture_stats();
+        let mut state = WatchState::default();
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56");
+
+        assert!(
+            frame.contains("connection refused"),
+            "a first-poll failure must show the error banner; frame:\n{frame}",
+        );
+        // No fabricated rows: the default labels must be absent entirely.
+        for (label, _value) in expected_rows(&config, &stats) {
+            assert!(
+                !frame.contains(&label),
+                "with no good poll the frame must not draw row {label:?}; frame:\n{frame}",
+            );
+        }
+        // No footer either — there is no cache size to report.
+        assert!(
+            !frame.contains("window"),
+            "with no good poll the frame must carry no footer; frame:\n{frame}",
+        );
     }
 
     #[test]
