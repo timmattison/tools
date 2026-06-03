@@ -10,6 +10,61 @@
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 
+/// The poll-outcome state machine that backs the watch loop's rendering.
+///
+/// Each poll of sccache feeds its outcome into [`WatchState::apply_poll`], which
+/// is the *only* way the two displayed facts evolve:
+///
+/// - `last_good` — the most recent successfully-parsed [`crate::stats::Stats`].
+///   The render closure draws the numeric rows from this, so it must survive a
+///   failed poll: when the server is briefly unreachable we keep showing the
+///   last numbers we trust rather than blanking the table.
+/// - `error` — the banner message for the *current* poll, or `None`. A poll
+///   failure is **non-fatal** (design §6: "error banner + keep last good
+///   frame"), so it sets the banner without disturbing `last_good`; the next
+///   successful poll clears the banner (recovery), so a transient blip leaves no
+///   lingering error once the server is back.
+#[derive(Debug, Default)]
+pub(crate) struct WatchState {
+    /// The most recent stats from a *successful* poll, retained across failures
+    /// so the table keeps showing trustworthy numbers during an outage.
+    last_good: Option<crate::stats::Stats>,
+    /// The error banner for the current poll, or `None` when the last poll
+    /// succeeded. Cleared on recovery.
+    error: Option<String>,
+}
+
+impl WatchState {
+    /// The last successfully-polled stats, if any poll has ever succeeded.
+    ///
+    /// The render closure draws the metric rows from this; `None` only before
+    /// the first successful poll (e.g. a first-poll failure), where the caller
+    /// renders a banner with no rows.
+    pub(crate) fn last_good(&self) -> Option<&crate::stats::Stats> {
+        self.last_good.as_ref()
+    }
+
+    /// The current error-banner message, or `None` when the last poll
+    /// succeeded.
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Fold a poll outcome into the state.
+    ///
+    /// - `Ok(stats)` is a successful poll: it becomes the new `last_good` and
+    ///   clears any error banner (recovery — a prior failure must not linger
+    ///   once the server is back).
+    /// - `Err(e)` is a *non-fatal* failed poll: it sets the banner to `e`'s
+    ///   display and leaves `last_good` untouched, so the table keeps showing
+    ///   the last good numbers (design §6).
+    pub(crate) fn apply_poll(&mut self, outcome: anyhow::Result<crate::stats::Stats>) {
+        // Intentionally inert stub for the RED step: the real behavior (store /
+        // clear / retain) is implemented in the GREEN step.
+        let _ = outcome;
+    }
+}
+
 /// Which rendering mode `seescc` runs in.
 ///
 /// Watch mode is the default, but it only makes sense when there is a live
@@ -71,6 +126,93 @@ pub(crate) fn should_force_colors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The captured real-sccache fixture, parsed into [`crate::stats::Stats`] —
+    /// the same data the rest of the crate's tests use, so [`WatchState`] is
+    /// exercised against a realistic payload rather than an ad-hoc literal.
+    const FIXTURE: &str = include_str!("../tests/fixtures/sccache-0.15.0.json");
+
+    /// Parse the captured fixture into [`crate::stats::Stats`] for the state
+    /// tests. The exact field values don't matter here — these tests assert
+    /// *which* stats are retained, not their contents — so any successfully
+    /// parsed payload works.
+    fn fixture_stats() -> crate::stats::Stats {
+        crate::stats::parse(FIXTURE).expect("fixture should parse")
+    }
+
+    #[test]
+    fn apply_poll_ok_stores_stats_and_clears_a_prior_error() {
+        // A successful poll must (1) record its stats as the new last-good frame
+        // and (2) clear any banner left over from an earlier failure — recovery
+        // wipes the error the moment the server is reachable again.
+        let mut state = WatchState::default();
+        // Seed a prior failure so we can prove recovery clears it.
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+        assert!(
+            state.error().is_some(),
+            "a failed poll must leave an error banner to be cleared",
+        );
+
+        state.apply_poll(Ok(fixture_stats()));
+        assert!(
+            state.last_good().is_some(),
+            "a successful poll must store its stats as last_good",
+        );
+        assert_eq!(
+            state.error(),
+            None,
+            "a successful poll must clear a prior error (recovery)",
+        );
+        // The retained stats are the ones we just supplied.
+        assert_eq!(
+            state.last_good().expect("last_good present").version,
+            "0.15.0",
+            "last_good must be the stats from the successful poll",
+        );
+    }
+
+    #[test]
+    fn apply_poll_err_sets_error_and_retains_previous_good_stats() {
+        // After at least one good poll, a failure is non-fatal: it raises the
+        // banner but must NOT discard the last good numbers — the table keeps
+        // showing them through the outage (design §6).
+        let mut state = WatchState::default();
+        state.apply_poll(Ok(fixture_stats()));
+
+        state.apply_poll(Err(anyhow::anyhow!("sccache --show-stats failed")));
+        assert_eq!(
+            state.error(),
+            Some("sccache --show-stats failed"),
+            "a failed poll must surface the error's display as the banner",
+        );
+        assert!(
+            state.last_good().is_some(),
+            "a failed poll must retain the previous good stats, not blank them",
+        );
+        assert_eq!(
+            state.last_good().expect("last_good retained").version,
+            "0.15.0",
+            "the retained stats must be the last successful poll's, unchanged",
+        );
+    }
+
+    #[test]
+    fn apply_poll_err_with_no_prior_good_leaves_last_good_none() {
+        // A first-poll failure (server down at startup) raises the banner but
+        // has no good frame to keep — last_good stays None, and the caller
+        // renders a banner with no rows.
+        let mut state = WatchState::default();
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+        assert_eq!(
+            state.error(),
+            Some("connection refused"),
+            "a first-poll failure must still raise the banner",
+        );
+        assert!(
+            state.last_good().is_none(),
+            "a first-poll failure has no good frame to keep: last_good stays None",
+        );
+    }
 
     #[test]
     fn decide_mode_watches_only_on_a_live_tty_without_force() {
