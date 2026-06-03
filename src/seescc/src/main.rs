@@ -1,9 +1,10 @@
 //! seescc — a self-refreshing terminal viewer for sccache statistics.
 //!
-//! Phase 1 implements a single poll → parse → aggregate → render → stdout pass.
-//! Later phases add a TOML config, a JSON one-shot format, a live watch loop,
-//! and sparkline history.
+//! Phases 1–4 are complete: a single poll → parse → aggregate → render → stdout
+//! pass, a TOML config, a JSON one-shot format, and a live watch loop that owns
+//! the terminal and refreshes on a timer. Phase 5 adds sparkline history.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -19,13 +20,9 @@ mod config;
 mod render;
 #[allow(
     dead_code,
-    reason = "Counters/Stats carry fields (cache_size, compilations, …) consumed by later phases"
+    reason = "Counters/Stats carry fields (compilations, cache_errors, …) consumed by Phase 5 sparklines"
 )]
 mod stats;
-#[allow(
-    dead_code,
-    reason = "the watch-mode terminal shell wires these in later in this phase"
-)]
 mod watch;
 
 /// The one-shot output format selected by `--format`.
@@ -48,13 +45,9 @@ enum OutputFormat {
 #[command(about = "Self-refreshing terminal viewer for sccache statistics")]
 struct Cli {
     /// Render once and exit instead of entering the live watch loop. On a
-    /// non-TTY (piped) stdout this is implied. The live watch loop arrives in a
-    /// later version; for now seescc always renders a single frame.
+    /// non-TTY (piped) stdout this is implied, so `seescc | cat` and capture
+    /// wrappers get a single frame without the flag.
     #[arg(long)]
-    #[allow(
-        dead_code,
-        reason = "accepted now for forward compatibility; selects single-render mode once the watch loop lands"
-    )]
     one_shot: bool,
 
     /// Path to an explicit config file. Overrides the per-user config file.
@@ -126,13 +119,34 @@ fn main() -> Result<()> {
     let config = config::load(cli.config.as_deref())?
         .with_overrides(cli.poll_interval.as_deref(), cli.window.as_deref())?;
 
-    let stats = poll_sccache()?;
-    let output = match cli.format {
-        OutputFormat::Human => render_oneshot(&config, &stats),
-        OutputFormat::Json => render_oneshot_json(&config, &stats),
-    };
-    println!("{output}");
-    Ok(())
+    // Color policy, mirroring gsw: NO_COLOR is an explicit kill switch, and a
+    // watch-like wrapper (no TTY but COLUMNS exported) gets colors forced back
+    // on so they pass through to the wrapper's own TTY-backed UI instead of
+    // being stripped as they would be for a plain pipe.
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let columns_env_present = std::env::var_os("COLUMNS").is_some();
+    let no_color_env = std::env::var_os("NO_COLOR").is_some();
+    if no_color_env {
+        colored::control::set_override(false);
+    } else if watch::should_force_colors(stdout_is_tty, columns_env_present, no_color_env) {
+        colored::control::set_override(true);
+    }
+
+    // Watch mode is the default on a live terminal; `--one-shot` and any non-TTY
+    // stdout fall back to a single render. `--format` is one-shot-only — the
+    // watch loop always renders the human view.
+    match watch::decide_mode(cli.one_shot, stdout_is_tty) {
+        watch::Mode::OneShot => {
+            let stats = poll_sccache()?;
+            let output = match cli.format {
+                OutputFormat::Human => render_oneshot(&config, &stats),
+                OutputFormat::Json => render_oneshot_json(&config, &stats),
+            };
+            println!("{output}");
+            Ok(())
+        }
+        watch::Mode::Watch => watch::run(&config, poll_sccache),
+    }
 }
 
 /// Run `sccache --show-stats --stats-format=json` and return the parsed stats.
