@@ -20,13 +20,13 @@ mod config;
 #[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 mod history;
 mod render;
+#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
+mod sparkline;
 #[allow(
     dead_code,
     reason = "Counters/Stats carry fields (compilations, cache_errors, …) consumed by Phase 5 sparklines"
 )]
 mod stats;
-#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
-mod sparkline;
 mod watch;
 
 /// The one-shot output format selected by `--format`.

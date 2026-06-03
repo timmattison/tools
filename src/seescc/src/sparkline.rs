@@ -24,6 +24,22 @@
 /// count — no `unicode-width` measurement is needed at this layer.
 pub(crate) const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
+/// Map a whole-number scale `level` in `0.0..=7.0` to its block glyph.
+///
+/// The level comes out of [`sparkline`]'s interpolation already `round`ed and
+/// clamped to the valid range, so this is a direct lookup — implemented by
+/// scanning for the matching integer index rather than a lossy `f64 as usize`
+/// cast, which clippy's `cast_possible_truncation`/`cast_sign_loss` lints forbid.
+/// Any out-of-band level (which the clamp makes unreachable) falls back to the
+/// full block, so the function is total and never panics.
+fn glyph_for_level(level: f64) -> char {
+    SPARK_GLYPHS
+        .iter()
+        .enumerate()
+        .find(|(index, _)| (*index as f64) == level)
+        .map_or(SPARK_GLYPHS[SPARK_GLYPHS.len() - 1], |(_, &glyph)| glyph)
+}
+
 /// Render `values` as a sparkline — one glyph per value, auto-scaled to the
 /// series' own `min..max`.
 ///
@@ -55,7 +71,54 @@ pub(crate) const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '
 /// The result is a `String` of glyph characters only — no leading/trailing
 /// whitespace and no newline.
 pub(crate) fn sparkline(values: &[f64]) -> String {
-    todo!("implemented in the green commit")
+    // The top index into SPARK_GLYPHS, as an f64 for the interpolation below. The
+    // eight glyphs span indices 0..=7, so a value's fractional position in the
+    // range scales across `0.0..=7.0` and rounds to one of those eight levels.
+    const TOP_INDEX: f64 = (SPARK_GLYPHS.len() - 1) as f64;
+
+    // Only finite values participate in the scale: a NaN/±inf would poison min/max
+    // (and any comparison with it is false), so they are excluded from range
+    // detection and later rendered at the baseline.
+    let (min, max) = values
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite())
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        });
+
+    // No finite range to scale against — either the series is empty/all-non-finite
+    // (min stays +inf, max stays -inf, so `range` is -inf) or it is flat
+    // (min == max, so `range` is 0). Either way there is no shape, so every position
+    // collapses to the baseline glyph. Returning here also guarantees the
+    // `(max - min)` divisor below is strictly positive. `range` is finite-minus
+    // -finite (or the ±inf no-finite case), never NaN, so `<= 0.0` is well-defined.
+    let range = max - min;
+    if range <= 0.0 {
+        return SPARK_GLYPHS[0].to_string().repeat(values.len());
+    }
+
+    values
+        .iter()
+        .map(|&v| {
+            if !v.is_finite() {
+                // Defensive: a stray non-finite value can't be scaled, so it
+                // degrades to the baseline rather than producing a garbage index.
+                return SPARK_GLYPHS[0];
+            }
+            // Linear interpolation across the observed range, rounded to the
+            // nearest of the eight levels. `round` is half-away-from-zero; clamping
+            // the *float* to `0.0..=TOP_INDEX` before any integer conversion folds
+            // away both endpoints' floating-point overshoot and keeps the value
+            // non-negative — so the resulting index is provably in `0..=7` without a
+            // lossy `f64 as usize` cast. The level is whole after `round`, so the
+            // glyph lookup just scans for the matching index.
+            let level = ((v - min) / range * TOP_INDEX)
+                .round()
+                .clamp(0.0, TOP_INDEX);
+            glyph_for_level(level)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -134,7 +197,9 @@ mod tests {
     fn large_magnitude_series_still_spans_full_scale() {
         // Auto-scaling is magnitude-independent: a series in the billions still
         // pins its own min to ▁ and its own max to █.
-        let out: Vec<char> = sparkline(&[1_000_000_000.0, 2_000_000_000.0]).chars().collect();
+        let out: Vec<char> = sparkline(&[1_000_000_000.0, 2_000_000_000.0])
+            .chars()
+            .collect();
         assert_eq!(out, vec![BASELINE, FULL]);
     }
 
