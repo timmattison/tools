@@ -8,11 +8,19 @@
 //! lifecycle and event loop that consume these helpers are wired in later in
 //! this phase.
 
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::io::{self, Write};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+};
 
 /// An external event the watch loop reacts to between polls.
 ///
@@ -347,6 +355,180 @@ pub(crate) fn compose_watch_frame(
         // number would be a fabrication, so draw no rows and no footer.
         None => crate::render::build_watch(&label, clock, width, &[], banner, None),
     }
+}
+
+/// Render width used when the live terminal size cannot be detected (no TTY
+/// behind the watch loop, which should not normally happen since the mode is
+/// only entered on a TTY). A sane default keeps the frame readable rather than
+/// collapsing to zero width.
+const DEFAULT_WATCH_WIDTH: usize = 80;
+
+/// Run the live watch loop: take over the alternate screen and repaint the
+/// sccache stats on a timer until the user quits with `q`, `Esc`, or Ctrl-C.
+///
+/// This is the thin, untestable shell — every decision it makes is delegated to
+/// a tested pure function ([`compose_watch_frame`], [`is_quit_event`],
+/// [`decide_mode`]) or to the already-tested [`event_loop`]. Its job is purely
+/// to acquire the terminal, wire up the event reader, and supply the loop's
+/// three side-effecting closures:
+///
+/// - **poll** is the caller-supplied stats fetch (production: shell out to
+///   sccache); a failure is folded into the loop's [`WatchState`] as a non-fatal
+///   banner and never tears the view down.
+/// - **render** queries the live terminal width and wall-clock each frame and
+///   composes the frame via [`compose_watch_frame`], so a resize redraws at the
+///   new width and the clock stays current.
+/// - **paint** writes the frame into the alternate screen via [`paint_output`].
+///
+/// The [`TerminalGuard`] restores the main screen, cursor, and cooked mode on
+/// every exit path — normal return, propagated error, or panic — so the terminal
+/// can never be left wedged. The `poll_interval` comes from the resolved config.
+pub(crate) fn run(
+    config: &crate::config::Config,
+    poll: impl FnMut() -> Result<crate::stats::Stats>,
+) -> Result<()> {
+    let _guard = TerminalGuard::enter()?;
+
+    let (tx, rx) = mpsc::channel();
+    spawn_event_reader(tx);
+
+    let mut state = WatchState::default();
+    let mut displayed = String::new();
+    event_loop(
+        &rx,
+        config.poll_interval,
+        &mut state,
+        &mut displayed,
+        poll,
+        // Re-query the terminal size and clock every frame so a resize lays out
+        // at the new width and the header clock stays live.
+        |state| {
+            let width = current_watch_width();
+            let clock = chrono::Local::now().format("%H:%M:%S").to_string();
+            compose_watch_frame(state, config, width, &clock)
+        },
+        paint_output,
+    )
+}
+
+/// The width the watch frame should lay out for, from the live terminal size.
+///
+/// Mirrors `gsw`'s watch sizing: take the column count from `terminal_size` and
+/// subtract a one-cell safety margin so a glyph in the rightmost column can't
+/// trigger the terminal's auto-wrap (DECAWM) and stair-step the frame. Falls
+/// back to [`DEFAULT_WATCH_WIDTH`] when no size is reported.
+fn current_watch_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(w, _h)| usize::from(w.0))
+        .unwrap_or(DEFAULT_WATCH_WIDTH)
+        .saturating_sub(1)
+        .max(1)
+}
+
+/// Paint `output` into the alternate screen, replacing whatever frame is there.
+///
+/// Copied faithfully from `gsw`: move home, clear the whole screen (so a shorter
+/// frame can't leave stale glyphs from a taller previous one), then write the
+/// frame. In raw mode a bare `'\n'` moves down *without* returning to column 0,
+/// which would stair-step the table, so every newline is translated to CRLF.
+fn paint_output(output: &str) -> Result<()> {
+    let mut out = io::stdout();
+    let painted = output.replace('\n', "\r\n");
+    execute!(out, MoveTo(0, 0), Clear(ClearType::All))?;
+    write!(out, "{painted}")?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Spawn the crossterm event-reader thread feeding the watch loop.
+///
+/// It blocks on `event::read`, translating any quit key recognized by the tested
+/// [`is_quit_event`] into [`Event::Quit`] and terminal resizes into
+/// [`Event::Resize`], and ignoring everything else. The thread exits when a send
+/// fails (the loop ended, so the receiver is gone) or when reading fails (the
+/// terminal closed) — there is nothing left to deliver in either case.
+fn spawn_event_reader(tx: Sender<Event>) {
+    thread::spawn(move || loop {
+        match event::read() {
+            Ok(CtEvent::Key(KeyEvent {
+                code,
+                modifiers,
+                kind,
+                ..
+            })) => {
+                if is_quit_event(code, modifiers, kind) && tx.send(Event::Quit).is_err() {
+                    break;
+                }
+            }
+            Ok(CtEvent::Resize(_, _)) => {
+                if tx.send(Event::Resize).is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+            // The terminal closed or reading failed: nothing more to read.
+            Err(_) => break,
+        }
+    });
+}
+
+/// A panic hook, matching what [`std::panic::take_hook`] returns. Held in an
+/// [`Arc`] so the installed wrapper and [`TerminalGuard::drop`] can both reach
+/// the same pre-watch hook — the wrapper to chain to it, `Drop` to reinstate it.
+type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send>;
+
+/// RAII guard for the alternate screen, hidden cursor, and raw mode. Restores
+/// the main screen and cursor on drop *and* via a panic hook, so no exit path —
+/// normal return, propagated error, or panic — can leave the terminal in a
+/// wedged state. The panic hook restores *before* the default handler prints, so
+/// the panic message lands on the main screen rather than the torn-down
+/// alternate one. On drop the pre-watch panic hook is reinstated, so our
+/// terminal-restoring wrapper never lingers as global process state once the
+/// guard is gone.
+struct TerminalGuard {
+    /// The panic hook in effect before [`TerminalGuard::enter`] wrapped it,
+    /// reinstated on drop. `Option` only so `Drop` can move it back out.
+    previous_hook: Option<PanicHook>,
+}
+
+impl TerminalGuard {
+    /// Enter raw mode and the alternate screen, hide the cursor, and install a
+    /// terminal-restoring panic hook chained in front of the existing one.
+    fn enter() -> Result<Self> {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, Hide)?;
+
+        let previous: PanicHook = Arc::from(std::panic::take_hook());
+        let chained = Arc::clone(&previous);
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal();
+            (*chained)(info);
+        }));
+
+        Ok(TerminalGuard {
+            previous_hook: Some(previous),
+        })
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+        // Reinstate the pre-watch panic hook so our terminal-restoring wrapper
+        // doesn't outlive the guard as global process state.
+        if let Some(previous) = self.previous_hook.take() {
+            std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+        }
+    }
+}
+
+/// Best-effort restore of the terminal to its pre-watch state. Idempotent and
+/// failure-tolerant: both the panic hook and `Drop` may call it (a panic runs
+/// the hook, then unwinding runs `Drop`), and a partially-entered terminal must
+/// still be cleaned up, so every step is independently ignored on error.
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
 }
 
 #[cfg(test)]
