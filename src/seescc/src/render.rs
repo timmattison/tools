@@ -15,10 +15,6 @@ use unicode_width::UnicodeWidthStr;
 /// the next coarser unit stays at the finer one, so `90s -> "90s"` (never
 /// `"1.5m"`) and `Duration::from_millis(500) -> "500ms"`. A zero window renders
 /// as `"0s"`.
-#[allow(
-    dead_code,
-    reason = "consumed by build_footer/build_watch, wired into the watch loop in a later slice"
-)]
 pub(crate) fn format_window(window: Duration) -> String {
     let total_millis = window.as_millis();
     if total_millis == 0 {
@@ -38,6 +34,18 @@ pub(crate) fn format_window(window: Duration) -> String {
     } else {
         format!("{total_millis}ms")
     }
+}
+
+/// Build the watch-mode footer line content (without the leading space the
+/// frame adds): `cache <size> / <max> · <window> window`.
+///
+/// Stub: returns an empty string until the behavior is implemented.
+#[allow(
+    dead_code,
+    reason = "consumed by build_watch, wired into the watch loop in a later slice"
+)]
+pub(crate) fn build_footer(_cache_size: u64, _max_cache_size: u64, _window: Duration) -> String {
+    String::new()
 }
 
 /// One display row: a label and its already-formatted value string.
@@ -281,6 +289,29 @@ mod tests {
     #[test]
     fn format_window_zero_is_zero_seconds() {
         assert_eq!(format_window(Duration::from_secs(0)), "0s");
+    }
+
+    #[test]
+    fn build_footer_uses_shared_size_formatter_and_window() {
+        // Fixture values: cache_size 809_212_237, max_cache_size 10_737_418_240,
+        // window 15m. The sizes must match the shared size formatter byte-for-byte
+        // (computed here, never hardcoded), and the window uses format_window.
+        let size = crate::aggregate::format_size(809_212_237);
+        let max = crate::aggregate::format_size(10_737_418_240);
+        let expected = format!("cache {size} / {max} · 15m window");
+        assert_eq!(
+            build_footer(809_212_237, 10_737_418_240, Duration::from_secs(900)),
+            expected
+        );
+    }
+
+    #[test]
+    fn build_footer_window_unit_follows_format_window() {
+        // The window segment is whatever format_window produces, e.g. "1h".
+        let size = crate::aggregate::format_size(0);
+        let max = crate::aggregate::format_size(0);
+        let expected = format!("cache {size} / {max} · 1h window");
+        assert_eq!(build_footer(0, 0, Duration::from_secs(3600)), expected);
     }
 
     #[test]
