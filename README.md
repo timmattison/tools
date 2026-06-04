@@ -1076,9 +1076,13 @@ nwt --tmux                    # Open in new tmux window
 ### Options
 
 - `-b, --branch <NAME>`: Create worktree with specific branch name instead of random name
+- `--random-directory`: Use a random directory name even when `--branch` is given (by default the branch name doubles as the directory name)
 - `-c, --checkout <REF>`: Check out an existing branch/tag/commit instead of creating a new branch
 - `--run <COMMAND>`: Run a command in the new worktree after creation
 - `--tmux`: Open the new worktree in a new tmux window (Unix only)
+- `--no-copy-env`: Skip copying untracked `.env` files from the main worktree into the new one
+- `--no-bootstrap-hooks`: Skip the package-manager install that regenerates git hooks (see Hook Bootstrap below)
+- `--shell-setup`: Install shell integration for auto-cd into new worktrees (conflicts with all other flags)
 - `-q, --quiet`: Suppress non-error messages
 
 ### Config File
@@ -1100,7 +1104,19 @@ tmux = true
 
 # Suppress output by default
 quiet = false
+
+# Copy untracked .env files into new worktrees (default true)
+copy_env = true
+
+# Run the package manager's install to regenerate git hooks (default true)
+bootstrap_hooks = true
 ```
+
+### Hook Bootstrap
+
+After creating the worktree, if `package.json` at the worktree root declares a `prepare` script (the husky convention), nwt runs the project's package manager install so git-hook managers regenerate their hooks directory. This matters because `core.hooksPath` often points at a gitignored, generated directory (e.g. `.husky/_`) that a freshly created worktree doesn't have — without the install, git finds no hooks directory and silently runs nothing, so every commit bypasses lint/typecheck/test gates. The package manager is chosen by the `packageManager` field, then a lockfile, then pnpm. Repos without a `prepare` script are unaffected — no install is run.
+
+Disable the install for a single invocation with `--no-bootstrap-hooks`, or set `bootstrap_hooks = false` in `~/.nwt.toml` to disable it by default. When a synchronous `--run` command (without `--tmux`) already invokes a package manager install (e.g. `--run "pnpm install"`), nwt skips its own bootstrap install so dependencies are installed once, not twice. As a safety net, nwt verifies the effective `core.hooksPath` directory actually exists and prints a loud warning if it doesn't — whether bootstrap was skipped, failed, or didn't apply — since that missing directory is the only signal that commits in the new worktree would otherwise be ungated. When you pass a synchronous `--run` command (without `--tmux`), this check runs *after* that command finishes, so a `--run` that installs hooks (e.g. `pnpm install`) can create the directory before the check looks — no false alarm. With `--tmux`, the `--run` command runs asynchronously inside the new window, so the check necessarily runs before tmux is spawned.
 
 ### Examples
 

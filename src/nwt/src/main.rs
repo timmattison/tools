@@ -78,6 +78,11 @@ fn default_copy_env() -> bool {
     true
 }
 
+/// Returns the default value for bootstrap_hooks (true).
+fn default_bootstrap_hooks() -> bool {
+    true
+}
+
 /// Configuration file schema for nwt.
 ///
 /// All fields are optional - only set what you need to override defaults.
@@ -95,6 +100,11 @@ struct NwtConfig {
     /// Defaults to true if not specified.
     #[serde(default = "default_copy_env")]
     copy_env: bool,
+
+    /// Run the package manager's install in a new worktree to regenerate
+    /// git-hook directories (e.g. husky's `.husky/_`). Defaults to true.
+    #[serde(default = "default_bootstrap_hooks")]
+    bootstrap_hooks: bool,
 
     /// Enable quiet mode by default.
     #[serde(default)]
@@ -120,8 +130,9 @@ impl Default for NwtConfig {
         Self {
             branch: None,
             checkout: None,
-            copy_env: true, // Must match default_copy_env()
-            quiet: false,   // Must match #[serde(default)] (false)
+            copy_env: true,        // Must match default_copy_env()
+            bootstrap_hooks: true, // Must match default_bootstrap_hooks()
+            quiet: false,          // Must match #[serde(default)] (false)
             run: None,
             tmux: false, // Must match #[serde(default)] (false)
         }
@@ -169,6 +180,7 @@ struct MergedConfig {
     branch: Option<String>,
     checkout: Option<String>,
     copy_env: bool,
+    bootstrap_hooks: bool,
     quiet: bool,
     run: Option<String>,
     tmux: bool,
@@ -248,6 +260,9 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // copy_env: config default is true, CLI --no-copy-env disables it.
         // If CLI specifies --no-copy-env, we disable. Otherwise use config value.
         copy_env: !cli.no_copy_env && config.copy_env,
+        // bootstrap_hooks: config default is true, CLI --no-bootstrap-hooks disables it.
+        // Same merge shape as copy_env: CLI disables, otherwise use config value.
+        bootstrap_hooks: !cli.no_bootstrap_hooks && config.bootstrap_hooks,
         // Boolean flags use OR: CLI can enable but not disable config defaults.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
@@ -486,7 +501,8 @@ CONFIGURATION:
 
     Example config file:
         branch = \"feature/default\"
-        copy_env = false  # disable .env file copying
+        copy_env = false       # disable .env file copying
+        bootstrap_hooks = true # run package-manager install to set up git hooks
         quiet = false
         tmux = true
         run = \"pnpm install\"
@@ -508,6 +524,37 @@ ENV FILE COPYING:
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
 
+HOOK BOOTSTRAP:
+    After creating the worktree, if package.json at the worktree root declares a
+    'prepare' script, nwt runs the project's package manager install (pnpm, npm,
+    yarn, or bun — chosen by the 'packageManager' field, then a lockfile, then
+    pnpm) so git-hook managers like husky regenerate their hooks directory.
+
+    This matters because 'core.hooksPath' often points at a gitignored, generated
+    directory (e.g. .husky/_) that a freshly created worktree does not have.
+    Without this install, git finds no hooks directory and silently runs nothing,
+    so every commit bypasses lint/typecheck/test gates.
+
+    Use --no-bootstrap-hooks to skip the install for a single invocation, or set
+    bootstrap_hooks = false in ~/.nwt.toml to disable it by default. Repos without
+    a 'prepare' script are unaffected — no install is run.
+
+    When a synchronous --run command (without --tmux) already invokes a package
+    manager install (e.g. --run \"pnpm install\"), nwt skips its own bootstrap
+    install so the install runs once, not twice.
+
+    As a safety net, nwt verifies the effective 'core.hooksPath' directory
+    actually exists, and prints a loud warning if it does not — whether bootstrap
+    was skipped, failed, or didn't apply. When you pass a synchronous --run
+    command (without --tmux), this check runs AFTER that command finishes, so a
+    --run that installs hooks (e.g. \"pnpm install\") gets the chance to create the
+    directory before the check looks — no false alarm. With --tmux the --run
+    command runs asynchronously inside the new window, so the check necessarily
+    runs before tmux is spawned. Git silently runs no hooks when that directory
+    is missing, so this warning is the only signal that commits in the new
+    worktree would otherwise be ungated. Because that signal must never be
+    invisible, this warning is printed to stderr even with --quiet.
+
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
@@ -521,6 +568,7 @@ EXAMPLES:
     nwt --tmux                       # Open worktree in a new tmux window
     nwt --tmux --run \"npm install\"   # Run command in a new tmux window
     nwt --no-copy-env                # Skip copying .env files
+    nwt --no-bootstrap-hooks         # Skip running install to set up git hooks
     nwt --shell-setup                # Install shell integration for auto-cd
 
 SHELL INTEGRATION:
@@ -624,6 +672,21 @@ struct Cli {
     #[arg(long)]
     no_copy_env: bool,
 
+    /// Disable running the package manager's install to bootstrap git hooks.
+    ///
+    /// By default, after creating the worktree, nwt detects a `prepare` script
+    /// in the worktree's package.json (the husky convention) and runs the
+    /// project's package manager install (pnpm/npm/yarn/bun) so git-hook
+    /// managers regenerate their hook directory. This matters because
+    /// `core.hooksPath` often points at a gitignored, generated directory that
+    /// a fresh worktree lacks — without the install, commits silently bypass
+    /// every hook.
+    ///
+    /// Use this flag to skip the install for a single invocation, or set
+    /// `bootstrap_hooks = false` in ~/.nwt.toml to disable it by default.
+    #[arg(long)]
+    no_bootstrap_hooks: bool,
+
     /// Install shell integration to automatically cd into new worktrees.
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
@@ -634,7 +697,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "random_directory"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory"])]
     shell_setup: bool,
 }
 
@@ -1265,6 +1328,58 @@ fn main() {
                     rename_zellij_tab(&tab_name);
                 }
 
+                // Bootstrap git hooks (e.g. husky's gitignored .husky/_) so they
+                // fire in this fresh worktree. Must run AFTER stdout's worktree
+                // path is printed and BEFORE any --run/tmux execution. A failure
+                // here never aborts worktree creation — the worktree is valid,
+                // just (possibly) ungated; bootstrap_hooks warns and continues.
+                //
+                // Dedup: skip our own bootstrap install when a SYNCHRONOUS --run
+                // (no --tmux) already invokes a package manager's install, so a
+                // user's documented `--run "pnpm install"` doesn't pay for a full
+                // install twice. We only skip for the synchronous path because the
+                // just-deferred ungated-worktree safety net re-checks AFTER that
+                // run and still catches a run that fails to create the hooks dir.
+                // For --tmux the run is async and the check is pre-spawn, so
+                // skipping bootstrap there would guarantee a false-positive
+                // warning — tmux+run keeps bootstrapping.
+                //
+                // The skip (and its notice) only make sense when a bootstrap was
+                // actually pending: gate on `detect_hook_bootstrap`. In a repo
+                // with no `prepare` script `bootstrap_hooks` is a silent no-op, so
+                // announcing a "skip" there would imply something was skipped when
+                // nothing would have run. When nothing is pending we fall through
+                // to `bootstrap_hooks`, which no-ops silently.
+                let skip_bootstrap_for_run = !config.tmux
+                    && config
+                        .run
+                        .as_deref()
+                        .is_some_and(run_command_installs_dependencies)
+                    && detect_hook_bootstrap(&worktree_path).is_some();
+                if config.bootstrap_hooks {
+                    if skip_bootstrap_for_run {
+                        error!(
+                            config.quiet,
+                            "Skipping hook bootstrap: run command already installs dependencies"
+                        );
+                    } else {
+                        bootstrap_hooks(&worktree_path, config.quiet);
+                    }
+                }
+
+                // Ungated-worktree safety net (issue #275). The placement of this
+                // check depends on the execution mode below — see
+                // `warn_if_hooks_missing`'s placement contract. A synchronous
+                // `--run` command can be the thing that creates the missing hooks
+                // directory, so for that path we defer the check until AFTER the
+                // command finishes; for the no-run and tmux paths we check here
+                // (tmux runs its --run command asynchronously, so we can't re-check
+                // after it).
+                let defer_hooks_check = config.run.is_some() && !config.tmux;
+                if !defer_hooks_check {
+                    warn_if_hooks_missing(&worktree_path);
+                }
+
                 // Execute tmux and/or run commands
                 if config.tmux {
                     #[cfg(unix)]
@@ -1354,16 +1469,24 @@ fn main() {
                         exit(exit_codes::TMUX_FAILED);
                     }
                 } else if let Some(ref cmd) = config.run {
-                    // Run command directly (no tmux)
+                    // Run command directly (no tmux). The ungated-worktree safety
+                    // net was deferred above so the command gets a chance to create
+                    // the hooks directory first (e.g. `pnpm install` regenerating
+                    // `.husky/_`). Re-check on EVERY outcome before exiting — a
+                    // failing run command must not swallow the warning.
                     match run_shell_command(cmd, &worktree_path) {
-                        ShellCommandResult::Success => {}
+                        ShellCommandResult::Success => {
+                            warn_if_hooks_missing(&worktree_path);
+                        }
                         ShellCommandResult::Failed(code) => {
+                            warn_if_hooks_missing(&worktree_path);
                             // Print error message so users know the exit code is from
                             // the command, not nwt itself (since codes 1-8 overlap).
                             error!(config.quiet, "Command exited with code {}", code);
                             exit(code);
                         }
                         ShellCommandResult::ExecutionError(e) => {
+                            warn_if_hooks_missing(&worktree_path);
                             error!(config.quiet, "Error running command: {}", e);
                             exit(exit_codes::RUN_COMMAND_FAILED);
                         }
@@ -1419,9 +1542,377 @@ fn main() {
     }
 }
 
+/// Package manager detected for bootstrapping git hooks in a new worktree.
+///
+/// When a freshly created worktree's `package.json` declares a `prepare`
+/// script (the husky convention), the install step that wires up
+/// `core.hooksPath` must be run with the project's chosen package manager.
+/// This enum identifies which one to invoke.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageManager {
+    Pnpm,
+    Npm,
+    Yarn,
+    Bun,
+}
+
+impl PackageManager {
+    /// Returns the install invocation as a `(program, args)` pair.
+    ///
+    /// Running `program` with `args` performs a dependency install, which in
+    /// turn triggers the `prepare` lifecycle script that regenerates the
+    /// gitignored hook directory (`.husky/_`) so git hooks fire in the new
+    /// worktree.
+    fn install_command(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            PackageManager::Pnpm => ("pnpm", &["install"]),
+            PackageManager::Npm => ("npm", &["install"]),
+            PackageManager::Yarn => ("yarn", &["install"]),
+            PackageManager::Bun => ("bun", &["install"]),
+        }
+    }
+}
+
+/// Detects whether a freshly created worktree needs a package-manager install
+/// to bootstrap its git hooks, and if so which package manager to use.
+///
+/// Returns `Some(pm)` only when `dir/package.json` exists, parses as JSON, and
+/// declares a non-empty string `scripts.prepare`. A `prepare` script is the
+/// husky convention for (re)generating the gitignored hook directory
+/// (`.husky/_`) that `core.hooksPath` points at, so its presence is the signal
+/// that an install is worth running in the new worktree.
+///
+/// The package manager is chosen in priority order:
+/// 1. The corepack `packageManager` field (e.g. `"pnpm@9.1.0"` or
+///    `"yarn@4.0.0+sha256..."`): the name before the first `@` is matched
+///    case-sensitively against pnpm/npm/yarn/bun. An unrecognized name is
+///    ignored and selection falls through to the lockfile check.
+/// 2. A lockfile in `dir`, checked in order: `pnpm-lock.yaml` → Pnpm,
+///    `package-lock.json` → Npm, `yarn.lock` → Yarn, `bun.lockb`/`bun.lock`
+///    → Bun.
+/// 3. Default: Pnpm.
+///
+/// This is fail-safe: a missing, unreadable, or malformed `package.json`, or
+/// any `scripts.prepare` that is absent, non-string, or empty, yields `None`.
+/// `None` means "do nothing" — the function never panics and never errors, so
+/// detection problems can never abort worktree creation.
+fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
+    // Read and parse package.json; any I/O or JSON error is treated as "no
+    // bootstrap needed" so detection can never abort worktree creation.
+    let contents = fs::read_to_string(dir.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    // Require a non-empty string `scripts.prepare` — the husky signal.
+    let prepare = value.get("scripts")?.get("prepare")?.as_str()?;
+    if prepare.is_empty() {
+        return None;
+    }
+
+    // Priority 1: corepack `packageManager` field. Take the name before the
+    // first `@` and match it case-sensitively; an unrecognized name falls
+    // through to lockfile detection rather than failing.
+    if let Some(spec) = value.get("packageManager").and_then(|v| v.as_str()) {
+        let name = spec.split_once('@').map_or(spec, |(name, _)| name);
+        match name {
+            "pnpm" => return Some(PackageManager::Pnpm),
+            "npm" => return Some(PackageManager::Npm),
+            "yarn" => return Some(PackageManager::Yarn),
+            "bun" => return Some(PackageManager::Bun),
+            _ => {}
+        }
+    }
+
+    // Priority 2: lockfile present in the worktree directory.
+    if dir.join("pnpm-lock.yaml").exists() {
+        return Some(PackageManager::Pnpm);
+    }
+    if dir.join("package-lock.json").exists() {
+        return Some(PackageManager::Npm);
+    }
+    if dir.join("yarn.lock").exists() {
+        return Some(PackageManager::Yarn);
+    }
+    if dir.join("bun.lockb").exists() || dir.join("bun.lock").exists() {
+        return Some(PackageManager::Bun);
+    }
+
+    // Priority 3: default to pnpm, this user's standard package manager.
+    Some(PackageManager::Pnpm)
+}
+
+/// Returns `true` when `cmd` already invokes a known package manager's install,
+/// so nwt's own hook-bootstrap install would be redundant and can be skipped.
+///
+/// # Why this exists
+///
+/// In a repo with a `prepare` script, [`bootstrap_hooks`] runs the package
+/// manager's install to regenerate the hooks directory. A user who also passes a
+/// `--run` that *itself* installs (the documented `nwt --run "pnpm install"`)
+/// would then pay for a full install twice per worktree. Detecting that the run
+/// command already installs lets the caller skip the bootstrap install — the
+/// run's install regenerates the hooks directory just the same.
+///
+/// # Matching is token-based, not substring-based
+///
+/// The command is whitespace-tokenized and scanned for an *adjacent* token pair
+/// where a program token (`pnpm`, `npm`, `yarn`, `bun`) is immediately followed
+/// by an install subcommand token. The accepted tokens differ per manager:
+/// `install` or `i` for `pnpm`/`bun`, the same plus `ci` for `npm`, and
+/// `install` only for `yarn` (which has no `i` alias — classic and berry both
+/// reject `yarn i`). This is deliberately stricter than a substring search so it
+/// does NOT misfire on
+/// `pnpm installer`, a script path like `scripts/npm-install.sh`, or a bare
+/// `install`. Matching ANY package manager counts — an `npm install` run still
+/// triggers the `prepare` script even if bootstrap would have chosen pnpm.
+///
+/// # The miss direction is fail-safe
+///
+/// A false negative is harmless: an unrecognized install spelling (e.g.
+/// `make setup`, or `pnpm install&&x` with no surrounding spaces so it does not
+/// tokenize as `pnpm` + `install`) simply means bootstrap runs as it does today
+/// — at worst a redundant install, never a missing one. So when in doubt this
+/// returns `false` and lets the bootstrap proceed.
+fn run_command_installs_dependencies(cmd: &str) -> bool {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        let program = pair[0];
+        let arg = pair[1];
+        match program {
+            "pnpm" | "bun" => arg == "install" || arg == "i",
+            "npm" => arg == "install" || arg == "i" || arg == "ci",
+            // yarn has no `i` alias: classic errors with `Command "i" not
+            // found` and berry rejects it too, so only `install` counts.
+            "yarn" => arg == "install",
+            _ => false,
+        }
+    })
+}
+
+/// Bootstraps git hooks in a freshly created worktree by running the project's
+/// package-manager install, returning `true` when nothing was needed or the
+/// install succeeded, and `false` when the install failed.
+///
+/// # Why this exists
+///
+/// Git-hook managers like husky put their hooks in a generated directory
+/// (`.husky/_`) that `core.hooksPath` points at, and that directory is
+/// gitignored — it's regenerated by the `prepare` lifecycle script during a
+/// package-manager install. A freshly created worktree has never run an
+/// install, so the directory is absent and git silently runs *no* hooks: lint,
+/// typecheck, and test gates are bypassed on every commit. Running the install
+/// here regenerates the directory so hooks fire in the new worktree.
+///
+/// # Behavior
+///
+/// - If [`detect_hook_bootstrap`] returns `None` (no `package.json`, or no
+///   non-empty `scripts.prepare`), there is nothing to do — returns `true`
+///   without spawning anything. Such repos are entirely unaffected.
+/// - Otherwise it runs the detected package manager's install in `worktree`.
+///
+/// # stdout must be null
+///
+/// nwt's own stdout is captured by its shell-integration wrapper
+/// (`dir=$(command nwt "$@")`) to `cd` into the new worktree. Any bytes a child
+/// process writes to stdout would corrupt that captured path, so the install's
+/// stdout is routed to `/dev/null`. Its stderr is inherited (so install
+/// progress and errors stay visible) unless `quiet`, in which case stderr is
+/// nulled too.
+///
+/// # Failure is non-fatal
+///
+/// A missing package manager (spawn error) or a non-zero install exit must
+/// never abort worktree creation — the worktree is already valid, just possibly
+/// ungated. On failure this prints a warning (unless `quiet`) and returns
+/// `false`; the caller ignores the value and continues.
+fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
+    let package_manager = match detect_hook_bootstrap(worktree) {
+        Some(pm) => pm,
+        // No prepare script (or no package.json): nothing to bootstrap.
+        None => return true,
+    };
+
+    let (program, args) = package_manager.install_command();
+
+    if !quiet {
+        eprintln!("Bootstrapping git hooks: {} {}", program, args.join(" "));
+    }
+
+    // stderr is inherited so install progress/errors are visible, except in
+    // quiet mode. stdout is ALWAYS nulled — see the function doc for why.
+    let stderr = if quiet {
+        Stdio::null()
+    } else {
+        Stdio::inherit()
+    };
+
+    let status = Command::new(program)
+        .args(args)
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(stderr)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => true,
+        // Spawn failure (e.g. the package manager isn't installed) or a
+        // non-zero exit: warn and continue. Never abort worktree creation.
+        _ => {
+            if !quiet {
+                eprintln!(
+                    "Warning: hook bootstrap ('{} {}') failed; git hooks may not run in this worktree",
+                    program,
+                    args.join(" ")
+                );
+            }
+            false
+        }
+    }
+}
+
+/// Returns the configured `core.hooksPath` if it is set for this worktree but
+/// the directory it names does not exist — i.e., git will silently run NO hooks.
+///
+/// This is the defense-in-depth half of issue #275. Git has a dangerous quiet
+/// failure mode: when `core.hooksPath` points at a directory that does not
+/// exist, git does not error — it simply finds no hooks and runs nothing, so
+/// EVERY commit silently bypasses the lint/typecheck/test gates the user
+/// believes are protecting them. `bootstrap_hooks` normally regenerates that
+/// directory, but it can be skipped (`--no-bootstrap-hooks`/config), can fail
+/// (e.g. pnpm not installed), or may not apply (a repo whose hooks dir is
+/// generated by something other than a package.json `prepare` script). In all
+/// of those cases we want a loud, visible warning rather than an invisibly
+/// ungated worktree, so this check runs unconditionally after bootstrap.
+///
+/// We shell out to `git config --type=path core.hooksPath` rather than reading
+/// any single config file because that reports the *effective* value git itself
+/// will use, resolving the worktree → repo-local → global → system precedence
+/// exactly the way git does at commit time. The `--type=path` flag additionally
+/// makes git apply its pathname expansion (`~/`, `~user/`) to the value, exactly
+/// as it will when it actually runs hooks — git treats `core.hooksPath` as a
+/// pathname config type, so a common global setup like `core.hooksPath =
+/// ~/.githooks` expands to an absolute home-relative path rather than being
+/// (mis)treated as worktree-relative. Without this, every `nwt` run would
+/// false-positive on such configs. Relative non-tilde values (e.g. `.husky/_`)
+/// are returned unchanged by `--type=path`, so those keep resolving against the
+/// worktree as before.
+///
+/// Returns:
+/// - `None` when `core.hooksPath` is unset (git's built-in `.git/hooks` default
+///   always exists "enough" — an empty hooks dir is not our concern), when the
+///   configured directory exists, or on ANY error. This check is purely
+///   advisory and must never block worktree creation or panic.
+/// - `Some(value)` — the path as git printed it after pathname expansion — when
+///   the path is set but the directory it names is missing. For tilde-based
+///   configs this is therefore the expanded absolute path, which is the
+///   actionable thing to show in the warning.
+fn missing_hooks_path(worktree: &Path) -> Option<String> {
+    // Ask git for the effective value, run from inside the worktree so the
+    // worktree → repo-local → global → system precedence matches commit time.
+    // `--type=path` makes git expand `~/` and `~user/` the same way it does at
+    // hook-run time. stdin is nulled so git can never block; stderr is nulled to
+    // avoid noise.
+    let output = Command::new("git")
+        .args(["config", "--type=path", "core.hooksPath"])
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    // Non-zero exit means unset (or outside a repo / git error) → not our
+    // concern. Fail-safe: any failure path returns None, never blocks.
+    if !output.status.success() {
+        return None;
+    }
+
+    // git prints the value with a trailing newline; trim surrounding whitespace.
+    // An empty value (shouldn't normally happen on success) is treated as unset.
+    let configured = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if configured.is_empty() {
+        return None;
+    }
+
+    // git resolves a relative core.hooksPath against the top-level working dir;
+    // absolute paths are used verbatim. Mirror that to decide existence.
+    let candidate = Path::new(&configured);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        worktree.join(candidate)
+    };
+
+    // If the directory exists, git will find (and run) hooks there → fine.
+    // If it does NOT exist, git silently runs nothing — report the configured
+    // value (as git printed it) so the warning shows the user exactly what to fix.
+    if resolved.is_dir() {
+        None
+    } else {
+        Some(configured)
+    }
+}
+
+/// Emits the loud ungated-worktree safety-net warning for a missing hooks dir.
+///
+/// Defense-in-depth (issue #275): regardless of whether hook bootstrap ran,
+/// succeeded, or applied, a missing `core.hooksPath` directory means git
+/// silently runs NO hooks and every commit here is ungated. This warning is the
+/// only signal that would otherwise be invisible, so it deliberately:
+///
+/// - bypasses quiet mode (no `error!`/`config.quiet` gate) — an ungated worktree
+///   is error-class, not the ordinary non-error noise `-q` suppresses, so the
+///   safety net must never disappear under `--quiet`; and
+/// - goes to stderr, so it can't corrupt the worktree path captured from stdout
+///   by the shell wrapper.
+///
+/// # Placement contract
+///
+/// Where this is called relative to a `--run` command matters, because a run
+/// command can be the very thing that creates the missing directory (e.g.
+/// `pnpm install` regenerating `.husky/_`):
+///
+/// - Synchronous `--run` (no `--tmux`): call this AFTER `run_shell_command`
+///   completes, on every outcome (success, failure, execution error) before any
+///   `exit`. Checking before the run would be a false alarm when the run is
+///   about to fix the directory; a failing run must still not swallow the
+///   warning.
+/// - `--tmux` (with or without `--run`): call this BEFORE spawning tmux. The run
+///   command executes inside the tmux window, asynchronously from nwt's
+///   perspective, so nwt can't re-check after it — the pre-spawn check is the
+///   best available signal.
+/// - No `--run` and no `--tmux`: call this right after hook bootstrap; nothing
+///   could fix the directory later.
+fn warn_if_hooks_missing(worktree: &Path) {
+    if let Some(hooks_path) = missing_hooks_path(worktree) {
+        eprintln!(
+            "Warning: core.hooksPath is '{}' but that directory does not exist in this worktree.",
+            hooks_path
+        );
+        eprintln!(
+            "Git will silently run NO hooks here — commits are ungated. Run your package manager's install (or create the directory) to fix this."
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to run a git command in a directory, returning whether it
+    /// succeeded. Shared across child test modules (`env_copy_tests`,
+    /// `bootstrap_hooks_tests`) which both need a real git repo for their
+    /// integration tests. Stdout/stderr are nulled so concurrent test runs
+    /// don't interleave noise.
+    fn run_git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 
     #[test]
     fn test_generate_docker_name_format() {
@@ -1644,6 +2135,7 @@ mod tests {
             branch: Some("feature/test".to_string()),
             checkout: None,
             copy_env: true,
+            bootstrap_hooks: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -1657,6 +2149,7 @@ mod tests {
             branch: None,
             checkout: None,
             copy_env: true,
+            bootstrap_hooks: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -1964,6 +2457,82 @@ mod tests {
         );
     }
 
+    /// Guardrail against the recurring "flag shipped without README docs" pattern.
+    ///
+    /// nwt has repeatedly grown new CLI flags (`--no-copy-env`,
+    /// `--no-bootstrap-hooks`, `--random-directory`, `--shell-setup`, …) that
+    /// never made it into the repo-root README's `## nwt` section. A user who
+    /// reaches for the README to learn the tool is silently missing capabilities.
+    ///
+    /// This test fails whenever any long flag defined on `Cli` is absent from the
+    /// README's nwt section, listing every missing flag so the failure is
+    /// directly actionable. It is read-only and parallel-safe: it only builds the
+    /// clap command in-memory and reads the README — no temp files, no env or cwd
+    /// mutation, so a concurrent bacon loop can run it safely.
+    #[test]
+    fn readme_documents_all_nwt_cli_flags() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // Collect every user-facing long flag, skipping clap's auto-generated
+        // `help`/`version` args which the README is not expected to document.
+        let long_flags: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|arg| arg.get_long())
+            .filter(|name| *name != "help" && *name != "version")
+            .map(|name| format!("--{name}"))
+            .collect();
+
+        // src/nwt is two levels below the repo root, so the workspace-root README
+        // lives at ../../README.md relative to this crate's manifest directory.
+        let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        let readme = fs::read_to_string(&readme_path).unwrap_or_else(|e| {
+            panic!(
+                "Failed to read workspace README at '{}': {}",
+                readme_path.display(),
+                e
+            )
+        });
+
+        // Extract ONLY the nwt section: from the `## nwt` heading up to (but not
+        // including) the next top-level `## ` heading (the next tool's section).
+        // Fail loudly if the heading can't be found — a renamed heading must not
+        // let this guard silently pass.
+        let all_lines: Vec<&str> = readme.lines().collect();
+        let start = all_lines
+            .iter()
+            .position(|line| line.starts_with("## nwt"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not find the '## nwt' section in {}. Was the heading renamed?",
+                    readme_path.display()
+                )
+            });
+        // Search for the next `## ` heading *after* the nwt heading; the section
+        // runs to that heading, or to end-of-file if nwt is the last section.
+        let end = all_lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(all_lines.len());
+        let section = all_lines[start..end].join("\n");
+
+        // Collect ALL missing flags first, then assert once, so the failure
+        // message lists every undocumented flag rather than just the first.
+        let missing: Vec<&String> = long_flags
+            .iter()
+            .filter(|flag| !section.contains(flag.as_str()))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "The README '## nwt' section is missing documentation for these CLI flags: {:?}. \
+             Document them in {} (under the `### Options` list).",
+            missing,
+            readme_path.display()
+        );
+    }
+
     #[test]
     fn test_cli_shell_setup_conflicts_with_random_directory() {
         use clap::CommandFactory;
@@ -2158,9 +2727,20 @@ mod tests {
             assert!(config.branch.is_none());
             assert!(config.checkout.is_none());
             assert!(config.copy_env); // defaults to true
+            assert!(config.bootstrap_hooks); // defaults to true
             assert!(!config.quiet);
             assert!(config.run.is_none());
             assert!(!config.tmux);
+        }
+
+        #[test]
+        fn test_parse_config_bootstrap_hooks_false() {
+            // An explicit `bootstrap_hooks = false` must parse and be respected;
+            // an absent field must default to true (covered by the empty-config test).
+            let toml = "bootstrap_hooks = false";
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert!(!config.bootstrap_hooks);
+            assert!(config.copy_env); // unrelated field keeps its default
         }
 
         /// Verifies that `NwtConfig::default()` produces the same values as serde defaults.
@@ -2191,6 +2771,10 @@ mod tests {
                 "copy_env default mismatch between impl Default and serde"
             );
             assert_eq!(
+                serde_defaults.bootstrap_hooks, manual_defaults.bootstrap_hooks,
+                "bootstrap_hooks default mismatch between impl Default and serde"
+            );
+            assert_eq!(
                 serde_defaults.quiet, manual_defaults.quiet,
                 "quiet default mismatch between impl Default and serde"
             );
@@ -2218,6 +2802,7 @@ mod tests {
                 branch: Some("feat".to_string()),
                 checkout: Some("main".to_string()),
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2232,6 +2817,7 @@ mod tests {
                 branch: Some("feat".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2246,6 +2832,7 @@ mod tests {
                 branch: None,
                 checkout: Some("main".to_string()),
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2261,6 +2848,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -2270,6 +2858,7 @@ mod tests {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
                 tmux: true,
@@ -2298,6 +2887,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2307,6 +2897,7 @@ mod tests {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: true,
                 run: Some("make build".to_string()),
                 tmux: true,
@@ -2328,6 +2919,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -2350,6 +2942,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: true, // CLI disables
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2359,6 +2952,7 @@ mod tests {
                 branch: None,
                 checkout: None,
                 copy_env: true, // config enables
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2376,6 +2970,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2385,6 +2980,7 @@ mod tests {
                 branch: None,
                 checkout: None,
                 copy_env: false, // config disables
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2393,6 +2989,106 @@ mod tests {
 
             // Config copy_env = false should be respected
             assert!(!merged.copy_env);
+        }
+
+        #[test]
+        fn test_merge_bootstrap_hooks_default_is_true() {
+            // With no CLI flag and no config, bootstrap_hooks defaults to true.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let merged = merge_config(&cli, None);
+            assert!(merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_merge_no_bootstrap_hooks_disables() {
+            // CLI --no-bootstrap-hooks overrides config bootstrap_hooks = true.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_bootstrap_hooks: true, // CLI disables
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true,
+                bootstrap_hooks: true, // config enables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_merge_config_bootstrap_hooks_false() {
+            // Config bootstrap_hooks = false is respected when CLI doesn't ask for it.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true,
+                bootstrap_hooks: false, // config disables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_cli_no_bootstrap_hooks_parses() {
+            use clap::CommandFactory;
+            let cmd = Cli::command();
+
+            let result = cmd.try_get_matches_from(["nwt", "--no-bootstrap-hooks"]);
+            assert!(result.is_ok(), "Should accept --no-bootstrap-hooks option");
+
+            let matches = result.unwrap();
+            assert!(
+                matches.get_flag("no_bootstrap_hooks"),
+                "Should set no_bootstrap_hooks flag"
+            );
+        }
+
+        #[test]
+        fn test_cli_shell_setup_conflicts_with_no_bootstrap_hooks() {
+            use clap::CommandFactory;
+            let cmd = Cli::command();
+
+            // --shell-setup conflicts with --no-bootstrap-hooks
+            let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-bootstrap-hooks"]);
+            assert!(
+                result.is_err(),
+                "Should fail when both --shell-setup and --no-bootstrap-hooks are provided"
+            );
         }
 
         #[test]
@@ -2650,18 +3346,6 @@ mod tests {
             );
         }
 
-        /// Helper to run a git command in a directory.
-        fn run_git(dir: &Path, args: &[&str]) -> bool {
-            Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        }
-
         #[test]
         fn test_tracked_env_file_not_copied() {
             let source = TempDir::new().expect("Failed to create temp dir");
@@ -2793,5 +3477,731 @@ mod tests {
         assert_eq!(shorten_tab_name(""), "");
         // Only issue- with digits and no suffix
         assert_eq!(shorten_tab_name("issue-0"), "#0");
+    }
+
+    /// Tests for git-hook bootstrap detection (`detect_hook_bootstrap`).
+    ///
+    /// Each test builds its own `TempDir` so concurrent runs (e.g. a
+    /// background bacon loop sharing `./target`) never clobber each other's
+    /// fixtures.
+    mod hook_bootstrap_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        #[test]
+        fn test_no_package_json_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_package_json_without_scripts_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(dir.path(), "package.json", r#"{"name": "demo"}"#);
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_scripts_without_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"build": "tsc"}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_empty_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": ""}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_non_string_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": 42}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_malformed_json_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(dir.path(), "package.json", "{ this is not json ]");
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_prepare_only_defaults_to_pnpm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_package_manager_npm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "npm@10.2.0"}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_package_manager_yarn_with_hash() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "yarn@4.0.0+sha256.abc"}"#,
+            );
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Yarn)
+            );
+        }
+
+        #[test]
+        fn test_package_manager_bun() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "bun@1.1.0"}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_unrecognized_package_manager_falls_through_to_lockfile() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "deno@2.0.0"}"#,
+            );
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_pnpm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_npm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "package-lock.json", "{}");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_lockfile_yarn() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "yarn.lock", "# yarn lockfile v1\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Yarn)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_bun_binary() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "bun.lockb", "");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_lockfile_bun_text() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "bun.lock", "");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_package_manager_takes_precedence_over_lockfile() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "npm@10.2.0"}"#,
+            );
+            // Conflicting lockfile must be ignored in favor of packageManager.
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_install_command_mapping() {
+            assert_eq!(
+                PackageManager::Pnpm.install_command(),
+                ("pnpm", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Npm.install_command(),
+                ("npm", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Yarn.install_command(),
+                ("yarn", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Bun.install_command(),
+                ("bun", &["install"][..])
+            );
+        }
+    }
+
+    /// Tests for `bootstrap_hooks` — the function that runs a package-manager
+    /// install in a freshly created worktree so git-hook managers (husky)
+    /// regenerate the gitignored hook directory `core.hooksPath` points at.
+    ///
+    /// Each test builds its own `TempDir` and unique fixtures so concurrent
+    /// runs (e.g. a background bacon loop sharing `./target`) never clobber
+    /// each other. Tests that need a real `pnpm`/`git` skip gracefully when
+    /// those binaries are unavailable, mirroring `env_copy_tests`.
+    mod bootstrap_hooks_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        /// Returns true if `pnpm --version` runs, i.e. pnpm is installed.
+        fn pnpm_available() -> bool {
+            Command::new("pnpm")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+
+        #[test]
+        fn test_bootstrap_skips_repo_without_package_json() {
+            // Acceptance criterion: repos with no `prepare` script are entirely
+            // unaffected. With no package.json, detection returns None, so
+            // bootstrap_hooks must report success and touch nothing.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(result, "No package.json should be a no-op success");
+            // No files should have been created.
+            let entries: Vec<_> = fs::read_dir(dir.path())
+                .expect("Failed to read temp dir")
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "bootstrap_hooks must not create files when there's nothing to do"
+            );
+        }
+
+        #[test]
+        fn test_bootstrap_runs_prepare_script_via_install() {
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            // A prepare script that creates a marker. pnpm runs lifecycle
+            // scripts through a shell, so `sh`-style syntax is fine. Zero
+            // dependencies keeps the install offline-safe.
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"mkdir -p .husky/_ && echo ok > .husky/_/marker"}}"#,
+            );
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(
+                result,
+                "Install with a passing prepare script should succeed"
+            );
+            assert!(
+                dir.path().join(".husky/_/marker").exists(),
+                "prepare script should have run and created the marker"
+            );
+        }
+
+        #[test]
+        fn test_bootstrap_failure_returns_false_without_panicking() {
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            // A prepare script that fails makes the install non-zero. We must
+            // surface that as `false` without panicking or aborting.
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"exit 1"}}"#,
+            );
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(!result, "A failing install must return false, not panic");
+        }
+
+        #[test]
+        fn test_bootstrapped_hook_rejects_violation_and_passes_clean() {
+            // End-to-end mutation proof for issue #275: after bootstrap_hooks
+            // runs the install, the husky-style pre-commit hook it regenerates
+            // must actually gate commits. We prove the guard can fail (rejects a
+            // staged `violation.txt`) and can pass (allows a clean file).
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let repo = TempDir::new().expect("Failed to create temp dir");
+            if !run_git(repo.path(), &["init"]) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+            run_git(repo.path(), &["config", "user.name", "Test User"]);
+
+            // The prepare script mimics husky exactly: write an executable
+            // pre-commit hook that blocks `violation.txt`, then point
+            // core.hooksPath at the generated (normally gitignored) dir.
+            create_file(
+                repo.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"mkdir -p .husky/_ && printf '#!/bin/sh\nif git diff --cached --name-only | grep -q violation.txt; then exit 1; fi\n' > .husky/_/pre-commit && chmod +x .husky/_/pre-commit && git config core.hooksPath .husky/_"}}"#,
+            );
+
+            // Baseline commit so the repo has a HEAD.
+            create_file(repo.path(), "baseline.txt", "baseline\n");
+            run_git(repo.path(), &["add", "baseline.txt"]);
+            assert!(
+                run_git(repo.path(), &["commit", "-m", "baseline"]),
+                "Baseline commit (before hooks exist) should succeed"
+            );
+
+            // Run the bootstrap: install triggers prepare, which installs the hook.
+            let result = bootstrap_hooks(repo.path(), true);
+            assert!(result, "Bootstrap install should succeed");
+            assert!(
+                repo.path().join(".husky/_/pre-commit").exists(),
+                "prepare should have generated the pre-commit hook"
+            );
+
+            // MUTATION: a staged violation.txt must be rejected by the hook.
+            create_file(repo.path(), "violation.txt", "bad\n");
+            run_git(repo.path(), &["add", "violation.txt"]);
+            assert!(
+                !run_git(repo.path(), &["commit", "-m", "should be blocked"]),
+                "Bootstrapped hook must REJECT a commit staging violation.txt"
+            );
+
+            // CLEAN: unstage the violation, stage a clean file, commit succeeds.
+            run_git(repo.path(), &["reset"]);
+            create_file(repo.path(), "clean.txt", "good\n");
+            run_git(repo.path(), &["add", "clean.txt"]);
+            assert!(
+                run_git(repo.path(), &["commit", "-m", "clean"]),
+                "Bootstrapped hook must ALLOW a clean commit"
+            );
+        }
+    }
+
+    /// Tests for `run_command_installs_dependencies` — the token-based matcher
+    /// that lets the caller skip nwt's own hook-bootstrap install when a
+    /// synchronous `--run` command already installs dependencies (issue #275).
+    mod run_command_installs_dependencies_tests {
+        use super::*;
+
+        #[test]
+        fn matches_known_install_invocations() {
+            for cmd in [
+                "pnpm install",
+                "pnpm i",
+                "npm install",
+                "npm i",
+                "npm ci",
+                "yarn install",
+                "bun install",
+                "bun i",
+                // A compound command tokenizes fine: `pnpm` and `install` are
+                // still adjacent tokens.
+                "cd x && pnpm install",
+            ] {
+                assert!(
+                    run_command_installs_dependencies(cmd),
+                    "{cmd:?} should be recognized as an install"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_non_install_commands() {
+            for cmd in [
+                // `installer` is a different token, not `install`.
+                "pnpm installer",
+                // A run that does nothing.
+                "true",
+                // A non-package-manager setup command.
+                "make setup",
+                // A script path, NOT a `npm` + `install` token pair.
+                "scripts/npm-install.sh",
+                // Empty command.
+                "",
+                // `install` with no preceding package-manager program.
+                "install",
+                // No space, so it does not tokenize as `pnpm` + `install`.
+                "pnpm install&&x",
+                // yarn has no `i` alias; classic and berry both reject it, so
+                // matching it would skip bootstrap for a run about to fail.
+                "yarn i",
+            ] {
+                assert!(
+                    !run_command_installs_dependencies(cmd),
+                    "{cmd:?} should NOT be recognized as an install"
+                );
+            }
+        }
+
+        #[test]
+        fn yarn_and_bun_do_not_accept_ci() {
+            // `ci` is an npm-only subcommand; for yarn/bun it is just an
+            // arbitrary token and must not count as an install.
+            assert!(!run_command_installs_dependencies("yarn ci"));
+            assert!(!run_command_installs_dependencies("bun ci"));
+            // npm ci is the documented clean-install and DOES count.
+            assert!(run_command_installs_dependencies("npm ci"));
+        }
+    }
+
+    /// Tests for `missing_hooks_path` — the defense-in-depth check (issue #275)
+    /// that warns when git's effective `core.hooksPath` names a directory that
+    /// does not exist, the condition under which git silently runs NO hooks.
+    ///
+    /// Each test builds its own `TempDir`, runs `git init` inside it, and sets
+    /// `core.hooksPath` *repo-locally* so the "set" cases never depend on the
+    /// machine's global git config. Absolute-path cases keep their target
+    /// directory inside the test's own `TempDir` so concurrent runs (e.g. a
+    /// background bacon loop sharing `./target`) stay isolated. No test ever
+    /// changes the process cwd or touches a fixed shared path.
+    mod missing_hooks_path_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Initializes a git repo in `dir`, returning false (so the caller can
+        /// skip) if git is unavailable. `git config core.hooksPath` consults the
+        /// effective config, but a fresh `git init` repo inherits only
+        /// global/system settings, and this machine's global config does not set
+        /// core.hooksPath — so the "unset" case is genuinely unset. The "set"
+        /// cases pin the value repo-locally, making them robust regardless.
+        fn git_init(dir: &Path) -> bool {
+            run_git(dir, &["init"])
+        }
+
+        #[test]
+        fn test_unset_hooks_path_returns_none() {
+            // No core.hooksPath configured anywhere relevant → git uses its
+            // built-in default, which we treat as "not our concern" → None.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "An unset core.hooksPath must yield None"
+            );
+        }
+
+        #[test]
+        fn test_missing_relative_hooks_path_detected() {
+            // A relative core.hooksPath whose directory was never created is the
+            // exact silent-no-hooks trap; we must flag it.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]),
+                "Setting core.hooksPath should succeed"
+            );
+            // Deliberately do NOT create .husky/_ .
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                Some(".husky/_".to_string()),
+                "A missing relative hooks dir must be reported with git's value"
+            );
+        }
+
+        #[test]
+        fn test_existing_relative_hooks_path_ok() {
+            // Same relative path, but the directory exists → hooks will run → None.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", ".husky/_"]),
+                "Setting core.hooksPath should succeed"
+            );
+            fs::create_dir_all(dir.path().join(".husky/_")).expect("Failed to create hooks dir");
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "An existing relative hooks dir must yield None"
+            );
+        }
+
+        #[test]
+        fn test_missing_absolute_hooks_path_detected() {
+            // Absolute paths are used as-is (not resolved against the worktree).
+            // Keep the target inside this test's own TempDir for parallel safety.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            let absolute = dir.path().join("nonexistent-hooks");
+            let absolute_str = absolute.to_str().expect("temp path must be UTF-8");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", absolute_str]),
+                "Setting core.hooksPath should succeed"
+            );
+            // Deliberately do NOT create the directory.
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                Some(absolute_str.to_string()),
+                "A missing absolute hooks dir must be reported as-is"
+            );
+        }
+
+        #[test]
+        fn test_existing_absolute_hooks_path_ok() {
+            // Absolute path that exists → None.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            let absolute = dir.path().join("existing-hooks");
+            fs::create_dir_all(&absolute).expect("Failed to create hooks dir");
+            let absolute_str = absolute.to_str().expect("temp path must be UTF-8");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", absolute_str]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "An existing absolute hooks dir must yield None"
+            );
+        }
+
+        #[test]
+        fn test_non_git_dir_returns_none() {
+            // Fail-safe: outside a git repo, `git config` errors. We must never
+            // panic or block — just return None.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            // No git init.
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "A non-git directory must yield None (fail-safe)"
+            );
+        }
+
+        /// RAII guard that removes a directory on drop, even if the test panics.
+        /// Used for the tilde-expansion tests, which must create a directory
+        /// directly under `$HOME` (the only place `~/` expands to) and therefore
+        /// must guarantee cleanup so we never leak test droppings into the real
+        /// home directory.
+        struct HomeDirGuard(std::path::PathBuf);
+        impl Drop for HomeDirGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// Produces a process- and time-unique directory name. Concurrent test
+        /// runs share this machine (a background bacon loop runs the same tests
+        /// in parallel), and these tests touch `$HOME` — a shared resource — so
+        /// the name MUST be unique per run to avoid one run clobbering another.
+        fn unique_name(prefix: &str) -> String {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{prefix}-{}-{nanos}", std::process::id())
+        }
+
+        #[test]
+        fn test_tilde_hooks_path_existing_dir_ok() {
+            // The false-positive repro for issue #275: a global hooks setup of
+            // `core.hooksPath = ~/.githooks` is common. git expands the leading
+            // `~` to the home directory at hook-run time (it treats
+            // core.hooksPath as a pathname config type), so an existing
+            // `~/<dir>` means hooks WILL run and must not be flagged. The checker
+            // therefore has to perform the same tilde expansion git does;
+            // treating `~/...` as a worktree-relative path is the bug.
+            let home = match dirs::home_dir() {
+                Some(home) => home,
+                None => {
+                    eprintln!("Skipping test: home directory not available");
+                    return;
+                }
+            };
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // Create a uniquely named, existing dir directly under $HOME so the
+            // expanded `~/<name>` resolves to a real directory. The RAII guard
+            // removes it even if an assert below panics.
+            let name = unique_name(".nwt-test-hooks");
+            let real_dir = home.join(&name);
+            fs::create_dir_all(&real_dir).expect("Failed to create home test dir");
+            let _guard = HomeDirGuard(real_dir);
+
+            // Pass the literal `~/<name>` as a plain argument (no shell), so the
+            // tilde is stored verbatim in git config exactly like a user's
+            // global `~/.githooks` setting.
+            let tilde_value = format!("~/{name}");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", &tilde_value]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "a tilde hooksPath whose expanded dir exists must not be flagged"
+            );
+        }
+
+        #[test]
+        fn test_tilde_hooks_path_missing_reports_expanded_path() {
+            // Pins the reporting contract for tilde paths: when `~/<name>` does
+            // NOT exist, the warning must carry the EXPANDED absolute path the
+            // user can actually act on, not the raw `~/...` string. git itself
+            // expands the tilde (core.hooksPath is a pathname config type), so
+            // the checker must report the same expanded path git would use.
+            let home = match dirs::home_dir() {
+                Some(home) => home,
+                None => {
+                    eprintln!("Skipping test: home directory not available");
+                    return;
+                }
+            };
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // A uniquely named dir under $HOME that we deliberately do NOT create.
+            let name = unique_name(".nwt-test-hooks-missing");
+            let tilde_value = format!("~/{name}");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", &tilde_value]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            let expected = home
+                .join(&name)
+                .to_str()
+                .expect("home test path must be UTF-8")
+                .to_string();
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                Some(expected),
+                "a missing tilde hooks dir must be reported as the expanded absolute path"
+            );
+        }
     }
 }
