@@ -347,6 +347,25 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     for a continuously refreshing dashboard. Shows branch, ahead/behind, working-tree changes, and
     a `git log --oneline` tail. Respects `COLUMNS` and preserves colors under watch wrappers.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
+- seescc (sccache stats viewer)
+  - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —
+    no `viddy`/`watch` wrapper needed. Polls `sccache --show-stats --stats-format=json` on a timer
+    (default 1s) and draws a compact, Rust-focused table with Unicode sparklines (`▁▂▃▄▅▆▇█`)
+    showing recent activity per metric over a configurable history window (default 15m). Counters
+    spark per-bucket deltas, hit rate sparks the windowed rate, and a mid-run
+    `sccache --zero-stats` never draws a spurious spike. Quit with `q`, `Esc`, or Ctrl-C.
+    `--one-shot` renders a single frame for scripting (implied when stdout is not a TTY);
+    `--one-shot --format json` emits the selected metrics as a JSON object for `jq`. Configure via
+    `~/.config/seescc/config.toml` (`--write-default-config` scaffolds an annotated one):
+    `poll_interval`/`window` (durations like `500ms`, `1s`, `15m`, `1h`), `languages` (per-language
+    metrics filtered to these; `[]` sums all), and `metrics` rows in display order with optional
+    `label` and `spark`. Metric keys: per-language `cache_hits`, `cache_misses`, `cache_errors`,
+    `hit_rate`; global `compile_requests`, `requests_executed`, `requests_not_cacheable`,
+    `requests_not_compile`, `requests_unsupported_compiler`, `cache_writes`, `compilations`,
+    `compile_fails`, `forced_recaches`, `cache_size`, `max_cache_size` (an unknown key errors with
+    the full catalog). A transient poll failure shows an error banner and keeps the last good
+    numbers on screen.
+  - To install: `cargo install --git https://github.com/timmattison/tools seescc`
 - tsm (terminal session manager)
   - Records every shell command you run via a precmd hook, writing JSONL session logs you can later
     search and replay. `tsm shell-init <shell>` emits the hook snippet to eval; `tsm record` is the
