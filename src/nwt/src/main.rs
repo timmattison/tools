@@ -539,6 +539,10 @@ HOOK BOOTSTRAP:
     bootstrap_hooks = false in ~/.nwt.toml to disable it by default. Repos without
     a 'prepare' script are unaffected — no install is run.
 
+    When a synchronous --run command (without --tmux) already invokes a package
+    manager install (e.g. --run \"pnpm install\"), nwt skips its own bootstrap
+    install so the install runs once, not twice.
+
     As a safety net, nwt verifies the effective 'core.hooksPath' directory
     actually exists, and prints a loud warning if it does not — whether bootstrap
     was skipped, failed, or didn't apply. When you pass a synchronous --run
@@ -1329,8 +1333,30 @@ fn main() {
                 // path is printed and BEFORE any --run/tmux execution. A failure
                 // here never aborts worktree creation — the worktree is valid,
                 // just (possibly) ungated; bootstrap_hooks warns and continues.
+                //
+                // Dedup: skip our own bootstrap install when a SYNCHRONOUS --run
+                // (no --tmux) already invokes a package manager's install, so a
+                // user's documented `--run "pnpm install"` doesn't pay for a full
+                // install twice. We only skip for the synchronous path because the
+                // just-deferred ungated-worktree safety net re-checks AFTER that
+                // run and still catches a run that fails to create the hooks dir.
+                // For --tmux the run is async and the check is pre-spawn, so
+                // skipping bootstrap there would guarantee a false-positive
+                // warning — tmux+run keeps bootstrapping.
+                let skip_bootstrap_for_run = !config.tmux
+                    && config
+                        .run
+                        .as_deref()
+                        .is_some_and(run_command_installs_dependencies);
                 if config.bootstrap_hooks {
-                    bootstrap_hooks(&worktree_path, config.quiet);
+                    if skip_bootstrap_for_run {
+                        error!(
+                            config.quiet,
+                            "Skipping hook bootstrap: run command already installs dependencies"
+                        );
+                    } else {
+                        bootstrap_hooks(&worktree_path, config.quiet);
+                    }
                 }
 
                 // Ungated-worktree safety net (issue #275). The placement of this
@@ -1604,6 +1630,48 @@ fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
 
     // Priority 3: default to pnpm, this user's standard package manager.
     Some(PackageManager::Pnpm)
+}
+
+/// Returns `true` when `cmd` already invokes a known package manager's install,
+/// so nwt's own hook-bootstrap install would be redundant and can be skipped.
+///
+/// # Why this exists
+///
+/// In a repo with a `prepare` script, [`bootstrap_hooks`] runs the package
+/// manager's install to regenerate the hooks directory. A user who also passes a
+/// `--run` that *itself* installs (the documented `nwt --run "pnpm install"`)
+/// would then pay for a full install twice per worktree. Detecting that the run
+/// command already installs lets the caller skip the bootstrap install — the
+/// run's install regenerates the hooks directory just the same.
+///
+/// # Matching is token-based, not substring-based
+///
+/// The command is whitespace-tokenized and scanned for an *adjacent* token pair
+/// where a program token (`pnpm`, `npm`, `yarn`, `bun`) is immediately followed
+/// by an install subcommand token (`install` or `i`, plus `ci` for npm). This is
+/// deliberately stricter than a substring search so it does NOT misfire on
+/// `pnpm installer`, a script path like `scripts/npm-install.sh`, or a bare
+/// `install`. Matching ANY package manager counts — an `npm install` run still
+/// triggers the `prepare` script even if bootstrap would have chosen pnpm.
+///
+/// # The miss direction is fail-safe
+///
+/// A false negative is harmless: an unrecognized install spelling (e.g.
+/// `make setup`, or `pnpm install&&x` with no surrounding spaces so it does not
+/// tokenize as `pnpm` + `install`) simply means bootstrap runs as it does today
+/// — at worst a redundant install, never a missing one. So when in doubt this
+/// returns `false` and lets the bootstrap proceed.
+fn run_command_installs_dependencies(cmd: &str) -> bool {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    tokens.windows(2).any(|pair| {
+        let program = pair[0];
+        let arg = pair[1];
+        match program {
+            "pnpm" | "yarn" | "bun" => arg == "install" || arg == "i",
+            "npm" => arg == "install" || arg == "i" || arg == "ci",
+            _ => false,
+        }
+    })
 }
 
 /// Bootstraps git hooks in a freshly created worktree by running the project's
@@ -3796,6 +3864,71 @@ mod tests {
                 run_git(repo.path(), &["commit", "-m", "clean"]),
                 "Bootstrapped hook must ALLOW a clean commit"
             );
+        }
+    }
+
+    /// Tests for `run_command_installs_dependencies` — the token-based matcher
+    /// that lets the caller skip nwt's own hook-bootstrap install when a
+    /// synchronous `--run` command already installs dependencies (issue #275).
+    mod run_command_installs_dependencies_tests {
+        use super::*;
+
+        #[test]
+        fn matches_known_install_invocations() {
+            for cmd in [
+                "pnpm install",
+                "pnpm i",
+                "npm install",
+                "npm i",
+                "npm ci",
+                "yarn install",
+                "yarn i",
+                "bun install",
+                "bun i",
+                // A compound command tokenizes fine: `pnpm` and `install` are
+                // still adjacent tokens.
+                "cd x && pnpm install",
+            ] {
+                assert!(
+                    run_command_installs_dependencies(cmd),
+                    "{cmd:?} should be recognized as an install"
+                );
+            }
+        }
+
+        #[test]
+        fn rejects_non_install_commands() {
+            for cmd in [
+                // `installer` is a different token, not `install`.
+                "pnpm installer",
+                // A run that does nothing.
+                "true",
+                // A non-package-manager setup command.
+                "make setup",
+                // A script path, NOT a `npm` + `install` token pair.
+                "scripts/npm-install.sh",
+                // Empty command.
+                "",
+                // `install` with no preceding package-manager program.
+                "install",
+                // No space, so it does not tokenize as `pnpm` + `install`.
+                "pnpm install&&x",
+            ] {
+                assert!(
+                    !run_command_installs_dependencies(cmd),
+                    "{cmd:?} should NOT be recognized as an install"
+                );
+            }
+        }
+
+        #[test]
+        fn yarn_and_bun_do_not_accept_ci() {
+            // `ci` is an npm-only subcommand; for yarn/bun it is just an
+            // arbitrary token and must not count as an install.
+            assert!(!run_command_installs_dependencies("yarn ci"));
+            assert!(!run_command_installs_dependencies("bun ci"));
+            // npm ci is the documented clean-install and DOES count.
+            assert!(run_command_installs_dependencies("npm ci"));
         }
     }
 
