@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -44,7 +44,7 @@ pub(crate) enum Event {
 /// The poll-outcome state machine that backs the watch loop's rendering.
 ///
 /// Each poll of sccache feeds its outcome into [`WatchState::apply_poll`], which
-/// is the *only* way the two displayed facts evolve:
+/// is the *only* way the three displayed facts evolve:
 ///
 /// - `last_good` — the most recent successfully-parsed [`crate::stats::Stats`].
 ///   The render closure draws the numeric rows from this, so it must survive a
@@ -55,7 +55,14 @@ pub(crate) enum Event {
 ///   frame"), so it sets the banner without disturbing `last_good`; the next
 ///   successful poll clears the banner (recovery), so a transient blip leaves no
 ///   lingering error once the server is back.
-#[derive(Debug, Default)]
+/// - `history` — the window-bounded [`crate::history::History`] ring of
+///   timestamped snapshots that backs the per-metric sparklines. Every
+///   successful poll is *also* pushed here (a failed poll leaves it untouched,
+///   so the trend keeps drawing from the last good samples during an outage),
+///   and [`compose_watch_frame`] buckets it to the terminal's spark budget at
+///   render time. It is private so the only way to feed or read it is through
+///   `apply_poll` / `compose_watch_frame`, keeping the ring's retention rule
+///   from ever desyncing.
 pub(crate) struct WatchState {
     /// The most recent stats from a *successful* poll, retained across failures
     /// so the table keeps showing trustworthy numbers during an outage.
@@ -63,9 +70,29 @@ pub(crate) struct WatchState {
     /// The error banner for the current poll, or `None` when the last poll
     /// succeeded. Cleared on recovery.
     error: Option<String>,
+    /// The window-bounded history of successful polls, bucketed into the
+    /// sparkline columns by [`compose_watch_frame`]. Empty at launch and filled
+    /// in over the first `window` of runtime.
+    history: crate::history::History,
 }
 
 impl WatchState {
+    /// Create a fresh watch state whose history retains samples observed within
+    /// `window`.
+    ///
+    /// `window` comes from the resolved [`crate::config::Config`]; it sizes the
+    /// [`crate::history::History`] ring that backs the sparklines. Nothing is
+    /// sampled yet, so the watch view starts with a blank sparkline that fills in
+    /// over the first `window` of runtime (design §4: "in-memory only, empty at
+    /// launch").
+    pub(crate) fn new(window: Duration) -> Self {
+        WatchState {
+            last_good: None,
+            error: None,
+            history: crate::history::History::new(window),
+        }
+    }
+
     /// The last successfully-polled stats, if any poll has ever succeeded.
     ///
     /// The render closure draws the metric rows from this; `None` only before
@@ -81,25 +108,49 @@ impl WatchState {
         self.error.as_deref()
     }
 
-    /// Fold a poll outcome into the state.
+    /// Bucket the retained history into `columns` time slices spanning
+    /// `[now - window, now]`, newest slice last.
     ///
-    /// - `Ok(stats)` is a successful poll: it becomes the new `last_good` and
-    ///   clears any error banner (recovery — a prior failure must not linger
-    ///   once the server is back).
+    /// A thin pass-through to [`crate::history::History::bucket_last`] that keeps
+    /// the `history` field private: [`compose_watch_frame`] reaches the bucketed
+    /// snapshots only through here, never the raw ring, so the retention rule
+    /// stays encapsulated. The returned slots are `Some(stats)` for the most
+    /// recent sample in that slice and `None` for a gap (drawn at baseline).
+    fn bucket_history(&self, now: Instant, columns: usize) -> Vec<Option<&crate::stats::Stats>> {
+        self.history.bucket_last(now, columns)
+    }
+
+    /// Fold a poll outcome into the state, timestamped at `at`.
+    ///
+    /// - `Ok(stats)` is a successful poll: it becomes the new `last_good`, is
+    ///   *also* pushed into `history` at `at` (so the sparklines accumulate a
+    ///   sample per successful poll), and clears any error banner (recovery — a
+    ///   prior failure must not linger once the server is back). The stats are
+    ///   cloned into the history ring so `last_good` and the ring each own a
+    ///   copy.
     /// - `Err(e)` is a *non-fatal* failed poll: it sets the banner to `e`'s
-    ///   display and leaves `last_good` untouched, so the table keeps showing
-    ///   the last good numbers (design §6).
-    pub(crate) fn apply_poll(&mut self, outcome: anyhow::Result<crate::stats::Stats>) {
+    ///   display and leaves both `last_good` and `history` untouched, so the
+    ///   table and the trend keep showing the last good data (design §6).
+    ///
+    /// `at` is the monotonic [`Instant`] the poll completed; the loop passes
+    /// `Instant::now()`, and tests fabricate it so history can be exercised
+    /// without sleeping.
+    pub(crate) fn apply_poll(&mut self, outcome: anyhow::Result<crate::stats::Stats>, at: Instant) {
         match outcome {
             Ok(stats) => {
-                // Success: adopt the fresh numbers and clear any banner — a
-                // recovered poll must not keep showing a stale error.
+                // Success: record the sample in the history ring (for the
+                // sparklines) and adopt the fresh numbers as last_good, then
+                // clear any banner — a recovered poll must not keep showing a
+                // stale error. The ring gets its own clone so both retain the
+                // stats independently.
+                self.history.push(at, stats.clone());
                 self.last_good = Some(stats);
                 self.error = None;
             }
             Err(e) => {
                 // Failure is non-fatal: raise the banner but leave `last_good`
-                // alone so the table keeps the last trustworthy numbers.
+                // and `history` alone so the table and trend keep the last
+                // trustworthy data.
                 self.error = Some(e.to_string());
             }
         }
@@ -203,7 +254,7 @@ where
     R: FnMut(&WatchState) -> String,
     Pa: FnMut(&str) -> Result<()>,
 {
-    state.apply_poll(poll());
+    state.apply_poll(poll(), Instant::now());
     let frame = render(state);
     if force || frame != *displayed {
         paint(&frame)?;
@@ -342,7 +393,9 @@ pub(crate) fn compose_watch_frame(
     config: &crate::config::Config,
     width: usize,
     clock: &str,
+    now: Instant,
 ) -> String {
+    let _ = now;
     let label = languages_label(config);
     let banner = state.error();
     match state.last_good() {
@@ -395,7 +448,7 @@ pub(crate) fn run(
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx);
 
-    let mut state = WatchState::default();
+    let mut state = WatchState::new(config.window);
     let mut displayed = String::new();
     event_loop(
         &rx,
@@ -403,12 +456,13 @@ pub(crate) fn run(
         &mut state,
         &mut displayed,
         poll,
-        // Re-query the terminal size and clock every frame so a resize lays out
-        // at the new width and the header clock stays live.
+        // Re-query the terminal size, clock, and monotonic instant every frame so
+        // a resize lays out at the new width, the header clock stays live, and the
+        // sparklines bucket history up to "now".
         |state| {
             let width = current_watch_width();
             let clock = chrono::Local::now().format("%H:%M:%S").to_string();
-            compose_watch_frame(state, config, width, &clock)
+            compose_watch_frame(state, config, width, &clock, Instant::now())
         },
         paint_output,
     )
@@ -554,6 +608,42 @@ mod tests {
         crate::stats::parse(FIXTURE).expect("fixture should parse")
     }
 
+    /// A generous default history window for the state/frame tests. Large enough
+    /// that none of the fabricated multi-poll sequences age out of the ring, so a
+    /// test asserting "the trend lit up" never has a sample pruned out from under
+    /// it.
+    const TEST_WINDOW: Duration = Duration::from_secs(15 * 60);
+
+    /// The eight block-drawing sparkline glyphs, mirrored from
+    /// [`crate::sparkline::SPARK_GLYPHS`]. The frame tests inspect composed lines
+    /// for these characters directly (never byte-slicing — repo UTF-8 rule).
+    const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    /// The baseline glyph an inactive/flat bucket renders at.
+    const BASELINE_GLYPH: char = '▁';
+
+    /// Whether `line` contains any sparkline block glyph at all.
+    fn has_any_spark_glyph(line: &str) -> bool {
+        line.chars().any(|c| SPARK_GLYPHS.contains(&c))
+    }
+
+    /// Whether `line` carries a non-baseline glyph — i.e. the trend "lit up"
+    /// above the flat baseline somewhere.
+    fn has_above_baseline_glyph(line: &str) -> bool {
+        line.chars()
+            .any(|c| SPARK_GLYPHS.contains(&c) && c != BASELINE_GLYPH)
+    }
+
+    /// The first composed frame line whose label cell is `label`, or `None`.
+    ///
+    /// Rows are emitted as ` <label><pad>  …`, so the label appears right after
+    /// the single leading space; `trim_start().starts_with(label)` finds the
+    /// row without depending on the exact padding width.
+    fn row_line<'a>(frame: &'a str, label: &str) -> Option<&'a str> {
+        frame
+            .lines()
+            .find(|line| line.trim_start().starts_with(label))
+    }
+
     /// The default-config metric rows for `stats`, built exactly the way the
     /// renderer builds them (label + formatted value per configured metric).
     /// The frame tests assert these strings appear in the composed frame, so
@@ -580,10 +670,11 @@ mod tests {
         // no error banner, since the current poll succeeded.
         let config = crate::config::Config::default();
         let stats = fixture_stats();
-        let mut state = WatchState::default();
-        state.apply_poll(Ok(stats.clone()));
+        let mut state = WatchState::new(TEST_WINDOW);
+        let now = Instant::now();
+        state.apply_poll(Ok(stats.clone()), now);
 
-        let frame = compose_watch_frame(&state, &config, 80, "12:34:56");
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
 
         for (label, value) in expected_rows(&config, &stats) {
             assert!(
@@ -616,11 +707,15 @@ mod tests {
         // table during a transient outage).
         let config = crate::config::Config::default();
         let stats = fixture_stats();
-        let mut state = WatchState::default();
-        state.apply_poll(Ok(stats.clone()));
-        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+        let mut state = WatchState::new(TEST_WINDOW);
+        let base = Instant::now();
+        state.apply_poll(Ok(stats.clone()), base);
+        state.apply_poll(
+            Err(anyhow::anyhow!("connection refused")),
+            base + Duration::from_secs(1),
+        );
 
-        let frame = compose_watch_frame(&state, &config, 80, "12:34:56");
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56", base + Duration::from_secs(1));
 
         assert!(
             frame.contains("connection refused"),
@@ -645,10 +740,11 @@ mod tests {
         // a fabrication.
         let config = crate::config::Config::default();
         let stats = fixture_stats();
-        let mut state = WatchState::default();
-        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+        let mut state = WatchState::new(TEST_WINDOW);
+        let now = Instant::now();
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")), now);
 
-        let frame = compose_watch_frame(&state, &config, 80, "12:34:56");
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
 
         assert!(
             frame.contains("connection refused"),
@@ -666,6 +762,250 @@ mod tests {
             !frame.contains("window"),
             "with no good poll the frame must carry no footer; frame:\n{frame}",
         );
+        // ...and no sparkline glyphs anywhere: there is no history to draw.
+        assert!(
+            !has_any_spark_glyph(&frame),
+            "a first-poll failure must draw no sparkline glyphs; frame:\n{frame}",
+        );
+    }
+
+    /// The default-config label for a `spark = true` metric (`cache_hits`),
+    /// resolved from the live config so the test never hardcodes a label that
+    /// could drift from the catalog.
+    fn spark_label(config: &crate::config::Config) -> String {
+        config
+            .metrics
+            .iter()
+            .find(|m| m.spark)
+            .expect("default config has at least one spark metric")
+            .label
+            .clone()
+    }
+
+    /// A fixture-based [`crate::stats::Stats`] with the Rust `cache_hits` /
+    /// `cache_misses` counters overridden to `hits` / `misses`. Mutating these
+    /// between pushes is how the multi-poll tests drive per-bucket activity into
+    /// the sparkline series for the default Rust-filtered config.
+    fn fixture_with_rust(hits: u64, misses: u64) -> crate::stats::Stats {
+        let mut stats = fixture_stats();
+        stats
+            .stats
+            .cache_hits
+            .counts
+            .insert("Rust".to_string(), hits);
+        stats
+            .stats
+            .cache_misses
+            .counts
+            .insert("Rust".to_string(), misses);
+        stats
+    }
+
+    #[test]
+    fn compose_attaches_sparklines_that_fill_in_over_successive_polls() {
+        // Several successful polls with the Rust cache_hits counter rising between
+        // them must light up the `cache_hits` sparkline — its row carries block
+        // glyphs and at least one rises above the flat baseline (activity is
+        // visible). The spark=false rows (compile_requests / requests_executed)
+        // must carry NO glyphs at all: only the configured spark metrics draw a
+        // trend.
+        let config = crate::config::Config::default();
+        let base = Instant::now();
+        let interval = config.poll_interval;
+        let mut state = WatchState::new(TEST_WINDOW);
+
+        // Rust cache_hits climbs 1700 -> 1800 -> 2000 across three polls, so the
+        // per-bucket deltas are non-zero and uneven — a shape, not a flat line.
+        state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
+        state.apply_poll(Ok(fixture_with_rust(1800, 950)), base + interval);
+        let now = base + interval * 2;
+        state.apply_poll(Ok(fixture_with_rust(2000, 1100)), now);
+
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
+
+        let hits_label = "Cache hits";
+        let hits_row =
+            row_line(&frame, hits_label).expect("the cache_hits row must be present in the frame");
+        assert!(
+            has_any_spark_glyph(hits_row),
+            "the spark=true cache_hits row must carry sparkline glyphs; row: {hits_row:?}",
+        );
+        assert!(
+            has_above_baseline_glyph(hits_row),
+            "rising activity must light the cache_hits sparkline above baseline; row: {hits_row:?}",
+        );
+
+        // The two spark=false rows must stay glyph-free.
+        for non_spark in ["Compile requests", "Requests executed"] {
+            let row = row_line(&frame, non_spark)
+                .unwrap_or_else(|| panic!("the {non_spark} row must be present"));
+            assert!(
+                !has_any_spark_glyph(row),
+                "a spark=false row ({non_spark}) must carry no glyphs; row: {row:?}",
+            );
+        }
+        // Sanity: spark_label resolves to a real spark metric label so the helper
+        // stays exercised alongside the literal labels above.
+        assert!(
+            config.metrics.iter().any(|m| m.spark && m.label == spark_label(&config)),
+            "spark_label must name a configured spark=true metric",
+        );
+    }
+
+    #[test]
+    fn compose_at_launch_draws_flat_baseline_sparklines_of_budget_length() {
+        // A single successful poll: every spark=true row shows a present-but-flat
+        // sparkline — all baseline glyphs (▁) — of exactly the width budget the
+        // renderer allots. One sample yields one observed bucket whose delta is 0,
+        // and the rest are gaps, so the whole series is flat.
+        let config = crate::config::Config::default();
+        let now = Instant::now();
+        let mut state = WatchState::new(TEST_WINDOW);
+        state.apply_poll(Ok(fixture_stats()), now);
+
+        let width = 80;
+        let frame = compose_watch_frame(&state, &config, width, "12:34:56", now);
+
+        // The budget the renderer computes for this frame, from the same rows it
+        // lays out — the spark length must match it exactly.
+        let rows = build_rows(&config, &fixture_stats());
+        let budget = crate::render::sparkline_budget(width, &rows);
+        assert!(budget > 0, "precondition: width 80 must leave a spark budget");
+
+        for spark_metric in config.metrics.iter().filter(|m| m.spark) {
+            let row = row_line(&frame, &spark_metric.label)
+                .unwrap_or_else(|| panic!("the {} row must be present", spark_metric.label));
+            let glyphs: Vec<char> = row
+                .chars()
+                .filter(|c| SPARK_GLYPHS.contains(c))
+                .collect();
+            assert_eq!(
+                glyphs.len(),
+                budget,
+                "spark for {} must be exactly the budget length; row: {row:?}",
+                spark_metric.label,
+            );
+            assert!(
+                glyphs.iter().all(|c| *c == BASELINE_GLYPH),
+                "a single poll must render a flat (all-baseline) spark for {}; row: {row:?}",
+                spark_metric.label,
+            );
+        }
+    }
+
+    #[test]
+    fn compose_in_a_narrow_terminal_drops_sparks_but_keeps_numbers() {
+        // A width that leaves no spark budget: the frame must carry NO glyphs, yet
+        // every label and value string stays intact and untruncated — numbers take
+        // priority over the trend (design §6).
+        let config = crate::config::Config::default();
+        let base = Instant::now();
+        let interval = config.poll_interval;
+        let mut state = WatchState::new(TEST_WINDOW);
+        state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
+        state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + interval);
+        let now = base + interval * 2;
+        state.apply_poll(Ok(fixture_with_rust(2100, 1200)), now);
+
+        // Choose a width at which sparkline_budget collapses to 0.
+        let stats = fixture_with_rust(2100, 1200);
+        let rows = build_rows(&config, &stats);
+        let narrow = 26; // below overhead + MIN_SPARK_WIDTH for the default rows
+        assert_eq!(
+            crate::render::sparkline_budget(narrow, &rows),
+            0,
+            "precondition: the chosen narrow width must zero the spark budget",
+        );
+
+        let frame = compose_watch_frame(&state, &config, narrow, "12:34:56", now);
+
+        assert!(
+            !has_any_spark_glyph(&frame),
+            "a zero-budget width must draw no sparkline glyphs; frame:\n{frame}",
+        );
+        // Every label and value survives intact.
+        for (label, value) in expected_rows(&config, &stats) {
+            assert!(
+                frame.contains(&label),
+                "narrow frame must keep the full label {label:?}; frame:\n{frame}",
+            );
+            assert!(
+                frame.contains(&value),
+                "narrow frame must keep the full value {value:?}; frame:\n{frame}",
+            );
+        }
+    }
+
+    #[test]
+    fn compose_hit_rate_row_sparks_the_windowed_rate_without_nan() {
+        // The hit_rate row sparks the WINDOWED rate per bucket. With crafted
+        // hit/miss deltas the row carries glyphs (a 0%/50%/100% spread is a real
+        // shape), zero-activity buckets render baseline, and nothing panics on a
+        // 0+0 bucket (no NaN). cache_hits / cache_misses cumulatives across four
+        // polls produce per-bucket (hits_delta, misses_delta):
+        //   p0 first observed -> 0/0   -> 0%
+        //   p1 +10h/+10m       -> 50%
+        //   p2 +0h/+0m         -> 0% (zero-activity baseline)
+        //   p3 +10h/+0m        -> 100%
+        let config = crate::config::Config::default();
+        let base = Instant::now();
+        let interval = config.poll_interval;
+        let mut state = WatchState::new(TEST_WINDOW);
+        state.apply_poll(Ok(fixture_with_rust(10, 10)), base);
+        state.apply_poll(Ok(fixture_with_rust(20, 20)), base + interval);
+        state.apply_poll(Ok(fixture_with_rust(20, 20)), base + interval * 2);
+        let now = base + interval * 3;
+        state.apply_poll(Ok(fixture_with_rust(30, 20)), now);
+
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
+
+        let rate_row =
+            row_line(&frame, "Hit rate").expect("the hit_rate row must be present in the frame");
+        assert!(
+            has_any_spark_glyph(rate_row),
+            "the hit_rate row must carry sparkline glyphs; row: {rate_row:?}",
+        );
+        assert!(
+            has_above_baseline_glyph(rate_row),
+            "a varied windowed rate must light the hit_rate spark above baseline; row: {rate_row:?}",
+        );
+        // No NaN can ever surface as a glyph — the whole frame stays clean.
+        assert!(
+            !frame.contains("NaN"),
+            "the windowed rate must never render NaN; frame:\n{frame}",
+        );
+    }
+
+    #[test]
+    fn compose_after_a_failed_poll_still_renders_sparklines_from_history() {
+        // poll ok, poll ok, then poll err: the banner shows AND the spark cells
+        // still render from the untouched history. A failed poll never disturbs
+        // the ring, so the trend persists through the outage.
+        let config = crate::config::Config::default();
+        let base = Instant::now();
+        let interval = config.poll_interval;
+        let mut state = WatchState::new(TEST_WINDOW);
+        state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
+        state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + interval);
+        let now = base + interval * 2;
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")), now);
+
+        let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
+
+        assert!(
+            frame.contains("connection refused"),
+            "the failed poll must still show its banner; frame:\n{frame}",
+        );
+        let hits_row =
+            row_line(&frame, "Cache hits").expect("the cache_hits row must survive the outage");
+        assert!(
+            has_any_spark_glyph(hits_row),
+            "history is untouched by a failed poll, so the spark must still render; row: {hits_row:?}",
+        );
+        assert!(
+            has_above_baseline_glyph(hits_row),
+            "the pre-outage activity must still light the spark above baseline; row: {hits_row:?}",
+        );
     }
 
     #[test]
@@ -673,15 +1013,16 @@ mod tests {
         // A successful poll must (1) record its stats as the new last-good frame
         // and (2) clear any banner left over from an earlier failure — recovery
         // wipes the error the moment the server is reachable again.
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
+        let base = Instant::now();
         // Seed a prior failure so we can prove recovery clears it.
-        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")), base);
         assert!(
             state.error().is_some(),
             "a failed poll must leave an error banner to be cleared",
         );
 
-        state.apply_poll(Ok(fixture_stats()));
+        state.apply_poll(Ok(fixture_stats()), base + Duration::from_secs(1));
         assert!(
             state.last_good().is_some(),
             "a successful poll must store its stats as last_good",
@@ -704,10 +1045,14 @@ mod tests {
         // After at least one good poll, a failure is non-fatal: it raises the
         // banner but must NOT discard the last good numbers — the table keeps
         // showing them through the outage (design §6).
-        let mut state = WatchState::default();
-        state.apply_poll(Ok(fixture_stats()));
+        let mut state = WatchState::new(TEST_WINDOW);
+        let base = Instant::now();
+        state.apply_poll(Ok(fixture_stats()), base);
 
-        state.apply_poll(Err(anyhow::anyhow!("sccache --show-stats failed")));
+        state.apply_poll(
+            Err(anyhow::anyhow!("sccache --show-stats failed")),
+            base + Duration::from_secs(1),
+        );
         assert_eq!(
             state.error(),
             Some("sccache --show-stats failed"),
@@ -729,8 +1074,8 @@ mod tests {
         // A first-poll failure (server down at startup) raises the banner but
         // has no good frame to keep — last_good stays None, and the caller
         // renders a banner with no rows.
-        let mut state = WatchState::default();
-        state.apply_poll(Err(anyhow::anyhow!("connection refused")));
+        let mut state = WatchState::new(TEST_WINDOW);
+        state.apply_poll(Err(anyhow::anyhow!("connection refused")), Instant::now());
         assert_eq!(
             state.error(),
             Some("connection refused"),
@@ -758,7 +1103,7 @@ mod tests {
         tx.send(Event::Quit).expect("queue quit");
         drop(tx);
 
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let mut renders = 0_usize;
@@ -797,7 +1142,7 @@ mod tests {
         // `polls` is a shared Cell so both the poll and render closures can read
         // it without one's mutable borrow conflicting with the other's read.
         let (tx, rx) = mpsc::channel();
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
         let mut displayed = String::new();
         let polls = Cell::new(0_usize);
         let mut paints = 0_usize;
@@ -841,7 +1186,7 @@ mod tests {
         // byte-identical to what's displayed, so suppression skips the paint.
         // The first (immediate) frame paints; the identical tick frame does not.
         let (tx, rx) = mpsc::channel();
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
         let mut displayed = String::new();
         let polls = Cell::new(0_usize);
         let mut paints = 0_usize;
@@ -884,7 +1229,7 @@ mod tests {
         tx.send(Event::Quit).expect("queue quit");
         drop(tx);
 
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let mut paints = 0_usize;
@@ -917,7 +1262,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Event>();
         drop(tx); // no events will ever arrive; channel is disconnected
 
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let result = event_loop(
@@ -943,7 +1288,7 @@ mod tests {
         // must still be called with the error visible in state (so the banner
         // shows). We fail the very first poll, then end on the next tick.
         let (tx, rx) = mpsc::channel();
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
         let mut displayed = String::new();
         let polls = Cell::new(0_usize);
         let saw_error_in_render = Cell::new(false);
@@ -999,7 +1344,7 @@ mod tests {
         tx.send(Event::Quit).expect("queue quit");
         drop(tx);
 
-        let mut state = WatchState::default();
+        let mut state = WatchState::new(TEST_WINDOW);
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let mut renders = 0_usize;
