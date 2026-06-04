@@ -343,7 +343,7 @@ pub(crate) fn build_output(
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
-    let commits_ahead = repo::commits_ahead(repo, &base);
+    let commits_ahead = repo::base_status(repo, &base).ahead;
 
     let last_commit_age = last_commit_age(repo);
 

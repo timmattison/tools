@@ -81,9 +81,33 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)
         .collect()
 }
 
-/// Count commits reachable from HEAD but not from `base`
-/// (`git rev-list --count base..HEAD`). Returns 0 on any failure.
-pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
+/// How HEAD relates to its base ref, as a pair of commit counts. See
+/// [`base_status`].
+pub struct BaseStatus {
+    /// Commits reachable from HEAD but not from the base
+    /// (`git rev-list --count base..HEAD`).
+    pub ahead: u32,
+    /// Commits reachable from the base but not from HEAD
+    /// (`git rev-list --count HEAD..base`) — i.e. how far behind the base HEAD
+    /// is, the needs-rebase signal.
+    pub behind: u32,
+}
+
+/// Count how far HEAD is ahead of and behind its `base` ref.
+///
+/// `ahead` is the number of commits reachable from HEAD but not from `base`
+/// (`git rev-list --count base..HEAD`); `behind` is the mirror — commits
+/// reachable from `base` but not from HEAD (`git rev-list --count HEAD..base`),
+/// which is nonzero when the base has moved on past the fork point and HEAD
+/// needs a rebase.
+///
+/// Any resolution or walk failure degrades to `BaseStatus { ahead: 0, behind:
+/// 0 }`, so a missing or unresolvable base produces no behind segment. When
+/// HEAD already points at the base commit the walks are short-circuited to
+/// `(0, 0)`. Each count is clamped to `u32::MAX`.
+pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
+    // STUB (red): reports the old `commits_ahead` value for `ahead` and never
+    // reports a behind count. The behind walk is implemented in the green step.
     let resolve = || -> anyhow::Result<u32> {
         let head = repo.head_id()?.detach();
         let base_id = repo.rev_parse_single(base)?.detach();
@@ -97,7 +121,10 @@ pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
             .count();
         Ok(u32::try_from(count).unwrap_or(u32::MAX))
     };
-    resolve().unwrap_or(0)
+    BaseStatus {
+        ahead: resolve().unwrap_or(0),
+        behind: 0,
+    }
 }
 
 /// The current branch's upstream tracking status. `name` is the short
@@ -527,7 +554,29 @@ mod tests {
     }
 
     #[test]
-    fn commits_ahead_counts_commits_past_base() {
+    fn base_status_reports_behind_when_base_advances_past_fork_point() {
+        // Fork `feature` off main, advance both: feature gets one commit, then
+        // main gets one commit. From feature's view the base (main) has moved
+        // on, so feature is 1 ahead and 1 behind.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("b.txt"), "two\n").unwrap();
+        git(p, &["add", "b.txt"]);
+        git(p, &["commit", "-q", "-m", "feature work"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("d.txt"), "main moved\n").unwrap();
+        git(p, &["add", "d.txt"]);
+        git(p, &["commit", "-q", "-m", "main moved on"]);
+        git(p, &["checkout", "-q", "feature"]);
+        let repo = open_at(p).unwrap();
+        let status = super::base_status(&repo, "main");
+        assert_eq!(status.ahead, 1, "feature has one commit past the fork point");
+        assert_eq!(status.behind, 1, "main moved one commit past the fork point");
+    }
+
+    #[test]
+    fn base_status_counts_commits_past_base() {
         let dir = init_repo();
         let p = dir.path();
         git(p, &["checkout", "-q", "-b", "feature"]);
@@ -538,14 +587,25 @@ mod tests {
         git(p, &["add", "c.txt"]);
         git(p, &["commit", "-q", "-m", "third"]);
         let repo = open_at(p).unwrap();
-        assert_eq!(super::commits_ahead(&repo, "main"), 2);
+        let status = super::base_status(&repo, "main");
+        assert_eq!(status.ahead, 2);
+        assert_eq!(status.behind, 0, "base has not moved");
     }
 
     #[test]
-    fn commits_ahead_is_zero_when_base_equals_head() {
+    fn base_status_is_zero_when_base_equals_head() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        assert_eq!(super::commits_ahead(&repo, "main"), 0);
+        let status = super::base_status(&repo, "main");
+        assert_eq!((status.ahead, status.behind), (0, 0));
+    }
+
+    #[test]
+    fn base_status_is_zero_when_base_unresolvable() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        let status = super::base_status(&repo, "no-such-branch");
+        assert_eq!((status.ahead, status.behind), (0, 0));
     }
 
     #[test]
