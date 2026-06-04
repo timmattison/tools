@@ -1419,6 +1419,59 @@ fn main() {
     }
 }
 
+/// Package manager detected for bootstrapping git hooks in a new worktree.
+///
+/// When a freshly created worktree's `package.json` declares a `prepare`
+/// script (the husky convention), the install step that wires up
+/// `core.hooksPath` must be run with the project's chosen package manager.
+/// This enum identifies which one to invoke.
+// TODO(#275): wired up in slice 2 — main() does not call the detection
+// helper yet, so the variants/functions are only exercised by tests until
+// then. The allow keeps clippy's dead-code lint quiet in the interim.
+#[allow(
+    dead_code,
+    reason = "TODO(#275): main() wiring lands in slice 2; tests-only usage until then"
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageManager {
+    Pnpm,
+    Npm,
+    Yarn,
+    Bun,
+}
+
+#[allow(
+    dead_code,
+    reason = "TODO(#275): main() wiring lands in slice 2; tests-only usage until then"
+)]
+impl PackageManager {
+    /// Returns the install invocation as a `(program, args)` pair.
+    ///
+    /// Running `program` with `args` performs a dependency install, which in
+    /// turn triggers the `prepare` lifecycle script that regenerates the
+    /// gitignored hook directory (`.husky/_`) so git hooks fire in the new
+    /// worktree.
+    fn install_command(&self) -> (&'static str, &'static [&'static str]) {
+        match self {
+            PackageManager::Pnpm => ("pnpm", &["install"]),
+            PackageManager::Npm => ("npm", &["install"]),
+            PackageManager::Yarn => ("yarn", &["install"]),
+            PackageManager::Bun => ("bun", &["install"]),
+        }
+    }
+}
+
+/// Detects whether a new worktree needs a package-manager install to bootstrap
+/// its git hooks. Stub for the red step — always returns `None`.
+#[allow(
+    dead_code,
+    reason = "TODO(#275): main() wiring lands in slice 2; tests-only usage until then"
+)]
+fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
+    let _ = dir;
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2793,5 +2846,242 @@ mod tests {
         assert_eq!(shorten_tab_name(""), "");
         // Only issue- with digits and no suffix
         assert_eq!(shorten_tab_name("issue-0"), "#0");
+    }
+
+    /// Tests for git-hook bootstrap detection (`detect_hook_bootstrap`).
+    ///
+    /// Each test builds its own `TempDir` so concurrent runs (e.g. a
+    /// background bacon loop sharing `./target`) never clobber each other's
+    /// fixtures.
+    mod hook_bootstrap_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        #[test]
+        fn test_no_package_json_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_package_json_without_scripts_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(dir.path(), "package.json", r#"{"name": "demo"}"#);
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_scripts_without_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"build": "tsc"}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_empty_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": ""}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_non_string_prepare_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": 42}}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_malformed_json_returns_none() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(dir.path(), "package.json", "{ this is not json ]");
+            assert_eq!(detect_hook_bootstrap(dir.path()), None);
+        }
+
+        #[test]
+        fn test_prepare_only_defaults_to_pnpm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_package_manager_npm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "npm@10.2.0"}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_package_manager_yarn_with_hash() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "yarn@4.0.0+sha256.abc"}"#,
+            );
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Yarn)
+            );
+        }
+
+        #[test]
+        fn test_package_manager_bun() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "bun@1.1.0"}"#,
+            );
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_unrecognized_package_manager_falls_through_to_lockfile() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "deno@2.0.0"}"#,
+            );
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_pnpm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Pnpm)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_npm() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "package-lock.json", "{}");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_lockfile_yarn() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "yarn.lock", "# yarn lockfile v1\n");
+            assert_eq!(
+                detect_hook_bootstrap(dir.path()),
+                Some(PackageManager::Yarn)
+            );
+        }
+
+        #[test]
+        fn test_lockfile_bun_binary() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "bun.lockb", "");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_lockfile_bun_text() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}}"#,
+            );
+            create_file(dir.path(), "bun.lock", "");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Bun));
+        }
+
+        #[test]
+        fn test_package_manager_takes_precedence_over_lockfile() {
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"scripts": {"prepare": "husky"}, "packageManager": "npm@10.2.0"}"#,
+            );
+            // Conflicting lockfile must be ignored in favor of packageManager.
+            create_file(dir.path(), "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+            assert_eq!(detect_hook_bootstrap(dir.path()), Some(PackageManager::Npm));
+        }
+
+        #[test]
+        fn test_install_command_mapping() {
+            assert_eq!(
+                PackageManager::Pnpm.install_command(),
+                ("pnpm", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Npm.install_command(),
+                ("npm", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Yarn.install_command(),
+                ("yarn", &["install"][..])
+            );
+            assert_eq!(
+                PackageManager::Bun.install_command(),
+                ("bun", &["install"][..])
+            );
+        }
     }
 }

@@ -5081,6 +5081,7 @@ dependencies = [
  "names",
  "repowalker",
  "serde",
+ "serde_json",
  "shellsetup",
  "tempfile",
  "toml",
