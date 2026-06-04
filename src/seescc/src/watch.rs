@@ -680,10 +680,10 @@ mod tests {
     /// tests jump the clock to exercise the same bucketing deterministically.)
     const POLL_STEP: Duration = Duration::from_secs(180);
 
-    /// The eight block-drawing sparkline glyphs, mirrored from
+    /// The seven block-drawing sparkline glyphs, mirrored from
     /// [`crate::sparkline::SPARK_GLYPHS`]. The frame tests inspect composed lines
     /// for these characters directly (never byte-slicing — repo UTF-8 rule).
-    const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    const SPARK_GLYPHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
     /// The baseline glyph an inactive/flat bucket renders at.
     const BASELINE_GLYPH: char = '▁';
 

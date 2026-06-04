@@ -12,26 +12,31 @@
 //! errors versus thousands of compile requests) and the point of the sparkline
 //! is the *trend*, not the absolute height. Scaling each series independently
 //! means the smallest value in the window always sits at the baseline glyph and
-//! the largest always reaches the full block, so the shape is visible regardless
-//! of magnitude. A flat series (every value equal, including all-zero) has no
-//! shape and renders as an unbroken row of baseline glyphs.
+//! the largest always reaches the tallest bar (`▇` — one eighth shy of a full
+//! cell, so adjacent rows never visually merge), keeping the shape visible
+//! regardless of magnitude. A flat series (every value equal, including
+//! all-zero) has no shape and renders as an unbroken row of baseline glyphs.
 
-/// The eight block-drawing glyphs used for a sparkline, lowest bar to highest.
+/// The seven block-drawing glyphs used for a sparkline, lowest bar to highest.
 ///
 /// Index 0 (`▁`) is the baseline a min value or an inactive bucket renders at;
-/// index 7 (`█`) is the full block a max value reaches. Each glyph is exactly
-/// one `char` and display width 1, so a sparkline's column count equals its glyph
-/// count — no `unicode-width` measurement is needed at this layer.
-pub(crate) const SPARK_GLYPHS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// index 6 (`▇`) is the tallest bar a max value reaches. The full block `█` is
+/// deliberately excluded: it fills its entire character cell, so a maxed bar
+/// would touch the bottom of whatever the row above renders and the two would
+/// read as one merged shape — capping at `▇` keeps the top eighth of every cell
+/// clear. Each glyph is exactly one `char` and display width 1, so a sparkline's
+/// column count equals its glyph count — no `unicode-width` measurement is
+/// needed at this layer.
+pub(crate) const SPARK_GLYPHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
-/// Map a whole-number scale `level` in `0.0..=7.0` to its block glyph.
+/// Map a whole-number scale `level` in `0.0..=6.0` to its block glyph.
 ///
 /// The level comes out of [`sparkline`]'s interpolation already `round`ed and
 /// clamped to the valid range, so this is a direct lookup — implemented by
 /// scanning for the matching integer index rather than a lossy `f64 as usize`
 /// cast, which clippy's `cast_possible_truncation`/`cast_sign_loss` lints forbid.
 /// Any out-of-band level (which the clamp makes unreachable) falls back to the
-/// full block, so the function is total and never panics.
+/// tallest glyph, so the function is total and never panics.
 fn glyph_for_level(level: f64) -> char {
     SPARK_GLYPHS
         .iter()
@@ -44,16 +49,18 @@ fn glyph_for_level(level: f64) -> char {
 /// series' own `min..max`.
 ///
 /// Each value `v` maps to a glyph index by linear interpolation across the
-/// series' observed range, rounded to the nearest of the eight levels:
+/// series' observed range, rounded to the nearest of the seven levels:
 ///
 /// ```text
-/// index = ((v - min) / (max - min) * 7.0).round()   clamped to 0..=7
+/// index = ((v - min) / (max - min) * 6.0).round()   clamped to 0..=6
 /// ```
 ///
 /// This pins the two endpoints exactly: the series minimum lands at index 0
-/// (`▁`) and the maximum at index 7 (`█`) whenever `min < max`. Rounding (rather
-/// than truncating) keeps the mapping symmetric — a value at the mid-point of the
-/// range lands on a mid glyph instead of biasing low.
+/// (`▁`) and the maximum at index 6 (`▇`) whenever `min < max` — never the full
+/// block `█`, which would touch the cell top and visually merge into the row
+/// above (see [`SPARK_GLYPHS`]). Rounding (rather than truncating) keeps the
+/// mapping symmetric — a value at the mid-point of the range lands on a mid
+/// glyph instead of biasing low.
 ///
 /// Degenerate inputs are handled defensively so the watch loop can never panic on
 /// live data:
@@ -72,8 +79,8 @@ fn glyph_for_level(level: f64) -> char {
 /// whitespace and no newline.
 pub(crate) fn sparkline(values: &[f64]) -> String {
     // The top index into SPARK_GLYPHS, as an f64 for the interpolation below. The
-    // eight glyphs span indices 0..=7, so a value's fractional position in the
-    // range scales across `0.0..=7.0` and rounds to one of those eight levels.
+    // seven glyphs span indices 0..=6, so a value's fractional position in the
+    // range scales across `0.0..=6.0` and rounds to one of those seven levels.
     const TOP_INDEX: f64 = (SPARK_GLYPHS.len() - 1) as f64;
 
     // Only finite values participate in the scale: a NaN/±inf would poison min/max
@@ -107,10 +114,10 @@ pub(crate) fn sparkline(values: &[f64]) -> String {
                 return SPARK_GLYPHS[0];
             }
             // Linear interpolation across the observed range, rounded to the
-            // nearest of the eight levels. `round` is half-away-from-zero; clamping
+            // nearest of the seven levels. `round` is half-away-from-zero; clamping
             // the *float* to `0.0..=TOP_INDEX` before any integer conversion folds
             // away both endpoints' floating-point overshoot and keeps the value
-            // non-negative — so the resulting index is provably in `0..=7` without a
+            // non-negative — so the resulting index is provably in `0..=6` without a
             // lossy `f64 as usize` cast. The level is whole after `round`, so the
             // glyph lookup just scans for the matching index.
             let level = ((v - min) / range * TOP_INDEX)
