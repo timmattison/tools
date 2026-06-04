@@ -1656,8 +1656,11 @@ fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
 ///
 /// The command is whitespace-tokenized and scanned for an *adjacent* token pair
 /// where a program token (`pnpm`, `npm`, `yarn`, `bun`) is immediately followed
-/// by an install subcommand token (`install` or `i`, plus `ci` for npm). This is
-/// deliberately stricter than a substring search so it does NOT misfire on
+/// by an install subcommand token. The accepted tokens differ per manager:
+/// `install` or `i` for `pnpm`/`bun`, the same plus `ci` for `npm`, and
+/// `install` only for `yarn` (which has no `i` alias — classic and berry both
+/// reject `yarn i`). This is deliberately stricter than a substring search so it
+/// does NOT misfire on
 /// `pnpm installer`, a script path like `scripts/npm-install.sh`, or a bare
 /// `install`. Matching ANY package manager counts — an `npm install` run still
 /// triggers the `prepare` script even if bootstrap would have chosen pnpm.
@@ -1675,8 +1678,11 @@ fn run_command_installs_dependencies(cmd: &str) -> bool {
         let program = pair[0];
         let arg = pair[1];
         match program {
-            "pnpm" | "yarn" | "bun" => arg == "install" || arg == "i",
+            "pnpm" | "bun" => arg == "install" || arg == "i",
             "npm" => arg == "install" || arg == "i" || arg == "ci",
+            // yarn has no `i` alias: classic errors with `Command "i" not
+            // found` and berry rejects it too, so only `install` counts.
+            "yarn" => arg == "install",
             _ => false,
         }
     })
