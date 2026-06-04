@@ -78,18 +78,21 @@ pub(crate) struct WatchState {
 
 impl WatchState {
     /// Create a fresh watch state whose history retains samples observed within
-    /// `window`.
+    /// `window`, with its sparkline slice grid anchored at `epoch`.
     ///
     /// `window` comes from the resolved [`crate::config::Config`]; it sizes the
-    /// [`crate::history::History`] ring that backs the sparklines. Nothing is
-    /// sampled yet, so the watch view starts with a blank sparkline that fills in
-    /// over the first `window` of runtime (design §4: "in-memory only, empty at
-    /// launch").
-    pub(crate) fn new(window: Duration) -> Self {
+    /// [`crate::history::History`] ring that backs the sparklines. `epoch` is the
+    /// fixed slice-grid anchor, captured once at watch startup (production passes
+    /// `Instant::now()`; tests fabricate it) and forwarded straight into
+    /// [`crate::history::History::new`] so bucket assignments stay stable between
+    /// frames. Nothing is sampled yet, so the watch view starts with a blank
+    /// sparkline that fills in over the first `window` of runtime (design §4:
+    /// "in-memory only, empty at launch").
+    pub(crate) fn new(window: Duration, epoch: Instant) -> Self {
         WatchState {
             last_good: None,
             error: None,
-            history: crate::history::History::new(window),
+            history: crate::history::History::new(window, epoch),
         }
     }
 
@@ -508,7 +511,12 @@ pub(crate) fn run(
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx);
 
-    let mut state = WatchState::new(config.window);
+    // Anchor the sparkline slice grid once, here at watch startup, so every frame
+    // buckets against the same grid and completed columns never shift under the
+    // user. `Instant::now()` is captured a single time and threaded into the
+    // history ring via `WatchState::new`.
+    let epoch = Instant::now();
+    let mut state = WatchState::new(config.window, epoch);
     let mut displayed = String::new();
     event_loop(
         &rx,
@@ -740,8 +748,8 @@ mod tests {
         // no error banner, since the current poll succeeded.
         let config = crate::config::Config::default();
         let stats = fixture_stats();
-        let mut state = WatchState::new(TEST_WINDOW);
         let now = Instant::now();
+        let mut state = WatchState::new(TEST_WINDOW, now);
         state.apply_poll(Ok(stats.clone()), now);
 
         let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
@@ -777,8 +785,8 @@ mod tests {
         // table during a transient outage).
         let config = crate::config::Config::default();
         let stats = fixture_stats();
-        let mut state = WatchState::new(TEST_WINDOW);
         let base = Instant::now();
+        let mut state = WatchState::new(TEST_WINDOW, base);
         state.apply_poll(Ok(stats.clone()), base);
         state.apply_poll(
             Err(anyhow::anyhow!("connection refused")),
@@ -816,8 +824,8 @@ mod tests {
         // a fabrication.
         let config = crate::config::Config::default();
         let stats = fixture_stats();
-        let mut state = WatchState::new(TEST_WINDOW);
         let now = Instant::now();
+        let mut state = WatchState::new(TEST_WINDOW, now);
         state.apply_poll(Err(anyhow::anyhow!("connection refused")), now);
 
         let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
@@ -887,7 +895,7 @@ mod tests {
         // trend.
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, base);
 
         // Rust cache_hits climbs 1700 -> 1800 -> 2000 across three polls spaced so
         // they land in distinct time buckets, so the per-bucket deltas are
@@ -939,7 +947,7 @@ mod tests {
         // and the rest are gaps, so the whole series is flat.
         let config = crate::config::Config::default();
         let now = Instant::now();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, now);
         state.apply_poll(Ok(fixture_stats()), now);
 
         let width = 80;
@@ -979,7 +987,7 @@ mod tests {
         // priority over the trend (design §6).
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, base);
         state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
         state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + POLL_STEP);
         let now = base + POLL_STEP * 2;
@@ -1027,7 +1035,7 @@ mod tests {
         //   p3 +10h/+0m        -> 100%
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, base);
         state.apply_poll(Ok(fixture_with_rust(10, 10)), base);
         state.apply_poll(Ok(fixture_with_rust(20, 20)), base + POLL_STEP);
         state.apply_poll(Ok(fixture_with_rust(20, 20)), base + POLL_STEP * 2);
@@ -1060,7 +1068,7 @@ mod tests {
         // the ring, so the trend persists through the outage.
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, base);
         state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
         state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + POLL_STEP);
         let now = base + POLL_STEP * 2;
@@ -1089,8 +1097,8 @@ mod tests {
         // A successful poll must (1) record its stats as the new last-good frame
         // and (2) clear any banner left over from an earlier failure — recovery
         // wipes the error the moment the server is reachable again.
-        let mut state = WatchState::new(TEST_WINDOW);
         let base = Instant::now();
+        let mut state = WatchState::new(TEST_WINDOW, base);
         // Seed a prior failure so we can prove recovery clears it.
         state.apply_poll(Err(anyhow::anyhow!("connection refused")), base);
         assert!(
@@ -1121,8 +1129,8 @@ mod tests {
         // After at least one good poll, a failure is non-fatal: it raises the
         // banner but must NOT discard the last good numbers — the table keeps
         // showing them through the outage (design §6).
-        let mut state = WatchState::new(TEST_WINDOW);
         let base = Instant::now();
+        let mut state = WatchState::new(TEST_WINDOW, base);
         state.apply_poll(Ok(fixture_stats()), base);
 
         state.apply_poll(
@@ -1150,7 +1158,7 @@ mod tests {
         // A first-poll failure (server down at startup) raises the banner but
         // has no good frame to keep — last_good stays None, and the caller
         // renders a banner with no rows.
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         state.apply_poll(Err(anyhow::anyhow!("connection refused")), Instant::now());
         assert_eq!(
             state.error(),
@@ -1179,7 +1187,7 @@ mod tests {
         tx.send(Event::Quit).expect("queue quit");
         drop(tx);
 
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let mut renders = 0_usize;
@@ -1218,7 +1226,7 @@ mod tests {
         // `polls` is a shared Cell so both the poll and render closures can read
         // it without one's mutable borrow conflicting with the other's read.
         let (tx, rx) = mpsc::channel();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         let mut displayed = String::new();
         let polls = Cell::new(0_usize);
         let mut paints = 0_usize;
@@ -1262,7 +1270,7 @@ mod tests {
         // byte-identical to what's displayed, so suppression skips the paint.
         // The first (immediate) frame paints; the identical tick frame does not.
         let (tx, rx) = mpsc::channel();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         let mut displayed = String::new();
         let polls = Cell::new(0_usize);
         let mut paints = 0_usize;
@@ -1305,7 +1313,7 @@ mod tests {
         tx.send(Event::Quit).expect("queue quit");
         drop(tx);
 
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let mut paints = 0_usize;
@@ -1338,7 +1346,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Event>();
         drop(tx); // no events will ever arrive; channel is disconnected
 
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let result = event_loop(
@@ -1364,7 +1372,7 @@ mod tests {
         // must still be called with the error visible in state (so the banner
         // shows). We fail the very first poll, then end on the next tick.
         let (tx, rx) = mpsc::channel();
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         let mut displayed = String::new();
         let polls = Cell::new(0_usize);
         let saw_error_in_render = Cell::new(false);
@@ -1420,7 +1428,7 @@ mod tests {
         tx.send(Event::Quit).expect("queue quit");
         drop(tx);
 
-        let mut state = WatchState::new(TEST_WINDOW);
+        let mut state = WatchState::new(TEST_WINDOW, Instant::now());
         let mut displayed = String::new();
         let mut polls = 0_usize;
         let mut renders = 0_usize;

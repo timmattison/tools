@@ -34,6 +34,13 @@ pub(crate) struct History {
     /// How far back samples are retained. A sample at time `t` survives a later
     /// `push(at, …)` iff `t >= at - window`; older samples are dropped.
     window: Duration,
+    /// The fixed anchor of the sparkline's slice grid, captured once at watch
+    /// startup. Grid points sit at `epoch + k * slice` (with
+    /// `slice = window / columns`), so a sample's bucket assignment is a pure
+    /// function of its timestamp and this anchor — it never shifts as `now`
+    /// advances within a slice, only when the grid steps to the next `k`. See
+    /// [`History::bucket_last`].
+    epoch: Instant,
     /// The retained samples, oldest at the front. Kept ordered by push time
     /// (which is monotonic, so insertion order *is* time order), so pruning is a
     /// cheap pop-from-front of the aged-out prefix and bucketing is a single
@@ -42,14 +49,20 @@ pub(crate) struct History {
 }
 
 impl History {
-    /// Create an empty history that retains samples observed within `window`.
+    /// Create an empty history that retains samples observed within `window`,
+    /// with its slice grid anchored at `epoch`.
     ///
+    /// `epoch` is captured once at watch startup (production passes
+    /// `Instant::now()`; tests fabricate it) and never changes for the process
+    /// lifetime. It anchors the sparkline's slice grid so a sample's bucket
+    /// assignment is stable between frames — see [`History::bucket_last`].
     /// Nothing is sampled yet — the watch view starts with a blank sparkline that
     /// fills in over the first `window` of runtime, matching the design's
     /// "in-memory only, empty at launch" rule.
-    pub(crate) fn new(window: Duration) -> Self {
+    pub(crate) fn new(window: Duration, epoch: Instant) -> Self {
         History {
             window,
+            epoch,
             samples: VecDeque::new(),
         }
     }
@@ -447,7 +460,10 @@ mod tests {
         // so it is 10s past the trailing edge and must be gone.
         let base = Instant::now();
         let window = Duration::from_secs(10);
-        let mut history = History::new(window);
+        // Epoch = base, so the slice grid is anchored at base. The bucket `now`s
+        // below sit on exact grid multiples (slice == window for a single
+        // column), so `leading == now` and the pre-quantization expectations hold.
+        let mut history = History::new(window, base);
 
         history.push(base, tagged(1)); // t = 0s — will age out
         history.push(base + Duration::from_secs(20), tagged(2)); // t = 20s — current
@@ -472,7 +488,10 @@ mod tests {
         // empty, slot 3 has one at exactly `now`.
         let base = Instant::now();
         let window = Duration::from_secs(4);
-        let mut history = History::new(window);
+        // Epoch = base; `now = base + 4s` is an exact grid multiple (4 slices of
+        // 1s), so `leading == now` and the slice boundaries match the pre-pinning
+        // window exactly.
+        let mut history = History::new(window, base);
         let now = base + Duration::from_secs(4);
 
         // now - window = base. Offsets are relative to base.
@@ -496,8 +515,10 @@ mod tests {
         // An empty ring (nothing polled yet — the launch state) must yield a vec
         // of exactly `columns` None entries, so the sparkline draws a full row of
         // baseline gaps rather than a short or panicking slice.
-        let history = History::new(Duration::from_secs(10));
         let now = Instant::now();
+        // Epoch is irrelevant to an empty ring (no samples to place), so any
+        // anchor <= `now` works; `now` itself keeps `elapsed` non-negative.
+        let history = History::new(Duration::from_secs(10), now);
 
         let buckets = history.bucket_last(now, 5);
         assert_eq!(
@@ -512,7 +533,9 @@ mod tests {
         // Zero columns means there is no room to draw anything; the result must be
         // an empty vec, never a divide-by-zero panic from the slice-width math.
         let base = Instant::now();
-        let mut history = History::new(Duration::from_secs(10));
+        // Epoch = base; `columns == 0` bails before any slice-width math, so the
+        // grid anchor never participates.
+        let mut history = History::new(Duration::from_secs(10), base);
         history.push(base, tagged(1));
 
         let buckets = history.bucket_last(base + Duration::from_secs(1), 0);
@@ -530,7 +553,10 @@ mod tests {
         // 3s over 3 columns; a single sample at exactly `now`.
         let base = Instant::now();
         let window = Duration::from_secs(3);
-        let mut history = History::new(window);
+        // Epoch = base; `now = base + 3s` is an exact grid multiple (3 slices of
+        // 1s), so `leading == now` and "exactly at `now` ⇒ last bucket" still
+        // pins the trailing edge.
+        let mut history = History::new(window, base);
         let now = base + Duration::from_secs(3);
         history.push(now, tagged(99));
 
@@ -549,7 +575,10 @@ mod tests {
         // its lower edge.
         let base = Instant::now();
         let window = Duration::from_secs(3);
-        let mut history = History::new(window);
+        // Epoch = base; `now = base + 3s` is an exact grid multiple, so
+        // `leading == now` and `leading - window == base`: the sample at `base`
+        // sits on the inclusive lower edge and still lands in the first bucket.
+        let mut history = History::new(window, base);
         let now = base + Duration::from_secs(3);
         // now - window = base exactly.
         history.push(base, tagged(7));
@@ -563,6 +592,51 @@ mod tests {
     }
 
     #[test]
+    fn bucket_assignment_is_invariant_as_now_advances_within_a_slice() {
+        // The headline stability property: as long as two `now`s quantize to the
+        // SAME grid point, a retained sample lands in the SAME bucket both times —
+        // no temporal aliasing, no glyph reshuffling between frames. window = 4s
+        // over 4 columns ⇒ 1s slices, epoch = base. Both bucket times sit in the
+        // same slice [base+4s, base+5s), so both ceil to k = 5 and
+        // leading = base + 5s for both calls.
+        //
+        // The sample at base+1.2s is chosen so the OLD sliding-window code
+        // re-bins it between the two nows: at now = base+4.1s the un-quantized
+        // window [base+0.1s, base+4.1s] puts it in bucket 1, but at now = base+4.5s
+        // the window [base+0.5s, base+4.5s] puts it in bucket 0 — a visible shift.
+        // Under the epoch-pinned grid both calls bucket against leading = base+5s,
+        // so the sample is bucket 0 both times and the assignment is stable.
+        let base = Instant::now();
+        let window = Duration::from_secs(4);
+        let mut history = History::new(window, base);
+        history.push(base + Duration::from_millis(1200), tagged(42));
+
+        let now1 = base + Duration::from_millis(4100);
+        let now2 = base + Duration::from_millis(4500);
+        let buckets1 = history.bucket_last(now1, 4);
+        let buckets2 = history.bucket_last(now2, 4);
+
+        assert_eq!(
+            tags(&buckets1),
+            tags(&buckets2),
+            "a sample's bucket assignment must not change as `now` advances within \
+             one slice (epoch-pinned grid); got {:?} then {:?}",
+            tags(&buckets1),
+            tags(&buckets2),
+        );
+        // Pin the actual assignment too, so a future regression can't make both
+        // calls agree on the *wrong* (un-pinned) bucket: leading = base+5s puts
+        // the base+1.2s sample 3.8s back from the leading edge, i.e. 0.2s into the
+        // window ⇒ bucket 0.
+        assert_eq!(
+            tags(&buckets1),
+            vec![Some(42), None, None, None],
+            "the pinned grid (leading = epoch + 5*slice) must place the sample in \
+             bucket 0",
+        );
+    }
+
+    #[test]
     fn bucket_last_excludes_samples_outside_the_window() {
         // Defensive range-checking inside bucket_last: samples older than
         // `now - window` (that somehow survived pruning because a smaller window
@@ -570,7 +644,7 @@ mod tests {
         // from the buckets entirely. We push with a generous window so nothing is
         // pruned, then bucket over a tighter window.
         let base = Instant::now();
-        let mut history = History::new(Duration::from_secs(1000)); // keep everything
+        let mut history = History::new(Duration::from_secs(1000), base); // keep everything
 
         history.push(base + Duration::from_secs(0), tagged(1)); // too old for the bucket window
         history.push(base + Duration::from_secs(50), tagged(2)); // in the bucket window
