@@ -26,7 +26,7 @@ mod watch;
 #[command(
     about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
-                  commits ahead of the base branch, last-commit age, and a per-file \
+                  commits ahead of (and behind) the base branch, last-commit age, and a per-file \
                   list showing a magnitude bar, +/- counts, and recency. On a TTY it \
                   runs as a self-refreshing watch that repaints on filesystem changes; \
                   with `--one-shot` (or when its output is piped) it renders once and \
