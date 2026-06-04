@@ -90,6 +90,10 @@ pub struct BaseStatus {
     /// Commits reachable from the base but not from HEAD
     /// (`git rev-list --count HEAD..base`) — i.e. how far behind the base HEAD
     /// is, the needs-rebase signal.
+    #[allow(
+        dead_code,
+        reason = "header wiring that reads `behind` lands in a later slice; the walk and its unit tests already exercise this value"
+    )]
     pub behind: u32,
 }
 
@@ -106,25 +110,31 @@ pub struct BaseStatus {
 /// HEAD already points at the base commit the walks are short-circuited to
 /// `(0, 0)`. Each count is clamped to `u32::MAX`.
 pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
-    // STUB (red): reports the old `commits_ahead` value for `ahead` and never
-    // reports a behind count. The behind walk is implemented in the green step.
-    let resolve = || -> anyhow::Result<u32> {
+    let resolve = || -> anyhow::Result<(u32, u32)> {
         let head = repo.head_id()?.detach();
         let base_id = repo.rev_parse_single(base)?.detach();
         if head == base_id {
-            return Ok(0);
+            return Ok((0, 0));
         }
-        let count = repo
+        // ahead: base..HEAD — commits on HEAD not on base.
+        let ahead = repo
             .rev_walk(std::iter::once(head))
             .with_hidden(std::iter::once(base_id))
             .all()?
             .count();
-        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+        // behind: HEAD..base — the mirror walk, base with HEAD hidden.
+        let behind = repo
+            .rev_walk(std::iter::once(base_id))
+            .with_hidden(std::iter::once(head))
+            .all()?
+            .count();
+        Ok((
+            u32::try_from(ahead).unwrap_or(u32::MAX),
+            u32::try_from(behind).unwrap_or(u32::MAX),
+        ))
     };
-    BaseStatus {
-        ahead: resolve().unwrap_or(0),
-        behind: 0,
-    }
+    let (ahead, behind) = resolve().unwrap_or((0, 0));
+    BaseStatus { ahead, behind }
 }
 
 /// The current branch's upstream tracking status. `name` is the short
@@ -571,8 +581,14 @@ mod tests {
         git(p, &["checkout", "-q", "feature"]);
         let repo = open_at(p).unwrap();
         let status = super::base_status(&repo, "main");
-        assert_eq!(status.ahead, 1, "feature has one commit past the fork point");
-        assert_eq!(status.behind, 1, "main moved one commit past the fork point");
+        assert_eq!(
+            status.ahead, 1,
+            "feature has one commit past the fork point"
+        );
+        assert_eq!(
+            status.behind, 1,
+            "main moved one commit past the fork point"
+        );
     }
 
     #[test]
