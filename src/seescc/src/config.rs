@@ -95,10 +95,13 @@ pub(crate) enum MetricKind {
 
 /// A single key in the metric catalog `seescc` knows how to surface.
 ///
-/// Variants split into two families: *per-language* keys, whose values are
-/// filtered by the `languages` setting ([`MetricKey::is_per_language`] is
-/// `true`), and *global* keys that apply to the whole cache. Each variant maps
-/// to a canonical TOML string via [`MetricKey::as_config_key`] and a pretty
+/// Variants split into two families: *per-language* keys
+/// (`cache_hits`/`cache_misses`/`cache_errors`/`hit_rate`), whose values are
+/// filtered by the `languages` setting, and *global* keys that apply to the
+/// whole cache. The per-language filtering lives in
+/// [`crate::aggregate::metric_value`] (which routes those keys through
+/// [`crate::aggregate::lang_sum`]) rather than as a predicate here. Each variant
+/// maps to a canonical TOML string via [`MetricKey::as_config_key`] and a pretty
 /// display string via [`MetricKey::default_label`]. The [`MetricKey::ALL`]
 /// catalog and [`MetricKey::parse`] are kept in lock-step by a round-trip test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,17 +203,6 @@ impl MetricKey {
             MetricKey::CacheSize => "Cache size",
             MetricKey::MaxCacheSize => "Max cache size",
         }
-    }
-
-    /// Whether this metric's value is filtered by the `languages` setting.
-    pub(crate) fn is_per_language(&self) -> bool {
-        matches!(
-            self,
-            MetricKey::CacheHits
-                | MetricKey::CacheMisses
-                | MetricKey::CacheErrors
-                | MetricKey::HitRate
-        )
     }
 
     /// The presentation [`MetricKind`] for this metric.
@@ -906,17 +898,6 @@ metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spa
             message.contains("compile_requests"),
             "message was: {message}"
         );
-    }
-
-    #[test]
-    fn is_per_language_splits_the_two_families() {
-        assert!(MetricKey::CacheHits.is_per_language());
-        assert!(MetricKey::CacheMisses.is_per_language());
-        assert!(MetricKey::CacheErrors.is_per_language());
-        assert!(MetricKey::HitRate.is_per_language());
-
-        assert!(!MetricKey::CompileRequests.is_per_language());
-        assert!(!MetricKey::CacheSize.is_per_language());
     }
 
     #[test]

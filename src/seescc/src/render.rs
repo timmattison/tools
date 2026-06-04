@@ -46,10 +46,6 @@ pub(crate) fn format_window(window: Duration) -> String {
 /// produced by [`format_window`]. For the captured fixture
 /// (`809_212_237` / `10_737_418_240` / 15m) this yields
 /// `cache 771.7 MiB / 10 GiB · 15m window`.
-#[allow(
-    dead_code,
-    reason = "passed as build_watch's footer arg by the watch loop, wired up in a later slice"
-)]
 pub(crate) fn build_footer(cache_size: u64, max_cache_size: u64, window: Duration) -> String {
     let size = crate::aggregate::format_size(cache_size);
     let max = crate::aggregate::format_size(max_cache_size);
@@ -74,7 +70,6 @@ pub(crate) struct Row {
 /// sparkline shrinks to this floor; once even this won't fit, the column is
 /// dropped entirely so the numbers are never sacrificed to a 1- or 2-cell
 /// sparkline stub that conveys no shape.
-#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 pub(crate) const MIN_SPARK_WIDTH: usize = 4;
 
 /// The fixed per-row overhead, in display columns, that the label/value cells and
@@ -129,7 +124,6 @@ fn column_widths(rows: &[Row]) -> (usize, usize) {
 /// `width - 5` (or 0 if that is below the minimum). This is deliberate — an empty
 /// frame has no metrics to spark, so the value is only a pinned-down corner case,
 /// not a meaningful column count.
-#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 pub(crate) fn sparkline_budget(width: usize, rows: &[Row]) -> usize {
     let (max_label, max_value) = column_widths(rows);
     // Saturating so an absurdly narrow terminal can never underflow `usize`.

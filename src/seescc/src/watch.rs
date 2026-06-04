@@ -371,7 +371,7 @@ pub(crate) fn build_rows(
 ///
 /// This is the bridge between the poll-outcome state machine and the pure
 /// [`crate::render`] layer: it decides *what* to draw from `state` and hands the
-/// pieces to [`crate::render::build_watch`]. The behavior tracks design §6
+/// pieces to [`crate::render::build_watch`]. The behavior tracks design §4/§6
 /// directly:
 ///
 /// - **With last-good stats** (a healthy poll, or a failure that still has the
@@ -381,13 +381,27 @@ pub(crate) fn build_rows(
 ///   ([`WatchState::error`]) — so a recovered server has rows + footer + no
 ///   banner, while a mid-outage server keeps the same rows + footer *plus* the
 ///   banner.
+///
+///   **Sparkline attachment** happens on top of those rows: the spark column's
+///   width budget is [`crate::render::sparkline_budget`] for this `width` and the
+///   rows' own label/value footprint. When the budget is positive the history is
+///   bucketed to exactly that many columns ([`WatchState::bucket_history`] at
+///   `now`), and every `spark == true` metric's row gets a rendered sparkline of
+///   its [`crate::history::metric_series`] (Count → per-bucket deltas, Rate →
+///   windowed hit rate, Size → carried-forward absolutes). `spark == false`
+///   metrics stay `None`. When the budget is **0** (a terminal too narrow to
+///   carry even [`crate::render::MIN_SPARK_WIDTH`] glyphs) every row stays `None`:
+///   the numbers take priority and the trend column is dropped entirely (design
+///   §6, "Narrow terminal"). A failed poll never disturbs the history ring, so
+///   the sparklines keep rendering from the last good samples through an outage.
 /// - **With no last-good stats** (the very first poll failed and we have nothing
 ///   trustworthy to show): draw only the header and the banner — no rows, no
-///   footer — because every number would be a fabrication.
+///   footer, no sparklines — because every number would be a fabrication.
 ///
-/// `width` is the terminal column count to lay the frame out for and `clock` is
-/// the preformatted wall-clock string; both are injected by the loop's render
-/// closure so this stays pure and testable without a TTY.
+/// `width` is the terminal column count to lay the frame out for, `clock` is the
+/// preformatted wall-clock string, and `now` is the monotonic [`Instant`] the
+/// history is bucketed up to; all three are injected by the loop's render closure
+/// so this stays pure and testable without a TTY or a real clock.
 pub(crate) fn compose_watch_frame(
     state: &WatchState,
     config: &crate::config::Config,
@@ -395,14 +409,14 @@ pub(crate) fn compose_watch_frame(
     clock: &str,
     now: Instant,
 ) -> String {
-    let _ = now;
     let label = languages_label(config);
     let banner = state.error();
     match state.last_good() {
         // We have trustworthy numbers: draw the table and the cache/window
         // footer, with the banner shown only while the current poll is failing.
         Some(stats) => {
-            let rows = build_rows(config, stats);
+            let mut rows = build_rows(config, stats);
+            attach_sparklines(&mut rows, state, config, width, now);
             let footer =
                 crate::render::build_footer(stats.cache_size, stats.max_cache_size, config.window);
             crate::render::build_watch(&label, clock, width, &rows, banner, Some(&footer))
@@ -410,6 +424,43 @@ pub(crate) fn compose_watch_frame(
         // No good poll yet (first poll failed): header + banner only. Every
         // number would be a fabrication, so draw no rows and no footer.
         None => crate::render::build_watch(&label, clock, width, &[], banner, None),
+    }
+}
+
+/// Attach a rendered sparkline to each `spark == true` row in `rows`, in place,
+/// sizing the column to whatever the frame `width` can spare after the numbers.
+///
+/// The budget is [`crate::render::sparkline_budget`] for `width` and the rows'
+/// label/value footprint. When it is 0 — a terminal too narrow to carry even
+/// [`crate::render::MIN_SPARK_WIDTH`] glyphs — this returns without touching any
+/// row, so the numbers are never sacrificed to a squashed stub (design §6). When
+/// it is positive the history is bucketed once to that many columns (at `now`)
+/// and reused for every metric; each `config` metric is matched to its row by
+/// position (`build_rows` emits one row per metric in order), and a `spark == true`
+/// metric's row gets `sparkline(metric_series(..))`. `spark == false` rows keep
+/// the `None` that [`build_rows`] gave them.
+fn attach_sparklines(
+    rows: &mut [crate::render::Row],
+    state: &WatchState,
+    config: &crate::config::Config,
+    width: usize,
+    now: Instant,
+) {
+    let budget = crate::render::sparkline_budget(width, rows);
+    // Too narrow for a useful trend: drop the column entirely and let the numbers
+    // stand alone. Every row keeps build_rows's `None`.
+    if budget == 0 {
+        return;
+    }
+
+    // One bucketing pass shared by every metric: the columns are identical, only
+    // the metric extracted from each bucket differs.
+    let buckets = state.bucket_history(now, budget);
+    for (spec, row) in config.metrics.iter().zip(rows.iter_mut()) {
+        if spec.spark {
+            let series = crate::history::metric_series(spec.key, &buckets, &config.languages);
+            row.spark = Some(crate::sparkline::sparkline(&series));
+        }
     }
 }
 
@@ -614,6 +665,16 @@ mod tests {
     /// it.
     const TEST_WINDOW: Duration = Duration::from_secs(15 * 60);
 
+    /// The spacing between fabricated polls in the multi-poll spark tests. Chosen
+    /// well above any plausible per-bucket slice width for [`TEST_WINDOW`] over a
+    /// width-80 frame's spark budget, so successive samples land in *distinct*
+    /// time buckets rather than collapsing into one slice (where "newest wins"
+    /// would flatten the series). This is what lets a rising counter actually
+    /// draw a shape, and all three timestamps still sit comfortably inside the
+    /// window so none is pruned. (A real 1 s poll fills buckets gradually; the
+    /// tests jump the clock to exercise the same bucketing deterministically.)
+    const POLL_STEP: Duration = Duration::from_secs(180);
+
     /// The eight block-drawing sparkline glyphs, mirrored from
     /// [`crate::sparkline::SPARK_GLYPHS`]. The frame tests inspect composed lines
     /// for these characters directly (never byte-slicing — repo UTF-8 rule).
@@ -715,7 +776,13 @@ mod tests {
             base + Duration::from_secs(1),
         );
 
-        let frame = compose_watch_frame(&state, &config, 80, "12:34:56", base + Duration::from_secs(1));
+        let frame = compose_watch_frame(
+            &state,
+            &config,
+            80,
+            "12:34:56",
+            base + Duration::from_secs(1),
+        );
 
         assert!(
             frame.contains("connection refused"),
@@ -811,14 +878,14 @@ mod tests {
         // trend.
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let interval = config.poll_interval;
         let mut state = WatchState::new(TEST_WINDOW);
 
-        // Rust cache_hits climbs 1700 -> 1800 -> 2000 across three polls, so the
-        // per-bucket deltas are non-zero and uneven — a shape, not a flat line.
+        // Rust cache_hits climbs 1700 -> 1800 -> 2000 across three polls spaced so
+        // they land in distinct time buckets, so the per-bucket deltas are
+        // non-zero and uneven — a shape, not a flat line.
         state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
-        state.apply_poll(Ok(fixture_with_rust(1800, 950)), base + interval);
-        let now = base + interval * 2;
+        state.apply_poll(Ok(fixture_with_rust(1800, 950)), base + POLL_STEP);
+        let now = base + POLL_STEP * 2;
         state.apply_poll(Ok(fixture_with_rust(2000, 1100)), now);
 
         let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
@@ -847,7 +914,10 @@ mod tests {
         // Sanity: spark_label resolves to a real spark metric label so the helper
         // stays exercised alongside the literal labels above.
         assert!(
-            config.metrics.iter().any(|m| m.spark && m.label == spark_label(&config)),
+            config
+                .metrics
+                .iter()
+                .any(|m| m.spark && m.label == spark_label(&config)),
             "spark_label must name a configured spark=true metric",
         );
     }
@@ -870,15 +940,15 @@ mod tests {
         // lays out — the spark length must match it exactly.
         let rows = build_rows(&config, &fixture_stats());
         let budget = crate::render::sparkline_budget(width, &rows);
-        assert!(budget > 0, "precondition: width 80 must leave a spark budget");
+        assert!(
+            budget > 0,
+            "precondition: width 80 must leave a spark budget"
+        );
 
         for spark_metric in config.metrics.iter().filter(|m| m.spark) {
             let row = row_line(&frame, &spark_metric.label)
                 .unwrap_or_else(|| panic!("the {} row must be present", spark_metric.label));
-            let glyphs: Vec<char> = row
-                .chars()
-                .filter(|c| SPARK_GLYPHS.contains(c))
-                .collect();
+            let glyphs: Vec<char> = row.chars().filter(|c| SPARK_GLYPHS.contains(c)).collect();
             assert_eq!(
                 glyphs.len(),
                 budget,
@@ -900,11 +970,10 @@ mod tests {
         // priority over the trend (design §6).
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let interval = config.poll_interval;
         let mut state = WatchState::new(TEST_WINDOW);
         state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
-        state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + interval);
-        let now = base + interval * 2;
+        state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + POLL_STEP);
+        let now = base + POLL_STEP * 2;
         state.apply_poll(Ok(fixture_with_rust(2100, 1200)), now);
 
         // Choose a width at which sparkline_budget collapses to 0.
@@ -949,12 +1018,11 @@ mod tests {
         //   p3 +10h/+0m        -> 100%
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let interval = config.poll_interval;
         let mut state = WatchState::new(TEST_WINDOW);
         state.apply_poll(Ok(fixture_with_rust(10, 10)), base);
-        state.apply_poll(Ok(fixture_with_rust(20, 20)), base + interval);
-        state.apply_poll(Ok(fixture_with_rust(20, 20)), base + interval * 2);
-        let now = base + interval * 3;
+        state.apply_poll(Ok(fixture_with_rust(20, 20)), base + POLL_STEP);
+        state.apply_poll(Ok(fixture_with_rust(20, 20)), base + POLL_STEP * 2);
+        let now = base + POLL_STEP * 3;
         state.apply_poll(Ok(fixture_with_rust(30, 20)), now);
 
         let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);
@@ -983,11 +1051,10 @@ mod tests {
         // the ring, so the trend persists through the outage.
         let config = crate::config::Config::default();
         let base = Instant::now();
-        let interval = config.poll_interval;
         let mut state = WatchState::new(TEST_WINDOW);
         state.apply_poll(Ok(fixture_with_rust(1700, 900)), base);
-        state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + interval);
-        let now = base + interval * 2;
+        state.apply_poll(Ok(fixture_with_rust(1900, 1000)), base + POLL_STEP);
+        let now = base + POLL_STEP * 2;
         state.apply_poll(Err(anyhow::anyhow!("connection refused")), now);
 
         let frame = compose_watch_frame(&state, &config, 80, "12:34:56", now);

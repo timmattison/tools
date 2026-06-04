@@ -1,8 +1,9 @@
 //! seescc — a self-refreshing terminal viewer for sccache statistics.
 //!
-//! Phases 1–4 are complete: a single poll → parse → aggregate → render → stdout
-//! pass, a TOML config, a JSON one-shot format, and a live watch loop that owns
-//! the terminal and refreshes on a timer. Phase 5 adds sparkline history.
+//! Phases 1–5 are complete: a single poll → parse → aggregate → render → stdout
+//! pass, a TOML config, a JSON one-shot format, a live watch loop that owns the
+//! terminal and refreshes on a timer, and per-metric Unicode sparklines drawn
+//! from an in-memory history ring that fills in over the configured window.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -12,20 +13,10 @@ use buildinfo::version_string;
 use clap::{Parser, ValueEnum};
 
 mod aggregate;
-#[allow(
-    dead_code,
-    reason = "the MetricKind enum and the MetricKey::kind / MetricKey::is_per_language catalog accessors are consumed by Phase 5 sparklines"
-)]
 mod config;
-#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 mod history;
 mod render;
-#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 mod sparkline;
-#[allow(
-    dead_code,
-    reason = "Counters/Stats carry fields (compilations, cache_errors, …) consumed by Phase 5 sparklines"
-)]
 mod stats;
 mod watch;
 
