@@ -695,6 +695,52 @@ mod tests {
     }
 
     #[test]
+    fn crossing_a_grid_point_shifts_the_whole_row_exactly_one_column_left() {
+        // The second half of the stability guarantee: when `now` advances past a
+        // grid point, the leading edge steps forward by exactly one slice, so the
+        // oldest column falls off the left, every surviving sample's index drops
+        // by one, and a fresh empty slot opens on the right. window = 4s over 4
+        // columns ⇒ 1s slices, epoch = base.
+        //
+        // Four samples, one per bucket-center for the grid at k = 4
+        // (leading = base+4s, window [base+0s, base+4s], slices [0,1)[1,2)[2,3)[3,4]):
+        //   A @ base+0.5s ⇒ bucket 0
+        //   B @ base+1.5s ⇒ bucket 1
+        //   C @ base+2.5s ⇒ bucket 2
+        //   D @ base+3.5s ⇒ bucket 3
+        // Bucketing at now = base+4.0s ceils to k = 4 (just *before* the next grid
+        // point); at now = base+4.5s it ceils to k = 5 (just *after*), stepping
+        // leading to base+5s with window [base+1s, base+5s]:
+        //   A (base+0.5s) is now below base+1s ⇒ falls off the left edge,
+        //   B ⇒ bucket 0, C ⇒ bucket 1, D ⇒ bucket 2 (each decremented by one),
+        //   bucket 3 opens as a fresh gap.
+        let base = Instant::now();
+        let window = Duration::from_secs(4);
+        let mut history = History::new(window, base);
+        history.push(base + Duration::from_millis(500), tagged(10)); // A
+        history.push(base + Duration::from_millis(1500), tagged(20)); // B
+        history.push(base + Duration::from_millis(2500), tagged(30)); // C
+        history.push(base + Duration::from_millis(3500), tagged(40)); // D
+
+        let before = history.bucket_last(base + Duration::from_secs(4), 4);
+        assert_eq!(
+            tags(&before),
+            vec![Some(10), Some(20), Some(30), Some(40)],
+            "before the grid step, the four samples occupy buckets 0..3 in order",
+        );
+
+        // Advance `now` just past the grid point so `k` increments by one.
+        let after = history.bucket_last(base + Duration::from_millis(4500), 4);
+        assert_eq!(
+            tags(&after),
+            vec![Some(20), Some(30), Some(40), None],
+            "crossing one grid point must shift the whole row exactly one column \
+             left: the oldest sample falls off, each survivor decrements by one, \
+             and a fresh gap opens on the right",
+        );
+    }
+
+    #[test]
     fn bucket_last_excludes_a_retained_sample_below_the_leading_window() {
         // Defensive lower-edge range checking inside bucket_last, restated for the
         // epoch-pinned grid: a sample strictly older than `leading - window` is
