@@ -1461,15 +1461,75 @@ impl PackageManager {
     }
 }
 
-/// Detects whether a new worktree needs a package-manager install to bootstrap
-/// its git hooks. Stub for the red step — always returns `None`.
+/// Detects whether a freshly created worktree needs a package-manager install
+/// to bootstrap its git hooks, and if so which package manager to use.
+///
+/// Returns `Some(pm)` only when `dir/package.json` exists, parses as JSON, and
+/// declares a non-empty string `scripts.prepare`. A `prepare` script is the
+/// husky convention for (re)generating the gitignored hook directory
+/// (`.husky/_`) that `core.hooksPath` points at, so its presence is the signal
+/// that an install is worth running in the new worktree.
+///
+/// The package manager is chosen in priority order:
+/// 1. The corepack `packageManager` field (e.g. `"pnpm@9.1.0"` or
+///    `"yarn@4.0.0+sha256..."`): the name before the first `@` is matched
+///    case-sensitively against pnpm/npm/yarn/bun. An unrecognized name is
+///    ignored and selection falls through to the lockfile check.
+/// 2. A lockfile in `dir`, checked in order: `pnpm-lock.yaml` → Pnpm,
+///    `package-lock.json` → Npm, `yarn.lock` → Yarn, `bun.lockb`/`bun.lock`
+///    → Bun.
+/// 3. Default: Pnpm.
+///
+/// This is fail-safe: a missing, unreadable, or malformed `package.json`, or
+/// any `scripts.prepare` that is absent, non-string, or empty, yields `None`.
+/// `None` means "do nothing" — the function never panics and never errors, so
+/// detection problems can never abort worktree creation.
 #[allow(
     dead_code,
     reason = "TODO(#275): main() wiring lands in slice 2; tests-only usage until then"
 )]
 fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
-    let _ = dir;
-    None
+    // Read and parse package.json; any I/O or JSON error is treated as "no
+    // bootstrap needed" so detection can never abort worktree creation.
+    let contents = fs::read_to_string(dir.join("package.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&contents).ok()?;
+
+    // Require a non-empty string `scripts.prepare` — the husky signal.
+    let prepare = value.get("scripts")?.get("prepare")?.as_str()?;
+    if prepare.is_empty() {
+        return None;
+    }
+
+    // Priority 1: corepack `packageManager` field. Take the name before the
+    // first `@` and match it case-sensitively; an unrecognized name falls
+    // through to lockfile detection rather than failing.
+    if let Some(spec) = value.get("packageManager").and_then(|v| v.as_str()) {
+        let name = spec.split('@').next().unwrap_or(spec);
+        match name {
+            "pnpm" => return Some(PackageManager::Pnpm),
+            "npm" => return Some(PackageManager::Npm),
+            "yarn" => return Some(PackageManager::Yarn),
+            "bun" => return Some(PackageManager::Bun),
+            _ => {}
+        }
+    }
+
+    // Priority 2: lockfile present in the worktree directory.
+    if dir.join("pnpm-lock.yaml").exists() {
+        return Some(PackageManager::Pnpm);
+    }
+    if dir.join("package-lock.json").exists() {
+        return Some(PackageManager::Npm);
+    }
+    if dir.join("yarn.lock").exists() {
+        return Some(PackageManager::Yarn);
+    }
+    if dir.join("bun.lockb").exists() || dir.join("bun.lock").exists() {
+        return Some(PackageManager::Bun);
+    }
+
+    // Priority 3: default to pnpm, this user's standard package manager.
+    Some(PackageManager::Pnpm)
 }
 
 #[cfg(test)]
