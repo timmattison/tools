@@ -1343,11 +1343,19 @@ fn main() {
                 // For --tmux the run is async and the check is pre-spawn, so
                 // skipping bootstrap there would guarantee a false-positive
                 // warning — tmux+run keeps bootstrapping.
+                //
+                // The skip (and its notice) only make sense when a bootstrap was
+                // actually pending: gate on `detect_hook_bootstrap`. In a repo
+                // with no `prepare` script `bootstrap_hooks` is a silent no-op, so
+                // announcing a "skip" there would imply something was skipped when
+                // nothing would have run. When nothing is pending we fall through
+                // to `bootstrap_hooks`, which no-ops silently.
                 let skip_bootstrap_for_run = !config.tmux
                     && config
                         .run
                         .as_deref()
-                        .is_some_and(run_command_installs_dependencies);
+                        .is_some_and(run_command_installs_dependencies)
+                    && detect_hook_bootstrap(&worktree_path).is_some();
                 if config.bootstrap_hooks {
                     if skip_bootstrap_for_run {
                         error!(
