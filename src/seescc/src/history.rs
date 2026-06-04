@@ -198,8 +198,221 @@ pub(crate) fn metric_series(
     buckets: &[Option<&Stats>],
     languages: &[String],
 ) -> Vec<f64> {
-    let _ = (key, buckets, languages);
-    todo!("implemented in the green commit")
+    match key.kind() {
+        // Cumulative counters → per-bucket deltas. Extract each bucket's
+        // cumulative value (per-language counters route through `lang_sum`;
+        // globals read the field directly) and let `count_deltas` do the
+        // carry-forward / first-bucket-zero / reset-clamp shaping.
+        MetricKind::Count => {
+            let cumulatives = count_cumulatives(key, buckets, languages);
+            count_deltas(&cumulatives)
+        }
+        // hit_rate → windowed rate per bucket: the per-bucket hits-delta and
+        // misses-delta (shaped exactly like Count), combined via `hit_rate` so a
+        // zero-activity slice is 0.0 (baseline, never NaN) and values are 0..=100.
+        MetricKind::Rate => {
+            let hit_cumulatives =
+                lang_cumulatives(buckets, languages, |stats| &stats.stats.cache_hits.counts);
+            let miss_cumulatives =
+                lang_cumulatives(buckets, languages, |stats| &stats.stats.cache_misses.counts);
+            // Keep the hit/miss deltas as `u64` here — feeding them straight into
+            // `hit_rate` avoids a lossy `f64 -> u64` round-trip (which clippy's
+            // cast lints forbid) and lets `hit_rate` own the 0..=100 / no-NaN
+            // contract.
+            let hit_deltas = count_deltas_u64(&hit_cumulatives);
+            let miss_deltas = count_deltas_u64(&miss_cumulatives);
+            hit_deltas
+                .iter()
+                .zip(miss_deltas.iter())
+                .map(|(&hits, &misses)| crate::aggregate::hit_rate(hits, misses))
+                .collect()
+        }
+        // Sizes → absolute value per bucket (not a delta), carried forward.
+        MetricKind::Size => size_absolutes(key, buckets),
+    }
+}
+
+/// The per-bucket cumulative value of the `Count` metric `key`, one `Option<u64>`
+/// per bucket: `Some(value)` when a sample landed in that slice, `None` for a gap.
+///
+/// Per-language counters (`cache_hits`/`cache_misses`/`cache_errors`) sum the
+/// selected `languages` via [`crate::aggregate::lang_sum`]; every global counter
+/// reads its scalar field directly and ignores `languages`. The result feeds
+/// [`count_deltas`], which turns these cumulatives into per-slice activity.
+fn count_cumulatives(
+    key: MetricKey,
+    buckets: &[Option<&Stats>],
+    languages: &[String],
+) -> Vec<Option<u64>> {
+    match key {
+        MetricKey::CacheHits => {
+            lang_cumulatives(buckets, languages, |stats| &stats.stats.cache_hits.counts)
+        }
+        MetricKey::CacheMisses => {
+            lang_cumulatives(buckets, languages, |stats| &stats.stats.cache_misses.counts)
+        }
+        MetricKey::CacheErrors => {
+            lang_cumulatives(buckets, languages, |stats| &stats.stats.cache_errors.counts)
+        }
+        // Every remaining `Count` key is a global scalar counter: read the field
+        // and ignore `languages`. `kind()` guarantees the size/rate keys never
+        // reach here, so the catch-all only ever sees globals.
+        _ => buckets
+            .iter()
+            .map(|bucket| bucket.map(|stats| global_count(key, stats)))
+            .collect(),
+    }
+}
+
+/// The cumulative value of a global scalar `Count` counter `key` from one
+/// `stats` snapshot.
+///
+/// Only the global `Count` keys are reachable — per-language and non-`Count`
+/// keys are routed elsewhere by [`metric_series`]/[`count_cumulatives`] — so the
+/// size, rate, and per-language arms collapse into an unreachable `0`, keeping
+/// the match total without inventing values for keys that never arrive.
+fn global_count(key: MetricKey, stats: &Stats) -> u64 {
+    let counters = &stats.stats;
+    match key {
+        MetricKey::CompileRequests => counters.compile_requests,
+        MetricKey::RequestsExecuted => counters.requests_executed,
+        MetricKey::RequestsNotCacheable => counters.requests_not_cacheable,
+        MetricKey::RequestsNotCompile => counters.requests_not_compile,
+        MetricKey::RequestsUnsupportedCompiler => counters.requests_unsupported_compiler,
+        MetricKey::CacheWrites => counters.cache_writes,
+        MetricKey::Compilations => counters.compilations,
+        MetricKey::CompileFails => counters.compile_fails,
+        MetricKey::ForcedRecaches => counters.forced_recaches,
+        // Unreachable for global `Count` keys; per-language counters, sizes, and
+        // the rate are handled before `global_count` is ever called.
+        MetricKey::CacheHits
+        | MetricKey::CacheMisses
+        | MetricKey::CacheErrors
+        | MetricKey::HitRate
+        | MetricKey::CacheSize
+        | MetricKey::MaxCacheSize => 0,
+    }
+}
+
+/// The per-bucket cumulative of a per-language counter map, filtered by
+/// `languages`.
+///
+/// `select` picks the relevant `HashMap<String, u64>` out of each sample (e.g.
+/// `cache_hits.counts`); [`crate::aggregate::lang_sum`] then sums the selected
+/// languages (an empty `languages` sums all). A `None` bucket stays `None` so the
+/// gap propagates into the delta engine as "no sample landed here".
+fn lang_cumulatives(
+    buckets: &[Option<&Stats>],
+    languages: &[String],
+    select: impl Fn(&Stats) -> &std::collections::HashMap<String, u64>,
+) -> Vec<Option<u64>> {
+    buckets
+        .iter()
+        .map(|bucket| bucket.map(|stats| crate::aggregate::lang_sum(select(stats), languages)))
+        .collect()
+}
+
+/// Turn a per-bucket cumulative series into the per-bucket *delta* series the
+/// sparkline draws — the activity that occurred within each time slice.
+///
+/// The shaping rules (from the design's "Sparkline semantics") are:
+///
+/// - **Carry-forward across gaps.** A `None` bucket means no sample landed in
+///   that slice, so the cumulative is unchanged and the delta is `0.0`. The
+///   previously-seen cumulative is carried forward to the next observed sample.
+/// - **Leading gap and first sample are baseline.** Buckets before the first
+///   observed sample are `0.0` (no data yet). The first observed bucket is *also*
+///   `0.0`: its cumulative includes everything since sccache started, and
+///   sparking that as a delta would draw a giant spurious launch spike.
+/// - **Reset clamping.** A cumulative *drop* (a mid-run `sccache --zero-stats`)
+///   would make the raw delta negative; [`u64::saturating_sub`] clamps it to
+///   `0.0` and the carried baseline becomes the new, lower value, so history
+///   continues from there and a later increase shows its true delta.
+///
+/// The output length always equals `cumulatives.len()`.
+///
+/// This is the `f64` face of [`count_deltas_u64`] used directly by `Count`
+/// metrics; the `Rate` path consumes the `u64` deltas instead, so the two share
+/// one definition of the shaping rules.
+fn count_deltas(cumulatives: &[Option<u64>]) -> Vec<f64> {
+    count_deltas_u64(cumulatives)
+        .into_iter()
+        .map(|delta| delta as f64)
+        .collect()
+}
+
+/// The integer per-bucket deltas backing [`count_deltas`] — identical shaping
+/// (carry-forward, first-bucket-zero, reset clamping), but kept as `u64` so the
+/// `hit_rate` path can consume them without a lossy `f64 -> u64` round-trip.
+///
+/// The output length always equals `cumulatives.len()`.
+fn count_deltas_u64(cumulatives: &[Option<u64>]) -> Vec<u64> {
+    // The most recent cumulative actually observed, or `None` until the first
+    // sample appears. While it is `None` every bucket is baseline `0` (no data to
+    // diff against); once set, each new sample's delta is measured against it.
+    let mut previous: Option<u64> = None;
+    cumulatives
+        .iter()
+        .map(|cumulative| match (*cumulative, previous) {
+            // No sample in this slice → cumulative unchanged → zero activity. The
+            // carried baseline is untouched so the next real sample diffs against
+            // the last observed value, not against this gap.
+            (None, _) => 0,
+            // First observed sample: establish the baseline but emit 0 — its
+            // cumulative is the all-time total, not this slice's activity.
+            (Some(current), None) => {
+                previous = Some(current);
+                0
+            }
+            // A subsequent sample: the delta is `current - baseline`, clamped to
+            // 0 on a reset (a drop). Either way the baseline advances to `current`
+            // so post-reset history continues from the new floor.
+            (Some(current), Some(baseline)) => {
+                let delta = current.saturating_sub(baseline);
+                previous = Some(current);
+                delta
+            }
+        })
+        .collect()
+}
+
+/// The per-bucket *absolute* value series for a `Size` metric `key`, carried
+/// forward across gaps.
+///
+/// Sizes (`cache_size`, `max_cache_size`) are not cumulative counters, so they
+/// spark their literal value, not a delta. A bucket with a sample contributes
+/// that sample's size; a `None` bucket carries the previously-observed size
+/// forward (the cache hasn't changed in that idle slice); buckets before the
+/// first sample are `0.0` (no data yet). The output length always equals
+/// `buckets.len()`.
+fn size_absolutes(key: MetricKey, buckets: &[Option<&Stats>]) -> Vec<f64> {
+    // The most recent size observed, carried into later gap buckets. `0` until the
+    // first sample, matching the "no data yet → baseline" rule for the leading run
+    // of `None`s.
+    let mut last: u64 = 0;
+    buckets
+        .iter()
+        .map(|bucket| {
+            if let Some(stats) = bucket {
+                last = size_value(key, stats);
+            }
+            last as f64
+        })
+        .collect()
+}
+
+/// The absolute byte value of the `Size` metric `key` from one `stats` snapshot.
+///
+/// Only the two size keys are reachable here ([`metric_series`] dispatches on
+/// [`MetricKind::Size`]); any other key collapses to `0`, keeping the match total
+/// without inventing a size for a non-size metric.
+fn size_value(key: MetricKey, stats: &Stats) -> u64 {
+    match key {
+        MetricKey::CacheSize => stats.cache_size,
+        MetricKey::MaxCacheSize => stats.max_cache_size,
+        // Unreachable: only `MetricKind::Size` keys reach `size_absolutes`.
+        _ => 0,
+    }
 }
 
 #[cfg(test)]
@@ -398,11 +611,7 @@ mod tests {
     fn lang_hits_misses(entries: &[(&str, u64, u64)]) -> Stats {
         let mut stats = Stats::default();
         for &(lang, hits, misses) in entries {
-            stats
-                .stats
-                .cache_hits
-                .counts
-                .insert(lang.to_string(), hits);
+            stats.stats.cache_hits.counts.insert(lang.to_string(), hits);
             stats
                 .stats
                 .cache_misses
