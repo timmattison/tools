@@ -343,7 +343,7 @@ pub(crate) fn build_output(
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
-    let commits_ahead = repo::base_status(repo, &base).ahead;
+    let base_status = repo::base_status(repo, &base);
 
     let last_commit_age = last_commit_age(repo);
 
@@ -358,8 +358,8 @@ pub(crate) fn build_output(
     let mut snapshot = build_snapshot(
         branch,
         base,
-        commits_ahead,
-        0,
+        base_status.ahead,
+        base_status.behind,
         last_commit_age,
         entries,
         &staged_numstat,

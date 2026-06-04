@@ -90,10 +90,6 @@ pub struct BaseStatus {
     /// Commits reachable from the base but not from HEAD
     /// (`git rev-list --count HEAD..base`) — i.e. how far behind the base HEAD
     /// is, the needs-rebase signal.
-    #[allow(
-        dead_code,
-        reason = "header wiring that reads `behind` lands in a later slice; the walk and its unit tests already exercise this value"
-    )]
     pub behind: u32,
 }
 
