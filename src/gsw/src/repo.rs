@@ -885,6 +885,26 @@ mod tests {
     }
 
     #[test]
+    fn upstream_reports_behind_count_when_remote_advances() {
+        // Advance the origin by one commit, fetch it into the clone without
+        // moving the clone's HEAD: the clone is now 1 behind origin/main and 0
+        // ahead. Locks in the behind direction (previously only covered by the
+        // integration test) before the ahead_behind helper extraction.
+        let (origin, clone) = init_repo_with_upstream();
+        let op = origin.path();
+        std::fs::write(op.join("remote.txt"), "x\n").unwrap();
+        git(op, &["add", "remote.txt"]);
+        git(op, &["commit", "-q", "-m", "remote moved on"]);
+        let p = clone.path();
+        git(p, &["fetch", "-q"]);
+        let repo = open_at(p).unwrap();
+        let up = super::upstream_status(&repo).expect("clone has an upstream");
+        assert_eq!(up.name, "origin/main");
+        assert_eq!(up.ahead, 0, "clone has no local commits past origin");
+        assert_eq!(up.behind, 1, "origin advanced one commit past the clone");
+    }
+
+    #[test]
     fn status_staged_typechange_file_to_symlink() {
         // Replace a tracked regular file with a symlink and stage it; git/gix
         // report this as a type change, not a plain modification.
