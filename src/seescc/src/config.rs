@@ -1003,6 +1003,47 @@ metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spa
     }
 
     #[test]
+    fn rejects_zero_magnitude_for_every_unit() {
+        // A zero duration would make the watch loop's `recv_timeout(ZERO)` time
+        // out immediately, busy-looping and spawning an `sccache --show-stats`
+        // subprocess as fast as the OS allows. Every unit must reject zero.
+        for input in ["0ms", "0s", "0m", "0h"] {
+            assert!(
+                parse_duration(input).is_err(),
+                "a zero magnitude must be rejected; `{input}` parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_duration_error_names_the_input() {
+        let err = parse_duration("0s").expect_err("`0s` must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("\"0s\""), "message was: {message}");
+    }
+
+    #[test]
+    fn zero_poll_interval_in_toml_errors() {
+        let err = Config::from_toml(r#"poll_interval = "0s""#)
+            .expect_err("a zero poll_interval must error");
+        assert!(
+            matches!(err, ConfigError::InvalidDuration { .. }),
+            "expected InvalidDuration, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_overrides_rejects_a_zero_poll_interval() {
+        let err = Config::default()
+            .with_overrides(Some("0ms"), None)
+            .expect_err("a zero poll_interval override must error");
+        assert!(
+            matches!(err, ConfigError::InvalidDuration { .. }),
+            "expected InvalidDuration, got: {err:?}"
+        );
+    }
+
+    #[test]
     fn error_message_names_input_and_units() {
         let err = parse_duration("10x").expect_err("`10x` must be rejected");
         let message = err.to_string();
