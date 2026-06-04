@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use colored::{ColoredString, Colorize};
 use serde::ser::SerializeMap;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Format a history `window` as a compact human string using the largest unit
 /// that divides it *exactly*.
@@ -164,6 +164,69 @@ pub(crate) fn banner_text(message: &str) -> ColoredString {
     message.red().bold()
 }
 
+/// The ellipsis appended to a banner message that was truncated to fit the
+/// frame, marking the cut so the user can tell the message was shortened. It is
+/// one display column wide, so it consumes exactly one column of the budget.
+const TRUNCATION_ELLIPSIS: char = '…';
+
+/// Flatten and width-truncate a raw error-banner `message` so it renders as one
+/// clean line no wider than `budget` display columns.
+///
+/// Poll failures embed sccache's trimmed stderr (see `poll_sccache` in
+/// `main.rs`), which can be multi-line and/or wider than the terminal. Left
+/// raw, embedded control characters (`\n`, `\r`, `\t`) would spill into
+/// unindented lines and an over-width line would auto-wrap (DECAWM) in the
+/// watch loop's raw mode — stair-stepping the whole frame exactly when the user
+/// most needs a readable view (mid-outage). [`build_watch`] funnels *every*
+/// banner through here so no caller can bypass the cleanup.
+///
+/// Two steps:
+/// 1. **Flatten** — split on any whitespace (which `char::is_whitespace`, and
+///    therefore `split_whitespace`, treats `\n`/`\r`/`\t` as) and rejoin the
+///    runs with single spaces. This collapses a multi-line message to one line,
+///    trims leading/trailing whitespace, and squeezes internal runs so the text
+///    reads cleanly. Remaining non-whitespace control characters are dropped.
+/// 2. **Width-truncate** — if the flattened text exceeds `budget` *display*
+///    columns (measured with `unicode-width`, so a CJK char counts as 2), take
+///    whole characters until appending the next one — plus the one-column
+///    [`TRUNCATION_ELLIPSIS`] — would overflow, then append the ellipsis.
+///    Iteration is per-`char` (never a byte slice — repo UTF-8 rule), and the
+///    per-char width is accumulated as `usize` so the workspace's lossy-cast
+///    lint stays satisfied.
+///
+/// A `budget` of 0 yields the empty string and a `budget` of 1 yields just the
+/// ellipsis (or a single one-column char if that already fits) — both saturate
+/// rather than underflow, so a 1-column terminal can never panic.
+fn sanitize_banner(message: &str, budget: usize) -> String {
+    // Step 1: flatten newlines/tabs/runs of whitespace to single spaces and trim.
+    let flattened = message.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    // Step 2: if it already fits, it passes through unchanged.
+    if UnicodeWidthStr::width(flattened.as_str()) <= budget {
+        return flattened;
+    }
+
+    // Over budget: keep whole chars while leaving one column for the ellipsis.
+    let ellipsis_width = UnicodeWidthStr::width(TRUNCATION_ELLIPSIS.to_string().as_str());
+    let keep_budget = budget.saturating_sub(ellipsis_width);
+    let mut used = 0_usize;
+    let mut truncated = String::new();
+    for ch in flattened.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width > keep_budget {
+            break;
+        }
+        used += ch_width;
+        truncated.push(ch);
+    }
+    // Only append the ellipsis when it itself fits the budget (a 0-column budget
+    // leaves no room even for the marker).
+    if budget >= ellipsis_width {
+        truncated.push(TRUNCATION_ELLIPSIS);
+    }
+    truncated
+}
+
 /// Build the live watch frame: the metric table plus an optional error `banner`
 /// and an optional `footer` line.
 ///
@@ -171,9 +234,12 @@ pub(crate) fn banner_text(message: &str) -> ColoredString {
 /// - The header: `sccache · <languages_label>` left-aligned with `clock`
 ///   right-justified against `width` (identical to the one-shot header).
 /// - The `banner`, when present: directly under the header on its own line, a
-///   single leading space then the message styled red + bold via
-///   [`banner_text`]. When absent the layout is byte-identical to the one-shot
-///   frame.
+///   single leading space then the message — first run through
+///   [`sanitize_banner`] (newlines/tabs flattened to single spaces and the text
+///   width-truncated to the frame so an embedded `\n` can't spill and an
+///   over-width line can't auto-wrap mid-outage) and then styled red + bold via
+///   [`banner_text`]. The message budget is `width - 1` columns (the one leading
+///   space). When absent the layout is byte-identical to the one-shot frame.
 /// - A blank separator line.
 /// - The metric `rows`: labels left-aligned in a shared column, values
 ///   right-aligned in a shared column, all measured with `unicode-width` so
@@ -203,8 +269,15 @@ pub(crate) fn build_watch(
     out.push_str(&header);
     out.push('\n');
     if let Some(message) = banner {
+        // The banner renders as one leading space + the message, so the message
+        // has `width - 1` display columns to work with. Sanitize before styling
+        // so a multi-line / over-width sccache error can't spill or auto-wrap
+        // (DECAWM) and stair-step the frame mid-outage. Saturating so a
+        // 0/1-column terminal can't underflow the budget.
+        let budget = width.saturating_sub(1);
+        let sanitized = sanitize_banner(message, budget);
         out.push(' ');
-        out.push_str(&banner_text(message).to_string());
+        out.push_str(&banner_text(&sanitized).to_string());
         out.push('\n');
     }
     out.push('\n');
