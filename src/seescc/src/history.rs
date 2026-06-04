@@ -830,6 +830,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bucket_last_sample_in_the_in_progress_slice_lands_in_the_final_bucket() {
+        // The live right column: the rightmost slice spans [leading - slice,
+        // leading] with leading >= now, so a sample polled AFTER the last grid
+        // point — but still at or before `now` — lands in the FINAL bucket and
+        // live-updates there until the grid steps past it. window = 4s over 4
+        // columns ⇒ 1s slices, epoch = base; grid points at base+1,2,3,4,5...
+        //
+        // now = base+4.5s ⇒ elapsed 4.5s, k = ceil(4.5/1) = 5, leading = base+5s.
+        // The last grid point `now` has passed is base + floor(4.5/1)*1 = base+4s,
+        // so the in-progress slice is [base+4s, base+5s] and its final-bucket
+        // portion up to `now` is [base+4s, base+4.5s]. A sample at base+4.3s is
+        // strictly after the last grid point (base+4s) and at/before now (base+4.5s)
+        // and at/before leading (base+5s):
+        //   age = leading - sample = 5s - 4.3s = 0.7s,
+        //   elapsed_into_window = window - age = 4s - 0.7s = 3.3s,
+        //   index = floor(3.3 * 4 / 4) = 3 ⇒ the final bucket (columns - 1).
+        let base = Instant::now();
+        let window = Duration::from_secs(4);
+        let mut history = History::new(window, base);
+
+        // A sample in the in-progress slice, after the last grid point (base+4s),
+        // before `now` (base+4.5s).
+        history.push(base + Duration::from_millis(4300), tagged(77));
+
+        let now = base + Duration::from_millis(4500);
+        let buckets = history.bucket_last(now, 4);
+        assert_eq!(
+            tags(&buckets),
+            vec![None, None, None, Some(77)],
+            "a sample pushed after the last grid point (in the in-progress slice) \
+             must land in the final bucket — the live right column tracks samples \
+             up to `now` even though `leading` (the slice's upper edge) is ahead of \
+             `now`",
+        );
+    }
+
     // ---- metric_series ----
 
     use crate::config::MetricKey;
