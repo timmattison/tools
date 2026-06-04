@@ -173,8 +173,9 @@ impl History {
 /// metrics. The output length always equals `buckets.len()`.
 ///
 /// This is the bridge between the raw bucketed [`Stats`] snapshots and the
-/// pure [`crate::sparkline::sparkline`] renderer: it turns each `MetricKind`'s
-/// cumulative or absolute values into exactly the series the sparkline expects.
+/// pure [`crate::sparkline::metric_sparkline`] renderer: it turns each
+/// `MetricKind`'s cumulative or absolute values into exactly the series the
+/// sparkline expects.
 /// The shaping rules come straight from the design's "Sparkline semantics" and
 /// differ by kind:
 ///

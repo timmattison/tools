@@ -393,7 +393,9 @@ pub(crate) fn build_rows(
 ///   bucketed to exactly that many columns ([`WatchState::bucket_history`] at
 ///   `now`), and every `spark == true` metric's row gets a rendered sparkline of
 ///   its [`crate::history::metric_series`] (Count → per-bucket deltas, Rate →
-///   windowed hit rate, Size → carried-forward absolutes). `spark == false`
+///   windowed hit rate, Size → carried-forward absolutes). Rate sparklines are
+///   direction-colored per bucket — green where the windowed rate rose, red
+///   where it fell ([`crate::sparkline::metric_sparkline`]). `spark == false`
 ///   metrics stay `None`. When the budget is **0** (a terminal too narrow to
 ///   carry even [`crate::render::MIN_SPARK_WIDTH`] glyphs) every row stays `None`:
 ///   the numbers take priority and the trend column is dropped entirely (design
@@ -442,8 +444,10 @@ pub(crate) fn compose_watch_frame(
 /// it is positive the history is bucketed once to that many columns (at `now`)
 /// and reused for every metric; each `config` metric is matched to its row by
 /// position (`build_rows` emits one row per metric in order), and a `spark == true`
-/// metric's row gets `sparkline(metric_series(..))`. `spark == false` rows keep
-/// the `None` that [`build_rows`] gave them.
+/// metric's row gets `metric_sparkline(kind, metric_series(..))` — the
+/// kind-aware renderer that draws rate cells green/red by the direction the
+/// windowed rate moved (see [`crate::sparkline::metric_sparkline`]).
+/// `spark == false` rows keep the `None` that [`build_rows`] gave them.
 fn attach_sparklines(
     rows: &mut [crate::render::Row],
     state: &WatchState,
@@ -464,7 +468,7 @@ fn attach_sparklines(
     for (spec, row) in config.metrics.iter().zip(rows.iter_mut()) {
         if spec.spark {
             let series = crate::history::metric_series(spec.key, &buckets, &config.languages);
-            row.spark = Some(crate::sparkline::sparkline(&series));
+            row.spark = Some(crate::sparkline::metric_sparkline(spec.key.kind(), &series));
         }
     }
 }

@@ -31,7 +31,7 @@ use crate::config::MetricKind;
 /// clear. Each glyph is exactly one `char` and display width 1, so a sparkline's
 /// column count equals its glyph count — no `unicode-width` measurement is
 /// needed at this layer.
-pub(crate) const SPARK_GLYPHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+const SPARK_GLYPHS: [char; 7] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
 /// Map a whole-number scale `level` in `0.0..=6.0` to its block glyph.
 ///
@@ -81,7 +81,10 @@ fn glyph_for_level(level: f64) -> char {
 ///
 /// The result is a `String` of glyph characters only — no leading/trailing
 /// whitespace and no newline.
-pub(crate) fn sparkline(values: &[f64]) -> String {
+///
+/// Private: callers outside this module go through [`metric_sparkline`], which
+/// layers the kind-aware direction coloring on top of this plain scale.
+fn sparkline(values: &[f64]) -> String {
     // The top index into SPARK_GLYPHS, as an f64 for the interpolation below. The
     // seven glyphs span indices 0..=6, so a value's fractional position in the
     // range scales across `0.0..=6.0` and rounds to one of those seven levels.
@@ -134,6 +137,22 @@ pub(crate) fn sparkline(values: &[f64]) -> String {
 
 /// Render the sparkline for a metric of `kind`: the glyphs from [`sparkline`],
 /// with rate metrics direction-colored per bucket.
+///
+/// This is the kind-aware entrance the watch view draws spark cells through.
+/// [`MetricKind::Rate`] (the hit rate) is a *quality* signal, so each of its
+/// glyphs is colored by where the windowed rate moved relative to the previous
+/// bucket — green for a rise, red for a fall, the terminal's default color for
+/// flat / first / non-finite buckets (see [`metric_spark_cells`]). Counts and
+/// sizes render plain: their movement is activity, not quality, so painting it
+/// green/red would imply a judgment the data doesn't carry.
+///
+/// The coloring wraps each glyph in a [`ColoredString`]; whether that emits
+/// ANSI is the `colored` crate's global decision (TTY detection, `NO_COLOR`,
+/// the force-color override in `main`), so under `NO_COLOR` or a plain pipe
+/// this degrades byte-for-byte to the uncolored glyph row. The glyph sequence
+/// itself is always exactly [`sparkline`]'s output — coloring never adds,
+/// drops, or changes a glyph, which keeps the spark column exactly as many
+/// display columns wide as its budget.
 pub(crate) fn metric_sparkline(kind: MetricKind, values: &[f64]) -> String {
     metric_spark_cells(kind, values)
         .iter()
@@ -143,12 +162,86 @@ pub(crate) fn metric_sparkline(kind: MetricKind, values: &[f64]) -> String {
 
 /// The typed spark cells behind [`metric_sparkline`], one [`ColoredString`]
 /// per value.
-fn metric_spark_cells(_kind: MetricKind, values: &[f64]) -> Vec<ColoredString> {
-    // Red-phase stub: every cell is plain regardless of kind.
-    sparkline(values)
-        .chars()
-        .map(|glyph| glyph.to_string().normal())
+///
+/// Kept separate from the string assembly so tests can assert each cell's
+/// typed `fgcolor` directly instead of parsing ANSI bytes — the `colored`
+/// crate gates ANSI emission on a process-global override that races under
+/// parallel tests (the same reasoning as [`crate::render::banner_text`]).
+fn metric_spark_cells(kind: MetricKind, values: &[f64]) -> Vec<ColoredString> {
+    let glyphs = sparkline(values);
+    match kind {
+        // Rates color each glyph by its direction vs the previous bucket.
+        // `sparkline` emits exactly one glyph per value, so the zip is total.
+        MetricKind::Rate => glyphs
+            .chars()
+            .zip(trends(values))
+            .map(|(glyph, trend)| trend_cell(glyph, trend))
+            .collect(),
+        // Counts and sizes are plain — movement is activity, not quality.
+        MetricKind::Count | MetricKind::Size => glyphs
+            .chars()
+            .map(|glyph| glyph.to_string().normal())
+            .collect(),
+    }
+}
+
+/// The direction one bucket's value moved relative to its predecessor — the
+/// signal a rate sparkline colors by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trend {
+    /// The value rose vs the previous bucket.
+    Up,
+    /// The value fell vs the previous bucket.
+    Down,
+    /// No direction: the first bucket (no predecessor), equal neighbors, or a
+    /// comparison involving a non-finite value.
+    Flat,
+}
+
+/// The per-position [`Trend`]s for `values` — element `i` is where `values[i]`
+/// moved relative to `values[i - 1]`. The output length equals `values.len()`.
+///
+/// The first position is [`Trend::Flat`] (nothing to compare against), as is
+/// any comparison where either side is non-finite — a `NaN`/`±inf` renders at
+/// the baseline glyph, so coloring it (or its successor) by "direction" would
+/// paint a movement the chart doesn't actually draw.
+fn trends(values: &[f64]) -> Vec<Trend> {
+    // The previous value, `None` only for the first position. Non-finite
+    // values still become the next comparison's `previous` so the Flat
+    // degradation stays local to the affected pair.
+    let mut previous: Option<f64> = None;
+    values
+        .iter()
+        .map(|&current| {
+            let trend = match previous {
+                Some(prev) if prev.is_finite() && current.is_finite() => {
+                    match current.partial_cmp(&prev) {
+                        Some(std::cmp::Ordering::Greater) => Trend::Up,
+                        Some(std::cmp::Ordering::Less) => Trend::Down,
+                        // Equal neighbors have no direction. (`None` is
+                        // unreachable here — both sides are finite — but Flat
+                        // is the only sane answer anyway.)
+                        _ => Trend::Flat,
+                    }
+                }
+                // First bucket, or a non-finite side: no direction to draw.
+                _ => Trend::Flat,
+            };
+            previous = Some(current);
+            trend
+        })
         .collect()
+}
+
+/// One spark cell: `glyph` colored by `trend` — green for [`Trend::Up`], red
+/// for [`Trend::Down`], and the terminal's default color for [`Trend::Flat`].
+fn trend_cell(glyph: char, trend: Trend) -> ColoredString {
+    let cell = glyph.to_string();
+    match trend {
+        Trend::Up => cell.green(),
+        Trend::Down => cell.red(),
+        Trend::Flat => cell.normal(),
+    }
 }
 
 #[cfg(test)]
