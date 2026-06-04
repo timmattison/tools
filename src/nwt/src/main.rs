@@ -3890,7 +3890,6 @@ mod tests {
                 "npm i",
                 "npm ci",
                 "yarn install",
-                "yarn i",
                 "bun install",
                 "bun i",
                 // A compound command tokenizes fine: `pnpm` and `install` are
@@ -3921,6 +3920,9 @@ mod tests {
                 "install",
                 // No space, so it does not tokenize as `pnpm` + `install`.
                 "pnpm install&&x",
+                // yarn has no `i` alias; classic and berry both reject it, so
+                // matching it would skip bootstrap for a run about to fail.
+                "yarn i",
             ] {
                 assert!(
                     !run_command_installs_dependencies(cmd),
