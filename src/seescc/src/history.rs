@@ -127,7 +127,10 @@ impl History {
     /// (see [`History::bucket_index`]) — so a sample sitting exactly on the
     /// trailing edge can't round into a phantom `columns`-th bucket. `columns == 0`
     /// yields an empty `Vec` (no room to draw anything) **before** any slice-width
-    /// math; an empty ring yields a `Vec` of `columns` `None`s.
+    /// math; an empty ring yields a `Vec` of `columns` `None`s. A degenerate window
+    /// shorter than `columns` nanoseconds (where `slice` truncates to zero) has no
+    /// grid to pin to, so the leading edge falls back to the raw, unquantized `now`
+    /// rather than dividing by zero.
     pub(crate) fn bucket_last(&self, now: Instant, columns: usize) -> Vec<Option<&Stats>> {
         // No columns ⇒ no room to draw anything; bail before any slice-width math
         // so the division below can never see a zero divisor.
@@ -144,14 +147,21 @@ impl History {
         //   k       = ceil(elapsed / slice)       (integer ceiling division)
         //   leading = epoch + k * slice
         //
-        // A `slice` of zero nanoseconds (a window shorter than `columns` ns) is
-        // intentionally NOT guarded here — that degenerate window is handled by a
-        // separate slice and would surface as a panic until then.
+        // A `slice` of zero nanoseconds (a window shorter than `columns` ns) makes
+        // the grid degenerate — there is no sub-nanosecond grid to pin to, so
+        // stability is moot — and the ceiling division below would divide by zero.
+        // Fall back to the raw, unquantized `now` as the leading edge: that skips
+        // quantization entirely and reproduces the pre-epoch sliding-window
+        // behavior for this degenerate case, with no division and no panic.
         let slice_ns = self.window.as_nanos() / columns as u128;
-        let elapsed_ns = now.duration_since(self.epoch).as_nanos();
-        let k = elapsed_ns.div_ceil(slice_ns);
-        let offset_ns = k * slice_ns;
-        let leading = self.epoch + nanos_to_duration(offset_ns);
+        let leading = if slice_ns == 0 {
+            now
+        } else {
+            let elapsed_ns = now.duration_since(self.epoch).as_nanos();
+            let k = elapsed_ns.div_ceil(slice_ns);
+            let offset_ns = k * slice_ns;
+            self.epoch + nanos_to_duration(offset_ns)
+        };
 
         let mut buckets: Vec<Option<&Stats>> = vec![None; columns];
 
