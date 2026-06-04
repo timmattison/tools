@@ -1692,24 +1692,36 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
 /// of those cases we want a loud, visible warning rather than an invisibly
 /// ungated worktree, so this check runs unconditionally after bootstrap.
 ///
-/// We shell out to `git config core.hooksPath` rather than reading any single
-/// config file because that reports the *effective* value git itself will use,
-/// resolving the worktree → repo-local → global → system precedence exactly the
-/// way git does at commit time.
+/// We shell out to `git config --type=path core.hooksPath` rather than reading
+/// any single config file because that reports the *effective* value git itself
+/// will use, resolving the worktree → repo-local → global → system precedence
+/// exactly the way git does at commit time. The `--type=path` flag additionally
+/// makes git apply its pathname expansion (`~/`, `~user/`) to the value, exactly
+/// as it will when it actually runs hooks — git treats `core.hooksPath` as a
+/// pathname config type, so a common global setup like `core.hooksPath =
+/// ~/.githooks` expands to an absolute home-relative path rather than being
+/// (mis)treated as worktree-relative. Without this, every `nwt` run would
+/// false-positive on such configs. Relative non-tilde values (e.g. `.husky/_`)
+/// are returned unchanged by `--type=path`, so those keep resolving against the
+/// worktree as before.
 ///
 /// Returns:
 /// - `None` when `core.hooksPath` is unset (git's built-in `.git/hooks` default
 ///   always exists "enough" — an empty hooks dir is not our concern), when the
 ///   configured directory exists, or on ANY error. This check is purely
 ///   advisory and must never block worktree creation or panic.
-/// - `Some(value)` — the configured path exactly as git printed it — when the
-///   path is set but the directory it names is missing.
+/// - `Some(value)` — the path as git printed it after pathname expansion — when
+///   the path is set but the directory it names is missing. For tilde-based
+///   configs this is therefore the expanded absolute path, which is the
+///   actionable thing to show in the warning.
 fn missing_hooks_path(worktree: &Path) -> Option<String> {
     // Ask git for the effective value, run from inside the worktree so the
     // worktree → repo-local → global → system precedence matches commit time.
-    // stdin is nulled so git can never block; stderr is nulled to avoid noise.
+    // `--type=path` makes git expand `~/` and `~user/` the same way it does at
+    // hook-run time. stdin is nulled so git can never block; stderr is nulled to
+    // avoid noise.
     let output = Command::new("git")
-        .args(["config", "core.hooksPath"])
+        .args(["config", "--type=path", "core.hooksPath"])
         .current_dir(worktree)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
