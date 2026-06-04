@@ -308,6 +308,9 @@ pub(crate) fn build_rows(
         .map(|spec| crate::render::Row {
             label: spec.label.clone(),
             value: crate::aggregate::metric_value(spec.key, stats, &config.languages).format(),
+            // No sparkline glyphs yet — the Phase 5 wiring slice attaches the
+            // real per-metric series after this layout slice lands.
+            spark: None,
         })
         .collect()
 }

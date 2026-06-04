@@ -57,10 +57,88 @@ pub(crate) fn build_footer(cache_size: u64, max_cache_size: u64, window: Duratio
     format!("cache {size} / {max} · {window} window")
 }
 
-/// One display row: a label and its already-formatted value string.
+/// One display row: a label, its already-formatted value string, and an optional
+/// pre-rendered sparkline for the metric's recent history.
 pub(crate) struct Row {
     pub label: String,
     pub value: String,
+    /// The pre-rendered sparkline glyphs for this row, or None for no sparkline
+    /// (spark=false metrics, one-shot frames, or a too-narrow terminal).
+    pub spark: Option<String>,
+}
+
+/// Minimum sparkline column width; below this the sparkline is dropped (budget 0)
+/// rather than rendered uselessly squashed.
+///
+/// Design §6 ("Narrow terminal"): the label/value columns take priority and the
+/// sparkline shrinks to this floor; once even this won't fit, the column is
+/// dropped entirely so the numbers are never sacrificed to a 1- or 2-cell
+/// sparkline stub that conveys no shape.
+#[allow(
+    dead_code,
+    reason = "consumed by the Phase 5 sparkline wiring slice"
+)]
+pub(crate) const MIN_SPARK_WIDTH: usize = 4;
+
+/// The fixed per-row overhead, in display columns, that the label/value cells and
+/// their separators consume before any sparkline glyphs: one leading space, the
+/// `max_label`-wide label cell, the two-space label/value gap, the `max_value`-wide
+/// value cell, and the two-space pre-spark separator.
+///
+/// This is exactly the non-spark width [`build_watch`] lays out per row, so the
+/// sparkline budget is just `width - row_overhead` and the two can never disagree
+/// about how much room the numbers claim.
+fn row_overhead(max_label: usize, max_value: usize) -> usize {
+    // 1 leading space + label cell + 2 gap + value cell + 2 pre-spark separator.
+    1 + max_label + 2 + max_value + 2
+}
+
+/// The shared label/value column widths for `rows`: the widest label and the
+/// widest value, each measured with `unicode-width` so multi-byte cells align.
+///
+/// Both [`build_watch`] (to pad the cells) and [`sparkline_budget`] (to size the
+/// leftover room) read these, so factoring the two `.iter().map(width).max()`
+/// chains into one private helper keeps the layout's notion of "how wide are the
+/// columns" in a single place — the budget can never drift from what the table
+/// actually renders. Empty `rows` yield `(0, 0)`.
+fn column_widths(rows: &[Row]) -> (usize, usize) {
+    let max_label = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.label.as_str()))
+        .max()
+        .unwrap_or(0);
+    let max_value = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.value.as_str()))
+        .max()
+        .unwrap_or(0);
+    (max_label, max_value)
+}
+
+/// How many columns a sparkline may occupy for a frame `width` whose rows are
+/// `rows` (their label/value column widths take priority). Returns 0 when the
+/// remaining room is below [`MIN_SPARK_WIDTH`] — the caller then attaches no
+/// sparks.
+///
+/// The budget is `width - row_overhead`, computed saturating so an absurdly narrow
+/// terminal can never underflow into a huge `usize`. The per-row overhead is the
+/// non-spark layout width [`build_watch`] already produces (see [`row_overhead`]),
+/// derived from the same [`column_widths`] the table pads to, so the budget always
+/// reflects the real numbers' footprint. Multi-byte labels/values widen the
+/// overhead exactly as they widen the cells.
+///
+/// Degenerate case: empty `rows` have zero label/value width, so the overhead is
+/// just the fixed `5` columns of leading space + separators and the budget is
+/// `width - 5` (or 0 if that is below the minimum). This is deliberate — an empty
+/// frame has no metrics to spark, so the value is only a pinned-down corner case,
+/// not a meaningful column count.
+#[allow(
+    dead_code,
+    reason = "consumed by the Phase 5 sparkline wiring slice"
+)]
+pub(crate) fn sparkline_budget(width: usize, rows: &[Row]) -> usize {
+    let _ = (width, rows);
+    todo!("implemented in the green commit")
 }
 
 /// Build the one-shot human frame for `rows`, with `languages_label` in the
@@ -212,22 +290,27 @@ mod tests {
             Row {
                 label: "Compile requests".into(),
                 value: "4,786".into(),
+                spark: None,
             },
             Row {
                 label: "Requests executed".into(),
                 value: "3,880".into(),
+                spark: None,
             },
             Row {
                 label: "Cache hits".into(),
                 value: "1,718".into(),
+                spark: None,
             },
             Row {
                 label: "Cache misses".into(),
                 value: "963".into(),
+                spark: None,
             },
             Row {
                 label: "Hit rate".into(),
                 value: "64.1%".into(),
+                spark: None,
             },
         ]
     }
@@ -292,14 +375,17 @@ mod tests {
             Row {
                 label: "日本語".into(),
                 value: "1".into(),
+                spark: None,
             },
             Row {
                 label: "café".into(),
                 value: "22".into(),
+                spark: None,
             },
             Row {
                 label: "x".into(),
                 value: "333".into(),
+                spark: None,
             },
         ];
         let out = build_human("all", "00:00:00", 30, &rows);
@@ -321,6 +407,7 @@ mod tests {
         let single = vec![Row {
             label: "Only".into(),
             value: "1".into(),
+            spark: None,
         }];
         let out = build_human("Rust", "12:00:00", 20, &single);
         assert!(out.lines().nth(2).unwrap().ends_with('1'));
@@ -545,6 +632,215 @@ mod tests {
         assert!(
             widths.iter().all(|w| *w == widths[0]),
             "data rows misaligned with multibyte banner/footer: {widths:?}"
+        );
+    }
+
+    // --- sparkline column ------------------------------------------------
+
+    #[test]
+    fn spark_row_appends_glyphs_after_two_space_separator() {
+        // A row with `spark: Some` renders the existing aligned label/value cells,
+        // then exactly TWO spaces, then the glyphs. The two-space pre-spark
+        // separator is what visually divides the numbers from their trend.
+        let spark = "▁▂▃▄";
+        let rows = vec![Row {
+            label: "Cache hits".into(),
+            value: "1,718".into(),
+            spark: Some(spark.into()),
+        }];
+        let out = build_watch("Rust", "12:34:56", 60, &rows, None, None);
+        let data = out.lines().nth(2).expect("a data row exists");
+        assert!(
+            data.ends_with(&format!("  {spark}")),
+            "spark row must end with two spaces then the glyphs; got {data:?}"
+        );
+        // The cells before the separator are exactly today's value-terminated
+        // layout for the same row sans spark.
+        let bare = vec![Row {
+            label: "Cache hits".into(),
+            value: "1,718".into(),
+            spark: None,
+        }];
+        let bare_line = build_watch("Rust", "12:34:56", 60, &bare, None, None)
+            .lines()
+            .nth(2)
+            .expect("a bare data row exists")
+            .to_string();
+        assert_eq!(
+            data,
+            format!("{bare_line}  {spark}"),
+            "the spark cell must be appended to the unchanged bare row",
+        );
+    }
+
+    #[test]
+    fn none_spark_row_is_unchanged_from_today() {
+        // A `spark: None` row renders exactly as today: it ends at the value with
+        // no trailing separator or glyphs. (The full-frame byte-identity is also
+        // asserted by `build_watch_with_no_extras_matches_build_human`; this pins
+        // the single-row case directly.)
+        let rows = vec![Row {
+            label: "Hit rate".into(),
+            value: "64.1%".into(),
+            spark: None,
+        }];
+        let out = build_watch("Rust", "12:34:56", 60, &rows, None, None);
+        let data = out.lines().nth(2).expect("a data row exists");
+        assert!(
+            data.ends_with("64.1%"),
+            "a None-spark row must end at its value; got {data:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_spark_rows_share_a_spark_start_column_with_multibyte_label() {
+        // Mixed spark / no-spark rows, including a multi-byte label, must keep the
+        // spark cells starting at the SAME display column — they fall out of the
+        // width-aligned label/value cells, so the glyphs line up vertically. The
+        // start column is measured via unicode-width, never byte offsets.
+        let spark = "▁▂▃▄▅";
+        let rows = vec![
+            Row {
+                label: "日本語".into(),
+                value: "1".into(),
+                spark: Some(spark.into()),
+            },
+            Row {
+                label: "café".into(),
+                value: "22".into(),
+                spark: None,
+            },
+            Row {
+                label: "Compile requests".into(),
+                value: "4,786".into(),
+                spark: Some(spark.into()),
+            },
+        ];
+        let out = build_watch("all", "00:00:00", 80, &rows, None, None);
+        let data: Vec<&str> = out.lines().skip(2).collect();
+        assert_eq!(data.len(), 3);
+
+        // For each spark-bearing row, the display column at which the glyphs begin
+        // is the width of the line up to (but not including) the spark suffix.
+        let spark_start = |line: &str| -> usize {
+            let suffix = format!("  {spark}");
+            let prefix = line
+                .strip_suffix(&suffix)
+                .expect("spark row ends with separator + glyphs");
+            UnicodeWidthStr::width(prefix)
+        };
+        let start_0 = spark_start(data[0]);
+        let start_2 = spark_start(data[2]);
+        assert_eq!(
+            start_0, start_2,
+            "spark cells must start at the same display column (got {start_0} vs {start_2})",
+        );
+        // The no-spark row carries no glyphs at all.
+        assert!(
+            !data[1].contains(spark),
+            "a None-spark row must not render any glyphs; got {:?}",
+            data[1],
+        );
+    }
+
+    #[test]
+    fn sparkline_budget_is_width_minus_overhead_when_roomy() {
+        // Crafted rows: widest label "Compile requests" is 16 display columns,
+        // widest value "4,786" is 5. Overhead = 1 + 16 + 2 + 5 + 2 = 26. At width
+        // 60 the budget is the leftover 60 - 26 = 34 columns.
+        let rows = vec![
+            Row {
+                label: "Compile requests".into(),
+                value: "4,786".into(),
+                spark: None,
+            },
+            Row {
+                label: "Hit rate".into(),
+                value: "64.1%".into(),
+                spark: None,
+            },
+        ];
+        assert_eq!(UnicodeWidthStr::width("Compile requests"), 16);
+        assert_eq!(UnicodeWidthStr::width("4,786"), 5);
+        assert_eq!(sparkline_budget(60, &rows), 34);
+    }
+
+    #[test]
+    fn sparkline_budget_shrinks_then_drops_to_zero_at_the_threshold() {
+        // Same rows: overhead 26. The budget tracks width down to the minimum and
+        // then drops to 0 the moment it would fall below MIN_SPARK_WIDTH (4).
+        let rows = vec![
+            Row {
+                label: "Compile requests".into(),
+                value: "4,786".into(),
+                spark: None,
+            },
+            Row {
+                label: "Hit rate".into(),
+                value: "64.1%".into(),
+                spark: None,
+            },
+        ];
+        // Roomy: shrinks one-for-one with width.
+        assert_eq!(sparkline_budget(40, &rows), 14);
+        // Exactly at the floor: overhead 26 + MIN_SPARK_WIDTH 4 = 30.
+        assert_eq!(sparkline_budget(30, &rows), MIN_SPARK_WIDTH);
+        // One column below the floor: dropped to 0 rather than a 3-cell stub.
+        assert_eq!(
+            sparkline_budget(29, &rows),
+            0,
+            "below MIN_SPARK_WIDTH the sparkline is dropped, not squashed",
+        );
+    }
+
+    #[test]
+    fn sparkline_budget_absurdly_small_width_is_zero_without_underflow() {
+        // A width far below the overhead must saturate to 0, never underflow into
+        // a giant usize. Width 3 is smaller than even the fixed 5-column overhead.
+        let rows = vec![
+            Row {
+                label: "Compile requests".into(),
+                value: "4,786".into(),
+                spark: None,
+            },
+        ];
+        assert_eq!(
+            sparkline_budget(3, &rows),
+            0,
+            "an absurdly small width must yield 0 with no underflow panic",
+        );
+        // Zero width is the extreme of the same saturating path.
+        assert_eq!(sparkline_budget(0, &rows), 0);
+    }
+
+    #[test]
+    fn sparkline_budget_accounts_for_multibyte_cell_widths() {
+        // A CJK label is wider in display columns than in bytes; the budget must
+        // use display width. Label "日本語ラベル" is 12 columns (6 wide chars),
+        // value "1" is 1. Overhead = 1 + 12 + 2 + 1 + 2 = 18, so at width 50 the
+        // budget is 50 - 18 = 32. Byte-length accounting would mis-size this.
+        let rows = vec![
+            Row {
+                label: "日本語ラベル".into(),
+                value: "1".into(),
+                spark: None,
+            },
+        ];
+        assert_eq!(UnicodeWidthStr::width("日本語ラベル"), 12);
+        assert_eq!(sparkline_budget(50, &rows), 32);
+    }
+
+    #[test]
+    fn sparkline_budget_empty_rows_is_width_minus_fixed_overhead() {
+        // Degenerate: with no rows the label/value cells are zero-width, so the
+        // overhead is just the fixed 5 columns (1 leading space + 2 + 2
+        // separators). At width 20 the budget is 20 - 5 = 15; below the floor it
+        // drops to 0.
+        assert_eq!(sparkline_budget(20, &[]), 15);
+        assert_eq!(
+            sparkline_budget(8, &[]),
+            0,
+            "fixed overhead 5 + width 8 leaves 3, below MIN_SPARK_WIDTH → 0",
         );
     }
 }
