@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Reject commits that fail clippy. --all-targets covers tests/ and benches/,
-# where lints like unseparated_literal_suffix would otherwise slip through, and
-# -D warnings turns every workspace lint into a hard error.
+# Reject commits that fail formatting or clippy. cargo fmt --check runs first
+# because it is fast and catches drift before the slower clippy pass.
+# --all-targets covers tests/ and benches/, where lints like
+# unseparated_literal_suffix would otherwise slip through, and -D warnings
+# turns every workspace lint into a hard error.
 set -euo pipefail
 
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$'; then
+    echo "pre-commit: running cargo fmt --all -- --check"
+    cargo fmt --all -- --check
     echo "pre-commit: running cargo clippy --all-targets --workspace -- -D warnings"
     cargo clippy --all-targets --workspace -- -D warnings
 fi
