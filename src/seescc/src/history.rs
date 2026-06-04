@@ -96,25 +96,38 @@ impl History {
         }
     }
 
-    /// Bucket the retained samples into `columns` equal time slices spanning
-    /// `[now - window, now]`, newest slice last.
+    /// Bucket the retained samples into `columns` equal time slices on the
+    /// **epoch-pinned grid**, newest slice last.
     ///
-    /// Each slice covers `window / columns` of time. Slot `i` holds the **most
-    /// recent** sample whose timestamp lands in slice `i`, or `None` when no
-    /// sample fell there (a gap the sparkline draws at baseline). The boundary
-    /// rules are pinned by tests and must stay exact:
+    /// The leading edge passed in as `now` is quantized **up** to the slice grid
+    /// anchored at [`History::new`]'s `epoch`, so the window the buckets actually
+    /// span is `[leading - window, leading]` where
+    /// `leading = epoch + ceil((now - epoch) / slice) * slice` and
+    /// `slice = window / columns`. Quantizing the leading edge (not `now` itself)
+    /// is what makes a sample's bucket a pure function of its timestamp and the
+    /// grid: between two frames whose `now`s fall in the same slice, `leading` is
+    /// identical, so every retained sample keeps its column; when `now` crosses a
+    /// grid point `leading` advances by exactly one `slice` and the whole row
+    /// shifts one column left. The rightmost slice `[leading - slice, leading]`
+    /// has `leading >= now`, so a sample polled after the last grid point still
+    /// lands in it — the live, in-progress column.
     ///
-    /// - a sample exactly at `now` lands in the **last** bucket (`columns - 1`),
-    /// - a sample exactly at `now - window` lands in the **first** bucket (`0`),
-    /// - samples strictly older than `now - window`, or (defensively) newer than
-    ///   `now`, are excluded entirely.
+    /// Each slice covers `slice` of time. Slot `i` holds the **most recent**
+    /// sample whose timestamp lands in slice `i`, or `None` when no sample fell
+    /// there (a gap the sparkline draws at baseline). The boundary rules are
+    /// pinned by tests and must stay exact (now measured against `leading`):
+    ///
+    /// - a sample exactly at `leading` lands in the **last** bucket (`columns - 1`),
+    /// - a sample exactly at `leading - window` lands in the **first** bucket (`0`),
+    /// - samples strictly older than `leading - window`, or (defensively) newer
+    ///   than `leading`, are excluded entirely.
     ///
     /// The slice index is chosen by integer duration arithmetic in nanoseconds —
     /// `elapsed_since_window_start * columns / window`, clamped to `columns - 1`
     /// (see [`History::bucket_index`]) — so a sample sitting exactly on the
     /// trailing edge can't round into a phantom `columns`-th bucket. `columns == 0`
-    /// yields an empty `Vec` (no room to draw anything); an empty ring yields a
-    /// `Vec` of `columns` `None`s.
+    /// yields an empty `Vec` (no room to draw anything) **before** any slice-width
+    /// math; an empty ring yields a `Vec` of `columns` `None`s.
     pub(crate) fn bucket_last(&self, now: Instant, columns: usize) -> Vec<Option<&Stats>> {
         // No columns ⇒ no room to draw anything; bail before any slice-width math
         // so the division below can never see a zero divisor.
@@ -122,14 +135,35 @@ impl History {
             return Vec::new();
         }
 
+        // Quantize the leading edge up to the epoch grid. All arithmetic is in
+        // integer nanoseconds (`u128`) so slice widths never accumulate rounding,
+        // and the ceiling division snaps `now` forward to the next grid point.
+        //
+        //   slice   = window / columns           (nanoseconds, truncated)
+        //   elapsed = now - epoch                 (nanoseconds)
+        //   k       = ceil(elapsed / slice)       (integer ceiling division)
+        //   leading = epoch + k * slice
+        //
+        // A `slice` of zero nanoseconds (a window shorter than `columns` ns) is
+        // intentionally NOT guarded here — that degenerate window is handled by a
+        // separate slice and would surface as a panic until then.
+        let slice_ns = self.window.as_nanos() / columns as u128;
+        let elapsed_ns = now.duration_since(self.epoch).as_nanos();
+        let k = elapsed_ns.div_ceil(slice_ns);
+        let offset_ns = k * slice_ns;
+        let leading = self.epoch + nanos_to_duration(offset_ns);
+
         let mut buckets: Vec<Option<&Stats>> = vec![None; columns];
 
         // The retained samples are ordered oldest-first, so a forward scan visits
         // each slice's candidates in increasing-time order; writing every in-range
         // sample into its slot means the LAST write per slot — the most recent
-        // sample — is the one that survives. That is the "newest wins" rule.
+        // sample — is the one that survives. That is the "newest wins" rule. The
+        // index is measured against the quantized `leading`, not the raw `now`, so
+        // the grid is the only reference and assignments never drift between
+        // frames.
         for (timestamp, stats) in &self.samples {
-            if let Some(index) = self.bucket_index(now, *timestamp, columns) {
+            if let Some(index) = self.bucket_index(leading, *timestamp, columns) {
                 buckets[index] = Some(stats);
             }
         }
@@ -138,30 +172,33 @@ impl History {
     }
 
     /// The bucket index a sample at `timestamp` belongs to within `columns`
-    /// slices spanning `[now - window, now]`, or `None` when it lies outside that
-    /// closed interval.
+    /// slices spanning `[leading - window, leading]`, or `None` when it lies
+    /// outside that closed interval.
     ///
-    /// Index is `elapsed_since_window_start * columns / window`, computed in
-    /// nanoseconds so no slice-width truncation accumulates, then clamped to
-    /// `columns - 1`. That clamp is what folds a sample sitting exactly on the
-    /// trailing edge (`timestamp == now`, where the raw quotient equals `columns`)
-    /// back into the final bucket instead of overflowing into a phantom
-    /// `columns`-th slot — pinning the "exactly at `now` ⇒ last bucket" boundary.
-    /// A sample exactly at `now - window` has zero elapsed time and so lands in
-    /// bucket `0`, making the lower edge inclusive. Samples newer than `now` (which
-    /// shouldn't happen with monotonic time, but are guarded defensively) are
-    /// rejected.
-    fn bucket_index(&self, now: Instant, timestamp: Instant, columns: usize) -> Option<usize> {
-        // Above the upper edge: a sample newer than `now` is out of range.
-        if timestamp > now {
+    /// `leading` is the **quantized** grid point [`History::bucket_last`] passes
+    /// in (`epoch + k * slice`), never a raw `now` — anchoring the index math to
+    /// the grid is what keeps a sample's bucket stable between frames. Index is
+    /// `elapsed_since_window_start * columns / window`, computed in nanoseconds so
+    /// no slice-width truncation accumulates, then clamped to `columns - 1`. That
+    /// clamp is what folds a sample sitting exactly on the trailing edge
+    /// (`timestamp == leading`, where the raw quotient equals `columns`) back into
+    /// the final bucket instead of overflowing into a phantom `columns`-th slot —
+    /// pinning the "exactly at `leading` ⇒ last bucket" boundary. A sample exactly
+    /// at `leading - window` has zero elapsed time and so lands in bucket `0`,
+    /// making the lower edge inclusive. Samples newer than `leading` (defensively
+    /// guarded) are rejected.
+    fn bucket_index(&self, leading: Instant, timestamp: Instant, columns: usize) -> Option<usize> {
+        // Above the upper edge: a sample newer than the leading grid point is out
+        // of range.
+        if timestamp > leading {
             return None;
         }
         // How far the sample sits *after* the window's leading edge. A `None` here
-        // means `timestamp` precedes `now - window`, i.e. it is below the lower
-        // edge and out of range. Computing it as `window - (now - timestamp)`
+        // means `timestamp` precedes `leading - window`, i.e. it is below the lower
+        // edge and out of range. Computing it as `window - (leading - timestamp)`
         // keeps the arithmetic on `Duration`s without materializing the
-        // possibly-pre-epoch instant `now - window`.
-        let age = now.duration_since(timestamp);
+        // possibly-pre-epoch instant `leading - window`.
+        let age = leading.duration_since(timestamp);
         let elapsed = self.window.checked_sub(age)?;
 
         // index = elapsed * columns / window, in nanoseconds for an exact, slice
@@ -179,6 +216,27 @@ impl History {
         let index = (raw as usize).min(columns - 1);
         Some(index)
     }
+}
+
+/// Convert a `u128` nanosecond count into a [`Duration`] without a truncating
+/// cast.
+///
+/// [`Duration::from_nanos`] only accepts a `u64`, and casting the grid offset
+/// (`k * slice` nanoseconds) down to `u64` would be a lossy `u128 -> u64`
+/// truncation that clippy rightly forbids. Splitting the count into whole
+/// seconds and a sub-second remainder keeps the conversion exact: the remainder
+/// is provably `< 1_000_000_000` (one second), so its `u32` form can never
+/// truncate, and the seconds use a checked `u64::try_from`. An offset large
+/// enough to overflow `u64` seconds is ~584 years of monotonic runtime — not
+/// reachable in practice — so that arm saturates at [`u64::MAX`] rather than
+/// panicking, which simply pins the leading edge to the far future.
+fn nanos_to_duration(nanos: u128) -> Duration {
+    const NANOS_PER_SEC: u128 = 1_000_000_000;
+    let secs = u64::try_from(nanos / NANOS_PER_SEC).unwrap_or(u64::MAX);
+    // `nanos % NANOS_PER_SEC` is in `0..1_000_000_000`, which always fits a
+    // `u32`, so this conversion is exact — never a truncation.
+    let subsec_nanos = u32::try_from(nanos % NANOS_PER_SEC).unwrap_or(0);
+    Duration::new(secs, subsec_nanos)
 }
 
 /// The per-bucket `f64` series for `key` over `buckets` (as produced by
@@ -637,27 +695,92 @@ mod tests {
     }
 
     #[test]
-    fn bucket_last_excludes_samples_outside_the_window() {
-        // Defensive range-checking inside bucket_last: samples older than
-        // `now - window` (that somehow survived pruning because a smaller window
-        // is used at bucket time) and any sample newer than `now` must be excluded
-        // from the buckets entirely. We push with a generous window so nothing is
-        // pruned, then bucket over a tighter window.
+    fn bucket_last_excludes_a_retained_sample_below_the_leading_window() {
+        // Defensive lower-edge range checking inside bucket_last, restated for the
+        // epoch-pinned grid: a sample strictly older than `leading - window` is
+        // excluded even though it survived pruning. With the quantized grid this
+        // is reachable when the leading edge has snapped far ahead of the oldest
+        // retained sample. window = 100s over 10 columns ⇒ 10s slices, epoch =
+        // base.
+        //
+        // Pushes (monotonic; the last push at base+100s prunes only samples older
+        // than base+0s, so the base+5s sample is retained):
+        //   tag 1 @ base+5s   — kept, but will fall below the leading window
+        //   tag 2 @ base+100s — the in-range target
+        // Bucket at now = base+200s ⇒ k = ceil(200/10) = 20, leading = base+200s,
+        // window [base+100s, base+200s]:
+        //   - tag 1 (base+5s) is below base+100s ⇒ excluded (lower guard),
+        //   - tag 2 (base+100s) sits on the inclusive lower edge ⇒ first bucket.
         let base = Instant::now();
-        let mut history = History::new(Duration::from_secs(1000), base); // keep everything
+        let window = Duration::from_secs(100);
+        let mut history = History::new(window, base);
 
-        history.push(base + Duration::from_secs(0), tagged(1)); // too old for the bucket window
-        history.push(base + Duration::from_secs(50), tagged(2)); // in the bucket window
-        history.push(base + Duration::from_secs(200), tagged(3)); // newer than `now`
+        history.push(base + Duration::from_secs(5), tagged(1)); // retained but below the window
+        history.push(base + Duration::from_secs(100), tagged(2)); // on the inclusive lower edge
 
-        // Bucket over [now - 10s, now] = [40s, 50s]: only tag 2 is in range. The
-        // t=0s sample is below the lower edge; the t=200s sample is above `now`.
-        let now = base + Duration::from_secs(50);
-        let buckets = history.bucket_last(now, 1);
+        let now = base + Duration::from_secs(200);
+        let buckets = history.bucket_last(now, 10);
         assert_eq!(
             tags(&buckets),
-            vec![Some(2)],
-            "samples below `now - window` or above `now` must be excluded",
+            vec![
+                Some(2),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            ],
+            "a retained sample older than `leading - window` must be excluded; the \
+             in-range sample on the lower edge occupies the first bucket",
+        );
+    }
+
+    #[test]
+    fn bucket_last_excludes_a_sample_newer_than_the_leading_edge() {
+        // Defensive upper-edge range checking inside bucket_last: a sample whose
+        // timestamp is strictly newer than the quantized `leading` is excluded.
+        // Monotonic pushes never produce this against a `now` taken at/after the
+        // last poll, but a frame bucketed at a `now` that precedes a
+        // later-timestamped retained sample (e.g. a clock anomaly) must still
+        // reject it rather than fold it into the last slot. window = 100s over 10
+        // columns ⇒ 10s slices, epoch = base.
+        //
+        // Pushes (monotonic; last push base+95s prunes nothing — cutoff saturates):
+        //   tag 1 @ base+50s — the in-range target
+        //   tag 2 @ base+95s — newer than the leading edge of an earlier `now`
+        // Bucket at now = base+50s ⇒ k = ceil(50/10) = 5, leading = base+50s,
+        // window [base-50s.., base+50s]:
+        //   - tag 1 (base+50s) sits exactly on `leading` ⇒ last bucket (clamped),
+        //   - tag 2 (base+95s) is newer than `leading` ⇒ excluded (upper guard).
+        let base = Instant::now();
+        let window = Duration::from_secs(100);
+        let mut history = History::new(window, base);
+
+        history.push(base + Duration::from_secs(50), tagged(1)); // exactly on the leading edge
+        history.push(base + Duration::from_secs(95), tagged(2)); // above the leading edge
+
+        let now = base + Duration::from_secs(50);
+        let buckets = history.bucket_last(now, 10);
+        assert_eq!(
+            tags(&buckets),
+            vec![
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(1)
+            ],
+            "a sample newer than `leading` must be excluded, not clamped into the \
+             last slot; the on-edge sample occupies the last bucket",
         );
     }
 
