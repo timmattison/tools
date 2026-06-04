@@ -2311,6 +2311,82 @@ mod tests {
         );
     }
 
+    /// Guardrail against the recurring "flag shipped without README docs" pattern.
+    ///
+    /// nwt has repeatedly grown new CLI flags (`--no-copy-env`,
+    /// `--no-bootstrap-hooks`, `--random-directory`, `--shell-setup`, …) that
+    /// never made it into the repo-root README's `## nwt` section. A user who
+    /// reaches for the README to learn the tool is silently missing capabilities.
+    ///
+    /// This test fails whenever any long flag defined on `Cli` is absent from the
+    /// README's nwt section, listing every missing flag so the failure is
+    /// directly actionable. It is read-only and parallel-safe: it only builds the
+    /// clap command in-memory and reads the README — no temp files, no env or cwd
+    /// mutation, so a concurrent bacon loop can run it safely.
+    #[test]
+    fn readme_documents_all_nwt_cli_flags() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+
+        // Collect every user-facing long flag, skipping clap's auto-generated
+        // `help`/`version` args which the README is not expected to document.
+        let long_flags: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|arg| arg.get_long())
+            .filter(|name| *name != "help" && *name != "version")
+            .map(|name| format!("--{name}"))
+            .collect();
+
+        // src/nwt is two levels below the repo root, so the workspace-root README
+        // lives at ../../README.md relative to this crate's manifest directory.
+        let readme_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
+        let readme = fs::read_to_string(&readme_path).unwrap_or_else(|e| {
+            panic!(
+                "Failed to read workspace README at '{}': {}",
+                readme_path.display(),
+                e
+            )
+        });
+
+        // Extract ONLY the nwt section: from the `## nwt` heading up to (but not
+        // including) the next top-level `## ` heading (the next tool's section).
+        // Fail loudly if the heading can't be found — a renamed heading must not
+        // let this guard silently pass.
+        let all_lines: Vec<&str> = readme.lines().collect();
+        let start = all_lines
+            .iter()
+            .position(|line| line.starts_with("## nwt"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not find the '## nwt' section in {}. Was the heading renamed?",
+                    readme_path.display()
+                )
+            });
+        // Search for the next `## ` heading *after* the nwt heading; the section
+        // runs to that heading, or to end-of-file if nwt is the last section.
+        let end = all_lines[start + 1..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map(|offset| start + 1 + offset)
+            .unwrap_or(all_lines.len());
+        let section = all_lines[start..end].join("\n");
+
+        // Collect ALL missing flags first, then assert once, so the failure
+        // message lists every undocumented flag rather than just the first.
+        let missing: Vec<&String> = long_flags
+            .iter()
+            .filter(|flag| !section.contains(flag.as_str()))
+            .collect();
+
+        assert!(
+            missing.is_empty(),
+            "The README '## nwt' section is missing documentation for these CLI flags: {:?}. \
+             Document them in {} (under the `### Options` list).",
+            missing,
+            readme_path.display()
+        );
+    }
+
     #[test]
     fn test_cli_shell_setup_conflicts_with_random_directory() {
         use clap::CommandFactory;
