@@ -127,25 +127,44 @@ mod tests {
 
     /// The baseline glyph, named for readability in the assertions below.
     const BASELINE: char = '▁';
-    /// The full-block glyph, the top of the scale.
-    const FULL: char = '█';
+    /// The tallest glyph on the scale — `▇`, deliberately NOT the full block
+    /// `█`: a full-height bar touches the top of its cell and visually fuses
+    /// with the bottom of whatever is rendered on the row above, so the scale
+    /// caps one eighth short of the cell.
+    const TOP: char = '▇';
 
     #[test]
-    fn strictly_increasing_eight_values_map_to_all_eight_glyphs_in_order() {
-        // A series that steps evenly from min to max across eight points must hit
-        // each level once, in order: index = round(i/7 * 7) = i for i in 0..=7.
-        let out = sparkline(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
-        assert_eq!(out, "▁▂▃▄▅▆▇█");
+    fn strictly_increasing_seven_values_map_to_all_seven_glyphs_in_order() {
+        // A series that steps evenly from min to max across seven points must hit
+        // each level once, in order: index = round(i/6 * 6) = i for i in 0..=6.
+        // The scale tops out at ▇ — never the full block █, which would touch
+        // the cell top and merge into the row above.
+        let out = sparkline(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(out, "▁▂▃▄▅▆▇");
     }
 
     #[test]
     fn known_mixed_series_maps_by_the_scaling_rule() {
         // [0, 4, 8]: min = 0, max = 8, range = 8.
-        //   0 -> round(0/8 * 7) = round(0.0) = 0 -> ▁
-        //   4 -> round(4/8 * 7) = round(3.5) = 4 -> ▅   (round-half-away-from-zero)
-        //   8 -> round(8/8 * 7) = round(7.0) = 7 -> █
+        //   0 -> round(0/8 * 6) = round(0.0) = 0 -> ▁
+        //   4 -> round(4/8 * 6) = round(3.0) = 3 -> ▄
+        //   8 -> round(8/8 * 6) = round(6.0) = 6 -> ▇
         let out = sparkline(&[0.0, 4.0, 8.0]);
-        assert_eq!(out, "▁▅█");
+        assert_eq!(out, "▁▄▇");
+    }
+
+    #[test]
+    fn max_value_renders_top_glyph_never_the_full_block() {
+        // The full block █ fills its entire character cell, so a maxed bar
+        // would touch the bottom of the glyph above it and the two would read
+        // as one merged shape. The scale therefore tops out at ▇ and █ must
+        // never appear in any output.
+        let out = sparkline(&[0.0, 1.0]);
+        assert_eq!(out, "▁▇");
+        assert!(
+            !out.contains('█'),
+            "the tallest bar must not touch the cell top: {out:?}"
+        );
     }
 
     #[test]
@@ -179,28 +198,28 @@ mod tests {
     }
 
     #[test]
-    fn min_maps_to_baseline_and_max_maps_to_full_for_any_ranged_series() {
+    fn min_maps_to_baseline_and_max_maps_to_top_for_any_ranged_series() {
         // For any series with min < max, the smallest value sits at ▁ and the
-        // largest reaches █, irrespective of magnitude or sign.
+        // largest reaches ▇ (the capped top), irrespective of magnitude or sign.
         let series = [-5.0, 100.0, 12.5, -5.0, 99.9, 100.0];
         let out: Vec<char> = sparkline(&series).chars().collect();
         assert_eq!(out.len(), series.len());
         // Positions of the global min (-5.0) must be baseline.
         assert_eq!(out[0], BASELINE);
         assert_eq!(out[3], BASELINE);
-        // Positions of the global max (100.0) must be the full block.
-        assert_eq!(out[1], FULL);
-        assert_eq!(out[5], FULL);
+        // Positions of the global max (100.0) must be the top glyph.
+        assert_eq!(out[1], TOP);
+        assert_eq!(out[5], TOP);
     }
 
     #[test]
     fn large_magnitude_series_still_spans_full_scale() {
         // Auto-scaling is magnitude-independent: a series in the billions still
-        // pins its own min to ▁ and its own max to █.
+        // pins its own min to ▁ and its own max to ▇.
         let out: Vec<char> = sparkline(&[1_000_000_000.0, 2_000_000_000.0])
             .chars()
             .collect();
-        assert_eq!(out, vec![BASELINE, FULL]);
+        assert_eq!(out, vec![BASELINE, TOP]);
     }
 
     #[test]
@@ -213,9 +232,9 @@ mod tests {
             .collect();
         assert_eq!(out.len(), 5);
         // Finite endpoints still scale: 0.0 is the min -> baseline, 10.0 is the
-        // max -> full block.
+        // max -> top glyph.
         assert_eq!(out[0], BASELINE);
-        assert_eq!(out[2], FULL);
+        assert_eq!(out[2], TOP);
         // The three non-finite positions degrade to baseline.
         assert_eq!(out[1], BASELINE);
         assert_eq!(out[3], BASELINE);
