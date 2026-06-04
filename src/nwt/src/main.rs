@@ -3880,5 +3880,115 @@ mod tests {
                 "A non-git directory must yield None (fail-safe)"
             );
         }
+
+        /// RAII guard that removes a directory on drop, even if the test panics.
+        /// Used for the tilde-expansion tests, which must create a directory
+        /// directly under `$HOME` (the only place `~/` expands to) and therefore
+        /// must guarantee cleanup so we never leak test droppings into the real
+        /// home directory.
+        struct HomeDirGuard(std::path::PathBuf);
+        impl Drop for HomeDirGuard {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// Produces a process- and time-unique directory name. Concurrent test
+        /// runs share this machine (a background bacon loop runs the same tests
+        /// in parallel), and these tests touch `$HOME` — a shared resource — so
+        /// the name MUST be unique per run to avoid one run clobbering another.
+        fn unique_name(prefix: &str) -> String {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            format!("{prefix}-{}-{nanos}", std::process::id())
+        }
+
+        #[test]
+        fn test_tilde_hooks_path_existing_dir_ok() {
+            // The false-positive repro for issue #275: a global hooks setup of
+            // `core.hooksPath = ~/.githooks` is common. git expands the leading
+            // `~` to the home directory at hook-run time (it treats
+            // core.hooksPath as a pathname config type), so an existing
+            // `~/<dir>` means hooks WILL run and must not be flagged. The checker
+            // therefore has to perform the same tilde expansion git does;
+            // treating `~/...` as a worktree-relative path is the bug.
+            let home = match dirs::home_dir() {
+                Some(home) => home,
+                None => {
+                    eprintln!("Skipping test: home directory not available");
+                    return;
+                }
+            };
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // Create a uniquely named, existing dir directly under $HOME so the
+            // expanded `~/<name>` resolves to a real directory. The RAII guard
+            // removes it even if an assert below panics.
+            let name = unique_name(".nwt-test-hooks");
+            let real_dir = home.join(&name);
+            fs::create_dir_all(&real_dir).expect("Failed to create home test dir");
+            let _guard = HomeDirGuard(real_dir);
+
+            // Pass the literal `~/<name>` as a plain argument (no shell), so the
+            // tilde is stored verbatim in git config exactly like a user's
+            // global `~/.githooks` setting.
+            let tilde_value = format!("~/{name}");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", &tilde_value]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                None,
+                "a tilde hooksPath whose expanded dir exists must not be flagged"
+            );
+        }
+
+        #[test]
+        fn test_tilde_hooks_path_missing_reports_expanded_path() {
+            // Pins the reporting contract for tilde paths: when `~/<name>` does
+            // NOT exist, the warning must carry the EXPANDED absolute path the
+            // user can actually act on, not the raw `~/...` string. git itself
+            // expands the tilde (core.hooksPath is a pathname config type), so
+            // the checker must report the same expanded path git would use.
+            let home = match dirs::home_dir() {
+                Some(home) => home,
+                None => {
+                    eprintln!("Skipping test: home directory not available");
+                    return;
+                }
+            };
+            let dir = TempDir::new().expect("Failed to create temp dir");
+            if !git_init(dir.path()) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+
+            // A uniquely named dir under $HOME that we deliberately do NOT create.
+            let name = unique_name(".nwt-test-hooks-missing");
+            let tilde_value = format!("~/{name}");
+            assert!(
+                run_git(dir.path(), &["config", "core.hooksPath", &tilde_value]),
+                "Setting core.hooksPath should succeed"
+            );
+
+            let expected = home
+                .join(&name)
+                .to_str()
+                .expect("home test path must be UTF-8")
+                .to_string();
+            assert_eq!(
+                missing_hooks_path(dir.path()),
+                Some(expected),
+                "a missing tilde hooks dir must be reported as the expanded absolute path"
+            );
+        }
     }
 }
