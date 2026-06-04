@@ -191,7 +191,7 @@ sccache · Rust                 12:34:56
 
  Compile requests   4,786
  Requests executed   3,880
- Cache hits          1,718  ▁▂▃▅▇█▆▄
+ Cache hits          1,718  ▁▂▃▅▆▇▆▄
  Cache misses          963  ▁▁▂▂▃▂▁▁
  Hit rate            64.1%  ▆▆▇▇▇▆▆▇
 
@@ -209,7 +209,9 @@ sccache · Rust                 12:34:56
 
 ### Sparkline semantics
 
-- Glyphs: `▁▂▃▄▅▆▇█` (8 levels).
+- Glyphs: `▁▂▃▄▅▆▇` (7 levels). The full block `█` is deliberately excluded: it fills its
+  entire character cell, so a maxed bar would touch the bottom of the row above and the two
+  would read as one merged shape — the scale caps one eighth below the cell top.
 - The history ring buffer stores `(Instant, Stats)` samples at `poll_interval`. At render
   time, samples are **bucketed to fit the available terminal width** — the `window` is
   divided into N columns where N is the sparkline width budget, decoupling poll cadence
@@ -219,7 +221,9 @@ sccache · Rust                 12:34:56
   min..max over the window so the shape is visible regardless of magnitude.
 - **`hit_rate`** sparks the **windowed** rate per bucket — `bucket_hits / (bucket_hits +
   bucket_misses)` — clamped to 0..100. Buckets with no hit/miss activity render at baseline
-  (`▁`), never NaN.
+  (`▁`), never NaN. Each bar is **direction-colored**: green where the windowed rate rose vs
+  the previous bucket, red where it fell, uncolored when flat or first. Counter and size
+  sparks stay uncolored — their movement is activity, not quality.
 - **Size metrics** (`cache_size`) spark the absolute value per bucket (not a delta).
 - History is **in-memory only**: empty at launch, fills over `window`. Rationale: sccache
   exposes no historical series, so we could only ever persist what this process observed;

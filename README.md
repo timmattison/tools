@@ -350,10 +350,12 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —
     no `viddy`/`watch` wrapper needed. Polls `sccache --show-stats --stats-format=json` on a timer
-    (default 1s) and draws a compact, Rust-focused table with Unicode sparklines (`▁▂▃▄▅▆▇█`)
-    showing recent activity per metric over a configurable history window (default 15m). Counters
-    spark per-bucket deltas, hit rate sparks the windowed rate, and a mid-run
-    `sccache --zero-stats` never draws a spurious spike. Quit with `q`, `Esc`, or Ctrl-C.
+    (default 1s) and draws a compact, Rust-focused table with Unicode sparklines (`▁▂▃▄▅▆▇` —
+    capped below the full block so adjacent rows never visually merge) showing recent activity per
+    metric over a configurable history window (default 15m). Counters spark per-bucket deltas, hit
+    rate sparks the windowed rate with each bar colored green or red by whether the rate rose or
+    fell in that slice, and a mid-run `sccache --zero-stats` never draws a spurious spike. Quit
+    with `q`, `Esc`, or Ctrl-C.
     `--one-shot` renders a single frame for scripting (implied when stdout is not a TTY);
     `--one-shot --format json` emits the selected metrics as a JSON object for `jq`. Configure via
     `~/.config/seescc/config.toml` (`--write-default-config` scaffolds an annotated one):
