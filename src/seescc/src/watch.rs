@@ -349,6 +349,11 @@ pub(crate) fn languages_label(config: &crate::config::Config) -> String {
 ///
 /// Shared by the one-shot human frame and the watch frame so the two build their
 /// tables identically — the rows can never drift apart between the two views.
+/// Every row starts with `spark: None`: the one-shot frame keeps it that way (a
+/// single sample has no history to draw), while the watch frame overwrites the
+/// `spark == true` rows afterward in [`attach_sparklines`]. Keeping the spark
+/// out of this shared helper is what lets one-shot stay sparkline-free without a
+/// second row builder.
 pub(crate) fn build_rows(
     config: &crate::config::Config,
     stats: &crate::stats::Stats,
@@ -359,8 +364,8 @@ pub(crate) fn build_rows(
         .map(|spec| crate::render::Row {
             label: spec.label.clone(),
             value: crate::aggregate::metric_value(spec.key, stats, &config.languages).format(),
-            // No sparkline glyphs yet — the Phase 5 wiring slice attaches the
-            // real per-metric series after this layout slice lands.
+            // No sparkline here: the one-shot frame wants none, and the watch
+            // frame fills in the spark=true rows later via `attach_sparklines`.
             spark: None,
         })
         .collect()
