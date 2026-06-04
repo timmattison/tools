@@ -539,6 +539,12 @@ HOOK BOOTSTRAP:
     bootstrap_hooks = false in ~/.nwt.toml to disable it by default. Repos without
     a 'prepare' script are unaffected — no install is run.
 
+    As a safety net, after the bootstrap step nwt verifies the effective
+    'core.hooksPath' directory actually exists, and prints a loud warning if it
+    does not — whether bootstrap was skipped, failed, or didn't apply. Git
+    silently runs no hooks when that directory is missing, so this warning is the
+    only signal that commits in the new worktree would otherwise be ungated.
+
 EXAMPLES:
     nwt                              # Random name for both directory and branch
     nwt -b issue-42                  # Branch 'issue-42', directory 'issue-42'
@@ -1699,8 +1705,47 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
 /// - `Some(value)` — the configured path exactly as git printed it — when the
 ///   path is set but the directory it names is missing.
 fn missing_hooks_path(worktree: &Path) -> Option<String> {
-    let _ = worktree;
-    None
+    // Ask git for the effective value, run from inside the worktree so the
+    // worktree → repo-local → global → system precedence matches commit time.
+    // stdin is nulled so git can never block; stderr is nulled to avoid noise.
+    let output = Command::new("git")
+        .args(["config", "core.hooksPath"])
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+
+    // Non-zero exit means unset (or outside a repo / git error) → not our
+    // concern. Fail-safe: any failure path returns None, never blocks.
+    if !output.status.success() {
+        return None;
+    }
+
+    // git prints the value with a trailing newline; trim surrounding whitespace.
+    // An empty value (shouldn't normally happen on success) is treated as unset.
+    let configured = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if configured.is_empty() {
+        return None;
+    }
+
+    // git resolves a relative core.hooksPath against the top-level working dir;
+    // absolute paths are used verbatim. Mirror that to decide existence.
+    let candidate = Path::new(&configured);
+    let resolved = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        worktree.join(candidate)
+    };
+
+    // If the directory exists, git will find (and run) hooks there → fine.
+    // If it does NOT exist, git silently runs nothing — report the configured
+    // value (as git printed it) so the warning shows the user exactly what to fix.
+    if resolved.is_dir() {
+        None
+    } else {
+        Some(configured)
+    }
 }
 
 #[cfg(test)]
