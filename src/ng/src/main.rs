@@ -65,7 +65,11 @@ const CLEAR_SCREEN: &str = "\x1B[2J\x1B[1;1H";
 /// terminal. When piped or redirected, returns an empty string so the output
 /// stays clean.
 fn screen_clear_sequence(is_tty: bool) -> &'static str {
-    if is_tty { CLEAR_SCREEN } else { "" }
+    if is_tty {
+        CLEAR_SCREEN
+    } else {
+        ""
+    }
 }
 
 fn run_pnpm_script(script: &str) {
@@ -85,7 +89,10 @@ fn run_pnpm_script(script: &str) {
             println!("{}", format!("pnpm {script} passed.").green());
         }
         Ok(s) => {
-            let code = s.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+            let code = s
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into());
             println!("{}", format!("pnpm {script} failed (exit {code}).").red());
         }
         Err(e) => {
@@ -132,9 +139,7 @@ fn collect_watch_dirs(root: &Path) -> Vec<PathBuf> {
 fn is_relevant_event(kind: &notify::EventKind) -> bool {
     matches!(
         kind,
-        notify::EventKind::Create(_)
-            | notify::EventKind::Modify(_)
-            | notify::EventKind::Remove(_)
+        notify::EventKind::Create(_) | notify::EventKind::Modify(_) | notify::EventKind::Remove(_)
     )
 }
 

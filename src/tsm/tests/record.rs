@@ -63,15 +63,20 @@ fn record_first_call_writes_header() {
         .success();
 
     let log_path = session_log_path(&data, TEST_SESSION_ID);
-    assert!(log_path.exists(), "session log file must exist at {log_path:?}");
+    assert!(
+        log_path.exists(),
+        "session log file must exist at {log_path:?}"
+    );
 
     let contents = fs::read_to_string(&log_path).expect("read log");
     let first_line = contents.lines().next().expect("at least one line");
-    let header: Header =
-        serde_json::from_str(first_line).expect("line 1 must parse as Header");
+    let header: Header = serde_json::from_str(first_line).expect("line 1 must parse as Header");
     assert!(matches!(header.kind, HeaderKind::Header));
     assert_eq!(header.schema_version, 1);
-    assert!(!header.tsm_version.is_empty(), "tsm_version should be populated");
+    assert!(
+        !header.tsm_version.is_empty(),
+        "tsm_version should be populated"
+    );
 }
 
 #[test]
@@ -93,10 +98,13 @@ fn record_second_call_appends_record_after_header() {
     let log_path = session_log_path(&data, TEST_SESSION_ID);
     let contents = fs::read_to_string(&log_path).expect("read log");
     let lines: Vec<&str> = contents.lines().collect();
-    assert_eq!(lines.len(), 2, "expected exactly 2 lines, got: {contents:?}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "expected exactly 2 lines, got: {contents:?}"
+    );
 
-    let header: Header =
-        serde_json::from_str(lines[0]).expect("line 1 must parse as Header");
+    let header: Header = serde_json::from_str(lines[0]).expect("line 1 must parse as Header");
     assert!(matches!(header.kind, HeaderKind::Header));
 
     let record: PrecmdRecord =
@@ -162,7 +170,10 @@ fn record_failure_increments_fail_counter() {
         .success();
 
     let counter = fail_count_path(&state);
-    assert!(counter.exists(), "fail-count file must exist at {counter:?}");
+    assert!(
+        counter.exists(),
+        "fail-count file must exist at {counter:?}"
+    );
     let v = fs::read_to_string(&counter).expect("read counter");
     assert_eq!(v.trim(), "1");
 
@@ -226,8 +237,7 @@ fn record_redacts_aws_session_token() {
     let contents = fs::read_to_string(&log_path).expect("read log");
     let lines: Vec<&str> = contents.lines().collect();
     assert!(lines.len() >= 2, "expected header + record");
-    let record: PrecmdRecord =
-        serde_json::from_str(lines[1]).expect("line 2 is PrecmdRecord");
+    let record: PrecmdRecord = serde_json::from_str(lines[1]).expect("line 2 is PrecmdRecord");
     assert!(
         !record.env.contains_key("AWS_SESSION_TOKEN"),
         "AWS_SESSION_TOKEN must be redacted out of env"
@@ -237,7 +247,9 @@ fn record_redacts_aws_session_token() {
         "MY_API_KEY must be redacted out of env"
     );
     assert!(
-        record.redacted_keys.contains(&"AWS_SESSION_TOKEN".to_string()),
+        record
+            .redacted_keys
+            .contains(&"AWS_SESSION_TOKEN".to_string()),
         "AWS_SESSION_TOKEN must be in redacted_keys"
     );
     assert!(

@@ -21,8 +21,8 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use tsm_id::SessionId;
 use tsm_jsonl::{
-    Header, HeaderKind, JsonlError, PrecmdKind, PrecmdRecord, TupleStub, append_header,
-    append_record,
+    append_header, append_record, Header, HeaderKind, JsonlError, PrecmdKind, PrecmdRecord,
+    TupleStub,
 };
 use wait_timeout::ChildExt;
 
@@ -113,9 +113,7 @@ fn is_redacted(name: &str) -> bool {
 /// Split `env` into (kept, redacted-keys-sorted). Values for keys that match
 /// the redaction list are dropped entirely from the kept map; their names are
 /// pushed onto `redacted_keys` and the result is sorted alphabetically.
-fn redact_env(
-    env: BTreeMap<String, String>,
-) -> (BTreeMap<String, String>, Vec<String>) {
+fn redact_env(env: BTreeMap<String, String>) -> (BTreeMap<String, String>, Vec<String>) {
     let mut kept = BTreeMap::new();
     let mut redacted = Vec::new();
     for (k, v) in env {
@@ -292,7 +290,11 @@ fn parent_pid() -> u32 {
     #[cfg(unix)]
     {
         let p = std::os::unix::process::parent_id();
-        if p == 0 { std::process::id() } else { p }
+        if p == 0 {
+            std::process::id()
+        } else {
+            p
+        }
     }
     #[cfg(not(unix))]
     {
@@ -324,7 +326,9 @@ fn rotate_error_log_if_needed(path: &Path) {
         buf.drain(..=nl);
     }
     let tmp = path.with_extension(format!("log.tmp.{}", std::process::id()));
-    let Ok(mut out) = File::create(&tmp) else { return };
+    let Ok(mut out) = File::create(&tmp) else {
+        return;
+    };
     if out.write_all(&buf).is_err() {
         let _ = fs::remove_file(&tmp);
         return;
@@ -358,7 +362,9 @@ fn write_fail_counter(path: &Path, value: u32) {
 
 /// Read the current fail counter (0 if absent or unparseable).
 fn read_fail_counter(path: &Path) -> u32 {
-    let Ok(s) = fs::read_to_string(path) else { return 0 };
+    let Ok(s) = fs::read_to_string(path) else {
+        return 0;
+    };
     s.trim().parse::<u32>().unwrap_or(0)
 }
 
@@ -414,8 +420,7 @@ fn build_header() -> Header {
         |_| "unknown".to_string(),
         |h| h.to_string_lossy().into_owned(),
     );
-    let terminal_program =
-        std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
+    let terminal_program = std::env::var("TERM_PROGRAM").unwrap_or_else(|_| "unknown".to_string());
     Header {
         kind: HeaderKind::Header,
         schema_version: 1,
@@ -469,15 +474,11 @@ fn append_record_with_header(path: &Path, record: &PrecmdRecord) -> Result<(), J
 
 /// The core of the recorder. Returns `Ok(())` on success, `Err(String)` on
 /// any internal failure (the caller logs the message and bumps the counter).
-fn do_record(
-    state_dir: &Path,
-    exit_code: i32,
-    last_command: String,
-) -> Result<(), String> {
+fn do_record(state_dir: &Path, exit_code: i32, last_command: String) -> Result<(), String> {
     let raw_id = std::env::var("TSM_SESSION_ID")
         .map_err(|_| "record: TSM_SESSION_ID is not set".to_string())?;
-    let session_id = SessionId::from_hex(&raw_id)
-        .map_err(|e| format!("record: invalid TSM_SESSION_ID: {e}"))?;
+    let session_id =
+        SessionId::from_hex(&raw_id).map_err(|e| format!("record: invalid TSM_SESSION_ID: {e}"))?;
 
     let _ = state_dir; // path resolution for the session log uses XDG_DATA_HOME.
     let log_path = session_log_path(&session_id)
@@ -504,11 +505,7 @@ fn do_record(
     Ok(())
 }
 
-fn handle_record(
-    exit_code: i32,
-    last_command: String,
-    probe_subprocess: Option<String>,
-) {
+fn handle_record(exit_code: i32, last_command: String, probe_subprocess: Option<String>) {
     let state_dir = xdg_state_home();
     let err_log = state_dir.as_deref().map(error_log_path_in);
 
@@ -530,7 +527,11 @@ fn handle_record(
         return;
     }
 
-    match do_record(state_dir.as_deref().unwrap_or(Path::new(".")), exit_code, last_command) {
+    match do_record(
+        state_dir.as_deref().unwrap_or(Path::new(".")),
+        exit_code,
+        last_command,
+    ) {
         Ok(()) => {
             if let Some(dir) = state_dir.as_deref() {
                 reset_fail_counter(dir);
@@ -552,9 +553,7 @@ fn main() {
     match cli.command {
         Commands::ShellInit { shell } => {
             if shell != "zsh" {
-                eprintln!(
-                    "tsm: shell-init: only \"zsh\" is supported in v1, got: {shell}"
-                );
+                eprintln!("tsm: shell-init: only \"zsh\" is supported in v1, got: {shell}");
                 std::process::exit(EXIT_UNSUPPORTED_SHELL);
             }
             let session_id = SessionId::random();
@@ -579,8 +578,7 @@ mod tests {
 
     /// Build a fixed session ID for deterministic snippet inspection.
     fn fixed_session_id() -> SessionId {
-        SessionId::from_hex("0123456789abcdef0123456789abcdef")
-            .expect("fixed hex is valid")
+        SessionId::from_hex("0123456789abcdef0123456789abcdef").expect("fixed hex is valid")
     }
 
     #[test]
@@ -608,10 +606,7 @@ mod tests {
     fn zsh_snippet_uses_random_id_when_called_via_main() {
         let a = generate_zsh_snippet(&SessionId::random());
         let b = generate_zsh_snippet(&SessionId::random());
-        assert_ne!(
-            a, b,
-            "two snippets generated with random ids should differ"
-        );
+        assert_ne!(a, b, "two snippets generated with random ids should differ");
     }
 
     #[test]

@@ -47,9 +47,7 @@ fn run_cargo_clean(dir: &Path, dry_run: bool) -> Result<(), std::io::Error> {
             dir.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
-        return Err(std::io::Error::other(
-            "cargo clean failed",
-        ));
+        return Err(std::io::Error::other("cargo clean failed"));
     }
 
     println!("Cleaned: {}", dir.display());

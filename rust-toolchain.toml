@@ -1,0 +1,8 @@
+# Pin the toolchain so the formatting contract (and clippy gate) is
+# machine-independent: every contributor and CI run resolves the exact same
+# rustfmt/clippy behavior instead of whatever stable happens to be installed.
+# See issue #273. Bump deliberately; after bumping, re-run `cargo fmt --all`
+# in a dedicated style-only commit if the check no longer passes.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

@@ -230,10 +230,9 @@ fn get_worktrees(repo_root: &Path) -> Result<Vec<Worktree>, String> {
 fn find_current_worktree(worktrees: &[Worktree], repo_root: &Path) -> Option<usize> {
     let canonical = std::fs::canonicalize(repo_root).ok()?;
 
-    worktrees.iter().position(|wt| {
-        std::fs::canonicalize(&wt.path)
-            .is_ok_and(|p| paths_equal(&p, &canonical))
-    })
+    worktrees
+        .iter()
+        .position(|wt| std::fs::canonicalize(&wt.path).is_ok_and(|p| paths_equal(&p, &canonical)))
 }
 
 /// Compares two paths, handling case-insensitivity on macOS.

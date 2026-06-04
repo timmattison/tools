@@ -1,0 +1,4 @@
+# Make the style contract explicit instead of inferred from the crate edition,
+# so formatting stays stable across future rust-toolchain.toml bumps (rustfmt
+# only changes formatting defaults between style editions). See issue #273.
+style_edition = "2021"

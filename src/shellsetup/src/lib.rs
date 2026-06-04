@@ -542,8 +542,7 @@ enum ConfigTarget {
 fn resolve_config_target(rendered_path: &Path) -> ConfigTarget {
     let direct = || ConfigTarget::Direct(rendered_path.to_path_buf());
 
-    let (Some(parent), Some(file_name)) =
-        (rendered_path.parent(), rendered_path.file_name())
+    let (Some(parent), Some(file_name)) = (rendered_path.parent(), rendered_path.file_name())
     else {
         return direct();
     };
@@ -558,7 +557,10 @@ fn resolve_config_target(rendered_path: &Path) -> ConfigTarget {
     };
     for entry in entries.flatten() {
         let entry_name = entry.file_name();
-        let Some(suffix) = entry_name.to_string_lossy().strip_prefix(&prefix).map(str::to_owned)
+        let Some(suffix) = entry_name
+            .to_string_lossy()
+            .strip_prefix(&prefix)
+            .map(str::to_owned)
         else {
             continue;
         };
@@ -1304,10 +1306,8 @@ function prmv() { OLD_PRCP; }
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock before unix epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "shellsetup-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("shellsetup-{tag}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir).expect("create unique temp dir");
         dir
     }
@@ -1318,10 +1318,7 @@ function prmv() { OLD_PRCP; }
         let rc = dir.join(".zshrc");
         fs::write(&rc, "# config\n").unwrap();
 
-        assert_eq!(
-            resolve_config_target(&rc),
-            ConfigTarget::Direct(rc.clone())
-        );
+        assert_eq!(resolve_config_target(&rc), ConfigTarget::Direct(rc.clone()));
 
         fs::remove_dir_all(&dir).ok();
     }

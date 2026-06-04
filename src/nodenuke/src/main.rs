@@ -69,12 +69,13 @@ fn main() {
 
         // Check for target directories
         if entry.file_type().is_some_and(|ft| ft.is_dir())
-            && target_dirs.contains(&entry_name.as_ref()) {
-                println!("Removing directory: {}", entry.path().display());
-                if let Err(e) = fs::remove_dir_all(entry.path()) {
-                    eprintln!("Error removing {}: {}", entry.path().display(), e);
-                }
+            && target_dirs.contains(&entry_name.as_ref())
+        {
+            println!("Removing directory: {}", entry.path().display());
+            if let Err(e) = fs::remove_dir_all(entry.path()) {
+                eprintln!("Error removing {}: {}", entry.path().display(), e);
             }
+        }
     }
 
     // Second pass: Find and remove target files
@@ -90,12 +91,13 @@ fn main() {
 
         // Check for target files
         if entry.file_type().is_some_and(|ft| ft.is_file())
-            && target_files.contains(&entry_name.as_ref()) {
-                println!("Removing file: {}", entry.path().display());
-                if let Err(e) = fs::remove_file(entry.path()) {
-                    eprintln!("Error removing {}: {}", entry.path().display(), e);
-                }
+            && target_files.contains(&entry_name.as_ref())
+        {
+            println!("Removing file: {}", entry.path().display());
+            if let Err(e) = fs::remove_file(entry.path()) {
+                eprintln!("Error removing {}: {}", entry.path().display(), e);
             }
+        }
     }
 
     println!("Cleanup complete!");

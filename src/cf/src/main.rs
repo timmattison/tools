@@ -43,7 +43,9 @@ fn main() -> Result<()> {
         Some(FilterType::Suffix(suffix))
     } else if let Some(prefix) = cli.prefix {
         Some(FilterType::Prefix(prefix))
-    } else { cli.substring.map(FilterType::Substring) };
+    } else {
+        cli.substring.map(FilterType::Substring)
+    };
 
     let walker = FileWalker::new(cli.paths).with_filter(filter);
 

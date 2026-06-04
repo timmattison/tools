@@ -246,19 +246,16 @@ fn ensure_file_exists(file_path: &Path) -> Result<()> {
     match fs::metadata(file_path) {
         Ok(metadata) => {
             if metadata.is_dir() {
-                anyhow::bail!(
-                    "{} is a directory, not a file",
-                    file_path.display()
-                );
+                anyhow::bail!("{} is a directory, not a file", file_path.display());
             }
             Ok(())
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             anyhow::bail!("File not found: {}", file_path.display());
         }
-        Err(error) => Err(error).with_context(|| {
-            format!("Failed to access file: {}", file_path.display())
-        }),
+        Err(error) => {
+            Err(error).with_context(|| format!("Failed to access file: {}", file_path.display()))
+        }
     }
 }
 
@@ -2932,7 +2929,10 @@ not_a_number  1 /bin/bash
     fn parse_dimensions_handles_newline_separated() {
         // ffprobe's `default=noprint_wrappers=1:nokey=1` writer emits one value
         // per line; the parser must accept that layout too.
-        assert_eq!(parse_video_dimensions("3840\n2160\n").unwrap(), (3840, 2160));
+        assert_eq!(
+            parse_video_dimensions("3840\n2160\n").unwrap(),
+            (3840, 2160)
+        );
     }
 
     #[test]

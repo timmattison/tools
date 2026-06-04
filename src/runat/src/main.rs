@@ -142,10 +142,10 @@ fn run_app(
                     KeyCode::Char('q') | KeyCode::Char('c')
                         if key
                             .modifiers
-                            .contains(crossterm::event::KeyModifiers::CONTROL)
-                        => {
-                            app.should_quit = true;
-                        }
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        app.should_quit = true;
+                    }
                     _ => {}
                 }
             }

@@ -373,10 +373,13 @@ fn fetch_binary_from_1password(op_path: &OpPath, output_path: &Path) -> Result<(
             ])
             .output()
         {
-            Ok(output) if output.status.success()
-                && output_path.exists() && output_path.metadata().is_ok_and(|m| m.len() > 0) => {
-                    return Ok(());
-                }
+            Ok(output)
+                if output.status.success()
+                    && output_path.exists()
+                    && output_path.metadata().is_ok_and(|m| m.len() > 0) =>
+            {
+                return Ok(());
+            }
             _ => {}
         }
 

@@ -31,7 +31,7 @@ use std::process::exit;
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
-use comfy_table::{ContentArrangement, Table, presets::UTF8_FULL};
+use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use serde::Serialize;
 use shellsetup::ShellIntegration;
 
@@ -225,7 +225,10 @@ fn classify_session_state(contents: &str) -> SessionState {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if value.get("isSidechain").and_then(serde_json::Value::as_bool) == Some(true)
+        if value
+            .get("isSidechain")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
             || value.get("isMeta").and_then(serde_json::Value::as_bool) == Some(true)
         {
             continue;
@@ -370,8 +373,8 @@ fn resolve_here_link(
     if !is_valid_session_id(session_id) {
         return Err(HereResolveError::InvalidSessionId);
     }
-    let original = find_session_file(projects_dir, session_id)
-        .ok_or(HereResolveError::SessionNotFound)?;
+    let original =
+        find_session_file(projects_dir, session_id).ok_or(HereResolveError::SessionNotFound)?;
     prepare_here_link(projects_dir, &original, pwd, session_id).map_err(HereResolveError::Io)
 }
 
@@ -832,12 +835,11 @@ function crap() {
 
 /// Installs the `crap` shell function into the user's shell config.
 fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
-    let integration = ShellIntegration::new(
-        "crap",
-        "Claude, Resume Anywhere Please",
-        SHELL_CODE,
-    )
-    .with_command("crap", "Resume a Claude session from its original directory");
+    let integration = ShellIntegration::new("crap", "Claude, Resume Anywhere Please", SHELL_CODE)
+        .with_command(
+            "crap",
+            "Resume a Claude session from its original directory",
+        );
     integration.setup()
 }
 
@@ -1384,10 +1386,14 @@ mod tests {
         // typo'd id fails fast and shell metacharacters never reach the binary.
         assert!(!is_valid_session_id("not-a-uuid"));
         assert!(!is_valid_session_id("4733ee2a-1ad6-4619-a01a-11840b8e190")); // too short
-        assert!(!is_valid_session_id("4733ee2a-1ad6-4619-a01a-11840b8e19011")); // too long
+        assert!(!is_valid_session_id(
+            "4733ee2a-1ad6-4619-a01a-11840b8e19011"
+        )); // too long
         assert!(!is_valid_session_id("4733ee2a1ad64619a01a11840b8e1901")); // no hyphens
         assert!(!is_valid_session_id("4733ee2g-1ad6-4619-a01a-11840b8e1901")); // 'g' not hex
-        assert!(!is_valid_session_id("4733ee2a-1ad6-4619-a01a-11840b8e1901 ; rm -rf ~"));
+        assert!(!is_valid_session_id(
+            "4733ee2a-1ad6-4619-a01a-11840b8e1901 ; rm -rf ~"
+        ));
         assert!(!is_valid_session_id("4733ee2a 1ad6 4619 a01a 11840b8e1901")); // spaces
     }
 
@@ -1441,7 +1447,10 @@ mod tests {
                 .join("-Volumes-x-here-cwd")
                 .join(format!("{SAMPLE_ID}.jsonl"))
         );
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert_eq!(fs::read_link(&link).unwrap(), original);
     }
 
@@ -1684,9 +1693,10 @@ mod tests {
         // ...but the session is live, so the live status wins for `state`.
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        let report =
-            resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041)
-                .unwrap();
+        let report = resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| {
+            pid == 17041
+        })
+        .unwrap();
         assert_eq!(report.state, "busy (live, pid 17041)");
     }
 
@@ -1942,10 +1952,7 @@ mod tests {
                 stdout.contains(marker),
                 "`crap {args}` should print the binary's output verbatim, got: {stdout:?}"
             );
-            assert!(
-                !claude_called,
-                "`crap {args}` must not attempt a resume"
-            );
+            assert!(!claude_called, "`crap {args}` must not attempt a resume");
         }
     }
 
@@ -2023,12 +2030,18 @@ mod tests {
 
     #[test]
     fn format_timestamp_prettifies_iso8601() {
-        assert_eq!(format_timestamp("2026-05-25T18:43:05.109Z"), "2026-05-25 18:43:05");
+        assert_eq!(
+            format_timestamp("2026-05-25T18:43:05.109Z"),
+            "2026-05-25 18:43:05"
+        );
     }
 
     #[test]
     fn format_timestamp_handles_missing_subseconds() {
-        assert_eq!(format_timestamp("2026-05-25T18:43:05Z"), "2026-05-25 18:43:05");
+        assert_eq!(
+            format_timestamp("2026-05-25T18:43:05Z"),
+            "2026-05-25 18:43:05"
+        );
     }
 
     #[test]
@@ -2067,7 +2080,10 @@ mod tests {
         assert_eq!(reports[0].session_id, ID_A);
         assert_eq!(reports[1].session_id, ID_B);
         assert!(reports.iter().all(|r| r.state == "waiting-for-user"));
-        assert_eq!(reports[1].started.as_deref(), Some("2026-05-25T11:00:00.000Z"));
+        assert_eq!(
+            reports[1].started.as_deref(),
+            Some("2026-05-25T11:00:00.000Z")
+        );
         assert_eq!(reports[1].last.as_deref(), Some("2026-05-25T11:00:00.000Z"));
     }
 
@@ -2090,10 +2106,12 @@ mod tests {
     fn resolve_dir_statuses_empty_when_folder_absent() {
         let projects = tempdir().unwrap();
         let sessions = tempdir().unwrap();
-        let reports =
-            resolve_dir_statuses(projects.path(), sessions.path(), Path::new("/no/such/dir"), |_| {
-                false
-            });
+        let reports = resolve_dir_statuses(
+            projects.path(),
+            sessions.path(),
+            Path::new("/no/such/dir"),
+            |_| false,
+        );
         assert!(reports.is_empty());
     }
 
@@ -2108,7 +2126,8 @@ mod tests {
         write_session_in(&folder, LIVE_ID, "2026-05-25T10:00:00.000Z");
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        let reports = resolve_dir_statuses(projects.path(), sessions.path(), pwd, |pid| pid == 17041);
+        let reports =
+            resolve_dir_statuses(projects.path(), sessions.path(), pwd, |pid| pid == 17041);
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].state, "busy (live, pid 17041)");
     }
@@ -2237,9 +2256,10 @@ mod tests {
         let sessions = tempdir().unwrap();
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        let report =
-            resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| pid == 17041)
-                .unwrap();
+        let report = resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| {
+            pid == 17041
+        })
+        .unwrap();
         assert_eq!(report.state, "busy (live, pid 17041)");
     }
 
