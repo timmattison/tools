@@ -183,8 +183,9 @@ impl WatchState {
 ///   of staring at a blank pane for a full `poll_interval`.
 /// - **Timeout ⇒ poll.** Each `recv_timeout(poll_interval)` timeout is a tick:
 ///   poll, apply, render, and repaint **only if the frame differs** from what's
-///   displayed. Byte-identical suppression is what stops an idle server from
-///   flickering — the poll still happens, but no paint.
+///   displayed. Byte-identical suppression skips repaints for ticks landing
+///   within the same clock second (sub-second intervals only, since the render
+///   closure embeds a live `%H:%M:%S` header that advances each second).
 /// - **Resize ⇒ forced repaint.** A resize re-renders from the *current* state
 ///   (no poll — the numbers haven't changed) and paints **unconditionally**,
 ///   even when the bytes match `displayed`, because the on-screen layout is
@@ -215,7 +216,7 @@ where
     loop {
         match rx.recv_timeout(poll_interval) {
             // A timeout is a tick: re-poll and repaint only if the frame
-            // changed (suppression keeps an idle server from flickering).
+            // changed (suppression skips repaints within a clock second).
             Err(RecvTimeoutError::Timeout) => {
                 poll_once(state, &mut poll, &mut render, &mut paint, displayed, false)?;
             }
