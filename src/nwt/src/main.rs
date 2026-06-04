@@ -78,6 +78,11 @@ fn default_copy_env() -> bool {
     true
 }
 
+/// Returns the default value for bootstrap_hooks (true).
+fn default_bootstrap_hooks() -> bool {
+    true
+}
+
 /// Configuration file schema for nwt.
 ///
 /// All fields are optional - only set what you need to override defaults.
@@ -95,6 +100,11 @@ struct NwtConfig {
     /// Defaults to true if not specified.
     #[serde(default = "default_copy_env")]
     copy_env: bool,
+
+    /// Run the package manager's install in a new worktree to regenerate
+    /// git-hook directories (e.g. husky's `.husky/_`). Defaults to true.
+    #[serde(default = "default_bootstrap_hooks")]
+    bootstrap_hooks: bool,
 
     /// Enable quiet mode by default.
     #[serde(default)]
@@ -120,8 +130,9 @@ impl Default for NwtConfig {
         Self {
             branch: None,
             checkout: None,
-            copy_env: true, // Must match default_copy_env()
-            quiet: false,   // Must match #[serde(default)] (false)
+            copy_env: true,        // Must match default_copy_env()
+            bootstrap_hooks: true, // Must match default_bootstrap_hooks()
+            quiet: false,          // Must match #[serde(default)] (false)
             run: None,
             tmux: false, // Must match #[serde(default)] (false)
         }
@@ -169,6 +180,7 @@ struct MergedConfig {
     branch: Option<String>,
     checkout: Option<String>,
     copy_env: bool,
+    bootstrap_hooks: bool,
     quiet: bool,
     run: Option<String>,
     tmux: bool,
@@ -248,6 +260,9 @@ fn merge_config(cli: &Cli, config: Option<NwtConfig>) -> MergedConfig {
         // copy_env: config default is true, CLI --no-copy-env disables it.
         // If CLI specifies --no-copy-env, we disable. Otherwise use config value.
         copy_env: !cli.no_copy_env && config.copy_env,
+        // bootstrap_hooks: config default is true, CLI --no-bootstrap-hooks disables it.
+        // Same merge shape as copy_env: CLI disables, otherwise use config value.
+        bootstrap_hooks: !cli.no_bootstrap_hooks && config.bootstrap_hooks,
         // Boolean flags use OR: CLI can enable but not disable config defaults.
         // See function-level doc comment for rationale.
         quiet: cli.quiet || config.quiet,
@@ -624,6 +639,21 @@ struct Cli {
     #[arg(long)]
     no_copy_env: bool,
 
+    /// Disable running the package manager's install to bootstrap git hooks.
+    ///
+    /// By default, after creating the worktree, nwt detects a `prepare` script
+    /// in the worktree's package.json (the husky convention) and runs the
+    /// project's package manager install (pnpm/npm/yarn/bun) so git-hook
+    /// managers regenerate their hook directory. This matters because
+    /// `core.hooksPath` often points at a gitignored, generated directory that
+    /// a fresh worktree lacks — without the install, commits silently bypass
+    /// every hook.
+    ///
+    /// Use this flag to skip the install for a single invocation, or set
+    /// `bootstrap_hooks = false` in ~/.nwt.toml to disable it by default.
+    #[arg(long)]
+    no_bootstrap_hooks: bool,
+
     /// Install shell integration to automatically cd into new worktrees.
     ///
     /// Adds a shell function to your ~/.zshrc or ~/.bashrc that wraps nwt
@@ -634,7 +664,7 @@ struct Cli {
     ///
     /// To activate after installation, run `source ~/.zshrc` (or `~/.bashrc`)
     /// or open a new terminal.
-    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "random_directory"])]
+    #[arg(long, conflicts_with_all = ["branch", "checkout", "quiet", "run", "tmux", "no_copy_env", "no_bootstrap_hooks", "random_directory"])]
     shell_setup: bool,
 }
 
@@ -1265,6 +1295,15 @@ fn main() {
                     rename_zellij_tab(&tab_name);
                 }
 
+                // Bootstrap git hooks (e.g. husky's gitignored .husky/_) so they
+                // fire in this fresh worktree. Must run AFTER stdout's worktree
+                // path is printed and BEFORE any --run/tmux execution. A failure
+                // here never aborts worktree creation — the worktree is valid,
+                // just (possibly) ungated; bootstrap_hooks warns and continues.
+                if config.bootstrap_hooks {
+                    bootstrap_hooks(&worktree_path, config.quiet);
+                }
+
                 // Execute tmux and/or run commands
                 if config.tmux {
                     #[cfg(unix)]
@@ -1532,9 +1571,33 @@ fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
     Some(PackageManager::Pnpm)
 }
 
+/// Bootstraps git hooks in a freshly created worktree, if it needs them.
+///
+/// Stub for the red commit: real implementation lands in the green commit.
+fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
+    let _ = (worktree, quiet);
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to run a git command in a directory, returning whether it
+    /// succeeded. Shared across child test modules (`env_copy_tests`,
+    /// `bootstrap_hooks_tests`) which both need a real git repo for their
+    /// integration tests. Stdout/stderr are nulled so concurrent test runs
+    /// don't interleave noise.
+    fn run_git(dir: &Path, args: &[&str]) -> bool {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 
     #[test]
     fn test_generate_docker_name_format() {
@@ -1757,6 +1820,7 @@ mod tests {
             branch: Some("feature/test".to_string()),
             checkout: None,
             copy_env: true,
+            bootstrap_hooks: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -1770,6 +1834,7 @@ mod tests {
             branch: None,
             checkout: None,
             copy_env: true,
+            bootstrap_hooks: true,
             quiet: false,
             run: None,
             tmux: false,
@@ -2271,9 +2336,20 @@ mod tests {
             assert!(config.branch.is_none());
             assert!(config.checkout.is_none());
             assert!(config.copy_env); // defaults to true
+            assert!(config.bootstrap_hooks); // defaults to true
             assert!(!config.quiet);
             assert!(config.run.is_none());
             assert!(!config.tmux);
+        }
+
+        #[test]
+        fn test_parse_config_bootstrap_hooks_false() {
+            // An explicit `bootstrap_hooks = false` must parse and be respected;
+            // an absent field must default to true (covered by the empty-config test).
+            let toml = "bootstrap_hooks = false";
+            let config: NwtConfig = toml::from_str(toml).expect("Should parse valid config");
+            assert!(!config.bootstrap_hooks);
+            assert!(config.copy_env); // unrelated field keeps its default
         }
 
         /// Verifies that `NwtConfig::default()` produces the same values as serde defaults.
@@ -2304,6 +2380,10 @@ mod tests {
                 "copy_env default mismatch between impl Default and serde"
             );
             assert_eq!(
+                serde_defaults.bootstrap_hooks, manual_defaults.bootstrap_hooks,
+                "bootstrap_hooks default mismatch between impl Default and serde"
+            );
+            assert_eq!(
                 serde_defaults.quiet, manual_defaults.quiet,
                 "quiet default mismatch between impl Default and serde"
             );
@@ -2331,6 +2411,7 @@ mod tests {
                 branch: Some("feat".to_string()),
                 checkout: Some("main".to_string()),
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2345,6 +2426,7 @@ mod tests {
                 branch: Some("feat".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2359,6 +2441,7 @@ mod tests {
                 branch: None,
                 checkout: Some("main".to_string()),
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2374,6 +2457,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -2383,6 +2467,7 @@ mod tests {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: false,
                 run: Some("npm install".to_string()),
                 tmux: true,
@@ -2411,6 +2496,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2420,6 +2506,7 @@ mod tests {
                 branch: Some("config-branch".to_string()),
                 checkout: None,
                 copy_env: true,
+                bootstrap_hooks: true,
                 quiet: true,
                 run: Some("make build".to_string()),
                 tmux: true,
@@ -2441,6 +2528,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: true,
                 run: None,
                 tmux: false,
@@ -2463,6 +2551,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: true, // CLI disables
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2472,6 +2561,7 @@ mod tests {
                 branch: None,
                 checkout: None,
                 copy_env: true, // config enables
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2489,6 +2579,7 @@ mod tests {
                 random_directory: false,
                 checkout: None,
                 no_copy_env: false,
+                no_bootstrap_hooks: false,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2498,6 +2589,7 @@ mod tests {
                 branch: None,
                 checkout: None,
                 copy_env: false, // config disables
+                bootstrap_hooks: true,
                 quiet: false,
                 run: None,
                 tmux: false,
@@ -2506,6 +2598,106 @@ mod tests {
 
             // Config copy_env = false should be respected
             assert!(!merged.copy_env);
+        }
+
+        #[test]
+        fn test_merge_bootstrap_hooks_default_is_true() {
+            // With no CLI flag and no config, bootstrap_hooks defaults to true.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let merged = merge_config(&cli, None);
+            assert!(merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_merge_no_bootstrap_hooks_disables() {
+            // CLI --no-bootstrap-hooks overrides config bootstrap_hooks = true.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_bootstrap_hooks: true, // CLI disables
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true,
+                bootstrap_hooks: true, // config enables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_merge_config_bootstrap_hooks_false() {
+            // Config bootstrap_hooks = false is respected when CLI doesn't ask for it.
+            let cli = Cli {
+                branch: None,
+                random_directory: false,
+                checkout: None,
+                no_copy_env: false,
+                no_bootstrap_hooks: false,
+                quiet: false,
+                run: None,
+                tmux: false,
+                shell_setup: false,
+            };
+            let config = NwtConfig {
+                branch: None,
+                checkout: None,
+                copy_env: true,
+                bootstrap_hooks: false, // config disables
+                quiet: false,
+                run: None,
+                tmux: false,
+            };
+            let merged = merge_config(&cli, Some(config));
+            assert!(!merged.bootstrap_hooks);
+        }
+
+        #[test]
+        fn test_cli_no_bootstrap_hooks_parses() {
+            use clap::CommandFactory;
+            let cmd = Cli::command();
+
+            let result = cmd.try_get_matches_from(["nwt", "--no-bootstrap-hooks"]);
+            assert!(result.is_ok(), "Should accept --no-bootstrap-hooks option");
+
+            let matches = result.unwrap();
+            assert!(
+                matches.get_flag("no_bootstrap_hooks"),
+                "Should set no_bootstrap_hooks flag"
+            );
+        }
+
+        #[test]
+        fn test_cli_shell_setup_conflicts_with_no_bootstrap_hooks() {
+            use clap::CommandFactory;
+            let cmd = Cli::command();
+
+            // --shell-setup conflicts with --no-bootstrap-hooks
+            let result = cmd.try_get_matches_from(["nwt", "--shell-setup", "--no-bootstrap-hooks"]);
+            assert!(
+                result.is_err(),
+                "Should fail when both --shell-setup and --no-bootstrap-hooks are provided"
+            );
         }
 
         #[test]
@@ -2761,18 +2953,6 @@ mod tests {
                 !dest.path().join("target/debug/.env").exists(),
                 "target directory contents should be skipped"
             );
-        }
-
-        /// Helper to run a git command in a directory.
-        fn run_git(dir: &Path, args: &[&str]) -> bool {
-            Command::new("git")
-                .args(args)
-                .current_dir(dir)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
         }
 
         #[test]
@@ -3141,6 +3321,171 @@ mod tests {
             assert_eq!(
                 PackageManager::Bun.install_command(),
                 ("bun", &["install"][..])
+            );
+        }
+    }
+
+    /// Tests for `bootstrap_hooks` — the function that runs a package-manager
+    /// install in a freshly created worktree so git-hook managers (husky)
+    /// regenerate the gitignored hook directory `core.hooksPath` points at.
+    ///
+    /// Each test builds its own `TempDir` and unique fixtures so concurrent
+    /// runs (e.g. a background bacon loop sharing `./target`) never clobber
+    /// each other. Tests that need a real `pnpm`/`git` skip gracefully when
+    /// those binaries are unavailable, mirroring `env_copy_tests`.
+    mod bootstrap_hooks_tests {
+        use super::*;
+        use std::fs;
+        use tempfile::TempDir;
+
+        /// Helper to create a file with content in a directory.
+        fn create_file(dir: &Path, name: &str, content: &str) {
+            let path = dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("Failed to create parent directories");
+            }
+            fs::write(&path, content).expect("Failed to write file");
+        }
+
+        /// Returns true if `pnpm --version` runs, i.e. pnpm is installed.
+        fn pnpm_available() -> bool {
+            Command::new("pnpm")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
+
+        #[test]
+        fn test_bootstrap_skips_repo_without_package_json() {
+            // Acceptance criterion: repos with no `prepare` script are entirely
+            // unaffected. With no package.json, detection returns None, so
+            // bootstrap_hooks must report success and touch nothing.
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(result, "No package.json should be a no-op success");
+            // No files should have been created.
+            let entries: Vec<_> = fs::read_dir(dir.path())
+                .expect("Failed to read temp dir")
+                .collect();
+            assert!(
+                entries.is_empty(),
+                "bootstrap_hooks must not create files when there's nothing to do"
+            );
+        }
+
+        #[test]
+        fn test_bootstrap_runs_prepare_script_via_install() {
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            // A prepare script that creates a marker. pnpm runs lifecycle
+            // scripts through a shell, so `sh`-style syntax is fine. Zero
+            // dependencies keeps the install offline-safe.
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"mkdir -p .husky/_ && echo ok > .husky/_/marker"}}"#,
+            );
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(
+                result,
+                "Install with a passing prepare script should succeed"
+            );
+            assert!(
+                dir.path().join(".husky/_/marker").exists(),
+                "prepare script should have run and created the marker"
+            );
+        }
+
+        #[test]
+        fn test_bootstrap_failure_returns_false_without_panicking() {
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let dir = TempDir::new().expect("Failed to create temp dir");
+
+            // A prepare script that fails makes the install non-zero. We must
+            // surface that as `false` without panicking or aborting.
+            create_file(
+                dir.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"exit 1"}}"#,
+            );
+
+            let result = bootstrap_hooks(dir.path(), true);
+
+            assert!(!result, "A failing install must return false, not panic");
+        }
+
+        #[test]
+        fn test_bootstrapped_hook_rejects_violation_and_passes_clean() {
+            // End-to-end mutation proof for issue #275: after bootstrap_hooks
+            // runs the install, the husky-style pre-commit hook it regenerates
+            // must actually gate commits. We prove the guard can fail (rejects a
+            // staged `violation.txt`) and can pass (allows a clean file).
+            if !pnpm_available() {
+                eprintln!("Skipping test: pnpm not available");
+                return;
+            }
+            let repo = TempDir::new().expect("Failed to create temp dir");
+            if !run_git(repo.path(), &["init"]) {
+                eprintln!("Skipping test: git not available");
+                return;
+            }
+            run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+            run_git(repo.path(), &["config", "user.name", "Test User"]);
+
+            // The prepare script mimics husky exactly: write an executable
+            // pre-commit hook that blocks `violation.txt`, then point
+            // core.hooksPath at the generated (normally gitignored) dir.
+            create_file(
+                repo.path(),
+                "package.json",
+                r#"{"name":"t","private":true,"version":"0.0.0","scripts":{"prepare":"mkdir -p .husky/_ && printf '#!/bin/sh\nif git diff --cached --name-only | grep -q violation.txt; then exit 1; fi\n' > .husky/_/pre-commit && chmod +x .husky/_/pre-commit && git config core.hooksPath .husky/_"}}"#,
+            );
+
+            // Baseline commit so the repo has a HEAD.
+            create_file(repo.path(), "baseline.txt", "baseline\n");
+            run_git(repo.path(), &["add", "baseline.txt"]);
+            assert!(
+                run_git(repo.path(), &["commit", "-m", "baseline"]),
+                "Baseline commit (before hooks exist) should succeed"
+            );
+
+            // Run the bootstrap: install triggers prepare, which installs the hook.
+            let result = bootstrap_hooks(repo.path(), true);
+            assert!(result, "Bootstrap install should succeed");
+            assert!(
+                repo.path().join(".husky/_/pre-commit").exists(),
+                "prepare should have generated the pre-commit hook"
+            );
+
+            // MUTATION: a staged violation.txt must be rejected by the hook.
+            create_file(repo.path(), "violation.txt", "bad\n");
+            run_git(repo.path(), &["add", "violation.txt"]);
+            assert!(
+                !run_git(repo.path(), &["commit", "-m", "should be blocked"]),
+                "Bootstrapped hook must REJECT a commit staging violation.txt"
+            );
+
+            // CLEAN: unstage the violation, stage a clean file, commit succeeds.
+            run_git(repo.path(), &["reset"]);
+            create_file(repo.path(), "clean.txt", "good\n");
+            run_git(repo.path(), &["add", "clean.txt"]);
+            assert!(
+                run_git(repo.path(), &["commit", "-m", "clean"]),
+                "Bootstrapped hook must ALLOW a clean commit"
             );
         }
     }
