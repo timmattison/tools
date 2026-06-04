@@ -17,6 +17,10 @@
 //! regardless of magnitude. A flat series (every value equal, including
 //! all-zero) has no shape and renders as an unbroken row of baseline glyphs.
 
+use colored::{ColoredString, Colorize};
+
+use crate::config::MetricKind;
+
 /// The seven block-drawing glyphs used for a sparkline, lowest bar to highest.
 ///
 /// Index 0 (`▁`) is the baseline a min value or an inactive bucket renders at;
@@ -125,6 +129,25 @@ pub(crate) fn sparkline(values: &[f64]) -> String {
                 .clamp(0.0, TOP_INDEX);
             glyph_for_level(level)
         })
+        .collect()
+}
+
+/// Render the sparkline for a metric of `kind`: the glyphs from [`sparkline`],
+/// with rate metrics direction-colored per bucket.
+pub(crate) fn metric_sparkline(kind: MetricKind, values: &[f64]) -> String {
+    metric_spark_cells(kind, values)
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// The typed spark cells behind [`metric_sparkline`], one [`ColoredString`]
+/// per value.
+fn metric_spark_cells(_kind: MetricKind, values: &[f64]) -> Vec<ColoredString> {
+    // Red-phase stub: every cell is plain regardless of kind.
+    sparkline(values)
+        .chars()
+        .map(|glyph| glyph.to_string().normal())
         .collect()
 }
 
@@ -262,5 +285,86 @@ mod tests {
         // glyphs from SPARK_GLYPHS — no stray characters from a rounding bug.
         let out = sparkline(&[0.0, 1.3, 9.9, 4.0, 7.7, 2.2]);
         assert!(out.chars().all(|c| SPARK_GLYPHS.contains(&c)));
+    }
+
+    // --- direction-colored rate sparklines --------------------------------
+    //
+    // Color assertions inspect the typed `ColoredString` cells directly (the
+    // same pattern as `render::banner_text`'s test): the `colored` crate gates
+    // ANSI emission on a process-global override that races under parallel
+    // tests, so no test here ever asserts on escape bytes.
+
+    use colored::Color;
+
+    #[test]
+    fn rate_cells_are_green_on_rise_red_on_fall_plain_on_flat_or_first() {
+        // Windowed rate series [0, 50, 50, 25, 100]:
+        //   bucket 0: first bucket, no predecessor -> plain
+        //   bucket 1: 50 > 0,   rate rose          -> green
+        //   bucket 2: 50 == 50, unchanged          -> plain
+        //   bucket 3: 25 < 50,  rate fell          -> red
+        //   bucket 4: 100 > 25, rate rose          -> green
+        let values = [0.0, 50.0, 50.0, 25.0, 100.0];
+        let cells = metric_spark_cells(MetricKind::Rate, &values);
+        let colors: Vec<Option<Color>> = cells.iter().map(|c| c.fgcolor).collect();
+        assert_eq!(
+            colors,
+            vec![
+                None,
+                Some(Color::Green),
+                None,
+                Some(Color::Red),
+                Some(Color::Green),
+            ],
+            "each rate cell must be colored by its direction vs the previous bucket",
+        );
+        // The coloring must not disturb the shape: cell N's text is exactly the
+        // plain scale's glyph N.
+        let glyphs: String = cells.iter().map(|c| c.input.as_str()).collect();
+        assert_eq!(glyphs, sparkline(&values));
+    }
+
+    #[test]
+    fn count_and_size_cells_are_never_direction_colored() {
+        // Direction coloring is a rate-only signal: a counter's per-bucket
+        // delta or a size's absolute value going up is not inherently "good"
+        // or "bad", so Count and Size cells stay uncolored regardless of shape.
+        let values = [0.0, 50.0, 25.0, 100.0];
+        for kind in [MetricKind::Count, MetricKind::Size] {
+            let cells = metric_spark_cells(kind, &values);
+            assert_eq!(cells.len(), values.len());
+            assert!(
+                cells.iter().all(|c| c.fgcolor.is_none()),
+                "{kind:?} cells must carry no direction color",
+            );
+        }
+    }
+
+    #[test]
+    fn rate_cells_with_non_finite_neighbors_stay_plain() {
+        // hit_rate never emits NaN, but the cells must degrade gracefully: a
+        // comparison of (or against) a non-finite value has no direction, so
+        // those cells stay plain rather than guessing a color.
+        let values = [50.0, f64::NAN, 60.0, f64::INFINITY, 40.0];
+        let cells = metric_spark_cells(MetricKind::Rate, &values);
+        assert_eq!(cells.len(), values.len());
+        assert!(
+            cells.iter().all(|c| c.fgcolor.is_none()),
+            "non-finite comparisons must not produce a direction color",
+        );
+    }
+
+    #[test]
+    fn metric_sparkline_renders_the_same_glyphs_as_the_plain_scale() {
+        // Whatever the global color mode, the glyph sequence (ANSI filtered out
+        // by keeping only SPARK_GLYPHS chars) must match the plain scale for
+        // every kind — coloring may wrap glyphs, never add, drop, or change
+        // them. This is what keeps the spark column exactly budget glyphs wide.
+        let values = [0.0, 50.0, 25.0, 100.0];
+        for kind in [MetricKind::Count, MetricKind::Rate, MetricKind::Size] {
+            let spark = metric_sparkline(kind, &values);
+            let glyphs: String = spark.chars().filter(|c| SPARK_GLYPHS.contains(c)).collect();
+            assert_eq!(glyphs, sparkline(&values), "glyphs must survive {kind:?}");
+        }
     }
 }
