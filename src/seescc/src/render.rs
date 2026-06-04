@@ -74,10 +74,7 @@ pub(crate) struct Row {
 /// sparkline shrinks to this floor; once even this won't fit, the column is
 /// dropped entirely so the numbers are never sacrificed to a 1- or 2-cell
 /// sparkline stub that conveys no shape.
-#[allow(
-    dead_code,
-    reason = "consumed by the Phase 5 sparkline wiring slice"
-)]
+#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 pub(crate) const MIN_SPARK_WIDTH: usize = 4;
 
 /// The fixed per-row overhead, in display columns, that the label/value cells and
@@ -132,13 +129,18 @@ fn column_widths(rows: &[Row]) -> (usize, usize) {
 /// `width - 5` (or 0 if that is below the minimum). This is deliberate — an empty
 /// frame has no metrics to spark, so the value is only a pinned-down corner case,
 /// not a meaningful column count.
-#[allow(
-    dead_code,
-    reason = "consumed by the Phase 5 sparkline wiring slice"
-)]
+#[allow(dead_code, reason = "consumed by the Phase 5 sparkline wiring slice")]
 pub(crate) fn sparkline_budget(width: usize, rows: &[Row]) -> usize {
-    let _ = (width, rows);
-    todo!("implemented in the green commit")
+    let (max_label, max_value) = column_widths(rows);
+    // Saturating so an absurdly narrow terminal can never underflow `usize`.
+    let budget = width.saturating_sub(row_overhead(max_label, max_value));
+    // Below the floor the column is dropped entirely rather than rendered as a
+    // useless 1- to 3-cell stub (design §6 — never sacrifice the numbers).
+    if budget < MIN_SPARK_WIDTH {
+        0
+    } else {
+        budget
+    }
 }
 
 /// Build the one-shot human frame for `rows`, with `languages_label` in the
@@ -201,16 +203,7 @@ pub(crate) fn build_watch(
         .max(1);
     let header = format!("{left}{}{clock}", " ".repeat(header_pad));
 
-    let max_label = rows
-        .iter()
-        .map(|r| UnicodeWidthStr::width(r.label.as_str()))
-        .max()
-        .unwrap_or(0);
-    let max_value = rows
-        .iter()
-        .map(|r| UnicodeWidthStr::width(r.value.as_str()))
-        .max()
-        .unwrap_or(0);
+    let (max_label, max_value) = column_widths(rows);
 
     let mut out = String::new();
     out.push_str(&header);
@@ -233,6 +226,15 @@ pub(crate) fn build_watch(
         out.push_str("  ");
         out.push_str(&" ".repeat(value_pad));
         out.push_str(&row.value);
+        // A sparkline-bearing row appends a two-space pre-spark separator then
+        // the glyphs. Because every row's label/value cells share the same widths
+        // (`max_label`/`max_value`), the separator always begins at the same
+        // column, so the spark cells line up vertically across rows. A `None`
+        // spark leaves the row ending at its value — byte-identical to before.
+        if let Some(spark) = &row.spark {
+            out.push_str("  ");
+            out.push_str(spark);
+        }
     }
     if let Some(footer) = footer {
         out.push_str("\n\n ");
@@ -797,13 +799,11 @@ mod tests {
     fn sparkline_budget_absurdly_small_width_is_zero_without_underflow() {
         // A width far below the overhead must saturate to 0, never underflow into
         // a giant usize. Width 3 is smaller than even the fixed 5-column overhead.
-        let rows = vec![
-            Row {
-                label: "Compile requests".into(),
-                value: "4,786".into(),
-                spark: None,
-            },
-        ];
+        let rows = vec![Row {
+            label: "Compile requests".into(),
+            value: "4,786".into(),
+            spark: None,
+        }];
         assert_eq!(
             sparkline_budget(3, &rows),
             0,
@@ -819,13 +819,11 @@ mod tests {
         // use display width. Label "日本語ラベル" is 12 columns (6 wide chars),
         // value "1" is 1. Overhead = 1 + 12 + 2 + 1 + 2 = 18, so at width 50 the
         // budget is 50 - 18 = 32. Byte-length accounting would mis-size this.
-        let rows = vec![
-            Row {
-                label: "日本語ラベル".into(),
-                value: "1".into(),
-                spark: None,
-            },
-        ];
+        let rows = vec![Row {
+            label: "日本語ラベル".into(),
+            value: "1".into(),
+            spark: None,
+        }];
         assert_eq!(UnicodeWidthStr::width("日本語ラベル"), 12);
         assert_eq!(sparkline_budget(50, &rows), 32);
     }
