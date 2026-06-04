@@ -544,6 +544,8 @@ HOOK BOOTSTRAP:
     does not — whether bootstrap was skipped, failed, or didn't apply. Git
     silently runs no hooks when that directory is missing, so this warning is the
     only signal that commits in the new worktree would otherwise be ungated.
+    Because that signal must never be invisible, this warning is printed to
+    stderr even with --quiet.
 
 EXAMPLES:
     nwt                              # Random name for both directory and branch
@@ -1332,14 +1334,18 @@ fn main() {
                 // directory actually exists. If it's configured but missing, git
                 // silently runs NO hooks and every commit here is ungated — warn
                 // loudly so that failure can't happen invisibly.
+                //
+                // This warning DELIBERATELY bypasses quiet mode (no `error!`/`config.quiet`
+                // gate): the safety net must never be invisible, and an ungated worktree is
+                // error-class, not the ordinary non-error noise `-q` suppresses. It goes to
+                // stderr, so it can't corrupt the worktree path captured from stdout by the
+                // shell wrapper.
                 if let Some(hooks_path) = missing_hooks_path(&worktree_path) {
-                    error!(
-                        config.quiet,
+                    eprintln!(
                         "Warning: core.hooksPath is '{}' but that directory does not exist in this worktree.",
                         hooks_path
                     );
-                    error!(
-                        config.quiet,
+                    eprintln!(
                         "Git will silently run NO hooks here — commits are ungated. Run your package manager's install (or create the directory) to fix this."
                     );
                 }
