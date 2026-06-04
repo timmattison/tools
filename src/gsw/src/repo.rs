@@ -81,23 +81,77 @@ pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)
         .collect()
 }
 
-/// Count commits reachable from HEAD but not from `base`
-/// (`git rev-list --count base..HEAD`). Returns 0 on any failure.
-pub fn commits_ahead(repo: &gix::Repository, base: &str) -> u32 {
-    let resolve = || -> anyhow::Result<u32> {
-        let head = repo.head_id()?.detach();
-        let base_id = repo.rev_parse_single(base)?.detach();
-        if head == base_id {
-            return Ok(0);
-        }
-        let count = repo
-            .rev_walk(std::iter::once(head))
-            .with_hidden(std::iter::once(base_id))
-            .all()?
-            .count();
-        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+/// How HEAD relates to its base ref, as a pair of commit counts. See
+/// [`base_status`].
+pub struct BaseStatus {
+    /// Commits reachable from HEAD but not from the base
+    /// (`git rev-list --count base..HEAD`).
+    pub ahead: u32,
+    /// Commits reachable from the base but not from HEAD
+    /// (`git rev-list --count HEAD..base`) — i.e. how far behind the base HEAD
+    /// is, the needs-rebase signal.
+    pub behind: u32,
+}
+
+/// Count how far HEAD is ahead of and behind its `base` ref.
+///
+/// `ahead` is the number of commits reachable from HEAD but not from `base`
+/// (`git rev-list --count base..HEAD`); `behind` is the mirror — commits
+/// reachable from `base` but not from HEAD (`git rev-list --count HEAD..base`),
+/// which is nonzero when the base has moved on past the fork point and HEAD
+/// needs a rebase.
+///
+/// Any resolution or walk failure degrades to `BaseStatus { ahead: 0, behind:
+/// 0 }`, so a missing or unresolvable base produces no behind segment. When
+/// HEAD already points at the base commit the walks are short-circuited to
+/// `(0, 0)`. Each count is clamped to `u32::MAX`.
+pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
+    let resolve = || -> Option<(u32, u32)> {
+        let head = repo.head_id().ok()?.detach();
+        let base_id = repo.rev_parse_single(base).ok()?.detach();
+        ahead_behind(repo, head, base_id)
     };
-    resolve().unwrap_or(0)
+    let (ahead, behind) = resolve().unwrap_or((0, 0));
+    BaseStatus { ahead, behind }
+}
+
+/// Count how far `ours` is ahead of and behind `theirs` as `(ahead, behind)`.
+///
+/// `ahead` is the number of commits reachable from `ours` but not from `theirs`
+/// (`git rev-list --count theirs..ours`); `behind` is the mirror — commits
+/// reachable from `theirs` but not from `ours` (`git rev-list --count
+/// ours..theirs`). Each count is clamped to `u32::MAX`.
+///
+/// Returns `None` if either rev walk fails. When `ours == theirs` the walks are
+/// short-circuited to `Some((0, 0))` (the walks would return `(0, 0)` anyway).
+/// Both `base_status` and `upstream_status` delegate here so the mirrored
+/// hidden-walk pair lives in exactly one place.
+fn ahead_behind(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<(u32, u32)> {
+    if ours == theirs {
+        return Some((0, 0));
+    }
+    // ahead: theirs..ours — commits on `ours` not on `theirs`.
+    let ahead = repo
+        .rev_walk(std::iter::once(ours))
+        .with_hidden(std::iter::once(theirs))
+        .all()
+        .ok()?
+        .count();
+    // behind: ours..theirs — the mirror walk, `theirs` with `ours` hidden.
+    let behind = repo
+        .rev_walk(std::iter::once(theirs))
+        .with_hidden(std::iter::once(ours))
+        .all()
+        .ok()?
+        .count();
+    Some((
+        u32::try_from(ahead).unwrap_or(u32::MAX),
+        u32::try_from(behind).unwrap_or(u32::MAX),
+    ))
 }
 
 /// The current branch's upstream tracking status. `name` is the short
@@ -122,23 +176,12 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     let head_id = repo.head_id().ok()?.detach();
     let upstream_id = repo.rev_parse_single("@{upstream}").ok()?.detach();
 
-    let ahead = repo
-        .rev_walk(std::iter::once(head_id))
-        .with_hidden(std::iter::once(upstream_id))
-        .all()
-        .ok()?
-        .count();
-    let behind = repo
-        .rev_walk(std::iter::once(upstream_id))
-        .with_hidden(std::iter::once(head_id))
-        .all()
-        .ok()?
-        .count();
+    let (ahead, behind) = ahead_behind(repo, head_id, upstream_id)?;
 
     Some(UpstreamStatus {
         name,
-        ahead: u32::try_from(ahead).unwrap_or(u32::MAX),
-        behind: u32::try_from(behind).unwrap_or(u32::MAX),
+        ahead,
+        behind,
     })
 }
 
@@ -527,7 +570,35 @@ mod tests {
     }
 
     #[test]
-    fn commits_ahead_counts_commits_past_base() {
+    fn base_status_reports_behind_when_base_advances_past_fork_point() {
+        // Fork `feature` off main, advance both: feature gets one commit, then
+        // main gets one commit. From feature's view the base (main) has moved
+        // on, so feature is 1 ahead and 1 behind.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("b.txt"), "two\n").unwrap();
+        git(p, &["add", "b.txt"]);
+        git(p, &["commit", "-q", "-m", "feature work"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("d.txt"), "main moved\n").unwrap();
+        git(p, &["add", "d.txt"]);
+        git(p, &["commit", "-q", "-m", "main moved on"]);
+        git(p, &["checkout", "-q", "feature"]);
+        let repo = open_at(p).unwrap();
+        let status = super::base_status(&repo, "main");
+        assert_eq!(
+            status.ahead, 1,
+            "feature has one commit past the fork point"
+        );
+        assert_eq!(
+            status.behind, 1,
+            "main moved one commit past the fork point"
+        );
+    }
+
+    #[test]
+    fn base_status_counts_commits_past_base() {
         let dir = init_repo();
         let p = dir.path();
         git(p, &["checkout", "-q", "-b", "feature"]);
@@ -538,14 +609,25 @@ mod tests {
         git(p, &["add", "c.txt"]);
         git(p, &["commit", "-q", "-m", "third"]);
         let repo = open_at(p).unwrap();
-        assert_eq!(super::commits_ahead(&repo, "main"), 2);
+        let status = super::base_status(&repo, "main");
+        assert_eq!(status.ahead, 2);
+        assert_eq!(status.behind, 0, "base has not moved");
     }
 
     #[test]
-    fn commits_ahead_is_zero_when_base_equals_head() {
+    fn base_status_is_zero_when_base_equals_head() {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
-        assert_eq!(super::commits_ahead(&repo, "main"), 0);
+        let status = super::base_status(&repo, "main");
+        assert_eq!((status.ahead, status.behind), (0, 0));
+    }
+
+    #[test]
+    fn base_status_is_zero_when_base_unresolvable() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        let status = super::base_status(&repo, "no-such-branch");
+        assert_eq!((status.ahead, status.behind), (0, 0));
     }
 
     #[test]
@@ -810,6 +892,26 @@ mod tests {
         assert_eq!(up.name, "origin/main");
         assert_eq!(up.ahead, 1);
         assert_eq!(up.behind, 0);
+    }
+
+    #[test]
+    fn upstream_reports_behind_count_when_remote_advances() {
+        // Advance the origin by one commit, fetch it into the clone without
+        // moving the clone's HEAD: the clone is now 1 behind origin/main and 0
+        // ahead. Locks in the behind direction (previously only covered by the
+        // integration test) before the ahead_behind helper extraction.
+        let (origin, clone) = init_repo_with_upstream();
+        let op = origin.path();
+        std::fs::write(op.join("remote.txt"), "x\n").unwrap();
+        git(op, &["add", "remote.txt"]);
+        git(op, &["commit", "-q", "-m", "remote moved on"]);
+        let p = clone.path();
+        git(p, &["fetch", "-q"]);
+        let repo = open_at(p).unwrap();
+        let up = super::upstream_status(&repo).expect("clone has an upstream");
+        assert_eq!(up.name, "origin/main");
+        assert_eq!(up.ahead, 0, "clone has no local commits past origin");
+        assert_eq!(up.behind, 1, "origin advanced one commit past the clone");
     }
 
     #[test]

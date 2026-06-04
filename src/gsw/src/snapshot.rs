@@ -19,6 +19,7 @@ pub fn build_snapshot(
     branch: String,
     base: String,
     commits_ahead: u32,
+    commits_behind: u32,
     last_commit_age: Option<Duration>,
     status_entries: Vec<FileEntry>,
     staged_numstat: &HashMap<String, NumStat>,
@@ -62,6 +63,7 @@ pub fn build_snapshot(
         branch,
         base,
         commits_ahead,
+        commits_behind,
         last_commit_age,
         files,
         log: Vec::new(),
@@ -96,6 +98,7 @@ mod tests {
             "gsv".into(),
             "main".into(),
             5,
+            7,
             Some(Duration::from_secs(120)),
             vec![],
             &HashMap::new(),
@@ -105,6 +108,7 @@ mod tests {
         assert_eq!(snap.branch, "gsv");
         assert_eq!(snap.base, "main");
         assert_eq!(snap.commits_ahead, 5);
+        assert_eq!(snap.commits_behind, 7);
         assert_eq!(snap.last_commit_age, Some(Duration::from_secs(120)));
     }
 
@@ -124,6 +128,7 @@ mod tests {
         let snap = build_snapshot(
             "x".into(),
             "main".into(),
+            0,
             0,
             Some(Duration::ZERO),
             entries,
@@ -154,6 +159,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
+            0,
             Some(Duration::ZERO),
             entries,
             &staged,
@@ -180,6 +186,7 @@ mod tests {
         let snap = build_snapshot(
             "x".into(),
             "main".into(),
+            0,
             0,
             Some(Duration::ZERO),
             entries,
@@ -208,6 +215,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
+            0,
             Some(Duration::ZERO),
             entries,
             &HashMap::new(),
@@ -229,6 +237,7 @@ mod tests {
         let snap = build_snapshot(
             "x".into(),
             "main".into(),
+            0,
             0,
             Some(Duration::ZERO),
             entries,
@@ -253,6 +262,7 @@ mod tests {
         let snap = build_snapshot(
             "x".into(),
             "main".into(),
+            0,
             0,
             Some(Duration::ZERO),
             entries,
@@ -289,6 +299,7 @@ mod tests {
         let snap = build_snapshot(
             "x".into(),
             "main".into(),
+            0,
             0,
             Some(Duration::ZERO),
             entries,
@@ -346,6 +357,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
+            0,
             Some(Duration::ZERO),
             entries,
             &HashMap::new(),
@@ -381,6 +393,7 @@ mod tests {
             "x".into(),
             "main".into(),
             0,
+            0,
             Some(Duration::ZERO),
             entries,
             &HashMap::new(),
@@ -404,6 +417,7 @@ mod tests {
         let snap = build_snapshot(
             "x".into(),
             "main".into(),
+            0,
             0,
             Some(Duration::ZERO),
             entries,

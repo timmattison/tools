@@ -15,6 +15,9 @@ pub struct Snapshot {
     pub branch: String,
     pub base: String,
     pub commits_ahead: u32,
+    /// Commits on the base not reachable from HEAD — how far behind the base
+    /// the branch is, i.e. whether it needs a rebase. `0` when up to date.
+    pub commits_behind: u32,
     pub last_commit_age: Option<Duration>,
     pub files: Vec<RenderEntry>,
     /// Most recent commits, newest first. Empty when not requested.
@@ -89,8 +92,20 @@ const SEP_DELS_AGE: usize = 3;
 pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     let mut lines = Vec::new();
 
-    let header_plain = header_text(snapshot);
-    lines.push(header_plain.bold().to_string());
+    let HeaderSegments {
+        prefix,
+        behind,
+        suffix,
+    } = header_segments(snapshot);
+    // The whole header is bold as before; the optional behind segment is
+    // additionally warning-colored (yellow) to flag that the branch needs a
+    // rebase. When `behind` is `None` the prefix+suffix reproduce today's
+    // line byte-for-byte.
+    let header_line = match behind {
+        Some(seg) => format!("{}{}{}", prefix.bold(), seg.yellow().bold(), suffix.bold()),
+        None => format!("{prefix}{suffix}").bold().to_string(),
+    };
+    lines.push(header_line);
     lines.push(render_separator(opts.terminal_width));
 
     let display_count = match opts.max_files {
@@ -184,7 +199,22 @@ fn compute_path_width(opts: &RenderOptions) -> usize {
     opts.terminal_width.saturating_sub(overhead).max(8)
 }
 
-fn header_text(snap: &Snapshot) -> String {
+/// The header split into independently-styleable pieces.
+///
+/// `render` paints `prefix` and `suffix` bold (as the whole header has always
+/// been) and, when present, paints `behind` yellow + bold as a rebase warning.
+/// `behind` is `None` exactly when the branch is up to date with its base, in
+/// which case `prefix` + `suffix` concatenate to today's header byte-for-byte.
+struct HeaderSegments {
+    /// Up to and including `ahead of {base}`.
+    prefix: String,
+    /// `, {m} behind` — present only when `commits_behind > 0`.
+    behind: Option<String>,
+    /// The upstream field and `• last commit {age} ago` tail.
+    suffix: String,
+}
+
+fn header_segments(snap: &Snapshot) -> HeaderSegments {
     let commit_word = if snap.commits_ahead == 1 {
         "commit"
     } else {
@@ -198,13 +228,20 @@ fn header_text(snap: &Snapshot) -> String {
         .as_ref()
         .map(|u| format!(" • ↑{} ↓{} {}", u.ahead, u.behind, u.name))
         .unwrap_or_default();
-    format!(
-        "gsw • {branch} • {n} {word} ahead of {base}{upstream_field} • last commit {age} ago",
+    let prefix = format!(
+        "gsw • {branch} • {n} {word} ahead of {base}",
         branch = snap.branch,
         n = snap.commits_ahead,
         word = commit_word,
         base = snap.base,
-    )
+    );
+    let behind = (snap.commits_behind > 0).then(|| format!(", {} behind", snap.commits_behind));
+    let suffix = format!("{upstream_field} • last commit {age} ago");
+    HeaderSegments {
+        prefix,
+        behind,
+        suffix,
+    }
 }
 
 fn render_separator(width: usize) -> String {
@@ -844,6 +881,7 @@ mod tests {
             branch: "gsv".into(),
             base: "main".into(),
             commits_ahead: 3,
+            commits_behind: 0,
             last_commit_age: Some(Duration::from_secs(5 * 60 + 23)),
             files,
             log: vec![],
@@ -2445,6 +2483,62 @@ mod tests {
             out_tc.matches("\x1b[").count(),
             2,
             "truecolor binary bar should emit exactly one ANSI fg + one reset: {out_tc:?}",
+        );
+    }
+
+    #[test]
+    fn header_shows_behind_segment_when_base_has_moved_on() {
+        // When the base has advanced past the fork point, the header gains a
+        // `, {m} behind` segment right after `ahead of {base}` — signalling
+        // the branch needs a rebase. The ahead text stays intact.
+        let mut snap = snap_with(vec![]);
+        snap.commits_behind = 87;
+        let out = strip_ansi(&render(&snap, &opts()));
+        let header_line = out.lines().next().unwrap_or("");
+        assert!(
+            header_line.contains("3 commits ahead of main, 87 behind"),
+            "header should append the behind segment after the ahead text: {header_line}",
+        );
+    }
+
+    #[test]
+    fn header_omits_behind_segment_when_up_to_date() {
+        // The default snapshot is up to date (commits_behind == 0), so the
+        // header must not mention "behind" at all — it stays byte-identical
+        // to today's output.
+        let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
+        let header_line = out.lines().next().unwrap_or("");
+        assert!(
+            !header_line.contains("behind"),
+            "up-to-date header should not mention 'behind': {header_line}",
+        );
+    }
+
+    #[test]
+    fn behind_segment_is_yellow_and_sits_before_the_suffix() {
+        // The behind segment is warning-colored (yellow + bold). Force
+        // `colored` on so the rendered header carries the real ANSI we'd
+        // emit on a terminal, then assert: (1) a yellow SGR appears, (2) the
+        // plain text is `…ahead of main, 87 behind • last commit…` with the
+        // segment wedged between the base name and the suffix.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
+        let mut snap = snap_with(vec![]);
+        snap.commits_behind = 87;
+        let rendered = render(&snap, &opts());
+        colored::control::unset_override();
+
+        let header_line = rendered.lines().next().unwrap_or("");
+        assert!(
+            header_line.contains("33m"),
+            "behind segment should carry a yellow SGR: {header_line:?}",
+        );
+        let plain = strip_ansi(header_line);
+        assert!(
+            plain.contains("ahead of main, 87 behind • last commit"),
+            "behind segment should sit between the base name and the suffix: {plain}",
         );
     }
 }
