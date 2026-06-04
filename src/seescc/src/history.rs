@@ -867,6 +867,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn bucket_last_degenerate_sub_columns_ns_window_falls_back_without_panicking() {
+        // A window SHORTER than `columns` nanoseconds makes `slice_ns =
+        // window / columns` truncate to zero, which would divide-by-zero in the
+        // `k = ceil(elapsed / slice_ns)` grid math. This degenerate window has no
+        // meaningful grid to pin to — stability is moot below one nanosecond per
+        // column — so `bucket_last` must NOT panic: it falls back to using the raw,
+        // unquantized `now` as the leading edge (the pre-epoch sliding-window
+        // behavior). window = 2ns over 5 columns ⇒ slice_ns = 0.
+        let epoch = Instant::now();
+        let window = Duration::from_nanos(2);
+        let mut history = History::new(window, epoch);
+
+        // Push a sample at `now` itself, then bucket against it. With the fallback
+        // leading = unquantized `now`, a sample exactly at `now` sits on the
+        // trailing edge and `bucket_index` clamps it into the final bucket — the
+        // same "exactly at the leading edge ⇒ last bucket" rule, just measured
+        // against raw `now` instead of a quantized grid point.
+        let now = epoch + Duration::from_secs(1);
+        history.push(now, tagged(55));
+
+        let buckets = history.bucket_last(now, 5);
+        assert_eq!(
+            tags(&buckets),
+            vec![None, None, None, None, Some(55)],
+            "a sub-columns-ns (degenerate) window must not panic: it falls back to \
+             the raw `now` as the leading edge, so the sample at `now` lands in the \
+             final bucket",
+        );
+    }
+
     // ---- metric_series ----
 
     use crate::config::MetricKey;
