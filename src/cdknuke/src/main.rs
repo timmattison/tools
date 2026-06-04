@@ -60,13 +60,14 @@ fn main() {
 
         // Check for target directories
         if entry.file_type().is_some_and(|ft| ft.is_dir())
-            && target_dirs.contains(&entry_name.as_ref()) {
-                found_any = true;
-                println!("Removing directory: {}", entry.path().display());
-                if let Err(e) = fs::remove_dir_all(entry.path()) {
-                    eprintln!("Error removing {}: {}", entry.path().display(), e);
-                }
+            && target_dirs.contains(&entry_name.as_ref())
+        {
+            found_any = true;
+            println!("Removing directory: {}", entry.path().display());
+            if let Err(e) = fs::remove_dir_all(entry.path()) {
+                eprintln!("Error removing {}: {}", entry.path().display(), e);
             }
+        }
     }
 
     // Also check for cdk.out at the top level even without --hidden

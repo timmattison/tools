@@ -1503,14 +1503,13 @@ fn read_yes_no_with_ctrlc() -> bool {
                         let _ = io::stderr().flush();
                         let _ = crossterm::terminal::enable_raw_mode();
                     }
-                    KeyCode::Backspace
-                        if input.pop().is_some() => {
-                            // Erase character from display
-                            let _ = crossterm::terminal::disable_raw_mode();
-                            eprint!("\x08 \x08"); // backspace, space, backspace
-                            let _ = io::stderr().flush();
-                            let _ = crossterm::terminal::enable_raw_mode();
-                        }
+                    KeyCode::Backspace if input.pop().is_some() => {
+                        // Erase character from display
+                        let _ = crossterm::terminal::disable_raw_mode();
+                        eprint!("\x08 \x08"); // backspace, space, backspace
+                        let _ = io::stderr().flush();
+                        let _ = crossterm::terminal::enable_raw_mode();
+                    }
                     _ => {}
                 }
             }

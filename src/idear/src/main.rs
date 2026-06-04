@@ -50,16 +50,15 @@ fn main() -> Result<()> {
     for entry in walker {
         let entry = entry?;
 
-        if entry.file_type().is_dir()
-            && is_idea_only_directory(entry.path())? {
-                if cli.delete || cli.dry_run {
-                    let size = calculate_dir_size(entry.path())?;
-                    total_size += size;
-                    found_dirs.push((entry.path().to_path_buf(), size));
-                } else {
-                    println!("{}", entry.path().display());
-                }
+        if entry.file_type().is_dir() && is_idea_only_directory(entry.path())? {
+            if cli.delete || cli.dry_run {
+                let size = calculate_dir_size(entry.path())?;
+                total_size += size;
+                found_dirs.push((entry.path().to_path_buf(), size));
+            } else {
+                println!("{}", entry.path().display());
             }
+        }
     }
 
     if cli.delete || cli.dry_run {

@@ -201,11 +201,10 @@ pub fn read_all(path: &Path) -> Result<SessionLog, JsonlError> {
             });
         }
     };
-    let header: Header = serde_json::from_str(&first_line).map_err(|_| {
-        JsonlError::MalformedFirstLine {
+    let header: Header =
+        serde_json::from_str(&first_line).map_err(|_| JsonlError::MalformedFirstLine {
             line: first_line.clone(),
-        }
-    })?;
+        })?;
 
     // Lines 2..N: each must parse as a PrecmdRecord. Track the 1-indexed line number for
     // error reporting (line 1 = header, so the first record is line 2).
@@ -214,12 +213,11 @@ pub fn read_all(path: &Path) -> Result<SessionLog, JsonlError> {
     for line_result in lines {
         line_number = line_number.saturating_add(1);
         let line = line_result?;
-        let record: PrecmdRecord = serde_json::from_str(&line).map_err(|_| {
-            JsonlError::MalformedRecordLine {
+        let record: PrecmdRecord =
+            serde_json::from_str(&line).map_err(|_| JsonlError::MalformedRecordLine {
                 line_number,
                 line: line.clone(),
-            }
-        })?;
+            })?;
         records.push(record);
     }
 
@@ -315,8 +313,7 @@ mod tests {
             "expected MissingHeader, got: {err:?}"
         );
         // File must remain empty or nonexistent.
-        let exists_and_empty = !path.exists()
-            || fs::metadata(&path).expect("metadata").len() == 0;
+        let exists_and_empty = !path.exists() || fs::metadata(&path).expect("metadata").len() == 0;
         assert!(exists_and_empty, "file must remain empty or absent");
     }
 

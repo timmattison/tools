@@ -17,9 +17,7 @@ fn run_command_in_directory(dir: &Path, command: &[&str]) -> Result<(), std::io:
             dir.display(),
             String::from_utf8_lossy(&output.stderr)
         );
-        return Err(std::io::Error::other(
-            "Command failed",
-        ));
+        return Err(std::io::Error::other("Command failed"));
     }
 
     println!("Ran {} in {}", command.join(" "), dir.display());

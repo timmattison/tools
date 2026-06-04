@@ -702,9 +702,7 @@ fn sanitize_for_filesystem(name: &str) -> Option<String> {
     // Reject names that start with a dot followed by only dots and underscores
     // (could be attempts to create hidden or traversal paths). Use chars().skip(1)
     // instead of byte indexing so the check is safe on any UTF-8 input.
-    if sanitized.starts_with('.')
-        && sanitized.chars().skip(1).all(|c| c == '.' || c == '_')
-    {
+    if sanitized.starts_with('.') && sanitized.chars().skip(1).all(|c| c == '.' || c == '_') {
         return None;
     }
 

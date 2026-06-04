@@ -122,8 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         match gix::discover(path) {
             Ok(repo) => {
-                let repo_name =
-                    get_repo_root_name(&repo).unwrap_or_else(|| basename.to_string());
+                let repo_name = get_repo_root_name(&repo).unwrap_or_else(|| basename.to_string());
                 match get_git_branch(&repo) {
                     Some(branch) => PortSource::GitRepo { repo_name, branch },
                     None => PortSource::DetachedHead { repo_name },
@@ -193,7 +192,10 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo = gix::discover(path).expect("Should find git repo");
         let name = get_repo_root_name(&repo);
-        assert!(name.is_some(), "Should find repo root name for a valid repo");
+        assert!(
+            name.is_some(),
+            "Should find repo root name for a valid repo"
+        );
         let name = name.unwrap();
         assert!(!name.is_empty(), "Repo root name should not be empty");
         assert!(!name.contains('/'), "Should be a basename, not a path");
@@ -205,15 +207,13 @@ mod tests {
         // Discover repo from the current path (may be a worktree)
         let worktree_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let worktree_repo = gix::discover(worktree_path).expect("Should find repo");
-        let worktree_name =
-            get_repo_root_name(&worktree_repo).expect("Should get repo root name");
+        let worktree_name = get_repo_root_name(&worktree_repo).expect("Should get repo root name");
 
         // Discover repo from the main repo root (parent of common_dir)
         let common = std::fs::canonicalize(worktree_repo.common_dir()).unwrap();
         let main_repo_root = common.parent().unwrap();
         let main_repo = gix::discover(main_repo_root).expect("Should find main repo");
-        let main_name =
-            get_repo_root_name(&main_repo).expect("Should get main repo root name");
+        let main_name = get_repo_root_name(&main_repo).expect("Should get main repo root name");
 
         assert_eq!(
             worktree_name, main_name,
