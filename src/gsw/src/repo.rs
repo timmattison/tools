@@ -106,31 +106,52 @@ pub struct BaseStatus {
 /// HEAD already points at the base commit the walks are short-circuited to
 /// `(0, 0)`. Each count is clamped to `u32::MAX`.
 pub fn base_status(repo: &gix::Repository, base: &str) -> BaseStatus {
-    let resolve = || -> anyhow::Result<(u32, u32)> {
-        let head = repo.head_id()?.detach();
-        let base_id = repo.rev_parse_single(base)?.detach();
-        if head == base_id {
-            return Ok((0, 0));
-        }
-        // ahead: base..HEAD — commits on HEAD not on base.
-        let ahead = repo
-            .rev_walk(std::iter::once(head))
-            .with_hidden(std::iter::once(base_id))
-            .all()?
-            .count();
-        // behind: HEAD..base — the mirror walk, base with HEAD hidden.
-        let behind = repo
-            .rev_walk(std::iter::once(base_id))
-            .with_hidden(std::iter::once(head))
-            .all()?
-            .count();
-        Ok((
-            u32::try_from(ahead).unwrap_or(u32::MAX),
-            u32::try_from(behind).unwrap_or(u32::MAX),
-        ))
+    let resolve = || -> Option<(u32, u32)> {
+        let head = repo.head_id().ok()?.detach();
+        let base_id = repo.rev_parse_single(base).ok()?.detach();
+        ahead_behind(repo, head, base_id)
     };
     let (ahead, behind) = resolve().unwrap_or((0, 0));
     BaseStatus { ahead, behind }
+}
+
+/// Count how far `ours` is ahead of and behind `theirs` as `(ahead, behind)`.
+///
+/// `ahead` is the number of commits reachable from `ours` but not from `theirs`
+/// (`git rev-list --count theirs..ours`); `behind` is the mirror — commits
+/// reachable from `theirs` but not from `ours` (`git rev-list --count
+/// ours..theirs`). Each count is clamped to `u32::MAX`.
+///
+/// Returns `None` if either rev walk fails. When `ours == theirs` the walks are
+/// short-circuited to `Some((0, 0))` (the walks would return `(0, 0)` anyway).
+/// Both `base_status` and `upstream_status` delegate here so the mirrored
+/// hidden-walk pair lives in exactly one place.
+fn ahead_behind(
+    repo: &gix::Repository,
+    ours: gix::ObjectId,
+    theirs: gix::ObjectId,
+) -> Option<(u32, u32)> {
+    if ours == theirs {
+        return Some((0, 0));
+    }
+    // ahead: theirs..ours — commits on `ours` not on `theirs`.
+    let ahead = repo
+        .rev_walk(std::iter::once(ours))
+        .with_hidden(std::iter::once(theirs))
+        .all()
+        .ok()?
+        .count();
+    // behind: ours..theirs — the mirror walk, `theirs` with `ours` hidden.
+    let behind = repo
+        .rev_walk(std::iter::once(theirs))
+        .with_hidden(std::iter::once(ours))
+        .all()
+        .ok()?
+        .count();
+    Some((
+        u32::try_from(ahead).unwrap_or(u32::MAX),
+        u32::try_from(behind).unwrap_or(u32::MAX),
+    ))
 }
 
 /// The current branch's upstream tracking status. `name` is the short
@@ -155,23 +176,12 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     let head_id = repo.head_id().ok()?.detach();
     let upstream_id = repo.rev_parse_single("@{upstream}").ok()?.detach();
 
-    let ahead = repo
-        .rev_walk(std::iter::once(head_id))
-        .with_hidden(std::iter::once(upstream_id))
-        .all()
-        .ok()?
-        .count();
-    let behind = repo
-        .rev_walk(std::iter::once(upstream_id))
-        .with_hidden(std::iter::once(head_id))
-        .all()
-        .ok()?
-        .count();
+    let (ahead, behind) = ahead_behind(repo, head_id, upstream_id)?;
 
     Some(UpstreamStatus {
         name,
-        ahead: u32::try_from(ahead).unwrap_or(u32::MAX),
-        behind: u32::try_from(behind).unwrap_or(u32::MAX),
+        ahead,
+        behind,
     })
 }
 
