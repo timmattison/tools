@@ -469,6 +469,43 @@ fn shows_upstream_ahead_and_behind_counts_when_branch_tracks_remote() {
 }
 
 #[test]
+fn shows_behind_base_count_in_header_when_base_advances_past_fork_point() {
+    // End-to-end: when the base branch has moved on past the fork point, the
+    // live header must show the needs-rebase segment `, {m} behind` after
+    // `ahead of {base}`. No remote is needed — this is purely local divergence
+    // between `feature` and its base `main`. Fork `feature` off `main`, commit
+    // on each, then sit on `feature`: it is 1 ahead of and 1 behind `main`.
+    let dir = setup_repo();
+    let p = dir.path();
+
+    // Fork `feature` off the initial commit and land a commit on it.
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    fs::write(p.join("feature.txt"), "feature work\n").unwrap();
+    run_git(p, &["add", "feature.txt"]);
+    run_git(p, &["commit", "-q", "-m", "feature commit"]);
+
+    // Advance `main` past the fork point with its own commit.
+    run_git(p, &["checkout", "-q", "main"]);
+    fs::write(p.join("main.txt"), "main work\n").unwrap();
+    run_git(p, &["add", "main.txt"]);
+    run_git(p, &["commit", "-q", "-m", "main commit"]);
+
+    // Back on `feature`: 1 ahead of `main`, 1 behind it — needs a rebase.
+    run_git(p, &["checkout", "-q", "feature"]);
+
+    let out = run_gsw(p);
+    let header = out.lines().next().unwrap_or("");
+    assert!(
+        header.contains("1 commit ahead of main"),
+        "header should show 1 commit ahead of the base: {header}",
+    );
+    assert!(
+        header.contains(", 1 behind"),
+        "header should show the needs-rebase segment when the base advanced: {header}",
+    );
+}
+
+#[test]
 fn omits_upstream_field_when_branch_has_no_remote() {
     // No `git remote add`, no `git push -u`. The branch has no upstream
     // configured, so gsw should not invent one or print arrows for a
