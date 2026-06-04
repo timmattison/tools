@@ -61,13 +61,13 @@ struct Cli {
     #[arg(long)]
     force: bool,
 
-    /// Override the config's poll interval (e.g. `2s`, `500ms`). Accepts an
-    /// integer magnitude plus a `ms`/`s`/`m`/`h` unit suffix.
+    /// Override the config's poll interval (e.g. `2s`, `500ms`). Accepts a
+    /// positive integer magnitude plus a `ms`/`s`/`m`/`h` unit suffix.
     #[arg(long)]
     poll_interval: Option<String>,
 
     /// Override the config's sparkline history window (e.g. `30m`, `1h`).
-    /// Accepts an integer magnitude plus a `ms`/`s`/`m`/`h` unit suffix.
+    /// Accepts a positive integer magnitude plus a `ms`/`s`/`m`/`h` unit suffix.
     #[arg(long)]
     window: Option<String>,
 

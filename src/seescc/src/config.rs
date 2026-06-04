@@ -18,10 +18,11 @@ use serde::Deserialize;
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
     /// A duration string was empty, missing its magnitude, used an unknown unit
-    /// suffix, or had a non-integer / overflowing magnitude.
+    /// suffix, had a zero, non-integer, or overflowing magnitude.
     #[error(
-        "invalid duration {input:?}: expected an integer magnitude followed by one of \
-         the unit suffixes `ms`, `s`, `m`, or `h` (e.g. `500ms`, `1s`, `15m`, `1h`)"
+        "invalid duration {input:?}: expected a positive (non-zero) integer magnitude \
+         followed by one of the unit suffixes `ms`, `s`, `m`, or `h` \
+         (e.g. `500ms`, `1s`, `15m`, `1h`)"
     )]
     InvalidDuration {
         /// The rejected input, echoed back so the user can spot the typo.
@@ -238,16 +239,17 @@ impl MetricKey {
 
 /// Parse a human-friendly duration string into a [`Duration`].
 ///
-/// Accepts an integer magnitude immediately followed by one of the unit
-/// suffixes `ms`, `s`, `m`, or `h` (for example `500ms`, `1s`, `15m`, `1h`).
-/// Surrounding whitespace is trimmed. The `ms` suffix is checked before `s`
-/// because both end in `s`.
+/// Accepts a positive (non-zero) integer magnitude immediately followed by one
+/// of the unit suffixes `ms`, `s`, `m`, or `h` (for example `500ms`, `1s`,
+/// `15m`, `1h`). Surrounding whitespace is trimmed. The `ms` suffix is checked
+/// before `s` because both end in `s`. A zero magnitude is rejected: a zero
+/// `poll_interval` would make the watch loop spin without delay.
 ///
 /// # Errors
 /// Returns [`ConfigError::InvalidDuration`] when `s` is empty, omits the
 /// magnitude (`"s"`), omits or uses an unknown unit suffix (`"10"`, `"10x"`),
-/// has a non-integer magnitude (`"1.5s"`), or whose magnitude overflows the
-/// internal `u64` second/millisecond arithmetic.
+/// has a non-integer magnitude (`"1.5s"`), has a zero magnitude (`"0s"`), or
+/// whose magnitude overflows the internal `u64` second/millisecond arithmetic.
 pub(crate) fn parse_duration(s: &str) -> Result<Duration, ConfigError> {
     let trimmed = s.trim();
     let invalid = || ConfigError::InvalidDuration {
@@ -269,6 +271,12 @@ pub(crate) fn parse_duration(s: &str) -> Result<Duration, ConfigError> {
         };
 
     let magnitude: u64 = digits.parse().map_err(|_| invalid())?;
+    // Reject a zero magnitude: a zero `poll_interval` makes the watch loop's
+    // `recv_timeout(ZERO)` time out immediately, busy-looping the CPU and
+    // spawning an `sccache --show-stats` subprocess as fast as the OS allows.
+    if magnitude == 0 {
+        return Err(invalid());
+    }
     build(magnitude).ok_or_else(invalid)
 }
 
@@ -300,7 +308,7 @@ const CONFIG_FILE_NAME: &str = "config.toml";
 /// It must stay byte-for-byte parseable by [`Config::from_toml`]; a test asserts
 /// `Config::from_toml(DEFAULT_CONFIG_TOML) == Config::default()`.
 pub(crate) const DEFAULT_CONFIG_TOML: &str = r#"# seescc configuration
-# poll_interval / window accept an integer + unit suffix: ms, s, m, h
+# poll_interval / window accept a positive integer + unit suffix: ms, s, m, h
 poll_interval = "1s"      # how often to query sccache
 window        = "15m"     # sparkline history retention
 
