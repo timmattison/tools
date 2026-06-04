@@ -75,12 +75,11 @@ fn pnpm_available() -> bool {
 }
 
 /// Creates a git repo (inside a TempDir subdir so the sibling
-/// `<name>-worktrees` output directory also lands inside the TempDir), commits
-/// a baseline `package.json` whose `prepare` script appends a line to
-/// [`PREPARE_MARKER`] on every install. The package.json is COMMITTED so it
-/// exists (tracked) in the new worktree. Zero dependencies keeps the install
-/// offline-safe. Returns the TempDir (keep it alive) and the repo path.
-fn repo_with_prepare_script() -> (TempDir, PathBuf) {
+/// `<name>-worktrees` output directory also lands inside the TempDir) and
+/// commits the given `package_json` body as a baseline. The package.json is
+/// COMMITTED so it exists (tracked) in the new worktree. Returns the TempDir
+/// (keep it alive) and the repo path.
+fn repo_with_package_json(package_json: &str) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("Failed to create temp dir");
     let repo = temp.path().join("repo");
     std::fs::create_dir(&repo).expect("Failed to create repo subdir");
@@ -95,16 +94,7 @@ fn repo_with_prepare_script() -> (TempDir, PathBuf) {
         "git config user.name failed"
     );
 
-    // A prepare script that appends a marker line on every install. pnpm runs
-    // lifecycle scripts through a shell, so `sh`-style syntax is fine. Zero
-    // dependencies keeps the install offline-safe.
-    std::fs::write(
-        repo.join("package.json"),
-        format!(
-            r#"{{"name":"t","private":true,"version":"0.0.0","scripts":{{"prepare":"echo x >> {PREPARE_MARKER}"}}}}"#
-        ),
-    )
-    .expect("Failed to write package.json");
+    std::fs::write(repo.join("package.json"), package_json).expect("Failed to write package.json");
 
     // Baseline commit. Commit exactly once (no retry loop); disable gpg signing
     // so a globally-configured signer can't break the test. package.json must be
@@ -119,6 +109,24 @@ fn repo_with_prepare_script() -> (TempDir, PathBuf) {
     );
 
     (temp, repo)
+}
+
+/// Creates a git repo whose `package.json` declares a `prepare` script that
+/// appends a line to [`PREPARE_MARKER`] on every install — so the file's
+/// presence proves the hooks were bootstrapped at least once. pnpm runs
+/// lifecycle scripts through a shell, so `sh`-style syntax is fine. Zero
+/// dependencies keeps the install offline-safe.
+fn repo_with_prepare_script() -> (TempDir, PathBuf) {
+    repo_with_package_json(&format!(
+        r#"{{"name":"t","private":true,"version":"0.0.0","scripts":{{"prepare":"echo x >> {PREPARE_MARKER}"}}}}"#
+    ))
+}
+
+/// Creates a git repo whose `package.json` declares NO scripts at all, so
+/// [`detect_hook_bootstrap`](../src/main.rs) returns `None` and there is nothing
+/// to bootstrap. Used to prove the skip notice is gated on a pending bootstrap.
+fn repo_without_scripts() -> (TempDir, PathBuf) {
+    repo_with_package_json(r#"{"name":"t","private":true,"version":"0.0.0"}"#)
 }
 
 /// Parses the worktree path from the FIRST line of nwt's stdout (later lines may
@@ -229,5 +237,52 @@ fn run_that_does_not_install_still_bootstraps() {
         worktree.join(PREPARE_MARKER).exists(),
         "bootstrap install must have run the prepare script.\nstdout: \
          {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn run_that_installs_in_repo_without_prepare_script_emits_no_skip_notice() {
+    if !pnpm_available() {
+        eprintln!("Skipping test: pnpm not available");
+        return;
+    }
+    // A repo with NO `prepare` script: bootstrap would have been a silent no-op
+    // anyway, so neither a bootstrap NOR a skip is meaningful here.
+    let (_temp, repo) = repo_without_scripts();
+
+    let branch = format!("dedup-noprepare-{}-{}", std::process::id(), nanos());
+
+    // `--run "pnpm install"` installs, but with nothing to bootstrap the skip
+    // notice would falsely imply something was skipped. stdin nulled so the
+    // install can't block on a prompt.
+    let output = Command::new(env!("CARGO_BIN_EXE_nwt"))
+        .args(["-b", &branch, "--run", "pnpm install"])
+        .current_dir(&repo)
+        .stdin(Stdio::null())
+        .output()
+        .expect("Failed to run nwt binary");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // pnpm install succeeds in a zero-dep repo, so nwt must succeed too.
+    assert!(
+        output.status.success(),
+        "nwt should succeed.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // The crux: with no `prepare` script, nothing was ever pending, so the skip
+    // notice must NOT appear (it would imply something was skipped when nothing
+    // would have run). On current (pre-fix) code the notice prints → fails.
+    assert!(
+        !stderr.contains(SKIP_NOTICE),
+        "no skip notice ('{SKIP_NOTICE}') may appear when there is no prepare \
+         script to bootstrap.\nstderr: {stderr}"
+    );
+    // And nothing was bootstrapped either way.
+    assert!(
+        !stderr.contains(BOOTSTRAP_LINE),
+        "no bootstrap line ('{BOOTSTRAP_LINE}') may appear when there is no \
+         prepare script to bootstrap.\nstderr: {stderr}"
     );
 }
