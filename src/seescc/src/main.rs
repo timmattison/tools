@@ -80,11 +80,6 @@ struct Cli {
 /// The sccache binary we shell out to for stats.
 const SCCACHE_BIN: &str = "sccache";
 
-/// Render width used for the one-shot human/JSON frame, which is emitted to a
-/// pipe or capture where no live terminal size applies. The watch loop queries
-/// the real terminal size per frame instead (see [`watch::run`]).
-const DEFAULT_WIDTH: usize = 80;
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -114,16 +109,19 @@ fn main() -> Result<()> {
     let config = config::load(cli.config.as_deref())?
         .with_overrides(cli.poll_interval.as_deref(), cli.window.as_deref())?;
 
-    // Color policy, mirroring gsw: NO_COLOR is an explicit kill switch, and a
-    // watch-like wrapper (no TTY but COLUMNS exported) gets colors forced back
-    // on so they pass through to the wrapper's own TTY-backed UI instead of
-    // being stripped as they would be for a plain pipe.
+    // Color and width policy, mirroring gsw: NO_COLOR is an explicit kill
+    // switch, and a watch-like wrapper (no TTY but COLUMNS exported) gets colors
+    // forced back on so they pass through to the wrapper's own TTY-backed UI
+    // instead of being stripped as they would be for a plain pipe. COLUMNS is
+    // parsed once here and shared by both decisions: an unparseable value is
+    // treated as absent for colors *and* width alike, so the two never disagree
+    // about whether a wrapper is present.
     let stdout_is_tty = std::io::stdout().is_terminal();
-    let columns_env_present = std::env::var_os("COLUMNS").is_some();
+    let columns_env: Option<usize> = std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok());
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
     if no_color_env {
         colored::control::set_override(false);
-    } else if watch::should_force_colors(stdout_is_tty, columns_env_present, no_color_env) {
+    } else if watch::should_force_colors(stdout_is_tty, columns_env.is_some(), no_color_env) {
         colored::control::set_override(true);
     }
 
@@ -134,7 +132,18 @@ fn main() -> Result<()> {
         watch::Mode::OneShot => {
             let stats = poll_sccache()?;
             let output = match cli.format {
-                OutputFormat::Human => render_oneshot(&config, &stats),
+                OutputFormat::Human => {
+                    // Lay the human frame out at the real width, mirroring gsw: a
+                    // direct `--one-shot` TTY uses the queried terminal width, a
+                    // watch-like wrapper uses its exported COLUMNS, and a plain
+                    // pipe falls back to the shared default — all minus the
+                    // one-cell safety margin baked into `effective_width`. The
+                    // JSON path is width-independent, so it is resolved only here.
+                    let tty_width =
+                        terminal_size::terminal_size().map(|(w, _h)| usize::from(w.0));
+                    let width = watch::effective_width(tty_width, columns_env, stdout_is_tty);
+                    render_oneshot(&config, &stats, width)
+                }
                 OutputFormat::Json => render_oneshot_json(&config, &stats),
             };
             println!("{output}");
@@ -171,17 +180,22 @@ fn poll_sccache() -> Result<stats::Stats> {
     stats::parse(&json)
 }
 
-/// Build the one-shot human frame from a resolved [`config::Config`].
+/// Build the one-shot human frame from a resolved [`config::Config`], laid out
+/// for `width` display columns.
 ///
 /// The header label and the metric rows are built by the same shared helpers the
 /// watch frame uses ([`watch::languages_label`] and [`watch::build_rows`]) so the
 /// one-shot and watch tables can never drift apart. The resulting rows are handed
-/// to [`render::build_human`] with the current wall-clock time.
-fn render_oneshot(config: &config::Config, stats: &stats::Stats) -> String {
+/// to [`render::build_human`] with the current wall-clock time. `width` is the
+/// caller-resolved frame width from [`watch::effective_width`] — the queried TTY
+/// width, a wrapper's `COLUMNS`, or the shared fallback, each less the one-cell
+/// safety margin — so the clock right-justifies against the real terminal rather
+/// than a hardcoded column count.
+fn render_oneshot(config: &config::Config, stats: &stats::Stats, width: usize) -> String {
     let languages_label = watch::languages_label(config);
     let rows = watch::build_rows(config, stats);
     let clock = chrono::Local::now().format("%H:%M:%S").to_string();
-    render::build_human(&languages_label, &clock, DEFAULT_WIDTH, &rows)
+    render::build_human(&languages_label, &clock, width, &rows)
 }
 
 /// Build the one-shot JSON frame from a resolved [`config::Config`].

@@ -324,6 +324,47 @@ pub(crate) fn should_force_colors(
     !stdout_is_tty && columns_env_present && !no_color_env
 }
 
+/// Render width assumed when no terminal-size signal is available at all — stdout
+/// is piped and the wrapper didn't export `COLUMNS`. The classic 80-column VT100
+/// default; the one-cell safety margin in [`effective_width`] still applies on
+/// top, so a plain pipe lays out at 79. One source of truth for both the one-shot
+/// and watch fallbacks so they can never disagree about the no-signal width.
+pub(crate) const FALLBACK_TERMINAL_WIDTH: usize = 80;
+
+/// Decide the effective terminal width seescc should render a frame for.
+///
+/// Mirrors `gsw`'s `effective_terminal_width` (sans gsw's extra `width_offset`,
+/// which seescc has no flag for). Always leaves one cell of margin against the
+/// detected column count, applied uniformly to every branch — including the
+/// fallback, for consistency:
+/// - **Watch-like wrapper** (`stdout_is_tty == false` *and* `COLUMNS` parsed,
+///   e.g. viddy/watch capturing stdout): trust `columns_env`. The wrapper reports
+///   the full terminal width via `COLUMNS` but renders into a content area one
+///   column narrower (its scroll/refresh chrome), so the margin keeps the
+///   rightmost cell clear. This is the same signal [`should_force_colors`] keys
+///   on, so colors and width now follow `COLUMNS` together instead of width
+///   stranding at 80 while colors pass through.
+/// - **Direct TTY, or no `COLUMNS`** (`stdout_is_tty == true`, or a plain pipe):
+///   use the queried `tty_width`, or [`FALLBACK_TERMINAL_WIDTH`] when none was
+///   reported. A leaked `COLUMNS` is ignored on a real TTY — `terminal_size` is
+///   authoritative there. The margin still applies: rendering a row exactly
+///   `cols` cells wide collides with DECAWM auto-wrap and right-edge chrome on
+///   many terminals, pushing the last glyph onto the next line.
+///
+/// The result is always at least 1, so a 1-column terminal can never collapse the
+/// frame to zero width.
+pub(crate) fn effective_width(
+    tty_width: Option<usize>,
+    columns_env: Option<usize>,
+    stdout_is_tty: bool,
+) -> usize {
+    let detected = match (stdout_is_tty, columns_env) {
+        (false, Some(cols)) => cols,
+        _ => tty_width.unwrap_or(FALLBACK_TERMINAL_WIDTH),
+    };
+    detected.saturating_sub(1).max(1)
+}
+
 /// The header label used when the config selects no specific languages, meaning
 /// per-language metrics are summed across every language.
 ///
@@ -476,12 +517,6 @@ fn attach_sparklines(
     }
 }
 
-/// Render width used when the live terminal size cannot be detected (no TTY
-/// behind the watch loop, which should not normally happen since the mode is
-/// only entered on a TTY). A sane default keeps the frame readable rather than
-/// collapsing to zero width.
-const DEFAULT_WATCH_WIDTH: usize = 80;
-
 /// Run the live watch loop: take over the alternate screen and repaint the
 /// sccache stats on a timer until the user quits with `q`, `Esc`, or Ctrl-C.
 ///
@@ -538,16 +573,16 @@ pub(crate) fn run(
 
 /// The width the watch frame should lay out for, from the live terminal size.
 ///
-/// Mirrors `gsw`'s watch sizing: take the column count from `terminal_size` and
-/// subtract a one-cell safety margin so a glyph in the rightmost column can't
-/// trigger the terminal's auto-wrap (DECAWM) and stair-step the frame. Falls
-/// back to [`DEFAULT_WATCH_WIDTH`] when no size is reported.
+/// A thin production wrapper over [`effective_width`]: the watch loop only runs
+/// behind a live TTY (see [`decide_mode`]), so it always takes the direct-TTY
+/// branch — `stdout_is_tty = true` makes the leaked `COLUMNS` irrelevant and
+/// trusts the queried column count, falling back to [`FALLBACK_TERMINAL_WIDTH`]
+/// when `terminal_size` reports nothing. The one-cell DECAWM safety margin and
+/// the fallback both come from `effective_width`, so the watch and one-shot
+/// paths can never disagree about either.
 fn current_watch_width() -> usize {
-    terminal_size::terminal_size()
-        .map(|(w, _h)| usize::from(w.0))
-        .unwrap_or(DEFAULT_WATCH_WIDTH)
-        .saturating_sub(1)
-        .max(1)
+    let tty_width = terminal_size::terminal_size().map(|(w, _h)| usize::from(w.0));
+    effective_width(tty_width, None, true)
 }
 
 /// Paint `output` into the alternate screen, replacing whatever frame is there.
@@ -1574,6 +1609,71 @@ mod tests {
         assert!(
             !should_force_colors(false, true, true),
             "NO_COLOR must suppress colors even when captured by a wrapper",
+        );
+    }
+
+    #[test]
+    fn effective_width_under_a_wrapper_uses_columns_minus_the_margin() {
+        // A watch-like wrapper (stdout not a TTY) that exported COLUMNS=120: trust
+        // it, minus the one-cell safety margin → 119. `terminal_size` can't see
+        // through the pipe, so the leaked tty_width here would be wrong; COLUMNS
+        // wins.
+        assert_eq!(
+            effective_width(Some(200), Some(120), false),
+            119,
+            "a wrapper's COLUMNS (minus the 1-cell margin) must drive the width, \
+             not the unreachable tty_width",
+        );
+    }
+
+    #[test]
+    fn effective_width_on_a_tty_ignores_leaked_columns() {
+        // A direct TTY: `terminal_size` is authoritative, so a COLUMNS that leaked
+        // from the parent shell must be ignored and the queried width used (minus
+        // the margin) → 100-1 = 99.
+        assert_eq!(
+            effective_width(Some(100), Some(120), true),
+            99,
+            "on a real TTY the queried width wins and a leaked COLUMNS is ignored",
+        );
+    }
+
+    #[test]
+    fn effective_width_with_no_signal_falls_back_to_eighty_minus_margin() {
+        // No TTY width reported and no COLUMNS (a plain pipe, or a TTY whose size
+        // query failed): fall back to FALLBACK_TERMINAL_WIDTH, still minus the
+        // margin → 79. Both the TTY-with-no-size branch and the plain-pipe branch
+        // land here.
+        assert_eq!(
+            effective_width(None, None, false),
+            FALLBACK_TERMINAL_WIDTH - 1,
+            "no width signal must fall back to the shared default minus the margin",
+        );
+        assert_eq!(
+            effective_width(None, None, true),
+            FALLBACK_TERMINAL_WIDTH - 1,
+            "a TTY whose size query failed must also fall back to the default minus margin",
+        );
+    }
+
+    #[test]
+    fn effective_width_saturates_to_at_least_one_on_a_tiny_terminal() {
+        // A 1-column terminal (or wrapper) must never collapse the frame to zero
+        // width: the margin subtraction saturates and the result floors at 1.
+        assert_eq!(
+            effective_width(Some(1), None, true),
+            1,
+            "a 1-column TTY must floor at width 1, not 0",
+        );
+        assert_eq!(
+            effective_width(None, Some(1), false),
+            1,
+            "a 1-column wrapper must floor at width 1, not 0",
+        );
+        assert_eq!(
+            effective_width(Some(0), None, true),
+            1,
+            "a 0-column query must saturate to 1, never underflow",
         );
     }
 }
