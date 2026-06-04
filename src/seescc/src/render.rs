@@ -631,6 +631,125 @@ mod tests {
         );
     }
 
+    // --- error-banner sanitization ---------------------------------------
+    //
+    // Poll failures embed sccache's trimmed stderr, which can be multi-line
+    // and/or wider than the terminal. Left raw, embedded newlines spill into
+    // unindented lines and over-width lines auto-wrap (DECAWM) in raw mode,
+    // stair-stepping the frame exactly during an outage. `build_watch` must
+    // flatten control characters to single spaces and width-truncate the
+    // message to the frame before styling it.
+
+    #[test]
+    fn build_watch_flattens_a_multiline_banner_to_one_line() {
+        // A multi-line poll error must render as a SINGLE banner line: the
+        // newlines (\n and \r\n) collapse to single spaces so all three
+        // fragments sit on line index 1, the blank separator stays at line 2,
+        // and the first data row stays at line 3 — the frame's line structure
+        // must be unbroken.
+        let rows = rows();
+        let banner = "first line\nsecond line\r\nthird";
+        let out = build_watch("Rust", "12:34:56", 80, &rows, Some(banner), None);
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines[0].starts_with("sccache · Rust"));
+        // All three fragments on the single banner line, separated by spaces.
+        assert!(
+            lines[1].contains("first line second line third"),
+            "multi-line banner must flatten to one line with single-space joins: {:?}",
+            lines[1],
+        );
+        // The structure below the banner is unbroken.
+        assert_eq!(lines[2], "", "blank separator must stay at line index 2");
+        assert!(
+            lines[3].trim_start().starts_with("Compile requests"),
+            "first data row must stay at line index 3: {:?}",
+            lines[3],
+        );
+    }
+
+    #[test]
+    fn build_watch_truncates_an_over_width_ascii_banner_with_an_ellipsis() {
+        // An ASCII message wider than the frame must truncate to fit: the
+        // banner line's display width is at most `width`, it ends with a
+        // visible ellipsis, and it preserves the leading prefix of the message.
+        let rows = rows();
+        let width = 30;
+        let banner = "this is a very long error message that absolutely will not fit";
+        let out = build_watch("Rust", "12:34:56", width, &rows, Some(banner), None);
+        let banner_line = out.lines().nth(1).expect("banner line present");
+        assert!(
+            UnicodeWidthStr::width(banner_line) <= width,
+            "banner line width {} must not exceed frame width {width}: {banner_line:?}",
+            UnicodeWidthStr::width(banner_line),
+        );
+        assert!(
+            banner_line.ends_with('…'),
+            "a truncated banner must end with the ellipsis: {banner_line:?}",
+        );
+        assert!(
+            banner_line.starts_with(" this is a very"),
+            "the truncated banner must keep the message's leading prefix: {banner_line:?}",
+        );
+    }
+
+    #[test]
+    fn build_watch_truncates_a_multibyte_over_width_banner_on_a_char_boundary() {
+        // A wide-CJK + emoji message over the budget must truncate on a
+        // character boundary (never a byte slice), not panic, and keep the
+        // banner line within the frame width. CJK chars are width 2, so the
+        // accumulator must count display columns per char.
+        let rows = rows();
+        let width = 20;
+        let banner = "日本語日本語日本語日本語 🎉🎉🎉";
+        let out = build_watch("all", "00:00:00", width, &rows, Some(banner), None);
+        let banner_line = out.lines().nth(1).expect("banner line present");
+        assert!(
+            UnicodeWidthStr::width(banner_line) <= width,
+            "multibyte banner width {} must not exceed {width}: {banner_line:?}",
+            UnicodeWidthStr::width(banner_line),
+        );
+        assert!(
+            banner_line.ends_with('…'),
+            "an over-width multibyte banner must end with the ellipsis: {banner_line:?}",
+        );
+        // It must start with the message's leading CJK, intact (no split char).
+        assert!(
+            banner_line.starts_with(" 日本"),
+            "the truncated multibyte banner must keep its leading chars intact: {banner_line:?}",
+        );
+    }
+
+    #[test]
+    fn build_watch_leaves_a_short_single_line_banner_unchanged() {
+        // A short, single-line message well under the width must pass through
+        // byte-identically: it appears verbatim with no ellipsis. This is the
+        // common case and must not regress.
+        let rows = rows();
+        let banner = "poll failed: connection refused";
+        let out = build_watch("Rust", "12:34:56", 80, &rows, Some(banner), None);
+        let banner_line = out.lines().nth(1).expect("banner line present");
+        assert!(
+            banner_line.contains(banner),
+            "a short banner must appear verbatim: {banner_line:?}",
+        );
+        assert!(
+            !banner_line.contains('…'),
+            "a short banner must not be truncated: {banner_line:?}",
+        );
+    }
+
+    #[test]
+    fn build_watch_degenerate_narrow_widths_do_not_panic() {
+        // Widths 0 and 1 leave a message budget of 0 or below; sanitization
+        // must saturate rather than underflow, so the frame composes without
+        // panicking for any banner.
+        let rows = rows();
+        let banner = "first line\nsecond line that is quite long indeed";
+        for width in [0_usize, 1_usize] {
+            let _ = build_watch("Rust", "12:34:56", width, &rows, Some(banner), None);
+        }
+    }
+
     // --- sparkline column ------------------------------------------------
 
     #[test]
