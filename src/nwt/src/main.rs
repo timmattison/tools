@@ -1574,7 +1574,7 @@ fn detect_hook_bootstrap(dir: &Path) -> Option<PackageManager> {
     // first `@` and match it case-sensitively; an unrecognized name falls
     // through to lockfile detection rather than failing.
     if let Some(spec) = value.get("packageManager").and_then(|v| v.as_str()) {
-        let name = spec.split('@').next().unwrap_or(spec);
+        let name = spec.split_once('@').map_or(spec, |(name, _)| name);
         match name {
             "pnpm" => return Some(PackageManager::Pnpm),
             "npm" => return Some(PackageManager::Npm),
