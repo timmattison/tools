@@ -27,13 +27,57 @@ fn write_stub(dir: &Path, body: &str) {
 /// `~/Library/Application Support/seescc/config.toml`), so `config::load(None)`
 /// always falls back to the built-in defaults unless a `--config` arg overrides.
 fn run_seescc_iso(path_value: &str, iso: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_seescc"))
-        .env("PATH", path_value)
-        .env("HOME", iso)
-        .env("XDG_CONFIG_HOME", iso)
-        .args(args)
+    base_command(path_value, iso, args)
+        .env_remove("COLUMNS")
         .output()
         .expect("invoke seescc")
+}
+
+/// Like [`run_seescc_iso`] but with `COLUMNS` exported into the child's
+/// environment, simulating a watch-like wrapper (e.g. `viddy`/`watch`) that
+/// reports the terminal width via `COLUMNS` even though it captures stdout
+/// through a pipe. Used to prove the one-shot frame lays out at the wrapper's
+/// width rather than the 80-column fallback.
+fn run_seescc_iso_columns(
+    path_value: &str,
+    iso: &Path,
+    columns: usize,
+    args: &[&str],
+) -> std::process::Output {
+    base_command(path_value, iso, args)
+        .env("COLUMNS", columns.to_string())
+        .output()
+        .expect("invoke seescc")
+}
+
+/// Build the isolated `seescc` command shared by [`run_seescc_iso`] and
+/// [`run_seescc_iso_columns`]: PATH from `path_value`, `HOME`/`XDG_CONFIG_HOME`
+/// pointed at `iso`, and `args` forwarded. The caller decides the `COLUMNS`
+/// policy (removed vs. set) so the two width regimes stay deterministic
+/// regardless of whatever `COLUMNS` the test runner itself leaked.
+fn base_command(path_value: &str, iso: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_seescc"));
+    cmd.env("PATH", path_value)
+        .env("HOME", iso)
+        .env("XDG_CONFIG_HOME", iso)
+        .args(args);
+    cmd
+}
+
+/// The display width of the header line (`sccache · …  HH:MM:SS`) — the first
+/// line of one-shot stdout. The frame right-justifies the clock against the
+/// resolved width, so the header is exactly that many columns wide. The default
+/// header is pure ASCII apart from the `·` separator (one char, one display
+/// column), so `chars().count()` equals the display width here without pulling
+/// in `unicode-width` (which the bin crate's deps don't expose to integration
+/// tests).
+fn header_width(stdout: &str) -> usize {
+    stdout
+        .lines()
+        .next()
+        .expect("one-shot output must have a header line")
+        .chars()
+        .count()
 }
 
 /// PATH that finds the stub first, then the real system PATH (so the stub's
@@ -262,5 +306,62 @@ fn write_default_config_roundtrip() {
         forced.status.success(),
         "--write-default-config --force must overwrite: {}",
         String::from_utf8_lossy(&forced.stderr)
+    );
+}
+
+/// Under a watch-like wrapper (stdout captured, `COLUMNS` exported) the one-shot
+/// frame must lay out at the wrapper's width — minus the one-cell safety margin —
+/// not the 80-column fallback. With `COLUMNS=120` the header right-justifies the
+/// clock against 119 columns, so the header line is 119 columns wide. This is the
+/// gsw-parity fix: colors are already forced on via the same `COLUMNS` signal, so
+/// the width must follow it too instead of stranding the clock at column 80.
+#[test]
+fn one_shot_width_honors_columns_under_a_wrapper() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let iso = tempfile::tempdir().expect("iso tempdir");
+    write_fixture_stub(dir.path());
+
+    let out = run_seescc_iso_columns(&path_with_stub(dir.path()), iso.path(), 120, &[]);
+    assert!(
+        out.status.success(),
+        "seescc failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        header_width(&stdout),
+        119,
+        "COLUMNS=120 must lay the one-shot header out at 120-1=119 columns, \
+         not the 80-column fallback; stdout:\n{stdout}"
+    );
+}
+
+/// Without any `COLUMNS` signal (a plain pipe) the one-shot frame falls back to
+/// the shared 80-column default, minus the same one-cell margin, so the header is
+/// 79 columns wide. This pins the margin/fallback consolidation: the one-shot and
+/// watch paths now subtract the margin in exactly one place, so a plain pipe lands
+/// at 79, never the bare 80.
+#[test]
+fn one_shot_width_falls_back_to_eighty_minus_margin_without_columns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let iso = tempfile::tempdir().expect("iso tempdir");
+    write_fixture_stub(dir.path());
+
+    // `run_seescc_iso` removes COLUMNS, so no width signal reaches the child even
+    // if the test runner leaked one.
+    let out = run_seescc_iso(&path_with_stub(dir.path()), iso.path(), &[]);
+    assert!(
+        out.status.success(),
+        "seescc failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert_eq!(
+        header_width(&stdout),
+        79,
+        "with no COLUMNS the one-shot header must fall back to 80-1=79 columns; \
+         stdout:\n{stdout}"
     );
 }
