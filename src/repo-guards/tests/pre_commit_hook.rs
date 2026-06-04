@@ -138,6 +138,39 @@ fn staged_misformatted_rust_file_fails_the_gate() {
     );
 }
 
+/// A minimal `rustfmt.toml` whose only job is to be a staged file that matches
+/// the gate's trigger regex. The pinned style edition mirrors the workspace.
+const RUSTFMT_TOML: &str = "style_edition = \"2021\"\n";
+
+/// Staging only a toolchain/style config file (and nothing else) must still
+/// trigger the gate, because such a commit is the exact scenario most likely to
+/// introduce formatting/lint drift. We prove the gate fires by leaving a
+/// misformatted `src/main.rs` unstaged on disk: if the gate runs, `cargo fmt
+/// --check` sees the dirty tree and the hook exits non-zero; if the gate is
+/// skipped, the hook exits zero and this test fails.
+#[test]
+fn staged_toolchain_config_alone_triggers_the_gate() {
+    // `rust-toolchain.toml` is already written by `write_fixture_package`, so it
+    // only needs staging; `rustfmt.toml` is written here first.
+    for config_file in ["rustfmt.toml", "rust-toolchain.toml"] {
+        let dir = unique_fixture_dir();
+        write_fixture_package(&dir);
+        fs::write(dir.join("rustfmt.toml"), RUSTFMT_TOML).expect("write rustfmt.toml");
+
+        // Stage ONLY the config file. The misformatted main.rs stays unstaged,
+        // so the gate must fire on the config file alone to catch it.
+        git_init_and_stage(&dir, &[config_file]);
+
+        let passed = run_hook(&dir);
+        cleanup(&dir);
+
+        assert!(
+            !passed,
+            "hook should run the gate when {config_file} is staged, but it exited zero (gate skipped)"
+        );
+    }
+}
+
 /// When only a non-Rust file is staged, the trigger condition is false and the
 /// gate is skipped — so the hook exits zero even though a misformatted
 /// `src/main.rs` sits on disk (unstaged). This proves the trigger, not the
