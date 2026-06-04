@@ -539,13 +539,17 @@ HOOK BOOTSTRAP:
     bootstrap_hooks = false in ~/.nwt.toml to disable it by default. Repos without
     a 'prepare' script are unaffected — no install is run.
 
-    As a safety net, after the bootstrap step nwt verifies the effective
-    'core.hooksPath' directory actually exists, and prints a loud warning if it
-    does not — whether bootstrap was skipped, failed, or didn't apply. Git
-    silently runs no hooks when that directory is missing, so this warning is the
-    only signal that commits in the new worktree would otherwise be ungated.
-    Because that signal must never be invisible, this warning is printed to
-    stderr even with --quiet.
+    As a safety net, nwt verifies the effective 'core.hooksPath' directory
+    actually exists, and prints a loud warning if it does not — whether bootstrap
+    was skipped, failed, or didn't apply. When you pass a synchronous --run
+    command (without --tmux), this check runs AFTER that command finishes, so a
+    --run that installs hooks (e.g. \"pnpm install\") gets the chance to create the
+    directory before the check looks — no false alarm. With --tmux the --run
+    command runs asynchronously inside the new window, so the check necessarily
+    runs before tmux is spawned. Git silently runs no hooks when that directory
+    is missing, so this warning is the only signal that commits in the new
+    worktree would otherwise be ungated. Because that signal must never be
+    invisible, this warning is printed to stderr even with --quiet.
 
 EXAMPLES:
     nwt                              # Random name for both directory and branch
@@ -1329,25 +1333,17 @@ fn main() {
                     bootstrap_hooks(&worktree_path, config.quiet);
                 }
 
-                // Defense-in-depth (issue #275): regardless of whether bootstrap
-                // ran, succeeded, or applied, verify the effective core.hooksPath
-                // directory actually exists. If it's configured but missing, git
-                // silently runs NO hooks and every commit here is ungated — warn
-                // loudly so that failure can't happen invisibly.
-                //
-                // This warning DELIBERATELY bypasses quiet mode (no `error!`/`config.quiet`
-                // gate): the safety net must never be invisible, and an ungated worktree is
-                // error-class, not the ordinary non-error noise `-q` suppresses. It goes to
-                // stderr, so it can't corrupt the worktree path captured from stdout by the
-                // shell wrapper.
-                if let Some(hooks_path) = missing_hooks_path(&worktree_path) {
-                    eprintln!(
-                        "Warning: core.hooksPath is '{}' but that directory does not exist in this worktree.",
-                        hooks_path
-                    );
-                    eprintln!(
-                        "Git will silently run NO hooks here — commits are ungated. Run your package manager's install (or create the directory) to fix this."
-                    );
+                // Ungated-worktree safety net (issue #275). The placement of this
+                // check depends on the execution mode below — see
+                // `warn_if_hooks_missing`'s placement contract. A synchronous
+                // `--run` command can be the thing that creates the missing hooks
+                // directory, so for that path we defer the check until AFTER the
+                // command finishes; for the no-run and tmux paths we check here
+                // (tmux runs its --run command asynchronously, so we can't re-check
+                // after it).
+                let defer_hooks_check = config.run.is_some() && !config.tmux;
+                if !defer_hooks_check {
+                    warn_if_hooks_missing(&worktree_path);
                 }
 
                 // Execute tmux and/or run commands
@@ -1439,16 +1435,24 @@ fn main() {
                         exit(exit_codes::TMUX_FAILED);
                     }
                 } else if let Some(ref cmd) = config.run {
-                    // Run command directly (no tmux)
+                    // Run command directly (no tmux). The ungated-worktree safety
+                    // net was deferred above so the command gets a chance to create
+                    // the hooks directory first (e.g. `pnpm install` regenerating
+                    // `.husky/_`). Re-check on EVERY outcome before exiting — a
+                    // failing run command must not swallow the warning.
                     match run_shell_command(cmd, &worktree_path) {
-                        ShellCommandResult::Success => {}
+                        ShellCommandResult::Success => {
+                            warn_if_hooks_missing(&worktree_path);
+                        }
                         ShellCommandResult::Failed(code) => {
+                            warn_if_hooks_missing(&worktree_path);
                             // Print error message so users know the exit code is from
                             // the command, not nwt itself (since codes 1-8 overlap).
                             error!(config.quiet, "Command exited with code {}", code);
                             exit(code);
                         }
                         ShellCommandResult::ExecutionError(e) => {
+                            warn_if_hooks_missing(&worktree_path);
                             error!(config.quiet, "Error running command: {}", e);
                             exit(exit_codes::RUN_COMMAND_FAILED);
                         }
@@ -1763,6 +1767,48 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
         None
     } else {
         Some(configured)
+    }
+}
+
+/// Emits the loud ungated-worktree safety-net warning for a missing hooks dir.
+///
+/// Defense-in-depth (issue #275): regardless of whether hook bootstrap ran,
+/// succeeded, or applied, a missing `core.hooksPath` directory means git
+/// silently runs NO hooks and every commit here is ungated. This warning is the
+/// only signal that would otherwise be invisible, so it deliberately:
+///
+/// - bypasses quiet mode (no `error!`/`config.quiet` gate) — an ungated worktree
+///   is error-class, not the ordinary non-error noise `-q` suppresses, so the
+///   safety net must never disappear under `--quiet`; and
+/// - goes to stderr, so it can't corrupt the worktree path captured from stdout
+///   by the shell wrapper.
+///
+/// # Placement contract
+///
+/// Where this is called relative to a `--run` command matters, because a run
+/// command can be the very thing that creates the missing directory (e.g.
+/// `pnpm install` regenerating `.husky/_`):
+///
+/// - Synchronous `--run` (no `--tmux`): call this AFTER `run_shell_command`
+///   completes, on every outcome (success, failure, execution error) before any
+///   `exit`. Checking before the run would be a false alarm when the run is
+///   about to fix the directory; a failing run must still not swallow the
+///   warning.
+/// - `--tmux` (with or without `--run`): call this BEFORE spawning tmux. The run
+///   command executes inside the tmux window, asynchronously from nwt's
+///   perspective, so nwt can't re-check after it — the pre-spawn check is the
+///   best available signal.
+/// - No `--run` and no `--tmux`: call this right after hook bootstrap; nothing
+///   could fix the directory later.
+fn warn_if_hooks_missing(worktree: &Path) {
+    if let Some(hooks_path) = missing_hooks_path(worktree) {
+        eprintln!(
+            "Warning: core.hooksPath is '{}' but that directory does not exist in this worktree.",
+            hooks_path
+        );
+        eprintln!(
+            "Git will silently run NO hooks here — commits are ungated. Run your package manager's install (or create the directory) to fix this."
+        );
     }
 }
 
