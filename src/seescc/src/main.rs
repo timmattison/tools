@@ -434,6 +434,59 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_stats_process_nonzero_exit_error_includes_stdout_diagnostic() {
+        // Some sccache versions print their failure diagnostic to STDOUT, not
+        // stderr (e.g. "sccache: error: server is shutting down"), then exit
+        // non-zero with an empty stderr. The non-zero-exit error must surface
+        // that stdout text so the user sees *why* the poll failed rather than a
+        // bare exit code with an empty message.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("sccache");
+        // Print the diagnostic to stdout (NOT stderr) and exit non-zero.
+        write_executable_stub(
+            &stub,
+            "#!/bin/sh\necho 'sccache: error: server is shutting down'\nexit 1\n",
+        );
+
+        let result = run_stats_process(&stub.display().to_string(), Duration::from_secs(10));
+        assert!(
+            result.is_err(),
+            "a non-zero exit must return Err, got Ok"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("server is shutting down"),
+            "the error must include the stdout diagnostic, got: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_stats_process_nonzero_exit_error_includes_stderr_diagnostic() {
+        // The existing behavior: when sccache writes its diagnostic to stderr
+        // and exits non-zero, that stderr text must still appear in the error.
+        // This pins the stderr path so the stdout fix can't quietly drop it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("sccache");
+        write_executable_stub(
+            &stub,
+            "#!/bin/sh\necho 'sccache: error: stderr diagnostic here' >&2\nexit 1\n",
+        );
+
+        let result = run_stats_process(&stub.display().to_string(), Duration::from_secs(10));
+        assert!(
+            result.is_err(),
+            "a non-zero exit must return Err, got Ok"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("stderr diagnostic here"),
+            "the error must include the stderr diagnostic, got: {message}"
+        );
+    }
+
     /// Parse the captured fixture into a [`stats::Stats`] for realistic data.
     fn fixture_stats() -> stats::Stats {
         stats::parse(FIXTURE).expect("fixture should parse")
