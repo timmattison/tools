@@ -389,6 +389,40 @@ mod tests {
         assert_eq!(out, "{\"ok\":true}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_stats_process_decodes_non_utf8_stdout_lossily() {
+        // sccache can prepend a locale-encoded warning line to stdout before the
+        // JSON object (e.g. a server-start notice written in the system's native
+        // encoding). A single non-UTF-8 byte in that prefix must NOT abort the
+        // whole poll: stdout has to be decoded lossily so the noise line becomes
+        // a U+FFFD-bearing string and the intact JSON that follows survives for
+        // `stats::parse` (which already skips leading non-`{` lines) to consume.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("sccache");
+        // 0o377 (\377 = 0xFF) is never a valid UTF-8 byte. Emit it at the head of
+        // a warning line, then a clean JSON object on the next line.
+        write_executable_stub(
+            &stub,
+            "#!/bin/sh\nprintf '\\377Warning: locale noise\\n{\"ok\":true}\\n'\n",
+        );
+
+        let out = run_stats_process(&stub.display().to_string(), Duration::from_secs(10))
+            .expect("a non-UTF-8 byte on stdout must be decoded lossily, not rejected");
+        assert!(
+            out.contains('\u{FFFD}'),
+            "the invalid byte must become the replacement character, got: {out:?}"
+        );
+        assert!(
+            out.contains("Warning: locale noise"),
+            "the rest of the noise line must survive decoding, got: {out:?}"
+        );
+        assert!(
+            out.contains("{\"ok\":true}"),
+            "the intact trailing JSON must survive decoding, got: {out:?}"
+        );
+    }
+
     /// Parse the captured fixture into a [`stats::Stats`] for realistic data.
     fn fixture_stats() -> stats::Stats {
         stats::parse(FIXTURE).expect("fixture should parse")
