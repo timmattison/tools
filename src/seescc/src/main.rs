@@ -7,6 +7,7 @@
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use buildinfo::version_string;
@@ -79,6 +80,17 @@ struct Cli {
 
 /// The sccache binary we shell out to for stats.
 const SCCACHE_BIN: &str = "sccache";
+
+/// How long a single sccache stats poll may run before it is abandoned.
+///
+/// The watch loop polls → renders → paints on one thread (see
+/// [`watch::run`]), so a sccache child that never returns — a wedged network
+/// cache backend, a server mid-restart, socket exhaustion — would otherwise
+/// block the *entire* UI indefinitely: no repaint, no quit key. Capping each
+/// poll at this deadline turns a hung server into an ordinary failed poll,
+/// which flows down the existing non-fatal banner path (design §6: error
+/// banner + keep the last good frame) and keeps the loop responsive.
+const POLL_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -158,25 +170,37 @@ fn main() -> Result<()> {
 /// Errors if sccache cannot be launched, exits non-zero, emits non-UTF-8, or
 /// produces JSON that fails to parse.
 fn poll_sccache() -> Result<stats::Stats> {
-    let output = std::process::Command::new(SCCACHE_BIN)
+    let json = run_stats_process(SCCACHE_BIN, POLL_TIMEOUT)?;
+    stats::parse(&json)
+}
+
+/// Run `bin --show-stats --stats-format=json` under a `timeout` deadline and
+/// return its stdout as a UTF-8 string.
+///
+/// Split out of [`poll_sccache`] so the deadline behavior is unit-testable with
+/// a stub executable (a real sccache server is not needed). `poll_sccache`
+/// supplies [`SCCACHE_BIN`] and [`POLL_TIMEOUT`]; the parse step stays in the
+/// caller.
+///
+/// # Errors
+/// Errors if the process cannot be launched, does not finish within `timeout`,
+/// exits non-zero, or emits non-UTF-8 on stdout.
+fn run_stats_process(bin: &str, _timeout: Duration) -> Result<String> {
+    let output = std::process::Command::new(bin)
         .args(["--show-stats", "--stats-format=json"])
         .output()
-        .with_context(|| {
-            format!("failed to run `{SCCACHE_BIN} --show-stats --stats-format=json`")
-        })?;
+        .with_context(|| format!("failed to run `{bin} --show-stats --stats-format=json`"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!(
-            "`{SCCACHE_BIN} --show-stats` failed ({}): {}",
+            "`{bin} --show-stats` failed ({}): {}",
             output.status,
             stderr.trim()
         );
     }
 
-    let json = String::from_utf8(output.stdout)
-        .context("sccache --show-stats output was not valid UTF-8")?;
-    stats::parse(&json)
+    String::from_utf8(output.stdout).context("sccache --show-stats output was not valid UTF-8")
 }
 
 /// Build the one-shot human frame from a resolved [`config::Config`], laid out
@@ -234,6 +258,67 @@ mod tests {
     use super::*;
 
     const FIXTURE: &str = include_str!("../tests/fixtures/sccache-0.15.0.json");
+
+    /// Write an executable stub at `path` with the given shell `body`, marked
+    /// `0o755` so it can be spawned directly. Unix-only (the crate's process
+    /// path is Unix-shaped), keyed off a parallel-safe tempdir by the caller.
+    #[cfg(unix)]
+    fn write_executable_stub(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).expect("write stub");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_stats_process_times_out_on_a_hung_child() {
+        // A wedged sccache (network backend stall, server restart, socket
+        // exhaustion) must NOT block the single-threaded watch loop forever.
+        // run_stats_process must enforce its deadline: a stub that sleeps far
+        // past a short timeout has to return an Err naming the timeout, and the
+        // call must return well before the stub's own sleep elapses — proving
+        // the deadline ended the wait, not the child exiting.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("sccache");
+        // Sleep 5s, well past the 200ms deadline below; if it ever printed it
+        // would print valid-looking output, so an Ok result means the deadline
+        // was ignored.
+        write_executable_stub(&stub, "#!/bin/sh\nsleep 5\necho '{}'\n");
+
+        let timeout = Duration::from_millis(200);
+        let start = std::time::Instant::now();
+        let result = run_stats_process(&stub.display().to_string(), timeout);
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a child that outruns the deadline must return Err, got Ok"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("timed out") || message.contains("timeout"),
+            "the error must name the timeout, got: {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the deadline (200ms) must cut the wait short, not the child's 5s \
+             sleep — returned after {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_stats_process_returns_stdout_for_a_fast_child() {
+        // A child that finishes inside the deadline returns its stdout verbatim
+        // for the caller to parse — the happy path through the helper.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stub = dir.path().join("sccache");
+        write_executable_stub(&stub, "#!/bin/sh\nprintf '{\"ok\":true}'\n");
+
+        let out = run_stats_process(&stub.display().to_string(), Duration::from_secs(10))
+            .expect("a fast child must succeed");
+        assert_eq!(out, "{\"ok\":true}");
+    }
 
     /// Parse the captured fixture into a [`stats::Stats`] for realistic data.
     fn fixture_stats() -> stats::Stats {
