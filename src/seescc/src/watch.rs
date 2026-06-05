@@ -671,13 +671,27 @@ fn enter_terminal_sequence(
     disable_raw: impl FnOnce(),
 ) -> Result<()> {
     enable_raw()?;
-    enter_screen()?;
+    // Raw mode is now on. If entering the alternate screen fails, the caller
+    // ([`TerminalGuard::enter`]) returns Err without constructing the guard, so
+    // no Drop will ever run restore_terminal — undo raw mode here ourselves
+    // (best-effort) so the failure can't strand the shell in raw mode.
+    if let Err(err) = enter_screen() {
+        disable_raw();
+        return Err(err);
+    }
     Ok(())
 }
 
 impl TerminalGuard {
     /// Enter raw mode and the alternate screen, hide the cursor, and install a
     /// terminal-restoring panic hook chained in front of the existing one.
+    ///
+    /// Entry is all-or-nothing for raw mode: the raw-mode + screen-entry step is
+    /// routed through [`enter_terminal_sequence`], which disables raw mode again
+    /// if the alternate-screen step fails. So an error here always returns with
+    /// raw mode off — it can never leave the shell raw with no guard alive to
+    /// restore it. Only a fully successful entry constructs the [`TerminalGuard`],
+    /// after which `Drop` (and the panic hook) own teardown.
     fn enter() -> Result<Self> {
         enter_terminal_sequence(
             || enable_raw_mode().map_err(Into::into),
@@ -1749,11 +1763,7 @@ mod tests {
         // would tear down raw mode while the watch loop is still running.
         let disabled = Cell::new(false);
 
-        let result = enter_terminal_sequence(
-            || Ok(()),
-            || Ok(()),
-            || disabled.set(true),
-        );
+        let result = enter_terminal_sequence(|| Ok(()), || Ok(()), || disabled.set(true));
 
         assert!(result.is_ok(), "a fully successful entry must return Ok");
         assert!(
