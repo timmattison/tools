@@ -172,14 +172,16 @@ fn main() -> Result<()> {
 ///
 /// # Errors
 /// Errors if sccache cannot be launched, does not finish within [`POLL_TIMEOUT`],
-/// exits non-zero, emits non-UTF-8, or produces JSON that fails to parse.
+/// exits non-zero, or produces JSON that fails to parse. Non-UTF-8 bytes on
+/// stdout are decoded lossily rather than erroring (see [`run_stats_process`]).
 fn poll_sccache() -> Result<stats::Stats> {
     let json = run_stats_process(SCCACHE_BIN, POLL_TIMEOUT)?;
     stats::parse(&json)
 }
 
 /// Run `bin --show-stats --stats-format=json` under a `timeout` deadline and
-/// return its stdout as a UTF-8 string.
+/// return its stdout as a string, decoded lossily so a stray non-UTF-8 byte in
+/// a server-start warning line can't abort the poll.
 ///
 /// Split out of [`poll_sccache`] so the deadline behavior is unit-testable with
 /// a stub executable (a real sccache server is not needed). `poll_sccache`
@@ -193,11 +195,13 @@ fn poll_sccache() -> Result<stats::Stats> {
 /// defeat the deadline outright, because a hung child never closes its pipes.
 /// If the deadline passes first the child is killed and reaped (which EOFs the
 /// pipes so the reader threads finish), and we bail with a timeout error. The
-/// existing non-zero-exit and UTF-8 handling are preserved exactly.
+/// existing non-zero-exit handling is preserved exactly; stdout is decoded
+/// lossily so non-UTF-8 bytes become U+FFFD instead of failing the poll.
 ///
 /// # Errors
 /// Errors if the process cannot be launched, does not finish within `timeout`,
-/// exits non-zero, or emits non-UTF-8 on stdout.
+/// or exits non-zero. Non-UTF-8 bytes on stdout are decoded lossily, not treated
+/// as an error.
 fn run_stats_process(bin: &str, timeout: Duration) -> Result<String> {
     use std::io::Read;
     use std::process::Stdio;
@@ -269,7 +273,14 @@ fn run_stats_process(bin: &str, timeout: Duration) -> Result<String> {
         );
     }
 
-    String::from_utf8(stdout).context("sccache --show-stats output was not valid UTF-8")
+    // Decode stdout lossily rather than rejecting it: sccache can prepend a
+    // locale-encoded warning line before the JSON during its server-start
+    // window, and a single non-UTF-8 byte there would otherwise kill the whole
+    // poll with a misleading "not valid UTF-8" error. Mapping the bad bytes to
+    // U+FFFD keeps the intact trailing JSON parseable — `stats::parse` already
+    // skips leading non-`{` noise lines, so the replacement-char warning line is
+    // dropped and the JSON object after it parses cleanly.
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 /// Build the one-shot human frame from a resolved [`config::Config`], laid out
