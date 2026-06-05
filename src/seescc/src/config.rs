@@ -817,6 +817,42 @@ metrics = [ { key = "cache_writes" }, { key = "cache_hits", label = "Hits!", spa
     }
 
     #[test]
+    fn unknown_top_level_key_in_toml_is_rejected() {
+        // A typo'd top-level key (`interval_ms` instead of `poll_interval`) must
+        // not be silently ignored — the default would then apply with no hint
+        // that the user's setting was discarded.
+        let err = Config::from_toml(r#"interval_ms = "500ms""#)
+            .expect_err("an unknown top-level key must be rejected, not silently ignored");
+        assert!(
+            matches!(err, ConfigError::Toml(_)),
+            "expected ConfigError::Toml, got: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("interval_ms"),
+            "error must name the offending key; message was: {message}"
+        );
+    }
+
+    #[test]
+    fn unknown_metric_field_in_toml_is_rejected() {
+        // A typo'd field inside a `[[metrics]]` entry (`sparks` instead of
+        // `spark`) must be rejected rather than silently dropped, which would
+        // leave the sparkline off with no diagnostic.
+        let err = Config::from_toml(r#"metrics = [ { key = "cache_hits", sparks = true } ]"#)
+            .expect_err("an unknown metric field must be rejected, not silently ignored");
+        assert!(
+            matches!(err, ConfigError::Toml(_)),
+            "expected ConfigError::Toml, got: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("sparks"),
+            "error must name the offending field; message was: {message}"
+        );
+    }
+
+    #[test]
     fn invalid_duration_in_toml_errors() {
         let err = Config::from_toml(r#"poll_interval = "nope""#)
             .expect_err("`nope` is not a valid duration");
