@@ -211,4 +211,34 @@ mod tests {
         assert_eq!(stats.max_cache_size, 0);
         assert_eq!(stats.version, "0.15.0");
     }
+
+    #[test]
+    fn skips_leading_noise_lines_before_json() {
+        // During the server-start window sccache can prepend warning/progress
+        // lines to stdout before the JSON object proper (e.g. "Warning: sccache
+        // server is busy"). A direct `from_str` on that whole buffer fails with
+        // "expected value at line 1 column 1" even though valid JSON follows.
+        // `parse` must recover by retrying from the first line that begins with
+        // `{`, so the false failure does not raise the watch error banner.
+        let json = format!("Warning: sccache server is busy\nStarting sccache server...\n{FIXTURE}");
+
+        let stats = parse(&json).expect("leading noise lines should be skipped");
+
+        assert_eq!(stats.stats.compile_requests, 4786);
+        assert_eq!(stats.stats.cache_hits.counts["Rust"], 1718);
+        assert_eq!(stats.cache_size, 809_212_237);
+        assert_eq!(stats.version, "0.15.0");
+    }
+
+    #[test]
+    fn garbage_without_any_json_object_errors() {
+        // If no line ever starts with `{`, there is no JSON object to retry from.
+        // `parse` must still surface an error rather than silently succeed.
+        let json = "Warning: sccache server is busy\nStarting sccache server...\n";
+
+        assert!(
+            parse(json).is_err(),
+            "noise with no JSON object anywhere must still error"
+        );
+    }
 }
