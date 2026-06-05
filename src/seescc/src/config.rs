@@ -41,8 +41,9 @@ pub(crate) enum ConfigError {
         valid: String,
     },
 
-    /// The supplied config string was not syntactically valid TOML, or did not
-    /// match the expected shape (wrong types, missing required fields).
+    /// The supplied config string was not syntactically valid TOML, did not
+    /// match the expected shape (wrong types, missing required fields), or
+    /// contained an unknown key (a typo'd top-level field or metric field).
     #[error("invalid config TOML: {0}")]
     Toml(#[from] toml::de::Error),
 
@@ -359,7 +360,12 @@ pub(crate) struct MetricSpec {
 /// The raw, untyped shape of a `seescc` config file, deserialized straight from
 /// TOML before validation/conversion into a [`Config`]. Every field is optional
 /// so absent keys can fall back to the built-in defaults.
+///
+/// `deny_unknown_fields` rejects any unrecognized top-level key so a typo (e.g.
+/// `interval_ms` for `poll_interval`) surfaces as a [`ConfigError::Toml`] naming
+/// the offending key rather than being silently ignored while the default applies.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawConfig {
     /// Raw `poll_interval` duration string, still to be parsed.
     poll_interval: Option<String>,
@@ -372,7 +378,12 @@ struct RawConfig {
 }
 
 /// The raw, untyped shape of a single `[[metrics]]` entry.
+///
+/// `deny_unknown_fields` rejects any unrecognized field so a typo (e.g. `sparks`
+/// for `spark`) surfaces as a [`ConfigError::Toml`] naming the offending field
+/// rather than being silently dropped while the default applies.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawMetric {
     /// The metric key string, validated against the catalog by [`MetricKey::parse`].
     key: String,
@@ -393,11 +404,16 @@ impl Config {
     /// `metrics` key triggers the default set. Each metric's label resolves to the
     /// user's `label` when present, otherwise [`MetricKey::default_label`].
     ///
+    /// Unknown keys are rejected, not ignored: a typo'd top-level key or metric
+    /// field surfaces as a [`ConfigError::Toml`] naming the offender rather than
+    /// silently falling back to the default.
+    ///
     /// # Errors
-    /// Returns [`ConfigError::Toml`] when `s` is not valid TOML or does not match
-    /// the expected shape, [`ConfigError::InvalidDuration`] when `poll_interval`
-    /// or `window` cannot be parsed, and [`ConfigError::UnknownMetricKey`] when a
-    /// metric names a key that is not in the catalog.
+    /// Returns [`ConfigError::Toml`] when `s` is not valid TOML, does not match
+    /// the expected shape, or contains an unknown key,
+    /// [`ConfigError::InvalidDuration`] when `poll_interval` or `window` cannot be
+    /// parsed, and [`ConfigError::UnknownMetricKey`] when a metric names a key
+    /// that is not in the catalog.
     pub(crate) fn from_toml(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s)?;
 
