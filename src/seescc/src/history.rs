@@ -243,9 +243,12 @@ impl History {
 fn nanos_to_duration(nanos: u128) -> Duration {
     const NANOS_PER_SEC: u128 = 1_000_000_000;
     let secs = u64::try_from(nanos / NANOS_PER_SEC).unwrap_or(u64::MAX);
-    // `nanos % NANOS_PER_SEC` is in `0..1_000_000_000`, which always fits a
-    // `u32`, so this conversion is exact — never a truncation.
-    let subsec_nanos = u32::try_from(nanos % NANOS_PER_SEC).unwrap_or(0);
+    // `nanos % NANOS_PER_SEC` is in `0..1_000_000_000`, so this conversion is
+    // exact — never a truncation. Should a future edit break that invariant, the
+    // `expect` panics loudly instead of silently truncating up to a second of
+    // sub-second time to zero.
+    let subsec_nanos = u32::try_from(nanos % NANOS_PER_SEC)
+        .expect("nanos % NANOS_PER_SEC is < 1e9 and always fits u32");
     Duration::new(secs, subsec_nanos)
 }
 
