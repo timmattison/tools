@@ -112,9 +112,51 @@ pub(crate) struct Stats {
 }
 
 /// Parse an sccache `--show-stats --stats-format=json` payload into [`Stats`].
+///
+/// The happy path is a buffer that is pure JSON: it is handed straight to
+/// `serde_json::from_str` and parsed in a single pass, so a clean payload never
+/// pays for a second attempt.
+///
+/// During the server-start window sccache can prepend warning/progress lines to
+/// stdout *before* the JSON object (e.g. `Warning: sccache server is busy`).
+/// A direct parse of that buffer fails at line 1 column 1 even though valid JSON
+/// follows, which the design spec (§6) says to tolerate rather than surface as a
+/// persistent watch-mode error. So when the direct parse fails, this retries
+/// from the first line whose trimmed contents begin with `{` and parses the
+/// remainder of the buffer from there.
+///
+/// # Errors
+/// Returns an error if the buffer is not valid JSON. When no line begins with
+/// `{` there is no JSON object to retry from, so the *original* (line-1) parse
+/// error is returned rather than a confusing secondary error from the retry.
 pub(crate) fn parse(json: &str) -> anyhow::Result<Stats> {
-    serde_json::from_str(json)
-        .map_err(|e| anyhow::anyhow!("failed to parse sccache --show-stats JSON: {e}"))
+    let original = match serde_json::from_str(json) {
+        Ok(stats) => return Ok(stats),
+        Err(e) => e,
+    };
+
+    // Retry from the first line whose trimmed contents begin with `{`, skipping
+    // leading noise lines. `split_inclusive` keeps each line's terminator, so the
+    // running byte offset stays exact across both `\n` and `\r\n` endings, and a
+    // line start is always a UTF-8 char boundary, so `get(offset..)` slices
+    // safely (and returns `None` rather than panicking if it somehow weren't).
+    let mut offset = 0;
+    for line in json.split_inclusive('\n') {
+        if line.trim_start().starts_with('{') {
+            if let Some(stats) = json
+                .get(offset..)
+                .and_then(|tail| serde_json::from_str(tail).ok())
+            {
+                return Ok(stats);
+            }
+            break;
+        }
+        offset += line.len();
+    }
+
+    Err(anyhow::anyhow!(
+        "failed to parse sccache --show-stats JSON: {original}"
+    ))
 }
 
 #[cfg(test)]
@@ -220,7 +262,8 @@ mod tests {
         // "expected value at line 1 column 1" even though valid JSON follows.
         // `parse` must recover by retrying from the first line that begins with
         // `{`, so the false failure does not raise the watch error banner.
-        let json = format!("Warning: sccache server is busy\nStarting sccache server...\n{FIXTURE}");
+        let json =
+            format!("Warning: sccache server is busy\nStarting sccache server...\n{FIXTURE}");
 
         let stats = parse(&json).expect("leading noise lines should be skipped");
 
