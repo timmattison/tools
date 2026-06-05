@@ -310,6 +310,35 @@ pub(crate) fn is_quit_event(code: KeyCode, modifiers: KeyModifiers, kind: KeyEve
         || (modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c')))
 }
 
+/// What the event-reader thread should do after handling one key event.
+///
+/// Extracted so the reader thread's per-key shutdown decision is testable
+/// without a live terminal — the raw `event::read` loop can't be exercised in a
+/// unit test, but this pure routing function can. The loop
+/// ([`spawn_event_reader`]) routes every key event through
+/// [`reader_action_after_key`] and acts on the result.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ReaderAction {
+    /// Keep reading terminal events.
+    Continue,
+    /// The reader's job is done; let the thread exit.
+    Stop,
+}
+
+/// Decide what the reader thread should do after handling one key event.
+///
+/// `is_quit` is whether the key was a quit key (per [`is_quit_event`]) and
+/// `send_ok` is whether forwarding the resulting [`Event::Quit`] to the watch
+/// loop succeeded. For a non-quit key there is nothing to forward, so the value
+/// of `send_ok` is irrelevant and the reader keeps running.
+pub(crate) fn reader_action_after_key(is_quit: bool, send_ok: bool) -> ReaderAction {
+    if is_quit && !send_ok {
+        ReaderAction::Stop
+    } else {
+        ReaderAction::Continue
+    }
+}
+
 /// Whether colors should be force-enabled despite stdout not being a TTY.
 ///
 /// True only when output is captured by a watch-like wrapper (stdout is not a
@@ -617,7 +646,9 @@ fn spawn_event_reader(tx: Sender<Event>) {
                 kind,
                 ..
             })) => {
-                if is_quit_event(code, modifiers, kind) && tx.send(Event::Quit).is_err() {
+                let is_quit = is_quit_event(code, modifiers, kind);
+                let send_ok = !is_quit || tx.send(Event::Quit).is_ok();
+                if reader_action_after_key(is_quit, send_ok) == ReaderAction::Stop {
                     break;
                 }
             }
@@ -1624,6 +1655,40 @@ mod tests {
         assert!(
             !is_quit_event(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Press),
             "Enter must not quit",
+        );
+    }
+
+    #[test]
+    fn reader_thread_stops_after_a_quit_key_regardless_of_send_outcome() {
+        // A quit key whose Quit forward *succeeded* still ends the reader: its
+        // job is done the moment it has signalled quit. Continuing to read would
+        // leave the thread alive nondeterministically, consuming input events
+        // until some later send happens to fail.
+        assert_eq!(
+            reader_action_after_key(true, true),
+            ReaderAction::Stop,
+            "a successful quit send must still stop the reader",
+        );
+
+        // A quit key whose forward *failed* (the loop already dropped the
+        // receiver) also ends the reader — there is nothing left to deliver.
+        assert_eq!(
+            reader_action_after_key(true, false),
+            ReaderAction::Stop,
+            "a failed quit send must stop the reader",
+        );
+
+        // A non-quit key leaves the reader running; nothing was forwarded, so
+        // the send outcome is irrelevant.
+        assert_eq!(
+            reader_action_after_key(false, true),
+            ReaderAction::Continue,
+            "a non-quit key must keep the reader running",
+        );
+        assert_eq!(
+            reader_action_after_key(false, false),
+            ReaderAction::Continue,
+            "a non-quit key keeps the reader running regardless of send outcome",
         );
     }
 
