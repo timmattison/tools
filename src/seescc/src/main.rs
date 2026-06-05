@@ -172,8 +172,10 @@ fn main() -> Result<()> {
 ///
 /// # Errors
 /// Errors if sccache cannot be launched, does not finish within [`POLL_TIMEOUT`],
-/// exits non-zero, or produces JSON that fails to parse. Non-UTF-8 bytes on
-/// stdout are decoded lossily rather than erroring (see [`run_stats_process`]).
+/// exits non-zero, or produces JSON that fails to parse. A non-zero exit names
+/// the exit status plus the diagnostic from whichever of stderr/stdout carry it
+/// (see [`run_stats_process`]). Non-UTF-8 bytes on stdout are decoded lossily
+/// rather than erroring.
 fn poll_sccache() -> Result<stats::Stats> {
     let json = run_stats_process(SCCACHE_BIN, POLL_TIMEOUT)?;
     stats::parse(&json)
@@ -194,14 +196,22 @@ fn poll_sccache() -> Result<stats::Stats> {
 /// child rather than draining-then-waiting: reading to EOF before the wait would
 /// defeat the deadline outright, because a hung child never closes its pipes.
 /// If the deadline passes first the child is killed and reaped (which EOFs the
-/// pipes so the reader threads finish), and we bail with a timeout error. The
-/// existing non-zero-exit handling is preserved exactly; stdout is decoded
-/// lossily so non-UTF-8 bytes become U+FFFD instead of failing the poll.
+/// pipes so the reader threads finish), and we bail with a timeout error.
+/// stdout is decoded lossily so non-UTF-8 bytes become U+FFFD instead of failing
+/// the poll.
+///
+/// On a non-zero exit the error detail is assembled from whichever of stderr and
+/// stdout carry text — labeled `stderr:`/`stdout:` and joined with `; ` when both
+/// are present, or `no diagnostic output` when neither is. sccache normally
+/// writes errors to stderr, but some versions print the diagnostic to stdout
+/// (e.g. "server is shutting down"); reporting both keeps the failure
+/// diagnosable regardless of the channel it chose.
 ///
 /// # Errors
 /// Errors if the process cannot be launched, does not finish within `timeout`,
-/// or exits non-zero. Non-UTF-8 bytes on stdout are decoded lossily, not treated
-/// as an error.
+/// or exits non-zero (the error names the exit status plus the stderr/stdout
+/// diagnostic described above). Non-UTF-8 bytes on either stream are decoded
+/// lossily, not treated as an error.
 fn run_stats_process(bin: &str, timeout: Duration) -> Result<String> {
     use std::io::Read;
     use std::process::Stdio;
@@ -265,12 +275,24 @@ fn run_stats_process(bin: &str, timeout: Duration) -> Result<String> {
     let stderr = stderr_reader.join().unwrap_or_default();
 
     if !status.success() {
+        // Some sccache versions print their failure diagnostic to stdout rather
+        // than stderr (e.g. "sccache: error: server is shutting down"), so a
+        // status-and-stderr-only message would leave the user with a bare exit
+        // code and an empty detail. Build the detail from whichever streams have
+        // content, labeled and joined, so the right diagnostic always surfaces:
+        //   • both present → "stderr: <...>; stdout: <...>"
+        //   • only one    → "stderr: <...>"  /  "stdout: <...>"
+        //   • neither     → "no diagnostic output"
+        // stderr is listed first because it is sccache's conventional channel.
         let stderr = String::from_utf8_lossy(&stderr);
-        anyhow::bail!(
-            "`{bin} --show-stats` failed ({}): {}",
-            status,
-            stderr.trim()
-        );
+        let stdout = String::from_utf8_lossy(&stdout);
+        let detail = match (stderr.trim(), stdout.trim()) {
+            ("", "") => "no diagnostic output".to_string(),
+            (err, "") => format!("stderr: {err}"),
+            ("", out) => format!("stdout: {out}"),
+            (err, out) => format!("stderr: {err}; stdout: {out}"),
+        };
+        anyhow::bail!("`{bin} --show-stats` failed ({status}): {detail}");
     }
 
     // Decode stdout lossily rather than rejecting it: sccache can prepend a
@@ -451,10 +473,7 @@ mod tests {
         );
 
         let result = run_stats_process(&stub.display().to_string(), Duration::from_secs(10));
-        assert!(
-            result.is_err(),
-            "a non-zero exit must return Err, got Ok"
-        );
+        assert!(result.is_err(), "a non-zero exit must return Err, got Ok");
         let message = result.unwrap_err().to_string();
         assert!(
             message.contains("server is shutting down"),
@@ -476,10 +495,7 @@ mod tests {
         );
 
         let result = run_stats_process(&stub.display().to_string(), Duration::from_secs(10));
-        assert!(
-            result.is_err(),
-            "a non-zero exit must return Err, got Ok"
-        );
+        assert!(result.is_err(), "a non-zero exit must return Err, got Ok");
         let message = result.unwrap_err().to_string();
         assert!(
             message.contains("stderr diagnostic here"),
