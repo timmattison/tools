@@ -109,6 +109,7 @@ num-format = "0.4"
 human_bytes = "0.4"
 unicode-width = "0.2"
 regex = "1.12"
+wait-timeout = "0.2"
 
 # Dev dependencies
 tempfile = "3"

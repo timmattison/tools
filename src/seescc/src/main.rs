@@ -166,9 +166,13 @@ fn main() -> Result<()> {
 
 /// Run `sccache --show-stats --stats-format=json` and return the parsed stats.
 ///
+/// The poll is capped at [`POLL_TIMEOUT`] (see [`run_stats_process`]) so a hung
+/// sccache server cannot freeze the single-threaded watch loop — a timed-out
+/// poll surfaces as an ordinary non-fatal banner.
+///
 /// # Errors
-/// Errors if sccache cannot be launched, exits non-zero, emits non-UTF-8, or
-/// produces JSON that fails to parse.
+/// Errors if sccache cannot be launched, does not finish within [`POLL_TIMEOUT`],
+/// exits non-zero, emits non-UTF-8, or produces JSON that fails to parse.
 fn poll_sccache() -> Result<stats::Stats> {
     let json = run_stats_process(SCCACHE_BIN, POLL_TIMEOUT)?;
     stats::parse(&json)
@@ -182,25 +186,90 @@ fn poll_sccache() -> Result<stats::Stats> {
 /// supplies [`SCCACHE_BIN`] and [`POLL_TIMEOUT`]; the parse step stays in the
 /// caller.
 ///
+/// The child is spawned with both pipes captured, drained by one reader thread
+/// each so a chatty server can't deadlock by filling a pipe buffer while we
+/// wait. We then [`wait_timeout`](wait_timeout::ChildExt::wait_timeout) on the
+/// child rather than draining-then-waiting: reading to EOF before the wait would
+/// defeat the deadline outright, because a hung child never closes its pipes.
+/// If the deadline passes first the child is killed and reaped (which EOFs the
+/// pipes so the reader threads finish), and we bail with a timeout error. The
+/// existing non-zero-exit and UTF-8 handling are preserved exactly.
+///
 /// # Errors
 /// Errors if the process cannot be launched, does not finish within `timeout`,
 /// exits non-zero, or emits non-UTF-8 on stdout.
-fn run_stats_process(bin: &str, _timeout: Duration) -> Result<String> {
-    let output = std::process::Command::new(bin)
+fn run_stats_process(bin: &str, timeout: Duration) -> Result<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    use wait_timeout::ChildExt;
+
+    let mut child = std::process::Command::new(bin)
         .args(["--show-stats", "--stats-format=json"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to run `{bin} --show-stats --stats-format=json`"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    // Drain both pipes on dedicated threads so a verbose child can never block
+    // by filling a pipe buffer while we wait for it. The handles are `take()`n
+    // so `wait_timeout` below still owns the `Child`.
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let status = match child
+        .wait_timeout(timeout)
+        .with_context(|| format!("failed to wait for `{bin} --show-stats`"))?
+    {
+        Some(status) => status,
+        None => {
+            // Deadline passed: the child is wedged. Kill and reap it so we don't
+            // leak a zombie, then bail without joining the readers. The reader
+            // threads are deliberately left detached: a hung child may have
+            // spawned its own children (e.g. a shell's `sleep`) that inherited
+            // the pipe's write end, so a reader's `read_to_end` won't see EOF
+            // until *those* exit too. Joining here would re-block us on exactly
+            // the stall the deadline exists to escape. The threads drain and
+            // exit on their own once the pipe finally closes, dropping their
+            // (now-unwanted) buffers.
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(stdout_reader);
+            drop(stderr_reader);
+            anyhow::bail!(
+                "`{bin} --show-stats` timed out after {}s",
+                timeout.as_secs()
+            );
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         anyhow::bail!(
             "`{bin} --show-stats` failed ({}): {}",
-            output.status,
+            status,
             stderr.trim()
         );
     }
 
-    String::from_utf8(output.stdout).context("sccache --show-stats output was not valid UTF-8")
+    String::from_utf8(stdout).context("sccache --show-stats output was not valid UTF-8")
 }
 
 /// Build the one-shot human frame from a resolved [`config::Config`], laid out
