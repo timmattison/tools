@@ -1,0 +1,33 @@
+{
+  "stats": {
+    "compile_requests": 4786,
+    "requests_unsupported_compiler": 0,
+    "requests_not_compile": 54,
+    "requests_not_cacheable": 852,
+    "requests_executed": 3880,
+    "cache_errors": { "counts": {}, "adv_counts": {} },
+    "cache_hits": { "counts": { "Assembler": 196, "Rust": 1718, "C/C++": 516 }, "adv_counts": { "rust": 1718, "c [clang]": 516, "assemblerToPreprocess [clang]": 196 } },
+    "cache_misses": { "counts": { "Assembler": 98, "Rust": 963, "C/C++": 312 }, "adv_counts": { "rust": 963, "c [clang]": 312, "assemblerToPreprocess [clang]": 98 } },
+    "cache_timeouts": 0,
+    "cache_read_errors": 0,
+    "non_cacheable_compilations": 0,
+    "forced_recaches": 0,
+    "cache_write_errors": 0,
+    "cache_writes": 1373,
+    "cache_write_duration": { "secs": 10, "nanos": 59067351 },
+    "cache_read_hit_duration": { "secs": 18, "nanos": 802462789 },
+    "compilations": 1373,
+    "compiler_write_duration": { "secs": 884, "nanos": 919613679 },
+    "compile_fails": 75,
+    "not_cached": { "-o": 33, "crate-type": 598, "-": 68, "missing input": 151, "-E": 2 },
+    "dist_compiles": {},
+    "dist_errors": 0,
+    "multi_level": null
+  },
+  "cache_location": "Local disk: \"/Users/example/sccache\"",
+  "cache_size": 809212237,
+  "max_cache_size": 10737418240,
+  "use_preprocessor_cache_mode": true,
+  "version": "0.15.0",
+  "basedirs": []
+}
