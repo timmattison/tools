@@ -165,6 +165,15 @@ mod tests {
 
     const FIXTURE: &str = include_str!("../tests/fixtures/sccache-0.15.0.json");
 
+    /// A full payload from a remote (S3) backend: identical shape to the local
+    /// `FIXTURE`, but `cache_size`/`max_cache_size` are explicit JSON `null`
+    /// because non-local caches don't report on-disk sizes. The inline-string
+    /// `tolerates_explicit_null_numeric_fields` test covers a trimmed snippet;
+    /// this fixture pins the same tolerance against a realistic full payload
+    /// shared with the integration suite's stub-driven path.
+    const FIXTURE_NULL_SIZES: &str =
+        include_str!("../tests/fixtures/sccache-0.15.0-null-sizes.json");
+
     #[test]
     fn parses_captured_fixture() {
         let stats = parse(FIXTURE).expect("fixture should parse");
@@ -175,6 +184,28 @@ mod tests {
         assert_eq!(stats.stats.cache_misses.counts["Rust"], 963);
         assert_eq!(stats.cache_size, 809_212_237);
         assert_eq!(stats.max_cache_size, 10_737_418_240);
+        assert_eq!(stats.version, "0.15.0");
+    }
+
+    #[test]
+    fn parses_remote_backend_fixture_with_null_sizes() {
+        // A remote (S3/GHA/redis) backend emits explicit `null` for
+        // `cache_size`/`max_cache_size` since there is no on-disk cache to
+        // measure. This pins that real-world payload shape end-to-end through
+        // the same `parse` the binary uses: the null sizes must land as their
+        // documented default (0) while every other field keeps its real value.
+        let stats = parse(FIXTURE_NULL_SIZES).expect("null-size remote fixture should parse");
+
+        // Null numerics default to 0.
+        assert_eq!(stats.cache_size, 0);
+        assert_eq!(stats.max_cache_size, 0);
+
+        // Non-null fields keep their real values, matching the local fixture.
+        assert_eq!(stats.stats.compile_requests, 4786);
+        assert_eq!(stats.stats.requests_executed, 3880);
+        assert_eq!(stats.stats.cache_writes, 1373);
+        assert_eq!(stats.stats.cache_hits.counts["Rust"], 1718);
+        assert_eq!(stats.stats.cache_misses.counts["Rust"], 963);
         assert_eq!(stats.version, "0.15.0");
     }
 
