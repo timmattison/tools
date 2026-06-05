@@ -340,7 +340,15 @@ pub(crate) fn build_json(fields: &[JsonField]) -> String {
             for field in self.0 {
                 match field.value {
                     JsonValue::Int(n) => map.serialize_entry(field.key, &n)?,
-                    JsonValue::Float(x) => map.serialize_entry(field.key, &x)?,
+                    // serde_json emits `null` for non-finite floats rather than
+                    // erroring, which would silently break the numbers-only
+                    // contract. Nothing upstream produces NaN/infinity today
+                    // (hit_rate guards 0/0), so clamp the never-happens case to
+                    // 0.0 and keep every field a JSON number.
+                    JsonValue::Float(x) => {
+                        let finite = if x.is_finite() { x } else { 0.0 };
+                        map.serialize_entry(field.key, &finite)?
+                    }
                 }
             }
             map.end()

@@ -139,8 +139,7 @@ fn main() -> Result<()> {
                     // pipe falls back to the shared default — all minus the
                     // one-cell safety margin baked into `effective_width`. The
                     // JSON path is width-independent, so it is resolved only here.
-                    let tty_width =
-                        terminal_size::terminal_size().map(|(w, _h)| usize::from(w.0));
+                    let tty_width = terminal_size::terminal_size().map(|(w, _h)| usize::from(w.0));
                     let width = watch::effective_width(tty_width, columns_env, stdout_is_tty);
                     render_oneshot(&config, &stats, width)
                 }
