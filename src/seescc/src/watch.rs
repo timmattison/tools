@@ -329,10 +329,14 @@ pub(crate) enum ReaderAction {
 ///
 /// `is_quit` is whether the key was a quit key (per [`is_quit_event`]) and
 /// `send_ok` is whether forwarding the resulting [`Event::Quit`] to the watch
-/// loop succeeded. For a non-quit key there is nothing to forward, so the value
-/// of `send_ok` is irrelevant and the reader keeps running.
-pub(crate) fn reader_action_after_key(is_quit: bool, send_ok: bool) -> ReaderAction {
-    if is_quit && !send_ok {
+/// loop succeeded. Any quit key stops the reader, whether or not the forward
+/// landed: once quit has been recognized the reader's job is done, so it must
+/// not keep reading (and consuming) further input. A failed forward stops it
+/// too — the loop already dropped the receiver, so there is nothing left to
+/// deliver. For a non-quit key there is nothing to forward, so the value of
+/// `send_ok` is irrelevant and the reader keeps running.
+pub(crate) fn reader_action_after_key(is_quit: bool, _send_ok: bool) -> ReaderAction {
+    if is_quit {
         ReaderAction::Stop
     } else {
         ReaderAction::Continue
@@ -634,9 +638,13 @@ fn paint_output(output: &str) -> Result<()> {
 ///
 /// It blocks on `event::read`, translating any quit key recognized by the tested
 /// [`is_quit_event`] into [`Event::Quit`] and terminal resizes into
-/// [`Event::Resize`], and ignoring everything else. The thread exits when a send
-/// fails (the loop ended, so the receiver is gone) or when reading fails (the
-/// terminal closed) — there is nothing left to deliver in either case.
+/// [`Event::Resize`], and ignoring everything else. The per-key shutdown
+/// decision is routed through the tested [`reader_action_after_key`]: a quit key
+/// exits the thread immediately (its job is done once quit has been signalled,
+/// so it must not keep consuming input during shutdown), whether or not the
+/// forward landed. It also exits when a resize send fails (the loop ended, so
+/// the receiver is gone) or when reading fails (the terminal closed) — there is
+/// nothing left to deliver in either case.
 fn spawn_event_reader(tx: Sender<Event>) {
     thread::spawn(move || loop {
         match event::read() {
