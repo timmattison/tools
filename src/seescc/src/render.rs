@@ -596,6 +596,32 @@ mod tests {
     }
 
     #[test]
+    fn build_json_non_finite_floats_serialize_as_zero() {
+        // serde_json refuses non-finite floats (returns Err rather than emit
+        // invalid JSON), so a NaN or infinity that slips past upstream guards
+        // must not panic build_json. It serializes as 0.0, keeping the output
+        // valid, jq-pipeable JSON.
+        let fields = [
+            JsonField {
+                key: "nan",
+                value: JsonValue::Float(f64::NAN),
+            },
+            JsonField {
+                key: "pos_inf",
+                value: JsonValue::Float(f64::INFINITY),
+            },
+            JsonField {
+                key: "neg_inf",
+                value: JsonValue::Float(f64::NEG_INFINITY),
+            },
+        ];
+        assert_eq!(
+            build_json(&fields),
+            r#"{"nan":0.0,"pos_inf":0.0,"neg_inf":0.0}"#
+        );
+    }
+
+    #[test]
     fn build_json_single_int_field() {
         let fields = [JsonField {
             key: "k",
