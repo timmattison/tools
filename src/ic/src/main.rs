@@ -144,6 +144,17 @@ struct Args {
     /// Monitor directories for new images and display them automatically
     #[clap(long)]
     monitor: Vec<PathBuf>,
+
+    /// Force a specific image protocol instead of auto-detecting from the terminal.
+    ///
+    /// Use this when auto-detection picks a protocol your terminal can't render —
+    /// e.g. an xterm.js front end such as ttyd supports Sixel and the iTerm2
+    /// inline-image protocol (via @xterm/addon-image) but not Kitty. Forcing a
+    /// protocol also bypasses the remote-transport (Mosh) check, which is the
+    /// escape hatch for a false-positive Mosh detection under multiplexers like
+    /// Zellij. Also settable via the IC_PROTOCOL environment variable.
+    #[clap(long, value_enum)]
+    protocol: Option<ProtocolArg>,
 }
 
 fn main() -> Result<()> {
@@ -509,7 +520,12 @@ fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Video")?;
+    // Skip the remote-transport / capability gate when a protocol is forced; see
+    // the note in display_image. Per-frame rendering also honours the override
+    // because each frame is drawn through display_image.
+    if forced_protocol_for(args).is_none() {
+        validate_terminal_for_graphics(&terminal_caps, &transport, "Video")?;
+    }
     ensure_ffmpeg_available()?;
 
     // Clear screen initially with function
@@ -1492,10 +1508,6 @@ fn resolve_protocol(forced: Option<Protocol>, terminal_type: &TerminalType) -> P
 /// `IC_PROTOCOL` environment variable. `Auto` keeps terminal-based detection; the
 /// other values force a specific protocol (see [`resolve_protocol`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-#[allow(
-    dead_code,
-    reason = "wired into the Args struct in the integration commit"
-)]
 enum ProtocolArg {
     Auto,
     Sixel,
@@ -1508,22 +1520,42 @@ enum ProtocolArg {
 ///
 /// The flag takes precedence over the environment variable. An unset or `auto`
 /// selection — or an unrecognised `IC_PROTOCOL` value — yields `None`, leaving
-/// terminal-based auto-detection in charge.
-#[allow(
-    dead_code,
-    reason = "exercised by unit tests; wired into the display path in the integration commit"
-)]
+/// terminal-based auto-detection in charge. Env parsing reuses clap's
+/// case-insensitive [`ValueEnum`](clap::ValueEnum) so the accepted values stay in
+/// lockstep with the `--protocol` flag.
 fn forced_protocol(flag: Option<ProtocolArg>, env: Option<&str>) -> Option<Protocol> {
-    // Stub: real resolution is added in the GREEN step.
-    let _ = (flag, env);
-    None
+    let arg = match flag {
+        Some(arg) => arg,
+        None => <ProtocolArg as clap::ValueEnum>::from_str(env?, true).ok()?,
+    };
+    match arg {
+        ProtocolArg::Auto => None,
+        ProtocolArg::Sixel => Some(Protocol::Sixel),
+        ProtocolArg::Kitty => Some(Protocol::Kitty),
+        ProtocolArg::Iterm2 => Some(Protocol::Iterm2),
+    }
+}
+
+/// Resolve the effective protocol override from CLI args plus the `IC_PROTOCOL`
+/// environment variable. The flag wins; `IC_PROTOCOL` is the fallback so the choice
+/// can be pinned per shell session (handy for a ttyd/xterm.js front end).
+fn forced_protocol_for(args: &Args) -> Option<Protocol> {
+    let env = std::env::var("IC_PROTOCOL").ok();
+    forced_protocol(args.protocol, env.as_deref())
 }
 
 fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
+    let forced = forced_protocol_for(args);
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
 
-    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
+    // A forced protocol means the user has vouched for their terminal, so skip the
+    // remote-transport / graphics-capability gate. This is the escape hatch for a
+    // false-positive Mosh detection under a multiplexer such as Zellij, where the
+    // heuristic can attribute another client's Mosh session to this one.
+    if forced.is_none() {
+        validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
+    }
 
     let under_remote_proxy = transport == RemoteTransport::EternalTerminal;
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
@@ -1581,7 +1613,7 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
     // Sixel (Zellij) does not need proxy cursor-sync because Zellij's server
     // manages its own rendering and cursor tracking — the image protocol
     // never reaches the remote transport's virtual terminal.
-    match resolve_protocol(None, &terminal_caps.terminal_type) {
+    match resolve_protocol(forced, &terminal_caps.terminal_type) {
         Protocol::Sixel => display_image_sixel(&img, scaled_width, scaled_height, args, no_newline),
         Protocol::Kitty => display_image_kitty(
             &img,
