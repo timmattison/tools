@@ -380,6 +380,27 @@ fn resolve_here_link(
     prepare_here_link(projects_dir, &original, pwd, session_id).map_err(HereResolveError::Io)
 }
 
+/// A caller-supplied `--here` new-session id that is not a valid UUID.
+#[derive(Debug, PartialEq, Eq)]
+struct InvalidNewSessionId;
+
+/// Validates the optional forked-session id a caller passed as the second
+/// `--here` argument.
+///
+/// Returns `Ok(None)` when none was supplied (so Claude mints a fresh random
+/// id), `Ok(Some(id))` when it is a valid UUID, and `Err(InvalidNewSessionId)`
+/// when one was supplied but is malformed. Validating up front keeps a bad id
+/// from ever reaching the shell function's `claude --session-id`.
+///
+/// # Errors
+///
+/// Returns [`InvalidNewSessionId`] if `new_session_id` is `Some` but not a UUID.
+fn resolve_new_session_id(
+    _new_session_id: Option<&str>,
+) -> Result<Option<&str>, InvalidNewSessionId> {
+    Err(InvalidNewSessionId)
+}
+
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
 /// cannot be determined.
 ///
@@ -877,6 +898,15 @@ struct Cli {
     )]
     session_id: Option<String>,
 
+    /// Id to assign the forked session created by `--here` (must be a UUID).
+    ///
+    /// Only valid with `--here`. When given, the resumed fork is created with
+    /// this exact id (`claude --fork-session --session-id <id>`) instead of a
+    /// random one — useful when a caller needs to know the new id in advance.
+    /// Without it, Claude mints a fresh random id as before.
+    #[arg(value_name = "NEW_SESSION_ID", requires = "here")]
+    new_session_id: Option<String>,
+
     /// Resume even if the session appears to be running in another process.
     ///
     /// By default `crap` refuses to resume a session that is already open
@@ -968,9 +998,10 @@ fn abort_if_session_live(session_id: &str, here: bool, force: bool) {
     }
 }
 
-/// Handles `crap --here <id>`: symlink the session into the current directory's
-/// project folder and emit the here-mode output the shell function consumes.
-fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
+/// Handles `crap --here <id> [<new-id>]`: symlink the session into the current
+/// directory's project folder and emit the here-mode output the shell function
+/// consumes, optionally pinning the forked session's id to `new_session_id`.
+fn run_here(projects_dir: &Path, session_id: &str, new_session_id: Option<&str>, force: bool) -> ! {
     let Ok(pwd) = std::env::current_dir() else {
         eprintln!(
             "{} could not determine the current directory",
@@ -979,12 +1010,29 @@ fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
         exit(exit_codes::HERE_PWD_UNAVAILABLE);
     };
 
+    // Validate the optional forced id before creating anything, so a bad id
+    // aborts without leaving a stray symlink behind.
+    let new_id = match resolve_new_session_id(new_session_id) {
+        Ok(id) => id,
+        Err(InvalidNewSessionId) => {
+            eprintln!(
+                "{} '{}' is not a valid session id",
+                "Error:".red().bold(),
+                new_session_id.unwrap_or_default()
+            );
+            exit(exit_codes::INVALID_SESSION_ID);
+        }
+    };
+
     // Guard before creating anything, so an aborted resume leaves no stray link.
     abort_if_session_live(session_id, true, force);
 
     match resolve_here_link(projects_dir, &pwd, session_id) {
         Ok(link) => {
-            print!("{}", format_here_output(session_id, None, link.as_deref()));
+            print!(
+                "{}",
+                format_here_output(session_id, new_id, link.as_deref())
+            );
             exit(0);
         }
         Err(HereResolveError::InvalidSessionId) => {
@@ -1102,7 +1150,12 @@ fn main() {
         .expect("session id is required without --shell-setup or --status");
 
     if cli.here {
-        run_here(&projects_dir, &session_id, cli.force);
+        run_here(
+            &projects_dir,
+            &session_id,
+            cli.new_session_id.as_deref(),
+            cli.force,
+        );
     }
 
     match resolve_session_dir(&projects_dir, &session_id) {
@@ -1166,6 +1219,27 @@ mod tests {
     #[test]
     fn force_overrides_the_live_block_in_default_mode() {
         assert!(!should_block_for_live(false, true));
+    }
+
+    #[test]
+    fn resolve_new_session_id_accepts_a_valid_uuid() {
+        // A well-formed UUID is passed through so `--here` can pin the fork.
+        assert_eq!(resolve_new_session_id(Some(ID_B)), Ok(Some(ID_B)));
+    }
+
+    #[test]
+    fn resolve_new_session_id_absent_is_none() {
+        // No second argument means Claude mints a fresh random id, as before.
+        assert_eq!(resolve_new_session_id(None), Ok(None));
+    }
+
+    #[test]
+    fn resolve_new_session_id_rejects_a_non_uuid() {
+        // A malformed id must be caught before it reaches `claude --session-id`.
+        assert_eq!(
+            resolve_new_session_id(Some("not-a-uuid")),
+            Err(InvalidNewSessionId)
+        );
     }
 
     #[test]
