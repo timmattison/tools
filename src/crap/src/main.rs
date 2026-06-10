@@ -735,6 +735,13 @@ fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
     }
     let count = reports.len();
     let noun = if count == 1 { "session" } else { "sessions" };
+    let table = dir_statuses_table(reports);
+    format!("{count} {noun} for {}\n\n{table}\n", pwd.display())
+}
+
+/// Builds the session-status table — one row per report, timestamps prettified
+/// into the cells — ready for rendering.
+fn dir_statuses_table(reports: &[SessionStatusReport]) -> Table {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
@@ -756,7 +763,7 @@ fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
             last,
         ]);
     }
-    format!("{count} {noun} for {}\n\n{table}\n", pwd.display())
+    table
 }
 
 /// Formats the binary's success output for the shell function to read back.
