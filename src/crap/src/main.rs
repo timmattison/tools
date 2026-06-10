@@ -741,11 +741,20 @@ fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
 
 /// Builds the session-status table — one row per report, timestamps prettified
 /// into the cells — ready for rendering.
+///
+/// Rendered with [`ContentArrangement::Disabled`] so each column is sized to its
+/// own content and the table is laid out at its natural width, **never wrapping
+/// a cell to fit the terminal**. Wrapping would chop a session UUID or timestamp
+/// across lines (unreadable), and — because the dynamic arrangement reads the
+/// ambient terminal width — would make the output depend on a shared,
+/// uncontrolled resource, so the rendering (and any test asserting on it) would
+/// silently change with the window size. Long rows simply overflow and let the
+/// terminal soft-wrap.
 fn dir_statuses_table(reports: &[SessionStatusReport]) -> Table {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_content_arrangement(ContentArrangement::Disabled)
         .set_header(vec!["SESSION", "STATE", "STARTED", "LAST"]);
     for report in reports {
         let started = report
