@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Reject commits that fail formatting, clippy, or the test suite. The three
-# Rust gates run cheapest-first so a commit fails fast on the quickest check:
+# Reject commits that fail formatting, linting, or the test suite, for both
+# languages in this repo: Rust first, then Go. Each language's gates only run
+# when a staged change touches that language's files (see the trigger regexes
+# below), so a Go-only commit never pays for the Rust toolchain and vice versa.
+#
+# The three Rust gates run cheapest-first so a commit fails fast on the
+# quickest check:
 #
 #   1. cargo fmt --check  - formatting drift; no compile, so it is fastest.
 #   2. cargo clippy       - lints as hard errors. --all-targets covers tests/
@@ -30,4 +35,29 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     cargo clippy --all-targets --workspace -- -D warnings
     echo "pre-commit: running cargo test --workspace"
     cargo test --workspace
+fi
+
+# The Go module gets the same treatment, again cheapest-first:
+#   1. gofmt -l   - format check; no compile, so it is fastest. gofmt -l lists
+#                   any file whose formatting differs; a non-empty list fails.
+#   2. go vet     - compiles + runs the static analysers (printf mismatches,
+#                   unreachable code, etc.).
+#   3. go test    - compiles + runs the suite. Slowest, so it runs last.
+#
+# These run in Go's default readonly module mode. That mode does not modify
+# go.sum, so a fresh worktree with a COLD module cache may report
+# "missing go.sum entry" on the first Go commit. The module cache lives at
+# $GOPATH/pkg/mod and is shared across every worktree, so warming it once with
+# `go mod download all` fixes this for all of them.
+if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.go$|(^|/)go\.(mod|sum)$'; then
+    echo "pre-commit: running gofmt -l (format check)"
+    gofmt_unformatted=$(gofmt -l .)
+    if [ -n "$gofmt_unformatted" ]; then
+        printf 'gofmt: these files are not formatted (run: gofmt -w .):\n%s\n' "$gofmt_unformatted" >&2
+        exit 1
+    fi
+    echo "pre-commit: running go vet ./..."
+    go vet ./...
+    echo "pre-commit: running go test ./..."
+    go test ./...
 fi
