@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# Reject commits that fail formatting or clippy. cargo fmt --check runs first
-# because it is fast and catches drift before the slower clippy pass.
-# --all-targets covers tests/ and benches/, where lints like
-# unseparated_literal_suffix would otherwise slip through, and -D warnings
-# turns every workspace lint into a hard error.
+# Reject commits that fail formatting, clippy, or the test suite. The three
+# Rust gates run cheapest-first so a commit fails fast on the quickest check:
+#
+#   1. cargo fmt --check  - formatting drift; no compile, so it is fastest.
+#   2. cargo clippy       - lints as hard errors. --all-targets covers tests/
+#                           and benches/, where lints like
+#                           unseparated_literal_suffix would otherwise slip
+#                           through, and -D warnings turns every workspace lint
+#                           into a hard error.
+#   3. cargo test         - the workspace test suite. Slowest, so it runs last;
+#                           clippy's --all-targets has already compiled the test
+#                           targets, so this pass is mostly incremental + run.
 #
 # The trigger regex also matches rustfmt.toml and rust-toolchain.toml at the
 # repo root: a commit that bumps the toolchain or style config is the scenario
 # most likely to introduce drift, so the gate must run on those changes too.
 #
-# Both checks read the WORKING TREE, not the staged index, so a partially
+# All three checks read the WORKING TREE, not the staged index, so a partially
 # staged file (or one staged then edited) is checked in its on-disk state, not
 # the version being committed. This is a deliberate trade-off: index-only
 # checking (stash --keep-index dances) is fragile, and the workspace-wide cargo
@@ -21,4 +28,6 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     cargo fmt --all -- --check
     echo "pre-commit: running cargo clippy --all-targets --workspace -- -D warnings"
     cargo clippy --all-targets --workspace -- -D warnings
+    echo "pre-commit: running cargo test --workspace"
+    cargo test --workspace
 fi
