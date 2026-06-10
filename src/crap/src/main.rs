@@ -2524,6 +2524,32 @@ mod tests {
     }
 
     #[test]
+    fn dir_statuses_table_never_wraps_cells_to_fit_a_narrow_terminal() {
+        // The status table must render at its natural content width regardless of
+        // the terminal: a session UUID or timestamp chopped across lines is
+        // unreadable, and tying the layout to the ambient terminal width makes the
+        // output (and every test that asserts on it) depend on a shared,
+        // uncontrolled resource — a flaky-test trap. Force an absurdly narrow
+        // width and demand every cell still appears whole on one line.
+        let reports = vec![SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "waiting-for-user".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: Some("2026-05-25T12:30:45.000Z".to_string()),
+        }];
+        let mut table = dir_statuses_table(&reports);
+        table.set_width(20);
+        let rendered = table.to_string();
+        assert!(
+            rendered.contains(ID_A),
+            "UUID must stay intact at narrow width, got:\n{rendered}"
+        );
+        assert!(rendered.contains("waiting-for-user"));
+        assert!(rendered.contains("2026-05-25 10:00:00"));
+        assert!(rendered.contains("2026-05-25 12:30:45"));
+    }
+
+    #[test]
     fn format_dir_statuses_uses_plural_and_dash_for_missing_times() {
         let reports = vec![
             SessionStatusReport {
