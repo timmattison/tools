@@ -362,6 +362,40 @@ pub(crate) fn build_json(fields: &[JsonField]) -> String {
 mod tests {
     use super::*;
 
+    /// Strips ANSI CSI escape sequences (e.g. `\x1b[1;31m`) from a rendered line
+    /// so its *visible* width and suffix can be asserted regardless of the
+    /// `colored` crate's process-global colorization flag — which turns ANSI on
+    /// when the test process's stdout is a TTY (running `cargo test` directly in
+    /// a terminal) and off when it is piped (CI). Without this, a forced-color
+    /// banner would be wrapped in `\x1b[1;31m…\x1b[0m`, inflating the measured
+    /// width and ending the line with the reset sequence instead of the ellipsis.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                // Consume the CSI introducer '[' and everything up to the final
+                // byte in '@'..='~' that terminates the sequence.
+                if chars.next() == Some('[') {
+                    for seq in chars.by_ref() {
+                        if ('@'..='~').contains(&seq) {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_sequences_but_keeps_text() {
+        assert_eq!(strip_ansi(" \u{1b}[1;31mhello…\u{1b}[0m"), " hello…");
+        assert_eq!(strip_ansi("no codes here"), "no codes here");
+    }
+
     fn rows() -> Vec<Row> {
         vec![
             Row {
@@ -783,11 +817,14 @@ mod tests {
         let width = 30;
         let banner = "this is a very long error message that absolutely will not fit";
         let out = build_watch("Rust", "12:34:56", width, &rows, Some(banner), None);
-        let banner_line = out.lines().nth(1).expect("banner line present");
+        // Measure the visible line: `colored` emits ANSI when the test process's
+        // stdout is a TTY, and those zero-width-on-screen codes must not count
+        // toward the frame width or mask the ellipsis suffix.
+        let banner_line = strip_ansi(out.lines().nth(1).expect("banner line present"));
         assert!(
-            UnicodeWidthStr::width(banner_line) <= width,
+            UnicodeWidthStr::width(banner_line.as_str()) <= width,
             "banner line width {} must not exceed frame width {width}: {banner_line:?}",
-            UnicodeWidthStr::width(banner_line),
+            UnicodeWidthStr::width(banner_line.as_str()),
         );
         assert!(
             banner_line.ends_with('…'),
@@ -809,11 +846,13 @@ mod tests {
         let width = 20;
         let banner = "日本語日本語日本語日本語 🎉🎉🎉";
         let out = build_watch("all", "00:00:00", width, &rows, Some(banner), None);
-        let banner_line = out.lines().nth(1).expect("banner line present");
+        // See the ASCII case: strip ANSI so a forced-color (TTY) run measures the
+        // visible width, not the escape bytes.
+        let banner_line = strip_ansi(out.lines().nth(1).expect("banner line present"));
         assert!(
-            UnicodeWidthStr::width(banner_line) <= width,
+            UnicodeWidthStr::width(banner_line.as_str()) <= width,
             "multibyte banner width {} must not exceed {width}: {banner_line:?}",
-            UnicodeWidthStr::width(banner_line),
+            UnicodeWidthStr::width(banner_line.as_str()),
         );
         assert!(
             banner_line.ends_with('…'),
