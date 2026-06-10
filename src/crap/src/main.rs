@@ -802,12 +802,14 @@ fn format_here_output(
 /// * **default** — `<session-id>\n<dir>`: the function `cd`s into the original
 ///   directory (splitting on the first newline so a path containing newlines
 ///   survives intact) and resumes.
-/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<link-or-sentinel>`: the binary
-///   has already symlinked the session into the *current* directory's project
-///   folder, so the function stays put, resumes with `--fork-session` (a fresh
-///   session id, leaving the original transcript untouched), and finally removes
-///   that symlink — unless the link field is `__CRAP_NO_LINK__`, meaning none
-///   was created because this already is the session's own directory.
+/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>`:
+///   the binary has already symlinked the session into the *current* directory's
+///   project folder, so the function stays put, resumes with `--fork-session` (a
+///   fresh session id, leaving the original transcript untouched), and finally
+///   removes that symlink — unless the link field is `__CRAP_NO_LINK__`, meaning
+///   none was created because this already is the session's own directory. When
+///   the new-id field is not `__CRAP_NO_NEW_ID__`, the fork is pinned to that id
+///   via `--session-id` instead of a random one.
 const SHELL_CODE: &str = r#"
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
@@ -825,9 +827,11 @@ function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
     if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
-        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
+        local __crap_rest __crap_session __crap_newid __crap_link __crap_folder __crap_n0 __crap_watcher
         __crap_rest=${__crap_out#*$'\n'}
         __crap_session=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_newid=${__crap_rest%%$'\n'*}
         __crap_link=${__crap_rest#*$'\n'}
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             # Claude only needs the symlink while it reads the transcript at
@@ -850,10 +854,20 @@ function crap() {
             __crap_watcher=$!
             disown 2>/dev/null
         fi
+        # Build the resume argv: always --fork-session, so the original
+        # transcript is left untouched. When the binary supplied a forced id
+        # (third field is not the sentinel), pin the fork to it with
+        # --session-id instead of letting Claude mint a random one. The earlier
+        # "command crap" call has already consumed the function's own arguments,
+        # so reusing the positional parameters here is safe.
+        set -- --resume "$__crap_session" --fork-session
+        if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
+            set -- "$@" --session-id "$__crap_newid"
+        fi
         if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded --resume "$__crap_session" --fork-session'
+            eval 'clauded "$@"'
         else
-            claude --resume "$__crap_session" --fork-session
+            claude "$@"
         fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
