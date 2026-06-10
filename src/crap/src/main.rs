@@ -11,7 +11,10 @@
 //! folder and resumes it as a `--fork-session` (a fresh id), leaving the
 //! original transcript untouched. Because the fork only reads that transcript,
 //! `--here` works even while the original session is still live in another
-//! process. The symlink is removed once the session ends.
+//! process. The symlink is removed once the session ends. A second argument
+//! (`crap --here <id> <new-id>`) pins the fork to a chosen UUID via
+//! `claude --session-id` instead of a random one, provided it does not already
+//! name an existing session.
 //!
 //! With `--status`, it resumes nothing: it classifies where the session left
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
@@ -1286,6 +1289,20 @@ mod tests {
             resolve_new_session_id(Some("not-a-uuid")),
             Err(InvalidNewSessionId)
         );
+    }
+
+    #[test]
+    fn here_accepts_session_and_new_id_positionals() {
+        let cli = Cli::try_parse_from(["crap", "--here", ID_A, ID_B]).expect("should parse");
+        assert!(cli.here);
+        assert_eq!(cli.session_id.as_deref(), Some(ID_A));
+        assert_eq!(cli.new_session_id.as_deref(), Some(ID_B));
+    }
+
+    #[test]
+    fn new_session_id_positional_requires_here() {
+        // A forked id is meaningless without --here, so clap must reject it.
+        assert!(Cli::try_parse_from(["crap", ID_A, ID_B]).is_err());
     }
 
     #[test]
