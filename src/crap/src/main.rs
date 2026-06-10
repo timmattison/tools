@@ -910,14 +910,22 @@ struct Cli {
     shell_setup: bool,
 }
 
-/// Aborts with a clear message if `session_id` is already open in another live
-/// process, unless `force` overrides the check.
+/// Whether a session that is already live in another process should block a
+/// resume of it.
 ///
-/// Both resume modes call this: two processes writing one session log can
-/// corrupt it, and even `--here`'s fork reads the live transcript while it is
-/// being written. `--force` bypasses the guard.
-fn abort_if_session_live(session_id: &str, force: bool) {
-    if force {
+/// The default resume mode reuses the session id, so a second process would
+/// append to the same transcript as the live one — that can corrupt it, so a
+/// live session blocks the resume unless `--force` overrides it. The `here`
+/// flag is threaded through for the `--here` fork path (see Phase 3) but is not
+/// yet consulted.
+fn should_block_for_live(_here: bool, force: bool) -> bool {
+    !force
+}
+
+/// Aborts with a clear message if `session_id` is already open in another live
+/// process and [`should_block_for_live`] says that should block this resume.
+fn abort_if_session_live(session_id: &str, here: bool, force: bool) {
+    if !should_block_for_live(here, force) {
         return;
     }
     if let Some(live) =
@@ -951,7 +959,7 @@ fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
     };
 
     // Guard before creating anything, so an aborted resume leaves no stray link.
-    abort_if_session_live(session_id, force);
+    abort_if_session_live(session_id, true, force);
 
     match resolve_here_link(projects_dir, &pwd, session_id) {
         Ok(link) => {
@@ -1078,7 +1086,7 @@ fn main() {
 
     match resolve_session_dir(&projects_dir, &session_id) {
         Ok(dir) => {
-            abort_if_session_live(&session_id, cli.force);
+            abort_if_session_live(&session_id, false, cli.force);
             print!("{}", format_output(&dir, &session_id));
         }
         Err(ResolveError::InvalidSessionId) => {
@@ -1126,6 +1134,17 @@ mod tests {
     /// Builds a single JSONL line recording `cwd`.
     fn cwd_line(cwd: &str) -> String {
         format!("{}\n", serde_json::json!({ "cwd": cwd }))
+    }
+
+    #[test]
+    fn default_mode_blocks_a_live_session_unless_forced() {
+        // Default resume reuses the session id, so a live original must block.
+        assert!(should_block_for_live(false, false));
+    }
+
+    #[test]
+    fn force_overrides_the_live_block_in_default_mode() {
+        assert!(!should_block_for_live(false, true));
     }
 
     #[test]
