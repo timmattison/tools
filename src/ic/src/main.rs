@@ -1456,6 +1456,41 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
     display_image(img, args, args.no_newline)
 }
 
+/// Graphics protocol used to emit an image to the terminal.
+///
+/// Decoupled from [`TerminalType`] so the protocol can be forced independently of
+/// auto-detection — e.g. an xterm.js front end such as ttyd renders Sixel and the
+/// iTerm2 inline-image protocol (via `@xterm/addon-image`) but not the Kitty
+/// graphics protocol, even though its inherited `TERM_PROGRAM` may say otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "variants are exercised by unit tests; wired into the display path in the integration commit"
+)]
+enum Protocol {
+    /// Sixel — Zellij passthrough and xterm.js (`@xterm/addon-image`).
+    Sixel,
+    /// Kitty graphics protocol — Kitty, Ghostty, WezTerm.
+    Kitty,
+    /// iTerm2 inline image protocol (IIP) — iTerm2 and xterm.js (`@xterm/addon-image`).
+    Iterm2,
+}
+
+/// Resolve the graphics protocol to emit for an image.
+///
+/// When `forced` is `Some`, that protocol is used verbatim — the caller has taken
+/// responsibility for matching it to their terminal. Otherwise the protocol is
+/// chosen from the auto-detected terminal type.
+#[allow(
+    dead_code,
+    reason = "exercised by unit tests; wired into the display path in the integration commit"
+)]
+fn resolve_protocol(forced: Option<Protocol>, terminal_type: &TerminalType) -> Protocol {
+    // Stub: real mapping is added in the GREEN step.
+    let _ = (forced, terminal_type);
+    Protocol::Iterm2
+}
+
 fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
@@ -2373,6 +2408,77 @@ fn print_iterm2_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Tests for resolve_protocol
+    // =========================================================================
+
+    #[test]
+    fn auto_protocol_zellij_is_sixel() {
+        assert_eq!(
+            resolve_protocol(None, &TerminalType::Zellij),
+            Protocol::Sixel
+        );
+    }
+
+    #[test]
+    fn auto_protocol_wezterm_is_kitty() {
+        assert_eq!(
+            resolve_protocol(None, &TerminalType::WezTerm),
+            Protocol::Kitty
+        );
+    }
+
+    #[test]
+    fn auto_protocol_kitty_is_kitty() {
+        assert_eq!(
+            resolve_protocol(None, &TerminalType::Kitty),
+            Protocol::Kitty
+        );
+    }
+
+    #[test]
+    fn auto_protocol_ghostty_is_kitty() {
+        assert_eq!(
+            resolve_protocol(None, &TerminalType::Ghostty),
+            Protocol::Kitty
+        );
+    }
+
+    #[test]
+    fn auto_protocol_iterm2_is_iterm2() {
+        assert_eq!(
+            resolve_protocol(None, &TerminalType::ITerm2),
+            Protocol::Iterm2
+        );
+    }
+
+    #[test]
+    fn auto_protocol_unknown_is_iterm2() {
+        assert_eq!(
+            resolve_protocol(None, &TerminalType::Unknown),
+            Protocol::Iterm2
+        );
+    }
+
+    #[test]
+    fn forced_protocol_overrides_terminal_type() {
+        // A forced Sixel wins even when the terminal would auto-select Kitty.
+        assert_eq!(
+            resolve_protocol(Some(Protocol::Sixel), &TerminalType::WezTerm),
+            Protocol::Sixel
+        );
+        // A forced iTerm2 wins even when the terminal would auto-select Sixel.
+        assert_eq!(
+            resolve_protocol(Some(Protocol::Iterm2), &TerminalType::Zellij),
+            Protocol::Iterm2
+        );
+        // A forced Kitty wins even when the terminal would auto-select iTerm2.
+        assert_eq!(
+            resolve_protocol(Some(Protocol::Kitty), &TerminalType::Unknown),
+            Protocol::Kitty
+        );
+    }
 
     // =========================================================================
     // Tests for calculate_aspect_preserving_size
