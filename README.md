@@ -1299,6 +1299,16 @@ A couple of things to know:
 - The replayed history still references the *original* directory's paths. Claude works in your current directory from here on, but the conversation it inherits talks about the old one.
 - It still won't resume a session that's open elsewhere unless you pass `--force` (forking reads the live transcript, which can be mid-write).
 
+#### Choosing the forked session's id
+
+By default the fork gets a random new id, which you only learn after Claude starts. Pass a second argument to choose it yourself:
+
+```bash
+crap --here 57570685-2d64-4431-8ab6-c021a12fa1af 9f8e7d6c-5b4a-3210-fedc-ba9876543210
+```
+
+The new id must be a valid UUID, and `crap` refuses it if it already names a session (so the fork can never overwrite an unrelated transcript). This is handy when a script needs to know the resumed session's id in advance — generate a UUID, hand it to `crap --here`, and you already know where the new transcript will live. Omit it to keep the random-id behavior.
+
 ### Don't attach twice
 
 Claude Code records every live CLI session under `~/.claude/sessions/<pid>.json` and removes it on clean exit. Before resuming, `crap` checks that registry: if the session you asked for is already open in another running `claude` process, it refuses and tells you where:

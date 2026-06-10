@@ -9,7 +9,12 @@
 //! `--resume <id>` only against the project folder matching the current working
 //! directory, so `crap --here` symlinks the session's transcript into that
 //! folder and resumes it as a `--fork-session` (a fresh id), leaving the
-//! original transcript untouched. The symlink is removed once the session ends.
+//! original transcript untouched. Because the fork only reads that transcript,
+//! `--here` works even while the original session is still live in another
+//! process. The symlink is removed once the session ends. A second argument
+//! (`crap --here <id> <new-id>`) pins the fork to a chosen UUID via
+//! `claude --session-id` instead of a random one, provided it does not already
+//! name an existing session.
 //!
 //! With `--status`, it resumes nothing: it classifies where the session left
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
@@ -55,6 +60,8 @@ mod exit_codes {
     pub const HERE_LINK_ERROR: i32 = 8;
     /// `--here`: the current working directory could not be determined.
     pub const HERE_PWD_UNAVAILABLE: i32 = 9;
+    /// `--here`: the requested new session id already names a transcript.
+    pub const NEW_SESSION_ID_EXISTS: i32 = 10;
 }
 
 /// Why a session id could not be resolved to an existing directory.
@@ -378,6 +385,45 @@ fn resolve_here_link(
     prepare_here_link(projects_dir, &original, pwd, session_id).map_err(HereResolveError::Io)
 }
 
+/// A caller-supplied `--here` new-session id that is not a valid UUID.
+#[derive(Debug, PartialEq, Eq)]
+struct InvalidNewSessionId;
+
+/// Validates the optional forked-session id a caller passed as the second
+/// `--here` argument.
+///
+/// Returns `Ok(None)` when none was supplied (so Claude mints a fresh random
+/// id), `Ok(Some(id))` when it is a valid UUID, and `Err(InvalidNewSessionId)`
+/// when one was supplied but is malformed. Validating up front keeps a bad id
+/// from ever reaching the shell function's `claude --session-id`.
+///
+/// # Errors
+///
+/// Returns [`InvalidNewSessionId`] if `new_session_id` is `Some` but not a UUID.
+fn resolve_new_session_id(
+    new_session_id: Option<&str>,
+) -> Result<Option<&str>, InvalidNewSessionId> {
+    match new_session_id {
+        None => Ok(None),
+        Some(id) if is_valid_session_id(id) => Ok(Some(id)),
+        Some(_) => Err(InvalidNewSessionId),
+    }
+}
+
+/// Whether pinning a `--here` fork to `new_session_id` would collide with an
+/// existing transcript.
+///
+/// `claude --session-id <id>` writes to `<id>.jsonl`, so reusing an id that
+/// already names a session would let the fork overwrite an unrelated
+/// conversation — the opposite of `--here`'s "leave the original untouched"
+/// guarantee. `None` (no forced id, Claude mints a random one) never collides.
+fn new_session_id_collides(projects_dir: &Path, new_session_id: Option<&str>) -> bool {
+    match new_session_id {
+        Some(id) => find_session_file(projects_dir, id).is_some(),
+        None => false,
+    }
+}
+
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
 /// cannot be determined.
 ///
@@ -689,10 +735,26 @@ fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
     }
     let count = reports.len();
     let noun = if count == 1 { "session" } else { "sessions" };
+    let table = dir_statuses_table(reports);
+    format!("{count} {noun} for {}\n\n{table}\n", pwd.display())
+}
+
+/// Builds the session-status table — one row per report, timestamps prettified
+/// into the cells — ready for rendering.
+///
+/// Rendered with [`ContentArrangement::Disabled`] so each column is sized to its
+/// own content and the table is laid out at its natural width, **never wrapping
+/// a cell to fit the terminal**. Wrapping would chop a session UUID or timestamp
+/// across lines (unreadable), and — because the dynamic arrangement reads the
+/// ambient terminal width — would make the output depend on a shared,
+/// uncontrolled resource, so the rendering (and any test asserting on it) would
+/// silently change with the window size. Long rows simply overflow and let the
+/// terminal soft-wrap.
+fn dir_statuses_table(reports: &[SessionStatusReport]) -> Table {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_content_arrangement(ContentArrangement::Disabled)
         .set_header(vec!["SESSION", "STATE", "STARTED", "LAST"]);
     for report in reports {
         let started = report
@@ -710,7 +772,7 @@ fn format_dir_statuses(pwd: &Path, reports: &[SessionStatusReport]) -> String {
             last,
         ]);
     }
-    format!("{count} {noun} for {}\n\n{table}\n", pwd.display())
+    table
 }
 
 /// Formats the binary's success output for the shell function to read back.
@@ -733,18 +795,31 @@ const HERE_SENTINEL: &str = "__CRAP_HERE__";
 /// function can tell "nothing to clean up" apart from a real path.
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
+/// Placeholder used in the forced-new-id field when `--here` was given no
+/// explicit new session id, so the shell function knows to let Claude mint a
+/// fresh random id (`--fork-session`) instead of pinning one (`--session-id`).
+const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
+
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
-/// the session id, then the symlink to remove once the session ends (or
-/// [`NO_LINK_SENTINEL`] when none was created).
+/// the session id, then the caller-supplied forked-session id (or
+/// [`NO_NEW_ID_SENTINEL`] when none was given), then the symlink to remove once
+/// the session ends (or [`NO_LINK_SENTINEL`] when none was created).
 ///
 /// The cleanup path is emitted last so that — like [`format_output`] — a path
-/// containing a newline survives intact as "everything after the second line".
-fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> String {
+/// containing a newline survives intact as "everything after the final field
+/// separator". The forced-new-id is a validated UUID (or the sentinel), so it
+/// never contains a newline and is safe in the middle.
+fn format_here_output(
+    session_id: &str,
+    new_session_id: Option<&str>,
+    link_to_cleanup: Option<&Path>,
+) -> String {
+    let new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
     let link = match link_to_cleanup {
         Some(path) => path.display().to_string(),
         None => NO_LINK_SENTINEL.to_string(),
     };
-    format!("{HERE_SENTINEL}\n{session_id}\n{link}\n")
+    format!("{HERE_SENTINEL}\n{session_id}\n{new_id}\n{link}\n")
 }
 
 /// The shell function installed by `crap --shell-setup`.
@@ -762,12 +837,14 @@ fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> Strin
 /// * **default** — `<session-id>\n<dir>`: the function `cd`s into the original
 ///   directory (splitting on the first newline so a path containing newlines
 ///   survives intact) and resumes.
-/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<link-or-sentinel>`: the binary
-///   has already symlinked the session into the *current* directory's project
-///   folder, so the function stays put, resumes with `--fork-session` (a fresh
-///   session id, leaving the original transcript untouched), and finally removes
-///   that symlink — unless the link field is `__CRAP_NO_LINK__`, meaning none
-///   was created because this already is the session's own directory.
+/// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>`:
+///   the binary has already symlinked the session into the *current* directory's
+///   project folder, so the function stays put, resumes with `--fork-session` (a
+///   fresh session id, leaving the original transcript untouched), and finally
+///   removes that symlink — unless the link field is `__CRAP_NO_LINK__`, meaning
+///   none was created because this already is the session's own directory. When
+///   the new-id field is not `__CRAP_NO_NEW_ID__`, the fork is pinned to that id
+///   via `--session-id` instead of a random one.
 const SHELL_CODE: &str = r#"
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
@@ -785,9 +862,11 @@ function crap() {
     local __crap_out
     __crap_out=$(command crap "$@") || return $?
     if [ "${__crap_out%%$'\n'*}" = "__CRAP_HERE__" ]; then
-        local __crap_rest __crap_session __crap_link __crap_folder __crap_n0 __crap_watcher
+        local __crap_rest __crap_session __crap_newid __crap_link __crap_folder __crap_n0 __crap_watcher
         __crap_rest=${__crap_out#*$'\n'}
         __crap_session=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_newid=${__crap_rest%%$'\n'*}
         __crap_link=${__crap_rest#*$'\n'}
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             # Claude only needs the symlink while it reads the transcript at
@@ -810,10 +889,20 @@ function crap() {
             __crap_watcher=$!
             disown 2>/dev/null
         fi
+        # Build the resume argv: always --fork-session, so the original
+        # transcript is left untouched. When the binary supplied a forced id
+        # (third field is not the sentinel), pin the fork to it with
+        # --session-id instead of letting Claude mint a random one. The earlier
+        # "command crap" call has already consumed the function's own arguments,
+        # so reusing the positional parameters here is safe.
+        set -- --resume "$__crap_session" --fork-session
+        if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
+            set -- "$@" --session-id "$__crap_newid"
+        fi
         if command -v clauded >/dev/null 2>&1; then
-            eval 'clauded --resume "$__crap_session" --fork-session'
+            eval 'clauded "$@"'
         else
-            claude --resume "$__crap_session" --fork-session
+            claude "$@"
         fi
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
             kill "$__crap_watcher" 2>/dev/null
@@ -862,11 +951,24 @@ struct Cli {
     )]
     session_id: Option<String>,
 
+    /// Id to assign the forked session created by `--here` (must be a UUID).
+    ///
+    /// Only valid with `--here`. When given, the resumed fork is created with
+    /// this exact id (`claude --fork-session --session-id <id>`) instead of a
+    /// random one — useful when a caller needs to know the new id in advance.
+    /// Without it, Claude mints a fresh random id as before.
+    #[arg(value_name = "NEW_SESSION_ID", requires = "here")]
+    new_session_id: Option<String>,
+
     /// Resume even if the session appears to be running in another process.
     ///
     /// By default `crap` refuses to resume a session that is already open
     /// elsewhere, because two processes writing the same session log can
     /// corrupt it.
+    ///
+    /// This guard applies only to the default resume mode. `--here` forks a
+    /// fresh session (it only reads the original transcript), so it is never
+    /// blocked by a live original and ignores `--force`.
     #[arg(short, long)]
     force: bool,
 
@@ -874,7 +976,8 @@ struct Cli {
     ///
     /// `crap` symlinks the session into the current directory's project folder
     /// so `claude --resume` can find it here, then resumes it as a forked
-    /// (new-id) session — the original transcript is left untouched. Use this to
+    /// (new-id) session — the original transcript is only read, never written,
+    /// so this works even if the original session is still live. Use this to
     /// carry a conversation's context into a different working directory.
     #[arg(long)]
     here: bool,
@@ -910,14 +1013,23 @@ struct Cli {
     shell_setup: bool,
 }
 
-/// Aborts with a clear message if `session_id` is already open in another live
-/// process, unless `force` overrides the check.
+/// Whether a session that is already live in another process should block a
+/// resume of it.
 ///
-/// Both resume modes call this: two processes writing one session log can
-/// corrupt it, and even `--here`'s fork reads the live transcript while it is
-/// being written. `--force` bypasses the guard.
-fn abort_if_session_live(session_id: &str, force: bool) {
-    if force {
+/// The default resume mode reuses the session id, so a second process would
+/// append to the same transcript as the live one — that can corrupt it, so a
+/// live session blocks the resume unless `--force` overrides it. `--here`
+/// resumes with `--fork-session`, which only *reads* the original transcript
+/// and writes a fresh file, so a live original can never be corrupted by it —
+/// `--here` therefore never blocks (and `--force` is irrelevant to it).
+fn should_block_for_live(here: bool, force: bool) -> bool {
+    !here && !force
+}
+
+/// Aborts with a clear message if `session_id` is already open in another live
+/// process and [`should_block_for_live`] says that should block this resume.
+fn abort_if_session_live(session_id: &str, here: bool, force: bool) {
+    if !should_block_for_live(here, force) {
         return;
     }
     if let Some(live) =
@@ -939,9 +1051,10 @@ fn abort_if_session_live(session_id: &str, force: bool) {
     }
 }
 
-/// Handles `crap --here <id>`: symlink the session into the current directory's
-/// project folder and emit the here-mode output the shell function consumes.
-fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
+/// Handles `crap --here <id> [<new-id>]`: symlink the session into the current
+/// directory's project folder and emit the here-mode output the shell function
+/// consumes, optionally pinning the forked session's id to `new_session_id`.
+fn run_here(projects_dir: &Path, session_id: &str, new_session_id: Option<&str>, force: bool) -> ! {
     let Ok(pwd) = std::env::current_dir() else {
         eprintln!(
             "{} could not determine the current directory",
@@ -950,12 +1063,41 @@ fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
         exit(exit_codes::HERE_PWD_UNAVAILABLE);
     };
 
+    // Validate the optional forced id before creating anything, so a bad id
+    // aborts without leaving a stray symlink behind.
+    let new_id = match resolve_new_session_id(new_session_id) {
+        Ok(id) => id,
+        Err(InvalidNewSessionId) => {
+            eprintln!(
+                "{} '{}' is not a valid session id",
+                "Error:".red().bold(),
+                new_session_id.unwrap_or_default()
+            );
+            exit(exit_codes::INVALID_SESSION_ID);
+        }
+    };
+
+    // Refuse to pin the fork to an id that already names a transcript: that
+    // would let `claude --session-id` overwrite an unrelated session.
+    if new_session_id_collides(projects_dir, new_id) {
+        eprintln!(
+            "{} a session with id '{}' already exists",
+            "Error:".red().bold(),
+            new_id.unwrap_or_default()
+        );
+        eprintln!("       choose a fresh id so the fork does not overwrite it");
+        exit(exit_codes::NEW_SESSION_ID_EXISTS);
+    }
+
     // Guard before creating anything, so an aborted resume leaves no stray link.
-    abort_if_session_live(session_id, force);
+    abort_if_session_live(session_id, true, force);
 
     match resolve_here_link(projects_dir, &pwd, session_id) {
         Ok(link) => {
-            print!("{}", format_here_output(session_id, link.as_deref()));
+            print!(
+                "{}",
+                format_here_output(session_id, new_id, link.as_deref())
+            );
             exit(0);
         }
         Err(HereResolveError::InvalidSessionId) => {
@@ -1073,12 +1215,17 @@ fn main() {
         .expect("session id is required without --shell-setup or --status");
 
     if cli.here {
-        run_here(&projects_dir, &session_id, cli.force);
+        run_here(
+            &projects_dir,
+            &session_id,
+            cli.new_session_id.as_deref(),
+            cli.force,
+        );
     }
 
     match resolve_session_dir(&projects_dir, &session_id) {
         Ok(dir) => {
-            abort_if_session_live(&session_id, cli.force);
+            abort_if_session_live(&session_id, false, cli.force);
             print!("{}", format_output(&dir, &session_id));
         }
         Err(ResolveError::InvalidSessionId) => {
@@ -1126,6 +1273,80 @@ mod tests {
     /// Builds a single JSONL line recording `cwd`.
     fn cwd_line(cwd: &str) -> String {
         format!("{}\n", serde_json::json!({ "cwd": cwd }))
+    }
+
+    #[test]
+    fn default_mode_blocks_a_live_session_unless_forced() {
+        // Default resume reuses the session id, so a live original must block.
+        assert!(should_block_for_live(false, false));
+    }
+
+    #[test]
+    fn force_overrides_the_live_block_in_default_mode() {
+        assert!(!should_block_for_live(false, true));
+    }
+
+    #[test]
+    fn resolve_new_session_id_accepts_a_valid_uuid() {
+        // A well-formed UUID is passed through so `--here` can pin the fork.
+        assert_eq!(resolve_new_session_id(Some(ID_B)), Ok(Some(ID_B)));
+    }
+
+    #[test]
+    fn resolve_new_session_id_absent_is_none() {
+        // No second argument means Claude mints a fresh random id, as before.
+        assert_eq!(resolve_new_session_id(None), Ok(None));
+    }
+
+    #[test]
+    fn resolve_new_session_id_rejects_a_non_uuid() {
+        // A malformed id must be caught before it reaches `claude --session-id`.
+        assert_eq!(
+            resolve_new_session_id(Some("not-a-uuid")),
+            Err(InvalidNewSessionId)
+        );
+    }
+
+    #[test]
+    fn here_accepts_session_and_new_id_positionals() {
+        let cli = Cli::try_parse_from(["crap", "--here", ID_A, ID_B]).expect("should parse");
+        assert!(cli.here);
+        assert_eq!(cli.session_id.as_deref(), Some(ID_A));
+        assert_eq!(cli.new_session_id.as_deref(), Some(ID_B));
+    }
+
+    #[test]
+    fn new_session_id_positional_requires_here() {
+        // A forked id is meaningless without --here, so clap must reject it.
+        assert!(Cli::try_parse_from(["crap", ID_A, ID_B]).is_err());
+    }
+
+    #[test]
+    fn new_session_id_collides_when_the_id_already_exists() {
+        // Pinning a fork to an id that already names a transcript would let it
+        // overwrite that conversation, so it must be reported as a collision.
+        let projects = tempdir().unwrap();
+        let folder = projects.path().join("some-project");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join(format!("{ID_B}.jsonl")), "{}\n").unwrap();
+        assert!(new_session_id_collides(projects.path(), Some(ID_B)));
+    }
+
+    #[test]
+    fn new_session_id_does_not_collide_when_unused_or_absent() {
+        let projects = tempdir().unwrap();
+        fs::create_dir_all(projects.path().join("some-project")).unwrap();
+        // An id no transcript uses is free, and "no forced id" never collides.
+        assert!(!new_session_id_collides(projects.path(), Some(ID_B)));
+        assert!(!new_session_id_collides(projects.path(), None));
+    }
+
+    #[test]
+    fn here_mode_never_blocks_a_live_session() {
+        // `--here` resumes with `--fork-session`: it only reads the original
+        // transcript and writes a fresh file, so a live original can never be
+        // corrupted by it. A live session must therefore not block `--here`.
+        assert!(!should_block_for_live(true, false));
     }
 
     #[test]
@@ -1804,23 +2025,49 @@ mod tests {
     #[test]
     fn here_output_carries_sentinel_session_and_link() {
         let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
-        let out = format_here_output(SAMPLE_ID, Some(link));
+        let out = format_here_output(SAMPLE_ID, None, Some(link));
 
         let mut lines = out.lines();
         assert_eq!(lines.next(), Some(HERE_SENTINEL));
         assert_eq!(lines.next(), Some(SAMPLE_ID));
-        // Everything after the second newline is the link path, intact.
-        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        // No forced id was given, so the third field is the sentinel.
+        assert_eq!(lines.next(), Some(NO_NEW_ID_SENTINEL));
+        // Everything after the third newline is the link path, intact.
+        let rest = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
     }
 
     #[test]
     fn here_output_uses_no_link_sentinel_when_nothing_to_clean() {
-        let out = format_here_output(SAMPLE_ID, None);
+        let out = format_here_output(SAMPLE_ID, None, None);
 
         assert_eq!(out.lines().next(), Some(HERE_SENTINEL));
-        let link_field = out.splitn(3, '\n').nth(2).unwrap();
+        let link_field = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(link_field.trim_end_matches('\n'), NO_LINK_SENTINEL);
+    }
+
+    #[test]
+    fn here_output_carries_forced_new_session_id() {
+        // When the caller supplies a forked-session id, it rides as the third
+        // field so the shell function can pass it to `claude --session-id`.
+        let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
+        let out = format_here_output(SAMPLE_ID, Some(ID_B), Some(link));
+
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(HERE_SENTINEL));
+        assert_eq!(lines.next(), Some(SAMPLE_ID));
+        assert_eq!(lines.next(), Some(ID_B));
+        // The link still lives last, after the forced-id field.
+        let rest = out.splitn(4, '\n').nth(3).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
+    }
+
+    #[test]
+    fn here_output_uses_no_new_id_sentinel_when_absent() {
+        // Without a caller-supplied id, the third field is the sentinel so the
+        // shell function lets Claude mint a fresh random id.
+        let out = format_here_output(SAMPLE_ID, None, None);
+        assert_eq!(out.lines().nth(2), Some(NO_NEW_ID_SENTINEL));
     }
 
     #[test]
@@ -1828,9 +2075,9 @@ mod tests {
         // The link lives last in the output, so a newline inside the path can't
         // be mistaken for a field boundary.
         let link = Path::new("/Users/tim/od\ndd/abc.jsonl");
-        let out = format_here_output(SAMPLE_ID, Some(link));
+        let out = format_here_output(SAMPLE_ID, None, Some(link));
 
-        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        let rest = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
     }
 
@@ -1954,6 +2201,129 @@ mod tests {
             );
             assert!(!claude_called, "`crap {args}` must not attempt a resume");
         }
+    }
+
+    /// Sources `SHELL_CODE` in a real `bash` with a fake `crap` that emits
+    /// here-mode output carrying `new_id_field` as its third field (and
+    /// `__CRAP_NO_LINK__`, so the symlink watcher is skipped), plus fake
+    /// `claude`/`clauded` that record the exact arguments they were resumed
+    /// with. Returns those recorded arguments, one per line.
+    ///
+    /// When `provide_clauded` is true the preferred `clauded` is on `PATH` and
+    /// records; otherwise only plain `claude` is available. All paths are keyed
+    /// on pid + a nanosecond timestamp so concurrent runs never share a temp
+    /// dir.
+    #[cfg(unix)]
+    fn run_here_shell_function(new_id_field: &str, provide_clauded: bool) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // The session id the fake binary reports as the resumed original.
+        const HERE_SESSION: &str = "33333333-4444-5555-6666-777777777777";
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("crap-here-shell-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let args_file = dir.join("claude_args");
+
+        // Fake `crap`: emit a here-output whose third field is `new_id_field`.
+        let fake_crap = format!(
+            "#!/bin/sh\nprintf '{HERE_SENTINEL}\\n%s\\n%s\\n%s\\n' '{HERE_SESSION}' '{new_id_field}' '{NO_LINK_SENTINEL}'\n"
+        );
+
+        // Fake `claude`/`clauded`: record the exact argument list, one per line.
+        let fake_claude = format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", args_file);
+
+        let mut tools = vec![("crap", fake_crap), ("claude", fake_claude.clone())];
+        if provide_clauded {
+            tools.push(("clauded", fake_claude));
+        }
+        for (name, body) in tools {
+            let path = dir.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{base_path}", dir.display());
+        let script = format!("{SHELL_CODE}\ncrap --here {HERE_SESSION}\n");
+
+        let output = Command::new("bash")
+            .env("PATH", new_path)
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash should be available");
+        assert!(
+            output.status.success(),
+            "here-mode shell function failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let recorded = fs::read_to_string(&args_file).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        recorded
+    }
+
+    /// A well-formed forked-session id for the here-mode dispatch tests.
+    const FORCED_NEW_ID: &str = "99999999-8888-7777-6666-555555555555";
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_pins_forced_new_id_via_session_id() {
+        // When the binary supplies a forced id, the resume must fork *and* pin
+        // the fork to that id with `--session-id`, on both the `clauded` and the
+        // plain `claude` dispatch paths.
+        for provide_clauded in [true, false] {
+            let recorded = run_here_shell_function(FORCED_NEW_ID, provide_clauded);
+            let args: Vec<&str> = recorded.lines().collect();
+            assert!(
+                args.contains(&"--fork-session"),
+                "must still fork (clauded={provide_clauded}); got {args:?}"
+            );
+            let pos = args
+                .iter()
+                .position(|a| *a == "--session-id")
+                .unwrap_or_else(|| {
+                    panic!("--session-id missing (clauded={provide_clauded}): {args:?}")
+                });
+            assert_eq!(
+                args.get(pos + 1).copied(),
+                Some(FORCED_NEW_ID),
+                "the forced id must follow --session-id (clauded={provide_clauded})"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_omits_session_id_without_a_forced_new_id() {
+        // The sentinel third field means "let Claude mint a random id": the
+        // resume forks but must not pass --session-id.
+        let recorded = run_here_shell_function(NO_NEW_ID_SENTINEL, true);
+        let args: Vec<&str> = recorded.lines().collect();
+        assert!(
+            args.contains(&"--fork-session"),
+            "must still fork: {args:?}"
+        );
+        assert!(
+            !args.contains(&"--session-id"),
+            "no forced id => no --session-id: {args:?}"
+        );
+    }
+
+    #[test]
+    fn shell_code_parses_new_id_field_and_pins_session_id() {
+        // here-mode reads the third field and, unless it is the sentinel, pins
+        // the fork's id via `claude --session-id`.
+        assert!(SHELL_CODE.contains(NO_NEW_ID_SENTINEL));
+        assert!(SHELL_CODE.contains("--session-id"));
     }
 
     // Two distinct session ids for the per-directory listing tests.
@@ -2160,6 +2530,32 @@ mod tests {
         // labels — those are column headers now).
         assert!(out.contains("2026-05-25 10:00:00"));
         assert!(out.contains("2026-05-25 12:30:45"));
+    }
+
+    #[test]
+    fn dir_statuses_table_never_wraps_cells_to_fit_a_narrow_terminal() {
+        // The status table must render at its natural content width regardless of
+        // the terminal: a session UUID or timestamp chopped across lines is
+        // unreadable, and tying the layout to the ambient terminal width makes the
+        // output (and every test that asserts on it) depend on a shared,
+        // uncontrolled resource — a flaky-test trap. Force an absurdly narrow
+        // width and demand every cell still appears whole on one line.
+        let reports = vec![SessionStatusReport {
+            session_id: ID_A.to_string(),
+            state: "waiting-for-user".to_string(),
+            started: Some("2026-05-25T10:00:00.000Z".to_string()),
+            last: Some("2026-05-25T12:30:45.000Z".to_string()),
+        }];
+        let mut table = dir_statuses_table(&reports);
+        table.set_width(20);
+        let rendered = table.to_string();
+        assert!(
+            rendered.contains(ID_A),
+            "UUID must stay intact at narrow width, got:\n{rendered}"
+        );
+        assert!(rendered.contains("waiting-for-user"));
+        assert!(rendered.contains("2026-05-25 10:00:00"));
+        assert!(rendered.contains("2026-05-25 12:30:45"));
     }
 
     #[test]
