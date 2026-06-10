@@ -2108,6 +2108,129 @@ mod tests {
         }
     }
 
+    /// Sources `SHELL_CODE` in a real `bash` with a fake `crap` that emits
+    /// here-mode output carrying `new_id_field` as its third field (and
+    /// `__CRAP_NO_LINK__`, so the symlink watcher is skipped), plus fake
+    /// `claude`/`clauded` that record the exact arguments they were resumed
+    /// with. Returns those recorded arguments, one per line.
+    ///
+    /// When `provide_clauded` is true the preferred `clauded` is on `PATH` and
+    /// records; otherwise only plain `claude` is available. All paths are keyed
+    /// on pid + a nanosecond timestamp so concurrent runs never share a temp
+    /// dir.
+    #[cfg(unix)]
+    fn run_here_shell_function(new_id_field: &str, provide_clauded: bool) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // The session id the fake binary reports as the resumed original.
+        const HERE_SESSION: &str = "33333333-4444-5555-6666-777777777777";
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("crap-here-shell-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let args_file = dir.join("claude_args");
+
+        // Fake `crap`: emit a here-output whose third field is `new_id_field`.
+        let fake_crap = format!(
+            "#!/bin/sh\nprintf '{HERE_SENTINEL}\\n%s\\n%s\\n%s\\n' '{HERE_SESSION}' '{new_id_field}' '{NO_LINK_SENTINEL}'\n"
+        );
+
+        // Fake `claude`/`clauded`: record the exact argument list, one per line.
+        let fake_claude = format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\n", args_file);
+
+        let mut tools = vec![("crap", fake_crap), ("claude", fake_claude.clone())];
+        if provide_clauded {
+            tools.push(("clauded", fake_claude));
+        }
+        for (name, body) in tools {
+            let path = dir.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{base_path}", dir.display());
+        let script = format!("{SHELL_CODE}\ncrap --here {HERE_SESSION}\n");
+
+        let output = Command::new("bash")
+            .env("PATH", new_path)
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash should be available");
+        assert!(
+            output.status.success(),
+            "here-mode shell function failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let recorded = fs::read_to_string(&args_file).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        recorded
+    }
+
+    /// A well-formed forked-session id for the here-mode dispatch tests.
+    const FORCED_NEW_ID: &str = "99999999-8888-7777-6666-555555555555";
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_pins_forced_new_id_via_session_id() {
+        // When the binary supplies a forced id, the resume must fork *and* pin
+        // the fork to that id with `--session-id`, on both the `clauded` and the
+        // plain `claude` dispatch paths.
+        for provide_clauded in [true, false] {
+            let recorded = run_here_shell_function(FORCED_NEW_ID, provide_clauded);
+            let args: Vec<&str> = recorded.lines().collect();
+            assert!(
+                args.contains(&"--fork-session"),
+                "must still fork (clauded={provide_clauded}); got {args:?}"
+            );
+            let pos = args
+                .iter()
+                .position(|a| *a == "--session-id")
+                .unwrap_or_else(|| {
+                    panic!("--session-id missing (clauded={provide_clauded}): {args:?}")
+                });
+            assert_eq!(
+                args.get(pos + 1).copied(),
+                Some(FORCED_NEW_ID),
+                "the forced id must follow --session-id (clauded={provide_clauded})"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_omits_session_id_without_a_forced_new_id() {
+        // The sentinel third field means "let Claude mint a random id": the
+        // resume forks but must not pass --session-id.
+        let recorded = run_here_shell_function(NO_NEW_ID_SENTINEL, true);
+        let args: Vec<&str> = recorded.lines().collect();
+        assert!(
+            args.contains(&"--fork-session"),
+            "must still fork: {args:?}"
+        );
+        assert!(
+            !args.contains(&"--session-id"),
+            "no forced id => no --session-id: {args:?}"
+        );
+    }
+
+    #[test]
+    fn shell_code_parses_new_id_field_and_pins_session_id() {
+        // here-mode reads the third field and, unless it is the sentinel, pins
+        // the fork's id via `claude --session-id`.
+        assert!(SHELL_CODE.contains(NO_NEW_ID_SENTINEL));
+        assert!(SHELL_CODE.contains("--session-id"));
+    }
+
     // Two distinct session ids for the per-directory listing tests.
     const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
     const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
