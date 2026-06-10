@@ -735,13 +735,26 @@ const HERE_SENTINEL: &str = "__CRAP_HERE__";
 /// function can tell "nothing to clean up" apart from a real path.
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
+/// Placeholder used in the forced-new-id field when `--here` was given no
+/// explicit new session id, so the shell function knows to let Claude mint a
+/// fresh random id (`--fork-session`) instead of pinning one (`--session-id`).
+const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
+
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
-/// the session id, then the symlink to remove once the session ends (or
-/// [`NO_LINK_SENTINEL`] when none was created).
+/// the session id, then the caller-supplied forked-session id (or
+/// [`NO_NEW_ID_SENTINEL`] when none was given), then the symlink to remove once
+/// the session ends (or [`NO_LINK_SENTINEL`] when none was created).
 ///
 /// The cleanup path is emitted last so that — like [`format_output`] — a path
-/// containing a newline survives intact as "everything after the second line".
-fn format_here_output(session_id: &str, link_to_cleanup: Option<&Path>) -> String {
+/// containing a newline survives intact as "everything after the final field
+/// separator". The forced-new-id is a validated UUID (or the sentinel), so it
+/// never contains a newline and is safe in the middle.
+fn format_here_output(
+    session_id: &str,
+    new_session_id: Option<&str>,
+    link_to_cleanup: Option<&Path>,
+) -> String {
+    let _new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
     let link = match link_to_cleanup {
         Some(path) => path.display().to_string(),
         None => NO_LINK_SENTINEL.to_string(),
@@ -971,7 +984,7 @@ fn run_here(projects_dir: &Path, session_id: &str, force: bool) -> ! {
 
     match resolve_here_link(projects_dir, &pwd, session_id) {
         Ok(link) => {
-            print!("{}", format_here_output(session_id, link.as_deref()));
+            print!("{}", format_here_output(session_id, None, link.as_deref()));
             exit(0);
         }
         Err(HereResolveError::InvalidSessionId) => {
@@ -1839,23 +1852,49 @@ mod tests {
     #[test]
     fn here_output_carries_sentinel_session_and_link() {
         let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
-        let out = format_here_output(SAMPLE_ID, Some(link));
+        let out = format_here_output(SAMPLE_ID, None, Some(link));
 
         let mut lines = out.lines();
         assert_eq!(lines.next(), Some(HERE_SENTINEL));
         assert_eq!(lines.next(), Some(SAMPLE_ID));
-        // Everything after the second newline is the link path, intact.
-        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        // No forced id was given, so the third field is the sentinel.
+        assert_eq!(lines.next(), Some(NO_NEW_ID_SENTINEL));
+        // Everything after the third newline is the link path, intact.
+        let rest = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
     }
 
     #[test]
     fn here_output_uses_no_link_sentinel_when_nothing_to_clean() {
-        let out = format_here_output(SAMPLE_ID, None);
+        let out = format_here_output(SAMPLE_ID, None, None);
 
         assert_eq!(out.lines().next(), Some(HERE_SENTINEL));
-        let link_field = out.splitn(3, '\n').nth(2).unwrap();
+        let link_field = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(link_field.trim_end_matches('\n'), NO_LINK_SENTINEL);
+    }
+
+    #[test]
+    fn here_output_carries_forced_new_session_id() {
+        // When the caller supplies a forked-session id, it rides as the third
+        // field so the shell function can pass it to `claude --session-id`.
+        let link = Path::new("/Users/tim/.claude/projects/-x/abc.jsonl");
+        let out = format_here_output(SAMPLE_ID, Some(ID_B), Some(link));
+
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(HERE_SENTINEL));
+        assert_eq!(lines.next(), Some(SAMPLE_ID));
+        assert_eq!(lines.next(), Some(ID_B));
+        // The link still lives last, after the forced-id field.
+        let rest = out.splitn(4, '\n').nth(3).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
+    }
+
+    #[test]
+    fn here_output_uses_no_new_id_sentinel_when_absent() {
+        // Without a caller-supplied id, the third field is the sentinel so the
+        // shell function lets Claude mint a fresh random id.
+        let out = format_here_output(SAMPLE_ID, None, None);
+        assert_eq!(out.lines().nth(2), Some(NO_NEW_ID_SENTINEL));
     }
 
     #[test]
@@ -1863,9 +1902,9 @@ mod tests {
         // The link lives last in the output, so a newline inside the path can't
         // be mistaken for a field boundary.
         let link = Path::new("/Users/tim/od\ndd/abc.jsonl");
-        let out = format_here_output(SAMPLE_ID, Some(link));
+        let out = format_here_output(SAMPLE_ID, None, Some(link));
 
-        let rest = out.splitn(3, '\n').nth(2).unwrap();
+        let rest = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
     }
 
