@@ -414,8 +414,11 @@ fn resolve_new_session_id(
 /// already names a session would let the fork overwrite an unrelated
 /// conversation — the opposite of `--here`'s "leave the original untouched"
 /// guarantee. `None` (no forced id, Claude mints a random one) never collides.
-fn new_session_id_collides(_projects_dir: &Path, _new_session_id: Option<&str>) -> bool {
-    false
+fn new_session_id_collides(projects_dir: &Path, new_session_id: Option<&str>) -> bool {
+    match new_session_id {
+        Some(id) => find_session_file(projects_dir, id).is_some(),
+        None => false,
+    }
 }
 
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
