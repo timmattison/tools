@@ -1463,10 +1463,6 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 /// iTerm2 inline-image protocol (via `@xterm/addon-image`) but not the Kitty
 /// graphics protocol, even though its inherited `TERM_PROGRAM` may say otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "variants are exercised by unit tests; wired into the display path in the integration commit"
-)]
 enum Protocol {
     /// Sixel — Zellij passthrough and xterm.js (`@xterm/addon-image`).
     Sixel,
@@ -1481,14 +1477,15 @@ enum Protocol {
 /// When `forced` is `Some`, that protocol is used verbatim — the caller has taken
 /// responsibility for matching it to their terminal. Otherwise the protocol is
 /// chosen from the auto-detected terminal type.
-#[allow(
-    dead_code,
-    reason = "exercised by unit tests; wired into the display path in the integration commit"
-)]
 fn resolve_protocol(forced: Option<Protocol>, terminal_type: &TerminalType) -> Protocol {
-    // Stub: real mapping is added in the GREEN step.
-    let _ = (forced, terminal_type);
-    Protocol::Iterm2
+    if let Some(protocol) = forced {
+        return protocol;
+    }
+    match terminal_type {
+        TerminalType::Zellij => Protocol::Sixel,
+        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => Protocol::Kitty,
+        _ => Protocol::Iterm2,
+    }
 }
 
 fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
@@ -1548,18 +1545,14 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
         (target_width, target_height)
     };
 
-    // Choose optimal display method based on terminal capabilities.
-    // Check Sixel first (for Zellij), then Kitty/Ghostty/WezTerm, then iTerm2.
-    // Use already-detected terminal_caps to avoid redundant env var lookups.
+    // Choose the display method based on the resolved protocol.
     //
     // Sixel (Zellij) does not need proxy cursor-sync because Zellij's server
     // manages its own rendering and cursor tracking — the image protocol
     // never reaches the remote transport's virtual terminal.
-    match terminal_caps.terminal_type {
-        TerminalType::Zellij => {
-            display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
-        }
-        TerminalType::Kitty | TerminalType::Ghostty | TerminalType::WezTerm => display_image_kitty(
+    match resolve_protocol(None, &terminal_caps.terminal_type) {
+        Protocol::Sixel => display_image_sixel(&img, scaled_width, scaled_height, args, no_newline),
+        Protocol::Kitty => display_image_kitty(
             &img,
             scaled_width,
             scaled_height,
@@ -1567,7 +1560,7 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
             under_remote_proxy,
             no_newline,
         ),
-        _ => display_image_iterm2(
+        Protocol::Iterm2 => display_image_iterm2(
             &img,
             scaled_width,
             scaled_height,
