@@ -754,12 +754,12 @@ fn format_here_output(
     new_session_id: Option<&str>,
     link_to_cleanup: Option<&Path>,
 ) -> String {
-    let _new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
+    let new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
     let link = match link_to_cleanup {
         Some(path) => path.display().to_string(),
         None => NO_LINK_SENTINEL.to_string(),
     };
-    format!("{HERE_SENTINEL}\n{session_id}\n{link}\n")
+    format!("{HERE_SENTINEL}\n{session_id}\n{new_id}\n{link}\n")
 }
 
 /// The shell function installed by `crap --shell-setup`.
