@@ -9,7 +9,9 @@
 //! `--resume <id>` only against the project folder matching the current working
 //! directory, so `crap --here` symlinks the session's transcript into that
 //! folder and resumes it as a `--fork-session` (a fresh id), leaving the
-//! original transcript untouched. The symlink is removed once the session ends.
+//! original transcript untouched. Because the fork only reads that transcript,
+//! `--here` works even while the original session is still live in another
+//! process. The symlink is removed once the session ends.
 //!
 //! With `--status`, it resumes nothing: it classifies where the session left
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
@@ -867,6 +869,10 @@ struct Cli {
     /// By default `crap` refuses to resume a session that is already open
     /// elsewhere, because two processes writing the same session log can
     /// corrupt it.
+    ///
+    /// This guard applies only to the default resume mode. `--here` forks a
+    /// fresh session (it only reads the original transcript), so it is never
+    /// blocked by a live original and ignores `--force`.
     #[arg(short, long)]
     force: bool,
 
@@ -874,7 +880,8 @@ struct Cli {
     ///
     /// `crap` symlinks the session into the current directory's project folder
     /// so `claude --resume` can find it here, then resumes it as a forked
-    /// (new-id) session — the original transcript is left untouched. Use this to
+    /// (new-id) session — the original transcript is only read, never written,
+    /// so this works even if the original session is still live. Use this to
     /// carry a conversation's context into a different working directory.
     #[arg(long)]
     here: bool,
@@ -915,11 +922,12 @@ struct Cli {
 ///
 /// The default resume mode reuses the session id, so a second process would
 /// append to the same transcript as the live one — that can corrupt it, so a
-/// live session blocks the resume unless `--force` overrides it. The `here`
-/// flag is threaded through for the `--here` fork path (see Phase 3) but is not
-/// yet consulted.
-fn should_block_for_live(_here: bool, force: bool) -> bool {
-    !force
+/// live session blocks the resume unless `--force` overrides it. `--here`
+/// resumes with `--fork-session`, which only *reads* the original transcript
+/// and writes a fresh file, so a live original can never be corrupted by it —
+/// `--here` therefore never blocks (and `--force` is irrelevant to it).
+fn should_block_for_live(here: bool, force: bool) -> bool {
+    !here && !force
 }
 
 /// Aborts with a clear message if `session_id` is already open in another live
