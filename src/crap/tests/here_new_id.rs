@@ -38,15 +38,29 @@ fn unique_root(tag: &str) -> PathBuf {
 /// runs the real `crap --here ORIG <extra_args>` binary from a fresh working
 /// directory. Returns the captured process output.
 fn run_here(tag: &str, extra_args: &[&str]) -> Output {
+    run_here_planting(tag, extra_args, &[])
+}
+
+/// Like [`run_here`], but also plants a transcript for each id in `also_plant`,
+/// so collisions with an existing session can be exercised.
+fn run_here_planting(tag: &str, extra_args: &[&str], also_plant: &[&str]) -> Output {
     let root = unique_root(tag);
     let home = root.join("home");
-    let session_folder = home.join(".claude").join("projects").join("orig-project");
+    let projects = home.join(".claude").join("projects");
+
+    let session_folder = projects.join("orig-project");
     fs::create_dir_all(&session_folder).unwrap();
     fs::write(
         session_folder.join(format!("{ORIG}.jsonl")),
         "{\"cwd\":\"/x\"}\n",
     )
     .unwrap();
+
+    let extra_folder = projects.join("other-project");
+    fs::create_dir_all(&extra_folder).unwrap();
+    for id in also_plant {
+        fs::write(extra_folder.join(format!("{id}.jsonl")), "{}\n").unwrap();
+    }
 
     let work = root.join("work");
     fs::create_dir_all(&work).unwrap();
@@ -96,6 +110,19 @@ fn here_without_new_id_uses_sentinel() {
     // Without a forced id the third field is the sentinel, so the shell lets
     // Claude mint a fresh random id.
     assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+}
+
+#[test]
+fn here_rejects_a_new_id_that_already_exists() {
+    // Pinning the fork to an id that already names a transcript would overwrite
+    // it, so `--here` must refuse before launching Claude.
+    let out = run_here_planting("collide", &[NEW], &[NEW]);
+    assert!(
+        !out.status.success(),
+        "a colliding new id must abort the resume"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("already exists"), "stderr: {stderr}");
 }
 
 #[test]

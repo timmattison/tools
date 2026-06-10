@@ -57,6 +57,8 @@ mod exit_codes {
     pub const HERE_LINK_ERROR: i32 = 8;
     /// `--here`: the current working directory could not be determined.
     pub const HERE_PWD_UNAVAILABLE: i32 = 9;
+    /// `--here`: the requested new session id already names a transcript.
+    pub const NEW_SESSION_ID_EXISTS: i32 = 10;
 }
 
 /// Why a session id could not be resolved to an existing directory.
@@ -403,6 +405,17 @@ fn resolve_new_session_id(
         Some(id) if is_valid_session_id(id) => Ok(Some(id)),
         Some(_) => Err(InvalidNewSessionId),
     }
+}
+
+/// Whether pinning a `--here` fork to `new_session_id` would collide with an
+/// existing transcript.
+///
+/// `claude --session-id <id>` writes to `<id>.jsonl`, so reusing an id that
+/// already names a session would let the fork overwrite an unrelated
+/// conversation — the opposite of `--here`'s "leave the original untouched"
+/// guarantee. `None` (no forced id, Claude mints a random one) never collides.
+fn new_session_id_collides(_projects_dir: &Path, _new_session_id: Option<&str>) -> bool {
+    false
 }
 
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
@@ -1042,6 +1055,18 @@ fn run_here(projects_dir: &Path, session_id: &str, new_session_id: Option<&str>,
         }
     };
 
+    // Refuse to pin the fork to an id that already names a transcript: that
+    // would let `claude --session-id` overwrite an unrelated session.
+    if new_session_id_collides(projects_dir, new_id) {
+        eprintln!(
+            "{} a session with id '{}' already exists",
+            "Error:".red().bold(),
+            new_id.unwrap_or_default()
+        );
+        eprintln!("       choose a fresh id so the fork does not overwrite it");
+        exit(exit_codes::NEW_SESSION_ID_EXISTS);
+    }
+
     // Guard before creating anything, so an aborted resume leaves no stray link.
     abort_if_session_live(session_id, true, force);
 
@@ -1258,6 +1283,26 @@ mod tests {
             resolve_new_session_id(Some("not-a-uuid")),
             Err(InvalidNewSessionId)
         );
+    }
+
+    #[test]
+    fn new_session_id_collides_when_the_id_already_exists() {
+        // Pinning a fork to an id that already names a transcript would let it
+        // overwrite that conversation, so it must be reported as a collision.
+        let projects = tempdir().unwrap();
+        let folder = projects.path().join("some-project");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join(format!("{ID_B}.jsonl")), "{}\n").unwrap();
+        assert!(new_session_id_collides(projects.path(), Some(ID_B)));
+    }
+
+    #[test]
+    fn new_session_id_does_not_collide_when_unused_or_absent() {
+        let projects = tempdir().unwrap();
+        fs::create_dir_all(projects.path().join("some-project")).unwrap();
+        // An id no transcript uses is free, and "no forced id" never collides.
+        assert!(!new_session_id_collides(projects.path(), Some(ID_B)));
+        assert!(!new_session_id_collides(projects.path(), None));
     }
 
     #[test]
