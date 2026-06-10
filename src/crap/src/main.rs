@@ -1148,6 +1148,14 @@ mod tests {
     }
 
     #[test]
+    fn here_mode_never_blocks_a_live_session() {
+        // `--here` resumes with `--fork-session`: it only reads the original
+        // transcript and writes a fresh file, so a live original can never be
+        // corrupted by it. A live session must therefore not block `--here`.
+        assert!(!should_block_for_live(true, false));
+    }
+
+    #[test]
     fn extract_cwd_returns_first_non_null_cwd() {
         let contents = format!(
             "{}{}{}{}",
