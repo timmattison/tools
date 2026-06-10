@@ -1488,6 +1488,37 @@ fn resolve_protocol(forced: Option<Protocol>, terminal_type: &TerminalType) -> P
     }
 }
 
+/// Selector for the image protocol, accepted by both the `--protocol` flag and the
+/// `IC_PROTOCOL` environment variable. `Auto` keeps terminal-based detection; the
+/// other values force a specific protocol (see [`resolve_protocol`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[allow(
+    dead_code,
+    reason = "wired into the Args struct in the integration commit"
+)]
+enum ProtocolArg {
+    Auto,
+    Sixel,
+    Kitty,
+    Iterm2,
+}
+
+/// Resolve an explicit protocol override from the `--protocol` flag (`flag`) and the
+/// `IC_PROTOCOL` environment variable (`env`).
+///
+/// The flag takes precedence over the environment variable. An unset or `auto`
+/// selection — or an unrecognised `IC_PROTOCOL` value — yields `None`, leaving
+/// terminal-based auto-detection in charge.
+#[allow(
+    dead_code,
+    reason = "exercised by unit tests; wired into the display path in the integration commit"
+)]
+fn forced_protocol(flag: Option<ProtocolArg>, env: Option<&str>) -> Option<Protocol> {
+    // Stub: real resolution is added in the GREEN step.
+    let _ = (flag, env);
+    None
+}
+
 fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
@@ -2470,6 +2501,76 @@ mod tests {
         assert_eq!(
             resolve_protocol(Some(Protocol::Kitty), &TerminalType::Unknown),
             Protocol::Kitty
+        );
+    }
+
+    // =========================================================================
+    // Tests for forced_protocol
+    // =========================================================================
+
+    #[test]
+    fn forced_flag_sixel_maps_to_sixel() {
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Sixel), None),
+            Some(Protocol::Sixel)
+        );
+    }
+
+    #[test]
+    fn forced_flag_kitty_maps_to_kitty() {
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Kitty), None),
+            Some(Protocol::Kitty)
+        );
+    }
+
+    #[test]
+    fn forced_flag_iterm2_maps_to_iterm2() {
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Iterm2), None),
+            Some(Protocol::Iterm2)
+        );
+    }
+
+    #[test]
+    fn forced_flag_auto_is_no_override() {
+        assert_eq!(forced_protocol(Some(ProtocolArg::Auto), None), None);
+    }
+
+    #[test]
+    fn forced_env_sixel_maps_to_sixel() {
+        assert_eq!(forced_protocol(None, Some("sixel")), Some(Protocol::Sixel));
+    }
+
+    #[test]
+    fn forced_env_is_case_insensitive() {
+        assert_eq!(
+            forced_protocol(None, Some("ITERM2")),
+            Some(Protocol::Iterm2)
+        );
+    }
+
+    #[test]
+    fn forced_env_auto_is_no_override() {
+        assert_eq!(forced_protocol(None, Some("auto")), None);
+    }
+
+    #[test]
+    fn forced_env_unrecognised_is_no_override() {
+        assert_eq!(forced_protocol(None, Some("nonsense")), None);
+    }
+
+    #[test]
+    fn forced_none_is_no_override() {
+        assert_eq!(forced_protocol(None, None), None);
+    }
+
+    #[test]
+    fn forced_flag_beats_env() {
+        // An explicit flag wins even when IC_PROTOCOL says something else.
+        assert_eq!(
+            forced_protocol(Some(ProtocolArg::Iterm2), Some("sixel")),
+            Some(Protocol::Iterm2)
         );
     }
 
