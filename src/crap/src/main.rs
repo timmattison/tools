@@ -396,9 +396,13 @@ struct InvalidNewSessionId;
 ///
 /// Returns [`InvalidNewSessionId`] if `new_session_id` is `Some` but not a UUID.
 fn resolve_new_session_id(
-    _new_session_id: Option<&str>,
+    new_session_id: Option<&str>,
 ) -> Result<Option<&str>, InvalidNewSessionId> {
-    Err(InvalidNewSessionId)
+    match new_session_id {
+        None => Ok(None),
+        Some(id) if is_valid_session_id(id) => Ok(Some(id)),
+        Some(_) => Err(InvalidNewSessionId),
+    }
 }
 
 /// Returns the `~/.claude/sessions` directory, or `None` if the home directory
