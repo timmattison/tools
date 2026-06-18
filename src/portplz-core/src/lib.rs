@@ -3,6 +3,8 @@
 //! This crate provides the stable hashing primitive used to turn an arbitrary
 //! string into a deterministic, guaranteed-unprivileged TCP port number.
 
+use sha2::{Digest, Sha256};
+
 /// A TCP port guaranteed to be unprivileged (always `>= 1024`).
 ///
 /// Construct one only via [`unprivileged_port_from_string`], which enforces the
@@ -25,8 +27,21 @@ impl DerivedPort {
 /// The same input always yields the same port, and the result is always
 /// `>= 1024` (i.e. never a privileged port).
 #[must_use]
-pub fn unprivileged_port_from_string(_input: &str) -> DerivedPort {
-    DerivedPort(0)
+pub fn unprivileged_port_from_string(input: &str) -> DerivedPort {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+
+    // `result` is a fixed 32-byte SHA-256 digest, so indexing the first two
+    // bytes directly is always in bounds (and avoids the `string_slice` lint).
+    let mut port = u16::from_be_bytes([result[0], result[1]]);
+
+    while port < 1024 {
+        port += 1024;
+        port %= 65535;
+    }
+
+    DerivedPort(port)
 }
 
 #[cfg(test)]
