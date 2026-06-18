@@ -185,6 +185,13 @@ fn shallow_clone(repo_url: &str) -> Result<TempDir> {
         .arg("1")
         .arg(repo_url)
         .arg(temp_dir.path())
+        // Scrub any inherited git-location vars so the clone's checkout writes
+        // into the new repo's own index, not whatever GIT_INDEX_FILE/GIT_DIR a
+        // parent git hook exported (which would corrupt the real repo's index).
+        // A no-op in normal use, where none of these are set.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output()
         .context("Failed to run git clone (is git installed?)")?;
 
