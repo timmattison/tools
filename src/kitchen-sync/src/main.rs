@@ -932,6 +932,13 @@ mod tests {
             let out = Command::new("git")
                 .args(args)
                 .current_dir(&repo)
+                // Scrub git-location vars git exports to a hook (absolute
+                // GIT_DIR/GIT_INDEX_FILE in a worktree) so these fixture commits
+                // target `repo`, not the real repo, when this suite runs from
+                // inside the pre-commit hook's own `cargo test`.
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
                 .output()
                 .expect("git must be on PATH for integration tests");
             assert!(

@@ -15,15 +15,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
 
+/// Scrub the git-location env vars git exports when it invokes a hook.
+///
+/// In a worktree, git exports absolute `GIT_DIR`/`GIT_WORK_TREE`/
+/// `GIT_INDEX_FILE` to the pre-commit hook. Those leak into child `git` and
+/// `nwt` processes and pin them to the *real* repo regardless of
+/// `current_dir(tempdir)`, so this fixture's git commands and `nwt`'s
+/// `git worktree add` would operate on the real repo. Scrub them so the
+/// per-test tempdir is the only repo touched.
+fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+}
+
 /// Runs a git command in `dir` with stdout/stderr nulled, returning success.
 /// Stdout/stderr are nulled so concurrent test runs don't interleave noise.
 fn run_git(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
+    let mut cmd = Command::new("git");
+    cmd.args(args)
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    scrub_git_env(&mut cmd)
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -80,10 +95,12 @@ fn ungated_worktree_warning_survives_quiet() {
     // runs these tests concurrently with the pre-commit hook's own run.
     let branch = format!("quiet-warn-{}-{}", std::process::id(), nanos());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_nwt"))
+    let mut nwt_cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
+    nwt_cmd
         .args(["-b", &branch, "-q"])
         .current_dir(&repo)
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    let output = scrub_git_env(&mut nwt_cmd)
         .output()
         .expect("Failed to run nwt binary");
 
