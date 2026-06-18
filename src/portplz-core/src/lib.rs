@@ -60,15 +60,24 @@ pub enum PortSource {
 impl PortSource {
     #[must_use]
     pub fn hash_input(&self) -> String {
-        let _ = self;
-        String::new()
+        match self {
+            Self::GitRepo { repo_name, branch } => format!("{repo_name}\n{branch}"),
+            Self::DetachedHead { repo_name } => repo_name.clone(),
+            Self::Directory { dirname } => dirname.clone(),
+        }
     }
 
     /// Human-readable one-line description, e.g. `Port 1234 for repo 'x' on branch 'y'`.
     #[must_use]
     pub fn describe(&self, port: DerivedPort) -> String {
-        let _ = (self, port);
-        String::new()
+        let desc = match self {
+            Self::GitRepo { repo_name, branch } => {
+                format!("repo '{repo_name}' on branch '{branch}'")
+            }
+            Self::DetachedHead { repo_name } => format!("repo '{repo_name}' (detached HEAD)"),
+            Self::Directory { dirname } => format!("directory '{dirname}' (no git repo)"),
+        };
+        format!("Port {} for {desc}", port.get())
     }
 }
 
