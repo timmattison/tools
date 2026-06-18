@@ -129,6 +129,7 @@ buildinfo = { path = "src/buildinfo" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
+portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
