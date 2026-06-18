@@ -5,6 +5,11 @@ edition.workspace = true
 
 [dependencies]
 sha2.workspace = true
+gix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

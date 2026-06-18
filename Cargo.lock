@@ -5635,7 +5635,10 @@ dependencies = [
 name = "portplz-core"
 version = "0.1.0"
 dependencies = [
+ "gix",
  "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
