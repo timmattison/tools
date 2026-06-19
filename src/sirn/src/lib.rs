@@ -495,10 +495,65 @@ fn respond_files(
     serve_file(file_path, request)
 }
 
-/// Handles one directory-mode request. Placeholder: real listing/file serving
-/// arrives in the next slice; for now every request is a `404`.
-fn respond_directory(_root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
-    request.respond(tiny_http::Response::empty(404))
+/// Handles one directory-mode request: resolves the URL path under `root`, then
+/// either renders a listing (for a directory) or streams the file.
+///
+/// The request URL has any `?query` stripped before resolution. An escape attempt
+/// (`..` traversal or a symlink pointing outside the root) yields `403`; an in-root
+/// path that does not exist yields `404`. An in-root directory renders an HTML
+/// listing; an in-root regular file streams as a `200` (see [`serve_file`]).
+fn respond_directory(root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
+    // Own the path so `request` can be moved into the handler below while it is
+    // still needed (the listing renderer needs the request path).
+    let url_path = request.url().split('?').next().unwrap_or("").to_string();
+    match resolve_under_root(root, &url_path) {
+        PathResolution::Forbidden => request.respond(tiny_http::Response::empty(403)),
+        PathResolution::Missing => request.respond(tiny_http::Response::empty(404)),
+        PathResolution::Allowed(path) => {
+            if path.is_dir() {
+                respond_listing(&path, &url_path, request)
+            } else {
+                serve_file(&path, request)
+            }
+        }
+    }
+}
+
+/// Renders an HTML directory listing for `dir` (already confirmed in-root) and
+/// responds with it.
+///
+/// Entries are collected as `(name, is_dir)` via [`std::fs::DirEntry::file_name`]
+/// (UTF-8 safe, no byte slicing) and sorted directories-first then by name
+/// ascending. A `read_dir` error responds `500`. The body is served as
+/// `text/html; charset=utf-8`.
+fn respond_listing(dir: &Path, url_path: &str, request: tiny_http::Request) -> std::io::Result<()> {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return request.respond(tiny_http::Response::empty(500));
+    };
+
+    let mut entries: Vec<(String, bool)> = Vec::new();
+    for entry in read_dir.flatten() {
+        // `to_string_lossy` keeps multi-byte UTF-8 names intact with no slicing.
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+        entries.push((name, is_dir));
+    }
+    // Directories first, then by name ascending — matching the listing renderer's
+    // caller contract (it expects pre-sorted entries).
+    entries.sort_by(|(a_name, a_dir), (b_name, b_dir)| {
+        b_dir.cmp(a_dir).then_with(|| a_name.cmp(b_name))
+    });
+
+    let body = render_directory_listing(url_path, &entries);
+
+    // The header name and value are compile-time-known-valid, so this `expect`
+    // can never fire.
+    let content_type =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+            .expect("static Content-Type header is always valid");
+
+    let response = tiny_http::Response::from_string(body).with_header(content_type);
+    request.respond(response)
 }
 
 /// A change in a served file's on-disk availability between two monitor polls.
