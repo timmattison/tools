@@ -59,6 +59,39 @@ pub fn content_type_for(path: &Path) -> &'static str {
     }
 }
 
+/// The result of resolving a request URL path against a directory-mode root.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PathResolution {
+    /// The request resolved to this existing, in-root canonical path.
+    Allowed(PathBuf),
+    /// The request tried to escape the root (`..` traversal or a symlink that
+    /// points outside it) -> `403`.
+    Forbidden,
+    /// The request resolved to a path inside the root that does not exist -> `404`.
+    Missing,
+}
+
+/// Resolves an HTTP request URL path against `root`, confining the result to it.
+///
+/// `root` MUST already be canonicalized by the caller. `url_path` is the request
+/// path with any `?query` already stripped (e.g. `/`, `/sub/file.txt`). The path
+/// is rebuilt from only its normal components — a leading `/` (root) and `.`
+/// (current dir) components are skipped, while any `..` (parent) or Windows
+/// prefix component is treated as an escape attempt and rejected. The candidate
+/// is then canonicalized (resolving symlinks) and confirmed to live under `root`;
+/// a symlink pointing outside the root is therefore rejected even though it sits
+/// inside it textually.
+///
+/// Returns [`PathResolution::Forbidden`] for an escape attempt, `Missing` when
+/// the in-root path does not exist, and `Allowed(canonical)` otherwise.
+#[must_use]
+pub fn resolve_under_root(root: &Path, url_path: &str) -> PathResolution {
+    // Naive stub: always reports the path as missing. The behavioral tests in
+    // `confinement_tests` fail against this until the real algorithm lands.
+    let _ = (root, url_path);
+    PathResolution::Missing
+}
+
 /// Error building the route map for files mode.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RouteError {
@@ -860,6 +893,140 @@ mod mode_tests {
         assert_eq!(
             decision,
             Err(ModeError::DirectoryMixedWithFiles("somedir".to_string()))
+        );
+    }
+}
+
+#[cfg(test)]
+mod confinement_tests {
+    use super::{resolve_under_root, PathResolution};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Creates a temp dir and returns it alongside its canonicalized path.
+    ///
+    /// The root MUST be canonicalized: on macOS `TempDir` lives under `/var`,
+    /// which is a symlink to `/private/var`, so an uncanonicalized root would make
+    /// every `starts_with` check fail spuriously.
+    fn canonical_root() -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("temp dir");
+        let root = dir.path().canonicalize().expect("canonicalize root");
+        (dir, root)
+    }
+
+    #[test]
+    fn root_request_resolves_to_the_root() {
+        let (_dir, root) = canonical_root();
+        assert_eq!(
+            resolve_under_root(&root, "/"),
+            PathResolution::Allowed(root.clone())
+        );
+    }
+
+    #[test]
+    fn in_root_file_resolves_to_its_canonical_path() {
+        let (_dir, root) = canonical_root();
+        let file = root.join("a.txt");
+        std::fs::write(&file, b"hi").expect("write file");
+        let expected = file.canonicalize().expect("canonicalize file");
+        assert_eq!(
+            resolve_under_root(&root, "/a.txt"),
+            PathResolution::Allowed(expected)
+        );
+    }
+
+    #[test]
+    fn nested_in_root_file_resolves() {
+        let (_dir, root) = canonical_root();
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).expect("create sub dir");
+        let file = sub.join("b.txt");
+        std::fs::write(&file, b"hi").expect("write file");
+        let expected = file.canonicalize().expect("canonicalize file");
+        assert_eq!(
+            resolve_under_root(&root, "/sub/b.txt"),
+            PathResolution::Allowed(expected)
+        );
+    }
+
+    #[test]
+    fn parent_traversal_is_forbidden() {
+        let (_dir, root) = canonical_root();
+        assert_eq!(
+            resolve_under_root(&root, "/../../etc/passwd"),
+            PathResolution::Forbidden
+        );
+    }
+
+    #[test]
+    fn dotdot_anywhere_is_forbidden() {
+        let (_dir, root) = canonical_root();
+        assert_eq!(
+            resolve_under_root(&root, "/sub/../../x"),
+            PathResolution::Forbidden
+        );
+    }
+
+    #[test]
+    fn missing_in_root_path_is_missing() {
+        let (_dir, root) = canonical_root();
+        assert_eq!(
+            resolve_under_root(&root, "/does-not-exist.txt"),
+            PathResolution::Missing
+        );
+    }
+
+    #[test]
+    fn absolute_looking_request_stays_in_root() {
+        let (_dir, root) = canonical_root();
+        // `/etc/passwd` must be rebuilt under the root, never resolving to the
+        // real system file. Since `root/etc/passwd` does not exist, this is
+        // `Missing`; it must never be an Allowed path outside the root.
+        let resolution = resolve_under_root(&root, "/etc/passwd");
+        assert_ne!(
+            resolution,
+            PathResolution::Allowed(PathBuf::from("/etc/passwd"))
+        );
+        if let PathResolution::Allowed(path) = &resolution {
+            assert!(
+                path.starts_with(&root),
+                "an Allowed path must stay under the root, got {path:?}"
+            );
+        }
+        assert_eq!(resolution, PathResolution::Missing);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_escape_is_forbidden() {
+        let (_dir, root) = canonical_root();
+        // A secret directory living OUTSIDE the served root.
+        let outside = TempDir::new().expect("outside temp dir");
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"top secret").expect("write secret");
+
+        // A symlink that sits textually inside the root but points outside it.
+        std::os::unix::fs::symlink(outside.path(), root.join("link")).expect("create symlink");
+
+        // The symlink target canonicalizes outside the root, so it is rejected.
+        assert_eq!(
+            resolve_under_root(&root, "/link"),
+            PathResolution::Forbidden
+        );
+        assert_eq!(
+            resolve_under_root(&root, "/link/secret.txt"),
+            PathResolution::Forbidden
+        );
+    }
+
+    #[test]
+    fn utf8_request_path_does_not_panic() {
+        let (_dir, root) = canonical_root();
+        // A multi-byte request path for a file that does not exist must resolve
+        // to `Missing` without any byte-index slicing panic.
+        assert_eq!(
+            resolve_under_root(&root, "/日本語.txt"),
+            PathResolution::Missing
         );
     }
 }
