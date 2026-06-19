@@ -1,8 +1,11 @@
 //! `sirn` ("Serve It Right Now") — a tiny, zero-config HTTP file server.
 //!
 //! This library crate holds the reusable pieces of the `sirn` binary so they can
-//! be exercised directly by unit tests. The first such piece is the
-//! [`content_type_for`] extension → MIME lookup used to label served files.
+//! be exercised directly by unit tests. It covers content-type lookup by file
+//! extension, route building from a list of files with basename-collision
+//! detection, serve-mode selection and request serving, directory listing
+//! rendering with path confinement under a served root, and the background
+//! availability monitor that reports when served paths appear or disappear.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
