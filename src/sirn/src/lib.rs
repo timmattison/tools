@@ -59,6 +59,28 @@ pub fn content_type_for(path: &Path) -> &'static str {
     }
 }
 
+/// HTML-escapes `s` for safe insertion into element text or a double-quoted
+/// attribute value. Escapes `&`, `<`, `>`, `"`, and `'`.
+#[must_use]
+pub fn html_escape(s: &str) -> String {
+    // RED stub: returns the input unescaped so the behavioral tests fail.
+    s.to_string()
+}
+
+/// Renders a directory-listing HTML page for `url_path` (the request path, e.g.
+/// `/` or `/sub/`) given `entries` as `(name, is_dir)` pairs (already sorted by
+/// the caller). Each entry name is HTML-escaped; directories are marked with a
+/// trailing `/` in both the displayed text and the link target. Entry hrefs are
+/// absolute (built from `url_path`) so they resolve correctly regardless of
+/// whether `url_path` ends in a slash. A `..` parent link is included unless
+/// `url_path` is the root (`/` or empty).
+#[must_use]
+pub fn render_directory_listing(url_path: &str, entries: &[(String, bool)]) -> String {
+    // RED stub: returns nothing so the behavioral tests fail.
+    let _ = (url_path, entries);
+    String::new()
+}
+
 /// The result of resolving a request URL path against a directory-mode root.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PathResolution {
@@ -918,6 +940,126 @@ mod mode_tests {
             decision,
             Err(ModeError::DirectoryMixedWithFiles("somedir".to_string()))
         );
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::{html_escape, render_directory_listing};
+
+    /// Builds an owned `(name, is_dir)` entry list from string slices.
+    fn entries(items: &[(&str, bool)]) -> Vec<(String, bool)> {
+        items
+            .iter()
+            .map(|(name, is_dir)| ((*name).to_string(), *is_dir))
+            .collect()
+    }
+
+    #[test]
+    fn html_escape_escapes_all_five() {
+        let escaped = html_escape("a<b>&\"'c");
+        assert!(escaped.contains("&lt;"), "should escape '<', got {escaped}");
+        assert!(escaped.contains("&gt;"), "should escape '>', got {escaped}");
+        assert!(
+            escaped.contains("&amp;"),
+            "should escape '&', got {escaped}"
+        );
+        assert!(
+            escaped.contains("&quot;"),
+            "should escape '\"', got {escaped}"
+        );
+        assert!(
+            escaped.contains("&#39;"),
+            "should escape '\\'' as &#39;, got {escaped}"
+        );
+        assert!(
+            !escaped.contains('<'),
+            "no raw '<' should remain, got {escaped}"
+        );
+    }
+
+    #[test]
+    fn listing_lists_entry_names() {
+        let html = render_directory_listing("/", &entries(&[("a.txt", false), ("docs", true)]));
+        assert!(html.contains("a.txt"), "should list a.txt, got:\n{html}");
+        assert!(html.contains("docs"), "should list docs, got:\n{html}");
+    }
+
+    #[test]
+    fn listing_marks_directories() {
+        let html = render_directory_listing("/", &entries(&[("a.txt", false), ("docs", true)]));
+        assert!(
+            html.contains("docs/"),
+            "directory should be marked with a trailing slash, got:\n{html}"
+        );
+        assert!(
+            html.contains("href=\"/docs/\""),
+            "directory href should end in docs/, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn listing_html_escapes_names() {
+        let html = render_directory_listing("/", &entries(&[("a<b>.txt", false)]));
+        assert!(
+            html.contains("a&lt;b&gt;.txt"),
+            "name should be HTML-escaped, got:\n{html}"
+        );
+        assert!(
+            !html.contains("a<b>.txt"),
+            "raw unescaped name must not appear, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn root_listing_has_no_parent_link() {
+        let html = render_directory_listing("/", &entries(&[("a.txt", false)]));
+        assert!(
+            !html.contains(">../<"),
+            "root listing must not include a parent link, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn subdir_listing_has_parent_link() {
+        let html = render_directory_listing("/sub/", &entries(&[("a.txt", false)]));
+        assert!(
+            html.contains(">../<"),
+            "subdir listing should include a `../` parent link, got:\n{html}"
+        );
+        assert!(
+            html.contains("href=\"/\""),
+            "subdir parent link should point to /, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn nested_listing_parent_points_one_level_up() {
+        let html = render_directory_listing("/a/b/", &entries(&[("c.txt", false)]));
+        assert!(
+            html.contains("href=\"/a/\""),
+            "nested parent link should point to /a/, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn entry_hrefs_are_absolute() {
+        let html = render_directory_listing("/sub/", &entries(&[("c.txt", false)]));
+        assert!(
+            html.contains("href=\"/sub/c.txt\""),
+            "entry href should be absolute, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn utf8_names_do_not_panic() {
+        // Multi-byte UTF-8 names must render without any byte-index slicing panic.
+        let html = render_directory_listing(
+            "/",
+            &entries(&[("日本語.txt", false), ("café", true), ("🎉", true)]),
+        );
+        assert!(html.contains("café/"), "café/ should appear, got:\n{html}");
+        assert!(html.contains("🎉/"), "🎉/ should appear, got:\n{html}");
     }
 }
 
