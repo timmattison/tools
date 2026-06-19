@@ -98,6 +98,24 @@ pub fn build_routes(files: &[PathBuf]) -> Result<BTreeMap<String, PathBuf>, Rout
     Ok(routes)
 }
 
+/// Builds the multi-line startup banner for files mode.
+///
+/// `version` is the buildinfo version string, `bind` the bind address, `port`
+/// the resolved port, `source` the optional port-derivation description (included
+/// only under `--verbose`), and `routes` the sorted route map. Every served
+/// file's full `http://<bind>:<port>/<basename>` URL appears on its own line.
+#[must_use]
+pub fn files_banner(
+    version: &str,
+    bind: &str,
+    port: u16,
+    source: Option<&str>,
+    routes: &BTreeMap<String, PathBuf>,
+) -> String {
+    let _ = (version, bind, port, source, routes);
+    String::new()
+}
+
 /// Serves `routes` on `server` using a fixed pool of `workers` threads.
 ///
 /// Each worker loops on `server.recv()`; the pool shuts down when the server is
@@ -348,5 +366,74 @@ mod route_tests {
         assert_eq!(routes.len(), 2);
         assert_eq!(routes.get("/café.md"), Some(&accented));
         assert_eq!(routes.get("/🎉.bin"), Some(&emoji));
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::files_banner;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    /// A 2-entry route map used across the banner assertions.
+    fn sample_routes() -> BTreeMap<String, PathBuf> {
+        let mut routes = BTreeMap::new();
+        routes.insert("/a.txt".to_string(), PathBuf::from("dir/a.txt"));
+        routes.insert("/b.css".to_string(), PathBuf::from("other/b.css"));
+        routes
+    }
+
+    #[test]
+    fn banner_includes_version_and_bind_port() {
+        let routes = sample_routes();
+        let banner = files_banner("0.1.0 (abc1234, clean)", "127.0.0.1", 8080, None, &routes);
+
+        assert!(
+            banner.contains("0.1.0 (abc1234, clean)"),
+            "banner should include the version string, got:\n{banner}"
+        );
+        assert!(
+            banner.contains("127.0.0.1:8080"),
+            "banner should include bind:port, got:\n{banner}"
+        );
+    }
+
+    #[test]
+    fn banner_includes_every_route_url() {
+        let routes = sample_routes();
+        let banner = files_banner("0.1.0", "127.0.0.1", 8080, None, &routes);
+
+        assert!(
+            banner.contains("http://127.0.0.1:8080/a.txt"),
+            "banner should include the full URL for a.txt, got:\n{banner}"
+        );
+        assert!(
+            banner.contains("http://127.0.0.1:8080/b.css"),
+            "banner should include the full URL for b.css, got:\n{banner}"
+        );
+    }
+
+    #[test]
+    fn banner_includes_source_when_some() {
+        let routes = sample_routes();
+        let source = "Port 8080 for repo 'sirn' on branch 'main'";
+        let banner = files_banner("0.1.0", "127.0.0.1", 8080, Some(source), &routes);
+
+        assert!(
+            banner.contains(source),
+            "banner should include the derivation source under --verbose, got:\n{banner}"
+        );
+    }
+
+    #[test]
+    fn banner_omits_source_when_none() {
+        let routes = sample_routes();
+        let source = "Port 8080 for repo 'sirn' on branch 'main'";
+        let banner = files_banner("0.1.0", "127.0.0.1", 8080, None, &routes);
+
+        assert!(
+            !banner.contains(source),
+            "banner should not include any derivation source when None, got:\n{banner}"
+        );
     }
 }
