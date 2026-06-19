@@ -112,8 +112,17 @@ pub fn files_banner(
     source: Option<&str>,
     routes: &BTreeMap<String, PathBuf>,
 ) -> String {
-    let _ = (version, bind, port, source, routes);
-    String::new()
+    use std::fmt::Write as _;
+
+    let mut banner = format!("sirn {version}\n");
+    if let Some(source) = source {
+        let _ = writeln!(banner, "{source}");
+    }
+    let _ = writeln!(banner, "Serving on http://{bind}:{port}");
+    for url_path in routes.keys() {
+        let _ = writeln!(banner, "  http://{bind}:{port}{url_path}");
+    }
+    banner
 }
 
 /// Serves `routes` on `server` using a fixed pool of `workers` threads.
