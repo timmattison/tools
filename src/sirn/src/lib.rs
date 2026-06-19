@@ -323,6 +323,21 @@ pub fn files_banner(
     banner
 }
 
+/// Builds the directory-mode startup banner: the version line, the optional
+/// port-derivation `source` line (under `--verbose`), and a line naming the
+/// served root plus its root URL `http://<bind>:<port>/`.
+#[must_use]
+pub fn directory_banner(
+    version: &str,
+    bind: &str,
+    port: u16,
+    source: Option<&str>,
+    root: &Path,
+) -> String {
+    let _ = (version, bind, port, source, root);
+    String::new()
+}
+
 /// Serves `routes` on `server` using a fixed pool of `workers` threads.
 ///
 /// Each worker loops on `server.recv()`; the pool shuts down when the server is
@@ -777,6 +792,72 @@ mod banner_tests {
         let source = "Port 8080 for repo 'sirn' on branch 'main'";
         let banner = files_banner("0.1.0", "127.0.0.1", 8080, None, &routes);
 
+        assert!(
+            !banner.contains(source),
+            "banner should not include any derivation source when None, got:\n{banner}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod directory_banner_tests {
+    use super::directory_banner;
+    use std::path::Path;
+
+    #[test]
+    fn banner_includes_version() {
+        let banner = directory_banner(
+            "0.1.0 (abc1234, clean)",
+            "127.0.0.1",
+            8080,
+            None,
+            Path::new("/srv/www"),
+        );
+        assert!(
+            banner.contains("0.1.0 (abc1234, clean)"),
+            "banner should include the version string, got:\n{banner}"
+        );
+    }
+
+    #[test]
+    fn banner_includes_root_display() {
+        let root = Path::new("/srv/www");
+        let banner = directory_banner("0.1.0", "127.0.0.1", 8080, None, root);
+        assert!(
+            banner.contains(&root.display().to_string()),
+            "banner should include the served root path, got:\n{banner}"
+        );
+    }
+
+    #[test]
+    fn banner_includes_root_url() {
+        let banner = directory_banner("0.1.0", "127.0.0.1", 8080, None, Path::new("/srv/www"));
+        assert!(
+            banner.contains("http://127.0.0.1:8080/"),
+            "banner should include the root URL, got:\n{banner}"
+        );
+    }
+
+    #[test]
+    fn banner_includes_source_when_some() {
+        let source = "Port 8080 for repo 'sirn' on branch 'main'";
+        let banner = directory_banner(
+            "0.1.0",
+            "127.0.0.1",
+            8080,
+            Some(source),
+            Path::new("/srv/www"),
+        );
+        assert!(
+            banner.contains(source),
+            "banner should include the derivation source under --verbose, got:\n{banner}"
+        );
+    }
+
+    #[test]
+    fn banner_omits_source_when_none() {
+        let source = "Port 8080 for repo 'sirn' on branch 'main'";
+        let banner = directory_banner("0.1.0", "127.0.0.1", 8080, None, Path::new("/srv/www"));
         assert!(
             !banner.contains(source),
             "banner should not include any derivation source when None, got:\n{banner}"
