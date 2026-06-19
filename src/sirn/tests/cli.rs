@@ -55,3 +55,34 @@ fn duplicate_basename_aborts_startup() {
         "stderr should explain the duplicate basename, got: {stderr}"
     );
 }
+
+/// A directory argument mixed with a file aborts startup with a non-zero exit and
+/// a "directory" error on stderr — before any port derivation or bind. This is the
+/// guard against the original bug where a directory argument made every request
+/// hang forever: `decide_mode` rejects the mix up front, so `.output()` returns
+/// promptly with no server ever bound (no hang, no timeout needed).
+#[test]
+fn directory_mixed_with_files_aborts_startup() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"alpha").expect("write a.txt");
+    let subdir = dir.path().join("sub");
+    std::fs::create_dir(&subdir).expect("create sub dir");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+        .args([&file, &subdir])
+        .output()
+        .expect("spawning sirn with a file and a directory should succeed");
+
+    assert!(
+        !output.status.success(),
+        "mixing a directory with a file should make sirn exit non-zero, got {:?}",
+        output.status
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("directory"),
+        "stderr should explain the directory cannot be mixed with files, got: {stderr}"
+    );
+}

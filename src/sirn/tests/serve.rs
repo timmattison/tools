@@ -7,7 +7,8 @@
 //! [`common`] module so they can also back the `monitor` integration test.
 
 mod common;
-use common::{http_get, start, stop};
+use common::{http_get, http_get_with_timeout, start, stop};
+use std::time::Duration;
 
 #[test]
 fn existing_file_serves_bytes_content_type_and_length() {
@@ -85,6 +86,34 @@ fn registered_route_with_missing_file_returns_404() {
     let (addr, server, handles) = start(routes);
 
     let (status, _headers, body) = http_get(addr, "/gone.txt");
+    assert_eq!(status, 404);
+    assert!(body.is_empty(), "404 should have an empty body");
+
+    stop(&server, handles);
+}
+
+/// A files-mode route whose target is a DIRECTORY must return `404` and must not
+/// hang. Before the directory guard existed, streaming a directory advertised its
+/// metadata length and then never produced a body, hanging the client forever.
+/// The timeout helper turns any regression here into a fast failure rather than a
+/// suite-wide hang.
+#[test]
+fn route_to_a_directory_returns_404_without_hanging() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    // Routing a directory path produces `/<dirname>` -> the directory itself.
+    let routes =
+        sirn::build_routes(std::slice::from_ref(&dir.path().to_path_buf())).expect("routes build");
+    let dir_name = dir
+        .path()
+        .file_name()
+        .expect("temp dir has a basename")
+        .to_string_lossy()
+        .into_owned();
+
+    let (addr, server, handles) = start(routes);
+
+    let (status, _headers, body) =
+        http_get_with_timeout(addr, &format!("/{dir_name}"), Duration::from_secs(5));
     assert_eq!(status, 404);
     assert!(body.is_empty(), "404 should have an empty body");
 
