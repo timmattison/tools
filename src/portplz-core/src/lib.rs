@@ -126,14 +126,30 @@ pub enum DeriveError {
 ///
 /// # Errors
 /// Returns [`DeriveError::NoBasename`] if `path` has no final path component.
-pub fn derive(_path: &Path, _no_git: bool) -> Result<Derivation, DeriveError> {
-    // STUB: ignores inputs, always returns a fixed Directory derivation.
-    Ok(Derivation {
-        port: unprivileged_port_from_string("STUB"),
-        source: PortSource::Directory {
-            dirname: "STUB".into(),
-        },
-    })
+pub fn derive(path: &Path, no_git: bool) -> Result<Derivation, DeriveError> {
+    let basename = path
+        .file_name()
+        .ok_or(DeriveError::NoBasename)?
+        .to_string_lossy()
+        .into_owned();
+
+    let source = if no_git {
+        PortSource::Directory { dirname: basename }
+    } else {
+        match gix::discover(path) {
+            Ok(repo) => {
+                let repo_name = get_repo_root_name(&repo).unwrap_or(basename);
+                match get_git_branch(&repo) {
+                    Some(branch) => PortSource::GitRepo { repo_name, branch },
+                    None => PortSource::DetachedHead { repo_name },
+                }
+            }
+            Err(_) => PortSource::Directory { dirname: basename },
+        }
+    };
+
+    let port = unprivileged_port_from_string(&source.hash_input());
+    Ok(Derivation { port, source })
 }
 
 #[cfg(test)]
