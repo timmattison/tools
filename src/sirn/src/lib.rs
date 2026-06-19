@@ -74,10 +74,26 @@ pub enum RouteError {
 ///
 /// # Errors
 /// Returns [`RouteError::DuplicateBasename`] when two inputs share a basename.
-pub fn build_routes(_files: &[PathBuf]) -> Result<BTreeMap<String, PathBuf>, RouteError> {
-    // STUB (red): always returns an empty map so the mapping/collision tests fail
-    // on their assertions rather than on a missing symbol.
-    Ok(BTreeMap::new())
+pub fn build_routes(files: &[PathBuf]) -> Result<BTreeMap<String, PathBuf>, RouteError> {
+    let mut routes: BTreeMap<String, PathBuf> = BTreeMap::new();
+
+    for file in files {
+        // The basename is the final path component; fall back to the whole path's
+        // lossy string for odd inputs (e.g. a trailing-slash or root path). Using
+        // `to_string_lossy` keeps multi-byte UTF-8 names intact with no slicing.
+        let basename = file
+            .file_name()
+            .map_or_else(|| file.to_string_lossy(), |name| name.to_string_lossy())
+            .into_owned();
+        let url = format!("/{basename}");
+
+        if routes.contains_key(&url) {
+            return Err(RouteError::DuplicateBasename(basename));
+        }
+        routes.insert(url, file.clone());
+    }
+
+    Ok(routes)
 }
 
 #[cfg(test)]
@@ -231,7 +247,7 @@ mod route_tests {
     #[test]
     fn single_file_maps_to_one_route() {
         let only = PathBuf::from("some/dir/report.pdf");
-        let routes = build_routes(&[only.clone()]).expect("a single file is ok");
+        let routes = build_routes(std::slice::from_ref(&only)).expect("a single file is ok");
 
         assert_eq!(routes.len(), 1);
         assert_eq!(routes.get("/report.pdf"), Some(&only));
