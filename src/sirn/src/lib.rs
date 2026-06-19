@@ -188,6 +188,16 @@ pub fn spawn_monitor(
     })
 }
 
+/// Opens `path` only if it is a regular file, returning `None` otherwise.
+///
+/// A directory, a missing path, or any other non-regular entry yields `None`.
+/// This guards the streaming path: advertising a directory's metadata length
+/// and then failing to read its bytes would hang the client waiting for a body
+/// that never arrives.
+fn open_regular_file(path: &Path) -> Option<std::fs::File> {
+    std::fs::File::open(path).ok()
+}
+
 /// Handles one request: looks up its path in `routes` and streams the file.
 ///
 /// The lookup path is the request URL with any `?query` stripped (no
@@ -697,5 +707,35 @@ mod monitor_tests {
 
         std::fs::write(&path, b"hi").expect("recreate file");
         assert_eq!(monitor.poll(), vec![Transition::Appeared(name.to_string())]);
+    }
+}
+
+#[cfg(test)]
+mod serve_file_tests {
+    use super::open_regular_file;
+    use tempfile::TempDir;
+
+    #[test]
+    fn directory_is_not_opened_as_a_regular_file() {
+        // A directory is openable via `File::open` on Unix, but it is not a
+        // regular file: streaming it would advertise the directory's metadata
+        // length and then hang the client. It must never be opened here.
+        let dir = TempDir::new().expect("temp dir");
+        assert!(open_regular_file(dir.path()).is_none());
+    }
+
+    #[test]
+    fn regular_file_is_opened() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("x.txt");
+        std::fs::write(&path, b"hi").expect("write file");
+        assert!(open_regular_file(&path).is_some());
+    }
+
+    #[test]
+    fn missing_path_is_not_opened() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("does-not-exist.txt");
+        assert!(open_regular_file(&path).is_none());
     }
 }
