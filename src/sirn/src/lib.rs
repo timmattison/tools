@@ -101,31 +101,58 @@ pub fn build_routes(files: &[PathBuf]) -> Result<BTreeMap<String, PathBuf>, Rout
 /// Serves `routes` on `server` using a fixed pool of `workers` threads.
 ///
 /// Each worker loops on `server.recv()`; the pool shuts down when the server is
-/// unblocked (`server.unblock()`), at which point `recv()` errors and the
-/// workers exit. Returns the worker handles so the caller can join them. At
-/// least one worker is always spawned even if `workers` is `0`.
+/// unblocked (`server.unblock()` once per worker), at which point `recv()` errors
+/// and the workers exit. Returns the worker handles so the caller can join them.
+/// At least one worker is always spawned even if `workers` is `0`.
 #[must_use]
 pub fn serve(
     server: Arc<tiny_http::Server>,
     routes: Arc<BTreeMap<String, PathBuf>>,
     workers: usize,
 ) -> Vec<JoinHandle<()>> {
-    // STUB (red): every request answered with 404 so the connection still
-    // completes (no hang) while status/body/header assertions fail.
-    let _ = &routes;
     (0..workers.max(1))
         .map(|_| {
             let server = Arc::clone(&server);
-            std::thread::spawn(move || loop {
-                match server.recv() {
-                    Ok(request) => {
-                        let _ = request.respond(tiny_http::Response::empty(404));
-                    }
-                    Err(_) => break,
+            let routes = Arc::clone(&routes);
+            std::thread::spawn(move || {
+                // `recv()` errors when the server is unblocked, ending the loop.
+                while let Ok(request) = server.recv() {
+                    // A request or mid-response IO error (e.g. a client
+                    // disconnecting) is swallowed so a single bad request can
+                    // never panic a worker and poison the pool.
+                    let _ = respond(&routes, request);
                 }
             })
         })
         .collect()
+}
+
+/// Handles one request: looks up its path in `routes` and streams the file.
+///
+/// The lookup path is the request URL with any `?query` stripped (no
+/// percent-decoding — exact match). An unregistered path or a file that cannot
+/// be opened on disk yields `404`; an openable file (even empty) streams as a
+/// `200` with a `Content-Length` (set by `tiny_http` from the file size) and a
+/// `Content-Type` from the file's extension.
+fn respond(routes: &BTreeMap<String, PathBuf>, request: tiny_http::Request) -> std::io::Result<()> {
+    let path = request.url().split('?').next().unwrap_or("");
+
+    let Some(file_path) = routes.get(path) else {
+        return request.respond(tiny_http::Response::empty(404));
+    };
+
+    let Ok(file) = std::fs::File::open(file_path) else {
+        return request.respond(tiny_http::Response::empty(404));
+    };
+
+    // The header name and value are compile-time-known-valid, so the only
+    // `expect` on the request path can never fire.
+    let content_type =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type_for(file_path).as_bytes())
+            .expect("static Content-Type header is always valid");
+
+    let response = tiny_http::Response::from_file(file).with_header(content_type);
+    request.respond(response)
 }
 
 #[cfg(test)]
