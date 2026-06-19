@@ -140,9 +140,21 @@ pub fn decide_mode(
     files: &[PathBuf],
     is_dir: impl Fn(&Path) -> bool,
 ) -> Result<ModeDecision, ModeError> {
-    // Naive stub (RED): always claims files mode, ignoring directories entirely.
-    let _ = (files, is_dir);
-    Ok(ModeDecision::Files)
+    match files {
+        // No positional arguments: serve the current directory as a tree.
+        [] => Ok(ModeDecision::Directory(None)),
+        // Exactly one argument that is a directory: serve it as a tree.
+        [only] if is_dir(only) => Ok(ModeDecision::Directory(Some(only.clone()))),
+        // Two or more arguments, or a single non-directory argument. A directory
+        // anywhere in the list is ambiguous (and would hang), so it is a hard
+        // error; otherwise every argument is a file, so this is files mode.
+        _ => match files.iter().find(|file| is_dir(file)) {
+            Some(dir) => Err(ModeError::DirectoryMixedWithFiles(
+                dir.to_string_lossy().into_owned(),
+            )),
+            None => Ok(ModeDecision::Files),
+        },
+    }
 }
 
 /// Builds the multi-line startup banner for files mode.
