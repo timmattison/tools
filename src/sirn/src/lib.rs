@@ -86,10 +86,34 @@ pub enum PathResolution {
 /// the in-root path does not exist, and `Allowed(canonical)` otherwise.
 #[must_use]
 pub fn resolve_under_root(root: &Path, url_path: &str) -> PathResolution {
-    // Naive stub: always reports the path as missing. The behavioral tests in
-    // `confinement_tests` fail against this until the real algorithm lands.
-    let _ = (root, url_path);
-    PathResolution::Missing
+    use std::path::Component;
+
+    // Rebuild the request path from only its normal components. A `..` or a
+    // Windows prefix is a textual escape attempt and is rejected outright; the
+    // leading `/` (root) and any `.` (current dir) are simply skipped.
+    let mut sanitized = PathBuf::new();
+    for component in Path::new(url_path).components() {
+        match component {
+            Component::Normal(c) => sanitized.push(c),
+            Component::CurDir | Component::RootDir => {}
+            Component::ParentDir | Component::Prefix(_) => return PathResolution::Forbidden,
+        }
+    }
+
+    let candidate = root.join(&sanitized);
+
+    // A non-existent path canonicalizes to an error -> Missing.
+    let canonical = match candidate.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => return PathResolution::Missing,
+    };
+
+    // A symlink that pointed outside the root now canonicalizes outside it.
+    if !canonical.starts_with(root) {
+        return PathResolution::Forbidden;
+    }
+
+    PathResolution::Allowed(canonical)
 }
 
 /// Error building the route map for files mode.
