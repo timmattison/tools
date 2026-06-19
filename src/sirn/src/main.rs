@@ -10,7 +10,7 @@ const WORKER_THREADS: usize = 4; // small fixed pool, per spec
 #[command(version = version_string!())]
 #[command(about = "Serve It Right Now — a tiny zero-config HTTP file server", long_about = None)]
 struct Cli {
-    /// Files to serve. Each is served at /<basename>.
+    /// Files to serve, each at /<basename>. With no files, serves the current directory as a browsable tree.
     #[arg(value_name = "FILES")]
     files: Vec<PathBuf>,
 
