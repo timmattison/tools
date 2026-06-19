@@ -15,11 +15,43 @@ use std::path::Path;
 ///
 /// This function never panics.
 #[must_use]
-pub fn content_type_for(_path: &Path) -> &'static str {
-    // Deliberately-wrong stub: the real lookup table is implemented in the GREEN
-    // step. Returning the fallback unconditionally makes the characterization
-    // tests fail on their assertions rather than on a missing symbol.
-    "application/octet-stream"
+pub fn content_type_for(path: &Path) -> &'static str {
+    const OCTET_STREAM: &str = "application/octet-stream";
+
+    // A missing or non-UTF-8 extension falls through to the binary fallback.
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return OCTET_STREAM;
+    };
+
+    // Normalize the extension to lowercase for case-insensitive matching.
+    let ext = ext.to_ascii_lowercase();
+    match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        // application/json is conventionally served without a charset parameter.
+        "json" => "application/json",
+        "txt" => "text/plain; charset=utf-8",
+        "md" => "text/markdown; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        "xml" => "text/xml; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "pdf" => "application/pdf",
+        "wasm" => "application/wasm",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "mp4" => "video/mp4",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        _ => OCTET_STREAM,
+    }
 }
 
 #[cfg(test)]
