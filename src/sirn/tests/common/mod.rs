@@ -86,6 +86,45 @@ pub fn http_get(addr: SocketAddr, path: &str) -> (u16, HashMap<String, String>, 
         raw.extend_from_slice(&buf[..n]);
     }
 
+    parse_response(&raw)
+}
+
+/// Like [`http_get`] but with a read timeout, so a server that hangs mid-response
+/// fails the test promptly instead of blocking forever. Panics (failing the test)
+/// if the read times out.
+pub fn http_get_with_timeout(
+    addr: SocketAddr,
+    path: &str,
+    timeout: std::time::Duration,
+) -> (u16, HashMap<String, String>, Vec<u8>) {
+    let mut stream = TcpStream::connect(addr).expect("connect to server");
+    // A hung server never sends EOF, so bound the read: on timeout the
+    // `.expect("read response")` below panics with a TimedOut error and the test
+    // fails fast instead of blocking the whole suite forever.
+    stream
+        .set_read_timeout(Some(timeout))
+        .expect("set read timeout");
+    let request = format!("GET {path} HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).expect("write request");
+    stream.flush().expect("flush request");
+
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 8192];
+    loop {
+        let n = stream.read(&mut buf).expect("read response");
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+    }
+
+    parse_response(&raw)
+}
+
+/// Parses a raw HTTP/1.0 response into `(status_code, headers_lowercased, body)`.
+///
+/// Header keys are lowercased and values trimmed for case-insensitive lookup.
+fn parse_response(raw: &[u8]) -> (u16, HashMap<String, String>, Vec<u8>) {
     let separator = b"\r\n\r\n";
     let head_end = raw
         .windows(separator.len())
