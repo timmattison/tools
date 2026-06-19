@@ -63,8 +63,18 @@ pub fn content_type_for(path: &Path) -> &'static str {
 /// attribute value. Escapes `&`, `<`, `>`, `"`, and `'`.
 #[must_use]
 pub fn html_escape(s: &str) -> String {
-    // RED stub: returns the input unescaped so the behavioral tests fail.
-    s.to_string()
+    let mut escaped = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// Renders a directory-listing HTML page for `url_path` (the request path, e.g.
@@ -76,9 +86,59 @@ pub fn html_escape(s: &str) -> String {
 /// `url_path` is the root (`/` or empty).
 #[must_use]
 pub fn render_directory_listing(url_path: &str, entries: &[(String, bool)]) -> String {
-    // RED stub: returns nothing so the behavioral tests fail.
-    let _ = (url_path, entries);
-    String::new()
+    use std::fmt::Write as _;
+
+    // A normalized base always ends in `/`, so hrefs are `{base}{name}` and
+    // resolve the same whether or not the request path ended in a slash.
+    let base = if url_path.ends_with('/') {
+        url_path.to_string()
+    } else {
+        format!("{url_path}/")
+    };
+    let escaped_path = html_escape(url_path);
+
+    let mut page = String::new();
+    let _ = writeln!(page, "<!DOCTYPE html>");
+    let _ = writeln!(page, "<html>");
+    let _ = writeln!(page, "<head>");
+    let _ = writeln!(page, "<meta charset=\"utf-8\">");
+    let _ = writeln!(page, "<title>{escaped_path}</title>");
+    let _ = writeln!(page, "</head>");
+    let _ = writeln!(page, "<body>");
+    let _ = writeln!(page, "<h1>{escaped_path}</h1>");
+    let _ = writeln!(page, "<ul>");
+
+    // A `..` parent link precedes the entries unless this is the root listing.
+    if url_path != "/" && !url_path.is_empty() {
+        let parent_href = html_escape(&parent_of(&base));
+        let _ = writeln!(page, "<li><a href=\"{parent_href}\">../</a></li>");
+    }
+
+    for (name, is_dir) in entries {
+        let suffix = if *is_dir { "/" } else { "" };
+        let text = format!("{}{suffix}", html_escape(name));
+        let href = format!("{}{suffix}", html_escape(&format!("{base}{name}")));
+        let _ = writeln!(page, "<li><a href=\"{href}\">{text}</a></li>");
+    }
+
+    let _ = writeln!(page, "</ul>");
+    let _ = writeln!(page, "</body>");
+    let _ = writeln!(page, "</html>");
+    page
+}
+
+/// Returns the parent href for a normalized base (one that ends in `/`).
+///
+/// The trailing `/` is dropped, then everything up to and including the last
+/// remaining `/` is kept (e.g. `/a/b/` -> `/a/`; `/sub/` -> `/`). UTF-8 safe:
+/// it splits on the ASCII `/` boundary via [`str::rsplit_once`], never indexing
+/// raw bytes.
+fn parent_of(base: &str) -> String {
+    let trimmed = base.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some((prefix, _)) => format!("{prefix}/"),
+        None => "/".to_string(),
+    }
 }
 
 /// The result of resolving a request URL path against a directory-mode root.
