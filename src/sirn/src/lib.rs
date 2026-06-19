@@ -100,6 +100,51 @@ pub fn build_routes(files: &[PathBuf]) -> Result<BTreeMap<String, PathBuf>, Rout
     Ok(routes)
 }
 
+/// The serving mode chosen from the positional arguments.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModeDecision {
+    /// Serve a single directory as a browsable tree. `None` means "no directory
+    /// argument was given — serve the current directory"; `Some(path)` means
+    /// "serve this directory argument".
+    Directory(Option<PathBuf>),
+    /// Serve the given positional files in files mode (`/<basename>` routes).
+    Files,
+}
+
+/// Error classifying the positional arguments into a [`ModeDecision`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ModeError {
+    /// A directory argument was mixed with other arguments. A directory can only
+    /// be served on its own; mixing it with files is ambiguous (and would
+    /// otherwise hang, since a directory cannot be streamed as a file).
+    #[error("cannot serve directory '{0}' alongside other arguments: pass a single directory to serve it as a tree, or list only files")]
+    DirectoryMixedWithFiles(String),
+}
+
+/// Classifies positional `files` into a [`ModeDecision`], using `is_dir` to test
+/// whether each argument is a directory on disk.
+///
+/// Rules:
+/// - no arguments -> `Directory(None)` (caller serves the current directory),
+/// - exactly one argument that is a directory -> `Directory(Some(arg))`,
+/// - one or more arguments, none a directory -> `Files`,
+/// - any directory mixed with other arguments -> `Err(DirectoryMixedWithFiles)`.
+///
+/// `is_dir` is injected (rather than calling the filesystem directly) so the
+/// decision logic is unit-testable without touching disk.
+///
+/// # Errors
+/// Returns [`ModeError::DirectoryMixedWithFiles`] when a directory argument is
+/// given together with any other argument.
+pub fn decide_mode(
+    files: &[PathBuf],
+    is_dir: impl Fn(&Path) -> bool,
+) -> Result<ModeDecision, ModeError> {
+    // Naive stub (RED): always claims files mode, ignoring directories entirely.
+    let _ = (files, is_dir);
+    Ok(ModeDecision::Files)
+}
+
 /// Builds the multi-line startup banner for files mode.
 ///
 /// `version` is the buildinfo version string, `bind` the bind address, `port`
@@ -749,5 +794,60 @@ mod serve_file_tests {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("does-not-exist.txt");
         assert!(open_regular_file(&path).is_none());
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::{decide_mode, ModeDecision, ModeError};
+    use std::path::PathBuf;
+
+    #[test]
+    fn no_args_is_directory_mode_for_current_dir() {
+        // No directory argument means "serve the current directory".
+        let decision = decide_mode(&[], |_| false);
+        assert_eq!(decision, Ok(ModeDecision::Directory(None)));
+    }
+
+    #[test]
+    fn single_directory_arg_is_directory_mode_for_that_dir() {
+        let dir = PathBuf::from("somedir");
+        let decision = decide_mode(std::slice::from_ref(&dir), |_| true);
+        assert_eq!(decision, Ok(ModeDecision::Directory(Some(dir))));
+    }
+
+    #[test]
+    fn single_file_arg_is_files_mode() {
+        let decision = decide_mode(&[PathBuf::from("a.txt")], |_| false);
+        assert_eq!(decision, Ok(ModeDecision::Files));
+    }
+
+    #[test]
+    fn multiple_files_is_files_mode() {
+        let decision = decide_mode(&[PathBuf::from("a.txt"), PathBuf::from("b.css")], |_| false);
+        assert_eq!(decision, Ok(ModeDecision::Files));
+    }
+
+    #[test]
+    fn directory_mixed_with_a_file_is_an_error() {
+        // `is_dir` returns true only for "somedir"; mixing it with a file is a
+        // hard startup error so it can never reach the hanging serve path.
+        let files = [PathBuf::from("a.txt"), PathBuf::from("somedir")];
+        let decision = decide_mode(&files, |p| p == std::path::Path::new("somedir"));
+        assert_eq!(
+            decision,
+            Err(ModeError::DirectoryMixedWithFiles("somedir".to_string()))
+        );
+    }
+
+    #[test]
+    fn file_mixed_with_a_directory_in_either_order_is_an_error() {
+        // Same as above, reversed order: the error must not depend on position.
+        let files = [PathBuf::from("somedir"), PathBuf::from("a.txt")];
+        let decision = decide_mode(&files, |p| p == std::path::Path::new("somedir"));
+        assert_eq!(
+            decision,
+            Err(ModeError::DirectoryMixedWithFiles("somedir".to_string()))
+        );
     }
 }
