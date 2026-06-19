@@ -182,6 +182,23 @@ fn respond(routes: &BTreeMap<String, PathBuf>, request: tiny_http::Request) -> s
     request.respond(response)
 }
 
+/// A change in a served file's on-disk availability between two monitor polls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Transition {
+    /// A previously-missing file now exists ("Ready to serve …").
+    Appeared(String),
+    /// A previously-present file is now missing ("Warning! … not found…").
+    Disappeared(String),
+}
+
+impl Transition {
+    /// The exact log line for this transition, mirroring the Java tool's wording.
+    #[must_use]
+    pub fn message(&self) -> String {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::content_type_for;
@@ -443,6 +460,39 @@ mod banner_tests {
         assert!(
             !banner.contains(source),
             "banner should not include any derivation source when None, got:\n{banner}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::Transition;
+
+    #[test]
+    fn appeared_reads_ready_to_serve() {
+        let transition = Transition::Appeared("foo.txt".to_string());
+        assert_eq!(transition.message(), "Ready to serve foo.txt");
+    }
+
+    #[test]
+    fn disappeared_reads_warning_not_found() {
+        let transition = Transition::Disappeared("foo.txt".to_string());
+        assert_eq!(
+            transition.message(),
+            "Warning!  File foo.txt not found..."
+        );
+    }
+
+    #[test]
+    fn utf8_name_survives_both_transitions() {
+        // Multi-byte UTF-8 names must format without any byte-index slicing panic.
+        let appeared = Transition::Appeared("café.txt".to_string());
+        assert_eq!(appeared.message(), "Ready to serve café.txt");
+
+        let disappeared = Transition::Disappeared("日本語.txt".to_string());
+        assert_eq!(
+            disappeared.message(),
+            "Warning!  File 日本語.txt not found..."
         );
     }
 }
