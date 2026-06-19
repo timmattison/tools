@@ -348,6 +348,17 @@ pub fn directory_banner(
     banner
 }
 
+/// The path whose `portplz` derivation supplies the default port, or `None`
+/// meaning "use the current directory".
+///
+/// Directory mode derives from the served root, so `sirn <dir>` selects the same
+/// port as `cd <dir> && sirn`. Files mode has no single served directory, so it
+/// derives from the current directory (`None`).
+#[must_use]
+pub fn port_basis(_mode: &ServeMode) -> Option<&Path> {
+    None
+}
+
 /// Which serving mode the worker pool runs.
 #[derive(Clone)]
 pub enum ServeMode {
@@ -1119,6 +1130,30 @@ mod mode_tests {
             decision,
             Err(ModeError::DirectoryMixedWithFiles("somedir".to_string()))
         );
+    }
+}
+
+#[cfg(test)]
+mod port_basis_tests {
+    use super::{port_basis, ServeMode};
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    #[test]
+    fn directory_mode_derives_from_its_root() {
+        // Directory mode must derive its port from the served root so that
+        // `sirn <dir>` picks the same port as `cd <dir> && sirn`.
+        let mode = ServeMode::Directory(Arc::new(PathBuf::from("/some/dir")));
+        assert_eq!(port_basis(&mode), Some(Path::new("/some/dir")));
+    }
+
+    #[test]
+    fn files_mode_derives_from_current_dir() {
+        // Files mode has no single served directory, so it derives from the
+        // current directory (`None`).
+        let mode = ServeMode::Files(Arc::new(BTreeMap::new()));
+        assert!(port_basis(&mode).is_none());
     }
 }
 
