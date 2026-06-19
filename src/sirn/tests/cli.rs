@@ -32,6 +32,41 @@ fn version_flag_prints_buildinfo_string() {
     );
 }
 
+/// `sirn --help` exits successfully and documents directory mode: with no file
+/// arguments, sirn serves the current directory as a browsable tree. The FILES
+/// positional's help text must mention this, so the rendered help reflects the
+/// full CLI surface from the spec (Phase 5).
+///
+/// We scope the assertion to the FILES argument's own help line (the one that
+/// also names "/<basename>") rather than the whole help output, because an
+/// unrelated option already happens to mention "directory" ("directory-name
+/// based") — a whole-output substring check would pass for the wrong reason.
+/// Asserts case-insensitively on "director" to cover "directory"/"directories".
+#[test]
+fn help_documents_directory_mode() {
+    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+        .arg("--help")
+        .output()
+        .expect("spawning sirn --help should succeed");
+
+    assert!(
+        output.status.success(),
+        "sirn --help should exit 0, got {:?}",
+        output.status
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files_help = stdout
+        .lines()
+        .find(|line| line.contains("/<basename>"))
+        .unwrap_or_else(|| panic!("help should describe the FILES argument, got: {stdout}"))
+        .to_lowercase();
+    assert!(
+        files_help.contains("director"),
+        "the FILES argument's help should document directory mode (no files -> serve a directory), got: {files_help}"
+    );
+}
+
 /// Two files sharing a basename abort startup with a non-zero exit and a clear
 /// "duplicate basename" error on stderr — before any port derivation or bind, so
 /// the process exits immediately rather than hanging on a server.
