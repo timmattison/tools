@@ -64,6 +64,7 @@ arboard = "3.6"
 
 # Networking
 reqwest = { version = "0.12", features = ["json", "stream"] }
+tiny_http = "0.12"
 url = "2.5"
 
 # Date/time
