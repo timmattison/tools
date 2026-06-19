@@ -5627,8 +5627,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
- "gix",
- "sha2 0.10.9",
+ "portplz-core",
 ]
 
 [[package]]
