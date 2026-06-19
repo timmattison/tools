@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 /// Returns the HTTP `Content-Type` for a file, based on its extension.
 ///
@@ -94,6 +96,36 @@ pub fn build_routes(files: &[PathBuf]) -> Result<BTreeMap<String, PathBuf>, Rout
     }
 
     Ok(routes)
+}
+
+/// Serves `routes` on `server` using a fixed pool of `workers` threads.
+///
+/// Each worker loops on `server.recv()`; the pool shuts down when the server is
+/// unblocked (`server.unblock()`), at which point `recv()` errors and the
+/// workers exit. Returns the worker handles so the caller can join them. At
+/// least one worker is always spawned even if `workers` is `0`.
+#[must_use]
+pub fn serve(
+    server: Arc<tiny_http::Server>,
+    routes: Arc<BTreeMap<String, PathBuf>>,
+    workers: usize,
+) -> Vec<JoinHandle<()>> {
+    // STUB (red): every request answered with 404 so the connection still
+    // completes (no hang) while status/body/header assertions fail.
+    let _ = &routes;
+    (0..workers.max(1))
+        .map(|_| {
+            let server = Arc::clone(&server);
+            std::thread::spawn(move || loop {
+                match server.recv() {
+                    Ok(request) => {
+                        let _ = request.respond(tiny_http::Response::empty(404));
+                    }
+                    Err(_) => break,
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
