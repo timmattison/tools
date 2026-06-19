@@ -348,7 +348,17 @@ pub fn directory_banner(
     banner
 }
 
-/// Serves `routes` on `server` using a fixed pool of `workers` threads.
+/// Which serving mode the worker pool runs.
+#[derive(Clone)]
+pub enum ServeMode {
+    /// Files mode: a fixed `/<basename>` -> file route map.
+    Files(Arc<BTreeMap<String, PathBuf>>),
+    /// Directory mode: serve a canonicalized root directory as a browsable tree.
+    Directory(Arc<PathBuf>),
+}
+
+/// Serves requests on `server` in the given `mode` using a fixed pool of
+/// `workers` threads.
 ///
 /// Each worker loops on `server.recv()`; the pool shuts down when the server is
 /// unblocked (`server.unblock()` once per worker), at which point `recv()` errors
@@ -357,20 +367,20 @@ pub fn directory_banner(
 #[must_use]
 pub fn serve(
     server: Arc<tiny_http::Server>,
-    routes: Arc<BTreeMap<String, PathBuf>>,
+    mode: ServeMode,
     workers: usize,
 ) -> Vec<JoinHandle<()>> {
     (0..workers.max(1))
         .map(|_| {
             let server = Arc::clone(&server);
-            let routes = Arc::clone(&routes);
+            let mode = mode.clone();
             std::thread::spawn(move || {
                 // `recv()` errors when the server is unblocked, ending the loop.
                 while let Ok(request) = server.recv() {
                     // A request or mid-response IO error (e.g. a client
                     // disconnecting) is swallowed so a single bad request can
                     // never panic a worker and poison the pool.
-                    let _ = respond(&routes, request);
+                    let _ = respond(&mode, request);
                 }
             })
         })
@@ -443,13 +453,25 @@ fn serve_file(path: &Path, request: tiny_http::Request) -> std::io::Result<()> {
     request.respond(response)
 }
 
-/// Handles one request: looks up its path in `routes` and streams the file.
+/// Dispatches one request to the handler for the active [`ServeMode`].
+fn respond(mode: &ServeMode, request: tiny_http::Request) -> std::io::Result<()> {
+    match mode {
+        ServeMode::Files(routes) => respond_files(routes, request),
+        ServeMode::Directory(root) => respond_directory(root, request),
+    }
+}
+
+/// Handles one files-mode request: looks up its path in `routes` and streams the
+/// file.
 ///
 /// The lookup path is the request URL with any `?query` stripped (no
 /// percent-decoding — exact match). An unregistered path, or a registered path
 /// whose target is missing or is a directory, yields `404`; a registered
 /// regular file (even empty) streams as a `200` (see [`serve_file`]).
-fn respond(routes: &BTreeMap<String, PathBuf>, request: tiny_http::Request) -> std::io::Result<()> {
+fn respond_files(
+    routes: &BTreeMap<String, PathBuf>,
+    request: tiny_http::Request,
+) -> std::io::Result<()> {
     let path = request.url().split('?').next().unwrap_or("");
 
     let Some(file_path) = routes.get(path) else {
@@ -457,6 +479,12 @@ fn respond(routes: &BTreeMap<String, PathBuf>, request: tiny_http::Request) -> s
     };
 
     serve_file(file_path, request)
+}
+
+/// Handles one directory-mode request. Placeholder: real listing/file serving
+/// arrives in the next slice; for now every request is a `404`.
+fn respond_directory(_root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
+    request.respond(tiny_http::Response::empty(404))
 }
 
 /// A change in a served file's on-disk availability between two monitor polls.

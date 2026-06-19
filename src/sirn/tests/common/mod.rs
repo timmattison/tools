@@ -31,7 +31,23 @@ pub fn start(
 ) -> (SocketAddr, Arc<tiny_http::Server>, Vec<JoinHandle<()>>) {
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let handles = sirn::serve(Arc::clone(&server), Arc::new(routes), 2);
+    let handles = sirn::serve(
+        Arc::clone(&server),
+        sirn::ServeMode::Files(Arc::new(routes)),
+        2,
+    );
+    (addr, server, handles)
+}
+
+/// Starts a directory-mode server rooted at `root` (caller canonicalizes it).
+pub fn start_dir(root: PathBuf) -> (SocketAddr, Arc<tiny_http::Server>, Vec<JoinHandle<()>>) {
+    let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
+    let addr = server.server_addr().to_ip().expect("ip addr");
+    let handles = sirn::serve(
+        Arc::clone(&server),
+        sirn::ServeMode::Directory(Arc::new(root)),
+        2,
+    );
     (addr, server, handles)
 }
 

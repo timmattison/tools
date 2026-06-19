@@ -21,7 +21,11 @@ fn file_created_then_deleted_is_reflected_in_fetches() {
 
     let server = Arc::new(tiny_http::Server::http("127.0.0.1:0").expect("bind ephemeral port"));
     let addr = server.server_addr().to_ip().expect("ip addr");
-    let handles = sirn::serve(Arc::clone(&server), Arc::clone(&routes), 2);
+    let handles = sirn::serve(
+        Arc::clone(&server),
+        sirn::ServeMode::Files(Arc::clone(&routes)),
+        2,
+    );
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
     let monitor = sirn::spawn_monitor(Arc::clone(&routes), shutdown_rx);

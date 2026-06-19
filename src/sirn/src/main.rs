@@ -34,17 +34,29 @@ struct Cli {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    if cli.files.is_empty() {
-        // Directory mode arrives in Phase 4.
-        return Err(
-            "directory mode is not yet implemented; specify one or more files to serve".into(),
-        );
-    }
+    // Classify the positional arguments into a serving mode. Render any error via
+    // Display (not the default Debug) so the user sees the helpful message rather
+    // than its Debug form. A directory mixed with files is rejected here.
+    let decision = sirn::decide_mode(&cli.files, |p| p.is_dir()).map_err(|e| e.to_string())?;
 
-    // Collision check BEFORE any binding so a bad invocation exits immediately.
-    // Render the error via Display (not the default Debug) so the user sees the
-    // helpful "duplicate basename '<name>': ..." message rather than its Debug form.
-    let routes = sirn::build_routes(&cli.files).map_err(|e| e.to_string())?;
+    // Build the serving mode up front so a files-mode collision (duplicate
+    // basename) or a mixed dir+files error exits BEFORE any port derivation or
+    // bind.
+    let mode = match decision {
+        sirn::ModeDecision::Files => {
+            let routes = sirn::build_routes(&cli.files).map_err(|e| e.to_string())?;
+            sirn::ServeMode::Files(Arc::new(routes))
+        }
+        sirn::ModeDecision::Directory(opt) => {
+            let root = match opt {
+                Some(p) => p,
+                None => std::env::current_dir()?,
+            };
+            // Canonicalize so directory-mode path confinement has a stable root.
+            let root = root.canonicalize()?;
+            sirn::ServeMode::Directory(Arc::new(root))
+        }
+    };
 
     let (port, source_desc) = match cli.port {
         Some(p) => (p, None),
@@ -67,32 +79,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|e| format!("failed to bind {bind}:{port}: {e}"))?,
     );
 
-    println!(
-        "{}",
-        sirn::files_banner(
-            version_string!(),
-            &bind,
-            port,
-            source_desc.as_deref(),
-            &routes
-        )
-    );
+    // Print the mode-appropriate banner and, in files mode only, spawn the
+    // background availability monitor (it stats the served files).
+    let monitor = match &mode {
+        sirn::ServeMode::Files(routes) => {
+            println!(
+                "{}",
+                sirn::files_banner(
+                    version_string!(),
+                    &bind,
+                    port,
+                    source_desc.as_deref(),
+                    routes
+                )
+            );
+            let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+            Some((
+                shutdown_tx,
+                sirn::spawn_monitor(Arc::clone(routes), shutdown_rx),
+            ))
+        }
+        sirn::ServeMode::Directory(root) => {
+            println!(
+                "{}",
+                sirn::directory_banner(
+                    version_string!(),
+                    &bind,
+                    port,
+                    source_desc.as_deref(),
+                    root
+                )
+            );
+            None
+        }
+    };
 
-    // Share one Arc of the route map across the worker pool and the monitor.
-    let routes = Arc::new(routes);
-
-    // Background availability monitor (files mode), mirroring the Java tool.
-    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
-    let monitor = sirn::spawn_monitor(Arc::clone(&routes), shutdown_rx);
-
-    let handles = sirn::serve(server, Arc::clone(&routes), WORKER_THREADS);
+    let handles = sirn::serve(server, mode, WORKER_THREADS);
     for h in handles {
         let _ = h.join();
     }
 
     // Workers exit only when the server is unblocked; on a clean exit, stop the
-    // monitor too and join it so teardown is orderly.
-    drop(shutdown_tx);
-    let _ = monitor.join();
+    // monitor too (files mode) and join it so teardown is orderly.
+    if let Some((shutdown_tx, monitor)) = monitor {
+        drop(shutdown_tx);
+        let _ = monitor.join();
+    }
     Ok(())
 }
