@@ -250,7 +250,20 @@ impl AvailabilityMonitor {
     /// the previous poll) produces nothing on the next poll. Any stat error is
     /// treated as the file being absent.
     pub fn poll(&mut self) -> Vec<Transition> {
-        Vec::new()
+        let mut transitions = Vec::new();
+        for entry in &mut self.files {
+            // Any stat error (permissions, broken symlink, etc.) counts as absent.
+            let now = entry.path.try_exists().unwrap_or(false);
+            if now != entry.present {
+                transitions.push(if now {
+                    Transition::Appeared(entry.name.clone())
+                } else {
+                    Transition::Disappeared(entry.name.clone())
+                });
+                entry.present = now;
+            }
+        }
+        transitions
     }
 }
 
@@ -553,13 +566,13 @@ mod transition_tests {
 mod monitor_tests {
     use super::{AvailabilityMonitor, Transition};
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
     /// Builds a single-route map (`/<basename>` -> `path`) for these tests.
-    fn route_for(basename: &str, path: &PathBuf) -> BTreeMap<String, PathBuf> {
+    fn route_for(basename: &str, path: &Path) -> BTreeMap<String, PathBuf> {
         let mut routes = BTreeMap::new();
-        routes.insert(format!("/{basename}"), path.clone());
+        routes.insert(format!("/{basename}"), path.to_path_buf());
         routes
     }
 
