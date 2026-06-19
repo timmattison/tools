@@ -7,6 +7,7 @@ edition.workspace = true
 buildinfo.workspace = true
 clap = { workspace = true }
 portplz-core.workspace = true
+thiserror.workspace = true
 tiny_http.workspace = true
 
 [dev-dependencies]

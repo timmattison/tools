@@ -4,7 +4,8 @@
 //! be exercised directly by unit tests. The first such piece is the
 //! [`content_type_for`] extension → MIME lookup used to label served files.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// Returns the HTTP `Content-Type` for a file, based on its extension.
 ///
@@ -52,6 +53,31 @@ pub fn content_type_for(path: &Path) -> &'static str {
         "wav" => "audio/wav",
         _ => OCTET_STREAM,
     }
+}
+
+/// Error building the route map for files mode.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RouteError {
+    /// Two distinct input files share a basename, so they would be served at the
+    /// same `/<basename>` URL. The payload is the bare colliding basename.
+    #[error("duplicate basename '{0}': two files would be served at the same URL")]
+    DuplicateBasename(String),
+}
+
+/// Builds the `/<basename>` -> file route map for files mode.
+///
+/// Each input file is served at `/<basename>` where basename is the final path
+/// component. Two inputs sharing a basename are a hard error (routes must be
+/// unambiguous and self-documenting). The returned [`BTreeMap`] is sorted by URL
+/// key, giving deterministic ordering for the startup banner and tests. Paths are
+/// kept exactly as given (not canonicalized); existence is checked per-request.
+///
+/// # Errors
+/// Returns [`RouteError::DuplicateBasename`] when two inputs share a basename.
+pub fn build_routes(_files: &[PathBuf]) -> Result<BTreeMap<String, PathBuf>, RouteError> {
+    // STUB (red): always returns an empty map so the mapping/collision tests fail
+    // on their assertions rather than on a missing symbol.
+    Ok(BTreeMap::new())
 }
 
 #[cfg(test)]
@@ -183,5 +209,69 @@ mod tests {
     fn dotfile_without_extension_is_octet_stream() {
         // A leading-dot file like ".gitignore" has no Path extension.
         assert_eq!(ct(".gitignore"), "application/octet-stream");
+    }
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::{build_routes, RouteError};
+    use std::path::PathBuf;
+
+    #[test]
+    fn distinct_basenames_map_to_their_files() {
+        let a = PathBuf::from("a/x.txt");
+        let b = PathBuf::from("b/y.txt");
+        let routes = build_routes(&[a.clone(), b.clone()]).expect("distinct basenames are ok");
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes.get("/x.txt"), Some(&a));
+        assert_eq!(routes.get("/y.txt"), Some(&b));
+    }
+
+    #[test]
+    fn single_file_maps_to_one_route() {
+        let only = PathBuf::from("some/dir/report.pdf");
+        let routes = build_routes(&[only.clone()]).expect("a single file is ok");
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes.get("/report.pdf"), Some(&only));
+    }
+
+    #[test]
+    fn empty_input_yields_empty_map() {
+        let routes = build_routes(&[]).expect("no files is ok");
+        assert!(routes.is_empty());
+    }
+
+    #[test]
+    fn duplicate_basename_across_dirs_is_an_error() {
+        let one = PathBuf::from("a/dup.txt");
+        let two = PathBuf::from("b/dup.txt");
+        let err = build_routes(&[one, two]).expect_err("same basename collides");
+
+        assert_eq!(err, RouteError::DuplicateBasename("dup.txt".to_string()));
+    }
+
+    #[test]
+    fn utf8_basenames_collide_correctly() {
+        // Japanese filename (multi-byte UTF-8) shared across two dirs collides on
+        // its bare basename, with no byte-index slicing panic.
+        let one = PathBuf::from("dir1/日本語.txt");
+        let two = PathBuf::from("dir2/日本語.txt");
+        let err = build_routes(&[one, two]).expect_err("same utf-8 basename collides");
+
+        assert_eq!(err, RouteError::DuplicateBasename("日本語.txt".to_string()));
+    }
+
+    #[test]
+    fn distinct_utf8_basenames_map_without_panicking() {
+        let accented = PathBuf::from("docs/café.md");
+        let emoji = PathBuf::from("assets/🎉.bin");
+        let routes =
+            build_routes(&[accented.clone(), emoji.clone()]).expect("distinct utf-8 names are ok");
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes.get("/café.md"), Some(&accented));
+        assert_eq!(routes.get("/🎉.bin"), Some(&emoji));
     }
 }
