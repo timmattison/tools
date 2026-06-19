@@ -78,9 +78,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     );
 
-    let handles = sirn::serve(server, Arc::new(routes), WORKER_THREADS);
+    // Share one Arc of the route map across the worker pool and the monitor.
+    let routes = Arc::new(routes);
+
+    // Background availability monitor (files mode), mirroring the Java tool.
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    let monitor = sirn::spawn_monitor(Arc::clone(&routes), shutdown_rx);
+
+    let handles = sirn::serve(server, Arc::clone(&routes), WORKER_THREADS);
     for h in handles {
         let _ = h.join();
     }
+
+    // Workers exit only when the server is unblocked; on a clean exit, stop the
+    // monitor too and join it so teardown is orderly.
+    drop(shutdown_tx);
+    let _ = monitor.join();
     Ok(())
 }

@@ -6,8 +6,10 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 /// Returns the HTTP `Content-Type` for a file, based on its extension.
 ///
@@ -152,6 +154,38 @@ pub fn serve(
             })
         })
         .collect()
+}
+
+/// How often the availability monitor restats the served files.
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Spawns the files-mode availability monitor on its own thread.
+///
+/// Polls every served file once per [`POLL_INTERVAL`] and prints a line for each
+/// availability transition (`Ready to serve <name>` / `Warning!  File <name> not
+/// found...`), mirroring the original Java tool. The thread exits promptly when
+/// `shutdown` is signalled — either an explicit `()` is sent or the sender is
+/// dropped — so it never delays process teardown by up to a full poll interval.
+/// Returns the join handle so the caller can wait for a clean shutdown.
+#[must_use]
+pub fn spawn_monitor(
+    routes: Arc<BTreeMap<String, PathBuf>>,
+    shutdown: Receiver<()>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut monitor = AvailabilityMonitor::new(&routes);
+        loop {
+            for transition in monitor.poll() {
+                println!("{}", transition.message());
+            }
+            match shutdown.recv_timeout(POLL_INTERVAL) {
+                // Explicit shutdown, or the sender was dropped: stop polling.
+                Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                // Timed out without a signal: poll again.
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    })
 }
 
 /// Handles one request: looks up its path in `routes` and streams the file.
