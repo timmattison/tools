@@ -195,16 +195,39 @@ pub fn spawn_monitor(
 /// and then failing to read its bytes would hang the client waiting for a body
 /// that never arrives.
 fn open_regular_file(path: &Path) -> Option<std::fs::File> {
-    std::fs::File::open(path).ok()
+    let file = std::fs::File::open(path).ok()?;
+    // A directory opens successfully on Unix, so confirm the entry is a regular
+    // file before letting it onto the streaming path.
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
+/// Streams `path` to `request`, or responds `404` if it is not a regular file.
+///
+/// `path` is opened through [`open_regular_file`], so a missing path, a
+/// directory, or any other non-regular entry yields `404` (never a hung stream).
+/// A regular file (even empty) streams as a `200` with a `Content-Length` (set
+/// by `tiny_http` from the file size) and a `Content-Type` from its extension.
+fn serve_file(path: &Path, request: tiny_http::Request) -> std::io::Result<()> {
+    let Some(file) = open_regular_file(path) else {
+        return request.respond(tiny_http::Response::empty(404));
+    };
+
+    // The header name and value are compile-time-known-valid, so the only
+    // `expect` on the request path can never fire.
+    let content_type =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type_for(path).as_bytes())
+            .expect("static Content-Type header is always valid");
+
+    let response = tiny_http::Response::from_file(file).with_header(content_type);
+    request.respond(response)
 }
 
 /// Handles one request: looks up its path in `routes` and streams the file.
 ///
 /// The lookup path is the request URL with any `?query` stripped (no
-/// percent-decoding — exact match). An unregistered path or a file that cannot
-/// be opened on disk yields `404`; an openable file (even empty) streams as a
-/// `200` with a `Content-Length` (set by `tiny_http` from the file size) and a
-/// `Content-Type` from the file's extension.
+/// percent-decoding — exact match). An unregistered path, or a registered path
+/// whose target is missing or is a directory, yields `404`; a registered
+/// regular file (even empty) streams as a `200` (see [`serve_file`]).
 fn respond(routes: &BTreeMap<String, PathBuf>, request: tiny_http::Request) -> std::io::Result<()> {
     let path = request.url().split('?').next().unwrap_or("");
 
@@ -212,18 +235,7 @@ fn respond(routes: &BTreeMap<String, PathBuf>, request: tiny_http::Request) -> s
         return request.respond(tiny_http::Response::empty(404));
     };
 
-    let Ok(file) = std::fs::File::open(file_path) else {
-        return request.respond(tiny_http::Response::empty(404));
-    };
-
-    // The header name and value are compile-time-known-valid, so the only
-    // `expect` on the request path can never fire.
-    let content_type =
-        tiny_http::Header::from_bytes(&b"Content-Type"[..], content_type_for(file_path).as_bytes())
-            .expect("static Content-Type header is always valid");
-
-    let response = tiny_http::Response::from_file(file).with_header(content_type);
-    request.respond(response)
+    serve_file(file_path, request)
 }
 
 /// A change in a served file's on-disk availability between two monitor polls.
