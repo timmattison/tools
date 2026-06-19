@@ -202,6 +202,58 @@ impl Transition {
     }
 }
 
+/// Tracks the on-disk presence of each served file and reports availability
+/// transitions between successive polls.
+///
+/// Each file starts assumed-present (optimistic): a file that is present at
+/// startup produces no message (the startup banner already announced it), while
+/// a file that is already missing at the first poll is reported exactly once.
+pub struct AvailabilityMonitor {
+    /// Per file: its display name, the path to stat, and last-observed presence.
+    files: Vec<MonitoredFile>,
+}
+
+/// One served file's monitor state: its display name, on-disk path, and the
+/// presence observed at the most recent poll.
+struct MonitoredFile {
+    /// The basename shown in log lines (the route key without the leading `/`).
+    name: String,
+    /// The path stat-ed each poll to determine presence.
+    path: PathBuf,
+    /// Last-observed presence; initialized `true` (assumed present at startup).
+    present: bool,
+}
+
+impl AvailabilityMonitor {
+    /// Builds a monitor from a files-mode route map (`/<basename>` -> path).
+    ///
+    /// The display name is the route key with its single leading `/` removed.
+    /// Every file starts assumed-present so that present-at-startup files emit
+    /// nothing on the first poll (the startup banner already announced them).
+    #[must_use]
+    pub fn new(routes: &BTreeMap<String, PathBuf>) -> Self {
+        let files = routes
+            .iter()
+            .map(|(url, path)| MonitoredFile {
+                name: url.strip_prefix('/').unwrap_or(url).to_string(),
+                path: path.clone(),
+                present: true,
+            })
+            .collect();
+        Self { files }
+    }
+
+    /// Stats every file and returns the transitions since the last poll, in the
+    /// monitor's file order.
+    ///
+    /// Each file's stored presence is updated so a steady state (no change since
+    /// the previous poll) produces nothing on the next poll. Any stat error is
+    /// treated as the file being absent.
+    pub fn poll(&mut self) -> Vec<Transition> {
+        Vec::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::content_type_for;
@@ -494,5 +546,109 @@ mod transition_tests {
             disappeared.message(),
             "Warning!  File 日本語.txt not found..."
         );
+    }
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::{AvailabilityMonitor, Transition};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    /// Builds a single-route map (`/<basename>` -> `path`) for these tests.
+    fn route_for(basename: &str, path: &PathBuf) -> BTreeMap<String, PathBuf> {
+        let mut routes = BTreeMap::new();
+        routes.insert(format!("/{basename}"), path.clone());
+        routes
+    }
+
+    #[test]
+    fn present_then_absent_yields_one_disappeared() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("x.txt");
+        std::fs::write(&path, b"hi").expect("write file");
+        let routes = route_for("x.txt", &path);
+
+        let mut monitor = AvailabilityMonitor::new(&routes);
+        // Present at startup -> nothing on the first poll.
+        assert_eq!(monitor.poll(), Vec::<Transition>::new());
+
+        std::fs::remove_file(&path).expect("remove file");
+        assert_eq!(
+            monitor.poll(),
+            vec![Transition::Disappeared("x.txt".to_string())]
+        );
+    }
+
+    #[test]
+    fn absent_then_present_yields_one_appeared() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("x.txt");
+        // Do not create the file yet.
+        let routes = route_for("x.txt", &path);
+
+        let mut monitor = AvailabilityMonitor::new(&routes);
+        // Absent at the first poll -> reported once.
+        assert_eq!(
+            monitor.poll(),
+            vec![Transition::Disappeared("x.txt".to_string())]
+        );
+
+        std::fs::write(&path, b"hi").expect("write file");
+        assert_eq!(
+            monitor.poll(),
+            vec![Transition::Appeared("x.txt".to_string())]
+        );
+    }
+
+    #[test]
+    fn steady_state_yields_no_messages() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("x.txt");
+        std::fs::write(&path, b"hi").expect("write file");
+        let routes = route_for("x.txt", &path);
+
+        let mut monitor = AvailabilityMonitor::new(&routes);
+        assert_eq!(monitor.poll(), Vec::<Transition>::new());
+        assert_eq!(monitor.poll(), Vec::<Transition>::new());
+    }
+
+    #[test]
+    fn initial_absence_reported_once() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("x.txt");
+        // Never created.
+        let routes = route_for("x.txt", &path);
+
+        let mut monitor = AvailabilityMonitor::new(&routes);
+        assert_eq!(
+            monitor.poll(),
+            vec![Transition::Disappeared("x.txt".to_string())]
+        );
+        // Still absent -> not reported again.
+        assert_eq!(monitor.poll(), Vec::<Transition>::new());
+    }
+
+    #[test]
+    fn utf8_name_does_not_panic() {
+        let dir = TempDir::new().expect("temp dir");
+        let name = "日本語.txt";
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"hi").expect("write file");
+        let routes = route_for(name, &path);
+
+        let mut monitor = AvailabilityMonitor::new(&routes);
+        // Present at startup -> nothing first.
+        assert_eq!(monitor.poll(), Vec::<Transition>::new());
+
+        std::fs::remove_file(&path).expect("remove file");
+        assert_eq!(
+            monitor.poll(),
+            vec![Transition::Disappeared(name.to_string())]
+        );
+
+        std::fs::write(&path, b"hi").expect("recreate file");
+        assert_eq!(monitor.poll(), vec![Transition::Appeared(name.to_string())]);
     }
 }
