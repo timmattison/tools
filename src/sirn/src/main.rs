@@ -61,7 +61,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (port, source_desc) = match cli.port {
         Some(p) => (p, None),
         None => {
-            let d = portplz_core::derive(&std::env::current_dir()?, cli.no_git)?;
+            // Directory mode derives from the served root so `sirn <dir>` picks
+            // the same port as `cd <dir> && sirn`; files mode derives from the
+            // current directory.
+            let derive_path = match sirn::port_basis(&mode) {
+                Some(p) => p.to_path_buf(),
+                None => std::env::current_dir()?,
+            };
+            let d = portplz_core::derive(&derive_path, cli.no_git)?;
             let src = if cli.verbose {
                 Some(d.source.describe(d.port))
             } else {

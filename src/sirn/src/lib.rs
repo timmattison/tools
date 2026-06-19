@@ -355,8 +355,11 @@ pub fn directory_banner(
 /// port as `cd <dir> && sirn`. Files mode has no single served directory, so it
 /// derives from the current directory (`None`).
 #[must_use]
-pub fn port_basis(_mode: &ServeMode) -> Option<&Path> {
-    None
+pub fn port_basis(mode: &ServeMode) -> Option<&Path> {
+    match mode {
+        ServeMode::Directory(root) => Some(root.as_ref()),
+        ServeMode::Files(_) => None,
+    }
 }
 
 /// Which serving mode the worker pool runs.
