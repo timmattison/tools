@@ -195,7 +195,10 @@ impl Transition {
     /// The exact log line for this transition, mirroring the Java tool's wording.
     #[must_use]
     pub fn message(&self) -> String {
-        String::new()
+        match self {
+            Transition::Appeared(name) => format!("Ready to serve {name}"),
+            Transition::Disappeared(name) => format!("Warning!  File {name} not found..."),
+        }
     }
 }
 
@@ -477,10 +480,7 @@ mod transition_tests {
     #[test]
     fn disappeared_reads_warning_not_found() {
         let transition = Transition::Disappeared("foo.txt".to_string());
-        assert_eq!(
-            transition.message(),
-            "Warning!  File foo.txt not found..."
-        );
+        assert_eq!(transition.message(), "Warning!  File foo.txt not found...");
     }
 
     #[test]
