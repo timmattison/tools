@@ -334,8 +334,18 @@ pub fn directory_banner(
     source: Option<&str>,
     root: &Path,
 ) -> String {
-    let _ = (version, bind, port, source, root);
-    String::new()
+    use std::fmt::Write as _;
+
+    let mut banner = format!("sirn {version}\n");
+    if let Some(source) = source {
+        let _ = writeln!(banner, "{source}");
+    }
+    let _ = writeln!(
+        banner,
+        "Serving {} on http://{bind}:{port}/",
+        root.display()
+    );
+    banner
 }
 
 /// Serves `routes` on `server` using a fixed pool of `workers` threads.
