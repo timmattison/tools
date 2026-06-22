@@ -64,7 +64,9 @@ arboard = "3.6"
 
 # Networking
 reqwest = { version = "0.12", features = ["json", "stream"] }
+tiny_http = "0.12"
 url = "2.5"
+percent-encoding = "2.3"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
@@ -129,6 +131,7 @@ buildinfo = { path = "src/buildinfo" }
 op-cache = { path = "src/op-cache" }
 clipboardmon = { path = "src/clipboardmon" }
 filewalker = { path = "src/filewalker" }
+portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }

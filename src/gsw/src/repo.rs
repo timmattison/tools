@@ -487,12 +487,21 @@ mod tests {
 
     /// Run a git command in `dir`, isolated from the host's global/system
     /// config, asserting success. Test-only fixture construction.
+    ///
+    /// Scrubs inherited `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` so the
+    /// fixture repo under `dir` is the one git operates on. Without this, when
+    /// the suite runs from inside this repo's own pre-commit hook (git exports
+    /// those vars for the hook), the fixture's commits would land in the *real*
+    /// repo despite `current_dir(dir)`.
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)
             .current_dir(dir)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .status()
             .expect("invoke git");
         assert!(status.success(), "git {args:?} failed");
@@ -673,6 +682,9 @@ mod tests {
             ])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .status()
             .expect("git clone");
         assert!(status.success(), "git clone failed");
@@ -950,6 +962,9 @@ mod tests {
             .current_dir(p)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .status()
             .expect("invoke git merge");
         let repo = open_at(p).unwrap();

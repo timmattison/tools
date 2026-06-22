@@ -6,13 +6,36 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
-fn run_git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        // Make sure user/email config from $HOME doesn't bleed in.
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+/// Scrub the git-location env vars that git exports when it invokes a hook.
+///
+/// In a *worktree*, git exports absolute `GIT_DIR`/`GIT_WORK_TREE`/
+/// `GIT_INDEX_FILE` to the pre-commit hook. Those leak into child `git` and
+/// `gsw` processes (the latter via `gix::discover`) and pin them to the *real*
+/// repo regardless of `current_dir(tempdir)`, so fixture commits land in the
+/// real repo and `gsw` reports the real repo's status. Every git and gsw
+/// invocation here routes through this so the per-test tempdir is the target,
+/// in both the main checkout (relative env, harmless) and worktrees (absolute).
+fn scrub_git_env(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+}
+
+/// Build a `gsw` binary command with the git env already scrubbed and
+/// `current_dir` set, ready for callers to add flags/env before running.
+fn gsw_command(dir: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_gsw"));
+    cmd.current_dir(dir);
+    scrub_git_env(&mut cmd);
+    cmd
+}
+
+fn run_git(dir: &Path, args: &[&str]) {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(dir);
+    let status = scrub_git_env(&mut cmd)
         .status()
         .expect("failed to invoke git");
     assert!(status.success(), "git {args:?} failed");
@@ -26,10 +49,9 @@ fn run_gsw(dir: &Path) -> String {
 /// return its stdout. Capturing the output makes stdout a pipe, which is the
 /// non-TTY path: watch mode auto-falls-back to a single one-shot render.
 fn run_gsw_args(dir: &Path, extra: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir)
         .arg("--no-color")
         .args(extra)
-        .current_dir(dir)
         .output()
         .expect("failed to invoke gsw");
     assert!(
@@ -154,12 +176,9 @@ fn outside_git_repo_prints_friendly_header_and_exits_zero() {
     // Deliberately no `git init`. Set GIT_CEILING_DIRECTORIES so git won't
     // walk upward into whatever happens to be above /tmp on this host.
     let parent = dir.path().parent().unwrap_or(Path::new("/"));
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .arg("--no-color")
-        .current_dir(dir.path())
         .env("GIT_CEILING_DIRECTORIES", parent)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .expect("failed to invoke gsw");
     assert!(
@@ -180,11 +199,8 @@ fn bare_repo_prints_friendly_header_and_exits_zero() {
     // A bare repo has no working tree, so gsw can't render a per-file view.
     // It should bail out cleanly the same way it does outside any repo.
     run_git(dir.path(), &["init", "--bare", "-q"]);
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .arg("--no-color")
-        .current_dir(dir.path())
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .expect("failed to invoke gsw");
     assert!(
@@ -210,9 +226,8 @@ fn shows_age_for_modified_file_when_run_from_subdir() {
     fs::create_dir(dir.path().join("sub")).unwrap();
     fs::write(dir.path().join("a.txt"), "edited from sub\n").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(&dir.path().join("sub"))
         .arg("--no-color")
-        .current_dir(dir.path().join("sub"))
         .output()
         .expect("failed to invoke gsw");
     assert!(output.status.success(), "gsw exited non-zero");
@@ -266,13 +281,12 @@ fn columns_env_with_piped_stdout_narrows_width_and_preserves_colors() {
     let dir = setup_repo();
     make_long_staged(dir.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .env("COLUMNS", "50")
         // Make the test independent of the host's NO_COLOR / CLICOLOR setup.
         .env_remove("NO_COLOR")
         .env_remove("CLICOLOR")
         .env_remove("CLICOLOR_FORCE")
-        .current_dir(dir.path())
         .output()
         .expect("failed to invoke gsw");
     assert!(
@@ -298,10 +312,9 @@ fn columns_env_ignored_when_no_color_env_is_set() {
     let dir = setup_repo();
     make_long_staged(dir.path());
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .env("COLUMNS", "50")
         .env("NO_COLOR", "1")
-        .current_dir(dir.path())
         .output()
         .expect("failed to invoke gsw");
     assert!(output.status.success(), "gsw exited non-zero");
@@ -328,9 +341,8 @@ fn shows_recent_commit_subject_in_log_section() {
 #[test]
 fn no_log_flag_suppresses_log_section() {
     let dir = setup_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .args(["--no-color", "--no-log"])
-        .current_dir(dir.path())
         .output()
         .expect("failed to invoke gsw");
     assert!(output.status.success(), "gsw exited non-zero");
@@ -348,9 +360,8 @@ fn log_row_ends_with_commit_age_in_detailed_format() {
     // `2h14m`, `3d12h`). The "initial" commit is freshly minted, so its row
     // should end with a digit followed by `s`/`m`/`h`/`d`.
     let dir = setup_repo();
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .args(["--no-color", "--log-lines", "1"])
-        .current_dir(dir.path())
         .output()
         .expect("failed to invoke gsw");
     assert!(output.status.success(), "gsw exited non-zero");
@@ -385,9 +396,8 @@ fn log_lines_flag_caps_visible_commits() {
             &["commit", "-q", "-m", &format!("rev-{i}-subject")],
         );
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .args(["--no-color", "--log-lines", "2"])
-        .current_dir(dir.path())
         .output()
         .expect("failed to invoke gsw");
     assert!(output.status.success(), "gsw exited non-zero");
@@ -527,10 +537,9 @@ fn width_offset_flag_narrows_render() {
     let dir = setup_repo();
     make_long_staged(dir.path());
 
-    let baseline = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let baseline = gsw_command(dir.path())
         .arg("--no-color")
         .env("COLUMNS", "80")
-        .current_dir(dir.path())
         .output()
         .expect("baseline gsw failed");
     assert!(baseline.status.success());
@@ -540,12 +549,11 @@ fn width_offset_flag_narrows_render() {
         "baseline width should fit the long path without truncation: {baseline_str}",
     );
 
-    let with_offset = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let with_offset = gsw_command(dir.path())
         .arg("--no-color")
         .arg("--width-offset")
         .arg("30")
         .env("COLUMNS", "80")
-        .current_dir(dir.path())
         .output()
         .expect("offset gsw failed");
     assert!(with_offset.status.success());
@@ -571,11 +579,10 @@ fn lines_env_under_watch_wrapper_keeps_output_within_content_area() {
         fs::write(dir.path().join(format!("file_{i:02}.txt")), "x\n").unwrap();
     }
     let lines = 15_usize;
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .arg("--no-color")
         .env("COLUMNS", "80")
         .env("LINES", lines.to_string())
-        .current_dir(dir.path())
         .output()
         .expect("failed to invoke gsw");
     assert!(
@@ -614,11 +621,10 @@ fn short_file_list_renders_in_full_in_a_short_terminal() {
     fs::write(dir.path().join("f2.txt"), "two\n").unwrap();
     run_git(dir.path(), &["add", "f1.txt", "f2.txt"]);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gsw"))
+    let output = gsw_command(dir.path())
         .arg("--no-color")
         .env("COLUMNS", "80")
         .env("LINES", "12")
-        .current_dir(dir.path())
         .output()
         .expect("failed to invoke gsw");
     assert!(output.status.success(), "gsw exited non-zero");
@@ -650,12 +656,12 @@ fn one_shot_flag_matches_default_piped_output() {
     // the formatter renders them as `XdYh` (smallest shown unit is hours);
     // sub-second drift between the runs then cannot change the bytes.
     const FIXED_PAST: &str = "2020-01-01T12:34:56 +0000";
-    let amend = Command::new("git")
+    let mut amend_cmd = Command::new("git");
+    amend_cmd
         .args(["commit", "--amend", "--no-edit", "--date", FIXED_PAST])
         .env("GIT_COMMITTER_DATE", FIXED_PAST)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_SYSTEM", "/dev/null")
-        .current_dir(dir.path())
+        .current_dir(dir.path());
+    let amend = scrub_git_env(&mut amend_cmd)
         .status()
         .expect("failed to backdate commit");
     assert!(amend.success(), "git commit --amend (backdate) failed");

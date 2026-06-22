@@ -53,6 +53,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `runat` | TUI to run a command at a specified time with a live countdown. |
 | `safeboard` | Monitors the clipboard for dangerous/invisible Unicode used in copy-paste attacks. |
 | `sf` | Size of Files — total size of files in directories, with optional suffix/prefix/substring filters. |
+| `sirn` | Serve It Right Now — a zero-config HTTP file server; serves files or the current directory on a git-derived port. |
 | `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd and open files. |
 | `subito` | Subscribes to AWS IoT Core topics and prints received messages. |
 | `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks). |
