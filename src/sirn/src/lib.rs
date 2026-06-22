@@ -926,6 +926,27 @@ mod banner_tests {
             "banner should not include any derivation source when None, got:\n{banner}"
         );
     }
+
+    #[test]
+    fn banner_percent_encodes_route_with_space() {
+        // A route key with a space must produce a clickable, valid URL line: the
+        // space is percent-encoded, and the raw-space URL must not appear.
+        let mut routes = BTreeMap::new();
+        routes.insert(
+            "/with space.txt".to_string(),
+            PathBuf::from("dir/with space.txt"),
+        );
+        let banner = files_banner("0.1.0", "127.0.0.1", 8080, None, &routes);
+
+        assert!(
+            banner.contains("http://127.0.0.1:8080/with%20space.txt"),
+            "banner should percent-encode the space in the route URL, got:\n{banner}"
+        );
+        assert!(
+            !banner.contains("http://127.0.0.1:8080/with space.txt"),
+            "banner must not contain a raw-space URL, got:\n{banner}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1354,6 +1375,66 @@ mod listing_tests {
         );
         assert!(html.contains("café/"), "café/ should appear, got:\n{html}");
         assert!(html.contains("🎉/"), "🎉/ should appear, got:\n{html}");
+    }
+
+    #[test]
+    fn space_in_name_is_percent_encoded_in_href_only() {
+        // A name with a space must be percent-encoded in the href (a raw space in
+        // an href is malformed) while the visible link text stays human-readable.
+        let html = render_directory_listing("/", &entries(&[("a b.txt", false)]));
+        assert!(
+            html.contains("href=\"/a%20b.txt\""),
+            "href should percent-encode the space, got:\n{html}"
+        );
+        assert!(
+            !html.contains("href=\"/a b.txt\""),
+            "href must not contain a raw space, got:\n{html}"
+        );
+        assert!(
+            html.contains(">a b.txt<"),
+            "visible link text must remain the readable name, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn non_ascii_name_is_percent_encoded_in_href() {
+        // A non-ASCII name must be percent-encoded in the href (UTF-8 bytes), so
+        // `café.txt` -> `caf%C3%A9.txt`, while the text stays readable.
+        let html = render_directory_listing("/", &entries(&[("café.txt", false)]));
+        assert!(
+            html.contains("href=\"/caf%C3%A9.txt\""),
+            "href should percent-encode the non-ASCII bytes, got:\n{html}"
+        );
+        assert!(
+            html.contains(">café.txt<"),
+            "visible link text must remain the readable name, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn directory_with_space_encodes_name_and_keeps_trailing_slash() {
+        // A directory name with a space must be encoded with its trailing `/`
+        // preserved (the `/` separator stays literal, the space is encoded).
+        let html = render_directory_listing("/", &entries(&[("my dir", true)]));
+        assert!(
+            html.contains("href=\"/my%20dir/\""),
+            "directory href should encode the space and keep the trailing slash, got:\n{html}"
+        );
+    }
+
+    #[test]
+    fn plain_ascii_hrefs_round_trip_unchanged() {
+        // Plain ASCII names must be byte-for-byte unchanged so existing links keep
+        // working: `/sub/c.txt` stays `/sub/c.txt`, `/docs/` stays `/docs/`.
+        let html = render_directory_listing("/sub/", &entries(&[("c.txt", false), ("docs", true)]));
+        assert!(
+            html.contains("href=\"/sub/c.txt\""),
+            "plain ASCII file href should be unchanged, got:\n{html}"
+        );
+        assert!(
+            html.contains("href=\"/sub/docs/\""),
+            "plain ASCII directory href should be unchanged, got:\n{html}"
+        );
     }
 }
 
