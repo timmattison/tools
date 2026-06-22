@@ -120,6 +120,45 @@ fn route_to_a_directory_returns_404_without_hanging() {
     stop(&server, handles);
 }
 
+/// A served filename containing a space arrives percent-encoded (`%20`) from a
+/// browser; the server must percent-decode the request path before matching it
+/// against the on-disk basename route.
+#[test]
+fn file_with_space_is_reachable_via_percent_encoded_path() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("with space.txt");
+    let contents = b"spaced out\n";
+    std::fs::write(&path, contents).expect("write with space.txt");
+
+    let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
+    let (addr, server, handles) = start(routes);
+
+    let (status, _headers, body) = http_get(addr, "/with%20space.txt");
+    assert_eq!(status, 200);
+    assert_eq!(body, contents);
+
+    stop(&server, handles);
+}
+
+/// A non-ASCII filename arrives UTF-8 percent-encoded (`café.txt` ->
+/// `/caf%C3%A9.txt`); the server must decode it before route lookup.
+#[test]
+fn non_ascii_file_is_reachable_via_percent_encoded_path() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let path = dir.path().join("café.txt");
+    let contents = b"accented\n";
+    std::fs::write(&path, contents).expect("write café.txt");
+
+    let routes = sirn::build_routes(std::slice::from_ref(&path)).expect("routes build");
+    let (addr, server, handles) = start(routes);
+
+    let (status, _headers, body) = http_get(addr, "/caf%C3%A9.txt");
+    assert_eq!(status, 200);
+    assert_eq!(body, contents);
+
+    stop(&server, handles);
+}
+
 #[test]
 fn unregistered_route_returns_404() {
     let dir = tempfile::TempDir::new().expect("temp dir");
