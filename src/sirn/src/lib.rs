@@ -7,7 +7,7 @@
 //! rendering with path confinement under a served root, and the background
 //! availability monitor that reports when served paths appear or disappear.
 
-use percent_encoding::percent_decode_str;
+use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -81,6 +81,54 @@ pub fn html_escape(s: &str) -> String {
     escaped
 }
 
+/// Chars to percent-encode within a single URL path segment: controls plus the
+/// reserved / unsafe ASCII characters. RFC 3986 unreserved chars
+/// (`A-Za-z0-9-._~`) are left readable; [`utf8_percent_encode`] encodes every
+/// non-ASCII byte regardless of this set.
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'+')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'{')
+    .add(b'}')
+    .add(b'|')
+    .add(b'\\');
+
+/// Percent-encodes one URL path segment (a filename with no `/`).
+///
+/// Reserved, unsafe, and control ASCII characters are escaped per [`PATH_SEGMENT`]
+/// and every non-ASCII byte is escaped too, so `a b.txt` -> `a%20b.txt` and
+/// `café.txt` -> `caf%C3%A9.txt`. UTF-8 safe: [`utf8_percent_encode`] iterates
+/// bytes within whole `char`s, never slicing a multi-byte sequence.
+fn encode_segment(segment: &str) -> String {
+    utf8_percent_encode(segment, PATH_SEGMENT).to_string()
+}
+
+/// Percent-encodes a `/`-separated URL path, encoding each segment while
+/// preserving the `/` separators (including any leading or trailing slash).
+///
+/// Splitting on `/` and rejoining keeps the path structure intact — a leading
+/// `/` yields a leading empty segment, a trailing `/` a trailing one — so
+/// `/sub/c.txt` round-trips unchanged and `/my dir/` becomes `/my%20dir/`.
+fn encode_path(path: &str) -> String {
+    path.split('/')
+        .map(encode_segment)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Renders a directory-listing HTML page for `url_path` (the request path, e.g.
 /// `/` or `/sub/`) given `entries` as `(name, is_dir)` pairs (already sorted by
 /// the caller). Each entry name is HTML-escaped; directories are marked with a
@@ -113,15 +161,21 @@ pub fn render_directory_listing(url_path: &str, entries: &[(String, bool)]) -> S
     let _ = writeln!(page, "<ul>");
 
     // A `..` parent link precedes the entries unless this is the root listing.
+    // The href is percent-encoded so a parent path with reserved/non-ASCII bytes
+    // still forms a valid URL.
     if url_path != "/" && !url_path.is_empty() {
-        let parent_href = html_escape(&parent_of(&base));
+        let parent_href = html_escape(&encode_path(&parent_of(&base)));
         let _ = writeln!(page, "<li><a href=\"{parent_href}\">../</a></li>");
     }
 
     for (name, is_dir) in entries {
         let suffix = if *is_dir { "/" } else { "" };
+        // The visible link text stays the decoded, human-readable name; only the
+        // href is percent-encoded so a name with a space or non-ASCII byte (e.g.
+        // `a b.txt`, `café.txt`) yields a valid, clickable URL.
         let text = format!("{}{suffix}", html_escape(name));
-        let href = format!("{}{suffix}", html_escape(&format!("{base}{name}")));
+        let href_raw = format!("{}{}{suffix}", encode_path(&base), encode_segment(name));
+        let href = html_escape(&href_raw);
         let _ = writeln!(page, "<li><a href=\"{href}\">{text}</a></li>");
     }
 
@@ -322,7 +376,9 @@ pub fn files_banner(
     }
     let _ = writeln!(banner, "Serving on http://{bind}:{port}");
     for url_path in routes.keys() {
-        let _ = writeln!(banner, "  http://{bind}:{port}{url_path}");
+        // Percent-encode the route path so a key with a space or non-ASCII byte
+        // (e.g. `/with space.txt`) prints as a valid, clickable URL line.
+        let _ = writeln!(banner, "  http://{bind}:{port}{}", encode_path(url_path));
     }
     banner
 }
