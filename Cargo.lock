@@ -6902,6 +6902,7 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "percent-encoding",
  "portplz-core",
  "tempfile",
  "thiserror 2.0.18",

@@ -66,6 +66,7 @@ arboard = "3.6"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tiny_http = "0.12"
 url = "2.5"
+percent-encoding = "2.3"
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }

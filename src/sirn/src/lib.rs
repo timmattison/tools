@@ -7,6 +7,7 @@
 //! rendering with path confinement under a served root, and the background
 //! availability monitor that reports when served paths appear or disappear.
 
+use percent_encoding::percent_decode_str;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -478,20 +479,34 @@ fn respond(mode: &ServeMode, request: tiny_http::Request) -> std::io::Result<()>
     }
 }
 
+/// Percent-decodes a request URL path (`%20` -> space, `%C3%A9` -> `é`).
+///
+/// Browsers percent-encode any byte outside the unreserved set in the request
+/// target, so a file named `my file.txt` arrives as `/my%20file.txt` and
+/// `café.txt` as `/caf%C3%A9.txt`. Decoding before routing lets these match the
+/// real on-disk names. Invalid UTF-8 in the encoding is replaced lossily, so a
+/// malformed path simply fails to match any real file (404) rather than
+/// erroring. This must run BEFORE [`resolve_under_root`], which still rejects a
+/// decoded `..`/prefix component, so decoding opens no path-traversal hole.
+fn decode_path(raw: &str) -> String {
+    percent_decode_str(raw).decode_utf8_lossy().into_owned()
+}
+
 /// Handles one files-mode request: looks up its path in `routes` and streams the
 /// file.
 ///
-/// The lookup path is the request URL with any `?query` stripped (no
-/// percent-decoding — exact match). An unregistered path, or a registered path
-/// whose target is missing or is a directory, yields `404`; a registered
-/// regular file (even empty) streams as a `200` (see [`serve_file`]).
+/// The lookup path is the request URL with any `?query` stripped and then
+/// percent-decoded (see [`decode_path`]), so a browser-encoded name like
+/// `/my%20file.txt` matches its on-disk basename. An unregistered path, or a
+/// registered path whose target is missing or is a directory, yields `404`; a
+/// registered regular file (even empty) streams as a `200` (see [`serve_file`]).
 fn respond_files(
     routes: &BTreeMap<String, PathBuf>,
     request: tiny_http::Request,
 ) -> std::io::Result<()> {
-    let path = request.url().split('?').next().unwrap_or("");
+    let path = decode_path(request.url().split('?').next().unwrap_or(""));
 
-    let Some(file_path) = routes.get(path) else {
+    let Some(file_path) = routes.get(&path) else {
         return request.respond(tiny_http::Response::empty(404));
     };
 
@@ -501,14 +516,18 @@ fn respond_files(
 /// Handles one directory-mode request: resolves the URL path under `root`, then
 /// either renders a listing (for a directory) or streams the file.
 ///
-/// The request URL has any `?query` stripped before resolution. An escape attempt
-/// (`..` traversal or a symlink pointing outside the root) yields `403`; an in-root
+/// The request URL has any `?query` stripped and is then percent-decoded (see
+/// [`decode_path`]) before resolution, so an encoded name like `/my%20file.txt`
+/// resolves to the real on-disk file and the listing title reflects the
+/// human-readable path. Decoding runs BEFORE [`resolve_under_root`], so a
+/// decoded `..` (e.g. from `%2e%2e`) is still rejected. An escape attempt (`..`
+/// traversal or a symlink pointing outside the root) yields `403`; an in-root
 /// path that does not exist yields `404`. An in-root directory renders an HTML
 /// listing; an in-root regular file streams as a `200` (see [`serve_file`]).
 fn respond_directory(root: &Path, request: tiny_http::Request) -> std::io::Result<()> {
-    // Own the path so `request` can be moved into the handler below while it is
-    // still needed (the listing renderer needs the request path).
-    let url_path = request.url().split('?').next().unwrap_or("").to_string();
+    // Own the decoded path so `request` can be moved into the handler below while
+    // it is still needed (the listing renderer needs the request path).
+    let url_path = decode_path(request.url().split('?').next().unwrap_or(""));
     match resolve_under_root(root, &url_path) {
         PathResolution::Forbidden => request.respond(tiny_http::Response::empty(403)),
         PathResolution::Missing => request.respond(tiny_http::Response::empty(404)),
