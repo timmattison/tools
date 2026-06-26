@@ -428,7 +428,7 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 /// contracts verified there:
 ///
 /// - a burst of filesystem events between renders collapses into **one** collect
-///   and at most one paint (coalescing);
+///   (re-seeding the cache) and at most one paint (coalescing);
 /// - a decay tick re-renders from cache with **no** collect, advancing every age
 ///   by `clock() - collected_at`, and repaints only if the frame changed;
 /// - a resize re-renders the cached snapshot at the new dimensions with **no**
@@ -518,6 +518,10 @@ where
         // — the fresh walk already renders at the current dimensions.
         let render = if saw_fs {
             cache.dims = (hooks.dimensions)();
+            // Re-seed the cache's collection time so a later decay tick or resize
+            // advances ages from *this* walk, not the previous one. Taken before
+            // the walk so it marks the walk's start.
+            cache.collected_at = (hooks.clock)();
             cache.snapshot = (hooks.collect)()?;
             (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
         } else if saw_resize {
