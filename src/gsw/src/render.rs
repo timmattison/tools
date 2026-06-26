@@ -89,14 +89,34 @@ const SEP_ADDS_DELS: usize = 1;
 const SEP_DELS_AGE: usize = 3;
 
 /// Produce the colored, multi-line frame.
+///
+/// Thin delegator to [`render_with_offset`] at `Duration::ZERO`, i.e. with no
+/// age advance — the output is byte-identical to the historical `render`. The
+/// 2-arg shape is preserved so existing call sites and tests stay unchanged.
 pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
+    render_with_offset(snapshot, opts, Duration::ZERO)
+}
+
+/// Produce the colored, multi-line frame with every displayed age advanced
+/// by `age_offset`.
+///
+/// `age_offset` is added (saturating) to the header's last-commit age, every
+/// file row's mtime age, and every commit-log row's age before they are
+/// formatted and faded. `Duration::ZERO` is an exact no-op
+/// (`d.saturating_add(ZERO) == d`), leaving the output byte-identical to
+/// [`render`].
+pub(crate) fn render_with_offset(
+    snapshot: &Snapshot,
+    opts: &RenderOptions,
+    age_offset: Duration,
+) -> String {
     let mut lines = Vec::new();
 
     let HeaderSegments {
         prefix,
         behind,
         suffix,
-    } = header_segments(snapshot);
+    } = header_segments(snapshot, age_offset);
     // The whole header is bold as before; the optional behind segment is
     // additionally warning-colored (yellow) to flag that the branch needs a
     // rebase. When `behind` is `None` the prefix+suffix reproduce today's
@@ -128,7 +148,12 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     let log_rendered = opts.log_lines > 0 && !snapshot.log.is_empty();
     if log_rendered {
         for entry in snapshot.log.iter().take(opts.log_lines) {
-            lines.push(render_log_row(entry, opts.terminal_width, opts.truecolor));
+            lines.push(render_log_row(
+                entry,
+                opts.terminal_width,
+                opts.truecolor,
+                age_offset,
+            ));
         }
     }
 
@@ -140,7 +165,7 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
             lines.push(render_separator(opts.terminal_width));
         }
         for entry in snapshot.files.iter().take(display_count) {
-            lines.push(render_row(entry, opts, max_change, path_width));
+            lines.push(render_row(entry, opts, max_change, path_width, age_offset));
         }
 
         let hidden = snapshot.files.len().saturating_sub(display_count);
@@ -159,29 +184,20 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     lines.join("\n")
 }
 
-/// Produce the colored, multi-line frame with every displayed age advanced
-/// by `age_offset`.
-///
-/// `age_offset` is added (saturating) to the header's last-commit age, every
-/// file row's mtime age, and every commit-log row's age before formatting and
-/// fading. `Duration::ZERO` is an exact no-op, leaving the output
-/// byte-identical to [`render`].
-pub(crate) fn render_with_offset(
-    snapshot: &Snapshot,
-    opts: &RenderOptions,
-    age_offset: Duration,
-) -> String {
-    let _ = age_offset;
-    render(snapshot, opts)
-}
-
 /// Visible gap between the short hash and the subject in a log row.
 const LOG_HASH_SUBJECT_SEP: &str = "  ";
 
-fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool) -> String {
+/// Render one commit-log row.
+///
+/// `age_offset` is added (saturating) to the commit's age before it is
+/// formatted and used to drive the hash/subject/age fades, so the whole row
+/// ages forward by a single shared `Duration`. `Duration::ZERO` leaves the
+/// row byte-identical to the un-offset render.
+fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: Duration) -> String {
     // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
     // hold the right-aligned age, matching the file-row age column exactly.
     // The subject is padded to fill the gap so the age column lines up.
+    let effective_age = entry.age.saturating_add(age_offset);
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
@@ -192,12 +208,12 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool) -> String {
     let subject_truncated = truncate_right(&entry.subject, subject_budget);
     let subject_padded = pad_right(&subject_truncated, subject_budget);
 
-    let age_raw = format_age_detailed(entry.age);
+    let age_raw = format_age_detailed(effective_age);
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
 
-    let hash_str = colorize_log_hash(&entry.hash, entry.age, truecolor);
-    let subject_str = colorize_log_subject(&subject_padded, entry.age, truecolor);
-    let age_str = colorize_log_age(&age_field, entry.age, truecolor);
+    let hash_str = colorize_log_hash(&entry.hash, effective_age, truecolor);
+    let subject_str = colorize_log_subject(&subject_padded, effective_age, truecolor);
+    let age_str = colorize_log_age(&age_field, effective_age, truecolor);
     format!("{hash_str}{LOG_HASH_SUBJECT_SEP}{subject_str}{sep_to_age}{age_str}")
 }
 
@@ -230,7 +246,13 @@ struct HeaderSegments {
     suffix: String,
 }
 
-fn header_segments(snap: &Snapshot) -> HeaderSegments {
+/// Split the header into independently-styleable pieces.
+///
+/// `age_offset` is added (saturating) to the last-commit age before it is
+/// formatted, so the header's `last commit {age} ago` advances in lockstep
+/// with the file and log ages. `Duration::ZERO` leaves the age unchanged. An
+/// unknown last-commit age (`None`) stays `?` regardless of the offset.
+fn header_segments(snap: &Snapshot, age_offset: Duration) -> HeaderSegments {
     let commit_word = if snap.commits_ahead == 1 {
         "commit"
     } else {
@@ -238,6 +260,7 @@ fn header_segments(snap: &Snapshot) -> HeaderSegments {
     };
     let age = snap
         .last_commit_age
+        .map(|a| a.saturating_add(age_offset))
         .map_or_else(|| "?".to_string(), format_age_detailed);
     let upstream_field = snap
         .upstream
@@ -264,14 +287,24 @@ fn render_separator(width: usize) -> String {
     "─".repeat(width).dimmed().to_string()
 }
 
+/// Render one file row.
+///
+/// `age_offset` is added (saturating) to the file's mtime age before it is
+/// formatted, faded, and used to drive the column styling, so the row ages
+/// forward by a single shared `Duration`. A `None` age (deleted file, unstat'd
+/// untracked dir) stays `None` and renders at the dark floor regardless of the
+/// offset. `Duration::ZERO` leaves the row byte-identical to the un-offset
+/// render.
 fn render_row(
     entry: &RenderEntry,
     opts: &RenderOptions,
     max_change: u32,
     path_width: usize,
+    age_offset: Duration,
 ) -> String {
     let (icon, letter) = icon_and_letter(entry);
-    let factor = file_fade_factor(entry.age);
+    let effective_age = entry.age.map(|a| a.saturating_add(age_offset));
+    let factor = file_fade_factor(effective_age);
     let truecolor = opts.truecolor;
 
     let path_display_raw = match &entry.orig_path {
@@ -291,9 +324,9 @@ fn render_row(
     ) {
         let gutter_width = right_block_width(opts.bar_width) - AGE_FIELD;
         let gutter = " ".repeat(gutter_width);
-        let age = entry.age.map(format_age_detailed).unwrap_or_default();
+        let age = effective_age.map(format_age_detailed).unwrap_or_default();
         let age_field = format!("{age:>width$}", width = AGE_FIELD);
-        let age_str = colorize_age(&age_field, entry.age, factor, truecolor);
+        let age_str = colorize_age(&age_field, effective_age, factor, truecolor);
         return format!("{icon_str} {letter_str} {path_str}{gutter}{age_str}");
     }
 
@@ -332,9 +365,9 @@ fn render_row(
         dels_field
     };
 
-    let age_raw = entry.age.map(format_age_detailed).unwrap_or_default();
+    let age_raw = effective_age.map(format_age_detailed).unwrap_or_default();
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
-    let age_str = colorize_age(&age_field, entry.age, factor, truecolor);
+    let age_str = colorize_age(&age_field, effective_age, factor, truecolor);
 
     let sep_bar_adds = " ".repeat(SEP_BAR_ADDS);
     let sep_adds_dels = " ".repeat(SEP_ADDS_DELS);
@@ -2601,6 +2634,15 @@ mod tests {
         // today's render — d.saturating_add(ZERO) == d for every age, so no
         // formatted age and no fade color byte changes. One-shot mode and the
         // seed walk render at ZERO and rely on this exactness.
+        //
+        // Force `colored` on under the shared override guard so the
+        // comparison exercises the actual ANSI bytes and a concurrent test
+        // toggling the process-global override can't flip it between our two
+        // render calls and make identical frames compare unequal.
+        let _guard = COLORED_OVERRIDE_GUARD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        colored::control::set_override(true);
         let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
         snap.last_commit_age = Some(Duration::from_secs(10));
         snap.files[0].age = Some(Duration::from_secs(20));
@@ -2611,9 +2653,9 @@ mod tests {
         }];
         let mut o = opts();
         o.log_lines = 5;
-        assert_eq!(
-            render_with_offset(&snap, &o, Duration::ZERO),
-            render(&snap, &o),
-        );
+        let with_offset = render_with_offset(&snap, &o, Duration::ZERO);
+        let baseline = render(&snap, &o);
+        colored::control::unset_override();
+        assert_eq!(with_offset, baseline);
     }
 }
