@@ -475,7 +475,10 @@ pub(crate) fn render_frame(
     } else {
         render_with_offset(snapshot, &opts, age_offset)
     };
-    let freshest_age = snapshot_freshest_age(snapshot);
+    // Advance the freshest age by the same offset so watch mode's decay-timer
+    // cadence stays in lockstep with the ages painted above. The uniform shift
+    // preserves which item is freshest, so the min() that picked it still holds.
+    let freshest_age = snapshot_freshest_age(snapshot).map(|d| d.saturating_add(age_offset));
     Render {
         output,
         freshest_age,
