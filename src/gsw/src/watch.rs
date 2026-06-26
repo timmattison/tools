@@ -431,6 +431,8 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 ///   and at most one paint (coalescing);
 /// - a decay tick re-renders from cache with **no** collect, advancing every age
 ///   by `clock() - collected_at`, and repaints only if the frame changed;
+/// - a resize re-renders the cached snapshot at the new dimensions with **no**
+///   collect;
 /// - a recompute whose output is byte-identical to what's displayed paints
 ///   nothing (suppression);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
@@ -454,16 +456,35 @@ where
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
+        // Track *which* triggers arrived so the render below can route them: a
+        // filesystem change walks git, a resize re-renders the cache at the new
+        // size, a bare timeout is a decay tick.
+        let mut saw_fs = false;
+        let mut saw_resize = false;
         let woke_for_tick = match (hooks.next_tick)(freshest) {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
-                Ok(_) => false,
+                Ok(Event::FsChanged) => {
+                    saw_fs = true;
+                    false
+                }
+                Ok(Event::Resize) => {
+                    saw_resize = true;
+                    false
+                }
                 Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
             None => match rx.recv() {
                 Ok(Event::Quit) => break,
-                Ok(_) => false,
+                Ok(Event::FsChanged) => {
+                    saw_fs = true;
+                    false
+                }
+                Ok(Event::Resize) => {
+                    saw_resize = true;
+                    false
+                }
                 Err(_) => break,
             },
         };
@@ -478,7 +499,8 @@ where
                         quitting = true;
                         break;
                     }
-                    Ok(_) => {}
+                    Ok(Event::FsChanged) => saw_fs = true,
+                    Ok(Event::Resize) => saw_resize = true,
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
                         quitting = true;
@@ -488,16 +510,24 @@ where
             }
         }
 
-        // Only a filesystem change walks git. A decay tick re-renders the cached
-        // snapshot with no git work, advancing every displayed age by the
-        // wall-clock elapsed since the snapshot was collected (Part A).
-        let render = if woke_for_tick {
-            let age_offset = (hooks.clock)().saturating_duration_since(cache.collected_at);
-            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
-        } else {
+        // Only a filesystem change walks git. A resize re-renders the cached
+        // snapshot at the freshly-queried dimensions; a decay tick re-renders it
+        // at the cached dimensions. Both advance every displayed age by the
+        // wall-clock elapsed since the snapshot was collected (Part A). A
+        // filesystem change in a coalesced burst wins over a co-arriving resize
+        // — the fresh walk already renders at the current dimensions.
+        let render = if saw_fs {
             cache.dims = (hooks.dimensions)();
             cache.snapshot = (hooks.collect)()?;
             (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+        } else if saw_resize {
+            cache.dims = (hooks.dimensions)();
+            let age_offset = (hooks.clock)().saturating_duration_since(cache.collected_at);
+            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+        } else {
+            // Decay tick: no event arrived, just the recv_timeout window elapsed.
+            let age_offset = (hooks.clock)().saturating_duration_since(cache.collected_at);
+            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
         };
 
         if should_repaint(&render.output, displayed) {
