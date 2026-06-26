@@ -1179,6 +1179,68 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_fs_change_reseeds_collected_at() {
+        // After a filesystem change re-collects the snapshot, a later decay tick
+        // must measure its age offset from the NEW collection time, not the stale
+        // seed (Part A). We drive: FsChanged (collected at t+10s), then a tick
+        // (clock at t+15s) whose render must see a 5s offset — not 15s.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue fs change");
+
+        let base = Instant::now();
+        // Clock returns t+10s for the FS collect, then t+15s for the tick.
+        let times = [
+            base + Duration::from_secs(10),
+            base + Duration::from_secs(15),
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let mut displayed = String::new();
+        let mut offsets: Vec<Duration> = Vec::new();
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            Some(Duration::ZERO),
+            LoopHooks {
+                collect: || Ok(empty_snapshot()),
+                render: |_snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                    offsets.push(offset);
+                    // First render is the FS walk (offset 0); the next wake is a
+                    // decay tick. End the loop once the tick render has happened.
+                    if offsets.len() >= 2 {
+                        let _ = tx.send(Event::Quit);
+                    }
+                    frame(&format!("frame {}", offsets.len()))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(offsets.len(), 2, "expected an FS render then a tick render");
+        assert_eq!(
+            offsets[0],
+            Duration::ZERO,
+            "the FS render is always at offset 0"
+        );
+        assert_eq!(
+            offsets[1],
+            Duration::from_secs(5),
+            "the tick after an FS change must measure its offset from the re-collected \
+             time (t+15 - t+10 = 5s), not from the stale seed",
+        );
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
