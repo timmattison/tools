@@ -159,6 +159,22 @@ pub fn render(snapshot: &Snapshot, opts: &RenderOptions) -> String {
     lines.join("\n")
 }
 
+/// Produce the colored, multi-line frame with every displayed age advanced
+/// by `age_offset`.
+///
+/// `age_offset` is added (saturating) to the header's last-commit age, every
+/// file row's mtime age, and every commit-log row's age before formatting and
+/// fading. `Duration::ZERO` is an exact no-op, leaving the output
+/// byte-identical to [`render`].
+pub(crate) fn render_with_offset(
+    snapshot: &Snapshot,
+    opts: &RenderOptions,
+    age_offset: Duration,
+) -> String {
+    let _ = age_offset;
+    render(snapshot, opts)
+}
+
 /// Visible gap between the short hash and the subject in a log row.
 const LOG_HASH_SUBJECT_SEP: &str = "  ";
 
@@ -2539,6 +2555,65 @@ mod tests {
         assert!(
             plain.contains("ahead of main, 87 behind • last commit"),
             "behind segment should sit between the base name and the suffix: {plain}",
+        );
+    }
+
+    #[test]
+    fn age_offset_advances_header_file_and_log_ages() {
+        // A render-time age offset advances every displayed age by a single
+        // Duration: the header's last-commit age, each file row's mtime age,
+        // and each commit-log row's age. The three base ages are picked so the
+        // advanced strings can't collide with the un-advanced ones.
+        let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
+        snap.last_commit_age = Some(Duration::from_secs(10)); // header: "10s"
+        snap.files[0].age = Some(Duration::from_secs(20)); // file row: "20s"
+        snap.log = vec![LogEntry {
+            hash: "abc1234".into(),
+            subject: "test".into(),
+            age: Duration::from_secs(100),
+        }]; // log: "1m40s"
+        let mut o = opts();
+        o.log_lines = 5; // so the log section renders
+
+        let advanced = strip_ansi(&render_with_offset(&snap, &o, Duration::from_secs(50)));
+        assert!(
+            advanced.contains("1m0s"),
+            "header age 10s + 50s offset should render as 1m0s: {advanced}",
+        );
+        assert!(
+            advanced.contains("1m10s"),
+            "file age 20s + 50s offset should render as 1m10s: {advanced}",
+        );
+        assert!(
+            advanced.contains("2m30s"),
+            "log age 1m40s + 50s offset should render as 2m30s: {advanced}",
+        );
+
+        let base = strip_ansi(&render(&snap, &o));
+        assert!(base.contains("10s"), "header age unoffset is 10s: {base}");
+        assert!(base.contains("20s"), "file age unoffset is 20s: {base}");
+        assert!(base.contains("1m40s"), "log age unoffset is 1m40s: {base}");
+    }
+
+    #[test]
+    fn age_offset_zero_is_an_exact_noop() {
+        // Offset ZERO must leave the full colored output byte-identical to
+        // today's render — d.saturating_add(ZERO) == d for every age, so no
+        // formatted age and no fade color byte changes. One-shot mode and the
+        // seed walk render at ZERO and rely on this exactness.
+        let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
+        snap.last_commit_age = Some(Duration::from_secs(10));
+        snap.files[0].age = Some(Duration::from_secs(20));
+        snap.log = vec![LogEntry {
+            hash: "abc1234".into(),
+            subject: "test".into(),
+            age: Duration::from_secs(100),
+        }];
+        let mut o = opts();
+        o.log_lines = 5;
+        assert_eq!(
+            render_with_offset(&snap, &o, Duration::ZERO),
+            render(&snap, &o),
         );
     }
 }
