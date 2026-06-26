@@ -1101,6 +1101,54 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_resize_renders_cached_snapshot_at_new_dims_without_collecting() {
+        // A terminal resize must re-render the CACHED snapshot at the new
+        // dimensions without walking git (Part A): the collect hook never runs
+        // and the render hook is handed the freshly-queried dimensions.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Resize).expect("queue resize");
+        drop(tx);
+
+        let new_dims = Dimensions {
+            width: 123,
+            height: 45,
+        };
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut seen_dims: Option<Dimensions> = None;
+        let now = Instant::now();
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(now),
+            None,
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, dims: Dimensions, _offset: Duration| {
+                    seen_dims = Some(dims);
+                    frame("resized")
+                },
+                dimensions: || new_dims,
+                paint: |_output: &str| Ok(()),
+                clock: || now,
+                next_tick: timer_off,
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(collects, 0, "a resize must not walk git");
+        assert_eq!(
+            seen_dims,
+            Some(new_dims),
+            "a resize must re-render at the freshly-queried dimensions",
+        );
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
