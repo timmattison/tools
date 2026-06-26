@@ -488,12 +488,17 @@ where
             }
         }
 
-        // NOTE (red step, behavior-preserving): every wake re-collects and
-        // renders at offset 0, exactly as before the cache seam existed. The
-        // green step routes the decay tick to a no-git re-render of the cache.
-        cache.dims = (hooks.dimensions)();
-        cache.snapshot = (hooks.collect)()?;
-        let render = (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO);
+        // Only a filesystem change walks git. A decay tick re-renders the cached
+        // snapshot with no git work, advancing every displayed age by the
+        // wall-clock elapsed since the snapshot was collected (Part A).
+        let render = if woke_for_tick {
+            let age_offset = (hooks.clock)().saturating_duration_since(cache.collected_at);
+            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+        } else {
+            cache.dims = (hooks.dimensions)();
+            cache.snapshot = (hooks.collect)()?;
+            (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+        };
 
         if should_repaint(&render.output, displayed) {
             (hooks.paint)(&render.output)?;
@@ -1005,7 +1010,10 @@ mod tests {
         .expect("loop");
 
         assert_eq!(renders, 1, "a decay tick must trigger exactly one render");
-        assert_eq!(paints, 1, "the tick-driven render must repaint the new frame");
+        assert_eq!(
+            paints, 1,
+            "the tick-driven render must repaint the new frame"
+        );
     }
 
     #[test]
