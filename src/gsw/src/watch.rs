@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -25,9 +25,10 @@ use crossterm::terminal::{
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::render::Snapshot;
 use crate::{
-    build_output, effective_terminal_height, effective_terminal_width, Render, RenderConfig,
-    DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
+    collect_snapshot, effective_terminal_height, effective_terminal_width, render_frame, Render,
+    RenderConfig, DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
 };
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
@@ -226,40 +227,56 @@ enum Event {
     Quit,
 }
 
-/// Run the live watch loop: take over the alternate screen, render once, then
-/// repaint on terminal resize until the user quits with `q` or Ctrl-C.
+/// Run the live watch loop: take over the alternate screen, seed the snapshot
+/// cache with one git walk, paint the first frame, then re-render on filesystem
+/// changes, terminal resizes, and decay-timer ticks until the user quits with
+/// `q` or Ctrl-C.
 ///
-/// The [`TerminalGuard`] restores the main screen and cursor on every exit
-/// path (normal return, error, or panic), so the terminal can never be left
-/// wedged. In this phase the only event producer is the crossterm reader
-/// thread; filesystem watching and the decay timer arrive in later phases.
+/// Filesystem changes walk git and re-seed the cache; decay ticks and resizes
+/// re-render the cached snapshot with no git work (Part A). The [`TerminalGuard`]
+/// restores the main screen and cursor on every exit path.
 pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
 
-    // Paint the first frame unconditionally (nothing is displayed yet) and seed
-    // the decay-timer cadence from how fresh that frame is.
-    let first = compute_output(repo, cfg)?;
+    // Seed the cache with one git walk and paint the first frame at offset 0,
+    // byte-identical to a one-shot render of the same state. That frame's
+    // freshest age seeds the decay-timer cadence.
+    let dims = current_dimensions(cfg.width_offset);
+    let collected_at = Instant::now();
+    let snapshot = collect_snapshot(repo, cfg)?;
+    let first = render_frame(&snapshot, cfg, dims, Duration::ZERO);
     paint_output(&first.output)?;
     let mut displayed = first.output;
     let initial_freshest = first.freshest_age;
 
+    let cache = SnapshotCache {
+        snapshot,
+        collected_at,
+        dims,
+    };
+
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx.clone());
 
-    // The filesystem watcher must outlive the loop — dropping it stops
-    // watching — so keep it bound here. `None` only when there is no worktree
-    // to watch, which `repo::open` already rules out for watch mode.
+    // The filesystem watcher must outlive the loop — dropping it stops watching.
     let _watcher = spawn_fs_watcher(repo, tx)?;
 
     event_loop(
         &rx,
         DEBOUNCE,
         &mut displayed,
+        cache,
         initial_freshest,
-        || compute_output(repo, cfg),
-        paint_output,
-        // No freshest item (empty/clean repo) → disable the timer entirely.
-        |freshest| freshest.and_then(next_tick),
+        LoopHooks {
+            collect: || collect_snapshot(repo, cfg),
+            render: |snap: &Snapshot, dims: Dimensions, offset: Duration| {
+                render_frame(snap, cfg, dims, offset)
+            },
+            dimensions: || current_dimensions(cfg.width_offset),
+            paint: |output: &str| paint_output(output),
+            clock: Instant::now,
+            next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
+        },
     )
 }
 
@@ -358,55 +375,90 @@ fn global_excludes_path(repo: &gix::Repository) -> Option<PathBuf> {
     Some(config_home.join("git").join("ignore"))
 }
 
-/// The render loop's terminal-free core: wait for a filesystem event *or* a
-/// decay-timer tick, coalesce any burst within the `debounce` window, then
-/// recompute once and repaint only if the output actually changed.
+/// The cached repository [`Snapshot`] plus the metadata Part A needs to
+/// re-render it without re-walking git. A decay tick or resize repaints from
+/// this cache, advancing every displayed age by `now - collected_at`; only a
+/// filesystem change re-collects and re-seeds it.
+struct SnapshotCache {
+    /// The most recently collected repository state.
+    snapshot: Snapshot,
+    /// When `snapshot` was collected, against the loop's injected clock. The age
+    /// offset for a no-git re-render is `clock() - collected_at`.
+    collected_at: Instant,
+    /// The dimensions `snapshot` was last rendered at, so a resize can re-render
+    /// the cached snapshot at the new size without collecting.
+    dims: Dimensions,
+}
+
+/// The side-effecting hooks the watch loop drives, bundled so the loop stays one
+/// testable function instead of taking a fistful of closures. Production wires
+/// these to the real git collect, render, terminal-size query, painter, and
+/// clock; tests inject counters and a controllable clock to assert which hooks
+/// ran — and with what age offset — without a TTY or real time.
+struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
+    /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
+    collect: Collect,
+    /// Render a snapshot at the given dimensions, advancing ages by the offset.
+    render: RenderFn,
+    /// Query the current terminal dimensions (re-evaluated on resize).
+    dimensions: Dims,
+    /// Paint a finished frame.
+    paint: Paint,
+    /// Read the current instant (real `Instant::now` in production).
+    clock: Clock,
+    /// Map the freshest displayed age to the decay-tick interval (`None` = off).
+    next_tick: Tick,
+}
+
+/// The render loop's terminal-free core: wait for a filesystem event, a resize,
+/// or a decay-timer tick, then update the screen. Only a filesystem change walks
+/// git; a tick or resize re-renders the *cached* [`Snapshot`] (Part A), so the
+/// idle-after-commit decay tick no longer pins a core re-walking an unchanged
+/// repo.
 ///
-/// The decay timer needs no thread of its own: `next_tick` turns the freshest
-/// displayed-item age (`initial_freshest`, then refreshed from every render's
-/// [`Render::freshest_age`]) into the `recv_timeout` window, so a timeout *is*
-/// a tick and the cadence is recomputed after every render. `None` from
-/// `next_tick` disables the timer — the loop blocks indefinitely on events.
+/// The decay timer needs no thread of its own: `next_tick` (in `hooks`) turns
+/// the freshest displayed-item age into the `recv_timeout` window, so a timeout
+/// *is* a tick and the cadence is recomputed after every render. `None` disables
+/// the timer — the loop blocks indefinitely on events.
 ///
-/// `compute` produces the current [`Render`] (a status walk plus its freshest
-/// age); `paint` displays the frame. Pulling these out as closures keeps the
-/// loop testable without a TTY, real filesystem events, or real time — a test
-/// feeds a pre-loaded channel and an injected `next_tick`, and asserts how many
-/// times each ran. The contract verified there:
+/// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
+/// clock, tick cadence) so the loop is one function testable without a TTY or
+/// real time: a test feeds a pre-loaded channel, a controllable clock, and
+/// counters, then asserts which hooks ran and with what age offset. The
+/// contracts verified there:
 ///
-/// - a burst of events between renders collapses into **one** `compute` and at
-///   most one `paint` (coalescing);
-/// - a decay tick (a `recv_timeout` timeout) drives a `compute` with no
-///   coalescing, and repaints only if the frame changed;
-/// - a recompute whose output is byte-identical to what's displayed does the
-///   `compute` (the status walk happened) but **no** `paint` (suppression);
-/// - [`Event::Quit`] ends the loop, as does every sender hanging up
-///   (`recv` / `recv_timeout` returning disconnected).
-fn event_loop<C, P, T>(
+/// - a burst of filesystem events between renders collapses into **one** collect
+///   and at most one paint (coalescing);
+/// - a decay tick re-renders from cache with **no** collect, advancing every age
+///   by `clock() - collected_at`, and repaints only if the frame changed;
+/// - a recompute whose output is byte-identical to what's displayed paints
+///   nothing (suppression);
+/// - [`Event::Quit`] ends the loop, as does every sender hanging up.
+fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
+    mut cache: SnapshotCache,
     initial_freshest: Option<Duration>,
-    mut compute: C,
-    mut paint: P,
-    next_tick: T,
+    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick>,
 ) -> Result<()>
 where
-    C: FnMut() -> Result<Render>,
-    P: FnMut(&str) -> Result<()>,
-    T: Fn(Option<Duration>) -> Option<Duration>,
+    Collect: FnMut() -> Result<Snapshot>,
+    RenderFn: FnMut(&Snapshot, Dimensions, Duration) -> Render,
+    Dims: Fn() -> Dimensions,
+    Paint: FnMut(&str) -> Result<()>,
+    Clock: Fn() -> Instant,
+    Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
-        // after `interval` of quiet for a tick. `recv` / `recv_timeout` error
-        // only once every sender has hung up, which — like an explicit Quit —
-        // means we're done.
-        let woke_for_tick = match next_tick(freshest) {
+        // after `interval` of quiet for a tick.
+        let woke_for_tick = match (hooks.next_tick)(freshest) {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
                 Ok(_) => false,
-                Err(RecvTimeoutError::Timeout) => true, // the interval elapsed: a decay tick
+                Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
             None => match rx.recv() {
@@ -417,10 +469,7 @@ where
         };
 
         // Coalesce a filesystem burst: keep draining until the channel stays
-        // quiet for a full `debounce`, folding every further wake-up into this
-        // one batch. A Quit seen mid-drain still renders the pending batch,
-        // then exits; a disconnect (all senders gone) does the same. A decay
-        // tick has no burst behind it, so it skips coalescing and renders now.
+        // quiet for a full `debounce`. A tick has no burst behind it.
         let mut quitting = false;
         if !woke_for_tick {
             loop {
@@ -429,8 +478,8 @@ where
                         quitting = true;
                         break;
                     }
-                    Ok(_) => {} // another change — fold it in and keep draining
-                    Err(RecvTimeoutError::Timeout) => break, // window elapsed
+                    Ok(_) => {}
+                    Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
                         quitting = true;
                         break;
@@ -439,12 +488,15 @@ where
             }
         }
 
-        // One status walk per coalesced batch, and a repaint only when the
-        // result actually differs from what's on screen. The fresh age feeds
-        // the next iteration's tick cadence.
-        let render = compute()?;
+        // NOTE (red step, behavior-preserving): every wake re-collects and
+        // renders at offset 0, exactly as before the cache seam existed. The
+        // green step routes the decay tick to a no-git re-render of the cache.
+        cache.dims = (hooks.dimensions)();
+        cache.snapshot = (hooks.collect)()?;
+        let render = (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO);
+
         if should_repaint(&render.output, displayed) {
-            paint(&render.output)?;
+            (hooks.paint)(&render.output)?;
             *displayed = render.output;
         }
         freshest = render.freshest_age;
@@ -454,13 +506,6 @@ where
         }
     }
     Ok(())
-}
-
-/// Recompute the full render (frame plus its freshest displayed-item age) for
-/// the current terminal size.
-fn compute_output(repo: &gix::Repository, cfg: &RenderConfig) -> Result<Render> {
-    let dims = current_dimensions(cfg.width_offset);
-    build_output(repo, cfg, dims)
 }
 
 /// Paint `output` into the alternate screen, replacing whatever frame is there.
@@ -770,185 +815,281 @@ mod tests {
         }
     }
 
+    /// A minimal [`Snapshot`] for loop tests that don't inspect snapshot contents
+    /// (the injected render hook returns a canned frame regardless).
+    fn empty_snapshot() -> Snapshot {
+        Snapshot {
+            branch: "b".into(),
+            base: "main".into(),
+            commits_ahead: 0,
+            commits_behind: 0,
+            last_commit_age: None,
+            files: Vec::new(),
+            log: Vec::new(),
+            upstream: None,
+        }
+    }
+
+    /// Dimensions used by loop tests that don't exercise resize.
+    const TEST_DIMS: Dimensions = Dimensions {
+        width: 80,
+        height: 24,
+    };
+
+    /// A [`SnapshotCache`] seeded at `collected_at` with an empty snapshot and
+    /// [`TEST_DIMS`].
+    fn seeded_cache(collected_at: Instant) -> SnapshotCache {
+        SnapshotCache {
+            snapshot: empty_snapshot(),
+            collected_at,
+            dims: TEST_DIMS,
+        }
+    }
+
     #[test]
     fn event_loop_coalesces_a_burst_into_one_repaint() {
         // A `git commit` is a storm of `.git/` writes; an editor save is a
         // write+rename. Either way the burst must collapse into a single
-        // status walk and a single repaint, not one per event.
+        // collect and a single repaint, not one per event.
         let (tx, rx) = mpsc::channel();
         for _ in 0..5 {
             tx.send(Event::FsChanged).expect("queue event");
         }
-        drop(tx); // loop ends once the coalesced batch is rendered
+        drop(tx);
 
         let mut displayed = String::new();
-        let mut computes = 0_usize;
+        let mut collects = 0_usize;
         let mut paints = 0_usize;
+        let now = Instant::now();
         event_loop(
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            seeded_cache(now),
             None,
-            || {
-                computes += 1;
-                Ok(frame("frame"))
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("frame"),
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| {
+                    paints += 1;
+                    Ok(())
+                },
+                clock: || now,
+                next_tick: timer_off,
             },
-            |_output| {
-                paints += 1;
-                Ok(())
-            },
-            timer_off,
         )
         .expect("loop");
 
-        assert_eq!(computes, 1, "a coalesced burst must walk status once");
+        assert_eq!(collects, 1, "a coalesced burst must walk status once");
         assert_eq!(paints, 1, "a coalesced burst must repaint once");
         assert_eq!(displayed, "frame");
     }
 
     #[test]
     fn event_loop_suppresses_when_recompute_is_unchanged() {
-        // FS churn that doesn't change the visible state (e.g. `.git/objects`
-        // writes during a commit that we already reflect) must still do the
-        // status walk but produce no repaint.
+        // FS churn that doesn't change the visible state must still collect but
+        // produce no repaint.
         let (tx, rx) = mpsc::channel();
         tx.send(Event::FsChanged).expect("queue event");
         drop(tx);
 
         let mut displayed = "unchanged".to_string();
-        let mut computes = 0_usize;
+        let mut collects = 0_usize;
         let mut paints = 0_usize;
+        let now = Instant::now();
         event_loop(
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            seeded_cache(now),
             None,
-            || {
-                computes += 1;
-                Ok(frame("unchanged"))
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("unchanged"),
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| {
+                    paints += 1;
+                    Ok(())
+                },
+                clock: || now,
+                next_tick: timer_off,
             },
-            |_output| {
-                paints += 1;
-                Ok(())
-            },
-            timer_off,
         )
         .expect("loop");
 
-        assert_eq!(computes, 1, "a wake-up still does the status walk");
+        assert_eq!(collects, 1, "a wake-up still does the status walk");
         assert_eq!(paints, 0, "byte-identical output must not repaint");
     }
 
     #[test]
     fn event_loop_quit_as_first_event_exits_without_rendering() {
-        // `q` / Ctrl-C before anything else changes must exit cleanly without
-        // a stray recompute or repaint.
+        // `q` / Ctrl-C before anything else changes must exit cleanly without a
+        // stray collect or repaint.
         let (tx, rx) = mpsc::channel();
         tx.send(Event::Quit).expect("queue quit");
         drop(tx);
 
         let mut displayed = String::new();
-        let mut computes = 0_usize;
+        let mut collects = 0_usize;
         let mut paints = 0_usize;
+        let now = Instant::now();
         event_loop(
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            seeded_cache(now),
             None,
-            || {
-                computes += 1;
-                Ok(frame("frame"))
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("frame"),
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| {
+                    paints += 1;
+                    Ok(())
+                },
+                clock: || now,
+                next_tick: timer_off,
             },
-            |_output| {
-                paints += 1;
-                Ok(())
-            },
-            timer_off,
         )
         .expect("loop");
 
-        assert_eq!(computes, 0, "Quit must not trigger a recompute");
+        assert_eq!(collects, 0, "Quit must not trigger a collect");
         assert_eq!(paints, 0, "Quit must not trigger a repaint");
     }
 
     #[test]
     fn event_loop_tick_triggers_a_render() {
-        // With no filesystem events at all, the decay timer must still wake the
-        // loop and re-render so the age text and color fade stay current. We
-        // model a tick with a tiny injected interval; the compute closure
+        // With no filesystem events, the decay timer must still wake the loop and
+        // re-render so the age text and color fade stay current. The render hook
         // queues a Quit so the loop ends right after the tick-driven render.
         let (tx, rx) = mpsc::channel();
         let mut displayed = String::new();
-        let mut computes = 0_usize;
+        let mut renders = 0_usize;
         let mut paints = 0_usize;
+        let now = Instant::now();
         event_loop(
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            seeded_cache(now),
             Some(Duration::ZERO),
-            || {
-                computes += 1;
-                // End the loop right after this first tick-driven render. `tx`
-                // outlives the call, so the channel stays open across the tick.
-                let _ = tx.send(Event::Quit);
-                Ok(Render {
-                    output: format!("tick {computes}"),
-                    freshest_age: Some(Duration::ZERO),
-                })
+            LoopHooks {
+                collect: || Ok(empty_snapshot()),
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    renders += 1;
+                    // End the loop right after this first tick-driven render.
+                    let _ = tx.send(Event::Quit);
+                    frame(&format!("tick {renders}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| {
+                    paints += 1;
+                    Ok(())
+                },
+                clock: || now,
+                // Tiny interval so the tick fires fast; the cadence-vs-age
+                // mapping is covered by the next_tick tests.
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
             },
-            |_output| {
-                paints += 1;
-                Ok(())
-            },
-            // Tiny interval so the tick fires fast instead of waiting a real
-            // second; the cadence-vs-age mapping is covered by next_tick tests.
-            |_freshest| Some(Duration::from_millis(5)),
         )
         .expect("loop");
 
-        assert_eq!(
-            computes, 1,
-            "a decay tick must trigger exactly one recompute"
-        );
-        assert_eq!(
-            paints, 1,
-            "the tick-driven render must repaint the new frame"
-        );
+        assert_eq!(renders, 1, "a decay tick must trigger exactly one render");
+        assert_eq!(paints, 1, "the tick-driven render must repaint the new frame");
     }
 
     #[test]
     fn event_loop_tick_with_unchanged_render_does_not_repaint() {
-        // A decay tick recomputes, but if the freshly-rendered frame is
-        // byte-identical to what's displayed (the age text hasn't ticked over
-        // yet), it must do the status walk and skip the repaint — the same
-        // suppression that absorbs no-op filesystem churn.
+        // A decay tick re-renders, but if the frame is byte-identical to what's
+        // displayed it must skip the repaint — the same suppression that absorbs
+        // no-op filesystem churn.
         let (tx, rx) = mpsc::channel();
         let mut displayed = "steady".to_string();
-        let mut computes = 0_usize;
+        let mut renders = 0_usize;
         let mut paints = 0_usize;
+        let now = Instant::now();
         event_loop(
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
+            seeded_cache(now),
             Some(Duration::from_secs(30)),
-            || {
-                computes += 1;
-                let _ = tx.send(Event::Quit);
-                Ok(Render {
-                    output: "steady".to_string(),
-                    freshest_age: Some(Duration::from_secs(30)),
-                })
+            LoopHooks {
+                collect: || Ok(empty_snapshot()),
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    renders += 1;
+                    let _ = tx.send(Event::Quit);
+                    frame("steady")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| {
+                    paints += 1;
+                    Ok(())
+                },
+                clock: || now,
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
             },
-            |_output| {
-                paints += 1;
-                Ok(())
-            },
-            |_freshest| Some(Duration::from_millis(5)),
         )
         .expect("loop");
 
-        assert_eq!(computes, 1, "the tick still does the status walk");
+        assert_eq!(renders, 1, "the tick still renders");
         assert_eq!(paints, 0, "an unchanged tick render must not repaint");
+    }
+
+    #[test]
+    fn event_loop_tick_renders_cached_snapshot_without_collecting() {
+        // A decay tick must NOT re-walk git: it re-renders the CACHED snapshot,
+        // advancing every displayed age by `now - collected_at` (Part A). With a
+        // clock 50s past collection, the render hook must see a 50s offset and
+        // the git-collect hook must never run.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut renders = 0_usize;
+        let mut seen_offset: Option<Duration> = None;
+        let collected_at = Instant::now();
+        let clock_at = collected_at + Duration::from_secs(50);
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(collected_at),
+            Some(Duration::ZERO),
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                    renders += 1;
+                    seen_offset = Some(offset);
+                    let _ = tx.send(Event::Quit);
+                    frame(&format!("tick {renders}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || clock_at,
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(collects, 0, "a decay tick must not walk git");
+        assert_eq!(
+            seen_offset,
+            Some(Duration::from_secs(50)),
+            "the no-git re-render must advance ages by now - collected_at",
+        );
     }
 
     #[test]
