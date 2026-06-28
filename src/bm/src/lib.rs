@@ -307,6 +307,50 @@ pub fn is_cross_device_error(_err: &std::io::Error) -> bool {
     false
 }
 
+/// How a file actually reached its destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveOutcome {
+    /// Moved instantly via `rename(2)` (same filesystem).
+    Renamed,
+    /// Copied then deleted because source and destination are on different volumes.
+    Copied,
+}
+
+/// Move a single file from `source` to `destination`.
+///
+/// Tries a fast `rename(2)` first. If that fails with a cross-device error
+/// ([`is_cross_device_error`]), it falls back to `copy_across_volumes` and then
+/// deletes the source — the original Go `bm` simply failed in this case.
+///
+/// # Errors
+///
+/// Propagates any rename error that is not cross-device, any error from
+/// `copy_across_volumes`, and any failure to remove the source after copying.
+pub fn move_file(
+    source: &Path,
+    destination: &Path,
+    copy_across_volumes: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
+) -> std::io::Result<MoveOutcome> {
+    move_file_with(
+        source,
+        destination,
+        |s, d| std::fs::rename(s, d),
+        copy_across_volumes,
+    )
+}
+
+/// [`move_file`] with the rename step injected, so the cross-device fallback can
+/// be exercised deterministically in tests without a second real filesystem.
+fn move_file_with(
+    source: &Path,
+    destination: &Path,
+    rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+    copy_across_volumes: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
+) -> std::io::Result<MoveOutcome> {
+    let _ = (source, destination, rename, copy_across_volumes);
+    todo!("driven by tests")
+}
+
 /// Error returned when the user did not specify exactly one search pattern.
 #[derive(Debug, thiserror::Error)]
 pub enum FilterSelectionError {
@@ -556,5 +600,73 @@ mod tests {
         assert!(!is_cross_device_error(&Error::from_raw_os_error(
             libc::EACCES
         )));
+    }
+
+    // --- move_file: rename + cross-volume fallback ---
+
+    #[test]
+    fn move_file_renames_within_same_volume() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"hi").unwrap();
+        let dst = dir.path().join("b.txt");
+
+        let outcome =
+            move_file(&src, &dst, |_, _| panic!("same-volume move must not copy")).unwrap();
+
+        assert_eq!(outcome, MoveOutcome::Renamed);
+        assert!(!src.exists());
+        assert_eq!(std::fs::read(&dst).unwrap(), b"hi");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_file_falls_back_to_copy_when_rename_is_cross_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"payload").unwrap();
+        let dst = dir.path().join("b.txt");
+
+        let outcome = move_file_with(
+            &src,
+            &dst,
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EXDEV)),
+            |s, d| std::fs::copy(s, d),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, MoveOutcome::Copied);
+        assert!(
+            !src.exists(),
+            "source must be removed after a successful cross-volume copy"
+        );
+        assert_eq!(std::fs::read(&dst).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn move_file_propagates_non_cross_device_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"x").unwrap();
+        let dst = dir.path().join("b.txt");
+
+        let err = move_file_with(
+            &src,
+            &dst,
+            |_, _| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "denied",
+                ))
+            },
+            |_, _| panic!("must not copy on a non-cross-device error"),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            src.exists(),
+            "nothing should be moved when rename fails fatally"
+        );
     }
 }
