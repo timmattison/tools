@@ -3,7 +3,7 @@
 //! Every test uses its own `tempfile::tempdir()` so concurrent runs (including a
 //! background `bacon` loop sharing `./target`) never clobber each other.
 
-use bm::{collect_sources, FilterType};
+use bm::{collect_sources, execute_plan, plan_moves, CollisionPolicy, FilterType};
 use std::fs;
 use std::path::Path;
 
@@ -64,5 +64,86 @@ fn collect_sources_excludes_files_already_in_destination() {
     assert!(
         !names.contains(&"already.mkv".to_string()),
         "a file already in the destination must not be collected: {sources:?}"
+    );
+}
+
+#[test]
+fn execute_plan_moves_planned_files_and_counts_renames() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    write_file(&root.path().join("a.mkv"), b"a");
+    write_file(&root.path().join("b.mkv"), b"b");
+
+    let sources = collect_sources(
+        &[root.path().to_path_buf()],
+        FilterType::Suffix(".mkv".into()),
+        dest.path(),
+    )
+    .unwrap();
+    let plan = plan_moves(&sources, dest.path(), CollisionPolicy::Abort, |p| {
+        p.exists()
+    })
+    .unwrap();
+
+    let summary = execute_plan(&plan, |_, _| panic!("same-volume move must not copy")).unwrap();
+
+    assert_eq!(summary.renamed, 2);
+    assert_eq!(summary.copied, 0);
+    assert_eq!(summary.moved(), 2);
+    assert!(dest.path().join("a.mkv").exists());
+    assert!(dest.path().join("b.mkv").exists());
+    assert!(!root.path().join("a.mkv").exists());
+    assert!(!root.path().join("b.mkv").exists());
+}
+
+#[test]
+fn execute_plan_reports_skipped_count_and_leaves_files_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    write_file(&root.path().join("dup.mkv"), b"new");
+    write_file(&dest.path().join("dup.mkv"), b"old");
+
+    let sources = collect_sources(
+        &[root.path().to_path_buf()],
+        FilterType::Suffix(".mkv".into()),
+        dest.path(),
+    )
+    .unwrap();
+    let plan = plan_moves(&sources, dest.path(), CollisionPolicy::Skip, |p| p.exists()).unwrap();
+
+    let summary = execute_plan(&plan, |_, _| panic!("nothing should be copied")).unwrap();
+
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.moved(), 0);
+    assert_eq!(fs::read(dest.path().join("dup.mkv")).unwrap(), b"old");
+    assert!(root.path().join("dup.mkv").exists());
+}
+
+#[test]
+fn end_to_end_moves_only_matching_files_into_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let dest = tempfile::tempdir().unwrap();
+    write_file(&root.path().join("keep.mkv"), b"1");
+    write_file(&root.path().join("photos/IMG_2.mkv"), b"2");
+    write_file(&root.path().join("notes.txt"), b"3");
+
+    let sources = collect_sources(
+        &[root.path().to_path_buf()],
+        FilterType::Suffix(".mkv".into()),
+        dest.path(),
+    )
+    .unwrap();
+    let plan = plan_moves(&sources, dest.path(), CollisionPolicy::Abort, |p| {
+        p.exists()
+    })
+    .unwrap();
+    let summary = execute_plan(&plan, |_, _| panic!("same-volume move must not copy")).unwrap();
+
+    assert_eq!(summary.moved(), 2);
+    assert!(dest.path().join("keep.mkv").exists());
+    assert!(dest.path().join("IMG_2.mkv").exists());
+    assert!(
+        root.path().join("notes.txt").exists(),
+        "an unmatched file must stay where it is"
     );
 }
