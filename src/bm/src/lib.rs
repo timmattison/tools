@@ -123,7 +123,23 @@ pub fn plan_moves(
         CollisionPolicy::Abort => plan_abort(&entries, &exists),
         CollisionPolicy::Skip => Ok(plan_skip(&entries, &exists)),
         CollisionPolicy::Rename => Ok(plan_rename(&entries, &exists)),
-        CollisionPolicy::Overwrite => todo!("driven by tests"),
+        CollisionPolicy::Overwrite => Ok(plan_overwrite(&entries)),
+    }
+}
+
+/// Overwrite planning: move every file to its basename in the destination,
+/// letting later moves clobber earlier ones. Lossy by design.
+fn plan_overwrite(entries: &[(&PathBuf, PathBuf)]) -> MovePlan {
+    let moves = entries
+        .iter()
+        .map(|(source, candidate)| PlannedMove {
+            source: (*source).clone(),
+            destination: candidate.clone(),
+        })
+        .collect();
+    MovePlan {
+        moves,
+        skipped: Vec::new(),
     }
 }
 
