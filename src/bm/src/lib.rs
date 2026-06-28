@@ -430,6 +430,26 @@ fn already_in_destination(file: &Path, destination_canonical: Option<&Path>) -> 
     std::fs::canonicalize(parent).is_ok_and(|parent| parent == destination)
 }
 
+/// Copy `source` to `destination` in chunks, invoking `on_progress` with the
+/// running byte total after each chunk. Source permissions are preserved.
+///
+/// This is the building block for cross-volume moves: a caller wraps it with a
+/// progress bar and hands the result to [`execute_plan`]. Modification time is
+/// not preserved.
+///
+/// # Errors
+///
+/// Propagates any I/O error from reading the source, writing the destination,
+/// or applying permissions.
+pub fn copy_file(
+    source: &Path,
+    destination: &Path,
+    on_progress: impl FnMut(u64),
+) -> std::io::Result<u64> {
+    let _ = (source, destination, on_progress);
+    todo!("driven by tests")
+}
+
 /// Execute every move in `plan`, using `copy_across_volumes` for any move that
 /// crosses a filesystem boundary.
 ///

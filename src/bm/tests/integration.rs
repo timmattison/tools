@@ -147,3 +147,36 @@ fn end_to_end_moves_only_matching_files_into_destination() {
         "an unmatched file must stay where it is"
     );
 }
+
+#[test]
+fn copy_file_copies_contents_and_reports_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("a.bin");
+    let data = vec![7u8; 10_000];
+    fs::write(&src, &data).unwrap();
+    let dst = dir.path().join("b.bin");
+
+    let mut last_reported = 0u64;
+    let n = bm::copy_file(&src, &dst, |bytes| last_reported = bytes).unwrap();
+
+    assert_eq!(n, data.len() as u64);
+    assert_eq!(last_reported, data.len() as u64);
+    assert_eq!(fs::read(&dst).unwrap(), data);
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_file_preserves_unix_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("a.sh");
+    fs::write(&src, b"#!/bin/sh\n").unwrap();
+    fs::set_permissions(&src, fs::Permissions::from_mode(0o755)).unwrap();
+    let dst = dir.path().join("b.sh");
+
+    bm::copy_file(&src, &dst, |_| {}).unwrap();
+
+    let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755);
+}
