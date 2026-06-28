@@ -121,10 +121,49 @@ pub fn plan_moves(
 
     match policy {
         CollisionPolicy::Abort => plan_abort(&entries, &exists),
-        CollisionPolicy::Skip => todo!("driven by tests"),
+        CollisionPolicy::Skip => Ok(plan_skip(&entries, &exists)),
         CollisionPolicy::Rename => todo!("driven by tests"),
         CollisionPolicy::Overwrite => todo!("driven by tests"),
     }
+}
+
+/// Skip planning: move what can be moved, skip anything that would collide.
+///
+/// Processing in sorted order means the first source claiming a basename wins
+/// and later duplicates are skipped.
+fn plan_skip(entries: &[(&PathBuf, PathBuf)], exists: &impl Fn(&Path) -> bool) -> MovePlan {
+    use std::collections::HashSet;
+
+    let mut claimed: HashSet<PathBuf> = HashSet::new();
+    let mut moves = Vec::new();
+    let mut skipped = Vec::new();
+
+    for (source, candidate) in entries {
+        let reason = if exists(candidate) {
+            Some(CollisionKind::DestinationExists)
+        } else if claimed.contains(candidate) {
+            Some(CollisionKind::DuplicateBasename)
+        } else {
+            None
+        };
+
+        match reason {
+            Some(reason) => skipped.push(SkippedMove {
+                source: (*source).clone(),
+                destination: candidate.clone(),
+                reason,
+            }),
+            None => {
+                claimed.insert(candidate.clone());
+                moves.push(PlannedMove {
+                    source: (*source).clone(),
+                    destination: candidate.clone(),
+                });
+            }
+        }
+    }
+
+    MovePlan { moves, skipped }
 }
 
 /// Abort planning: surface every collision, plan nothing if any exists.
