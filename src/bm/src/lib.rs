@@ -360,6 +360,57 @@ fn move_file_with(
     }
 }
 
+/// Counts describing what a run did (or, for a dry run, what it would do).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Summary {
+    /// Files moved instantly via `rename(2)` (same filesystem).
+    pub renamed: usize,
+    /// Files moved across volumes via copy-then-delete.
+    pub copied: usize,
+    /// Files skipped because of a collision (only under [`CollisionPolicy::Skip`]).
+    pub skipped: usize,
+}
+
+impl Summary {
+    /// Total number of files actually relocated (renamed plus copied).
+    #[must_use]
+    pub fn moved(&self) -> usize {
+        self.renamed + self.copied
+    }
+}
+
+/// Recursively find files under `directories` matching `filter`.
+///
+/// Files that already live directly in `destination` are excluded, so bm never
+/// tries to move a file onto itself when the destination is nested inside a
+/// searched directory. Results are returned in directory-walk order.
+///
+/// # Errors
+///
+/// Propagates any error from walking the directory trees.
+pub fn collect_sources(
+    directories: &[PathBuf],
+    filter: FilterType,
+    destination: &Path,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let _ = (directories, filter, destination);
+    todo!("driven by tests")
+}
+
+/// Execute every move in `plan`, using `copy_across_volumes` for any move that
+/// crosses a filesystem boundary.
+///
+/// # Errors
+///
+/// Stops and returns the first error encountered while moving a file.
+pub fn execute_plan(
+    plan: &MovePlan,
+    mut copy_across_volumes: impl FnMut(&Path, &Path) -> std::io::Result<u64>,
+) -> anyhow::Result<Summary> {
+    let _ = (plan, &mut copy_across_volumes);
+    todo!("driven by tests")
+}
+
 /// Error returned when the user did not specify exactly one search pattern.
 #[derive(Debug, thiserror::Error)]
 pub enum FilterSelectionError {
