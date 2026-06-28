@@ -6,10 +6,16 @@
 //! collision-safe move planning, and a cross-volume move fallback that ordinary
 //! `rename(2)` cannot perform.
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub use filewalker::FilterType;
+
+/// The filename portion of a path, as an owned [`PathBuf`] of just the basename.
+///
+/// Returns `None` for paths that have no final component (e.g. `/`).
+fn basename(path: &Path) -> Option<&std::ffi::OsStr> {
+    path.file_name()
+}
 
 /// What to do when two files would land on the same destination path.
 ///
@@ -103,8 +109,72 @@ pub fn plan_moves(
     policy: CollisionPolicy,
     exists: impl Fn(&Path) -> bool,
 ) -> Result<MovePlan, CollisionError> {
-    let _ = (sources, destination, policy, &exists);
-    todo!("driven by tests")
+    // Deterministic order so plans (and collision reports) are stable across runs.
+    let mut ordered: Vec<&PathBuf> = sources.iter().collect();
+    ordered.sort();
+
+    // Skip anything without a final path component (can't form a destination).
+    let entries: Vec<(&PathBuf, PathBuf)> = ordered
+        .iter()
+        .filter_map(|source| basename(source).map(|name| (*source, destination.join(name))))
+        .collect();
+
+    match policy {
+        CollisionPolicy::Abort => plan_abort(&entries, &exists),
+        CollisionPolicy::Skip => todo!("driven by tests"),
+        CollisionPolicy::Rename => todo!("driven by tests"),
+        CollisionPolicy::Overwrite => todo!("driven by tests"),
+    }
+}
+
+/// Abort planning: surface every collision, plan nothing if any exists.
+fn plan_abort(
+    entries: &[(&PathBuf, PathBuf)],
+    exists: &impl Fn(&Path) -> bool,
+) -> Result<MovePlan, CollisionError> {
+    use std::collections::BTreeMap;
+
+    // Group sources by their candidate destination to find intra-batch duplicates.
+    let mut by_destination: BTreeMap<&Path, Vec<PathBuf>> = BTreeMap::new();
+    for (source, candidate) in entries {
+        by_destination
+            .entry(candidate.as_path())
+            .or_default()
+            .push((*source).clone());
+    }
+
+    let mut collisions = Vec::new();
+    for (candidate, batch_sources) in by_destination {
+        if batch_sources.len() > 1 {
+            collisions.push(Collision {
+                destination: candidate.to_path_buf(),
+                sources: batch_sources,
+                kind: CollisionKind::DuplicateBasename,
+            });
+        } else if exists(candidate) {
+            collisions.push(Collision {
+                destination: candidate.to_path_buf(),
+                sources: batch_sources,
+                kind: CollisionKind::DestinationExists,
+            });
+        }
+    }
+
+    if !collisions.is_empty() {
+        return Err(CollisionError { collisions });
+    }
+
+    let moves = entries
+        .iter()
+        .map(|(source, candidate)| PlannedMove {
+            source: (*source).clone(),
+            destination: candidate.clone(),
+        })
+        .collect();
+    Ok(MovePlan {
+        moves,
+        skipped: Vec::new(),
+    })
 }
 
 /// Error returned when the user did not specify exactly one search pattern.
