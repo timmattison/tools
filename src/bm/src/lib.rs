@@ -300,4 +300,35 @@ mod tests {
         assert_eq!(err.collisions[0].kind, CollisionKind::DuplicateBasename);
         assert_eq!(err.collisions[0].sources.len(), 2);
     }
+
+    // --- plan_moves: skip policy ---
+
+    #[test]
+    fn plan_skip_moves_noncolliding_and_skips_existing() {
+        let sources = vec![PathBuf::from("/a/keep.mkv"), PathBuf::from("/a/dupe.mkv")];
+        let plan = plan_moves(&sources, Path::new("/dest"), CollisionPolicy::Skip, |p| {
+            p == Path::new("/dest/dupe.mkv")
+        })
+        .unwrap();
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.moves[0].destination, PathBuf::from("/dest/keep.mkv"));
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].source, PathBuf::from("/a/dupe.mkv"));
+        assert_eq!(plan.skipped[0].reason, CollisionKind::DestinationExists);
+    }
+
+    #[test]
+    fn plan_skip_keeps_first_of_duplicate_basenames() {
+        let sources = vec![PathBuf::from("/b/dup.mkv"), PathBuf::from("/a/dup.mkv")];
+        let plan = plan_moves(&sources, Path::new("/dest"), CollisionPolicy::Skip, |_| {
+            false
+        })
+        .unwrap();
+        assert_eq!(plan.moves.len(), 1);
+        // Sorted order means /a/dup.mkv wins; /b/dup.mkv is skipped.
+        assert_eq!(plan.moves[0].source, PathBuf::from("/a/dup.mkv"));
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(plan.skipped[0].source, PathBuf::from("/b/dup.mkv"));
+        assert_eq!(plan.skipped[0].reason, CollisionKind::DuplicateBasename);
+    }
 }
