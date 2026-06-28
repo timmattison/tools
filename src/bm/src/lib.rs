@@ -347,8 +347,17 @@ fn move_file_with(
     rename: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
     copy_across_volumes: impl FnOnce(&Path, &Path) -> std::io::Result<u64>,
 ) -> std::io::Result<MoveOutcome> {
-    let _ = (source, destination, rename, copy_across_volumes);
-    todo!("driven by tests")
+    match rename(source, destination) {
+        Ok(()) => Ok(MoveOutcome::Renamed),
+        Err(err) if is_cross_device_error(&err) => {
+            // Different filesystems: copy the bytes over, then remove the
+            // original only once the copy has fully succeeded.
+            copy_across_volumes(source, destination)?;
+            std::fs::remove_file(source)?;
+            Ok(MoveOutcome::Copied)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Error returned when the user did not specify exactly one search pattern.
