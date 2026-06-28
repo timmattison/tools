@@ -122,8 +122,66 @@ pub fn plan_moves(
     match policy {
         CollisionPolicy::Abort => plan_abort(&entries, &exists),
         CollisionPolicy::Skip => Ok(plan_skip(&entries, &exists)),
-        CollisionPolicy::Rename => todo!("driven by tests"),
+        CollisionPolicy::Rename => Ok(plan_rename(&entries, &exists)),
         CollisionPolicy::Overwrite => todo!("driven by tests"),
+    }
+}
+
+/// Append `-N` before the extension: `foo.mkv`,1 -> `foo-1.mkv`; `README`,2 -> `README-2`.
+///
+/// `n == 0` yields the basename unchanged. Splitting on the file stem keeps the
+/// extension recognizable (`archive.tar.gz` -> `archive.tar-1.gz`).
+fn disambiguated_name(basename: &std::ffi::OsStr, n: usize) -> std::ffi::OsString {
+    use std::ffi::OsString;
+
+    if n == 0 {
+        return basename.to_os_string();
+    }
+
+    let as_path = Path::new(basename);
+    let stem = as_path.file_stem().unwrap_or(basename);
+    let mut name = OsString::new();
+    name.push(stem);
+    name.push(format!("-{n}"));
+    if let Some(ext) = as_path.extension() {
+        name.push(".");
+        name.push(ext);
+    }
+    name
+}
+
+/// Rename planning: move every file, disambiguating any name that would collide
+/// with an existing file or with another file already placed in this batch.
+fn plan_rename(entries: &[(&PathBuf, PathBuf)], exists: &impl Fn(&Path) -> bool) -> MovePlan {
+    use std::collections::HashSet;
+
+    let mut taken: HashSet<PathBuf> = HashSet::new();
+    let mut moves = Vec::new();
+
+    for (source, candidate) in entries {
+        // `candidate` is `destination_dir/basename`; reuse its pieces to rename.
+        let dir = candidate.parent().unwrap_or_else(|| Path::new(""));
+        let base = candidate.file_name().unwrap_or_default();
+
+        let mut n = 0;
+        let final_destination = loop {
+            let attempt = dir.join(disambiguated_name(base, n));
+            if !exists(&attempt) && !taken.contains(&attempt) {
+                break attempt;
+            }
+            n += 1;
+        };
+
+        taken.insert(final_destination.clone());
+        moves.push(PlannedMove {
+            source: (*source).clone(),
+            destination: final_destination,
+        });
+    }
+
+    MovePlan {
+        moves,
+        skipped: Vec::new(),
     }
 }
 
