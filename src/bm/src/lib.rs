@@ -474,4 +474,37 @@ mod tests {
         assert!(dests.contains(&PathBuf::from("/dest/README")));
         assert!(dests.contains(&PathBuf::from("/dest/README-1")));
     }
+
+    // --- plan_moves: overwrite policy ---
+
+    #[test]
+    fn plan_overwrite_moves_everything_ignoring_existing() {
+        let sources = vec![PathBuf::from("/a/one.mkv"), PathBuf::from("/b/two.mkv")];
+        let plan = plan_moves(
+            &sources,
+            Path::new("/dest"),
+            CollisionPolicy::Overwrite,
+            |_| true,
+        )
+        .unwrap();
+        assert_eq!(plan.moves.len(), 2);
+        assert!(plan.skipped.is_empty());
+    }
+
+    #[test]
+    fn plan_overwrite_keeps_all_duplicate_basenames() {
+        let sources = vec![PathBuf::from("/a/dup.mkv"), PathBuf::from("/b/dup.mkv")];
+        let plan = plan_moves(
+            &sources,
+            Path::new("/dest"),
+            CollisionPolicy::Overwrite,
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(plan.moves.len(), 2);
+        assert!(plan
+            .moves
+            .iter()
+            .all(|m| m.destination == Path::new("/dest/dup.mkv")));
+    }
 }
