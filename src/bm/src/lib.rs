@@ -393,8 +393,41 @@ pub fn collect_sources(
     filter: FilterType,
     destination: &Path,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    let _ = (directories, filter, destination);
-    todo!("driven by tests")
+    use filewalker::FileWalker;
+
+    let paths: Vec<String> = directories
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+
+    // Canonicalize the destination once so we can recognize files that already
+    // live there even when it is nested inside one of the searched directories.
+    let destination_canonical = std::fs::canonicalize(destination).ok();
+
+    let mut sources = Vec::new();
+    FileWalker::new(paths)
+        .with_filter(Some(filter))
+        .walk(|entry| {
+            let path = entry.path();
+            if already_in_destination(path, destination_canonical.as_deref()) {
+                return Ok(());
+            }
+            sources.push(path.to_path_buf());
+            Ok(())
+        })?;
+
+    Ok(sources)
+}
+
+/// Whether `file`'s parent directory is the (canonicalized) destination.
+fn already_in_destination(file: &Path, destination_canonical: Option<&Path>) -> bool {
+    let Some(destination) = destination_canonical else {
+        return false;
+    };
+    let Some(parent) = file.parent() else {
+        return false;
+    };
+    std::fs::canonicalize(parent).is_ok_and(|parent| parent == destination)
 }
 
 /// Execute every move in `plan`, using `copy_across_volumes` for any move that
