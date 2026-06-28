@@ -370,4 +370,50 @@ mod tests {
         assert_eq!(plan.skipped[0].source, PathBuf::from("/b/dup.mkv"));
         assert_eq!(plan.skipped[0].reason, CollisionKind::DuplicateBasename);
     }
+
+    // --- plan_moves: rename policy ---
+
+    #[test]
+    fn plan_rename_disambiguates_duplicate_basenames() {
+        let sources = vec![PathBuf::from("/a/dup.mkv"), PathBuf::from("/b/dup.mkv")];
+        let plan = plan_moves(
+            &sources,
+            Path::new("/dest"),
+            CollisionPolicy::Rename,
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(plan.moves.len(), 2);
+        assert!(plan.skipped.is_empty());
+        let dests: Vec<_> = plan.moves.iter().map(|m| m.destination.clone()).collect();
+        assert!(dests.contains(&PathBuf::from("/dest/dup.mkv")));
+        assert!(dests.contains(&PathBuf::from("/dest/dup-1.mkv")));
+    }
+
+    #[test]
+    fn plan_rename_avoids_existing_destination_files() {
+        let sources = vec![PathBuf::from("/a/foo.mkv")];
+        // foo.mkv and foo-1.mkv already exist, so the file must become foo-2.mkv.
+        let plan = plan_moves(&sources, Path::new("/dest"), CollisionPolicy::Rename, |p| {
+            p == Path::new("/dest/foo.mkv") || p == Path::new("/dest/foo-1.mkv")
+        })
+        .unwrap();
+        assert_eq!(plan.moves.len(), 1);
+        assert_eq!(plan.moves[0].destination, PathBuf::from("/dest/foo-2.mkv"));
+    }
+
+    #[test]
+    fn plan_rename_handles_files_without_extension() {
+        let sources = vec![PathBuf::from("/a/README"), PathBuf::from("/b/README")];
+        let plan = plan_moves(
+            &sources,
+            Path::new("/dest"),
+            CollisionPolicy::Rename,
+            |_| false,
+        )
+        .unwrap();
+        let dests: Vec<_> = plan.moves.iter().map(|m| m.destination.clone()).collect();
+        assert!(dests.contains(&PathBuf::from("/dest/README")));
+        assert!(dests.contains(&PathBuf::from("/dest/README-1")));
+    }
 }
