@@ -290,6 +290,24 @@ fn plan_abort(
     })
 }
 
+/// Whether `err` is the "cross-device link" error (`EXDEV`).
+///
+/// `rename(2)` raises `EXDEV` when the source and destination live on different
+/// filesystems — exactly the case bm must handle by copying then deleting, since
+/// the original Go tool (and a naive `fs::rename`) simply fails here.
+#[cfg(unix)]
+pub fn is_cross_device_error(err: &std::io::Error) -> bool {
+    let _ = err;
+    todo!("driven by tests")
+}
+
+/// On Windows, `std::fs::rename` uses `MoveFileEx`, which already moves files
+/// across volumes, so there is no cross-device error to fall back from.
+#[cfg(not(unix))]
+pub fn is_cross_device_error(_err: &std::io::Error) -> bool {
+    false
+}
+
 /// Error returned when the user did not specify exactly one search pattern.
 #[derive(Debug, thiserror::Error)]
 pub enum FilterSelectionError {
@@ -522,5 +540,22 @@ mod tests {
             .moves
             .iter()
             .all(|m| m.destination == Path::new("/dest/dup.mkv")));
+    }
+
+    // --- cross-device detection ---
+
+    #[cfg(unix)]
+    #[test]
+    fn is_cross_device_error_true_only_for_exdev() {
+        use std::io::Error;
+        assert!(is_cross_device_error(&Error::from_raw_os_error(
+            libc::EXDEV
+        )));
+        assert!(!is_cross_device_error(&Error::from_raw_os_error(
+            libc::ENOENT
+        )));
+        assert!(!is_cross_device_error(&Error::from_raw_os_error(
+            libc::EACCES
+        )));
     }
 }
