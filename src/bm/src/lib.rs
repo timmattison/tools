@@ -440,8 +440,32 @@ pub fn execute_plan(
     plan: &MovePlan,
     mut copy_across_volumes: impl FnMut(&Path, &Path) -> std::io::Result<u64>,
 ) -> anyhow::Result<Summary> {
-    let _ = (plan, &mut copy_across_volumes);
-    todo!("driven by tests")
+    use anyhow::Context;
+
+    let mut summary = Summary {
+        skipped: plan.skipped.len(),
+        ..Summary::default()
+    };
+
+    for planned in &plan.moves {
+        let outcome = move_file(&planned.source, &planned.destination, |s, d| {
+            copy_across_volumes(s, d)
+        })
+        .with_context(|| {
+            format!(
+                "moving {} to {}",
+                planned.source.display(),
+                planned.destination.display()
+            )
+        })?;
+
+        match outcome {
+            MoveOutcome::Renamed => summary.renamed += 1,
+            MoveOutcome::Copied => summary.copied += 1,
+        }
+    }
+
+    Ok(summary)
 }
 
 /// Error returned when the user did not specify exactly one search pattern.
