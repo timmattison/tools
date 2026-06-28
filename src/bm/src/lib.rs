@@ -297,8 +297,7 @@ fn plan_abort(
 /// the original Go tool (and a naive `fs::rename`) simply fails here.
 #[cfg(unix)]
 pub fn is_cross_device_error(err: &std::io::Error) -> bool {
-    let _ = err;
-    todo!("driven by tests")
+    err.raw_os_error() == Some(libc::EXDEV)
 }
 
 /// On Windows, `std::fs::rename` uses `MoveFileEx`, which already moves files
