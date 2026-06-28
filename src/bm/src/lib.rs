@@ -6,7 +6,106 @@
 //! collision-safe move planning, and a cross-volume move fallback that ordinary
 //! `rename(2)` cannot perform.
 
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
 pub use filewalker::FilterType;
+
+/// What to do when two files would land on the same destination path.
+///
+/// A collision happens either because a file with that basename already exists
+/// in the destination, or because two matched source files share a basename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum CollisionPolicy {
+    /// Refuse to move anything; report every collision. The safe default.
+    #[default]
+    Abort,
+    /// Move the non-colliding files and skip the colliding ones.
+    Skip,
+    /// Move everything, disambiguating colliding names (`foo.mkv` -> `foo-1.mkv`).
+    Rename,
+    /// Move everything, letting later files clobber earlier ones (lossy).
+    Overwrite,
+}
+
+/// Why a particular file would not be moved as-is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionKind {
+    /// A file with this basename already exists in the destination directory.
+    DestinationExists,
+    /// Another matched source file in this batch claims the same basename.
+    DuplicateBasename,
+}
+
+/// A single move the plan will perform: `source` -> `destination`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedMove {
+    /// The file to move.
+    pub source: PathBuf,
+    /// The full path it will be moved to (destination dir + final filename).
+    pub destination: PathBuf,
+}
+
+/// A file the plan will leave in place, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedMove {
+    /// The file that will not be moved.
+    pub source: PathBuf,
+    /// The destination path it collided with.
+    pub destination: PathBuf,
+    /// Why it was skipped.
+    pub reason: CollisionKind,
+}
+
+/// The result of planning a batch of moves under a [`CollisionPolicy`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MovePlan {
+    /// Moves that will be executed.
+    pub moves: Vec<PlannedMove>,
+    /// Files that will be skipped (only populated under [`CollisionPolicy::Skip`]).
+    pub skipped: Vec<SkippedMove>,
+}
+
+/// One destination path that more than one file wants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collision {
+    /// The contested destination path.
+    pub destination: PathBuf,
+    /// The source file(s) that would land there. For [`CollisionKind::DestinationExists`]
+    /// this is the single matched file; for [`CollisionKind::DuplicateBasename`] it is
+    /// every batch file sharing the basename.
+    pub sources: Vec<PathBuf>,
+    /// The nature of the collision.
+    pub kind: CollisionKind,
+}
+
+/// Returned by [`plan_moves`] under [`CollisionPolicy::Abort`] when any collision exists.
+#[derive(Debug, thiserror::Error)]
+#[error("{} destination collision(s) detected", .collisions.len())]
+pub struct CollisionError {
+    /// Every collision found, in deterministic order.
+    pub collisions: Vec<Collision>,
+}
+
+/// Plan which of `sources` to move into `destination`, honoring `policy`.
+///
+/// `exists` reports whether a candidate destination path is already occupied on
+/// disk; it is injected so the planning logic stays pure and testable. Sources
+/// are processed in sorted order so the plan is deterministic.
+///
+/// # Errors
+///
+/// Under [`CollisionPolicy::Abort`], returns [`CollisionError`] listing every
+/// collision and plans no moves. Other policies never error.
+pub fn plan_moves(
+    sources: &[PathBuf],
+    destination: &Path,
+    policy: CollisionPolicy,
+    exists: impl Fn(&Path) -> bool,
+) -> Result<MovePlan, CollisionError> {
+    let _ = (sources, destination, policy, &exists);
+    todo!("driven by tests")
+}
 
 /// Error returned when the user did not specify exactly one search pattern.
 #[derive(Debug, thiserror::Error)]
@@ -82,5 +181,53 @@ mod tests {
     #[test]
     fn select_filter_rejects_when_multiple_given() {
         assert!(select_filter(Some(".mkv".to_string()), Some("IMG_".to_string()), None).is_err());
+    }
+
+    // --- plan_moves: abort policy ---
+
+    #[test]
+    fn plan_abort_moves_all_when_no_collisions() {
+        let sources = vec![PathBuf::from("/a/one.mkv"), PathBuf::from("/b/two.mkv")];
+        let plan = plan_moves(&sources, Path::new("/dest"), CollisionPolicy::Abort, |_| {
+            false
+        })
+        .unwrap();
+        assert_eq!(plan.moves.len(), 2);
+        assert!(plan.skipped.is_empty());
+        assert!(plan
+            .moves
+            .iter()
+            .any(|m| m.destination == Path::new("/dest/one.mkv")));
+        assert!(plan
+            .moves
+            .iter()
+            .any(|m| m.destination == Path::new("/dest/two.mkv")));
+    }
+
+    #[test]
+    fn plan_abort_errors_when_destination_file_exists() {
+        let sources = vec![PathBuf::from("/a/one.mkv")];
+        let err = plan_moves(&sources, Path::new("/dest"), CollisionPolicy::Abort, |p| {
+            p == Path::new("/dest/one.mkv")
+        })
+        .unwrap_err();
+        assert_eq!(err.collisions.len(), 1);
+        assert_eq!(
+            err.collisions[0].destination,
+            PathBuf::from("/dest/one.mkv")
+        );
+        assert_eq!(err.collisions[0].kind, CollisionKind::DestinationExists);
+    }
+
+    #[test]
+    fn plan_abort_errors_on_intra_batch_duplicate_basenames() {
+        let sources = vec![PathBuf::from("/a/dup.mkv"), PathBuf::from("/b/dup.mkv")];
+        let err = plan_moves(&sources, Path::new("/dest"), CollisionPolicy::Abort, |_| {
+            false
+        })
+        .unwrap_err();
+        assert_eq!(err.collisions.len(), 1);
+        assert_eq!(err.collisions[0].kind, CollisionKind::DuplicateBasename);
+        assert_eq!(err.collisions[0].sources.len(), 2);
     }
 }
