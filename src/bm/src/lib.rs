@@ -444,10 +444,33 @@ fn already_in_destination(file: &Path, destination_canonical: Option<&Path>) -> 
 pub fn copy_file(
     source: &Path,
     destination: &Path,
-    on_progress: impl FnMut(u64),
+    mut on_progress: impl FnMut(u64),
 ) -> std::io::Result<u64> {
-    let _ = (source, destination, on_progress);
-    todo!("driven by tests")
+    use std::io::{Read, Write};
+
+    const CHUNK: usize = 64 * 1024;
+
+    let mut reader = std::fs::File::open(source)?;
+    let mut writer = std::fs::File::create(destination)?;
+    let mut buffer = vec![0_u8; CHUNK];
+    let mut total = 0_u64;
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read])?;
+        total += read as u64;
+        on_progress(total);
+    }
+    writer.flush()?;
+
+    // Preserve permissions so an executable stays executable after the move.
+    let permissions = std::fs::metadata(source)?.permissions();
+    std::fs::set_permissions(destination, permissions)?;
+
+    Ok(total)
 }
 
 /// Execute every move in `plan`, using `copy_across_volumes` for any move that

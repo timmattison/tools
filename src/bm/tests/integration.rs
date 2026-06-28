@@ -152,11 +152,11 @@ fn end_to_end_moves_only_matching_files_into_destination() {
 fn copy_file_copies_contents_and_reports_progress() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("a.bin");
-    let data = vec![7u8; 10_000];
+    let data = vec![7_u8; 10_000];
     fs::write(&src, &data).unwrap();
     let dst = dir.path().join("b.bin");
 
-    let mut last_reported = 0u64;
+    let mut last_reported = 0_u64;
     let n = bm::copy_file(&src, &dst, |bytes| last_reported = bytes).unwrap();
 
     assert_eq!(n, data.len() as u64);
