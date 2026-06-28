@@ -30,7 +30,26 @@ pub fn select_filter(
     prefix: Option<String>,
     substring: Option<String>,
 ) -> Result<FilterType, FilterSelectionError> {
-    todo!("driven by tests")
+    let mut selected = None;
+    let mut count = 0;
+
+    if let Some(suffix) = suffix {
+        selected = Some(FilterType::Suffix(suffix));
+        count += 1;
+    }
+    if let Some(prefix) = prefix {
+        selected = Some(FilterType::Prefix(prefix));
+        count += 1;
+    }
+    if let Some(substring) = substring {
+        selected = Some(FilterType::Substring(substring));
+        count += 1;
+    }
+
+    match (count, selected) {
+        (1, Some(filter)) => Ok(filter),
+        _ => Err(FilterSelectionError::NotExactlyOne),
+    }
 }
 
 #[cfg(test)]
