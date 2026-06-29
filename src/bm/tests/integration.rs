@@ -164,6 +164,30 @@ fn copy_file_copies_contents_and_reports_progress() {
     assert_eq!(fs::read(&dst).unwrap(), data);
 }
 
+#[test]
+fn copy_file_preserves_modification_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("a.bin");
+    fs::write(&src, b"data").unwrap();
+    // A distinctive past mtime so "now" can't accidentally match without the fix.
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    let dst = dir.path().join("b.bin");
+
+    bm::copy_file(&src, &dst, |_| {}).unwrap();
+
+    let dst_mtime = fs::metadata(&dst).unwrap().modified().unwrap();
+    assert_eq!(
+        dst_mtime, past,
+        "destination must keep the source's modification time"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn copy_file_preserves_unix_permissions() {
