@@ -73,8 +73,20 @@ pub enum UserSaltError {
 /// - any other non-empty value → `Err(UserSaltError::InvalidUidOverride)`,
 ///   carrying the original untrimmed raw string
 fn parse_uid_override(raw: Option<&str>) -> Result<Option<UserSalt>, UserSaltError> {
-    // RED stub: silently drops malformed input (old behavior) so the new tests fail.
-    Ok(raw.and_then(|r| r.trim().parse::<u32>().ok()).map(UserSalt::Uid))
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        // An empty or whitespace-only value clears the override (use live detection).
+        return Ok(None);
+    }
+    match trimmed.parse::<u32>() {
+        Ok(uid) => Ok(Some(UserSalt::Uid(uid))),
+        // Carry the original untrimmed raw string so the error reflects exactly
+        // what the user set.
+        Err(_) => Err(UserSaltError::InvalidUidOverride(raw.to_string())),
+    }
 }
 
 /// Identifies the current user so two people on the same machine derive
