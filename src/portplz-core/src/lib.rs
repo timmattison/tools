@@ -45,6 +45,71 @@ pub fn unprivileged_port_from_string(input: &str) -> DerivedPort {
     DerivedPort(port)
 }
 
+/// Environment variable that overrides the detected user.
+///
+/// When set to a non-negative integer it replaces the live user id in the port
+/// derivation. This lets you reproduce another user's port, or pin a stable
+/// port in containers/CI where the uid differs from your workstation.
+pub const PORTPLZ_UID_ENV: &str = "PORTPLZ_UID";
+
+/// Identifies the current user so two people on the same machine derive
+/// different ports for the same repo and branch.
+///
+/// On Unix the identity is the numeric POSIX user id; on platforms without one
+/// (e.g. Windows) it falls back to the login name. Use [`UserSalt::current`] for
+/// the live value, or construct a fixed [`UserSalt::Uid`]/[`UserSalt::Name`] in
+/// tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserSalt {
+    /// A numeric POSIX user id (the common case on Unix).
+    Uid(u32),
+    /// A login name, used where no numeric uid exists (e.g. Windows).
+    Name(String),
+}
+
+impl UserSalt {
+    /// Resolves the current user.
+    ///
+    /// Honors the [`PORTPLZ_UID_ENV`] override first; otherwise uses the live
+    /// POSIX uid on Unix, or the login name on platforms without one.
+    #[must_use]
+    pub fn current() -> Self {
+        if let Some(uid) = std::env::var(PORTPLZ_UID_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+        {
+            return Self::Uid(uid);
+        }
+
+        #[cfg(unix)]
+        {
+            // SAFETY: `getuid` is a POSIX call that always succeeds, has no
+            // preconditions, and can neither fail nor invoke undefined behavior.
+            Self::Uid(unsafe { libc::getuid() })
+        }
+        #[cfg(not(unix))]
+        {
+            Self::Name(
+                std::env::var("USERNAME")
+                    .or_else(|_| std::env::var("USER"))
+                    .unwrap_or_else(|_| "unknown".to_string()),
+            )
+        }
+    }
+
+    /// The component mixed into the port hash to distinguish users.
+    fn hash_component(&self) -> String {
+        // RED stub: ignores the variant so every user hashes identically.
+        String::new()
+    }
+
+    /// Human-readable label appended to `--verbose` output, e.g. `uid 501`.
+    fn label(&self) -> String {
+        // RED stub: empty so the description omits the user.
+        String::new()
+    }
+}
+
 /// Describes how the port's hash input was determined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortSource {
@@ -104,11 +169,22 @@ fn get_git_branch(repo: &gix::Repository) -> Option<String> {
     }
 }
 
-/// The result of deriving a port: the port and how it was derived.
+/// The result of deriving a port: the port, how it was derived, and for whom.
 #[derive(Debug, Clone)]
 pub struct Derivation {
     pub port: DerivedPort,
     pub source: PortSource,
+    pub user: UserSalt,
+}
+
+impl Derivation {
+    /// One-line human-readable description including the user, e.g.
+    /// `Port 51877 for repo 'foo' on branch 'main' (uid 501)`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        // RED stub: omits the user label.
+        self.source.describe(self.port)
+    }
 }
 
 /// Errors that can occur while deriving a port.
@@ -122,11 +198,12 @@ pub enum DeriveError {
 ///
 /// When `no_git` is true, or `path` is not inside a git repo, the directory
 /// basename is used; otherwise the repo-root name plus the current branch
-/// (detached HEAD falls back to just the repo-root name).
+/// (detached HEAD falls back to just the repo-root name). `user` is mixed into
+/// the hash so different users derive different ports for the same location.
 ///
 /// # Errors
 /// Returns [`DeriveError::NoBasename`] if `path` has no final path component.
-pub fn derive(path: &Path, no_git: bool) -> Result<Derivation, DeriveError> {
+pub fn derive(path: &Path, no_git: bool, user: &UserSalt) -> Result<Derivation, DeriveError> {
     let basename = path
         .file_name()
         .ok_or(DeriveError::NoBasename)?
@@ -148,8 +225,13 @@ pub fn derive(path: &Path, no_git: bool) -> Result<Derivation, DeriveError> {
         }
     };
 
-    let port = unprivileged_port_from_string(&source.hash_input());
-    Ok(Derivation { port, source })
+    let hash_input = format!("{}\n{}", user.hash_component(), source.hash_input());
+    let port = unprivileged_port_from_string(&hash_input);
+    Ok(Derivation {
+        port,
+        source,
+        user: user.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -168,6 +250,40 @@ mod tests {
         assert_eq!(
             unprivileged_port_from_string("example").get(),
             unprivileged_port_from_string("example").get()
+        );
+    }
+
+    #[test]
+    fn test_different_users_get_different_ports() {
+        let path = std::path::Path::new("/example/myrepo");
+        let a = derive(path, true, &UserSalt::Uid(501)).expect("derive");
+        let b = derive(path, true, &UserSalt::Uid(502)).expect("derive");
+        assert_ne!(
+            a.port.get(),
+            b.port.get(),
+            "different users must derive different ports for the same location"
+        );
+    }
+
+    #[test]
+    fn test_describe_includes_uid_label() {
+        let path = std::path::Path::new("/example/myrepo");
+        let d = derive(path, true, &UserSalt::Uid(501)).expect("derive");
+        assert!(
+            d.describe().contains("(uid 501)"),
+            "verbose description must include the uid, got: {}",
+            d.describe()
+        );
+    }
+
+    #[test]
+    fn test_describe_includes_name_label() {
+        let path = std::path::Path::new("/example/myrepo");
+        let d = derive(path, true, &UserSalt::Name("alice".into())).expect("derive");
+        assert!(
+            d.describe().contains("(user 'alice')"),
+            "verbose description must include the login name, got: {}",
+            d.describe()
         );
     }
 
@@ -338,8 +454,8 @@ mod tests {
             ],
         );
 
-        let d1 = derive(dir, false).expect("derive should succeed");
-        let d2 = derive(dir, false).expect("derive should succeed");
+        let d1 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
+        let d2 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
         assert_eq!(
             d1.port.get(),
             d2.port.get(),
