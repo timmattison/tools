@@ -434,16 +434,18 @@ fn already_in_destination(file: &Path, destination_canonical: Option<&Path>) -> 
 }
 
 /// Copy `source` to `destination` in chunks, invoking `on_progress` with the
-/// running byte total after each chunk. Source permissions are preserved.
+/// running byte total after each chunk. Source permissions and modification
+/// time are preserved.
 ///
 /// This is the building block for cross-volume moves: a caller wraps it with a
-/// progress bar and hands the result to [`execute_plan`]. Modification time is
-/// not preserved.
+/// progress bar and hands the result to [`execute_plan`]. The destination keeps
+/// the source's modification time so a moved file is indistinguishable from the
+/// original.
 ///
 /// # Errors
 ///
 /// Propagates any I/O error from reading the source, writing the destination,
-/// or applying permissions.
+/// applying permissions, or setting the destination timestamp.
 pub fn copy_file(
     source: &Path,
     destination: &Path,
@@ -469,9 +471,15 @@ pub fn copy_file(
     }
     writer.flush()?;
 
-    // Preserve permissions so an executable stays executable after the move.
-    let permissions = std::fs::metadata(source)?.permissions();
-    std::fs::set_permissions(destination, permissions)?;
+    // Preserve permissions and modification time so a moved file is
+    // indistinguishable from the original — important for cross-volume
+    // backup/archive moves, the primary use case. Set mtime last, after the
+    // data flush and the permission change (chmod bumps ctime, not mtime).
+    let metadata = std::fs::metadata(source)?;
+    std::fs::set_permissions(destination, metadata.permissions())?;
+    if let Ok(modified) = metadata.modified() {
+        writer.set_modified(modified)?;
+    }
 
     Ok(total)
 }
