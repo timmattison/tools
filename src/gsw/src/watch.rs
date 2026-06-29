@@ -1906,6 +1906,76 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_force_refresh_walks_immediately_mid_cooldown() {
+        // Phase 5: pressing `r` (Event::ForceRefresh) mid-cooldown must force an
+        // immediate git walk, bypassing the active cooldown. An arming FS walk costs
+        // D = 10 ms, arming a 100·D = 1 s cooldown (expiry = base + 1 s). A force
+        // refresh arrives at base + 100 ms — genuinely mid-cooldown — and must walk
+        // anyway. Across the sequence git is therefore walked exactly TWICE: the
+        // arming walk and the forced walk. The injected clock is a short clamped
+        // sequence (trailing reads saturate at the last entry), so the test is
+        // deterministic and never sleeps on the clock.
+        let base = Instant::now();
+        let times = [
+            base,                              // arming walk start
+            base + Duration::from_millis(10),  // arming walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_millis(100), // force-refresh wake: mid-cooldown
+            base + Duration::from_millis(110), // forced walk end
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue arming change");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut stage = 0_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            None, // decay timer off: isolate the throttle from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    stage += 1;
+                    match stage {
+                        // After the arming walk: a manual refresh lands mid-cooldown.
+                        1 => {
+                            let _ = tx.send(Event::ForceRefresh);
+                        }
+                        // The forced walk's render (or, if force were unwired, the
+                        // deferred re-render): end the loop.
+                        _ => {
+                            let _ = tx.send(Event::Quit);
+                        }
+                    }
+                    frame(&format!("frame {stage}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: timer_off,
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 2,
+            "a force refresh mid-cooldown must walk despite the unexpired cooldown: \
+             the arming walk plus the forced walk",
+        );
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
