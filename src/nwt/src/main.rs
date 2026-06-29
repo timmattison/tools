@@ -996,6 +996,12 @@ fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
     let output = Command::new("git")
         .args(["ls-files"])
         .current_dir(repo_root)
+        // Scrub any inherited git-location vars (set when this process is a
+        // child of a git hook) so the query targets `repo_root`, not whatever
+        // GIT_DIR/GIT_INDEX_FILE the parent exported. A no-op in normal use.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output();
 
     match output {
@@ -1775,6 +1781,13 @@ fn bootstrap_hooks(worktree: &Path, quiet: bool) -> bool {
     let status = Command::new(program)
         .args(args)
         .current_dir(worktree)
+        // Scrub any inherited git-location vars so the install's lifecycle
+        // scripts (e.g. a `prepare` that runs `git config core.hooksPath`)
+        // operate on `worktree`, not on whatever GIT_DIR/GIT_INDEX_FILE a parent
+        // git hook exported. A no-op in normal use (no such vars are set).
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
@@ -1842,6 +1855,12 @@ fn missing_hooks_path(worktree: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["config", "--type=path", "core.hooksPath"])
         .current_dir(worktree)
+        // Scrub any inherited git-location vars (set when this process is a
+        // child of a git hook) so the query targets `worktree`, not whatever
+        // GIT_DIR/GIT_INDEX_FILE the parent exported. A no-op in normal use.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -1934,6 +1953,13 @@ mod tests {
         Command::new("git")
             .args(args)
             .current_dir(dir)
+            // Scrub git-location vars git exports to a hook (absolute GIT_DIR/
+            // GIT_INDEX_FILE in a worktree) so fixture git commands target `dir`,
+            // not the real repo, when these tests run from inside the pre-commit
+            // hook's own `cargo test`.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()

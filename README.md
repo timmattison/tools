@@ -30,6 +30,12 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
 - Only processes relevant content based on custom rules
 - Used as the foundation for clipboard transformation tools like `htmlboard`, `jsonboard`, and `unescapeboard`
 
+### portplz-core
+A shared Rust library that derives a deterministic, unprivileged TCP port from a git repository's root name and
+current branch (or, with no git, a directory name). It hides SHA-256 hashing and `gix` repository discovery behind
+a single `derive()` entry point. Used by `portplz` (which prints the port) and `sirn` (which serves on it), so both
+agree on the same port for a given project without `portplz` needing to be installed.
+
 ## The tools
 
 - dirhash
@@ -102,6 +108,13 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
       for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
       separate instances/VMs.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
+- sirn
+    - Serve It Right Now — a tiny, zero-config HTTP file server. Run `sirn <file>...` to serve each file at
+      `/<basename>`, or `sirn` with no arguments to serve the current directory as a browsable tree. The listening
+      port is derived automatically from the git repo root and branch (the same algorithm as `portplz`), so a given
+      project always serves on a stable port; override it with `-p/--port`. Binds `127.0.0.1` by default — use
+      `--bind 0.0.0.0` to expose it on the LAN.
+    - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based
       v5 (SHA-1) UUID, so the same input always produces the same UUID — handy for stable, reproducible IDs. The

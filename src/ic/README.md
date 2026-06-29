@@ -77,6 +77,19 @@ This utility uses iTerm2's inline image protocol or the Kitty image protocol. It
 
 Kitty support is experimental.
 
+Inside Zellij, `ic` uses Sixel instead, since the Kitty protocol does not pass through Zellij's renderer.
+
+### muxiavelli Panels
+
+Inside a [muxiavelli](https://github.com/timmattison/muxiavelli) panel, the web terminal is ttyd's xterm.js with `@xterm/addon-image`, which renders **Sixel and iTerm2's inline image protocol (IIP) only — not the Kitty graphics protocol**.
+
+A panel's PTY inherits the environment of whatever terminal launched the muxiavelli server, so the usual host-terminal detection would mis-fire (e.g. emit the Kitty protocol the addon cannot render). To avoid this, muxiavelli advertises its real capability and `ic` honors it:
+
+| Variable | Value | Meaning |
+|----------|-------|---------|
+| `MUXIAVELLI` | `1` | The PTY is inside a muxiavelli panel. Checked before every host-terminal signal so leaked env vars cannot win. |
+| `MUXIAVELLI_IMAGE_PROTOCOLS` | e.g. `sixel,iterm2` | Ordered preference of inline-image protocols the panel renders. `ic` picks the first one it supports. Absent, empty, or naming nothing supported falls back to Sixel. The Kitty protocol is intentionally never used in muxiavelli panels. |
+
 ### tmux Support
 
 The utility automatically detects when running inside tmux and reports an error. This program does not work in tmux (yet).
