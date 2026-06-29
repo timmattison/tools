@@ -188,6 +188,45 @@ fn copy_file_preserves_modification_time() {
     );
 }
 
+#[test]
+fn execute_plan_reports_partial_summary_when_a_move_fails() {
+    use bm::{MovePlan, PlannedMove};
+
+    let dir = tempfile::tempdir().unwrap();
+    let src_a = dir.path().join("a.txt");
+    let src_b = dir.path().join("b.txt");
+    fs::write(&src_a, b"a").unwrap();
+    fs::write(&src_b, b"b").unwrap();
+
+    let good_dest = dir.path().join("a-moved.txt");
+    // Parent dir doesn't exist, so renaming here fails (ENOENT, not cross-device).
+    let bad_dest = dir.path().join("missing").join("b.txt");
+
+    let plan = MovePlan {
+        moves: vec![
+            PlannedMove {
+                source: src_a.clone(),
+                destination: good_dest.clone(),
+            },
+            PlannedMove {
+                source: src_b.clone(),
+                destination: bad_dest,
+            },
+        ],
+        skipped: Vec::new(),
+    };
+
+    let err = execute_plan(&plan, |_, _| panic!("no cross-volume copy expected")).unwrap_err();
+
+    assert_eq!(
+        err.summary.moved(),
+        1,
+        "the first successful move must be counted in the partial summary"
+    );
+    assert!(good_dest.exists(), "the first file was moved before the failure");
+    assert!(src_b.exists(), "the failed move leaves its source in place");
+}
+
 #[cfg(unix)]
 #[test]
 fn copy_file_preserves_unix_permissions() {

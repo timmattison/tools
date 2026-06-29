@@ -128,7 +128,17 @@ fn run() -> Result<ExitCode> {
     }
 
     let start = Instant::now();
-    let summary = execute_plan(&plan, copy_across_volumes)?;
+    let summary = match execute_plan(&plan, copy_across_volumes) {
+        Ok(summary) => summary,
+        Err(err) => {
+            // A move failed mid-batch: surface what already moved before the
+            // error so a partial run isn't silent, then report the error.
+            if err.summary.moved() > 0 || err.summary.skipped > 0 {
+                print_interrupted(&err.summary, start.elapsed());
+            }
+            return Err(err.into());
+        }
+    };
     print_summary(&summary, start.elapsed());
 
     Ok(ExitCode::SUCCESS)
@@ -217,6 +227,18 @@ fn print_summary(summary: &Summary, duration: Duration) {
     println!(
         "Move complete: {moved} moved ({} renamed, {} copied across volumes), {} skipped in {:.2?} ({rate:.0} files/sec)",
         summary.renamed, summary.copied, summary.skipped, duration
+    );
+}
+
+/// Print the partial tally when a run stops early because a move failed.
+fn print_interrupted(summary: &Summary, duration: Duration) {
+    println!(
+        "Move interrupted: {} moved ({} renamed, {} copied across volumes), {} skipped in {:.2?} before the error below:",
+        summary.moved(),
+        summary.renamed,
+        summary.copied,
+        summary.skipped,
+        duration
     );
 }
 

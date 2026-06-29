@@ -493,6 +493,24 @@ pub fn copy_file(
     Ok(total)
 }
 
+/// Returned by [`execute_plan`] when a move fails partway through a batch.
+///
+/// Carries the [`Summary`] of everything successfully moved *before* the
+/// failure, so callers can report partial progress instead of discarding it.
+#[derive(Debug, thiserror::Error)]
+#[error("moving {} to {}", .source_path.display(), .destination.display())]
+pub struct ExecuteError {
+    /// Files moved (and skipped) before the failure.
+    pub summary: Summary,
+    /// The source file whose move failed.
+    pub source_path: PathBuf,
+    /// The destination the failed move targeted.
+    pub destination: PathBuf,
+    /// The underlying I/O error.
+    #[source]
+    pub source: std::io::Error,
+}
+
 /// Execute every move in `plan`, using `copy_across_volumes` for any move that
 /// crosses a filesystem boundary.
 ///
@@ -502,29 +520,26 @@ pub fn copy_file(
 pub fn execute_plan(
     plan: &MovePlan,
     mut copy_across_volumes: impl FnMut(&Path, &Path) -> std::io::Result<u64>,
-) -> anyhow::Result<Summary> {
-    use anyhow::Context;
-
+) -> Result<Summary, ExecuteError> {
     let mut summary = Summary {
         skipped: plan.skipped.len(),
         ..Summary::default()
     };
 
     for planned in &plan.moves {
-        let outcome = move_file(&planned.source, &planned.destination, |s, d| {
+        match move_file(&planned.source, &planned.destination, |s, d| {
             copy_across_volumes(s, d)
-        })
-        .with_context(|| {
-            format!(
-                "moving {} to {}",
-                planned.source.display(),
-                planned.destination.display()
-            )
-        })?;
-
-        match outcome {
-            MoveOutcome::Renamed => summary.renamed += 1,
-            MoveOutcome::Copied => summary.copied += 1,
+        }) {
+            Ok(MoveOutcome::Renamed) => summary.renamed += 1,
+            Ok(MoveOutcome::Copied) => summary.copied += 1,
+            Err(source) => {
+                return Err(ExecuteError {
+                    summary: Summary::default(),
+                    source_path: planned.source.clone(),
+                    destination: planned.destination.clone(),
+                    source,
+                });
+            }
         }
     }
 
