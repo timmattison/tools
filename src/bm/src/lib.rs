@@ -354,10 +354,19 @@ fn move_file_with(
         Ok(()) => Ok(MoveOutcome::Renamed),
         Err(err) if is_cross_device_error(&err) => {
             // Different filesystems: copy the bytes over, then remove the
-            // original only once the copy has fully succeeded.
-            copy_across_volumes(source, destination)?;
-            std::fs::remove_file(source)?;
-            Ok(MoveOutcome::Copied)
+            // original only once the copy has fully succeeded. If the copy
+            // fails partway, delete the truncated destination so a failed move
+            // never leaves a corrupt file behind; the source is left intact.
+            match copy_across_volumes(source, destination) {
+                Ok(_) => {
+                    std::fs::remove_file(source)?;
+                    Ok(MoveOutcome::Copied)
+                }
+                Err(copy_err) => {
+                    let _ = std::fs::remove_file(destination);
+                    Err(copy_err)
+                }
+            }
         }
         Err(err) => Err(err),
     }
@@ -856,7 +865,7 @@ mod tests {
             |_s, d| {
                 // A copy that writes a truncated file, then fails partway.
                 std::fs::write(d, b"par").unwrap();
-                Err(std::io::Error::new(std::io::ErrorKind::Other, "disk full"))
+                Err(std::io::Error::other("disk full"))
             },
         )
         .unwrap_err();
