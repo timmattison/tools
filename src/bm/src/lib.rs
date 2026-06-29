@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 pub use filewalker::FilterType;
 
-/// The filename portion of a path, as an owned [`PathBuf`] of just the basename.
+/// The final path component (basename), borrowed as an [`OsStr`].
 ///
 /// Returns `None` for paths that have no final component (e.g. `/`).
 fn basename(path: &Path) -> Option<&std::ffi::OsStr> {
