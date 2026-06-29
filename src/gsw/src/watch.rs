@@ -882,6 +882,30 @@ mod tests {
     }
 
     #[test]
+    fn floor_clamps_a_fast_walk_to_the_minimum_cooldown() {
+        // A nearly-free walk has a tiny 100·cost cooldown, which would let the
+        // throttle update FASTER than today's 150 ms debounce window. The FLOOR
+        // clamps it: watch-mode updates can never be quicker than today even
+        // when a walk costs almost nothing. A 1 ms walk's un-floored cooldown is
+        // 100·1 ms = 100 ms; the floor must extend it out to 150 ms. Instants are
+        // derived from one base, so the test is deterministic and parallel-safe.
+        let t0 = Instant::now();
+
+        let mut throttle = Throttle::new();
+        throttle.record(t0, Duration::from_millis(1));
+        assert_eq!(
+            throttle.on_change(t0 + Duration::from_millis(100)),
+            Walk::Defer,
+            "still gated past the un-floored 100 ms cooldown — the floor extends it",
+        );
+        assert_eq!(
+            throttle.on_change(t0 + Duration::from_millis(150)),
+            Walk::Now,
+            "allowed exactly at the 150 ms floor, never faster than today's debounce",
+        );
+    }
+
+    #[test]
     fn should_react_accepts_a_tracked_or_untracked_non_ignored_worktree_path() {
         // An edit to a normal source file under the worktree must wake the
         // loop — it's exactly what gsw exists to show.
