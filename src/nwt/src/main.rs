@@ -1411,13 +1411,18 @@ fn main() {
                         // a shell), so it doesn't need shell escaping. Control characters are
                         // validated above via debug_assert. Directory names are safe because they're
                         // either random (adjective-noun from names crate) or sanitized branch names.
-                        let mut tmux_args: Vec<String> = vec![
-                            "new-window".into(),
-                            "-c".into(),
-                            worktree_path_str.into(),
-                            "-n".into(),
-                            tab_name,
-                        ];
+                        let mut tmux_args: Vec<String> =
+                            vec!["new-window".into(), "-c".into(), worktree_path_str.into()];
+
+                        // Name the new window after the worktree, unless tab/window
+                        // renaming is explicitly disabled (issue #283). Without `-n`,
+                        // tmux auto-names the window after the running command — the
+                        // standard non-renaming behavior — so a test or script that
+                        // sets NWT_NO_TAB_RENAME can't retarget the user's window.
+                        if !tab_rename_disabled() {
+                            tmux_args.push("-n".into());
+                            tmux_args.push(tab_name);
+                        }
 
                         // If --run is specified, wrap the command in an interactive shell
                         // so that aliases and shell functions are available.
