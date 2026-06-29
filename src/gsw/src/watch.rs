@@ -231,6 +231,17 @@ enum Walk {
 )]
 const BUDGET: f64 = 0.01;
 
+/// Minimum cooldown, equal to today's [`DEBOUNCE`] window (150 ms). When a walk
+/// is cheap enough that 100·`cost` falls below this, [`cooldown`] clamps the
+/// result UP to `FLOOR` — so adaptive throttling can only ever make watch-mode
+/// updates *slower* (for an expensive repo), never faster than they already are
+/// under today's debounce. A nearly-free walk therefore still settles at 150 ms.
+#[allow(
+    dead_code,
+    reason = "Unused until Phase 4 wires the Throttle into the event loop."
+)]
+const FLOOR: Duration = Duration::from_millis(150);
+
 /// Pure, time-injected throttle that gates git walks to the [`BUDGET`] duty
 /// cycle. After a walk costing `D`, the next walk is held off for `D / BUDGET`
 /// (= 100·`D`), so an expensive repo automatically backs off and a cheap one
@@ -273,11 +284,13 @@ impl Throttle {
     }
 }
 
-/// Cooldown for a walk costing `cost`: `cost / BUDGET` (= 100·`cost`), so the
-/// sustained git duty cycle settles at [`BUDGET`]. The integer multiply by the
-/// reciprocal (not `Duration::mul_f64`) keeps it nanosecond-exact, so the
-/// [`Walk::Defer`]/[`Walk::Now`] boundary lands precisely at `walk_start +
-/// cost / BUDGET`; a cost large enough to overflow saturates at [`Duration::MAX`].
+/// Cooldown for a walk costing `cost`: `max(FLOOR, cost / BUDGET)` (= `max(FLOOR,
+/// 100·cost)`), so the sustained git duty cycle settles at [`BUDGET`] while the
+/// [`FLOOR`] keeps a nearly-free walk from updating faster than today's debounce.
+/// The integer multiply by the reciprocal (not `Duration::mul_f64`) keeps it
+/// nanosecond-exact, so the [`Walk::Defer`]/[`Walk::Now`] boundary lands precisely
+/// at `walk_start + cost / BUDGET` once that exceeds the floor; a cost large enough
+/// to overflow saturates at [`Duration::MAX`].
 #[allow(
     dead_code,
     reason = "Unused until Phase 4 wires the Throttle into the event loop."
@@ -286,8 +299,11 @@ fn cooldown(cost: Duration) -> Duration {
     // = 1 / BUDGET (0.01); an exact integer scale avoids the nanosecond drift
     // `Duration::mul_f64` would introduce at the on_change boundary.
     const COOLDOWN_MULTIPLIER: u32 = 100;
+    // Clamp UP to FLOOR: a sub-1.5 ms walk's 100·cost is under 150 ms, so it
+    // settles at the floor; anything ≥ 1.5 ms already clears it and is unaffected.
     cost.checked_mul(COOLDOWN_MULTIPLIER)
         .unwrap_or(Duration::MAX)
+        .max(FLOOR)
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
