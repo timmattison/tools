@@ -1780,6 +1780,69 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_decay_tick_during_cooldown_does_not_walk() {
+        // Part A and Part B compose: while a cooldown is active (a deferred walk
+        // is owed), a plain decay tick — which fires on the SHORTER decay cadence,
+        // before the cooldown expires — must re-render the cached snapshot WITHOUT
+        // walking git. Only the owed walk, once its cooldown has actually expired,
+        // walks. A constant injected clock pins "now" at `base`, so the 150 ms
+        // FLOOR cooldown (the arming walk costs 0) is never reached: the arming
+        // walk is the ONLY walk; the deferred change and the decay tick during the
+        // cooldown add none.
+        let base = Instant::now();
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue arming change");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut stage = 0_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            Some(Duration::ZERO),
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    stage += 1;
+                    match stage {
+                        // After the arming walk: one FS change lands mid-cooldown
+                        // (it is deferred, setting the dirty flag).
+                        1 => {
+                            let _ = tx.send(Event::FsChanged);
+                        }
+                        // The deferred re-render: do nothing, let a decay tick fire
+                        // while the cooldown is still active.
+                        2 => {}
+                        // The decay tick during the cooldown (or, if the guard were
+                        // missing, a wrongful owed walk): end the loop.
+                        _ => {
+                            let _ = tx.send(Event::Quit);
+                        }
+                    }
+                    frame(&format!("frame {stage}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || base,
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 1,
+            "a decay tick that fires during an active cooldown must re-render \
+             from cache without walking git — only the arming walk runs",
+        );
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
