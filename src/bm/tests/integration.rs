@@ -164,6 +164,72 @@ fn copy_file_copies_contents_and_reports_progress() {
     assert_eq!(fs::read(&dst).unwrap(), data);
 }
 
+#[test]
+fn copy_file_preserves_modification_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("a.bin");
+    fs::write(&src, b"data").unwrap();
+    // A distinctive past mtime so "now" can't accidentally match without the fix.
+    let past = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    let dst = dir.path().join("b.bin");
+
+    bm::copy_file(&src, &dst, |_| {}).unwrap();
+
+    let dst_mtime = fs::metadata(&dst).unwrap().modified().unwrap();
+    assert_eq!(
+        dst_mtime, past,
+        "destination must keep the source's modification time"
+    );
+}
+
+#[test]
+fn execute_plan_reports_partial_summary_when_a_move_fails() {
+    use bm::{MovePlan, PlannedMove};
+
+    let dir = tempfile::tempdir().unwrap();
+    let src_a = dir.path().join("a.txt");
+    let src_b = dir.path().join("b.txt");
+    fs::write(&src_a, b"a").unwrap();
+    fs::write(&src_b, b"b").unwrap();
+
+    let good_dest = dir.path().join("a-moved.txt");
+    // Parent dir doesn't exist, so renaming here fails (ENOENT, not cross-device).
+    let bad_dest = dir.path().join("missing").join("b.txt");
+
+    let plan = MovePlan {
+        moves: vec![
+            PlannedMove {
+                source: src_a,
+                destination: good_dest.clone(),
+            },
+            PlannedMove {
+                source: src_b.clone(),
+                destination: bad_dest,
+            },
+        ],
+        skipped: Vec::new(),
+    };
+
+    let err = execute_plan(&plan, |_, _| panic!("no cross-volume copy expected")).unwrap_err();
+
+    assert_eq!(
+        err.summary.moved(),
+        1,
+        "the first successful move must be counted in the partial summary"
+    );
+    assert!(
+        good_dest.exists(),
+        "the first file was moved before the failure"
+    );
+    assert!(src_b.exists(), "the failed move leaves its source in place");
+}
+
 #[cfg(unix)]
 #[test]
 fn copy_file_preserves_unix_permissions() {

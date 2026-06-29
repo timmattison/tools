@@ -6,11 +6,14 @@
 //! collision-safe move planning, and a cross-volume move fallback that ordinary
 //! `rename(2)` cannot perform.
 
+#![cfg_attr(not(test), warn(clippy::unwrap_used))]
+#![cfg_attr(not(test), warn(clippy::expect_used))]
+
 use std::path::{Path, PathBuf};
 
 pub use filewalker::FilterType;
 
-/// The filename portion of a path, as an owned [`PathBuf`] of just the basename.
+/// The final path component (basename), borrowed as an [`OsStr`].
 ///
 /// Returns `None` for paths that have no final component (e.g. `/`).
 fn basename(path: &Path) -> Option<&std::ffi::OsStr> {
@@ -351,10 +354,19 @@ fn move_file_with(
         Ok(()) => Ok(MoveOutcome::Renamed),
         Err(err) if is_cross_device_error(&err) => {
             // Different filesystems: copy the bytes over, then remove the
-            // original only once the copy has fully succeeded.
-            copy_across_volumes(source, destination)?;
-            std::fs::remove_file(source)?;
-            Ok(MoveOutcome::Copied)
+            // original only once the copy has fully succeeded. If the copy
+            // fails partway, delete the truncated destination so a failed move
+            // never leaves a corrupt file behind; the source is left intact.
+            match copy_across_volumes(source, destination) {
+                Ok(_) => {
+                    std::fs::remove_file(source)?;
+                    Ok(MoveOutcome::Copied)
+                }
+                Err(copy_err) => {
+                    let _ = std::fs::remove_file(destination);
+                    Err(copy_err)
+                }
+            }
         }
         Err(err) => Err(err),
     }
@@ -431,16 +443,18 @@ fn already_in_destination(file: &Path, destination_canonical: Option<&Path>) -> 
 }
 
 /// Copy `source` to `destination` in chunks, invoking `on_progress` with the
-/// running byte total after each chunk. Source permissions are preserved.
+/// running byte total after each chunk. Source permissions and modification
+/// time are preserved.
 ///
 /// This is the building block for cross-volume moves: a caller wraps it with a
-/// progress bar and hands the result to [`execute_plan`]. Modification time is
-/// not preserved.
+/// progress bar and hands the result to [`execute_plan`]. The destination keeps
+/// the source's modification time so a moved file is indistinguishable from the
+/// original.
 ///
 /// # Errors
 ///
 /// Propagates any I/O error from reading the source, writing the destination,
-/// or applying permissions.
+/// applying permissions, or setting the destination timestamp.
 pub fn copy_file(
     source: &Path,
     destination: &Path,
@@ -466,11 +480,35 @@ pub fn copy_file(
     }
     writer.flush()?;
 
-    // Preserve permissions so an executable stays executable after the move.
-    let permissions = std::fs::metadata(source)?.permissions();
-    std::fs::set_permissions(destination, permissions)?;
+    // Preserve permissions and modification time so a moved file is
+    // indistinguishable from the original — important for cross-volume
+    // backup/archive moves, the primary use case. Set mtime last, after the
+    // data flush and the permission change (chmod bumps ctime, not mtime).
+    let metadata = std::fs::metadata(source)?;
+    std::fs::set_permissions(destination, metadata.permissions())?;
+    if let Ok(modified) = metadata.modified() {
+        writer.set_modified(modified)?;
+    }
 
     Ok(total)
+}
+
+/// Returned by [`execute_plan`] when a move fails partway through a batch.
+///
+/// Carries the [`Summary`] of everything successfully moved *before* the
+/// failure, so callers can report partial progress instead of discarding it.
+#[derive(Debug, thiserror::Error)]
+#[error("moving {} to {}", .source_path.display(), .destination.display())]
+pub struct ExecuteError {
+    /// Files moved (and skipped) before the failure.
+    pub summary: Summary,
+    /// The source file whose move failed.
+    pub source_path: PathBuf,
+    /// The destination the failed move targeted.
+    pub destination: PathBuf,
+    /// The underlying I/O error.
+    #[source]
+    pub source: std::io::Error,
 }
 
 /// Execute every move in `plan`, using `copy_across_volumes` for any move that
@@ -482,29 +520,26 @@ pub fn copy_file(
 pub fn execute_plan(
     plan: &MovePlan,
     mut copy_across_volumes: impl FnMut(&Path, &Path) -> std::io::Result<u64>,
-) -> anyhow::Result<Summary> {
-    use anyhow::Context;
-
+) -> Result<Summary, ExecuteError> {
     let mut summary = Summary {
         skipped: plan.skipped.len(),
         ..Summary::default()
     };
 
     for planned in &plan.moves {
-        let outcome = move_file(&planned.source, &planned.destination, |s, d| {
+        match move_file(&planned.source, &planned.destination, |s, d| {
             copy_across_volumes(s, d)
-        })
-        .with_context(|| {
-            format!(
-                "moving {} to {}",
-                planned.source.display(),
-                planned.destination.display()
-            )
-        })?;
-
-        match outcome {
-            MoveOutcome::Renamed => summary.renamed += 1,
-            MoveOutcome::Copied => summary.copied += 1,
+        }) {
+            Ok(MoveOutcome::Renamed) => summary.renamed += 1,
+            Ok(MoveOutcome::Copied) => summary.copied += 1,
+            Err(source) => {
+                return Err(ExecuteError {
+                    summary,
+                    source_path: planned.source.clone(),
+                    destination: planned.destination.clone(),
+                    source,
+                });
+            }
         }
     }
 
@@ -827,6 +862,37 @@ mod tests {
         assert!(
             src.exists(),
             "nothing should be moved when rename fails fatally"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_file_cleans_up_partial_destination_when_cross_volume_copy_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"payload").unwrap();
+        let dst = dir.path().join("b.txt");
+
+        let err = move_file_with(
+            &src,
+            &dst,
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EXDEV)),
+            |_s, d| {
+                // A copy that writes a truncated file, then fails partway.
+                std::fs::write(d, b"par").unwrap();
+                Err(std::io::Error::other("disk full"))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert!(
+            !dst.exists(),
+            "a failed cross-volume copy must not leave a truncated destination behind"
+        );
+        assert!(
+            src.exists(),
+            "source must remain after a failed cross-volume copy"
         );
     }
 }
