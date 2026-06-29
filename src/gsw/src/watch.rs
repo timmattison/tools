@@ -290,8 +290,11 @@ impl Throttle {
     /// Arm the next cooldown from a walk that started at `walk_start` and took
     /// `cost`: the next walk is gated until `walk_start + cost / BUDGET`. Purely
     /// last-write-wins — each call replaces any prior cooldown, no averaging.
+    /// Clears any pending deferred walk: a freshly-recorded walk reflects the
+    /// latest coalesced state, so no walk is owed afterward (see [`Self::dirty`]).
     fn record(&mut self, walk_start: Instant, cost: Duration) {
         self.next_allowed_at = Some(walk_start + cooldown(cost));
+        self.dirty = false;
     }
 
     /// The instant a pending deferred walk should fire — the cooldown's expiry —
