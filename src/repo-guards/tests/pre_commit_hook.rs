@@ -9,12 +9,16 @@
 //!
 //! Parallel safety: a `bacon` loop runs `cargo test` concurrently with the
 //! pre-commit hook's own `cargo test`, so two copies of each test can execute
-//! at once. Every fixture directory is keyed on the process id plus a
-//! nanosecond timestamp so concurrent runs never share a path.
+//! at once. Every fixture directory is keyed on the process id, a nanosecond
+//! timestamp, AND a process-wide atomic counter. The counter is load-bearing:
+//! `cargo` runs these tests on parallel threads, and pid+nanos alone collides
+//! when two threads sample the clock in the same tick — two tests then share a
+//! dir and the second `git init` aborts with a template-copy "File exists".
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A deliberately misformatted Rust source file. `cargo fmt --check` rejects it
@@ -40,13 +44,20 @@ fn rust_toolchain_path() -> PathBuf {
     })
 }
 
+/// Monotonic per-process counter that disambiguates fixture dirs created within
+/// the same clock tick. Without it, two parallel test threads can produce the
+/// same pid+nanos name and collide.
+static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Create a process-unique fixture directory.
 fn unique_fixture_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before UNIX_EPOCH")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("repo-guards-{}-{nanos}", std::process::id()));
+    let seq = FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("repo-guards-{}-{nanos}-{seq}", std::process::id()));
     fs::create_dir_all(&dir).expect("create fixture dir");
     dir
 }
