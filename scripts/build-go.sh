@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./scripts/build-go.sh           # Build all Go tools
-#   ./scripts/build-go.sh bm dirc   # Build specific tools
+#   ./scripts/build-go.sh dirc prgz  # Build specific tools
 
 set -e
 
@@ -37,7 +37,7 @@ LDFLAGS="${LDFLAGS} -X github.com/timmattison/tools/internal/version.Version=${V
 mkdir -p bin
 
 # List of all Go tools
-ALL_TOOLS="bm dirc localnext prgz procinfo subito symfix"
+ALL_TOOLS="dirc localnext prgz procinfo subito symfix"
 
 # Determine which tools to build
 if [ $# -eq 0 ]; then

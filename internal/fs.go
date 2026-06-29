@@ -5,30 +5,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 type NameChecker func(filename string) bool
 type FileHandler func(entryPath string, fileInfo os.FileInfo)
 type DirectoryHandler func(entryPath string, entry os.DirEntry)
-
-func HasSuffixNameChecker(suffix string) NameChecker {
-	return func(filename string) bool {
-		return strings.HasSuffix(filename, suffix)
-	}
-}
-
-func HasPrefixNameChecker(prefix string) NameChecker {
-	return func(filename string) bool {
-		return strings.HasPrefix(filename, prefix)
-	}
-}
-
-func ContainsNameChecker(substring string) NameChecker {
-	return func(filename string) bool {
-		return strings.Contains(filename, substring)
-	}
-}
 
 func CalculateDirSize(dirPath string) (int64, error) {
 	var totalSize int64
