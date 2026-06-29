@@ -101,11 +101,16 @@ impl UserSalt {
     ///
     /// A uid renders as its decimal digits (no separators), which contain no
     /// newline, so prefixing it to the location's hash input keeps the
-    /// user/location boundary unambiguous.
+    /// user/location boundary unambiguous. For the `Name` variant, newline
+    /// characters (`\n` and `\r`) are stripped from the login name for the same
+    /// reason: the derived-port hash input uses `\n` as the boundary between the
+    /// user and location components, so a newline inside the name would make
+    /// that boundary ambiguous and let two distinct (user, location) pairs
+    /// collide onto the same port.
     fn hash_component(&self) -> String {
         match self {
             Self::Uid(uid) => uid.to_string(),
-            Self::Name(name) => name.clone(),
+            Self::Name(name) => name.chars().filter(|c| *c != '\n' && *c != '\r').collect(),
         }
     }
 
