@@ -99,7 +99,14 @@ pub fn init_repo() -> (TempDir, PathBuf) {
 /// those `.env(...)` calls run after the scrub here, they win for that child.
 pub fn nwt_command(repo: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
-    cmd.current_dir(repo).stdin(Stdio::null());
+    cmd.current_dir(repo)
+        .stdin(Stdio::null())
+        // Issue #283: strip the terminal-multiplexer env so a suite launched
+        // from inside zellij/tmux can't make the spawned nwt rename the user's
+        // real tab. Tests that deliberately exercise the multiplexer behavior
+        // re-add ZELLIJ/TMUX after calling this (a later `.env(..)` wins).
+        .env_remove("ZELLIJ")
+        .env_remove("TMUX");
     cmd
 }
 

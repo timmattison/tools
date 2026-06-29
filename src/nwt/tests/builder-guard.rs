@@ -28,12 +28,16 @@ fn nwt_command_scrubs_multiplexer_env() {
         .collect();
 
     assert!(
-        scheduled_for_removal.iter().any(|k| k == OsStr::new("ZELLIJ")),
+        scheduled_for_removal
+            .iter()
+            .any(|k| k == OsStr::new("ZELLIJ")),
         "nwt_command must remove ZELLIJ from the child env so the spawned nwt \
          never believes it is inside zellij.\nscheduled removals: {scheduled_for_removal:?}"
     );
     assert!(
-        scheduled_for_removal.iter().any(|k| k == OsStr::new("TMUX")),
+        scheduled_for_removal
+            .iter()
+            .any(|k| k == OsStr::new("TMUX")),
         "nwt_command must remove TMUX from the child env so the spawned nwt \
          never believes it is inside tmux.\nscheduled removals: {scheduled_for_removal:?}"
     );
