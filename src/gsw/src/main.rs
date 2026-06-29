@@ -9,7 +9,9 @@ use clap::Parser;
 use colored::Colorize;
 
 use crate::git::FileEntry;
-use crate::render::{plan_section_caps, render, LogEntry, RenderOptions, Snapshot};
+use crate::render::{
+    plan_section_caps, render, render_with_offset, LogEntry, RenderOptions, Snapshot,
+};
 use crate::snapshot::build_snapshot;
 
 mod age;
@@ -328,18 +330,35 @@ fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
         .min()
 }
 
-/// Walk the repository and render the full status output for `dims`.
+/// Walk the repository and render the full status frame for `dims`.
 ///
-/// Pure with respect to the terminal: it returns the rendered frame (and the
-/// freshest displayed-item age for the decay timer) and never touches stdout,
-/// so callers decide how to display it — one-shot prints it, watch mode paints
-/// it into the alternate screen. The row-budget split (file list vs. log
-/// section) is computed here from `dims.height`.
+/// Composes the two halves of the render pipeline: [`collect_snapshot`]
+/// assembles the repo state, then [`render_frame`] turns it into a frame at no
+/// age offset (`Duration::ZERO`). Because the offset is zero, the output is
+/// byte-identical to a direct render; watch mode instead calls the two halves
+/// separately so it can re-render a *cached* snapshot at a growing offset
+/// without re-walking the repo.
 pub(crate) fn build_output(
     repo: &gix::Repository,
     cfg: &RenderConfig,
     dims: watch::Dimensions,
 ) -> Result<Render> {
+    let snapshot = collect_snapshot(repo, cfg)?;
+    Ok(render_frame(&snapshot, cfg, dims, Duration::ZERO))
+}
+
+/// Walk the repository and assemble the fully-populated [`Snapshot`] — the
+/// git-work half of the render pipeline.
+///
+/// This is the expensive, side-effecting step: it queries the current branch,
+/// resolves the base ref and counts commits ahead/behind, reads the last-commit
+/// age, collects working-tree changes and their mtimes, and fetches the
+/// recent-commit log and upstream status. The result is a pure description of
+/// repository state, independent of the live terminal — turning it into a frame
+/// for a given [`watch::Dimensions`] is the separate, cheap [`render_frame`]
+/// half. Watch mode collects once per filesystem change and re-renders the
+/// cached snapshot many times. Uses only `cfg.base` and `cfg.log_lines`.
+pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Result<Snapshot> {
     let branch = repo::branch_name(repo);
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
@@ -371,6 +390,28 @@ pub(crate) fn build_output(
 
     snapshot.upstream = repo::upstream_status(repo);
 
+    Ok(snapshot)
+}
+
+/// Render an already-collected [`Snapshot`] into a frame for `dims`, advancing
+/// every displayed age — and the returned [`Render::freshest_age`] — by
+/// `age_offset`.
+///
+/// This is the cheap, terminal-shaped half of the pipeline. Given a snapshot
+/// from [`collect_snapshot`], it performs the row-budget split (file list vs.
+/// log section) from `dims.height`, builds the [`RenderOptions`], and produces
+/// the colored frame via [`render_with_offset`]. `age_offset` lets watch mode
+/// keep the painted ages and the decay-timer cadence ticking forward between
+/// git rescans without re-walking the repo; `Duration::ZERO` reproduces a
+/// freshly-collected frame byte-for-byte. Pure with respect to the terminal: it
+/// never touches stdout, so callers decide how to display the frame. Uses
+/// `cfg.max_files`, `cfg.bar_width`, and `cfg.truecolor`.
+pub(crate) fn render_frame(
+    snapshot: &Snapshot,
+    cfg: &RenderConfig,
+    dims: watch::Dimensions,
+    age_offset: Duration,
+) -> Render {
     let terminal_width = dims.width;
     let terminal_height = dims.height;
 
@@ -425,12 +466,23 @@ pub(crate) fn build_output(
         truecolor: cfg.truecolor,
     };
 
-    let output = render(&snapshot, &opts);
-    let freshest_age = snapshot_freshest_age(&snapshot);
-    Ok(Render {
+    // One-shot mode and the watch seed walk render at offset zero, which is
+    // exactly the public `render` entry — route them through it so their output
+    // stays the byte-identical call the pre-split `build_output` made. Only the
+    // live decay/resize re-renders advance ages and take the offset-aware path.
+    let output = if age_offset.is_zero() {
+        render(snapshot, &opts)
+    } else {
+        render_with_offset(snapshot, &opts, age_offset)
+    };
+    // Advance the freshest age by the same offset so watch mode's decay-timer
+    // cadence stays in lockstep with the ages painted above. The uniform shift
+    // preserves which item is freshest, so the min() that picked it still holds.
+    let freshest_age = snapshot_freshest_age(snapshot).map(|d| d.saturating_add(age_offset));
+    Render {
         output,
         freshest_age,
-    })
+    }
 }
 
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
@@ -587,6 +639,75 @@ mod tests {
         // be disabled, which the caller infers from `None`.
         let snap = snapshot_with(None, &[None, None]);
         assert_eq!(snapshot_freshest_age(&snap), None);
+    }
+
+    #[test]
+    fn render_frame_applies_age_offset_to_output_and_freshest_age() {
+        // render_frame must advance BOTH the painted ages and the returned
+        // freshest_age by `age_offset`, so watch mode's decay-timer cadence and
+        // the frame on screen stay in lockstep between git rescans. The commit
+        // (10s) is the freshest item; a file at 40s stays older under any
+        // uniform offset, so the freshest age tracks the commit before and
+        // after the shift.
+        let snap = Snapshot {
+            branch: "b".into(),
+            base: "main".into(),
+            commits_ahead: 0,
+            commits_behind: 0,
+            last_commit_age: Some(Duration::from_secs(10)),
+            files: vec![RenderEntry {
+                path: "f.rs".into(),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: false,
+                adds: 1,
+                dels: 0,
+                binary: false,
+                age: Some(Duration::from_secs(40)),
+            }],
+            log: Vec::new(),
+            upstream: None,
+        };
+        let cfg = RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 6,
+            log_lines: 0,
+            truecolor: false,
+            width_offset: 0,
+        };
+        let dims = watch::Dimensions {
+            width: 80,
+            height: 40,
+        };
+
+        // No offset: the header shows the un-advanced commit age and the
+        // freshest age is the raw commit age.
+        let frame = render_frame(&snap, &cfg, dims, Duration::ZERO);
+        assert_eq!(
+            frame.freshest_age,
+            Some(Duration::from_secs(10)),
+            "with no offset the freshest age is the raw 10s commit age",
+        );
+        assert!(
+            frame.output.contains("10s"),
+            "header should show the un-advanced commit age: {:?}",
+            frame.output,
+        );
+
+        // A 50s offset advances the commit age to 60s ("1m0s") in the header
+        // AND the returned freshest_age to 60s, in lockstep.
+        let frame = render_frame(&snap, &cfg, dims, Duration::from_secs(50));
+        assert_eq!(
+            frame.freshest_age,
+            Some(Duration::from_secs(60)),
+            "freshest_age must advance by the offset (10s + 50s = 60s)",
+        );
+        assert!(
+            frame.output.contains("1m0s"),
+            "header should show the advanced commit age (1m0s): {:?}",
+            frame.output,
+        );
     }
 
     #[test]
