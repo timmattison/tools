@@ -23,11 +23,14 @@
 //!     proving the dedup didn't degrade into "never bootstrap when any --run is
 //!     present".
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use tempfile::TempDir;
+
+mod support;
+
+use support::{nanos, nwt_command, run_git};
 
 /// The `prepare` script appends one line to this file on every install, so the
 /// file's presence proves the hooks were bootstrapped at least once.
@@ -40,28 +43,6 @@ const BOOTSTRAP_LINE: &str = "Bootstrapping git hooks:";
 /// Substring of the one-line notice printed when bootstrap is skipped because
 /// the run command already installs dependencies.
 const SKIP_NOTICE: &str = "Skipping hook bootstrap";
-
-/// Runs a git command in `dir` with stdout/stderr nulled, returning success.
-/// Stdout/stderr are nulled so concurrent test runs don't interleave noise.
-fn run_git(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Nanosecond timestamp for building process-unique, parallel-safe names.
-fn nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos()
-}
 
 /// Returns true if `pnpm --version` runs, i.e. pnpm is installed.
 fn pnpm_available() -> bool {
@@ -153,10 +134,8 @@ fn run_that_installs_skips_bootstrap_install() {
 
     // `--run "pnpm install"` already runs an install. nwt must NOT also run its
     // own bootstrap install. stdin nulled so the install can't block on a prompt.
-    let output = Command::new(env!("CARGO_BIN_EXE_nwt"))
+    let output = nwt_command(&repo)
         .args(["-b", &branch, "--run", "pnpm install"])
-        .current_dir(&repo)
-        .stdin(Stdio::null())
         .output()
         .expect("Failed to run nwt binary");
 
@@ -203,10 +182,8 @@ fn run_that_does_not_install_still_bootstraps() {
 
     // `--run "true"` does NOT install, so nwt must still bootstrap. This guards
     // against "fixing" the dedup by never bootstrapping when any --run present.
-    let output = Command::new(env!("CARGO_BIN_EXE_nwt"))
+    let output = nwt_command(&repo)
         .args(["-b", &branch, "--run", "true"])
-        .current_dir(&repo)
-        .stdin(Stdio::null())
         .output()
         .expect("Failed to run nwt binary");
 
@@ -255,10 +232,8 @@ fn run_that_installs_in_repo_without_prepare_script_emits_no_skip_notice() {
     // `--run "pnpm install"` installs, but with nothing to bootstrap the skip
     // notice would falsely imply something was skipped. stdin nulled so the
     // install can't block on a prompt.
-    let output = Command::new(env!("CARGO_BIN_EXE_nwt"))
+    let output = nwt_command(&repo)
         .args(["-b", &branch, "--run", "pnpm install"])
-        .current_dir(&repo)
-        .stdin(Stdio::null())
         .output()
         .expect("Failed to run nwt binary");
 
