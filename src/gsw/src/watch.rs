@@ -612,8 +612,14 @@ where
         // size, a bare timeout is a decay tick.
         let mut saw_fs = false;
         let mut saw_resize = false;
-        let wait = wait_window((hooks.next_tick)(freshest), None);
-        let woke_for_tick = match wait {
+        // Wait window: the soonest of the decay-tick cadence and, when a walk was
+        // deferred during a cooldown, that cooldown's expiry. The clock is read
+        // for the deferred deadline only when one is actually pending.
+        let deferred_wait = throttle
+            .next_allowed()
+            .map(|expiry| expiry.saturating_duration_since((hooks.clock)()));
+        let wait = wait_window((hooks.next_tick)(freshest), deferred_wait);
+        let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
                 Ok(Event::FsChanged) => {
@@ -644,7 +650,7 @@ where
         // Coalesce a filesystem burst: keep draining until the channel stays
         // quiet for a full `debounce`. A tick has no burst behind it.
         let mut quitting = false;
-        if !woke_for_tick {
+        if !woke_for_timeout {
             loop {
                 match rx.recv_timeout(debounce) {
                     Ok(Event::Quit) => {
@@ -666,13 +672,21 @@ where
         // start, and any age offset all key off the same instant.
         let now = (hooks.clock)();
 
-        // Only a filesystem change walks git, and only when the throttle admits
-        // it. An FS change during an active cooldown is deferred — `on_change`
-        // sets the throttle's dirty flag and we fall through to a cheap cached
-        // re-render (Part A) instead of walking. A resize or decay tick never
-        // walks. A filesystem walk in a coalesced burst wins over a co-arriving
-        // resize: the fresh walk already renders at the current dimensions.
-        let walk_now = saw_fs && matches!(throttle.on_change(now), Walk::Now);
+        // Does this wake walk git? An FS change the throttle admits, or — when a
+        // change was deferred during a cooldown — the single owed walk, fired by
+        // the timeout the loop armed at the cooldown's expiry. `on_change` defers
+        // a mid-cooldown FS change (setting the throttle's dirty flag) and we
+        // fall through to a cheap cached re-render (Part A) instead of walking. A
+        // resize or a plain decay tick never walks. A filesystem walk in a
+        // coalesced burst wins over a co-arriving resize: the fresh walk already
+        // renders at the current dimensions.
+        let walk_now = if saw_fs {
+            matches!(throttle.on_change(now), Walk::Now)
+        } else if woke_for_timeout {
+            throttle.next_allowed().is_some()
+        } else {
+            false
+        };
 
         let render = if walk_now {
             cache.dims = (hooks.dimensions)();
@@ -1704,7 +1718,7 @@ mod tests {
             base,                              // arming walk start
             base + Duration::from_millis(10),  // arming walk end → D = 10 ms → 1 s cooldown
             base + Duration::from_millis(100), // burst: mid-cooldown → deferred
-            base + Duration::from_secs(2),     // owed-walk wake: past expiry; trailing reads clamp here
+            base + Duration::from_secs(2), // owed-walk wake: past expiry; trailing reads clamp here
         ];
         let clock_calls = std::cell::Cell::new(0_usize);
 
