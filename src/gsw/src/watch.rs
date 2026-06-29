@@ -254,6 +254,10 @@ const FLOOR: Duration = Duration::from_millis(150);
 struct Throttle {
     /// Earliest instant the next walk may start. `None` = a walk is allowed now.
     next_allowed_at: Option<Instant>,
+    /// Set when a change arrives during an active cooldown: a walk has been
+    /// deferred and exactly one coalesced walk is now owed at the cooldown's
+    /// expiry. Cleared (in a later slice) once that owed walk is performed.
+    dirty: bool,
 }
 
 #[allow(
@@ -264,6 +268,7 @@ impl Throttle {
     fn new() -> Self {
         Self {
             next_allowed_at: None,
+            dirty: false,
         }
     }
 
@@ -281,6 +286,15 @@ impl Throttle {
     /// last-write-wins — each call replaces any prior cooldown, no averaging.
     fn record(&mut self, walk_start: Instant, cost: Duration) {
         self.next_allowed_at = Some(walk_start + cooldown(cost));
+    }
+
+    /// The instant a pending deferred walk should fire — the cooldown's expiry —
+    /// or `None` when no walk is owed. A change that arrives mid-cooldown is
+    /// deferred (it sets the dirty flag) and registers exactly one coalesced
+    /// walk at expiry; the Phase-4 loop reads this to arm a throttle wakeup only
+    /// when one is actually owed, and stays asleep otherwise.
+    fn next_allowed(&self) -> Option<Instant> {
+        None
     }
 }
 
@@ -918,6 +932,37 @@ mod tests {
             throttle.on_change(t0 + Duration::from_millis(150)),
             Walk::Now,
             "allowed exactly at the 150 ms floor, never faster than today's debounce",
+        );
+    }
+
+    #[test]
+    fn a_change_during_an_active_cooldown_pends_a_deferred_walk() {
+        // Deferring a mid-cooldown change must NOT walk immediately — instead it
+        // registers exactly one pending walk at the cooldown's expiry, so a burst
+        // of changes coalesces into a single owed walk. `next_allowed()` exposes
+        // WHEN that owed walk should fire (so the Phase-4 loop can arm a wakeup),
+        // and is `None` until a deferral actually owes one. A 150 ms walk gates
+        // the next for 100·150 ms = 15 s, so the owed walk lands at t0 + 15 s.
+        // Instants derive from one base — deterministic and parallel-safe.
+        let t0 = Instant::now();
+
+        let mut throttle = Throttle::new();
+        throttle.record(t0, Duration::from_millis(150));
+        assert_eq!(
+            throttle.next_allowed(),
+            None,
+            "a recorded-but-unchanged throttle owes no walk yet — nothing is pending",
+        );
+
+        assert_eq!(
+            throttle.on_change(t0 + Duration::from_secs(1)),
+            Walk::Defer,
+            "a change 1 s into the 15 s cooldown is deferred, not walked",
+        );
+        assert_eq!(
+            throttle.next_allowed(),
+            Some(t0 + Duration::from_secs(15)),
+            "that deferred change now owes one coalesced walk at the cooldown's expiry",
         );
     }
 
