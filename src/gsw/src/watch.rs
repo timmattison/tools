@@ -1602,6 +1602,77 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_throttles_walks_after_an_idle_change() {
+        // Part B: the FIRST change after idle walks immediately — the throttle
+        // imposes no cooldown until a walk is recorded. That walk costs D = 10 ms,
+        // arming a cooldown of 100·D = 1 s (the walk occupies 10 ms of every 1 s
+        // it gates — a 1% duty cycle). A second change 100 ms in is DURING the
+        // cooldown, so it must be deferred (no git walk). A third change at
+        // base + 2 s is past the cooldown, so it walks again. Three FS changes
+        // across the cooldown boundary therefore collapse to exactly TWO walks.
+        //
+        // The injected clock is a short clamped sequence — once exhausted, every
+        // further read saturates at base + 2 s (well past expiry) — so the test
+        // is fully deterministic and never sleeps on the clock. The three changes
+        // are delivered one per loop iteration (via the render hook) so they land
+        // in separate debounce windows instead of coalescing into one walk.
+        let base = Instant::now();
+        let times = [
+            base,                              // first walk start
+            base + Duration::from_millis(10),  // first walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_millis(100), // second change: mid-cooldown → deferred
+            base + Duration::from_secs(2), // third change: past expiry → walks; trailing reads clamp here
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue first change");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut changes_sent = 1_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            None, // decay timer off: isolate the throttle from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    // Deliver the next change in its own iteration so the three
+                    // never coalesce; quit once all three have been processed.
+                    if changes_sent < 3 {
+                        changes_sent += 1;
+                        let _ = tx.send(Event::FsChanged);
+                    } else {
+                        let _ = tx.send(Event::Quit);
+                    }
+                    frame(&format!("frame {changes_sent}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: timer_off,
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 2,
+            "three FS changes across the cooldown boundary must walk exactly \
+             twice — the mid-cooldown change is deferred",
+        );
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
