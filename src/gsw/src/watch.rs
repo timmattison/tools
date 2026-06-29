@@ -361,6 +361,9 @@ enum Event {
     Resize,
     /// The user asked to quit (`q` or Ctrl-C).
     Quit,
+    /// The user asked to force an immediate refresh (`r`), bypassing the
+    /// throttle cooldown.
+    ForceRefresh,
 }
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
@@ -616,6 +619,7 @@ where
                     saw_resize = true;
                     false
                 }
+                Ok(Event::ForceRefresh) => false,
                 Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
@@ -629,6 +633,7 @@ where
                     saw_resize = true;
                     false
                 }
+                Ok(Event::ForceRefresh) => false,
                 Err(_) => break,
             },
         };
@@ -645,6 +650,7 @@ where
                     }
                     Ok(Event::FsChanged) => saw_fs = true,
                     Ok(Event::Resize) => saw_resize = true,
+                    Ok(Event::ForceRefresh) => {}
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
                         quitting = true;
@@ -742,37 +748,60 @@ fn current_dimensions(width_offset: usize) -> Dimensions {
     )
 }
 
-/// Spawn the crossterm event-reader thread. It blocks on `event::read`,
-/// translating `q`/Ctrl-C into [`Event::Quit`] and terminal resizes into
-/// [`Event::Resize`], and exits when the receiver is gone or reading fails.
+/// The pure, unit-testable core of [`spawn_event_reader`]: map one crossterm
+/// terminal event to the [`Event`] the watch loop should react to, or `None`
+/// when the event is irrelevant. Keeping the key→event decision here —
+/// terminal-free and side-effect-free — lets it be tested without a pty while
+/// the reader thread stays a thin `event::read` → `classify_input` → `tx.send`
+/// loop.
+///
+/// - A key *release* is ignored (kitty/Windows report them; only a press acts).
+/// - `q`, or Ctrl-C, requests a [`Event::Quit`].
+/// - `r` forces an immediate refresh ([`Event::ForceRefresh`]), bypassing the
+///   throttle cooldown.
+/// - A terminal resize becomes [`Event::Resize`].
+/// - Everything else is ignored.
+fn classify_input(event: CtEvent) -> Option<Event> {
+    match event {
+        CtEvent::Key(KeyEvent {
+            code,
+            modifiers,
+            kind,
+            ..
+        }) => {
+            if kind == KeyEventKind::Release {
+                // Ignore key releases (kitty/Windows report them); only a press acts.
+                None
+            } else if code == KeyCode::Char('q') {
+                Some(Event::Quit)
+            } else if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+                Some(Event::Quit)
+            } else if code == KeyCode::Char('r') {
+                None
+            } else {
+                None
+            }
+        }
+        CtEvent::Resize(_, _) => Some(Event::Resize),
+        _ => None,
+    }
+}
+
+/// Spawn the crossterm event-reader thread. It blocks on `event::read`, routes
+/// each event through [`classify_input`] (which maps `q`/Ctrl-C to
+/// [`Event::Quit`], `r` to [`Event::ForceRefresh`], and terminal resizes to
+/// [`Event::Resize`]), forwards any resulting [`Event`], and exits when the
+/// receiver is gone or reading fails.
 fn spawn_event_reader(tx: Sender<Event>) {
     thread::spawn(move || loop {
         match event::read() {
-            Ok(CtEvent::Key(KeyEvent {
-                code,
-                modifiers,
-                kind,
-                ..
-            })) => {
-                // Ignore key-release events (kitty/Windows report them); only
-                // a press should quit.
-                if kind == KeyEventKind::Release {
-                    continue;
-                }
-                let quit = matches!(code, KeyCode::Char('q'))
-                    || (modifiers.contains(KeyModifiers::CONTROL)
-                        && matches!(code, KeyCode::Char('c')));
-                if quit && tx.send(Event::Quit).is_err() {
-                    break;
+            Ok(ct_event) => {
+                if let Some(event) = classify_input(ct_event) {
+                    if tx.send(event).is_err() {
+                        break;
+                    }
                 }
             }
-            Ok(CtEvent::Resize(_, _)) => {
-                if tx.send(Event::Resize).is_err() {
-                    break;
-                }
-            }
-            Ok(_) => {}
-            // The terminal closed or reading failed: nothing more to read.
             Err(_) => break,
         }
     });
@@ -1105,6 +1134,14 @@ mod tests {
             Walk::Now,
             "after force, the same mid-cooldown instant walks immediately — the gate is lifted",
         );
+    }
+
+    #[test]
+    fn classify_input_maps_the_r_key_to_force_refresh() {
+        // Pressing `r` is the manual-refresh escape hatch: the input classifier
+        // must turn an `r` key PRESS into Event::ForceRefresh.
+        let r_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(matches!(classify_input(r_press), Some(Event::ForceRefresh)));
     }
 
     #[test]
