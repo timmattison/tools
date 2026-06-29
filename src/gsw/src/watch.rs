@@ -210,6 +210,10 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Whether a filesystem change may walk git right now, or must wait out the
 /// adaptive cooldown. Returned by [`Throttle::on_change`].
+#[allow(
+    dead_code,
+    reason = "Unused until Phase 4 wires the Throttle into the event loop."
+)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Walk {
     /// The cooldown has expired (or none is armed): walk git now.
@@ -221,6 +225,10 @@ enum Walk {
 /// Fraction of one core git walks may occupy under sustained churn (1%). A walk
 /// costing `D` is followed by a cooldown of `D / BUDGET`, so the duty cycle
 /// settles at `BUDGET`. Hard-coded, not a user dial.
+#[allow(
+    dead_code,
+    reason = "Unused until Phase 4 wires the Throttle into the event loop."
+)]
 const BUDGET: f64 = 0.01;
 
 /// Pure, time-injected throttle that gates git walks to the [`BUDGET`] duty
@@ -228,11 +236,19 @@ const BUDGET: f64 = 0.01;
 /// (= 100·`D`), so an expensive repo automatically backs off and a cheap one
 /// stays responsive — all decided here with injected instants, no clock of its
 /// own.
+#[allow(
+    dead_code,
+    reason = "Unused until Phase 4 wires the Throttle into the event loop."
+)]
 struct Throttle {
     /// Earliest instant the next walk may start. `None` = a walk is allowed now.
     next_allowed_at: Option<Instant>,
 }
 
+#[allow(
+    dead_code,
+    reason = "Unused until Phase 4 wires the Throttle into the event loop."
+)]
 impl Throttle {
     fn new() -> Self {
         Self {
@@ -240,16 +256,38 @@ impl Throttle {
         }
     }
 
-    fn on_change(&mut self, _now: Instant) -> Walk {
-        // RED stub: always allow. The real cooldown gate arrives in the green
-        // commit; this exists only so the test compiles and fails on behavior.
-        Walk::Now
+    /// Decide whether a change arriving at `now` may walk git: [`Walk::Now`] once
+    /// the armed cooldown has elapsed (or none is armed), otherwise [`Walk::Defer`].
+    fn on_change(&mut self, now: Instant) -> Walk {
+        match self.next_allowed_at {
+            Some(allowed_at) if now < allowed_at => Walk::Defer,
+            _ => Walk::Now,
+        }
     }
 
-    fn record(&mut self, _walk_start: Instant, _cost: Duration) {
-        // RED stub: arm nothing. The real arithmetic arrives in the green commit.
-        self.next_allowed_at = None;
+    /// Arm the next cooldown from a walk that started at `walk_start` and took
+    /// `cost`: the next walk is gated until `walk_start + cost / BUDGET`. Purely
+    /// last-write-wins — each call replaces any prior cooldown, no averaging.
+    fn record(&mut self, walk_start: Instant, cost: Duration) {
+        self.next_allowed_at = Some(walk_start + cooldown(cost));
     }
+}
+
+/// Cooldown for a walk costing `cost`: `cost / BUDGET` (= 100·`cost`), so the
+/// sustained git duty cycle settles at [`BUDGET`]. The integer multiply by the
+/// reciprocal (not `Duration::mul_f64`) keeps it nanosecond-exact, so the
+/// [`Walk::Defer`]/[`Walk::Now`] boundary lands precisely at `walk_start +
+/// cost / BUDGET`; a cost large enough to overflow saturates at [`Duration::MAX`].
+#[allow(
+    dead_code,
+    reason = "Unused until Phase 4 wires the Throttle into the event loop."
+)]
+fn cooldown(cost: Duration) -> Duration {
+    // = 1 / BUDGET (0.01); an exact integer scale avoids the nanosecond drift
+    // `Duration::mul_f64` would introduce at the on_change boundary.
+    const COOLDOWN_MULTIPLIER: u32 = 100;
+    cost.checked_mul(COOLDOWN_MULTIPLIER)
+        .unwrap_or(Duration::MAX)
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
