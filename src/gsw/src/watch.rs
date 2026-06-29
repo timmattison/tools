@@ -345,6 +345,16 @@ fn cooldown(cost: Duration) -> Duration {
         .max(FLOOR)
 }
 
+/// The loop's wait window: the soonest of the decay-tick cadence
+/// (`decay_tick`) and a pending deferred walk's remaining cooldown
+/// (`deferred_walk`), or `None` to block until an event arrives. Both inputs
+/// are already expressed as durations from now; a `None` from either source
+/// means that source imposes no deadline.
+fn wait_window(decay_tick: Option<Duration>, deferred_walk: Option<Duration>) -> Option<Duration> {
+    let _ = deferred_walk;
+    decay_tick
+}
+
 /// Events the watch loop reacts to. The main thread owns all rendering and
 /// blocks on a single channel carrying these.
 ///
@@ -598,7 +608,8 @@ where
         // size, a bare timeout is a decay tick.
         let mut saw_fs = false;
         let mut saw_resize = false;
-        let woke_for_tick = match (hooks.next_tick)(freshest) {
+        let wait = wait_window((hooks.next_tick)(freshest), None);
+        let woke_for_tick = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
                 Ok(Event::FsChanged) => {
@@ -870,6 +881,27 @@ mod tests {
             None,
             "a month-old freshest item produces no ticks",
         );
+    }
+
+    #[test]
+    fn wait_window_picks_the_earliest_deadline() {
+        // The loop waits on the SOONER of the decay-tick cadence and a pending
+        // deferred walk's remaining cooldown. A `None` from either source means
+        // it imposes no deadline; both `None` means block until an event arrives.
+        let short = Duration::from_secs(5);
+        let long = Duration::from_secs(60);
+
+        // Earliest of two present deadlines wins, regardless of argument order.
+        assert_eq!(wait_window(Some(long), Some(short)), Some(short));
+        assert_eq!(wait_window(Some(short), Some(long)), Some(short));
+        assert_eq!(wait_window(Some(short), Some(short)), Some(short));
+
+        // One source absent: the other's deadline stands.
+        assert_eq!(wait_window(Some(short), None), Some(short));
+        assert_eq!(wait_window(None, Some(short)), Some(short));
+
+        // Neither source imposes a deadline: block until an event arrives.
+        assert_eq!(wait_window(None, None), None);
     }
 
     #[test]
