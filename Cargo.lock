@@ -971,6 +971,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "filewalker",
+ "indicatif",
+ "libc",
+ "tempfile",
+ "termbar",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -82,8 +82,8 @@ agree on the same port for a given project without `portplz` needing to be insta
 - bm
     - Bulk Move - recursively find and move files matching a pattern to a destination directory. Named "bm" because
       moving lots of files is shitty. Much simpler than `find ... -exec mv`, especially for common tasks like moving
-      all files of a certain type.
-    - To install: `go install github.com/timmattison/tools/cmd/bm@latest`
+      all files of a certain type. Collision-safe by default and handles moves across volumes (where `rename` fails).
+    - To install: `cargo install --git https://github.com/timmattison/tools bm`
 - localnext
     - Runs statically compiled NextJS applications locally. You'll need to build your code and get the magic `out`
       directory by adding `output: 'export'` to your `next.config.mjs` file. This was written to work
@@ -1504,90 +1504,76 @@ The binary speaks one of two output shapes. By default it prints the session id 
 
 Recursively find and move files matching a pattern (suffix, prefix, or substring) to a destination directory. Named "bm" because moving lots of files is shitty.
 
+Unlike a bare `mv`/`rename`, bm is collision-safe by default (it refuses to silently overwrite) and transparently handles **moves across volumes** — where `rename(2)` fails with a cross-device error — by copying then deleting, with a progress bar.
+
 ### Basic Usage
 
 ```bash
-bm -suffix .jpg -destination ~/Pictures/photos
-bm -prefix IMG_ -destination ~/Pictures/camera
-bm -substring 2024 -destination ~/archive/2024
+bm --suffix .jpg --destination ~/Pictures/photos
+bm --prefix IMG_ --destination ~/Pictures/camera ~/Downloads
+bm --substring 2024 --destination ~/archive/2024
 ```
 
 ### Options
 
-- `-suffix <SUFFIX>`: Match files ending with this string (e.g., `.jpg`, `.mkv`)
-- `-prefix <PREFIX>`: Match files starting with this string (e.g., `IMG_`, `video_`)
-- `-substring <SUBSTRING>`: Match files containing this string anywhere in the name
-- `-destination <PATH>`: Directory to move matching files to (required)
+- `-s`, `--suffix <SUFFIX>`: Match files ending with this string (e.g., `.jpg`, `.mkv`)
+- `-p`, `--prefix <PREFIX>`: Match files starting with this string (e.g., `IMG_`, `video_`)
+- `--substring <SUBSTRING>`: Match files containing this string anywhere in the name
+- `-d`, `--destination <DIR>`: Directory to move matching files to (required; must already exist)
+- `--on-collision <POLICY>`: What to do when a destination name already exists or repeats within the batch — `abort` (default), `skip`, `rename`, or `overwrite`
+- `--dry-run`: Show what would be moved without moving anything
+- `[DIR]...`: Directories to search (defaults to the current directory)
 
-**Note:** Exactly one of `-suffix`, `-prefix`, or `-substring` must be specified.
+**Note:** Exactly one of `--suffix`, `--prefix`, or `--substring` must be specified.
+
+### Collision handling
+
+If two matched files would land on the same destination name — because the destination already contains that name, or because two source files share a basename — bm does not silently clobber. Choose the behavior with `--on-collision`:
+
+- **`abort`** (default): report every collision and move nothing.
+- **`skip`**: move the non-colliding files, leave the colliding ones in place.
+- **`rename`**: move everything, disambiguating names (`foo.mkv` → `foo-1.mkv`), preserving extensions.
+- **`overwrite`**: move everything, letting later files clobber earlier ones (lossy).
+
+### Cross-volume moves
+
+A plain `rename(2)` cannot move a file between filesystems (e.g. internal disk → an external `/Volumes/...` drive); it fails with a cross-device error. bm detects this and falls back to a chunked copy (with a progress bar) followed by deleting the source, so the same command works whether or not the destination is on the same volume:
+
+```bash
+bm --suffix .mkv --destination /Volumes/Backup/videos
+```
 
 ### Why use bm instead of mv?
 
-**Moving all .mkv files to a backup drive:**
-
 ```bash
-# With mv and find (verbose, error-prone)
+# Moving all .mkv files to a backup drive, with mv + find (verbose, error-prone,
+# and find's mv fails file-by-file across volumes):
 find . -name "*.mkv" -exec mv {} /Volumes/Backup/videos/ \;
 
-# With bm (simple and clear)
-bm -suffix .mkv -destination /Volumes/Backup/videos
+# With bm (simple, collision-safe, cross-volume aware):
+bm --suffix .mkv --destination /Volumes/Backup/videos
 ```
-
-**Moving camera photos scattered across subdirectories:**
-
-```bash
-# With mv and find
-find ~/Downloads -name "IMG_*" -type f -exec mv {} ~/Pictures/camera/ \;
-
-# With bm
-bm -prefix IMG_ -destination ~/Pictures/camera ~/Downloads
-```
-
-**Moving files from multiple directories:**
-
-```bash
-# With mv and find (requires multiple commands or complex logic)
-find dir1 dir2 dir3 -name "*2024*" -exec mv {} ~/archive/ \;
-
-# With bm (just list the directories)
-bm -substring 2024 -destination ~/archive dir1 dir2 dir3
-```
-
-### Features
-
-- **Recursive search**: Automatically walks through all subdirectories
-- **Pattern flexibility**: Filter by suffix, prefix, or any substring in the filename
-- **Multiple source paths**: Process multiple directories in a single command with automatic deduplication
-- **Statistics**: Reports files moved, duration, and files per second on completion
-- **Current directory default**: When no source paths are specified, searches the current directory
 
 ### Examples
 
-Move all video files to an external drive:
+Preview moving every file from 2024 without touching anything:
 ```bash
-bm -suffix .mp4 -destination /Volumes/External/videos
-bm -suffix .mkv -destination /Volumes/External/videos
+bm --substring 2024 --destination ~/archive/2024 --dry-run
 ```
 
-Organize photos by moving all files starting with a camera prefix:
+Organize photos, keeping every file even on name clashes:
 ```bash
-bm -prefix DSCN -destination ~/Pictures/nikon
-bm -prefix IMG_ -destination ~/Pictures/iphone
+bm --prefix IMG_ --on-collision rename --destination ~/Pictures/iphone ~/Downloads
 ```
 
-Archive files from a specific year:
+Move PDFs from several directories at once:
 ```bash
-bm -substring _2023_ -destination ~/archive/2023
-```
-
-Move files from multiple download directories:
-```bash
-bm -suffix .pdf -destination ~/Documents/pdfs ~/Downloads ~/Desktop /tmp
+bm --suffix .pdf --destination ~/Documents/pdfs ~/Downloads ~/Desktop /tmp
 ```
 
 ### Output
 
-On completion, bm shows a summary:
+On completion, bm prints a summary:
 ```
-INFO Move complete filesMoved=42 duration=1.234s filesMovedPerSecond=34.02
+Move complete: 42 moved (40 renamed, 2 copied across volumes), 0 skipped in 1.23s (34 files/sec)
 ```
