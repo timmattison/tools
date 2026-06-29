@@ -309,6 +309,13 @@ impl Throttle {
             None
         }
     }
+
+    /// Force the next walk to be allowed immediately, lifting any active
+    /// cooldown gate — the manual-refresh escape hatch (Phase 5's `r` key) for
+    /// a long cooldown the user doesn't want to wait out. Leaves [`Self::dirty`]
+    /// untouched (the forced walk's subsequent [`Self::record`] clears it); this
+    /// only opens the gate so the next [`Self::on_change`] returns [`Walk::Now`].
+    fn force(&mut self) {}
 }
 
 /// Cooldown for a walk costing `cost`: `max(FLOOR, cost / BUDGET)` (= `max(FLOOR,
@@ -1016,6 +1023,32 @@ mod tests {
             throttle.next_allowed(),
             None,
             "the owed walk is consumed by the record; no walk is owed afterward",
+        );
+    }
+
+    #[test]
+    fn force_allows_an_immediate_walk_mid_cooldown() {
+        // `force` is the manual-refresh escape hatch (Phase 5's `r` key): when a
+        // long cooldown is still gating walks, the user can demand an immediate
+        // one and bypass the unexpired cooldown. A 150 ms walk gates the next for
+        // 100·150 ms = 15 s, so a change 1 s in is normally deferred — but after
+        // `force` that SAME mid-cooldown instant must walk now. Instants derive
+        // from one base — deterministic and parallel-safe, no sleeping.
+        let t0 = Instant::now();
+
+        let mut throttle = Throttle::new();
+        throttle.record(t0, Duration::from_millis(150)); // cooldown until t0 + 15 s
+        assert_eq!(
+            throttle.on_change(t0 + Duration::from_secs(1)),
+            Walk::Defer,
+            "a change 1 s into the 15 s cooldown is deferred — we're genuinely mid-cooldown",
+        );
+
+        throttle.force();
+        assert_eq!(
+            throttle.on_change(t0 + Duration::from_secs(1)),
+            Walk::Now,
+            "after force, the same mid-cooldown instant walks immediately — the gate is lifted",
         );
     }
 
