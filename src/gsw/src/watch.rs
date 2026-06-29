@@ -977,6 +977,46 @@ mod tests {
     }
 
     #[test]
+    fn recording_a_walk_consumes_the_pending_deferred_walk() {
+        // A completed walk reflects the LATEST coalesced state, so recording it
+        // must consume the single owed walk and reset the deferral — otherwise
+        // the throttle would believe a walk is owed forever. Any number of
+        // mid-cooldown changes collapse to exactly one owed walk at the original
+        // expiry (they neither double up nor move it), and the next `record`
+        // clears it. A 150 ms walk gates the next for 100·150 ms = 15 s. Instants
+        // derive from one base — deterministic and parallel-safe, no sleeping.
+        let t0 = Instant::now();
+
+        let mut throttle = Throttle::new();
+        throttle.record(t0, Duration::from_millis(150)); // next_allowed_at = t0 + 15 s
+        assert_eq!(
+            throttle.on_change(t0 + Duration::from_secs(1)),
+            Walk::Defer,
+            "a change 1 s into the 15 s cooldown is deferred, not walked",
+        );
+        assert_eq!(
+            throttle.on_change(t0 + Duration::from_secs(2)),
+            Walk::Defer,
+            "a second mid-cooldown change coalesces into the same owed walk",
+        );
+        assert_eq!(
+            throttle.next_allowed(),
+            Some(t0 + Duration::from_secs(15)),
+            "still exactly one walk owed at the original expiry — coalesced, not doubled or moved",
+        );
+
+        // The owed walk runs at expiry and is recorded: that walk reflects the
+        // latest coalesced state, so the single owed walk is consumed and the
+        // deferral resets — nothing is pending afterward.
+        throttle.record(t0 + Duration::from_secs(15), Duration::from_millis(150));
+        assert_eq!(
+            throttle.next_allowed(),
+            None,
+            "the owed walk is consumed by the record; no walk is owed afterward",
+        );
+    }
+
+    #[test]
     fn should_react_accepts_a_tracked_or_untracked_non_ignored_worktree_path() {
         // An edit to a normal source file under the worktree must wake the
         // loop — it's exactly what gsw exists to show.
