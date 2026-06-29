@@ -6,9 +6,10 @@
 //! sibling test file references the raw binary path, so the bypass can't creep
 //! back in.
 //!
-//! `support/mod.rs` is the single sanctioned home of the raw path (it lives in a
-//! subdirectory, so the top-level scan never visits it), and this guard skips
-//! itself.
+//! `support/mod.rs` (the shared builder) and this guard file are the sole
+//! sanctioned homes of the raw path (see `SANCTIONED_TOKEN_HOMES`); the
+//! recursive scan visits them but allowlists them, so the bypass stays caught
+//! everywhere else in the `tests/` tree.
 
 use std::fs;
 use std::path::Path;
@@ -17,9 +18,11 @@ use std::path::Path;
 /// binary. Only the shared builder in `support/mod.rs` may use it.
 const RAW_SPAWN_TOKEN: &str = "CARGO_BIN_EXE_nwt";
 
-/// This guard's own file name, skipped during the scan (it necessarily mentions
-/// the forbidden token in this very const and in the mutation test below).
-const SELF_FILE: &str = "no-raw-nwt-spawn.rs";
+/// Relative paths (forward-slash, relative to the scanned root) that are the
+/// SANCTIONED homes of the raw `CARGO_BIN_EXE_nwt` token: the shared builder and
+/// this guard file itself (which necessarily mentions the token in its consts
+/// and mutation test). Everything else that references the token is an offender.
+const SANCTIONED_TOKEN_HOMES: &[&str] = &["support/mod.rs", "no-raw-nwt-spawn.rs"];
 
 /// Returns true if `source` reaches for the raw nwt binary path instead of going
 /// through the shared builder.
@@ -27,38 +30,51 @@ fn references_raw_nwt_binary(source: &str) -> bool {
     source.contains(RAW_SPAWN_TOKEN)
 }
 
-/// Scan `root` for `.rs` files that reference the raw nwt binary path, returning
-/// the offenders' paths relative to `root` (forward-slash, sorted), excluding
-/// the sanctioned homes of the token.
+/// Recursively scan `root` for `.rs` files that reference the raw nwt binary
+/// path, returning the offenders' paths relative to `root` (forward-slash,
+/// sorted), excluding the sanctioned homes in `SANCTIONED_TOKEN_HOMES`.
 ///
-/// NOTE: this implementation is currently top-level only (non-recursive) — it
-/// does not descend into subdirectories of `root`.
+/// The scan descends into every subdirectory so a raw spawn hidden in a helper
+/// module (e.g. `tests/<subdir>/foo.rs`) can't slip past the guard.
 fn scan_for_raw_spawns(root: &Path) -> Vec<String> {
     let mut offenders = Vec::new();
-    for entry in fs::read_dir(root).expect("read nwt tests dir") {
+    collect_raw_spawns(root, root, &mut offenders);
+    offenders.sort();
+    offenders
+}
+
+/// Recursive worker for [`scan_for_raw_spawns`]: walks `dir`, recording any
+/// non-sanctioned `.rs` file under `root` that references the raw token. Paths
+/// are recorded relative to `root` with forward slashes.
+fn collect_raw_spawns(root: &Path, dir: &Path, offenders: &mut Vec<String>) {
+    for entry in fs::read_dir(dir).expect("read nwt tests dir") {
         let path = entry.expect("read dir entry").path();
 
-        // Only top-level `.rs` test files. The `support/` subdir (home of the
-        // sanctioned builder) is a directory and is skipped here.
+        if path.is_dir() {
+            collect_raw_spawns(root, &path, offenders);
+            continue;
+        }
+
         if path.extension().and_then(|e| e.to_str()) != Some("rs") {
             continue;
         }
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-        if name == SELF_FILE {
+
+        let rel = path
+            .strip_prefix(root)
+            .expect("scanned path lies under root")
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if SANCTIONED_TOKEN_HOMES.contains(&rel.as_str()) {
             continue;
         }
 
         let source = fs::read_to_string(&path).expect("read test source");
         if references_raw_nwt_binary(&source) {
-            offenders.push(name);
+            offenders.push(rel);
         }
     }
-    offenders.sort();
-    offenders
 }
 
 #[test]
