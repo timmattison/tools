@@ -1684,6 +1684,88 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_defers_a_cooldown_burst_into_one_walk_at_expiry() {
+        // Part B coalescing: an arming walk starts a cooldown; a BURST of FS
+        // changes that all land during that cooldown must not each walk — they
+        // collapse into exactly ONE deferred walk that the loop runs when the
+        // cooldown expires. Across the whole sequence git is walked twice: the
+        // arming walk, then the single owed walk. The collect counter proves the
+        // burst added exactly one walk, not one per event.
+        //
+        // The arming walk costs D = 10 ms → a 1 s cooldown (expiry = base + 1 s).
+        // The burst lands at base + 100 ms (mid-cooldown → deferred). The owed
+        // walk fires at base + 2 s, past expiry, on a zero-length timeout (the
+        // injected clock reports "now" already past expiry, so the loop never
+        // sleeps it out). A 5 ms decay timer is enabled so the loop still wakes
+        // periodically — proving the owed walk runs at the cooldown's expiry, not
+        // merely on the next tick.
+        let base = Instant::now();
+        let times = [
+            base,                              // arming walk start
+            base + Duration::from_millis(10),  // arming walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_millis(100), // burst: mid-cooldown → deferred
+            base + Duration::from_secs(2),     // owed-walk wake: past expiry; trailing reads clamp here
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue arming change");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut stage = 0_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            Some(Duration::ZERO),
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    stage += 1;
+                    match stage {
+                        // After the arming walk: fire a burst of three changes
+                        // that coalesce inside one debounce window.
+                        1 => {
+                            for _ in 0..3 {
+                                let _ = tx.send(Event::FsChanged);
+                            }
+                        }
+                        // The deferred re-render of the coalesced burst: do
+                        // nothing, let the cooldown expire so the owed walk fires.
+                        2 => {}
+                        // The owed walk at expiry (or, if throttling were absent,
+                        // a tick): end the loop.
+                        _ => {
+                            let _ = tx.send(Event::Quit);
+                        }
+                    }
+                    frame(&format!("frame {stage}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 2,
+            "an arming walk plus a mid-cooldown burst must walk exactly twice: \
+             the arming walk and one coalesced owed walk at the cooldown's expiry",
+        );
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
