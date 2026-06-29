@@ -208,6 +208,50 @@ pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
 /// arrives inside this window and collapses into a single repaint.
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// Whether a filesystem change may walk git right now, or must wait out the
+/// adaptive cooldown. Returned by [`Throttle::on_change`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Walk {
+    /// The cooldown has expired (or none is armed): walk git now.
+    Now,
+    /// A walk is still gated by the cooldown: skip the git work this time.
+    Defer,
+}
+
+/// Fraction of one core git walks may occupy under sustained churn (1%). A walk
+/// costing `D` is followed by a cooldown of `D / BUDGET`, so the duty cycle
+/// settles at `BUDGET`. Hard-coded, not a user dial.
+const BUDGET: f64 = 0.01;
+
+/// Pure, time-injected throttle that gates git walks to the [`BUDGET`] duty
+/// cycle. After a walk costing `D`, the next walk is held off for `D / BUDGET`
+/// (= 100·`D`), so an expensive repo automatically backs off and a cheap one
+/// stays responsive — all decided here with injected instants, no clock of its
+/// own.
+struct Throttle {
+    /// Earliest instant the next walk may start. `None` = a walk is allowed now.
+    next_allowed_at: Option<Instant>,
+}
+
+impl Throttle {
+    fn new() -> Self {
+        Self {
+            next_allowed_at: None,
+        }
+    }
+
+    fn on_change(&mut self, _now: Instant) -> Walk {
+        // RED stub: always allow. The real cooldown gate arrives in the green
+        // commit; this exists only so the test compiles and fails on behavior.
+        Walk::Now
+    }
+
+    fn record(&mut self, _walk_start: Instant, _cost: Duration) {
+        // RED stub: arm nothing. The real arithmetic arrives in the green commit.
+        self.next_allowed_at = None;
+    }
+}
+
 /// Events the watch loop reacts to. The main thread owns all rendering and
 /// blocks on a single channel carrying these.
 ///
@@ -732,6 +776,70 @@ mod tests {
             next_tick(Duration::from_secs(60 * 60 * 24 * 30)),
             None,
             "a month-old freshest item produces no ticks",
+        );
+    }
+
+    #[test]
+    fn cooldown_gates_the_next_walk_at_one_hundred_times_the_latest_cost() {
+        // BUDGET is a 1% duty cycle, so a walk costing D must be followed by a
+        // cooldown of D / 0.01 = 100·D before the next walk is allowed:
+        // on_change returns Defer until that instant and Now at/after it. The
+        // cooldown is recomputed PURELY from the latest record (last-write-wins,
+        // no smoothing) and has NO ceiling. All instants are derived from one
+        // base so the test is deterministic and parallel-safe — no real sleeping.
+        let t0 = Instant::now();
+
+        // Representative cost: a 150 ms walk gates the next for 100·150 ms = 15 s.
+        let mut representative = Throttle::new();
+        representative.record(t0, Duration::from_millis(150));
+        assert_eq!(
+            representative.on_change(t0 + Duration::from_secs(15) - Duration::from_nanos(1)),
+            Walk::Defer,
+            "still gated one nanosecond before 100× the 150 ms cost",
+        );
+        assert_eq!(
+            representative.on_change(t0 + Duration::from_secs(15)),
+            Walk::Now,
+            "allowed exactly at 100× the 150 ms cost",
+        );
+
+        // No ceiling: a 5 s walk gates the next for 100·5 s = 500 s, uncapped.
+        let mut costly = Throttle::new();
+        costly.record(t0, Duration::from_secs(5));
+        assert_eq!(
+            costly.on_change(t0 + Duration::from_secs(500) - Duration::from_nanos(1)),
+            Walk::Defer,
+            "an expensive walk yields a proportionally long, uncapped cooldown",
+        );
+        assert_eq!(
+            costly.on_change(t0 + Duration::from_secs(500)),
+            Walk::Now,
+            "allowed exactly at 100× the 5 s cost — no ceiling clamps it",
+        );
+
+        // Recompute-from-latest: a later record fully replaces the earlier one,
+        // gating from the LATEST walk start at 100× the LATEST cost.
+        let mut last_write_wins = Throttle::new();
+        let t1 = t0 + Duration::from_secs(1);
+        last_write_wins.record(t0, Duration::from_millis(500)); // would gate until t0 + 50 s
+        last_write_wins.record(t1, Duration::from_millis(30)); // replaced: gate until t1 + 3 s
+        assert_eq!(
+            last_write_wins.on_change(t1 + Duration::from_secs(3) - Duration::from_nanos(1)),
+            Walk::Defer,
+            "the gate follows the latest 30 ms cost (3 s from t1), not the prior 500 ms",
+        );
+        assert_eq!(
+            last_write_wins.on_change(t1 + Duration::from_secs(3)),
+            Walk::Now,
+            "allowed exactly at 100× the latest cost, measured from the latest walk start",
+        );
+
+        // A fresh throttle that has never recorded imposes no cooldown.
+        let mut fresh = Throttle::new();
+        assert_eq!(
+            fresh.on_change(t0),
+            Walk::Now,
+            "a throttle that has never walked allows a walk immediately",
         );
     }
 
