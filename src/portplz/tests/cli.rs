@@ -47,6 +47,26 @@ fn no_git_verbose_prints_the_directory_description_with_user() {
 }
 
 #[test]
+fn portplz_rejects_malformed_uid() {
+    // A malformed PORTPLZ_UID must be a hard error, not silently ignored. Set the
+    // env var on the child only so concurrent test runs stay isolated.
+    let output = Command::new(env!("CARGO_BIN_EXE_portplz"))
+        .env("PORTPLZ_UID", "abc")
+        .args(["/tmp", "--no-git"])
+        .output()
+        .expect("run portplz binary");
+    assert!(
+        !output.status.success(),
+        "portplz must exit non-zero on a malformed PORTPLZ_UID"
+    );
+    let stderr = String::from_utf8(output.stderr).expect("portplz stderr is valid UTF-8");
+    assert!(
+        stderr.contains("PORTPLZ_UID"),
+        "stderr must mention PORTPLZ_UID, got: {stderr:?}"
+    );
+}
+
+#[test]
 fn portplz_uid_override_changes_the_port() {
     // Two different users derive different ports for the same location, so the
     // suite stays correct even when the real runner happens to be uid 0.

@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => env::current_dir()?,
     };
 
-    let user = portplz_core::UserSalt::current();
+    let user = portplz_core::UserSalt::current()?;
     let derivation = portplz_core::derive(&path, cli.no_git, &user)?;
 
     if cli.verbose {

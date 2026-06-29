@@ -50,7 +50,32 @@ pub fn unprivileged_port_from_string(input: &str) -> DerivedPort {
 /// When set to a non-negative integer it replaces the live user id in the port
 /// derivation. This lets you reproduce another user's port, or pin a stable
 /// port in containers/CI where the uid differs from your workstation.
+///
+/// An empty or whitespace-only value is treated as unset (live detection is
+/// used). A non-empty value that is not a non-negative integer is a hard error
+/// ([`UserSaltError::InvalidUidOverride`]) — it is no longer silently ignored,
+/// which would otherwise hand back a surprising, silently-different port.
 pub const PORTPLZ_UID_ENV: &str = "PORTPLZ_UID";
+
+/// Error resolving the current user from the environment.
+#[derive(Debug, thiserror::Error)]
+pub enum UserSaltError {
+    /// `PORTPLZ_UID` was set to a non-empty value that is not a non-negative integer.
+    #[error("PORTPLZ_UID must be a non-negative integer, but was set to '{0}'")]
+    InvalidUidOverride(String),
+}
+
+/// Parses the `PORTPLZ_UID` override value.
+///
+/// - `None`, or an empty/whitespace-only string → `Ok(None)` (no override; use
+///   live detection)
+/// - a non-negative integer (after trimming) → `Ok(Some(UserSalt::Uid(n)))`
+/// - any other non-empty value → `Err(UserSaltError::InvalidUidOverride)`,
+///   carrying the original untrimmed raw string
+fn parse_uid_override(raw: Option<&str>) -> Result<Option<UserSalt>, UserSaltError> {
+    // RED stub: silently drops malformed input (old behavior) so the new tests fail.
+    Ok(raw.and_then(|r| r.trim().parse::<u32>().ok()).map(UserSalt::Uid))
+}
 
 /// Identifies the current user so two people on the same machine derive
 /// different ports for the same repo and branch.
@@ -72,28 +97,30 @@ impl UserSalt {
     ///
     /// Honors the [`PORTPLZ_UID_ENV`] override first; otherwise uses the live
     /// POSIX uid on Unix, or the login name on platforms without one.
-    #[must_use]
-    pub fn current() -> Self {
-        if let Some(uid) = std::env::var(PORTPLZ_UID_ENV)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u32>().ok())
-        {
-            return Self::Uid(uid);
+    ///
+    /// # Errors
+    /// Returns [`UserSaltError::InvalidUidOverride`] when `PORTPLZ_UID` is set to
+    /// a non-empty value that is not a non-negative integer (e.g. `abc` or `-1`).
+    /// An empty or whitespace-only value is treated as unset and falls through to
+    /// live detection without erroring.
+    pub fn current() -> Result<Self, UserSaltError> {
+        if let Some(user) = parse_uid_override(std::env::var(PORTPLZ_UID_ENV).ok().as_deref())? {
+            return Ok(user);
         }
 
         #[cfg(unix)]
         {
             // SAFETY: `getuid` is a POSIX call that always succeeds, has no
             // preconditions, and can neither fail nor invoke undefined behavior.
-            Self::Uid(unsafe { libc::getuid() })
+            Ok(Self::Uid(unsafe { libc::getuid() }))
         }
         #[cfg(not(unix))]
         {
-            Self::Name(
+            Ok(Self::Name(
                 std::env::var("USERNAME")
                     .or_else(|_| std::env::var("USER"))
                     .unwrap_or_else(|_| "unknown".to_string()),
-            )
+            ))
         }
     }
 
@@ -254,6 +281,61 @@ pub fn derive(path: &Path, no_git: bool, user: &UserSalt) -> Result<Derivation, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_uid_override_rejects_non_numeric() {
+        assert!(
+            parse_uid_override(Some("abc")).is_err(),
+            "a non-numeric PORTPLZ_UID must be a hard error"
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_rejects_negative() {
+        assert!(
+            parse_uid_override(Some("-1")).is_err(),
+            "a negative PORTPLZ_UID must be a hard error"
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_accepts_integer() {
+        assert_eq!(
+            parse_uid_override(Some("5")).expect("valid uid"),
+            Some(UserSalt::Uid(5))
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_trims_surrounding_whitespace() {
+        assert_eq!(
+            parse_uid_override(Some("  7 ")).expect("valid uid"),
+            Some(UserSalt::Uid(7))
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_treats_blank_as_unset() {
+        assert_eq!(
+            parse_uid_override(Some("")).expect("empty is unset"),
+            None,
+            "an empty PORTPLZ_UID must clear the override without erroring"
+        );
+        assert_eq!(
+            parse_uid_override(Some("   ")).expect("whitespace is unset"),
+            None,
+            "a whitespace-only PORTPLZ_UID must clear the override without erroring"
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_treats_missing_as_unset() {
+        assert_eq!(
+            parse_uid_override(None).expect("missing is unset"),
+            None,
+            "an unset PORTPLZ_UID must use live detection without erroring"
+        );
+    }
 
     #[test]
     fn test_port_generation() {
