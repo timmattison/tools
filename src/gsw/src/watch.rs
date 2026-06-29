@@ -351,8 +351,11 @@ fn cooldown(cost: Duration) -> Duration {
 /// are already expressed as durations from now; a `None` from either source
 /// means that source imposes no deadline.
 fn wait_window(decay_tick: Option<Duration>, deferred_walk: Option<Duration>) -> Option<Duration> {
-    let _ = deferred_walk;
-    decay_tick
+    match (decay_tick, deferred_walk) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
