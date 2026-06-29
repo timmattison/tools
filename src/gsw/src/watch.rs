@@ -683,7 +683,11 @@ where
         let walk_now = if saw_fs {
             matches!(throttle.on_change(now), Walk::Now)
         } else if woke_for_timeout {
-            throttle.next_allowed().is_some()
+            // Only the OWED walk fires here, and only once its cooldown has
+            // actually expired: a plain decay tick that fires mid-cooldown (a
+            // shorter wait than the deferred deadline) re-renders from cache
+            // without walking, so Part A and Part B compose.
+            matches!(throttle.next_allowed(), Some(expiry) if now >= expiry)
         } else {
             false
         };
