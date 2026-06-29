@@ -31,10 +31,14 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
 - Used as the foundation for clipboard transformation tools like `htmlboard`, `jsonboard`, and `unescapeboard`
 
 ### portplz-core
-A shared Rust library that derives a deterministic, unprivileged TCP port from a git repository's root name and
-current branch (or, with no git, a directory name). It hides SHA-256 hashing and `gix` repository discovery behind
-a single `derive()` entry point. Used by `portplz` (which prints the port) and `sirn` (which serves on it), so both
-agree on the same port for a given project without `portplz` needing to be installed.
+A shared Rust library that derives a deterministic, unprivileged TCP port from a git repository's root name,
+current branch, and the current user (or, with no git, a directory name plus the user). Mixing in the user means
+two people on the same machine get different ports for the same repo and branch, so they can run the same project
+side by side without colliding. It hides SHA-256 hashing, `gix` repository discovery, and user detection behind a
+single `derive()` entry point. Used by `portplz` (which prints the port) and `sirn` (which serves on it), so both
+agree on the same port for a given project and user without `portplz` needing to be installed. Set `PORTPLZ_UID`
+to a fixed integer to override the detected user (handy for reproducing a teammate's port or pinning one in
+containers/CI).
 
 ## The tools
 
@@ -104,16 +108,19 @@ agree on the same port for a given project without `portplz` needing to be insta
       I thought that was cooler. Just run `subito topic1 topic2 topic3 ...` and you'll see the messages.
     - To install: `go install github.com/timmattison/tools/cmd/subito@latest`
 - portplz
-    - Generates an unprivileged port number based on the name of the current directory and git branch. Nice for picking a port number
-      for a service that needs to live behind a reverse proxy that also needs to be consistent across deployments and
-      separate instances/VMs.
+    - Generates an unprivileged port number based on the name of the current directory, the git branch, and the current
+      user. Mixing in the user lets two people run the same branch of the same repo at the same time without colliding.
+      Because the user is mixed in, the derived port is *not* the same across machines by default — different
+      deployments, instances, or VMs run the service under different uids and so land on different ports. To get a port
+      that stays consistent across deployments and separate instances/VMs — say, for a service living behind a reverse
+      proxy — set `PORTPLZ_UID` to the same fixed integer on each, which overrides the detected user and pins the port.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
 - sirn
     - Serve It Right Now — a tiny, zero-config HTTP file server. Run `sirn <file>...` to serve each file at
       `/<basename>`, or `sirn` with no arguments to serve the current directory as a browsable tree. The listening
-      port is derived automatically from the git repo root and branch (the same algorithm as `portplz`), so a given
-      project always serves on a stable port; override it with `-p/--port`. Binds `127.0.0.1` by default — use
-      `--bind 0.0.0.0` to expose it on the LAN.
+      port is derived automatically from the git repo root, branch, and current user (the same algorithm as `portplz`),
+      so a given project always serves on a stable port and two users on one machine don't collide; override it with
+      `-p/--port`. Binds `127.0.0.1` by default — use `--bind 0.0.0.0` to expose it on the LAN.
     - To install: `cargo install --git https://github.com/timmattison/tools sirn`
 - uuidplz
     - Generates UUIDs. With no input it prints a random v4 UUID. Given a string or a file it seeds a name-based

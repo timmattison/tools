@@ -45,6 +45,124 @@ pub fn unprivileged_port_from_string(input: &str) -> DerivedPort {
     DerivedPort(port)
 }
 
+/// Environment variable that overrides the detected user.
+///
+/// When set to a non-negative integer it replaces the live user id in the port
+/// derivation. This lets you reproduce another user's port, or pin a stable
+/// port in containers/CI where the uid differs from your workstation.
+///
+/// An empty or whitespace-only value is treated as unset (live detection is
+/// used). A non-empty value that is not a non-negative integer is a hard error
+/// ([`UserSaltError::InvalidUidOverride`]) — it is no longer silently ignored,
+/// which would otherwise hand back a surprising, silently-different port.
+pub const PORTPLZ_UID_ENV: &str = "PORTPLZ_UID";
+
+/// Error resolving the current user from the environment.
+#[derive(Debug, thiserror::Error)]
+pub enum UserSaltError {
+    /// `PORTPLZ_UID` was set to a non-empty value that is not a non-negative integer.
+    #[error("PORTPLZ_UID must be a non-negative integer, but was set to '{0}'")]
+    InvalidUidOverride(String),
+}
+
+/// Parses the `PORTPLZ_UID` override value.
+///
+/// - `None`, or an empty/whitespace-only string → `Ok(None)` (no override; use
+///   live detection)
+/// - a non-negative integer (after trimming) → `Ok(Some(UserSalt::Uid(n)))`
+/// - any other non-empty value → `Err(UserSaltError::InvalidUidOverride)`,
+///   carrying the original untrimmed raw string
+fn parse_uid_override(raw: Option<&str>) -> Result<Option<UserSalt>, UserSaltError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        // An empty or whitespace-only value clears the override (use live detection).
+        return Ok(None);
+    }
+    match trimmed.parse::<u32>() {
+        Ok(uid) => Ok(Some(UserSalt::Uid(uid))),
+        // Carry the original untrimmed raw string so the error reflects exactly
+        // what the user set.
+        Err(_) => Err(UserSaltError::InvalidUidOverride(raw.to_string())),
+    }
+}
+
+/// Identifies the current user so two people on the same machine derive
+/// different ports for the same repo and branch.
+///
+/// On Unix the identity is the numeric POSIX user id; on platforms without one
+/// (e.g. Windows) it falls back to the login name. Use [`UserSalt::current`] for
+/// the live value, or construct a fixed [`UserSalt::Uid`]/[`UserSalt::Name`] in
+/// tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserSalt {
+    /// A numeric POSIX user id (the common case on Unix).
+    Uid(u32),
+    /// A login name, used where no numeric uid exists (e.g. Windows).
+    Name(String),
+}
+
+impl UserSalt {
+    /// Resolves the current user.
+    ///
+    /// Honors the [`PORTPLZ_UID_ENV`] override first; otherwise uses the live
+    /// POSIX uid on Unix, or the login name on platforms without one.
+    ///
+    /// # Errors
+    /// Returns [`UserSaltError::InvalidUidOverride`] when `PORTPLZ_UID` is set to
+    /// a non-empty value that is not a non-negative integer (e.g. `abc` or `-1`).
+    /// An empty or whitespace-only value is treated as unset and falls through to
+    /// live detection without erroring.
+    pub fn current() -> Result<Self, UserSaltError> {
+        if let Some(user) = parse_uid_override(std::env::var(PORTPLZ_UID_ENV).ok().as_deref())? {
+            return Ok(user);
+        }
+
+        #[cfg(unix)]
+        {
+            // SAFETY: `getuid` is a POSIX call that always succeeds, has no
+            // preconditions, and can neither fail nor invoke undefined behavior.
+            Ok(Self::Uid(unsafe { libc::getuid() }))
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self::Name(
+                std::env::var("USERNAME")
+                    .or_else(|_| std::env::var("USER"))
+                    .unwrap_or_else(|_| "unknown".to_string()),
+            ))
+        }
+    }
+
+    /// The component mixed into the port hash to distinguish users.
+    ///
+    /// A uid renders as its decimal digits (no separators), which contain no
+    /// newline, so prefixing it to the location's hash input keeps the
+    /// user/location boundary unambiguous. For the `Name` variant, newline
+    /// characters (`\n` and `\r`) are stripped from the login name for the same
+    /// reason: the derived-port hash input uses `\n` as the boundary between the
+    /// user and location components, so a newline inside the name would make
+    /// that boundary ambiguous and let two distinct (user, location) pairs
+    /// collide onto the same port.
+    fn hash_component(&self) -> String {
+        match self {
+            Self::Uid(uid) => uid.to_string(),
+            Self::Name(name) => name.chars().filter(|c| *c != '\n' && *c != '\r').collect(),
+        }
+    }
+
+    /// Human-readable label appended to `--verbose` output, e.g. `uid 501`
+    /// or `user 'alice'`.
+    fn label(&self) -> String {
+        match self {
+            Self::Uid(uid) => format!("uid {uid}"),
+            Self::Name(name) => format!("user '{name}'"),
+        }
+    }
+}
+
 /// Describes how the port's hash input was determined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PortSource {
@@ -104,11 +222,25 @@ fn get_git_branch(repo: &gix::Repository) -> Option<String> {
     }
 }
 
-/// The result of deriving a port: the port and how it was derived.
+/// The result of deriving a port: the port, how it was derived, and for whom.
 #[derive(Debug, Clone)]
 pub struct Derivation {
     pub port: DerivedPort,
     pub source: PortSource,
+    pub user: UserSalt,
+}
+
+impl Derivation {
+    /// One-line human-readable description including the user, e.g.
+    /// `Port 51877 for repo 'foo' on branch 'main' (uid 501)`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "{} ({})",
+            self.source.describe(self.port),
+            self.user.label()
+        )
+    }
 }
 
 /// Errors that can occur while deriving a port.
@@ -122,11 +254,12 @@ pub enum DeriveError {
 ///
 /// When `no_git` is true, or `path` is not inside a git repo, the directory
 /// basename is used; otherwise the repo-root name plus the current branch
-/// (detached HEAD falls back to just the repo-root name).
+/// (detached HEAD falls back to just the repo-root name). `user` is mixed into
+/// the hash so different users derive different ports for the same location.
 ///
 /// # Errors
 /// Returns [`DeriveError::NoBasename`] if `path` has no final path component.
-pub fn derive(path: &Path, no_git: bool) -> Result<Derivation, DeriveError> {
+pub fn derive(path: &Path, no_git: bool, user: &UserSalt) -> Result<Derivation, DeriveError> {
     let basename = path
         .file_name()
         .ok_or(DeriveError::NoBasename)?
@@ -148,13 +281,73 @@ pub fn derive(path: &Path, no_git: bool) -> Result<Derivation, DeriveError> {
         }
     };
 
-    let port = unprivileged_port_from_string(&source.hash_input());
-    Ok(Derivation { port, source })
+    let hash_input = format!("{}\n{}", user.hash_component(), source.hash_input());
+    let port = unprivileged_port_from_string(&hash_input);
+    Ok(Derivation {
+        port,
+        source,
+        user: user.clone(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_uid_override_rejects_non_numeric() {
+        assert!(
+            parse_uid_override(Some("abc")).is_err(),
+            "a non-numeric PORTPLZ_UID must be a hard error"
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_rejects_negative() {
+        assert!(
+            parse_uid_override(Some("-1")).is_err(),
+            "a negative PORTPLZ_UID must be a hard error"
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_accepts_integer() {
+        assert_eq!(
+            parse_uid_override(Some("5")).expect("valid uid"),
+            Some(UserSalt::Uid(5))
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_trims_surrounding_whitespace() {
+        assert_eq!(
+            parse_uid_override(Some("  7 ")).expect("valid uid"),
+            Some(UserSalt::Uid(7))
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_treats_blank_as_unset() {
+        assert_eq!(
+            parse_uid_override(Some("")).expect("empty is unset"),
+            None,
+            "an empty PORTPLZ_UID must clear the override without erroring"
+        );
+        assert_eq!(
+            parse_uid_override(Some("   ")).expect("whitespace is unset"),
+            None,
+            "a whitespace-only PORTPLZ_UID must clear the override without erroring"
+        );
+    }
+
+    #[test]
+    fn parse_uid_override_treats_missing_as_unset() {
+        assert_eq!(
+            parse_uid_override(None).expect("missing is unset"),
+            None,
+            "an unset PORTPLZ_UID must use live detection without erroring"
+        );
+    }
 
     #[test]
     fn test_port_generation() {
@@ -168,6 +361,63 @@ mod tests {
         assert_eq!(
             unprivileged_port_from_string("example").get(),
             unprivileged_port_from_string("example").get()
+        );
+    }
+
+    #[test]
+    fn test_different_users_get_different_ports() {
+        let path = std::path::Path::new("/example/myrepo");
+        let a = derive(path, true, &UserSalt::Uid(501)).expect("derive");
+        let b = derive(path, true, &UserSalt::Uid(502)).expect("derive");
+        assert_ne!(
+            a.port.get(),
+            b.port.get(),
+            "different users must derive different ports for the same location"
+        );
+    }
+
+    #[test]
+    fn test_describe_includes_uid_label() {
+        let path = std::path::Path::new("/example/myrepo");
+        let d = derive(path, true, &UserSalt::Uid(501)).expect("derive");
+        assert!(
+            d.describe().contains("(uid 501)"),
+            "verbose description must include the uid, got: {}",
+            d.describe()
+        );
+    }
+
+    #[test]
+    fn test_name_hash_component_strips_newlines() {
+        // A name containing newlines must not leak them into the hash component,
+        // or the `\n` boundary between the user and location components becomes
+        // ambiguous and two distinct (user, location) pairs could collide.
+        let component = UserSalt::Name("a\nb\rc".into()).hash_component();
+        assert!(
+            !component.contains('\n'),
+            "Name hash component must not contain a newline, got: {component:?}"
+        );
+        assert!(
+            !component.contains('\r'),
+            "Name hash component must not contain a carriage return, got: {component:?}"
+        );
+
+        // A newline-free name must pass through unchanged (no over-stripping).
+        assert_eq!(
+            UserSalt::Name("alice".into()).hash_component(),
+            "alice",
+            "a name without newlines must be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_describe_includes_name_label() {
+        let path = std::path::Path::new("/example/myrepo");
+        let d = derive(path, true, &UserSalt::Name("alice".into())).expect("derive");
+        assert!(
+            d.describe().contains("(user 'alice')"),
+            "verbose description must include the login name, got: {}",
+            d.describe()
         );
     }
 
@@ -338,8 +588,8 @@ mod tests {
             ],
         );
 
-        let d1 = derive(dir, false).expect("derive should succeed");
-        let d2 = derive(dir, false).expect("derive should succeed");
+        let d1 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
+        let d2 = derive(dir, false, &UserSalt::Uid(501)).expect("derive should succeed");
         assert_eq!(
             d1.port.get(),
             d2.port.get(),
