@@ -301,10 +301,6 @@ impl Throttle {
     /// a long cooldown the user doesn't want to wait out. Leaves [`Self::dirty`]
     /// untouched (the forced walk's subsequent [`Self::record`] clears it); this
     /// only opens the gate so the next [`Self::on_change`] returns [`Walk::Now`].
-    #[allow(
-        dead_code,
-        reason = "Wired by Phase 5's manual-refresh `r` key, not yet in the loop."
-    )]
     fn force(&mut self) {
         // Clearing the gate is exactly the "a walk is allowed now" state, so the
         // next on_change short-circuits to Walk::Now regardless of how much
@@ -601,6 +597,7 @@ where
         // size, a bare timeout is a decay tick.
         let mut saw_fs = false;
         let mut saw_resize = false;
+        let mut saw_force = false;
         // Wait window: the soonest of the decay-tick cadence and, when a walk was
         // deferred during a cooldown, that cooldown's expiry. The clock is read
         // for the deferred deadline only when one is actually pending.
@@ -619,7 +616,10 @@ where
                     saw_resize = true;
                     false
                 }
-                Ok(Event::ForceRefresh) => false,
+                Ok(Event::ForceRefresh) => {
+                    saw_force = true;
+                    false
+                }
                 Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
@@ -633,7 +633,10 @@ where
                     saw_resize = true;
                     false
                 }
-                Ok(Event::ForceRefresh) => false,
+                Ok(Event::ForceRefresh) => {
+                    saw_force = true;
+                    false
+                }
                 Err(_) => break,
             },
         };
@@ -650,7 +653,7 @@ where
                     }
                     Ok(Event::FsChanged) => saw_fs = true,
                     Ok(Event::Resize) => saw_resize = true,
-                    Ok(Event::ForceRefresh) => {}
+                    Ok(Event::ForceRefresh) => saw_force = true,
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
                         quitting = true;
@@ -664,15 +667,22 @@ where
         // start, and any age offset all key off the same instant.
         let now = (hooks.clock)();
 
-        // Does this wake walk git? An FS change the throttle admits, or — when a
-        // change was deferred during a cooldown — the single owed walk, fired by
-        // the timeout the loop armed at the cooldown's expiry. `on_change` defers
-        // a mid-cooldown FS change (setting the throttle's dirty flag) and we
-        // fall through to a cheap cached re-render (Part A) instead of walking. A
-        // resize or a plain decay tick never walks. A filesystem walk in a
-        // coalesced burst wins over a co-arriving resize: the fresh walk already
-        // renders at the current dimensions.
-        let walk_now = if saw_fs {
+        // Does this wake walk git? A manual refresh (`r`) forces one
+        // unconditionally, bypassing the cooldown. Otherwise an FS change the
+        // throttle admits, or — when a change was deferred during a cooldown —
+        // the single owed walk, fired by the timeout the loop armed at the
+        // cooldown's expiry. `on_change` defers a mid-cooldown FS change (setting
+        // the throttle's dirty flag) and we fall through to a cheap cached
+        // re-render (Part A) instead of walking. A resize or a plain decay tick
+        // never walks. A filesystem walk in a coalesced burst wins over a
+        // co-arriving resize: the fresh walk already renders at the current
+        // dimensions.
+        let walk_now = if saw_force {
+            // Manual refresh (`r`): lift the cooldown gate and walk now. The walk
+            // branch re-measures cost and re-arms the throttle from it.
+            throttle.force();
+            true
+        } else if saw_fs {
             matches!(throttle.on_change(now), Walk::Now)
         } else if woke_for_timeout {
             // Only the OWED walk fires here, and only once its cooldown has
@@ -1973,6 +1983,124 @@ mod tests {
             "a force refresh mid-cooldown must walk despite the unexpired cooldown: \
              the arming walk plus the forced walk",
         );
+    }
+
+    #[test]
+    fn event_loop_force_refresh_rearms_throttle_from_fresh_measurement() {
+        // Phase 5 acceptance: a forced walk must re-measure its cost and re-arm the
+        // cooldown from it, exactly like an ordinary FS walk — so a *subsequent* FS
+        // change is throttled against the FRESH measurement. The forced walk costs
+        // D = 10 ms, arming a 100·D = 1 s cooldown. An FS change then lands at
+        // base + 100 ms, genuinely mid-cooldown, and must be DEFERRED — proving the
+        // forced walk re-armed the throttle. Across the sequence git is walked
+        // exactly ONCE (the forced walk); if `force` had failed to re-arm, the FS
+        // change would have walked too and collects would be 2. The injected clock
+        // is a short clamped sequence, so the test is deterministic and never sleeps.
+        let base = Instant::now();
+        let times = [
+            base,                              // forced walk start
+            base + Duration::from_millis(10),  // forced walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_millis(100), // FS-change wake: mid-cooldown → deferred
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::ForceRefresh).expect("queue forced refresh");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut stage = 0_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            None, // decay timer off: isolate the throttle from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    stage += 1;
+                    match stage {
+                        // After the forced walk: an FS change lands mid-cooldown.
+                        1 => {
+                            let _ = tx.send(Event::FsChanged);
+                        }
+                        // The deferred re-render of that FS change: end the loop.
+                        _ => {
+                            let _ = tx.send(Event::Quit);
+                        }
+                    }
+                    frame(&format!("frame {stage}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: timer_off,
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 1,
+            "the forced walk re-arms the cooldown from its fresh cost, so a later \
+             mid-cooldown FS change is deferred: only the forced walk runs. If force \
+             failed to re-arm, the FS change would walk too and collects would be 2.",
+        );
+    }
+
+    #[test]
+    fn event_loop_force_refresh_on_idle_walks_once() {
+        // Phase 5 acceptance: pressing `r` on a clean/idle loop simply walks once
+        // and repaints once — no error, no double walk. With a constant clock and
+        // the decay timer off, the single queued ForceRefresh drives exactly one
+        // collect and one paint before the render hook quits.
+        let base = Instant::now();
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::ForceRefresh).expect("queue forced refresh");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut paints = 0_usize;
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            None, // decay timer off: isolate the forced walk from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    // End the loop right after the forced walk's render.
+                    let _ = tx.send(Event::Quit);
+                    frame("forced")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| {
+                    paints += 1;
+                    Ok(())
+                },
+                clock: || base,
+                next_tick: timer_off,
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 1,
+            "a forced refresh on an idle loop walks git once"
+        );
+        assert_eq!(paints, 1, "the forced walk repaints exactly once");
     }
 
     #[test]
