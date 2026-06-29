@@ -6,7 +6,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "portplz")]
 #[command(version = version_string!())]
-#[command(about = "Generate a port number from the git repo root and branch name", long_about = None)]
+#[command(about = "Generate a port number from the git repo root, branch, and current user", long_about = None)]
 struct Cli {
     #[arg(help = "Directory path (defaults to current directory)")]
     path: Option<String>,
