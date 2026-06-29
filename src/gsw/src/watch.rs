@@ -315,7 +315,12 @@ impl Throttle {
     /// a long cooldown the user doesn't want to wait out. Leaves [`Self::dirty`]
     /// untouched (the forced walk's subsequent [`Self::record`] clears it); this
     /// only opens the gate so the next [`Self::on_change`] returns [`Walk::Now`].
-    fn force(&mut self) {}
+    fn force(&mut self) {
+        // Clearing the gate is exactly the "a walk is allowed now" state, so the
+        // next on_change short-circuits to Walk::Now regardless of how much
+        // cooldown remained. dirty is left as-is — the forced walk's record clears it.
+        self.next_allowed_at = None;
+    }
 }
 
 /// Cooldown for a walk costing `cost`: `max(FLOOR, cost / BUDGET)` (= `max(FLOOR,
