@@ -840,4 +840,35 @@ mod tests {
             "nothing should be moved when rename fails fatally"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_file_cleans_up_partial_destination_when_cross_volume_copy_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"payload").unwrap();
+        let dst = dir.path().join("b.txt");
+
+        let err = move_file_with(
+            &src,
+            &dst,
+            |_, _| Err(std::io::Error::from_raw_os_error(libc::EXDEV)),
+            |_s, d| {
+                // A copy that writes a truncated file, then fails partway.
+                std::fs::write(d, b"par").unwrap();
+                Err(std::io::Error::new(std::io::ErrorKind::Other, "disk full"))
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        assert!(
+            !dst.exists(),
+            "a failed cross-volume copy must not leave a truncated destination behind"
+        );
+        assert!(
+            src.exists(),
+            "source must remain after a failed cross-volume copy"
+        );
+    }
 }
