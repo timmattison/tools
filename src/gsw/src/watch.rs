@@ -603,6 +603,7 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
+    let mut throttle = Throttle::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -661,27 +662,37 @@ where
             }
         }
 
-        // Only a filesystem change walks git. A resize re-renders the cached
-        // snapshot at the freshly-queried dimensions; a decay tick re-renders it
-        // at the cached dimensions. Both advance every displayed age by the
-        // wall-clock elapsed since the snapshot was collected (Part A). A
-        // filesystem change in a coalesced burst wins over a co-arriving resize
-        // — the fresh walk already renders at the current dimensions.
-        let render = if saw_fs {
+        // Read the clock once for this wake: the throttle decision, a walk's
+        // start, and any age offset all key off the same instant.
+        let now = (hooks.clock)();
+
+        // Only a filesystem change walks git, and only when the throttle admits
+        // it. An FS change during an active cooldown is deferred — `on_change`
+        // sets the throttle's dirty flag and we fall through to a cheap cached
+        // re-render (Part A) instead of walking. A resize or decay tick never
+        // walks. A filesystem walk in a coalesced burst wins over a co-arriving
+        // resize: the fresh walk already renders at the current dimensions.
+        let walk_now = saw_fs && matches!(throttle.on_change(now), Walk::Now);
+
+        let render = if walk_now {
             cache.dims = (hooks.dimensions)();
-            // Re-seed the cache's collection time so a later decay tick or resize
-            // advances ages from *this* walk, not the previous one. Taken before
-            // the walk so it marks the walk's start.
-            cache.collected_at = (hooks.clock)();
+            // Re-seed the collection time to the walk's start so a later decay
+            // tick or resize advances ages from *this* walk, not the previous
+            // one. Measure the walk's wall-clock cost around collect and feed it
+            // to the throttle, which arms the next cooldown (= 100·cost) from it.
+            cache.collected_at = now;
             cache.snapshot = (hooks.collect)()?;
+            let cost = (hooks.clock)().saturating_duration_since(now);
+            throttle.record(now, cost);
             (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
         } else if saw_resize {
             cache.dims = (hooks.dimensions)();
-            let age_offset = (hooks.clock)().saturating_duration_since(cache.collected_at);
+            let age_offset = now.saturating_duration_since(cache.collected_at);
             (hooks.render)(&cache.snapshot, cache.dims, age_offset)
         } else {
-            // Decay tick: no event arrived, just the recv_timeout window elapsed.
-            let age_offset = (hooks.clock)().saturating_duration_since(cache.collected_at);
+            // Decay tick, or an FS change the throttle deferred: re-render the
+            // cached snapshot, advancing every displayed age by the elapsed time.
+            let age_offset = now.saturating_duration_since(cache.collected_at);
             (hooks.render)(&cache.snapshot, cache.dims, age_offset)
         };
 
