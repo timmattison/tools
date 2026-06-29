@@ -6,6 +6,9 @@
 //! collision-safe move planning, and a cross-volume move fallback that ordinary
 //! `rename(2)` cannot perform.
 
+#![cfg_attr(not(test), warn(clippy::unwrap_used))]
+#![cfg_attr(not(test), warn(clippy::expect_used))]
+
 use std::path::{Path, PathBuf};
 
 pub use filewalker::FilterType;
