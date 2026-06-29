@@ -9,78 +9,15 @@
 //! with `-q` against a repo whose `core.hooksPath` is missing and asserts the
 //! warning still reaches stderr.
 
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod support;
 
-use tempfile::TempDir;
-
-/// Scrub the git-location env vars git exports when it invokes a hook.
-///
-/// In a worktree, git exports absolute `GIT_DIR`/`GIT_WORK_TREE`/
-/// `GIT_INDEX_FILE` to the pre-commit hook. Those leak into child `git` and
-/// `nwt` processes and pin them to the *real* repo regardless of
-/// `current_dir(tempdir)`, so this fixture's git commands and `nwt`'s
-/// `git worktree add` would operate on the real repo. Scrub them so the
-/// per-test tempdir is the only repo touched.
-fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-}
-
-/// Runs a git command in `dir` with stdout/stderr nulled, returning success.
-/// Stdout/stderr are nulled so concurrent test runs don't interleave noise.
-fn run_git(dir: &Path, args: &[&str]) -> bool {
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    scrub_git_env(&mut cmd)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Nanosecond timestamp for building process-unique, parallel-safe names.
-fn nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos()
-}
+use support::{init_repo, nanos, nwt_command, run_git};
 
 #[test]
 fn ungated_worktree_warning_survives_quiet() {
-    // Everything lives inside this TempDir. `repo` is a SUBDIR so nwt's sibling
-    // `<name>-worktrees` output directory also lands inside the TempDir.
-    let temp = TempDir::new().expect("Failed to create temp dir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("Failed to create repo subdir");
-
-    assert!(run_git(&repo, &["init"]), "git init failed");
-    assert!(
-        run_git(&repo, &["config", "user.email", "test@example.com"]),
-        "git config user.email failed"
-    );
-    assert!(
-        run_git(&repo, &["config", "user.name", "Test User"]),
-        "git config user.name failed"
-    );
-
-    // Create + commit a baseline file. Commit exactly once (no retry loop) and
-    // disable gpg signing so a globally-configured signer can't break the test.
-    std::fs::write(repo.join("README.md"), "baseline\n").expect("Failed to write baseline file");
-    assert!(run_git(&repo, &["add", "README.md"]), "git add failed");
-    assert!(
-        run_git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "baseline"]
-        ),
-        "git commit failed"
-    );
+    // A fresh repo with a baseline commit (everything inside a TempDir so nwt's
+    // sibling `<name>-worktrees` output dir is cleaned up with it).
+    let (_temp, repo) = init_repo();
 
     // The silent-no-hooks trap: configure core.hooksPath repo-locally to a
     // directory we deliberately do NOT create. Worktrees share repo-local config,
@@ -95,12 +32,9 @@ fn ungated_worktree_warning_survives_quiet() {
     // runs these tests concurrently with the pre-commit hook's own run.
     let branch = format!("quiet-warn-{}-{}", std::process::id(), nanos());
 
-    let mut nwt_cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
-    nwt_cmd
+    // nwt_command scrubs ZELLIJ/TMUX so this never touches a real multiplexer.
+    let output = nwt_command(&repo)
         .args(["-b", &branch, "-q"])
-        .current_dir(&repo)
-        .stdin(Stdio::null());
-    let output = scrub_git_env(&mut nwt_cmd)
         .output()
         .expect("Failed to run nwt binary");
 

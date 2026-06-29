@@ -2121,20 +2121,17 @@ mod tests {
     /// resume target. Returns the captured stdout plus whether the `claude`
     /// stub was invoked (it drops a marker file when called).
     ///
-    /// All paths are keyed on the pid + a nanosecond timestamp so concurrent
-    /// runs of this test never share a temp dir.
+    /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
+    /// concurrent runs of this test never share a directory. A pid+nanos name is
+    /// NOT enough: two threads in the same test process can sample the clock in
+    /// the same tick and collide, letting one run clobber the other's fakes.
     #[cfg(unix)]
     fn run_shell_function(args: &str) -> (String, bool) {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
-        use std::time::{SystemTime, UNIX_EPOCH};
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("crap-shell-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
 
         let claude_marker = dir.join("claude_called");
 
@@ -2174,7 +2171,7 @@ mod tests {
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let claude_called = claude_marker.exists();
-        let _ = fs::remove_dir_all(&dir);
+        // `temp` drops at end of scope, removing the directory.
         (stdout, claude_called)
     }
 
@@ -2210,25 +2207,21 @@ mod tests {
     /// with. Returns those recorded arguments, one per line.
     ///
     /// When `provide_clauded` is true the preferred `clauded` is on `PATH` and
-    /// records; otherwise only plain `claude` is available. All paths are keyed
-    /// on pid + a nanosecond timestamp so concurrent runs never share a temp
-    /// dir.
+    /// records; otherwise only plain `claude` is available. Each call gets its
+    /// own `tempfile::TempDir` (an `O_EXCL` random name) so concurrent runs
+    /// never share a directory. A pid+nanos name is NOT enough: two threads in
+    /// the same test process can sample the clock in the same tick and collide,
+    /// letting one run read args the other recorded.
     #[cfg(unix)]
     fn run_here_shell_function(new_id_field: &str, provide_clauded: bool) -> String {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
-        use std::time::{SystemTime, UNIX_EPOCH};
 
         // The session id the fake binary reports as the resumed original.
         const HERE_SESSION: &str = "33333333-4444-5555-6666-777777777777";
 
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("crap-here-shell-{}-{nanos}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
 
         let args_file = dir.join("claude_args");
 
@@ -2267,7 +2260,7 @@ mod tests {
         );
 
         let recorded = fs::read_to_string(&args_file).unwrap_or_default();
-        let _ = fs::remove_dir_all(&dir);
+        // `temp` drops at end of scope, removing the directory.
         recorded
     }
 

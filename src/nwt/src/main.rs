@@ -400,6 +400,26 @@ fn is_running_in_zellij() -> bool {
     std::env::var("ZELLIJ").is_ok()
 }
 
+/// Returns true if tab/window renaming has been explicitly disabled via the
+/// `NWT_NO_TAB_RENAME` environment variable.
+///
+/// Renaming the current tab/window is an interactive convenience: when `nwt`
+/// runs inside a terminal multiplexer it retargets the *current* tab to the new
+/// worktree's short name. That is what a human wants when they run
+/// `nwt -b issue-42`, but catastrophic when something *else* runs `nwt` while
+/// sharing the user's multiplexer session — most notably `nwt`'s own
+/// integration tests, which shell out to the real binary. If such a child
+/// inherits `ZELLIJ`/`TMUX`, the rename hijacks whatever tab the runner is
+/// sitting in (issue #283).
+///
+/// This env var is the belt-and-suspenders safety net: even if a test or script
+/// forgets to scrub the multiplexer env from the child process, setting
+/// `NWT_NO_TAB_RENAME` to any non-empty value suppresses the rename entirely.
+/// Interactive use is unaffected because nothing sets this var by default.
+fn tab_rename_disabled() -> bool {
+    std::env::var_os("NWT_NO_TAB_RENAME").is_some_and(|value| !value.is_empty())
+}
+
 /// Renames the current Zellij tab to the given name.
 ///
 /// This is a best-effort operation — if the rename fails (e.g., `zellij` binary
@@ -1329,8 +1349,10 @@ fn main() {
                     copy_untracked_env_files(&repo_root, &worktree_path, config.quiet);
                 }
 
-                // Rename Zellij tab if running inside Zellij
-                if is_running_in_zellij() {
+                // Rename Zellij tab if running inside Zellij, unless tab renaming
+                // has been explicitly disabled (e.g. by a test or script that
+                // must not hijack the user's real tab — issue #283).
+                if is_running_in_zellij() && !tab_rename_disabled() {
                     rename_zellij_tab(&tab_name);
                 }
 
@@ -1395,13 +1417,18 @@ fn main() {
                         // a shell), so it doesn't need shell escaping. Control characters are
                         // validated above via debug_assert. Directory names are safe because they're
                         // either random (adjective-noun from names crate) or sanitized branch names.
-                        let mut tmux_args: Vec<String> = vec![
-                            "new-window".into(),
-                            "-c".into(),
-                            worktree_path_str.into(),
-                            "-n".into(),
-                            tab_name,
-                        ];
+                        let mut tmux_args: Vec<String> =
+                            vec!["new-window".into(), "-c".into(), worktree_path_str.into()];
+
+                        // Name the new window after the worktree, unless tab/window
+                        // renaming is explicitly disabled (issue #283). Without `-n`,
+                        // tmux auto-names the window after the running command — the
+                        // standard non-renaming behavior — so a test or script that
+                        // sets NWT_NO_TAB_RENAME can't retarget the user's window.
+                        if !tab_rename_disabled() {
+                            tmux_args.push("-n".into());
+                            tmux_args.push(tab_name);
+                        }
 
                         // If --run is specified, wrap the command in an interactive shell
                         // so that aliases and shell functions are available.

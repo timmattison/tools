@@ -14,88 +14,24 @@
 //!   * a run that does NOT create the dir must still warn (so the false-positive
 //!     fix can't be "delete the check").
 
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod support;
+
+use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-/// Scrub the git-location env vars git exports when it invokes a hook.
-///
-/// In a worktree, git exports absolute `GIT_DIR`/`GIT_WORK_TREE`/
-/// `GIT_INDEX_FILE` to the pre-commit hook. Those leak into child `git` and
-/// `nwt` processes and pin them to the *real* repo regardless of
-/// `current_dir(tempdir)`, so this fixture's git commands and `nwt`'s
-/// `git worktree add` would operate on the real repo. Scrub them so the
-/// per-test tempdir is the only repo touched.
-fn scrub_git_env(cmd: &mut Command) -> &mut Command {
-    cmd.env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-}
+use support::{init_repo, nanos, nwt_command, run_git};
 
-/// Runs a git command in `dir` with stdout/stderr nulled, returning success.
-/// Stdout/stderr are nulled so concurrent test runs don't interleave noise.
-fn run_git(dir: &Path, args: &[&str]) -> bool {
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    scrub_git_env(&mut cmd)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Nanosecond timestamp for building process-unique, parallel-safe names.
-fn nanos() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock before UNIX epoch")
-        .as_nanos()
-}
-
-/// Creates a git repo (inside a TempDir subdir so the sibling `<name>-worktrees`
-/// output directory also lands inside the TempDir), commits a baseline file, and
-/// configures `core.hooksPath` repo-locally to a directory that does NOT exist.
-/// No package.json exists, so hook bootstrap is a no-op. Returns the TempDir
-/// (keep it alive) and the repo path.
-fn repo_with_missing_hooks_dir() -> (TempDir, std::path::PathBuf) {
-    let temp = TempDir::new().expect("Failed to create temp dir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("Failed to create repo subdir");
-
-    assert!(run_git(&repo, &["init"]), "git init failed");
-    assert!(
-        run_git(&repo, &["config", "user.email", "test@example.com"]),
-        "git config user.email failed"
-    );
-    assert!(
-        run_git(&repo, &["config", "user.name", "Test User"]),
-        "git config user.name failed"
-    );
-
-    // Baseline commit. Commit exactly once (no retry loop); disable gpg signing
-    // so a globally-configured signer can't break the test.
-    std::fs::write(repo.join("README.md"), "baseline\n").expect("Failed to write baseline file");
-    assert!(run_git(&repo, &["add", "README.md"]), "git add failed");
-    assert!(
-        run_git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "baseline"]
-        ),
-        "git commit failed"
-    );
-
-    // The silent-no-hooks trap: configure core.hooksPath repo-locally to a
-    // directory we deliberately do NOT create. Worktrees share repo-local config.
+/// A fresh repo whose `core.hooksPath` is configured repo-locally to a directory
+/// that does NOT exist. No package.json exists, so hook bootstrap is a no-op.
+/// Returns the `TempDir` (keep it alive) and the repo path.
+fn repo_with_missing_hooks_dir() -> (TempDir, PathBuf) {
+    let (temp, repo) = init_repo();
+    // The silent-no-hooks trap: a missing hooks dir that worktrees inherit.
     assert!(
         run_git(&repo, &["config", "core.hooksPath", ".husky/_"]),
         "git config core.hooksPath failed"
     );
-
     (temp, repo)
 }
 
@@ -110,12 +46,8 @@ fn run_command_that_creates_hooks_dir_suppresses_warning() {
     // The --run command creates the missing hooks dir. Because the safety-net
     // check is deferred until AFTER the run completes, it must see the dir now
     // exists and stay silent.
-    let mut nwt_cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
-    nwt_cmd
+    let output = nwt_command(&repo)
         .args(["-b", &branch, "--run", "mkdir -p .husky/_"])
-        .current_dir(&repo)
-        .stdin(Stdio::null());
-    let output = scrub_git_env(&mut nwt_cmd)
         .output()
         .expect("Failed to run nwt binary");
 
@@ -148,12 +80,8 @@ fn run_command_that_leaves_hooks_dir_missing_still_warns() {
     // The --run command does nothing to the hooks dir. The deferred check must
     // still fire — this guards against "fixing" the false positive by deleting
     // the check entirely.
-    let mut nwt_cmd = Command::new(env!("CARGO_BIN_EXE_nwt"));
-    nwt_cmd
+    let output = nwt_command(&repo)
         .args(["-b", &branch, "--run", "true"])
-        .current_dir(&repo)
-        .stdin(Stdio::null());
-    let output = scrub_git_env(&mut nwt_cmd)
         .output()
         .expect("Failed to run nwt binary");
 

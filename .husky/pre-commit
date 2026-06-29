@@ -34,7 +34,15 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     echo "pre-commit: running cargo clippy --all-targets --workspace -- -D warnings"
     cargo clippy --all-targets --workspace -- -D warnings
     echo "pre-commit: running cargo test --workspace"
-    cargo test --workspace
+    # Git exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_PREFIX into the hook's
+    # environment, and `cargo test` inherits them. The suite spawns helpers that
+    # run `git init`/`add`/`commit` inside throwaway temp repos; if those vars
+    # leak through, the child git targets THIS repo instead of the temp dir and
+    # can rewrite the real index and branch. (Observed: a gsw test committed its
+    # `a.txt` fixture plus the developer's staged changes straight onto the
+    # branch, and parallel runs flooded the real .git/config with lock errors.)
+    # Scrub them for the test run so every test's git stays sandboxed.
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX cargo test --workspace
 fi
 
 # The Go module gets the same treatment, again cheapest-first:
@@ -59,5 +67,10 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.go$|(^|/)go\.(
     echo "pre-commit: running go vet ./..."
     go vet ./...
     echo "pre-commit: running go test ./..."
-    go test ./...
+    # Same git-env scrub as the Rust gate above: git exports GIT_DIR/
+    # GIT_WORK_TREE/GIT_INDEX_FILE/GIT_PREFIX into the hook, and `go test`
+    # inherits them. No Go test shells out to git against a temp repo today, but
+    # scrubbing keeps the two gates symmetric so a future one can't silently
+    # target THIS repo instead of its fixture.
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX go test ./...
 fi
