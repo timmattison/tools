@@ -67,5 +67,10 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.go$|(^|/)go\.(
     echo "pre-commit: running go vet ./..."
     go vet ./...
     echo "pre-commit: running go test ./..."
-    go test ./...
+    # Same git-env scrub as the Rust gate above: git exports GIT_DIR/
+    # GIT_WORK_TREE/GIT_INDEX_FILE/GIT_PREFIX into the hook, and `go test`
+    # inherits them. No Go test shells out to git against a temp repo today, but
+    # scrubbing keeps the two gates symmetric so a future one can't silently
+    # target THIS repo instead of its fixture.
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX go test ./...
 fi
