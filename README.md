@@ -110,9 +110,10 @@ containers/CI).
 - portplz
     - Generates an unprivileged port number based on the name of the current directory, the git branch, and the current
       user. Mixing in the user lets two people run the same branch of the same repo at the same time without colliding.
-      Nice for picking a port number for a service that needs to live behind a reverse proxy that also needs to be
-      consistent across deployments and separate instances/VMs. Set `PORTPLZ_UID` to a fixed integer to override the
-      detected user.
+      Because the user is mixed in, the derived port is *not* the same across machines by default — different
+      deployments, instances, or VMs run the service under different uids and so land on different ports. To get a port
+      that stays consistent across deployments and separate instances/VMs — say, for a service living behind a reverse
+      proxy — set `PORTPLZ_UID` to the same fixed integer on each, which overrides the detected user and pins the port.
     - To install: `cargo install --git https://github.com/timmattison/tools portplz`
 - sirn
     - Serve It Right Now — a tiny, zero-config HTTP file server. Run `sirn <file>...` to serve each file at
