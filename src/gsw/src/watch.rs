@@ -772,12 +772,12 @@ fn classify_input(event: CtEvent) -> Option<Event> {
             if kind == KeyEventKind::Release {
                 // Ignore key releases (kitty/Windows report them); only a press acts.
                 None
-            } else if code == KeyCode::Char('q') {
-                Some(Event::Quit)
-            } else if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+            } else if code == KeyCode::Char('q')
+                || (modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c'))
+            {
                 Some(Event::Quit)
             } else if code == KeyCode::Char('r') {
-                None
+                Some(Event::ForceRefresh)
             } else {
                 None
             }
@@ -793,16 +793,15 @@ fn classify_input(event: CtEvent) -> Option<Event> {
 /// [`Event::Resize`]), forwards any resulting [`Event`], and exits when the
 /// receiver is gone or reading fails.
 fn spawn_event_reader(tx: Sender<Event>) {
-    thread::spawn(move || loop {
-        match event::read() {
-            Ok(ct_event) => {
-                if let Some(event) = classify_input(ct_event) {
-                    if tx.send(event).is_err() {
-                        break;
-                    }
+    thread::spawn(move || {
+        // Loop until reading fails (terminal closed) — the `while let` exits on
+        // `Err` — or a forwarded send fails because the receiver is gone.
+        while let Ok(ct_event) = event::read() {
+            if let Some(event) = classify_input(ct_event) {
+                if tx.send(event).is_err() {
+                    break;
                 }
             }
-            Err(_) => break,
         }
     });
 }
@@ -1142,6 +1141,43 @@ mod tests {
         // must turn an `r` key PRESS into Event::ForceRefresh.
         let r_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         assert!(matches!(classify_input(r_press), Some(Event::ForceRefresh)));
+    }
+
+    #[test]
+    fn classify_input_handles_keys_and_ignores_releases() {
+        // Regression guard for the rest of the classifier's contract once `r`
+        // joined it: a key RELEASE is dropped (kitty/Windows emit them and only
+        // a press should act), `q` and Ctrl-C still quit, a resize still maps to
+        // a repaint, and an unrelated key is ignored.
+
+        // A key release — even of a key we act on — is ignored.
+        let r_release = CtEvent::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)
+        });
+        assert!(
+            classify_input(r_release).is_none(),
+            "a key release must be ignored — only a press acts",
+        );
+
+        // `q` and Ctrl-C both request a quit.
+        let q_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(classify_input(q_press), Some(Event::Quit)));
+        let ctrl_c = CtEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(matches!(classify_input(ctrl_c), Some(Event::Quit)));
+
+        // A resize becomes a repaint at the new dimensions.
+        assert!(matches!(
+            classify_input(CtEvent::Resize(80, 24)),
+            Some(Event::Resize)
+        ));
+
+        // An unrelated key press is ignored.
+        let x_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(
+            classify_input(x_press).is_none(),
+            "an unrelated key must be ignored",
+        );
     }
 
     #[test]
