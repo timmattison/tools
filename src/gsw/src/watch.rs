@@ -210,10 +210,6 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Whether a filesystem change may walk git right now, or must wait out the
 /// adaptive cooldown. Returned by [`Throttle::on_change`].
-#[allow(
-    dead_code,
-    reason = "Unused until Phase 4 wires the Throttle into the event loop."
-)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Walk {
     /// The cooldown has expired (or none is armed): walk git now.
@@ -227,7 +223,9 @@ enum Walk {
 /// settles at `BUDGET`. Hard-coded, not a user dial.
 #[allow(
     dead_code,
-    reason = "Unused until Phase 4 wires the Throttle into the event loop."
+    reason = "Names the 1% duty-cycle target for the docs and spec; `cooldown` \
+              applies the exact integer reciprocal (100) to avoid float drift, so \
+              the constant itself is never read."
 )]
 const BUDGET: f64 = 0.01;
 
@@ -236,10 +234,6 @@ const BUDGET: f64 = 0.01;
 /// result UP to `FLOOR` — so adaptive throttling can only ever make watch-mode
 /// updates *slower* (for an expensive repo), never faster than they already are
 /// under today's debounce. A nearly-free walk therefore still settles at 150 ms.
-#[allow(
-    dead_code,
-    reason = "Unused until Phase 4 wires the Throttle into the event loop."
-)]
 const FLOOR: Duration = Duration::from_millis(150);
 
 /// Pure, time-injected throttle that gates git walks to the [`BUDGET`] duty
@@ -247,23 +241,15 @@ const FLOOR: Duration = Duration::from_millis(150);
 /// (= 100·`D`), so an expensive repo automatically backs off and a cheap one
 /// stays responsive — all decided here with injected instants, no clock of its
 /// own.
-#[allow(
-    dead_code,
-    reason = "Unused until Phase 4 wires the Throttle into the event loop."
-)]
 struct Throttle {
     /// Earliest instant the next walk may start. `None` = a walk is allowed now.
     next_allowed_at: Option<Instant>,
     /// Set when a change arrives during an active cooldown: a walk has been
     /// deferred and exactly one coalesced walk is now owed at the cooldown's
-    /// expiry. Cleared (in a later slice) once that owed walk is performed.
+    /// expiry. Cleared by [`Self::record`] once that owed walk is performed.
     dirty: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "Unused until Phase 4 wires the Throttle into the event loop."
-)]
 impl Throttle {
     fn new() -> Self {
         Self {
@@ -315,6 +301,10 @@ impl Throttle {
     /// a long cooldown the user doesn't want to wait out. Leaves [`Self::dirty`]
     /// untouched (the forced walk's subsequent [`Self::record`] clears it); this
     /// only opens the gate so the next [`Self::on_change`] returns [`Walk::Now`].
+    #[allow(
+        dead_code,
+        reason = "Wired by Phase 5's manual-refresh `r` key, not yet in the loop."
+    )]
     fn force(&mut self) {
         // Clearing the gate is exactly the "a walk is allowed now" state, so the
         // next on_change short-circuits to Walk::Now regardless of how much
@@ -330,10 +320,6 @@ impl Throttle {
 /// nanosecond-exact, so the [`Walk::Defer`]/[`Walk::Now`] boundary lands precisely
 /// at `walk_start + cost / BUDGET` once that exceeds the floor; a cost large enough
 /// to overflow saturates at [`Duration::MAX`].
-#[allow(
-    dead_code,
-    reason = "Unused until Phase 4 wires the Throttle into the event loop."
-)]
 fn cooldown(cost: Duration) -> Duration {
     // = 1 / BUDGET (0.01); an exact integer scale avoids the nanosecond drift
     // `Duration::mul_f64` would introduce at the on_change boundary.
