@@ -276,7 +276,13 @@ impl Throttle {
     /// the armed cooldown has elapsed (or none is armed), otherwise [`Walk::Defer`].
     fn on_change(&mut self, now: Instant) -> Walk {
         match self.next_allowed_at {
-            Some(allowed_at) if now < allowed_at => Walk::Defer,
+            Some(allowed_at) if now < allowed_at => {
+                // A change landed mid-cooldown: don't walk now, but remember that
+                // a change has happened which no walk has yet reflected, so one
+                // coalesced walk is owed when the cooldown expires.
+                self.dirty = true;
+                Walk::Defer
+            }
             _ => Walk::Now,
         }
     }
@@ -294,7 +300,11 @@ impl Throttle {
     /// walk at expiry; the Phase-4 loop reads this to arm a throttle wakeup only
     /// when one is actually owed, and stays asleep otherwise.
     fn next_allowed(&self) -> Option<Instant> {
-        None
+        if self.dirty {
+            self.next_allowed_at
+        } else {
+            None
+        }
     }
 }
 
