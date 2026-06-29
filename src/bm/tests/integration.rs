@@ -205,7 +205,7 @@ fn execute_plan_reports_partial_summary_when_a_move_fails() {
     let plan = MovePlan {
         moves: vec![
             PlannedMove {
-                source: src_a.clone(),
+                source: src_a,
                 destination: good_dest.clone(),
             },
             PlannedMove {
@@ -223,7 +223,10 @@ fn execute_plan_reports_partial_summary_when_a_move_fails() {
         1,
         "the first successful move must be counted in the partial summary"
     );
-    assert!(good_dest.exists(), "the first file was moved before the failure");
+    assert!(
+        good_dest.exists(),
+        "the first file was moved before the failure"
+    );
     assert!(src_b.exists(), "the failed move leaves its source in place");
 }
 

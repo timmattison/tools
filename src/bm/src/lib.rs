@@ -534,7 +534,7 @@ pub fn execute_plan(
             Ok(MoveOutcome::Copied) => summary.copied += 1,
             Err(source) => {
                 return Err(ExecuteError {
-                    summary: Summary::default(),
+                    summary,
                     source_path: planned.source.clone(),
                     destination: planned.destination.clone(),
                     source,
