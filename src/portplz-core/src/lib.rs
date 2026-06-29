@@ -289,6 +289,29 @@ mod tests {
     }
 
     #[test]
+    fn test_name_hash_component_strips_newlines() {
+        // A name containing newlines must not leak them into the hash component,
+        // or the `\n` boundary between the user and location components becomes
+        // ambiguous and two distinct (user, location) pairs could collide.
+        let component = UserSalt::Name("a\nb\rc".into()).hash_component();
+        assert!(
+            !component.contains('\n'),
+            "Name hash component must not contain a newline, got: {component:?}"
+        );
+        assert!(
+            !component.contains('\r'),
+            "Name hash component must not contain a carriage return, got: {component:?}"
+        );
+
+        // A newline-free name must pass through unchanged (no over-stripping).
+        assert_eq!(
+            UserSalt::Name("alice".into()).hash_component(),
+            "alice",
+            "a name without newlines must be unchanged"
+        );
+    }
+
+    #[test]
     fn test_describe_includes_name_label() {
         let path = std::path::Path::new("/example/myrepo");
         let d = derive(path, true, &UserSalt::Name("alice".into())).expect("derive");
