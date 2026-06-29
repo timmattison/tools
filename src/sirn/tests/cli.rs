@@ -121,3 +121,31 @@ fn directory_mixed_with_files_aborts_startup() {
         "stderr should explain the directory cannot be mixed with files, got: {stderr}"
     );
 }
+
+/// A malformed PORTPLZ_UID must surface the helpful Display message on stderr,
+/// not the opaque Debug form of the error. portplz already renders this via its
+/// main()/run() split; sirn must match (it renders every other startup error via
+/// Display too). Set the env var on the child only so concurrent runs stay isolated.
+#[test]
+fn malformed_uid_reports_helpful_message() {
+    // A single (non-existent) file forces Files mode; build_routes inspects only
+    // basenames, so the path need not exist. Port derivation then calls
+    // UserSalt::current(), which errors on the malformed PORTPLZ_UID before any bind.
+    let output = Command::new(env!("CARGO_BIN_EXE_sirn"))
+        .env("PORTPLZ_UID", "abc")
+        .arg("/some/dir/file.txt")
+        .output()
+        .expect("spawning sirn with a malformed PORTPLZ_UID should succeed");
+
+    assert!(
+        !output.status.success(),
+        "a malformed PORTPLZ_UID should make sirn exit non-zero, got {:?}",
+        output.status
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("PORTPLZ_UID must be a non-negative integer"),
+        "stderr should surface the helpful Display message, not the Debug form, got: {stderr}"
+    );
+}
