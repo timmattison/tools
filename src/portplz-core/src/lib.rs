@@ -98,15 +98,24 @@ impl UserSalt {
     }
 
     /// The component mixed into the port hash to distinguish users.
+    ///
+    /// A uid renders as its decimal digits (no separators), which contain no
+    /// newline, so prefixing it to the location's hash input keeps the
+    /// user/location boundary unambiguous.
     fn hash_component(&self) -> String {
-        // RED stub: ignores the variant so every user hashes identically.
-        String::new()
+        match self {
+            Self::Uid(uid) => uid.to_string(),
+            Self::Name(name) => name.clone(),
+        }
     }
 
-    /// Human-readable label appended to `--verbose` output, e.g. `uid 501`.
+    /// Human-readable label appended to `--verbose` output, e.g. `uid 501`
+    /// or `user 'alice'`.
     fn label(&self) -> String {
-        // RED stub: empty so the description omits the user.
-        String::new()
+        match self {
+            Self::Uid(uid) => format!("uid {uid}"),
+            Self::Name(name) => format!("user '{name}'"),
+        }
     }
 }
 
@@ -182,8 +191,11 @@ impl Derivation {
     /// `Port 51877 for repo 'foo' on branch 'main' (uid 501)`.
     #[must_use]
     pub fn describe(&self) -> String {
-        // RED stub: omits the user label.
-        self.source.describe(self.port)
+        format!(
+            "{} ({})",
+            self.source.describe(self.port),
+            self.user.label()
+        )
     }
 }
 
