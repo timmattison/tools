@@ -332,7 +332,12 @@ fn render_operation_line(op: &Operation) -> String {
         Operation::Merge { conflicts } => *conflicts,
     };
     let label_styled = label.yellow().bold();
-    let clause = format!(" · {conflicts} conflicts to resolve").red().bold();
+    let word = if conflicts == 1 {
+        "conflict"
+    } else {
+        "conflicts"
+    };
+    let clause = format!(" · {conflicts} {word} to resolve").red().bold();
     format!("{label_styled}{clause}")
 }
 
