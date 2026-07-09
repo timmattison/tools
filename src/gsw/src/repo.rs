@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::git::{FileEntry, FileStatus, NumStat};
-use crate::render::UpstreamStatus;
+use crate::render::{Operation, UpstreamStatus};
 
 /// Open the repository containing `cwd`, or `None` when there isn't one with a
 /// working tree (outside any repo, or a bare repo — gsw has nothing per-file to
@@ -183,6 +183,26 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
         ahead,
         behind,
     })
+}
+
+/// The in-progress git operation gsw should surface in the header, or `None`
+/// for a clean tree or an out-of-scope operation.
+///
+/// Classification uses gix's native [`gix::Repository::state`], which is modeled
+/// on git's own `wt-status.c` / `git-prompt.sh` logic: it inspects `MERGE_HEAD`,
+/// `rebase-merge/`, and `rebase-apply/` under the git dir, so it is
+/// worktree-aware and takes no locks — consistent with gsw's read-only,
+/// gix-only philosophy. `conflicts` is the unmerged-path count the caller
+/// already has from the status walk, so this does no extra git work.
+///
+/// Only merge is surfaced today; the `Operation` enum reserves a `Rebase`
+/// variant for a later slice. Cherry-pick, revert, bisect, and plain `git am`
+/// are intentionally out of scope and yield `None`.
+pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operation> {
+    match repo.state()? {
+        gix::state::InProgress::Merge => Some(Operation::Merge { conflicts }),
+        _ => None,
+    }
 }
 
 /// Everything one working-tree status walk produces: the `FileEntry` rows plus

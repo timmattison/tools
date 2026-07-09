@@ -8,7 +8,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 
-use crate::git::FileEntry;
+use crate::git::{FileEntry, FileStatus};
 use crate::render::{
     plan_section_caps, render, render_with_offset, LogEntry, RenderOptions, Snapshot,
 };
@@ -389,6 +389,19 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
     snapshot.log = fetch_log(repo, cfg.log_lines);
 
     snapshot.upstream = repo::upstream_status(repo);
+
+    // Surface an in-progress merge/rebase. The conflict count comes for free
+    // from the status walk already done — every unmerged path is a
+    // `FileStatus::Conflicted` row — so no extra git work is needed.
+    let conflicts = u32::try_from(
+        snapshot
+            .files
+            .iter()
+            .filter(|f| f.status == FileStatus::Conflicted)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    snapshot.operation = repo::operation_state(repo, conflicts);
 
     Ok(snapshot)
 }
