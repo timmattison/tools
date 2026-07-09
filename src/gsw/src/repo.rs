@@ -504,6 +504,7 @@ mod tests {
     use std::process::Command;
 
     use crate::git::FileStatus;
+    use crate::render::Operation;
 
     /// Run a git command in `dir`, isolated from the host's global/system
     /// config, asserting success. Test-only fixture construction.
@@ -993,6 +994,36 @@ mod tests {
             s.iter()
                 .any(|(path, st, _)| path == "a.txt" && *st == FileStatus::Conflicted),
             "a.txt should be Conflicted after a failed merge: {s:?}",
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_merge_with_conflict_count() {
+        // A real in-progress merge (MERGE_HEAD present) must classify as
+        // Operation::Merge, carrying the caller-supplied conflict count.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(p.join("a.txt"), "from other\n").unwrap();
+        git(p, &["commit", "-q", "-am", "other edit"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("a.txt"), "from main\n").unwrap();
+        git(p, &["commit", "-q", "-am", "main edit"]);
+        // The merge exits non-zero on conflict; don't assert success.
+        let _ = std::process::Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(p)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .expect("invoke git merge");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Merge { conflicts: 1 }),
         );
     }
 }
