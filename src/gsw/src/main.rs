@@ -430,7 +430,11 @@ pub(crate) fn render_frame(
     // `plan_section_caps`.
     let file_count = snapshot.files.len();
     let log_count = snapshot.log.len();
-    let header_chrome: usize = 2;
+    // The operation indicator (merge/rebase) is one extra chrome row between
+    // the header and the separator, present only when the snapshot carries an
+    // in-progress operation. Reserve it so the file list at the bottom isn't
+    // pushed past the fold.
+    let header_chrome: usize = 2 + usize::from(snapshot.operation.is_some());
     let inter_chrome: usize = if file_count > 0 && log_count > 0 {
         1
     } else {
