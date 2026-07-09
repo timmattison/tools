@@ -25,6 +25,8 @@ pub struct Snapshot {
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
     pub upstream: Option<UpstreamStatus>,
+    /// In-progress git operation (merge/rebase), or `None` for a clean tree.
+    pub operation: Option<Operation>,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -36,6 +38,17 @@ pub struct UpstreamStatus {
     pub ahead: u32,
     /// Commits on the upstream not yet on HEAD.
     pub behind: u32,
+}
+
+/// An in-progress git operation surfaced in the header area.
+///
+/// Rebase and merge are mutually exclusive git states, so at most one is ever
+/// present. Detection lives in `repo::operation_state`; rendering lives in
+/// `render_operation_line`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operation {
+    /// A merge is in progress. `conflicts` is the number of unmerged paths.
+    Merge { conflicts: u32 },
 }
 
 /// One recent-commit row.
@@ -935,6 +948,7 @@ mod tests {
             files,
             log: vec![],
             upstream: None,
+            operation: None,
         }
     }
 
@@ -966,6 +980,25 @@ mod tests {
             opts.terminal_width,
             "separator width should match terminal width ({})\n  sep: {sep:?}",
             opts.terminal_width,
+        );
+    }
+
+    #[test]
+    fn merge_operation_line_appears_between_header_and_separator() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 2 });
+        let out = strip_ansi(&render(&s, &opts()));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.get(1).copied(),
+            Some("⚠ merge · 2 conflicts to resolve"),
+            "operation line should sit between the header and separator: {out}",
+        );
+        assert!(
+            lines
+                .get(2)
+                .is_some_and(|l| !l.is_empty() && l.chars().all(|c| c == '─')),
+            "separator (run of '─') should follow the operation line: {out}",
         );
     }
 

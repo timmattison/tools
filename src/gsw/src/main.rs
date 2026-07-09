@@ -576,6 +576,7 @@ mod tests {
             files,
             log: Vec::new(),
             upstream: None,
+            operation: None,
         }
     }
 
@@ -667,6 +668,7 @@ mod tests {
             }],
             log: Vec::new(),
             upstream: None,
+            operation: None,
         };
         let cfg = RenderConfig {
             base: None,
