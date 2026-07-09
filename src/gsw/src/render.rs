@@ -45,6 +45,20 @@ pub struct UpstreamStatus {
 /// Rebase and merge are mutually exclusive git states, so at most one is ever
 /// present. Detection lives in `repo::operation_state`; rendering lives in
 /// `render_operation_line`.
+///
+/// The variants are only *constructed* by the render tests until the detection
+/// wiring lands (a later slice populates `Snapshot::operation` from
+/// `repo::operation_state`). In non-test builds nothing constructs them yet, so
+/// `-D dead_code` would fire under `--all-targets`; suppress that only for the
+/// non-test build. The gate falls away naturally once production code builds an
+/// `Operation`.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "constructed by detection wiring in a later slice; only tests build it for now"
+    )
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     /// A merge is in progress. `conflicts` is the number of unmerged paths.
@@ -139,6 +153,9 @@ pub(crate) fn render_with_offset(
         None => format!("{prefix}{suffix}").bold().to_string(),
     };
     lines.push(header_line);
+    if let Some(op) = &snapshot.operation {
+        lines.push(render_operation_line(op));
+    }
     lines.push(render_separator(opts.terminal_width));
 
     let display_count = match opts.max_files {
@@ -298,6 +315,25 @@ fn header_segments(snap: &Snapshot, age_offset: Duration) -> HeaderSegments {
 
 fn render_separator(width: usize) -> String {
     "─".repeat(width).dimmed().to_string()
+}
+
+/// Render the in-progress-operation indicator line shown between the header
+/// and the separator during a merge or rebase.
+///
+/// The label (`⚠ merge`, `⚠ rebase 3/10`) is yellow + bold — matching the
+/// header's "behind" warning segment — and the trailing
+/// ` · {n} conflict[s] to resolve` clause, present only when `conflicts > 0`,
+/// is red + bold to flag the pending action. Like the header, the line is free
+/// text and is never width-truncated. Color/NO_COLOR handling falls out of the
+/// `colored` global override set in `main`.
+fn render_operation_line(op: &Operation) -> String {
+    let label = "⚠ merge";
+    let conflicts = match op {
+        Operation::Merge { conflicts } => *conflicts,
+    };
+    let label_styled = label.yellow().bold();
+    let clause = format!(" · {conflicts} conflicts to resolve").red().bold();
+    format!("{label_styled}{clause}")
 }
 
 /// Render one file row.
