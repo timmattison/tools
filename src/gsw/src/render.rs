@@ -1039,6 +1039,18 @@ mod tests {
     }
 
     #[test]
+    fn merge_line_uses_singular_for_one_conflict() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 1 });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ merge · 1 conflict to resolve"),
+            "a single conflict should read 'conflict', not 'conflicts': {out}",
+        );
+    }
+
+    #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
