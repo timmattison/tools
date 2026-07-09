@@ -1056,6 +1056,18 @@ mod tests {
     }
 
     #[test]
+    fn merge_line_omits_clause_when_no_conflicts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 0 });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ merge"),
+            "a conflict-free merge should show only the label, no clause: {out}",
+        );
+    }
+
+    #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
