@@ -544,7 +544,62 @@ fn collect_ages(entries: &[FileEntry], repo_root: Option<&Path>) -> HashMap<Stri
 mod tests {
     use super::*;
     use crate::git::FileStatus;
+    use crate::render::Operation;
     use crate::render::RenderEntry;
+
+    #[test]
+    fn operation_line_reserves_a_chrome_row_so_file_list_is_not_clipped() {
+        // When an in-progress operation adds its indicator line between the
+        // header and the separator, render_frame must count that line as
+        // chrome. Otherwise the row budget is one too generous and the rendered
+        // frame overflows the terminal height — a watch wrapper (viddy) then
+        // clips the bottom of the file list below the fold. The whole frame
+        // must fit within `height` when the indicator is shown.
+        let files: Vec<RenderEntry> = (0..20)
+            .map(|i| RenderEntry {
+                path: format!("f{i}.rs"),
+                orig_path: None,
+                status: FileStatus::Modified,
+                staged: false,
+                adds: 1,
+                dels: 0,
+                binary: false,
+                age: Some(Duration::from_secs(30)),
+            })
+            .collect();
+        let cfg = RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 6,
+            log_lines: 0,
+            truecolor: false,
+            width_offset: 0,
+        };
+        let dims = watch::Dimensions {
+            width: 80,
+            height: 8,
+        };
+        let snap = Snapshot {
+            branch: "b".into(),
+            base: "main".into(),
+            commits_ahead: 0,
+            commits_behind: 0,
+            last_commit_age: Some(Duration::from_secs(30)),
+            files,
+            log: Vec::new(),
+            upstream: None,
+            operation: Some(Operation::Merge { conflicts: 1 }),
+        };
+        let frame = render_frame(&snap, &cfg, dims, Duration::ZERO);
+        let lines = frame.output.lines().count();
+        assert!(
+            lines <= dims.height,
+            "frame ({lines} lines) must fit within the terminal height ({}) when an \
+             operation indicator is shown; the indicator row must be reserved as chrome:\n{}",
+            dims.height,
+            frame.output,
+        );
+    }
 
     /// Build a minimal [`Snapshot`] with the given HEAD-commit age and a file
     /// row per supplied mtime age, so the freshest-age tests can exercise the
