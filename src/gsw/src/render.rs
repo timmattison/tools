@@ -349,7 +349,13 @@ fn render_separator(width: usize) -> String {
 fn render_operation_line(op: &Operation) -> String {
     let (label, conflicts) = match op {
         Operation::Merge { conflicts } => ("⚠ merge".to_string(), *conflicts),
-        Operation::Rebase { conflicts, .. } => ("⚠ rebase".to_string(), *conflicts),
+        Operation::Rebase { step, conflicts } => {
+            let label = match step {
+                Some(StepProgress { current, total }) => format!("⚠ rebase {current}/{total}"),
+                None => "⚠ rebase".to_string(),
+            };
+            (label, *conflicts)
+        }
     };
     let label_styled = label.yellow().bold();
     if conflicts > 0 {
