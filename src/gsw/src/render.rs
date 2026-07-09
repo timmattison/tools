@@ -63,6 +63,26 @@ pub struct UpstreamStatus {
 pub enum Operation {
     /// A merge is in progress. `conflicts` is the number of unmerged paths.
     Merge { conflicts: u32 },
+    /// A rebase is in progress. `step` is git's `current/total` progress when
+    /// readable (may be `None`); `conflicts` is the number of unmerged paths.
+    Rebase {
+        step: Option<StepProgress>,
+        conflicts: u32,
+    },
+}
+
+/// Git's `current`/`total` rebase step counters (step 3 of 10 -> `3/10`).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "constructed by detection wiring in a later slice; only tests build it for now"
+    )
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepProgress {
+    pub current: u32,
+    pub total: u32,
 }
 
 /// One recent-commit row.
@@ -329,6 +349,7 @@ fn render_separator(width: usize) -> String {
 fn render_operation_line(op: &Operation) -> String {
     let (label, conflicts) = match op {
         Operation::Merge { conflicts } => ("⚠ merge".to_string(), *conflicts),
+        Operation::Rebase { conflicts, .. } => ("⚠ rebase".to_string(), *conflicts),
     };
     let label_styled = label.yellow().bold();
     if conflicts > 0 {
@@ -1067,6 +1088,24 @@ mod tests {
             out.lines().nth(1),
             Some("⚠ merge"),
             "a conflict-free merge should show only the label, no clause: {out}",
+        );
+    }
+
+    #[test]
+    fn rebase_line_shows_steps_and_conflicts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Rebase {
+            step: Some(StepProgress {
+                current: 3,
+                total: 10,
+            }),
+            conflicts: 2,
+        });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ rebase 3/10 · 2 conflicts to resolve"),
+            "rebase line should show step counts and the conflict clause: {out}",
         );
     }
 
