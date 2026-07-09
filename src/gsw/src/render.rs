@@ -327,18 +327,21 @@ fn render_separator(width: usize) -> String {
 /// text and is never width-truncated. Color/NO_COLOR handling falls out of the
 /// `colored` global override set in `main`.
 fn render_operation_line(op: &Operation) -> String {
-    let label = "⚠ merge";
-    let conflicts = match op {
-        Operation::Merge { conflicts } => *conflicts,
+    let (label, conflicts) = match op {
+        Operation::Merge { conflicts } => ("⚠ merge".to_string(), *conflicts),
     };
     let label_styled = label.yellow().bold();
-    let word = if conflicts == 1 {
-        "conflict"
+    if conflicts > 0 {
+        let word = if conflicts == 1 {
+            "conflict"
+        } else {
+            "conflicts"
+        };
+        let clause = format!(" · {conflicts} {word} to resolve").red().bold();
+        format!("{label_styled}{clause}")
     } else {
-        "conflicts"
-    };
-    let clause = format!(" · {conflicts} {word} to resolve").red().bold();
-    format!("{label_styled}{clause}")
+        label_styled.to_string()
+    }
 }
 
 /// Render one file row.
