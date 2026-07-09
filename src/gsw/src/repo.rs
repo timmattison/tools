@@ -1026,4 +1026,11 @@ mod tests {
             Some(Operation::Merge { conflicts: 1 }),
         );
     }
+
+    #[test]
+    fn operation_state_is_none_for_clean_tree() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::operation_state(&repo, 0), None);
+    }
 }
