@@ -1116,6 +1116,21 @@ mod tests {
     }
 
     #[test]
+    fn rebase_line_without_steps_omits_step_counts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Rebase {
+            step: None,
+            conflicts: 1,
+        });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ rebase · 1 conflict to resolve"),
+            "an unreadable rebase step should drop the counts but keep the label + clause: {out}",
+        );
+    }
+
+    #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
