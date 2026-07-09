@@ -1131,6 +1131,23 @@ mod tests {
     }
 
     #[test]
+    fn no_operation_keeps_separator_on_second_line() {
+        // With no in-progress operation, the frame is unchanged from today: no
+        // indicator line is inserted, so the separator sits directly under the
+        // header on line index 1 (not pushed down to index 2).
+        let s = snap_with(vec![]);
+        assert!(s.operation.is_none(), "default snapshot has no operation");
+        let out = strip_ansi(&render(&s, &opts()));
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|l| !l.is_empty() && l.chars().all(|c| c == '─')),
+            "separator (run of '─') should stay on the second line when no operation is in progress: {out}",
+        );
+    }
+
+    #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
