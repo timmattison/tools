@@ -68,6 +68,7 @@ pub fn build_snapshot(
         files,
         log: Vec::new(),
         upstream: None,
+        operation: None,
     }
 }
 

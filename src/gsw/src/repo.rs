@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::git::{FileEntry, FileStatus, NumStat};
-use crate::render::UpstreamStatus;
+use crate::render::{Operation, UpstreamStatus};
 
 /// Open the repository containing `cwd`, or `None` when there isn't one with a
 /// working tree (outside any repo, or a bare repo — gsw has nothing per-file to
@@ -183,6 +183,26 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
         ahead,
         behind,
     })
+}
+
+/// The in-progress git operation gsw should surface in the header, or `None`
+/// for a clean tree or an out-of-scope operation.
+///
+/// Classification uses gix's native [`gix::Repository::state`], which is modeled
+/// on git's own `wt-status.c` / `git-prompt.sh` logic: it inspects `MERGE_HEAD`,
+/// `rebase-merge/`, and `rebase-apply/` under the git dir, so it is
+/// worktree-aware and takes no locks — consistent with gsw's read-only,
+/// gix-only philosophy. `conflicts` is the unmerged-path count the caller
+/// already has from the status walk, so this does no extra git work.
+///
+/// Only merge is surfaced today; the `Operation` enum reserves a `Rebase`
+/// variant for a later slice. Cherry-pick, revert, bisect, and plain `git am`
+/// are intentionally out of scope and yield `None`.
+pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operation> {
+    match repo.state()? {
+        gix::state::InProgress::Merge => Some(Operation::Merge { conflicts }),
+        _ => None,
+    }
 }
 
 /// Everything one working-tree status walk produces: the `FileEntry` rows plus
@@ -484,6 +504,7 @@ mod tests {
     use std::process::Command;
 
     use crate::git::FileStatus;
+    use crate::render::Operation;
 
     /// Run a git command in `dir`, isolated from the host's global/system
     /// config, asserting success. Test-only fixture construction.
@@ -974,5 +995,42 @@ mod tests {
                 .any(|(path, st, _)| path == "a.txt" && *st == FileStatus::Conflicted),
             "a.txt should be Conflicted after a failed merge: {s:?}",
         );
+    }
+
+    #[test]
+    fn operation_state_reports_merge_with_conflict_count() {
+        // A real in-progress merge (MERGE_HEAD present) must classify as
+        // Operation::Merge, carrying the caller-supplied conflict count.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "other"]);
+        std::fs::write(p.join("a.txt"), "from other\n").unwrap();
+        git(p, &["commit", "-q", "-am", "other edit"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("a.txt"), "from main\n").unwrap();
+        git(p, &["commit", "-q", "-am", "main edit"]);
+        // The merge exits non-zero on conflict; don't assert success.
+        let _ = std::process::Command::new("git")
+            .args(["merge", "other"])
+            .current_dir(p)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .expect("invoke git merge");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Merge { conflicts: 1 }),
+        );
+    }
+
+    #[test]
+    fn operation_state_is_none_for_clean_tree() {
+        let dir = init_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::operation_state(&repo, 0), None);
     }
 }

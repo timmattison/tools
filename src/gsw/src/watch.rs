@@ -1321,6 +1321,7 @@ mod tests {
             files: Vec::new(),
             log: Vec::new(),
             upstream: None,
+            operation: None,
         }
     }
 

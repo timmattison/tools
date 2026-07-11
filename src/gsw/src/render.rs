@@ -25,6 +25,8 @@ pub struct Snapshot {
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
     pub upstream: Option<UpstreamStatus>,
+    /// In-progress git operation (merge/rebase), or `None` for a clean tree.
+    pub operation: Option<Operation>,
 }
 
 /// State of the local branch relative to its upstream tracking ref.
@@ -36,6 +38,51 @@ pub struct UpstreamStatus {
     pub ahead: u32,
     /// Commits on the upstream not yet on HEAD.
     pub behind: u32,
+}
+
+/// An in-progress git operation surfaced in the header area.
+///
+/// Rebase and merge are mutually exclusive git states, so at most one is ever
+/// present. Detection lives in `repo::operation_state`; rendering lives in
+/// `render_operation_line`.
+///
+/// `Merge` is populated in production by `repo::operation_state`; the `Rebase`
+/// variant is plumbing constructed only by tests until the rebase slice wires
+/// rebase detection. In non-test builds nothing constructs `Rebase` yet, so
+/// `-D dead_code` would fire on that variant under `--all-targets`; the
+/// per-variant `allow` suppresses only that, and falls away once rebase
+/// detection lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operation {
+    /// A merge is in progress. `conflicts` is the number of unmerged paths.
+    Merge { conflicts: u32 },
+    /// A rebase is in progress. `step` is git's `current/total` progress when
+    /// readable (may be `None`); `conflicts` is the number of unmerged paths.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "rebase plumbing: its detection/consumer lands in the rebase slice; only tests construct this variant today"
+        )
+    )]
+    Rebase {
+        step: Option<StepProgress>,
+        conflicts: u32,
+    },
+}
+
+/// Git's `current`/`total` rebase step counters (step 3 of 10 -> `3/10`).
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "constructed only by rebase render tests until the rebase slice wires rebase detection"
+    )
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepProgress {
+    pub current: u32,
+    pub total: u32,
 }
 
 /// One recent-commit row.
@@ -126,6 +173,9 @@ pub(crate) fn render_with_offset(
         None => format!("{prefix}{suffix}").bold().to_string(),
     };
     lines.push(header_line);
+    if let Some(op) = &snapshot.operation {
+        lines.push(render_operation_line(op));
+    }
     lines.push(render_separator(opts.terminal_width));
 
     let display_count = match opts.max_files {
@@ -285,6 +335,40 @@ fn header_segments(snap: &Snapshot, age_offset: Duration) -> HeaderSegments {
 
 fn render_separator(width: usize) -> String {
     "─".repeat(width).dimmed().to_string()
+}
+
+/// Render the in-progress-operation indicator line shown between the header
+/// and the separator during a merge or rebase.
+///
+/// The label (`⚠ merge`, `⚠ rebase 3/10`) is yellow + bold — matching the
+/// header's "behind" warning segment — and the trailing
+/// ` · {n} conflict[s] to resolve` clause, present only when `conflicts > 0`,
+/// is red + bold to flag the pending action. Like the header, the line is free
+/// text and is never width-truncated. Color/NO_COLOR handling falls out of the
+/// `colored` global override set in `main`.
+fn render_operation_line(op: &Operation) -> String {
+    let (label, conflicts) = match op {
+        Operation::Merge { conflicts } => ("⚠ merge".to_string(), *conflicts),
+        Operation::Rebase { step, conflicts } => {
+            let label = match step {
+                Some(StepProgress { current, total }) => format!("⚠ rebase {current}/{total}"),
+                None => "⚠ rebase".to_string(),
+            };
+            (label, *conflicts)
+        }
+    };
+    let label_styled = label.yellow().bold();
+    if conflicts > 0 {
+        let word = if conflicts == 1 {
+            "conflict"
+        } else {
+            "conflicts"
+        };
+        let clause = format!(" · {conflicts} {word} to resolve").red().bold();
+        format!("{label_styled}{clause}")
+    } else {
+        label_styled.to_string()
+    }
 }
 
 /// Render one file row.
@@ -935,6 +1019,7 @@ mod tests {
             files,
             log: vec![],
             upstream: None,
+            operation: None,
         }
     }
 
@@ -966,6 +1051,99 @@ mod tests {
             opts.terminal_width,
             "separator width should match terminal width ({})\n  sep: {sep:?}",
             opts.terminal_width,
+        );
+    }
+
+    #[test]
+    fn merge_operation_line_appears_between_header_and_separator() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 2 });
+        let out = strip_ansi(&render(&s, &opts()));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines.get(1).copied(),
+            Some("⚠ merge · 2 conflicts to resolve"),
+            "operation line should sit between the header and separator: {out}",
+        );
+        assert!(
+            lines
+                .get(2)
+                .is_some_and(|l| !l.is_empty() && l.chars().all(|c| c == '─')),
+            "separator (run of '─') should follow the operation line: {out}",
+        );
+    }
+
+    #[test]
+    fn merge_line_uses_singular_for_one_conflict() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 1 });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ merge · 1 conflict to resolve"),
+            "a single conflict should read 'conflict', not 'conflicts': {out}",
+        );
+    }
+
+    #[test]
+    fn merge_line_omits_clause_when_no_conflicts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Merge { conflicts: 0 });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ merge"),
+            "a conflict-free merge should show only the label, no clause: {out}",
+        );
+    }
+
+    #[test]
+    fn rebase_line_shows_steps_and_conflicts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Rebase {
+            step: Some(StepProgress {
+                current: 3,
+                total: 10,
+            }),
+            conflicts: 2,
+        });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ rebase 3/10 · 2 conflicts to resolve"),
+            "rebase line should show step counts and the conflict clause: {out}",
+        );
+    }
+
+    #[test]
+    fn rebase_line_without_steps_omits_step_counts() {
+        let mut s = snap_with(vec![]);
+        s.operation = Some(Operation::Rebase {
+            step: None,
+            conflicts: 1,
+        });
+        let out = strip_ansi(&render(&s, &opts()));
+        assert_eq!(
+            out.lines().nth(1),
+            Some("⚠ rebase · 1 conflict to resolve"),
+            "an unreadable rebase step should drop the counts but keep the label + clause: {out}",
+        );
+    }
+
+    #[test]
+    fn no_operation_keeps_separator_on_second_line() {
+        // With no in-progress operation, the frame is unchanged from today: no
+        // indicator line is inserted, so the separator sits directly under the
+        // header on line index 1 (not pushed down to index 2).
+        let s = snap_with(vec![]);
+        assert!(s.operation.is_none(), "default snapshot has no operation");
+        let out = strip_ansi(&render(&s, &opts()));
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|l| !l.is_empty() && l.chars().all(|c| c == '─')),
+            "separator (run of '─') should stay on the second line when no operation is in progress: {out}",
         );
     }
 

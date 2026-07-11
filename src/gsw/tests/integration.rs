@@ -41,6 +41,16 @@ fn run_git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
+/// Like `run_git` but does NOT assert success — for commands that exit
+/// non-zero as part of normal operation (e.g. `git merge` on a conflict).
+fn run_git_allow_fail(dir: &Path, args: &[&str]) {
+    let mut cmd = Command::new("git");
+    cmd.args(args).current_dir(dir);
+    let _ = scrub_git_env(&mut cmd)
+        .status()
+        .expect("failed to invoke git");
+}
+
 fn run_gsw(dir: &Path) -> String {
     run_gsw_args(dir, &[])
 }
@@ -698,5 +708,33 @@ fn non_tty_renders_once_and_exits() {
     assert!(
         out.contains("main"),
         "a single render should still include the branch name: {out}",
+    );
+}
+
+#[test]
+fn shows_merge_indicator_with_conflict_count_during_a_conflicted_merge() {
+    // Drive a real merge conflict: two branches edit the same line of the same
+    // file, then merge — git stops with a.txt unmerged. gsw must surface a
+    // dedicated indicator line between the header and the separator:
+    // `⚠ merge · 1 conflict to resolve` (one conflicted path → singular).
+    let dir = setup_repo(); // on `main`, a.txt = "initial\n"
+    let p = dir.path();
+    run_git(p, &["checkout", "-q", "-b", "other"]);
+    fs::write(p.join("a.txt"), "from other\n").unwrap();
+    run_git(p, &["commit", "-q", "-am", "other edit"]);
+    run_git(p, &["checkout", "-q", "main"]);
+    fs::write(p.join("a.txt"), "from main\n").unwrap();
+    run_git(p, &["commit", "-q", "-am", "main edit"]);
+    // `git merge` exits non-zero on conflict — expected, don't assert success.
+    run_git_allow_fail(p, &["merge", "other"]);
+
+    let out = run_gsw(p);
+    assert!(
+        out.contains("⚠ merge"),
+        "output should show the merge-in-progress indicator: {out}",
+    );
+    assert!(
+        out.contains("· 1 conflict to resolve"),
+        "indicator should report the singular conflict count: {out}",
     );
 }
