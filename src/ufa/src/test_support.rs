@@ -9,16 +9,17 @@
 //! Any parse that runs concurrently with it fails for that unrelated reason.
 //!
 //! Everything that reads or writes the environment therefore goes through
-//! this module, which serialises the access. Acquiring the lock is not
+//! this module, which serialises the access and discards whatever `UNIFI_*`
+//! settings the binary inherited from the shell that started it. Neither is
 //! something a caller can forget, because the only parse entry point offered
-//! here takes it internally — and the guard test below fails the build if a
+//! here does both internally — and the guard test below fails the build if a
 //! parse appears anywhere else in the crate.
 
 use crate::Args;
 use clap::Parser;
 use std::cell::Cell;
 use std::ffi::OsString;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, Once, OnceLock};
 
 /// The one lock guarding the process environment for the whole test binary.
 fn environment_mutex() -> &'static Mutex<()> {
@@ -34,6 +35,32 @@ thread_local! {
     /// against itself if the parse tried to lock again. Tracking ownership
     /// per thread makes the nested acquisition a no-op instead.
     static HELD_BY_THIS_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The prefix every setting clap reads for `Args` shares.
+///
+/// Matching on the prefix rather than on today's four names means a flag
+/// somebody adds tomorrow with `env = "UNIFI_SOMETHING"` is covered without
+/// anybody remembering to list it here.
+const SETTING_PREFIX: &str = "UNIFI_";
+
+/// Drop every `UNIFI_*` setting the test binary inherited from the shell that
+/// started it.
+///
+/// The lock below can serialise what the *tests* write, but an inherited
+/// setting is already in place before the first test body runs and stays
+/// there for the whole process — so the only way a test can be independent of
+/// it is for it not to be there. Tests that want one supply it themselves
+/// through [`ScopedVar`], after this has run.
+fn discard_inherited_settings() {
+    let inherited: Vec<OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_string_lossy().starts_with(SETTING_PREFIX))
+        .collect();
+
+    for name in inherited {
+        std::env::remove_var(name);
+    }
 }
 
 /// Exclusive access to the process environment, held for as long as it lives.
@@ -69,6 +96,12 @@ impl EnvironmentGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         HELD_BY_THIS_THREAD.with(|held| held.set(true));
+
+        // The first guard to be taken is the earliest point at which the
+        // environment can be touched safely, and no test may observe it
+        // before then, so this is where the inherited settings go.
+        static DISCARD_INHERITED: Once = Once::new();
+        DISCARD_INHERITED.call_once(discard_inherited_settings);
 
         Self {
             _owned: Some(owned),
