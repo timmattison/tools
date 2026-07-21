@@ -43,12 +43,47 @@ pub async fn fetch_all<T>(client: &UnifiClient, path: &str) -> Result<Vec<T>>
 where
     T: DeserializeOwned,
 {
+    fetch_all_matching(client, path, None).await
+}
+
+/// Fetch every item of the collection at `path` that `filter` selects.
+///
+/// The same exhaustive walk as [`fetch_all`], with the server-side filter
+/// expression applied. A caller that is about to act on "everything that
+/// matches" needs the whole match, not the first page of it.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to issue the requests with.
+/// * `path` - Collection path relative to the API root.
+/// * `filter` - The API's filter expression, or `None` for the whole
+///   collection.
+///
+/// # Returns
+///
+/// Every matching item, in the order the server returned them.
+///
+/// # Errors
+///
+/// Returns an error if any request fails, if a response cannot be parsed, or
+/// if the server stops making progress before the collection is exhausted.
+pub async fn fetch_all_matching<T>(
+    client: &UnifiClient,
+    path: &str,
+    filter: Option<&str>,
+) -> Result<Vec<T>>
+where
+    T: DeserializeOwned,
+{
     collect_pages(|offset| {
         let offset = offset.to_string();
         let limit = PAGE_SIZE.to_string();
         async move {
-            let params: Vec<(&str, &dyn std::fmt::Display)> =
+            let mut params: Vec<(&str, &dyn std::fmt::Display)> =
                 vec![("limit", &limit), ("offset", &offset)];
+            if let Some(expression) = filter.as_ref() {
+                params.push(("filter", expression));
+            }
             client.get_with_params(path, &params).await
         }
     })

@@ -41,9 +41,6 @@ pub trait Console {
     /// Returns an error if the answer stream ends before a line arrives, so a
     /// closed stdin ends the question instead of looping on empty answers.
     fn ask(&mut self, question: &str) -> Result<String>;
-
-    /// Show `message` on a line of its own.
-    fn tell(&mut self, message: &str);
 }
 
 /// The real terminal.
@@ -63,10 +60,6 @@ impl Console for Stdio {
             bail!("Input ended before the question was answered.");
         }
         Ok(line)
-    }
-
-    fn tell(&mut self, message: &str) {
-        println!("{message}");
     }
 }
 
@@ -90,18 +83,23 @@ enum ConfirmStep {
 /// * `match_count` - How many items the action would affect.
 /// * `assume_yes` - Whether the user passed `--yes`.
 /// * `is_terminal` - Whether answers would come from a person.
-fn plan_confirmation(_match_count: usize, _assume_yes: bool, _is_terminal: bool) -> ConfirmStep {
-    // Skeleton: today the caller simply goes ahead, whatever the answer would
-    // have been.
-    ConfirmStep::Approved
+fn plan_confirmation(match_count: usize, assume_yes: bool, is_terminal: bool) -> ConfirmStep {
+    if match_count == 0 {
+        ConfirmStep::NothingMatched
+    } else if assume_yes {
+        ConfirmStep::Approved
+    } else if is_terminal {
+        ConfirmStep::Ask
+    } else {
+        ConfirmStep::NeedsExplicitYes
+    }
 }
 
 /// Interpret one typed answer to a `[y/N]` question.
 ///
 /// Anything that is not an explicit yes — including an empty line — is a no.
-fn answered_yes(_response: &str) -> bool {
-    // Skeleton: today no question is asked, so every action goes ahead.
-    true
+fn answered_yes(response: &str) -> bool {
+    matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// Ask the user to approve an action that would destroy `match_count` items.
@@ -195,8 +193,6 @@ impl Console for Scripted {
             None => bail!("the test scripted no answer for {question:?}"),
         }
     }
-
-    fn tell(&mut self, _message: &str) {}
 }
 
 #[cfg(test)]
