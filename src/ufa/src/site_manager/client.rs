@@ -6,6 +6,54 @@ use serde::de::DeserializeOwned;
 /// The Site Manager API path segment that cloud hosts live under.
 const HOSTS_SEGMENT: &str = "hosts";
 
+/// Path segments that name no resource, and that a path-segment builder
+/// silently discards rather than appending.
+const NON_SEGMENTS: [&str; 3] = ["", ".", ".."];
+
+/// Append `segments` to `base_url` as percent-encoded path segments.
+///
+/// Every segment is encoded in full -- slashes, question marks, hashes and
+/// non-ASCII alike -- so a segment taken from user input can only ever name a
+/// child of `base_url`, never steer the request elsewhere. This is what
+/// [`Url::join`] deliberately does *not* do: `join` treats its argument as a
+/// relative reference, where `../`, a leading `/`, `?` and `#` all carry
+/// meaning.
+///
+/// # Arguments
+///
+/// * `base_url` - The API base URL, which must end in a slash.
+/// * `segments` - The path segments to append, unencoded.
+///
+/// # Returns
+///
+/// The URL naming the resource at `base_url` + `segments`.
+///
+/// # Errors
+///
+/// Returns an error if `base_url` cannot be a base (so it has no path to
+/// append to), or if any segment names no resource -- empty, `.` or `..` --
+/// since those would be dropped and quietly address the parent collection
+/// instead.
+fn api_url(base_url: &Url, segments: &[&str]) -> Result<Url> {
+    for segment in segments {
+        if NON_SEGMENTS.contains(segment) {
+            anyhow::bail!("{segment:?} does not name a Site Manager API resource");
+        }
+    }
+
+    let mut url = base_url.clone();
+    {
+        let mut path = url.path_segments_mut().map_err(|()| {
+            anyhow::anyhow!("Site Manager API base URL {base_url} cannot be a base")
+        })?;
+        // The base URL ends in a slash, i.e. a trailing empty segment; without
+        // dropping it the appended segments would follow a doubled slash.
+        path.pop_if_empty().extend(segments);
+    }
+
+    Ok(url)
+}
+
 /// Build the request URL for a single cloud host.
 ///
 /// # Arguments
@@ -19,11 +67,27 @@ const HOSTS_SEGMENT: &str = "hosts";
 ///
 /// # Errors
 ///
-/// Returns an error if the URL cannot be constructed.
+/// Returns an error if the URL cannot be constructed, or if `id` names no
+/// host.
 fn host_url(base_url: &Url, id: &str) -> Result<Url> {
-    base_url
-        .join(&format!("{HOSTS_SEGMENT}/{id}"))
-        .context("Failed to construct request URL")
+    api_url(base_url, &[HOSTS_SEGMENT, id])
+}
+
+/// Build the request URL for the cloud host listing.
+///
+/// # Arguments
+///
+/// * `base_url` - The Site Manager API base URL.
+///
+/// # Returns
+///
+/// The URL of the host collection.
+///
+/// # Errors
+///
+/// Returns an error if the URL cannot be constructed.
+fn hosts_url(base_url: &Url) -> Result<Url> {
+    api_url(base_url, &[HOSTS_SEGMENT])
 }
 
 pub struct SiteManagerClient {
@@ -55,11 +119,7 @@ impl SiteManagerClient {
     }
 
     pub async fn get_hosts(&self) -> Result<Vec<Host>> {
-        let url = self
-            .base_url
-            .join(HOSTS_SEGMENT)
-            .context("Failed to construct request URL")?;
-        let response: HostsResponse = self.get(url).await?;
+        let response: HostsResponse = self.get(hosts_url(&self.base_url)?).await?;
         Ok(response.hosts)
     }
 
@@ -186,6 +246,14 @@ mod tests {
             url.as_str(),
             "https://api.ui.com/v1/hosts/900A6F00301A0000000004D1BC3A0000000004E6BA8E000000005E8B2D3B"
         );
+    }
+
+    /// Encoding the host id must not have moved the listing endpoint.
+    #[test]
+    fn the_host_listing_url_is_unchanged() {
+        let url = hosts_url(&base_url()).expect("the host listing URL must build");
+
+        assert_eq!(url.as_str(), "https://api.ui.com/v1/hosts");
     }
 
     #[test]
