@@ -11,18 +11,22 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   constants,
   accessSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { InstallError, installBinary, verifyExec } from "./install-bin.ts";
 
@@ -125,4 +129,34 @@ test("verifyExec reports a binary that execs normally as ok", (t) => {
   const verdict = verifyExec(healthy, "--version");
 
   assert.ok(verdict.ok && verdict.exitCode === 0);
+});
+
+// The tool is deployed as a PATH symlink (~/.local/bin/install-bin →
+// install-bin.ts), so process.argv[1] is the symlink path while
+// import.meta.url is the resolved module file. A naive equality guard
+// concludes "not the main module", silently skips main(), and exits 0 having
+// installed nothing — the worst failure mode for an installer.
+test("runs the CLI when invoked through a PATH symlink", (t) => {
+  const dir = sandbox();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const script = join(dirname(fileURLToPath(import.meta.url)), "install-bin.ts");
+  const cliLink = join(dir, "install-bin");
+  symlinkSync(script, cliLink);
+
+  const source = join(dir, "fake-tool");
+  writeExecutable(source, "#!/bin/sh\necho fake-tool 1.0\n");
+  const destDir = join(dir, "bin");
+
+  const run = spawnSync("npx", ["tsx", cliLink, source, "--dest", destDir], {
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+
+  assert.equal(run.status, 0, `stderr: ${run.stderr}`);
+  assert.match(run.stdout, /installed .*fake-tool/);
+  assert.ok(
+    existsSync(join(destDir, "fake-tool")),
+    "CLI exited 0 but installed nothing — main() never ran through the symlink",
+  );
 });
