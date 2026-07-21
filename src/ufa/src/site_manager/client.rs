@@ -97,7 +97,7 @@ pub struct SiteManagerClient {
 }
 
 impl SiteManagerClient {
-    pub async fn new(api_key: &str) -> Result<Self> {
+    pub fn new(api_key: &str) -> Result<Self> {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::HeaderName::from_static("x-api-key"),
