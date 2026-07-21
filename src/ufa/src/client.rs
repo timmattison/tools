@@ -9,7 +9,7 @@ pub struct UnifiClient {
 }
 
 impl UnifiClient {
-    pub async fn new(base_url: &str, api_key: &str, insecure: bool) -> Result<Self> {
+    pub fn new(base_url: &str, api_key: &str, insecure: bool) -> Result<Self> {
         // Check if this is a cloud console URL
         if crate::site_manager::is_cloud_console_url(base_url) {
             anyhow::bail!(
@@ -285,6 +285,34 @@ mod tests {
         assert!(
             !is_tls_failure(&error),
             "only a failure from the TLS layer may be reported as one"
+        );
+    }
+
+    /// Building a client reads no configuration and opens no connection, so
+    /// it belongs in ordinary code rather than behind an await -- and this
+    /// test, which is not async, is only able to call it because it is.
+    #[test]
+    fn a_client_is_built_without_an_async_context() {
+        let client = UnifiClient::new("https://192.168.1.1", "an-api-key", true)
+            .expect("a local controller URL must build a client");
+
+        assert_eq!(
+            client.base_url.as_str(),
+            "https://192.168.1.1/proxy/network/integration/v1/"
+        );
+    }
+
+    /// A cloud console URL is rejected up front, with advice on what to use
+    /// instead, rather than by whatever the first request happens to fail on.
+    #[test]
+    fn a_cloud_console_url_is_rejected_when_the_client_is_built() {
+        let error = UnifiClient::new("https://unifi.ui.com/consoles/ABC123", "an-api-key", false)
+            .err()
+            .expect("a cloud console URL has no direct API");
+
+        assert!(
+            error.to_string().contains("ufa cloud"),
+            "the rejection must point at the cloud commands, got: {error}"
         );
     }
 

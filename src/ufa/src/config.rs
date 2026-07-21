@@ -361,7 +361,7 @@ impl Config {
 
         // Test the connection
         println!("\n🔍 Testing connection...");
-        match UnifiClient::new(&controller_url, &api_key, insecure).await {
+        match UnifiClient::new(&controller_url, &api_key, insecure) {
             Ok(client) => match client.get::<crate::models::ApplicationInfo>("info").await {
                 Ok(info) => {
                     println!("✅ Successfully connected to UniFi controller!");

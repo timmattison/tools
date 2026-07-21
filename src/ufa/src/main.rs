@@ -1,3 +1,5 @@
+#![warn(clippy::unused_async)]
+
 mod client;
 mod commands;
 mod config;
@@ -243,7 +245,7 @@ async fn main() -> Result<()> {
             file_config.as_ref(),
         )?;
 
-        let sm_client = site_manager::SiteManagerClient::new(&sm_api_key).await?;
+        let sm_client = site_manager::SiteManagerClient::new(&sm_api_key)?;
         return site_manager::handle_cloud_command(command.clone(), &sm_client, args.output).await;
     }
 
@@ -273,7 +275,7 @@ async fn main() -> Result<()> {
         .or_else(|| file_config.as_ref().and_then(|c| c.insecure))
         .unwrap_or(false);
 
-    let client = UnifiClient::new(&url, &api_key, insecure).await?;
+    let client = UnifiClient::new(&url, &api_key, insecure)?;
 
     match args.command {
         Commands::Sites {
