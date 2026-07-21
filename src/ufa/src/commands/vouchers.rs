@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Subcommand;
 use tabled::Tabled;
 use uuid::Uuid;
@@ -7,6 +7,7 @@ use crate::{
     client::UnifiClient,
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
     output::{print_single_item, print_vec_table, OutputFormat},
+    pagination::fetch_all_matching,
     prompt::{self, Approval, Console},
     site_helper::get_site_id_or_prompt,
 };
@@ -77,6 +78,14 @@ pub enum VouchersCommand {
         /// Filter expression
         #[clap(long)]
         filter: String,
+
+        /// Delete without asking for confirmation
+        #[clap(long, short = 'y')]
+        yes: bool,
+
+        /// List the vouchers the filter matches without deleting any of them
+        #[clap(long)]
+        dry_run: bool,
     },
 }
 
@@ -154,8 +163,16 @@ pub async fn handle_vouchers_command(
             create_vouchers(client, site_id, request, output_format).await
         }
         VouchersCommand::Delete { voucher_id } => delete_voucher(client, site_id, voucher_id).await,
-        VouchersCommand::DeleteFiltered { filter } => {
-            delete_vouchers_filtered(client, site_id, filter).await
+        VouchersCommand::DeleteFiltered {
+            filter,
+            yes,
+            dry_run,
+        } => {
+            let options = DeleteOptions {
+                assume_yes: yes,
+                dry_run,
+            };
+            delete_vouchers_filtered(client, site_id, filter, options, output_format).await
         }
     }
 }
@@ -262,7 +279,7 @@ enum DeletionOutcome {
     /// `--dry-run`: the matches were listed and nothing was deleted.
     Listed,
     /// The deletion was approved and this many vouchers were destroyed.
-    Deleted(u32),
+    Deleted(u64),
     /// The user was asked and declined.
     Aborted,
 }
@@ -292,25 +309,74 @@ async fn confirm_then_delete<D, Fut>(
 ) -> Result<DeletionOutcome>
 where
     D: FnOnce() -> Fut,
-    Fut: Future<Output = Result<u32>>,
+    Fut: Future<Output = Result<u64>>,
 {
-    // Skeleton: today the vouchers are gone before anyone is asked anything.
-    let _ = (match_count, options, console);
-    Ok(DeletionOutcome::Deleted(delete().await?))
+    let question = format!("Delete {match_count} voucher(s)?");
+
+    // A dry run is a confirmation that has already been answered "no": the
+    // matches have been listed, so there is nothing left to ask and nothing
+    // to destroy.
+    let approval = prompt::confirm_destructive(
+        console,
+        &question,
+        match_count,
+        options.assume_yes || options.dry_run,
+    )?;
+
+    match approval {
+        Approval::NothingMatched => Ok(DeletionOutcome::NoMatches),
+        Approval::Declined => Ok(DeletionOutcome::Aborted),
+        Approval::Approved if options.dry_run => Ok(DeletionOutcome::Listed),
+        Approval::Approved => Ok(DeletionOutcome::Deleted(delete().await?)),
+    }
 }
 
+/// Delete every voucher a filter expression matches.
+///
+/// The matches are listed first and then confirmed, because the filter is
+/// evaluated by the controller: the only way to know what a filter really
+/// selects is to look at what came back, and by the time the API has answered
+/// a `DELETE` it is too late.
 async fn delete_vouchers_filtered(
     client: &UnifiClient,
     site_id: Option<Uuid>,
     filter: String,
+    options: DeleteOptions,
+    output_format: OutputFormat,
 ) -> Result<()> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
+
+    let matches: Vec<Voucher> = fetch_all_matching(client, &path, Some(&filter))
+        .await
+        .context("Failed to list the vouchers the filter matches")?;
+
+    if !matches.is_empty() {
+        let rows: Vec<VoucherRow> = matches.iter().map(VoucherRow::from).collect();
+        print_vec_table(&rows, output_format)?;
+    }
+
     let params: Vec<(&str, &dyn std::fmt::Display)> = vec![("filter", &filter)];
+    let outcome = confirm_then_delete(matches.len(), options, &mut prompt::Stdio, || async {
+        let result: VoucherDeletionResults = client.delete_with_params(&path, &params).await?;
+        Ok(result.vouchers_deleted)
+    })
+    .await?;
 
-    let result: VoucherDeletionResults = client.delete_with_params(&path, &params).await?;
+    match outcome {
+        DeletionOutcome::NoMatches => {
+            println!("No vouchers match that filter; nothing to delete.");
+        }
+        DeletionOutcome::Listed => {
+            println!(
+                "Dry run: {} voucher(s) would be deleted. Re-run without --dry-run to delete them.",
+                matches.len()
+            );
+        }
+        DeletionOutcome::Aborted => println!("Aborted; no vouchers were deleted."),
+        DeletionOutcome::Deleted(deleted) => println!("Deleted {deleted} voucher(s)"),
+    }
 
-    println!("Deleted {} voucher(s)", result.vouchers_deleted);
     Ok(())
 }
 
@@ -324,11 +390,12 @@ mod deletion_tests {
     const MATCHES: usize = 7;
 
     /// A deletion that records whether it was ever reached.
-    fn recording_delete(reached: &Cell<bool>) -> impl FnOnce() -> std::future::Ready<Result<u32>> + '_
-    {
+    fn recording_delete(
+        reached: &Cell<bool>,
+    ) -> impl FnOnce() -> std::future::Ready<Result<u64>> + '_ {
         move || {
             reached.set(true);
-            std::future::ready(Ok(u32::try_from(MATCHES).unwrap()))
+            std::future::ready(Ok(u64::try_from(MATCHES).unwrap()))
         }
     }
 
@@ -350,7 +417,10 @@ mod deletion_tests {
         .await
         .expect("--yes must be able to delete");
 
-        assert_eq!(outcome, DeletionOutcome::Deleted(MATCHES as u32));
+        assert_eq!(
+            outcome,
+            DeletionOutcome::Deleted(u64::try_from(MATCHES).unwrap())
+        );
         assert!(reached.get(), "--yes must actually delete");
         assert!(!console.was_asked(), "--yes must not stop to ask");
     }
@@ -371,7 +441,10 @@ mod deletion_tests {
         .expect("declining is not an error");
 
         assert_eq!(outcome, DeletionOutcome::Aborted);
-        assert!(!reached.get(), "a declined deletion must never reach the API");
+        assert!(
+            !reached.get(),
+            "a declined deletion must never reach the API"
+        );
         assert!(console.was_asked(), "the user must have been asked");
     }
 
