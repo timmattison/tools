@@ -110,23 +110,30 @@ fn resolve_credential(
 }
 
 /// UniFi API CLI tool for managing UniFi Network applications
+///
+/// The connection and output options are `global`, so they are accepted at any
+/// position: `ufa devices list --output json` and `ufa --output json devices
+/// list` are the same command. Nothing about the leading position is
+/// discoverable from the help text, and `--output` in particular is the flag
+/// people reach for while scripting, so requiring it to come first would make
+/// the natural spelling fail.
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!(), about)]
 struct Args {
     /// UniFi controller URL (e.g., https://192.168.1.1)
-    #[clap(long, env = "UNIFI_URL")]
+    #[clap(long, global = true, env = "UNIFI_URL")]
     url: Option<String>,
 
     /// API key for authentication (generate in Settings -> Control Plane -> Integrations)
-    #[clap(long, env = "UNIFI_API_KEY")]
+    #[clap(long, global = true, env = "UNIFI_API_KEY")]
     api_key: Option<String>,
 
     /// Skip TLS certificate verification
-    #[clap(long, env = "UNIFI_INSECURE", value_parser = parse_bool_env)]
+    #[clap(long, global = true, env = "UNIFI_INSECURE", value_parser = parse_bool_env)]
     insecure: Option<bool>,
 
     /// Output format
-    #[clap(long, value_enum, default_value = "table")]
+    #[clap(long, global = true, value_enum, default_value = "table")]
     output: output::OutputFormat,
 
     #[clap(subcommand)]
