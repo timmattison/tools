@@ -77,10 +77,12 @@ fn choose_from<T: Choosable>(items: &[T], console: &mut impl Console) -> Result<
             print_vec_table(&rows, OutputFormat::Table)?;
             eprintln!();
 
-            // Skeleton: today the user is shown the table and told to start
-            // over with an explicit id.
-            let _ = console;
-            anyhow::bail!("{}", T::HOW_TO_SPECIFY)
+            match prompt::select_one(console, &format!("Select a {}", T::NOUN), many.len())? {
+                Some(index) => Ok(many[index].id()),
+                // No terminal to ask at: the choice has to come from the
+                // command line instead.
+                None => anyhow::bail!("{}", T::HOW_TO_SPECIFY),
+            }
         }
     }
 }

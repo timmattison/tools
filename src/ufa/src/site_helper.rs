@@ -1,53 +1,57 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use uuid::Uuid;
 
 use crate::{
-    client::UnifiClient, commands::sites::SiteRow, models::Site, output::print_vec_table,
-    pagination::fetch_all,
+    chooser::{choose_id, Choosable},
+    client::UnifiClient,
+    commands::sites::SiteRow,
+    models::Site,
 };
 
-/// Get site ID automatically or prompt user to specify one
+impl Choosable for Site {
+    type Row = SiteRow;
+
+    const NOUN: &'static str = "site";
+    const PLURAL: &'static str = "sites";
+    const NONE_FOUND: &'static str = "Well, this is awkward... We didn't think it was possible to \
+        have zero sites, but here we are. 🤷\n\n\
+        You might want to check your UniFi controller setup.";
+    const HOW_TO_SPECIFY: &'static str = "Several sites exist and there is no terminal to ask at. \
+         Pass --site-id to say which site to use.";
+
+    fn id(&self) -> Uuid {
+        self.id
+    }
+
+    fn label(&self) -> &str {
+        &self.name
+    }
+}
+
+/// Get the site ID to work with, asking the user when it is ambiguous.
+///
+/// A site id given on the command line is used as-is. Otherwise the
+/// controller's sites are listed: a single site is used automatically, and
+/// several are shown as a table the user picks from. When there is no
+/// terminal to ask at — a piped or scripted run — the choice has to be named
+/// with `--site-id` instead.
+///
+/// # Arguments
+///
+/// * `client` - The controller client to list sites with.
+/// * `provided_site_id` - The site id the user named, if any.
+///
+/// # Returns
+///
+/// The id of the site to operate on.
+///
+/// # Errors
+///
+/// Returns an error if the sites cannot be listed, if there are none, or if
+/// the choice is ambiguous and cannot be put to anyone.
 pub async fn get_site_id_or_prompt(
     client: &UnifiClient,
     provided_site_id: Option<Uuid>,
 ) -> Result<Uuid> {
-    // If site ID was provided, use it
-    if let Some(site_id) = provided_site_id {
-        return Ok(site_id);
-    }
-
-    // Otherwise, fetch every site -- a truncated answer would turn "many
-    // sites" into a wrong automatic choice -- and decide what to do
-    let sites: Vec<Site> = fetch_all(client, "sites")
-        .await
-        .context("Failed to fetch sites for auto-discovery")?;
-
-    match sites.len() {
-        0 => {
-            anyhow::bail!(
-                "Well, this is awkward... We didn't think it was possible to have zero sites, \
-                but here we are. 🤷\n\n\
-                You might want to check your UniFi controller setup."
-            );
-        }
-        1 => {
-            // Single site - use it automatically
-            let site = &sites[0];
-            eprintln!("Using site: {} ({})", site.name, site.id);
-            Ok(site.id)
-        }
-        _ => {
-            // Multiple sites - show them and ask user to choose
-            eprintln!("Multiple sites found:");
-            eprintln!();
-
-            let rows: Vec<SiteRow> = sites.iter().map(SiteRow::from).collect();
-            print_vec_table(&rows, crate::output::OutputFormat::Table)?;
-
-            eprintln!();
-            anyhow::bail!(
-                "Please specify which site to use by providing the site ID as an argument."
-            );
-        }
-    }
+    choose_id::<Site>(client, "sites", provided_site_id).await
 }

@@ -176,9 +176,20 @@ pub fn select_one(
     question: &str,
     count: usize,
 ) -> Result<Option<usize>> {
-    // Skeleton: today nobody is ever asked which one to use.
-    let _ = (console, question, count);
-    Ok(None)
+    // Nothing to choose between, and nobody to ask when the answers are not
+    // coming from a person.
+    if count == 0 || !console.is_terminal() {
+        return Ok(None);
+    }
+
+    loop {
+        let answer = console.ask(&format!("{question} [1-{count}]: "))?;
+
+        match answer.trim().parse::<usize>() {
+            Ok(choice) if (1..=count).contains(&choice) => return Ok(Some(choice - 1)),
+            _ => console.tell("Invalid choice. Please try again."),
+        }
+    }
 }
 
 /// A [`Console`] with its answers written in advance.
