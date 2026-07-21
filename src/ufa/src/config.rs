@@ -102,9 +102,15 @@ pub struct Config {
     /// `Private/ufa` item exists.
     pub api_key: Option<String>,
     pub insecure: Option<bool>,
+    /// Site Manager (cloud) API key stored directly in the config file.
+    ///
+    /// Legacy fallback: `sm_op_path` is preferred.
     pub site_manager_api_key: Option<String>,
     /// 1Password path to the API key (e.g. "op://Private/ufa/key - 192.168.0.1 port 443")
     pub op_path: Option<String>,
+    /// 1Password path to the Site Manager (cloud) API key
+    /// (e.g. "op://Private/ufa/site manager key")
+    pub sm_op_path: Option<String>,
 }
 
 impl Config {
@@ -167,18 +173,21 @@ impl Config {
     /// Read the API key from 1Password via op-cache, falling back to the
     /// plaintext `api_key` field for backward compatibility.
     pub fn resolve_api_key(&self) -> Result<String> {
-        if let Some(op_path) = &self.op_path {
-            let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let path = op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let key = cache
-                .read(&path, None)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            return Ok(key);
-        }
-        if let Some(key) = &self.api_key {
+        resolve_secret(
+            self.op_path.as_deref(),
+            self.api_key.as_deref(),
+            "No API key configured. Run 'ufa config setup'.",
+        )
+    }
+
+    /// Read the Site Manager (cloud) API key from 1Password via op-cache,
+    /// falling back to the plaintext `site_manager_api_key` field for
+    /// backward compatibility.
+    pub fn resolve_site_manager_api_key(&self) -> Result<String> {
+        if let Some(key) = &self.site_manager_api_key {
             return Ok(key.clone());
         }
-        anyhow::bail!("No API key configured. Run 'ufa config setup'.")
+        anyhow::bail!("No Site Manager API key configured. Run 'ufa config cloud'.")
     }
 
     /// Save configuration to the default location
@@ -355,6 +364,28 @@ impl Config {
 
         Ok(())
     }
+}
+
+/// Resolve a secret that may live in 1Password.
+///
+/// A configured `op_path` always wins: if it is present but cannot be read the
+/// error is reported rather than quietly downgrading to the plaintext copy,
+/// which would hide a broken 1Password reference. `plaintext` is the legacy
+/// in-config fallback, and `missing` is the message used when neither source is
+/// configured.
+fn resolve_secret(op_path: Option<&str>, plaintext: Option<&str>, missing: &str) -> Result<String> {
+    if let Some(op_path) = op_path {
+        let path = op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+        let secret = cache
+            .read(&path, None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        return Ok(secret);
+    }
+    if let Some(secret) = plaintext {
+        return Ok(secret.to_string());
+    }
+    anyhow::bail!("{missing}")
 }
 
 /// Run network discovery (mDNS + common IPs) and let the user pick.
@@ -540,5 +571,71 @@ mod tests {
             .resolve_api_key()
             .expect("the key pasted during setup must still resolve after saving");
         assert_eq!(resolved, "pasted-api-key");
+    }
+
+    /// The config file can hold an API key in plaintext (the pasted-key path,
+    /// and the legacy `site_manager_api_key` field), so it must never be
+    /// readable by other users on the machine.
+    #[cfg(unix)]
+    #[test]
+    fn saved_config_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempConfigDir::new("permissions");
+        let config = Config {
+            api_key: Some("plaintext-controller-key".to_string()),
+            ..Config::default()
+        };
+        config
+            .save_to(&temp.config_file())
+            .expect("saving the config must succeed");
+
+        let mode = fs::metadata(temp.config_file())
+            .expect("the saved config file must exist")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "config file holding plaintext secrets must be owner-only, got {mode:o}"
+        );
+    }
+
+    /// A configured 1Password reference wins over the legacy plaintext field.
+    /// Falling back on failure would silently keep using a stale plaintext key
+    /// after the user moved the credential into 1Password.
+    #[test]
+    fn site_manager_key_prefers_1password_over_the_plaintext_field() {
+        // Deliberately not an `op://` reference: op-cache rejects it locally,
+        // so the test never shells out to the `op` CLI.
+        let config = Config {
+            sm_op_path: Some("not-an-op-path".to_string()),
+            site_manager_api_key: Some("stale-plaintext-key".to_string()),
+            ..Config::default()
+        };
+
+        let error = config.resolve_site_manager_api_key().expect_err(
+            "an unreadable 1Password reference must not fall back to the plaintext key",
+        );
+        assert!(
+            error.to_string().contains("not-an-op-path"),
+            "the failure must name the 1Password reference it could not read, got {error}"
+        );
+    }
+
+    /// Configs written before `sm_op_path` existed keep working.
+    #[test]
+    fn site_manager_key_falls_back_to_the_plaintext_field() {
+        let config = Config {
+            site_manager_api_key: Some("legacy-plaintext-key".to_string()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            config
+                .resolve_site_manager_api_key()
+                .expect("a legacy plaintext key must still resolve"),
+            "legacy-plaintext-key"
+        );
     }
 }
