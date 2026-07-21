@@ -193,12 +193,17 @@ pub struct DeviceStatsRowWithName {
 }
 
 impl DeviceStatsRowWithName {
+    /// Build the row for one device.
+    ///
+    /// `stats` is the outcome of that device's statistics request: `Err` means
+    /// the request itself failed, which is a different thing from a device
+    /// that answered without any figures to report.
     fn from_device_and_stats(
         device: &Device,
-        stats: Option<&crate::models::DeviceStatistics>,
+        stats: Result<&crate::models::DeviceStatistics, &anyhow::Error>,
     ) -> Self {
         match stats {
-            Some(s) => Self {
+            Ok(s) => Self {
                 name: device.name.clone(),
                 model: device.model.clone(),
                 uptime: format_uptime(s.uptime_sec),
@@ -208,7 +213,7 @@ impl DeviceStatsRowWithName {
                 tx_rate: format_rate(s.uplink.as_ref().and_then(|u| u.tx_rate_bps)),
                 rx_rate: format_rate(s.uplink.as_ref().and_then(|u| u.rx_rate_bps)),
             },
-            None => Self {
+            Err(_) => Self {
                 name: device.name.clone(),
                 model: device.model.clone(),
                 uptime: "N/A".to_string(),
@@ -361,7 +366,7 @@ async fn get_all_device_stats(
         .iter()
         .zip(&statistics)
         .map(|(device, stats)| {
-            DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref().ok())
+            DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref())
         })
         .collect();
 
@@ -488,7 +493,12 @@ mod tests {
     fn rows_for(names: &[&str]) -> Vec<DeviceStatsRowWithName> {
         names
             .iter()
-            .map(|name| DeviceStatsRowWithName::from_device_and_stats(&test_device(name), None))
+            .map(|name| {
+                DeviceStatsRowWithName::from_device_and_stats(
+                    &test_device(name),
+                    Ok(&stats_with_uptime(0)),
+                )
+            })
             .collect()
     }
 
@@ -517,6 +527,46 @@ mod tests {
             entries[1]["name"], "switch-8",
             "wrong second device:\n{rendered}"
         );
+    }
+
+    /// A device that answered with nothing to report and a device whose
+    /// statistics request failed outright are different situations -- one is
+    /// idle or offline, the other may be a permissions problem -- and a row
+    /// that reads "N/A" either way tells the user nothing about which.
+    #[test]
+    fn a_failed_fetch_reads_differently_from_a_device_with_no_figures() {
+        let device = test_device("ap-lr");
+        let nothing_to_report = stats_with_no_figures();
+        let failure = anyhow::anyhow!("HTTP 403: insufficient permissions");
+
+        let no_figures =
+            DeviceStatsRowWithName::from_device_and_stats(&device, Ok(&nothing_to_report));
+        let failed = DeviceStatsRowWithName::from_device_and_stats(&device, Err(&failure));
+
+        assert_eq!(
+            no_figures.uptime, "N/A",
+            "a device with nothing to report keeps reading N/A"
+        );
+        assert_ne!(
+            failed.uptime, no_figures.uptime,
+            "a failed statistics request must not be rendered as missing data"
+        );
+        assert_ne!(
+            failed.cpu_pct, no_figures.cpu_pct,
+            "a failed statistics request must not be rendered as missing data"
+        );
+        assert_eq!(
+            failed.name, device.name,
+            "a failed device must still be listed by name"
+        );
+    }
+
+    /// Statistics from a device that answered without any figures.
+    fn stats_with_no_figures() -> DeviceStatistics {
+        DeviceStatistics {
+            uptime_sec: None,
+            ..stats_with_uptime(0)
+        }
     }
 
     /// Statistics carrying `uptime` as their only identifying value.
