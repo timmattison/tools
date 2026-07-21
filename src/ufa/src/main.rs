@@ -307,6 +307,145 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Pins the claim that clap — not hand-written `std::env::var` fallbacks —
+/// is what turns `UNIFI_*` environment variables into parsed arguments.
+///
+/// `dotenvy::dotenv()` runs before `Args::parse()` and does nothing but write
+/// into the process environment, so a value from a `.env` file is
+/// indistinguishable from an exported one by the time clap looks. Covering the
+/// environment therefore covers `.env` too.
+#[cfg(test)]
+mod environment_tests {
+    use super::{Args, Commands};
+    use clap::Parser;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// The process environment is shared by every thread in the test binary,
+    /// so the tests that write to it take turns.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Sets an environment variable for as long as it is held, then removes
+    /// it — so a failing assertion cannot leak state into the next test.
+    struct ScopedVar {
+        name: &'static str,
+        _guard: MutexGuard<'static, ()>,
+    }
+
+    impl ScopedVar {
+        fn set(name: &'static str, value: &str) -> Self {
+            let guard = env_lock();
+            std::env::set_var(name, value);
+            Self {
+                name,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for ScopedVar {
+        fn drop(&mut self) {
+            std::env::remove_var(self.name);
+        }
+    }
+
+    #[test]
+    fn unifi_url_reaches_the_parsed_arguments() {
+        let _var = ScopedVar::set("UNIFI_URL", "https://controller.example");
+
+        let args = Args::try_parse_from(["ufa", "info"]).expect("ufa info must parse");
+
+        assert_eq!(
+            args.url.as_deref(),
+            Some("https://controller.example"),
+            "UNIFI_URL must reach --url without a hand-written fallback"
+        );
+    }
+
+    #[test]
+    fn unifi_api_key_reaches_the_parsed_arguments() {
+        let _var = ScopedVar::set("UNIFI_API_KEY", "key-from-the-environment");
+
+        let args = Args::try_parse_from(["ufa", "info"]).expect("ufa info must parse");
+
+        assert_eq!(
+            args.api_key.as_deref(),
+            Some("key-from-the-environment"),
+            "UNIFI_API_KEY must reach --api-key without a hand-written fallback"
+        );
+    }
+
+    /// The environment spelling of a boolean goes through the same
+    /// `parse_bool_env` value parser as the flag, so `on`/`yes`/`1` all work.
+    #[test]
+    fn unifi_insecure_reaches_the_parsed_arguments() {
+        for (spelling, expected) in [("yes", true), ("1", true), ("off", false)] {
+            let _var = ScopedVar::set("UNIFI_INSECURE", spelling);
+
+            let args = Args::try_parse_from(["ufa", "info"]).expect("ufa info must parse");
+
+            assert_eq!(
+                args.insecure,
+                Some(expected),
+                "UNIFI_INSECURE={spelling} must reach --insecure without a hand-written fallback"
+            );
+        }
+    }
+
+    /// Unlike the hand-written fallback it replaces, clap *rejects* a value it
+    /// cannot parse instead of silently falling through to the config file.
+    #[test]
+    fn an_unparseable_unifi_insecure_is_rejected_rather_than_ignored() {
+        let _var = ScopedVar::set("UNIFI_INSECURE", "maybe");
+
+        let error = Args::try_parse_from(["ufa", "info"])
+            .expect_err("an unparseable UNIFI_INSECURE must not be silently discarded");
+
+        assert!(
+            error.to_string().contains("maybe"),
+            "the failure must name the offending value, got {error}"
+        );
+    }
+
+    #[test]
+    fn unifi_site_manager_api_key_reaches_the_parsed_arguments() {
+        let _var = ScopedVar::set(
+            "UNIFI_SITE_MANAGER_API_KEY",
+            "cloud-key-from-the-environment",
+        );
+
+        let args = Args::try_parse_from(["ufa", "cloud", "hosts"]).expect("ufa cloud hosts parses");
+
+        let Commands::Cloud {
+            site_manager_api_key,
+            ..
+        } = args.command
+        else {
+            panic!("`ufa cloud hosts` must parse as the cloud command");
+        };
+        assert_eq!(
+            site_manager_api_key.as_deref(),
+            Some("cloud-key-from-the-environment"),
+            "UNIFI_SITE_MANAGER_API_KEY must reach --site-manager-api-key"
+        );
+    }
+
+    /// An explicit flag still beats the environment.
+    #[test]
+    fn a_command_line_flag_overrides_the_environment() {
+        let _var = ScopedVar::set("UNIFI_URL", "https://from-the-environment");
+
+        let args = Args::try_parse_from(["ufa", "--url", "https://from-the-flag", "info"])
+            .expect("ufa info must parse");
+
+        assert_eq!(args.url.as_deref(), Some("https://from-the-flag"));
+    }
+}
+
 #[cfg(test)]
 mod credential_tests {
     use super::{resolve_credential, Config, Credential};
