@@ -1,4 +1,4 @@
-use crate::output::{print_output, render_output, OutputFormat};
+use crate::output::{print_output, render_output, render_vec_table, OutputFormat};
 use crate::site_manager::models::Host;
 use crate::site_manager::utils::CLOUD_HOST_ID_DISPLAY_CHARS;
 use crate::site_manager::SiteManagerClient;
@@ -14,6 +14,60 @@ const NO_DATA: &str = "N/A";
 
 /// How a host's last state change is spelled in the listing.
 const LAST_SEEN_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+
+/// One row of the cloud host listing.
+#[derive(tabled::Tabled, serde::Serialize)]
+pub struct HostRow {
+    #[tabled(rename = "ID")]
+    id: String,
+    #[tabled(rename = "Name")]
+    name: String,
+    #[tabled(rename = "Model")]
+    model: String,
+    #[tabled(rename = "Firmware")]
+    firmware: String,
+    #[tabled(rename = "IP Address")]
+    ip_address: String,
+    #[tabled(rename = "Type")]
+    host_type: String,
+    #[tabled(rename = "Owner")]
+    owner: String,
+    #[tabled(rename = "Last Seen")]
+    last_seen: String,
+}
+
+impl From<&Host> for HostRow {
+    fn from(host: &Host) -> Self {
+        let reported = host.reported_state.as_ref();
+
+        Self {
+            // Cloud host ids run to 60-odd characters, which is wider than
+            // every other column put together; cutting them short keeps the
+            // listing readable, on character boundaries so a multi-byte id
+            // from the API cannot be split.
+            id: truncate_for_display(&host.id, CLOUD_HOST_ID_DISPLAY_CHARS),
+            name: reported
+                .and_then(|state| state.name.clone())
+                .unwrap_or_else(|| UNKNOWN.to_string()),
+            model: reported
+                .and_then(|state| state.model.clone())
+                .unwrap_or_else(|| UNKNOWN.to_string()),
+            firmware: reported
+                .and_then(|state| state.firmware_version.clone())
+                .unwrap_or_else(|| UNKNOWN.to_string()),
+            ip_address: host
+                .ip_address
+                .clone()
+                .unwrap_or_else(|| NO_DATA.to_string()),
+            host_type: host.host_type.clone(),
+            owner: host.owner.to_string(),
+            last_seen: host
+                .last_connection_state_change
+                .map(|changed| changed.format(LAST_SEEN_FORMAT).to_string())
+                .unwrap_or_else(|| NO_DATA.to_string()),
+        }
+    }
+}
 
 /// Render the cloud host listing.
 ///
@@ -37,56 +91,8 @@ fn render_hosts(hosts: &[Host], format: OutputFormat) -> Result<String> {
     match format {
         OutputFormat::Json => render_output(hosts, format),
         OutputFormat::Table => {
-            let mut rendered = format!(
-                "{:<64} {:<15} {:<15} {:<10} {:<15} {:<8} {:<6} {:<20}\n{}",
-                "ID",
-                "Name",
-                "Model",
-                "Firmware",
-                "IP Address",
-                "Type",
-                "Owner",
-                "Last Seen",
-                "-".repeat(150)
-            );
-
-            for host in hosts {
-                let name = host
-                    .reported_state
-                    .as_ref()
-                    .and_then(|s| s.name.as_ref())
-                    .map(|s| s.as_str())
-                    .unwrap_or(UNKNOWN);
-                let model = host
-                    .reported_state
-                    .as_ref()
-                    .and_then(|s| s.model.as_ref())
-                    .map(|s| s.as_str())
-                    .unwrap_or(UNKNOWN);
-                let firmware = host
-                    .reported_state
-                    .as_ref()
-                    .and_then(|s| s.firmware_version.as_ref())
-                    .map(|s| s.as_str())
-                    .unwrap_or(UNKNOWN);
-                let ip = host.ip_address.as_deref().unwrap_or(NO_DATA);
-                let last_seen = host
-                    .last_connection_state_change
-                    .as_ref()
-                    .map(|dt| dt.format(LAST_SEEN_FORMAT).to_string())
-                    .unwrap_or_else(|| NO_DATA.to_string());
-
-                // Truncate ID for display (on character boundaries, so
-                // multi-byte IDs from the API cannot panic).
-                let display_id = truncate_for_display(&host.id, CLOUD_HOST_ID_DISPLAY_CHARS);
-
-                rendered.push_str(&format!(
-                    "\n{:<64} {:<15} {:<15} {:<10} {:<15} {:<8} {:<6} {:<20}",
-                    display_id, name, model, firmware, ip, host.host_type, host.owner, last_seen
-                ));
-            }
-
-            Ok(rendered)
+            let rows: Vec<HostRow> = hosts.iter().map(HostRow::from).collect();
+            render_vec_table(&rows, format)
         }
     }
 }
