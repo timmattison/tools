@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::ValueEnum;
 use serde::Serialize;
-use tabled::{Table, Tabled, settings::Style};
+use tabled::{settings::Style, Table, Tabled};
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum OutputFormat {
@@ -33,7 +33,6 @@ where
     println!("{}", table);
     Ok(())
 }
-
 
 // Specific implementation for vectors with Tabled items
 pub fn print_vec_table<T>(data: &[T], format: OutputFormat) -> Result<()>

@@ -1,6 +1,6 @@
 pub mod client;
-pub mod models;
 pub mod commands;
+pub mod models;
 pub mod utils;
 
 pub use client::SiteManagerClient;

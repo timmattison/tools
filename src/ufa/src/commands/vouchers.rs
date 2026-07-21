@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
-    output::{OutputFormat, print_vec_table, print_single_item},
+    output::{print_single_item, print_vec_table, OutputFormat},
     site_helper::get_site_id_or_prompt,
 };
 
@@ -105,7 +105,10 @@ impl From<&Voucher> for VoucherRow {
             name: voucher.name.clone(),
             code: voucher.code.clone(),
             time_limit_minutes: voucher.time_limit_minutes.to_string(),
-            guest_limit: voucher.authorized_guest_limit.map(|l| l.to_string()).unwrap_or("unlimited".to_string()),
+            guest_limit: voucher
+                .authorized_guest_limit
+                .map(|l| l.to_string())
+                .unwrap_or("unlimited".to_string()),
             guest_count: voucher.authorized_guest_count.to_string(),
             expired: voucher.expired.to_string(),
             created_at: voucher.created_at.clone(),
@@ -120,9 +123,11 @@ pub async fn handle_vouchers_command(
     output_format: OutputFormat,
 ) -> Result<()> {
     match command {
-        VouchersCommand::List { limit, offset, filter } => {
-            list_vouchers(client, site_id, limit, offset, filter, output_format).await
-        }
+        VouchersCommand::List {
+            limit,
+            offset,
+            filter,
+        } => list_vouchers(client, site_id, limit, offset, filter, output_format).await,
         VouchersCommand::Get { voucher_id } => {
             get_voucher(client, site_id, voucher_id, output_format).await
         }
@@ -146,9 +151,7 @@ pub async fn handle_vouchers_command(
             };
             create_vouchers(client, site_id, request, output_format).await
         }
-        VouchersCommand::Delete { voucher_id } => {
-            delete_voucher(client, site_id, voucher_id).await
-        }
+        VouchersCommand::Delete { voucher_id } => delete_voucher(client, site_id, voucher_id).await,
         VouchersCommand::DeleteFiltered { filter } => {
             delete_vouchers_filtered(client, site_id, filter).await
         }
@@ -165,10 +168,8 @@ async fn list_vouchers(
 ) -> Result<()> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
-    let mut params: Vec<(&str, &dyn std::fmt::Display)> = vec![
-        ("limit", &limit_str),
-        ("offset", &offset_str),
-    ];
+    let mut params: Vec<(&str, &dyn std::fmt::Display)> =
+        vec![("limit", &limit_str), ("offset", &offset_str)];
 
     if let Some(f) = &filter {
         params.push(("filter", f));
@@ -250,7 +251,7 @@ async fn delete_vouchers_filtered(
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/hotspot/vouchers", site_id);
     let params: Vec<(&str, &dyn std::fmt::Display)> = vec![("filter", &filter)];
-    
+
     let result: VoucherDeletionResults = client.delete_with_params(&path, &params).await?;
 
     println!("Deleted {} voucher(s)", result.vouchers_deleted);

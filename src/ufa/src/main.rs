@@ -1,25 +1,28 @@
 mod client;
-mod models;
 mod commands;
+mod config;
+mod device_helper;
+mod discovery;
+mod models;
 mod output;
 mod site_helper;
-mod device_helper;
-mod config;
-mod discovery;
 mod site_manager;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
-use uuid::Uuid;
 use config::Config;
+use uuid::Uuid;
 
 fn parse_bool_env(s: &str) -> Result<bool, String> {
     match s.to_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Ok(true),
         "false" | "0" | "no" | "off" => Ok(false),
-        _ => Err(format!("Invalid boolean value: {}. Use true/false, 1/0, yes/no, or on/off", s))
+        _ => Err(format!(
+            "Invalid boolean value: {}. Use true/false, 1/0, yes/no, or on/off",
+            s
+        )),
     }
 }
 
@@ -63,52 +66,52 @@ enum Commands {
         #[clap(long)]
         filter: Option<String>,
     },
-    
+
     /// Manage devices
     Devices {
         /// Site ID (if not provided, will auto-detect)
         #[clap(long)]
         site_id: Option<Uuid>,
-        
+
         #[clap(subcommand)]
         command: devices::DevicesCommand,
     },
-    
+
     /// Manage clients
     Clients {
         /// Site ID (if not provided, will auto-detect)
         #[clap(long)]
         site_id: Option<Uuid>,
-        
+
         #[clap(subcommand)]
         command: clients::ClientsCommand,
     },
-    
+
     /// Manage hotspot vouchers
     Vouchers {
         /// Site ID (if not provided, will auto-detect)
         #[clap(long)]
         site_id: Option<Uuid>,
-        
+
         #[clap(subcommand)]
         command: vouchers::VouchersCommand,
     },
-    
+
     /// Get application information
     Info,
-    
+
     /// Configure ufa settings
     Config {
         #[clap(subcommand)]
         command: ConfigCommand,
     },
-    
+
     /// Manage cloud-hosted UniFi consoles
     Cloud {
         /// Site Manager API key (generate at unifi.ui.com API section)
         #[clap(long, env = "UNIFI_SITE_MANAGER_API_KEY")]
         site_manager_api_key: Option<String>,
-        
+
         #[clap(subcommand)]
         command: site_manager::CloudCommand,
     },
@@ -128,7 +131,7 @@ enum ConfigCommand {
 async fn main() -> Result<()> {
     // Load .env file if it exists (ignore errors if file doesn't exist)
     let _ = dotenvy::dotenv();
-    
+
     let args = Args::parse();
 
     // Handle config commands first (they don't need API connection)
@@ -145,59 +148,78 @@ async fn main() -> Result<()> {
             }
             ConfigCommand::Cloud => {
                 println!("Setting up UniFi Site Manager (Cloud) API credentials...");
-                Config::setup().await?;  // Reuse the setup function which now includes cloud config
+                Config::setup().await?; // Reuse the setup function which now includes cloud config
                 return Ok(());
             }
         }
     }
 
     // Handle cloud commands (they need Site Manager API key, not controller connection)
-    if let Commands::Cloud { site_manager_api_key, command } = &args.command {
+    if let Commands::Cloud {
+        site_manager_api_key,
+        command,
+    } = &args.command
+    {
         let file_config = Config::load()?;
-        
+
         let sm_api_key = site_manager_api_key
             .clone()
             .or_else(|| std::env::var("UNIFI_SITE_MANAGER_API_KEY").ok())
             .or_else(|| file_config.as_ref().and_then(|c| c.site_manager_api_key.clone()))
             .context("Site Manager API key not provided. Set it via --site-manager-api-key, UNIFI_SITE_MANAGER_API_KEY environment variable, or run 'ufa config cloud' to set it up.")?;
-        
+
         let sm_client = site_manager::SiteManagerClient::new(&sm_api_key).await?;
         return site_manager::handle_cloud_command(command.clone(), &sm_client, args.output).await;
     }
 
     // Load configuration from file
     let file_config = Config::load()?;
-    
+
     // Determine final configuration values (CLI args > env vars > config file)
     let url = args.url
         .or_else(|| std::env::var("UNIFI_URL").ok())
         .or_else(|| file_config.as_ref().and_then(|c| c.url.clone()))
         .context("UniFi URL not provided. Set it via --url, UNIFI_URL environment variable, or run 'ufa config setup' to create a configuration file.")?;
-    
+
     let api_key = args.api_key
         .or_else(|| std::env::var("UNIFI_API_KEY").ok())
         .or_else(|| file_config.as_ref().and_then(|c| c.resolve_api_key().ok()))
         .context("API key not provided. Set it via --api-key, UNIFI_API_KEY environment variable, or run 'ufa config setup' to create a configuration file.")?;
-    
-    let insecure = args.insecure
-        .or_else(|| std::env::var("UNIFI_INSECURE").ok().and_then(|v| parse_bool_env(&v).ok()))
+
+    let insecure = args
+        .insecure
+        .or_else(|| {
+            std::env::var("UNIFI_INSECURE")
+                .ok()
+                .and_then(|v| parse_bool_env(&v).ok())
+        })
         .or_else(|| file_config.as_ref().and_then(|c| c.insecure))
         .unwrap_or(false);
 
-    let client = UnifiClient::new(
-        &url,
-        &api_key,
-        insecure,
-    ).await?;
+    let client = UnifiClient::new(&url, &api_key, insecure).await?;
 
     match args.command {
-        Commands::Sites { limit, offset, filter } => {
-            let cmd = sites::SitesCommand::List { limit, offset, filter };
+        Commands::Sites {
+            limit,
+            offset,
+            filter,
+        } => {
+            let cmd = sites::SitesCommand::List {
+                limit,
+                offset,
+                filter,
+            };
             sites::handle_sites_command(cmd, &client, args.output).await
-        },
-        Commands::Devices { site_id, command } => devices::handle_devices_command(command, site_id, &client, args.output).await,
-        Commands::Clients { site_id, command } => clients::handle_clients_command(command, site_id, &client, args.output).await,
-        Commands::Vouchers { site_id, command } => vouchers::handle_vouchers_command(command, site_id, &client, args.output).await,
+        }
+        Commands::Devices { site_id, command } => {
+            devices::handle_devices_command(command, site_id, &client, args.output).await
+        }
+        Commands::Clients { site_id, command } => {
+            clients::handle_clients_command(command, site_id, &client, args.output).await
+        }
+        Commands::Vouchers { site_id, command } => {
+            vouchers::handle_vouchers_command(command, site_id, &client, args.output).await
+        }
         Commands::Info => info::handle_info_command(&client, args.output).await,
         Commands::Config { .. } => unreachable!("Config commands handled above"),
         Commands::Cloud { .. } => unreachable!("Cloud commands handled above"),

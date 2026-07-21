@@ -340,11 +340,17 @@ pub struct Voucher {
 pub struct VoucherCreateRequest {
     pub count: u32,
     pub name: String,
-    #[serde(rename = "authorizedGuestLimit", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "authorizedGuestLimit",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub authorized_guest_limit: Option<u64>,
     #[serde(rename = "timeLimitMinutes")]
     pub time_limit_minutes: u64,
-    #[serde(rename = "dataUsageLimitMBytes", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "dataUsageLimitMBytes",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub data_usage_limit_mbytes: Option<u64>,
     #[serde(rename = "rxRateLimitKbps", skip_serializing_if = "Option::is_none")]
     pub rx_rate_limit_kbps: Option<u64>,
@@ -392,7 +398,10 @@ pub enum ClientAction {
     AuthorizeGuestAccess {
         #[serde(rename = "timeLimitMinutes", skip_serializing_if = "Option::is_none")]
         time_limit_minutes: Option<u64>,
-        #[serde(rename = "dataUsageLimitMBytes", skip_serializing_if = "Option::is_none")]
+        #[serde(
+            rename = "dataUsageLimitMBytes",
+            skip_serializing_if = "Option::is_none"
+        )]
         data_usage_limit_mbytes: Option<u64>,
         #[serde(rename = "rxRateLimitKbps", skip_serializing_if = "Option::is_none")]
         rx_rate_limit_kbps: Option<u64>,
