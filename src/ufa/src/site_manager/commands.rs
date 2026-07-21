@@ -1,4 +1,5 @@
 use crate::output::{print_output, OutputFormat};
+use crate::site_manager::utils::{truncate_for_display, CLOUD_HOST_ID_DISPLAY_CHARS};
 use crate::site_manager::SiteManagerClient;
 use anyhow::Result;
 use clap::Subcommand;
@@ -74,12 +75,10 @@ pub async fn handle_cloud_command(
                             .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                             .unwrap_or_else(|| "N/A".to_string());
 
-                        // Truncate ID for display
-                        let display_id = if host.id.len() > 60 {
-                            format!("{}...", &host.id[..60])
-                        } else {
-                            host.id.clone()
-                        };
+                        // Truncate ID for display (on character boundaries, so
+                        // multi-byte IDs from the API cannot panic).
+                        let display_id =
+                            truncate_for_display(&host.id, CLOUD_HOST_ID_DISPLAY_CHARS);
 
                         println!(
                             "{:<64} {:<15} {:<15} {:<10} {:<15} {:<8} {:<6} {:<20}",

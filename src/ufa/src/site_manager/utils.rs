@@ -24,11 +24,14 @@ pub const CLOUD_HOST_ID_DISPLAY_CHARS: usize = 60;
 /// `value` unchanged when it is `max_chars` characters or shorter, otherwise
 /// the first `max_chars` characters followed by `...`.
 pub fn truncate_for_display(value: &str, max_chars: usize) -> String {
-    if value.len() > max_chars {
-        format!("{}...", &value[..max_chars])
-    } else {
-        value.to_string()
+    let mut kept: String = value.chars().take(max_chars).collect();
+
+    // Only an ellipsis when at least one character was actually dropped.
+    if value.chars().nth(max_chars).is_some() {
+        kept.push_str("...");
     }
+
+    kept
 }
 
 #[cfg(test)]
