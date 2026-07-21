@@ -350,20 +350,60 @@ async fn get_all_device_stats(
         return Ok(());
     }
 
-    // Create rows with device information and stats
-    let mut stats_rows = Vec::new();
-
-    // Fetch statistics for each device (sequentially for now to avoid ownership issues)
-    for device in &devices {
+    let statistics = fetch_device_statistics(&devices, |device| {
         let stats_path = format!("sites/{}/devices/{}/statistics/latest", site_id, device.id);
-        let stats = client.get::<DeviceStatistics>(&stats_path).await.ok();
-        let row = DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref());
-        stats_rows.push(row);
-    }
+        async move { client.get::<DeviceStatistics>(&stats_path).await }
+    })
+    .await;
+
+    let stats_rows: Vec<DeviceStatsRowWithName> = devices
+        .iter()
+        .zip(&statistics)
+        .map(|(device, stats)| {
+            DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref().ok())
+        })
+        .collect();
 
     println!("{}", render_all_device_stats(&stats_rows, output_format)?);
 
     Ok(())
+}
+
+/// Upper bound on statistics requests in flight at once.
+///
+/// A site can hold hundreds of devices and the controller answering them is
+/// often a home router, so the fetches are throttled rather than all launched
+/// at once.
+const MAX_CONCURRENT_STAT_REQUESTS: usize = 8;
+
+/// Fetch the statistics of every device, one result per device in device
+/// order.
+///
+/// A failed fetch is reported as an `Err` in the corresponding slot rather
+/// than aborting the whole listing: one unreachable device should not hide the
+/// rest of the site.
+///
+/// # Arguments
+///
+/// * `devices` - The devices to fetch statistics for.
+/// * `fetch` - Issues the statistics request for one device.
+///
+/// # Returns
+///
+/// One result per device, in the same order as `devices`.
+async fn fetch_device_statistics<F, Fut>(
+    devices: &[Device],
+    fetch: F,
+) -> Vec<Result<DeviceStatistics>>
+where
+    F: Fn(&Device) -> Fut,
+    Fut: std::future::Future<Output = Result<DeviceStatistics>>,
+{
+    let mut results = Vec::with_capacity(devices.len());
+    for device in devices {
+        results.push(fetch(device).await);
+    }
+    results
 }
 
 /// Render the per-device statistics of `devices stats --all`.
@@ -422,7 +462,10 @@ async fn power_cycle_port(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{DeviceFeature, DeviceInterface, DeviceState};
+    use crate::models::{
+        DeviceFeature, DeviceInterface, DeviceInterfaceStatistics, DeviceState, UplinkStatistics,
+    };
+    use std::cell::Cell;
 
     /// Box-drawing corner produced by the table renderer.
     const TABLE_CORNER: char = '┌';
@@ -472,6 +515,98 @@ mod tests {
         assert_eq!(
             entries[1]["name"], "switch-8",
             "wrong second device:\n{rendered}"
+        );
+    }
+
+    /// Statistics carrying `uptime` as their only identifying value.
+    fn stats_with_uptime(uptime: u64) -> DeviceStatistics {
+        DeviceStatistics {
+            uptime_sec: Some(uptime),
+            last_heartbeat_at: None,
+            next_heartbeat_at: None,
+            load_average_1min: None,
+            load_average_5min: None,
+            load_average_15min: None,
+            cpu_utilization_pct: None,
+            memory_utilization_pct: None,
+            uplink: Some(UplinkStatistics {
+                tx_rate_bps: None,
+                rx_rate_bps: None,
+            }),
+            interfaces: DeviceInterfaceStatistics { radios: None },
+        }
+    }
+
+    /// The index a `device-N` test device was built with.
+    fn index_of(device: &Device) -> usize {
+        device
+            .name
+            .rsplit('-')
+            .next()
+            .and_then(|index| index.parse().ok())
+            .expect("test devices are named device-N")
+    }
+
+    /// One statistics request per device, each an independent round trip, so
+    /// they belong in flight together rather than one after another -- but
+    /// bounded, because a site can hold hundreds of devices and the controller
+    /// answering them is often a home router.
+    ///
+    /// Concurrency is observed rather than timed: each fake fetch records how
+    /// many of its peers are in flight alongside it, and completes after a
+    /// number of scheduler yields that decreases with the device index, so the
+    /// results necessarily arrive out of device order.
+    #[tokio::test]
+    async fn device_statistics_are_fetched_concurrently_and_stay_in_device_order() {
+        let devices: Vec<Device> = (0..MAX_CONCURRENT_STAT_REQUESTS * 2 + 3)
+            .map(|index| test_device(&format!("device-{index}")))
+            .collect();
+        let in_flight = Cell::new(0_usize);
+        let peak_in_flight = Cell::new(0_usize);
+
+        let results = fetch_device_statistics(&devices, |device| {
+            let index = index_of(device);
+            let yields_before_completing = devices.len() - index;
+            let in_flight = &in_flight;
+            let peak_in_flight = &peak_in_flight;
+
+            async move {
+                in_flight.set(in_flight.get() + 1);
+                peak_in_flight.set(peak_in_flight.get().max(in_flight.get()));
+
+                for _ in 0..yields_before_completing {
+                    tokio::task::yield_now().await;
+                }
+
+                in_flight.set(in_flight.get() - 1);
+                Ok(stats_with_uptime(u64::try_from(index).unwrap()))
+            }
+        })
+        .await;
+
+        assert_eq!(
+            results.len(),
+            devices.len(),
+            "every device must be represented in the results"
+        );
+        for (index, result) in results.iter().enumerate() {
+            let stats = result.as_ref().expect("the fake fetch never fails");
+            assert_eq!(
+                stats.uptime_sec,
+                Some(u64::try_from(index).unwrap()),
+                "result {index} belongs to a different device: results must stay in device order"
+            );
+        }
+
+        assert!(
+            peak_in_flight.get() > 1,
+            "statistics must be fetched concurrently, but only {} request was ever in flight",
+            peak_in_flight.get()
+        );
+        assert!(
+            peak_in_flight.get() <= MAX_CONCURRENT_STAT_REQUESTS,
+            "concurrency must stay bounded by {MAX_CONCURRENT_STAT_REQUESTS}, saw {} in flight",
+            peak_in_flight.get()
         );
     }
 
