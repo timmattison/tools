@@ -2,10 +2,8 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 
 use crate::{
-    client::UnifiClient,
-    commands::devices::DeviceRow,
-    models::{Device, Page},
-    output::print_vec_table,
+    client::UnifiClient, commands::devices::DeviceRow, models::Device, output::print_vec_table,
+    pagination::fetch_all,
 };
 
 /// Get device ID automatically or prompt user to specify one
@@ -19,15 +17,14 @@ pub async fn get_device_id_or_prompt(
         return Ok(device_id);
     }
 
-    // Otherwise, fetch devices and decide what to do
-    let params: Vec<(&str, &dyn std::fmt::Display)> = vec![];
+    // Otherwise, fetch every device -- a truncated answer would turn "many
+    // devices" into a wrong automatic choice -- and decide what to do
     let path = format!("sites/{}/devices", site_id);
-    let devices_page: Page<Device> = client
-        .get_with_params(&path, &params)
+    let devices: Vec<Device> = fetch_all(client, &path)
         .await
         .context("Failed to fetch devices for auto-discovery")?;
 
-    match devices_page.data.len() {
+    match devices.len() {
         0 => {
             anyhow::bail!(
                 "No devices found on this site. \
@@ -36,7 +33,7 @@ pub async fn get_device_id_or_prompt(
         }
         1 => {
             // Single device - use it automatically
-            let device = &devices_page.data[0];
+            let device = &devices[0];
             eprintln!("Using device: {} ({})", device.name, device.id);
             Ok(device.id)
         }
@@ -45,7 +42,7 @@ pub async fn get_device_id_or_prompt(
             eprintln!("Multiple devices found:");
             eprintln!();
 
-            let rows: Vec<DeviceRow> = devices_page.data.iter().map(DeviceRow::from).collect();
+            let rows: Vec<DeviceRow> = devices.iter().map(DeviceRow::from).collect();
             print_vec_table(&rows, crate::output::OutputFormat::Table)?;
 
             eprintln!();

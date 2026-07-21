@@ -2,10 +2,8 @@ use anyhow::{Context, Result};
 use uuid::Uuid;
 
 use crate::{
-    client::UnifiClient,
-    commands::sites::SiteRow,
-    models::{Page, Site},
-    output::print_vec_table,
+    client::UnifiClient, commands::sites::SiteRow, models::Site, output::print_vec_table,
+    pagination::fetch_all,
 };
 
 /// Get site ID automatically or prompt user to specify one
@@ -18,14 +16,13 @@ pub async fn get_site_id_or_prompt(
         return Ok(site_id);
     }
 
-    // Otherwise, fetch sites and decide what to do
-    let params: Vec<(&str, &dyn std::fmt::Display)> = vec![];
-    let sites_page: Page<Site> = client
-        .get_with_params("sites", &params)
+    // Otherwise, fetch every site -- a truncated answer would turn "many
+    // sites" into a wrong automatic choice -- and decide what to do
+    let sites: Vec<Site> = fetch_all(client, "sites")
         .await
         .context("Failed to fetch sites for auto-discovery")?;
 
-    match sites_page.data.len() {
+    match sites.len() {
         0 => {
             anyhow::bail!(
                 "Well, this is awkward... We didn't think it was possible to have zero sites, \
@@ -35,7 +32,7 @@ pub async fn get_site_id_or_prompt(
         }
         1 => {
             // Single site - use it automatically
-            let site = &sites_page.data[0];
+            let site = &sites[0];
             eprintln!("Using site: {} ({})", site.name, site.id);
             Ok(site.id)
         }
@@ -44,7 +41,7 @@ pub async fn get_site_id_or_prompt(
             eprintln!("Multiple sites found:");
             eprintln!();
 
-            let rows: Vec<SiteRow> = sites_page.data.iter().map(SiteRow::from).collect();
+            let rows: Vec<SiteRow> = sites.iter().map(SiteRow::from).collect();
             print_vec_table(&rows, crate::output::OutputFormat::Table)?;
 
             eprintln!();
