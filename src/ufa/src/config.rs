@@ -161,7 +161,7 @@ impl Config {
 
     /// [`Config::edit`] against an explicit path.
     fn edit_at(config_path: &Path, edit: impl FnOnce(&mut Self)) -> Result<Self> {
-        let mut config = Self::default();
+        let mut config = Self::load_from(config_path)?.unwrap_or_default();
         edit(&mut config);
         config.save_to(config_path)?;
         Ok(config)
@@ -213,15 +213,17 @@ impl Config {
     /// Record the Site Manager answer gathered during interactive setup.
     ///
     /// An `op://` reference is stored as a 1Password path; anything else is
-    /// treated as the key itself.
+    /// treated as the key itself. An empty answer means "skip", so the
+    /// currently configured credential — if any — is left untouched.
     fn set_site_manager(&mut self, answer: &str) {
         let answer = answer.trim();
 
+        if answer.is_empty() {
+            return;
+        }
+
         if answer.starts_with(OP_REFERENCE_PREFIX) {
             self.sm_op_path = Some(answer.to_string());
-            self.site_manager_api_key = None;
-        } else if answer.is_empty() {
-            self.sm_op_path = None;
             self.site_manager_api_key = None;
         } else {
             self.sm_op_path = None;
@@ -234,12 +236,11 @@ impl Config {
         self.sm_op_path.is_some() || self.site_manager_api_key.is_some()
     }
 
-    /// Save configuration to the default location
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&Self::config_file_path()?)
-    }
-
     /// Save configuration to an explicit path, creating parent directories.
+    ///
+    /// Private on purpose: callers go through [`Config::edit`], which reads
+    /// what is already on disk first, so no command can blank out a field it
+    /// never asked about.
     fn save_to(&self, config_path: &Path) -> Result<()> {
         if let Some(config_dir) = config_path.parent() {
             fs::create_dir_all(config_dir).with_context(|| {
@@ -380,6 +381,7 @@ impl Config {
         }
 
         // Site Manager API Key (optional)
+        println!("\n\nOptional: UniFi Site Manager (Cloud) Configuration");
         let sm_answer = prompt_for_site_manager_key()?;
 
         // Save configuration
@@ -405,13 +407,32 @@ impl Config {
 
         Ok(())
     }
+
+    /// Interactive setup for the UniFi Site Manager (cloud) credential alone.
+    ///
+    /// Only the cloud credential is touched: the controller URL, its
+    /// 1Password reference and the TLS choice are loaded from the saved
+    /// configuration and written back unchanged.
+    pub fn setup_site_manager() -> Result<()> {
+        println!("Setting up UniFi Site Manager (Cloud) API credentials...\n");
+
+        let answer = prompt_for_site_manager_key()?;
+        let config = Self::edit(|config| config.set_site_manager(&answer))?;
+
+        if config.has_site_manager_key() {
+            println!("\nCloud commands are available: try 'ufa cloud hosts'");
+        } else {
+            println!("\nNo Site Manager API key configured; cloud commands stay unavailable.");
+        }
+
+        Ok(())
+    }
 }
 
-/// Prompt for the optional Site Manager (cloud) credential.
+/// Prompt for the Site Manager (cloud) credential.
 ///
 /// The answer is either an `op://` reference, the key itself, or empty to skip.
 fn prompt_for_site_manager_key() -> Result<String> {
-    println!("\n\nOptional: UniFi Site Manager (Cloud) Configuration");
     println!(
         "Paste the key from the unifi.ui.com API section, or a 1Password reference \
          ({OP_REFERENCE_PREFIX}Private/ufa/site manager key) to keep it out of the config file."

@@ -148,8 +148,7 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             ConfigCommand::Cloud => {
-                println!("Setting up UniFi Site Manager (Cloud) API credentials...");
-                Config::setup().await?; // Reuse the setup function which now includes cloud config
+                Config::setup_site_manager()?;
                 return Ok(());
             }
         }
