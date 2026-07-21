@@ -151,6 +151,61 @@ impl Drop for ScopedVar {
     }
 }
 
+/// The lock only serialises the variables the *tests* set. A variable the
+/// test binary **inherited** is set before any test runs and stays set for
+/// the whole process, so no amount of locking hides it — and `ufa`'s own
+/// developers are exactly the people likely to have `UNIFI_URL` and friends
+/// exported in the shell they run `cargo test` from.
+#[cfg(test)]
+mod inherited_environment_tests {
+    use std::process::Command;
+
+    /// Set in the child so its copy of this test does not fork forever.
+    const CHILD_MARKER: &str = "UFA_INHERITED_ENVIRONMENT_CHILD";
+
+    /// A hostile spelling of every `UNIFI_*` variable clap reads.
+    ///
+    /// `UNIFI_INSECURE=maybe` is the sharpest of them: clap cannot parse it,
+    /// so it fails *every* parse in the binary rather than merely changing
+    /// what one of them returns.
+    const INHERITED: &[(&str, &str)] = &[
+        ("UNIFI_URL", "https://inherited.example"),
+        ("UNIFI_API_KEY", "inherited-key"),
+        ("UNIFI_INSECURE", "maybe"),
+        ("UNIFI_SITE_MANAGER_API_KEY", "inherited-cloud-key"),
+    ];
+
+    /// Re-run the whole suite in a child that inherited a `UNIFI_*`
+    /// environment, which is the one thing a test cannot simulate in-process:
+    /// by the time any test body runs, an inherited variable has already been
+    /// set for the entire process.
+    #[test]
+    fn the_suite_ignores_the_unifi_variables_it_inherited() {
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            return;
+        }
+
+        let binary = std::env::current_exe().expect("the test binary must be locatable");
+        let mut command = Command::new(&binary);
+        command.env(CHILD_MARKER, "1");
+        for (name, value) in INHERITED {
+            command.env(name, value);
+        }
+
+        let output = command
+            .output()
+            .unwrap_or_else(|error| panic!("{} must be runnable: {error}", binary.display()));
+
+        assert!(
+            output.status.success(),
+            "the suite must pass with UNIFI_* exported the way a ufa developer's \
+             shell exports them, got:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[cfg(test)]
 mod lock_tests {
     use super::{parse_args_for_test, ScopedVar};
