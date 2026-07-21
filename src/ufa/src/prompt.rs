@@ -41,6 +41,9 @@ pub trait Console {
     /// Returns an error if the answer stream ends before a line arrives, so a
     /// closed stdin ends the question instead of looping on empty answers.
     fn ask(&mut self, question: &str) -> Result<String>;
+
+    /// Show `message` on a line of its own.
+    fn tell(&mut self, message: &str);
 }
 
 /// The real terminal.
@@ -60,6 +63,10 @@ impl Console for Stdio {
             bail!("Input ended before the question was answered.");
         }
         Ok(line)
+    }
+
+    fn tell(&mut self, message: &str) {
+        println!("{message}");
     }
 }
 
@@ -144,6 +151,36 @@ pub fn confirm_destructive(
     }
 }
 
+/// Ask which of `count` numbered options to use.
+///
+/// The options themselves have already been shown to the user; this asks for
+/// the number and keeps asking until one of them is named.
+///
+/// # Arguments
+///
+/// * `console` - Where the question is put.
+/// * `question` - The question, without the `[1-n]` suffix.
+/// * `count` - How many options there are.
+///
+/// # Returns
+///
+/// The zero-based index of the chosen option, or `None` when there is no
+/// terminal to ask at -- which the caller has to answer for itself, because
+/// only it knows how the choice can be named on the command line instead.
+///
+/// # Errors
+///
+/// Returns an error if the answer stream ends before a choice is made.
+pub fn select_one(
+    console: &mut impl Console,
+    question: &str,
+    count: usize,
+) -> Result<Option<usize>> {
+    // Skeleton: today nobody is ever asked which one to use.
+    let _ = (console, question, count);
+    Ok(None)
+}
+
 /// A [`Console`] with its answers written in advance.
 ///
 /// Records every question so a test can assert that nothing was asked.
@@ -193,6 +230,8 @@ impl Console for Scripted {
             None => bail!("the test scripted no answer for {question:?}"),
         }
     }
+
+    fn tell(&mut self, _message: &str) {}
 }
 
 #[cfg(test)]
@@ -258,6 +297,44 @@ mod tests {
         for no in ["", "\n", "n", "no", "N", "maybe", "ye s"] {
             assert!(!answered_yes(no), "{no:?} must not be read as approval");
         }
+    }
+
+    /// A person at a terminal can say which one they meant.
+    #[test]
+    fn a_terminal_is_asked_which_one_to_use() {
+        let mut console = Scripted::terminal(&["2"]);
+
+        let chosen = select_one(&mut console, "Select a site", 3)
+            .expect("a scripted answer must be readable");
+
+        assert_eq!(chosen, Some(1), "the second option is index 1");
+        assert!(console.was_asked(), "the user must have been asked");
+    }
+
+    /// A number that names no option is a typo, not a choice.
+    #[test]
+    fn an_answer_outside_the_range_is_asked_again() {
+        let mut console = Scripted::terminal(&["0", "4", "nope", "3"]);
+
+        let chosen = select_one(&mut console, "Select a site", 3)
+            .expect("a scripted answer must be readable");
+
+        assert_eq!(chosen, Some(2), "only the in-range answer counts");
+    }
+
+    /// A pipe cannot pick, and must not be left hanging on a prompt.
+    #[test]
+    fn a_pipe_is_not_asked_which_one_to_use() {
+        let mut console = Scripted::not_a_terminal();
+
+        let chosen =
+            select_one(&mut console, "Select a site", 3).expect("no terminal is not an error");
+
+        assert_eq!(chosen, None, "there is nobody to ask");
+        assert!(
+            !console.was_asked(),
+            "nothing can be asked without a terminal"
+        );
     }
 
     /// The refusal has to name the escape hatch, or a scripted caller has no

@@ -1,5 +1,6 @@
 #![warn(clippy::unused_async)]
 
+mod chooser;
 mod client;
 mod commands;
 mod config;
