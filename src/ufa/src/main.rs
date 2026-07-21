@@ -322,53 +322,14 @@ async fn main() -> Result<()> {
 /// environment therefore covers `.env` too.
 #[cfg(test)]
 mod environment_tests {
-    use super::{Args, Commands};
-    use clap::Parser;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    /// The process environment is shared by every thread in the test binary,
-    /// so the tests that write to it take turns.
-    ///
-    /// Tests that merely *read* the environment — anything calling
-    /// `Args::try_parse_from`, since clap consults `UNIFI_*` on every parse —
-    /// take the same lock, so a `ScopedVar` set by one test cannot bleed into
-    /// another test's parse.
-    pub(super) fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Sets an environment variable for as long as it is held, then removes
-    /// it — so a failing assertion cannot leak state into the next test.
-    struct ScopedVar {
-        name: &'static str,
-        _guard: MutexGuard<'static, ()>,
-    }
-
-    impl ScopedVar {
-        fn set(name: &'static str, value: &str) -> Self {
-            let guard = env_lock();
-            std::env::set_var(name, value);
-            Self {
-                name,
-                _guard: guard,
-            }
-        }
-    }
-
-    impl Drop for ScopedVar {
-        fn drop(&mut self) {
-            std::env::remove_var(self.name);
-        }
-    }
+    use super::Commands;
+    use crate::test_support::{parse_args_for_test, ScopedVar};
 
     #[test]
     fn unifi_url_reaches_the_parsed_arguments() {
         let _var = ScopedVar::set("UNIFI_URL", "https://controller.example");
 
-        let args = Args::try_parse_from(["ufa", "info"]).expect("ufa info must parse");
+        let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
 
         assert_eq!(
             args.url.as_deref(),
@@ -381,7 +342,7 @@ mod environment_tests {
     fn unifi_api_key_reaches_the_parsed_arguments() {
         let _var = ScopedVar::set("UNIFI_API_KEY", "key-from-the-environment");
 
-        let args = Args::try_parse_from(["ufa", "info"]).expect("ufa info must parse");
+        let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
 
         assert_eq!(
             args.api_key.as_deref(),
@@ -397,7 +358,7 @@ mod environment_tests {
         for (spelling, expected) in [("yes", true), ("1", true), ("off", false)] {
             let _var = ScopedVar::set("UNIFI_INSECURE", spelling);
 
-            let args = Args::try_parse_from(["ufa", "info"]).expect("ufa info must parse");
+            let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
 
             assert_eq!(
                 args.insecure,
@@ -413,7 +374,7 @@ mod environment_tests {
     fn an_unparseable_unifi_insecure_is_rejected_rather_than_ignored() {
         let _var = ScopedVar::set("UNIFI_INSECURE", "maybe");
 
-        let error = Args::try_parse_from(["ufa", "info"])
+        let error = parse_args_for_test(["ufa", "info"])
             .expect_err("an unparseable UNIFI_INSECURE must not be silently discarded");
 
         assert!(
@@ -429,7 +390,7 @@ mod environment_tests {
             "cloud-key-from-the-environment",
         );
 
-        let args = Args::try_parse_from(["ufa", "cloud", "hosts"]).expect("ufa cloud hosts parses");
+        let args = parse_args_for_test(["ufa", "cloud", "hosts"]).expect("ufa cloud hosts parses");
 
         let Commands::Cloud {
             site_manager_api_key,
@@ -450,7 +411,7 @@ mod environment_tests {
     fn a_command_line_flag_overrides_the_environment() {
         let _var = ScopedVar::set("UNIFI_URL", "https://from-the-environment");
 
-        let args = Args::try_parse_from(["ufa", "--url", "https://from-the-flag", "info"])
+        let args = parse_args_for_test(["ufa", "--url", "https://from-the-flag", "info"])
             .expect("ufa info must parse");
 
         assert_eq!(args.url.as_deref(), Some("https://from-the-flag"));
@@ -466,9 +427,9 @@ mod environment_tests {
 /// defect, not a style preference.
 #[cfg(test)]
 mod flag_position_tests {
-    use super::{environment_tests::env_lock, Args, Commands};
+    use super::{Args, Commands};
     use crate::output::OutputFormat;
-    use clap::Parser;
+    use crate::test_support::parse_args_for_test;
 
     /// Every argv spelling that must yield `--output json`, with the flag
     /// placed after the subcommand it applies to.
@@ -481,7 +442,7 @@ mod flag_position_tests {
     ];
 
     fn parse(argv: &[&str]) -> Args {
-        Args::try_parse_from(argv)
+        parse_args_for_test(argv)
             .unwrap_or_else(|error| panic!("`{}` must parse, got {error}", argv.join(" ")))
     }
 
@@ -491,8 +452,6 @@ mod flag_position_tests {
 
     #[test]
     fn output_is_accepted_after_the_subcommand() {
-        let _guard = env_lock();
-
         for argv in TRAILING_OUTPUT_ARGV {
             let args = parse(argv);
             assert!(
@@ -505,8 +464,6 @@ mod flag_position_tests {
 
     #[test]
     fn output_is_still_accepted_before_the_subcommand() {
-        let _guard = env_lock();
-
         for argv in [
             ["ufa", "--output", "json", "cloud", "hosts"].as_slice(),
             ["ufa", "--output", "json", "devices", "list"].as_slice(),
@@ -526,8 +483,6 @@ mod flag_position_tests {
     /// value the user gave earlier on the line.
     #[test]
     fn a_leading_output_is_not_overwritten_by_the_default() {
-        let _guard = env_lock();
-
         let args = parse(&["ufa", "--output", "json", "devices", "list", "--limit", "5"]);
 
         assert!(
@@ -538,8 +493,6 @@ mod flag_position_tests {
 
     #[test]
     fn output_defaults_to_table_in_both_positions() {
-        let _guard = env_lock();
-
         for argv in [
             ["ufa", "sites"].as_slice(),
             ["ufa", "devices", "list"].as_slice(),
@@ -556,8 +509,6 @@ mod flag_position_tests {
 
     #[test]
     fn connection_flags_are_accepted_after_the_subcommand() {
-        let _guard = env_lock();
-
         let args = parse(&[
             "ufa",
             "devices",
@@ -583,8 +534,6 @@ mod flag_position_tests {
     /// subcommand-specific flag alongside them still binds to the subcommand.
     #[test]
     fn connection_flags_are_accepted_beside_subcommand_flags() {
-        let _guard = env_lock();
-
         let args = parse(&[
             "ufa",
             "devices",
@@ -614,8 +563,6 @@ mod flag_position_tests {
 
     #[test]
     fn connection_flags_are_still_accepted_before_the_subcommand() {
-        let _guard = env_lock();
-
         let args = parse(&[
             "ufa",
             "--url",

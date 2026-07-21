@@ -488,7 +488,7 @@ mod tests {
         DeviceFeature, DeviceInterface, DeviceInterfaceStatistics, DeviceState, IpAddress,
         MacAddress, UplinkStatistics,
     };
-    use clap::Parser;
+    use crate::test_support::parse_args_for_test;
     use std::cell::Cell;
 
     /// Box-drawing corner produced by the table renderer.
@@ -634,7 +634,7 @@ mod tests {
     fn stats_rejects_a_device_id_together_with_all_at_parse_time() {
         let device_id = Uuid::new_v4().to_string();
 
-        let error = crate::Args::try_parse_from(["ufa", "devices", "stats", "--all", &device_id])
+        let error = parse_args_for_test(["ufa", "devices", "stats", "--all", &device_id])
             .expect_err("--all and a device id are mutually exclusive");
 
         assert_eq!(
@@ -649,9 +649,9 @@ mod tests {
     fn stats_accepts_all_and_a_device_id_separately() {
         let device_id = Uuid::new_v4().to_string();
 
-        crate::Args::try_parse_from(["ufa", "devices", "stats", "--all"])
+        parse_args_for_test(["ufa", "devices", "stats", "--all"])
             .expect("--all on its own is valid");
-        crate::Args::try_parse_from(["ufa", "devices", "stats", &device_id])
+        parse_args_for_test(["ufa", "devices", "stats", &device_id])
             .expect("a device id on its own is valid");
     }
 
