@@ -9,6 +9,7 @@ mod output;
 mod pagination;
 mod site_helper;
 mod site_manager;
+mod text;
 
 use anyhow::{Context, Result};
 use buildinfo::version_string;

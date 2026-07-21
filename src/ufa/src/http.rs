@@ -7,10 +7,20 @@
 //! The only thing that differs is how the API is named to the user, so that
 //! is the only thing callers get to choose.
 
+use crate::text::truncate_for_display;
 use anyhow::{Context, Result};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
+
+/// How much of a response body an error quotes before cutting it short.
+///
+/// A server can answer with anything at all -- a stack trace, an HTML error
+/// page, a dump of the record that failed -- and the whole of it in an error
+/// floods the terminal and lands in whatever collects the user's logs. This
+/// is enough to recognise what came back and to read a short message that was
+/// not in the API's own error shape.
+const ERROR_BODY_DISPLAY_CHARS: usize = 500;
 
 /// The error body a UniFi API answers a failed request with.
 ///
@@ -120,8 +130,13 @@ fn parse_body<T>(api: Api, body: &str) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_str(body)
-        .with_context(|| format!("Failed to parse {} response JSON: {body}", api.label()))
+    serde_json::from_str(body).with_context(|| {
+        format!(
+            "Failed to parse {} response JSON: {}",
+            api.label(),
+            truncate_for_display(body, ERROR_BODY_DISPLAY_CHARS)
+        )
+    })
 }
 
 /// Build the error for a response whose status was not a success.
@@ -145,7 +160,11 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
         return anyhow::anyhow!("{} error: {} (HTTP {status})", api.label(), error.message);
     }
 
-    anyhow::anyhow!("{} HTTP error {status}: {body}", api.label())
+    anyhow::anyhow!(
+        "{} HTTP error {status}: {}",
+        api.label(),
+        truncate_for_display(body, ERROR_BODY_DISPLAY_CHARS)
+    )
 }
 
 #[cfg(test)]

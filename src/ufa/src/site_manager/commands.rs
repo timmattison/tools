@@ -1,6 +1,7 @@
 use crate::output::{print_output, OutputFormat};
-use crate::site_manager::utils::{truncate_for_display, CLOUD_HOST_ID_DISPLAY_CHARS};
+use crate::site_manager::utils::CLOUD_HOST_ID_DISPLAY_CHARS;
 use crate::site_manager::SiteManagerClient;
+use crate::text::truncate_for_display;
 use anyhow::Result;
 use clap::Subcommand;
 
