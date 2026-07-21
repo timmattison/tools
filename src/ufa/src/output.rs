@@ -133,14 +133,58 @@ where
     Ok(())
 }
 
-pub fn print_table<T>(data: &[T]) -> Result<()>
+/// Render `data` as a multi-column table, one row per item.
+///
+/// # Arguments
+///
+/// * `data` - The rows to render.
+///
+/// # Returns
+///
+/// The rendered table, without a trailing newline.
+pub fn render_table<T>(data: &[T]) -> String
 where
     T: Tabled,
 {
     let mut table = Table::new(data);
     table.with(Style::modern());
-    println!("{}", table);
+    table.to_string()
+}
+
+pub fn print_table<T>(data: &[T]) -> Result<()>
+where
+    T: Tabled,
+{
+    println!("{}", render_table(data));
     Ok(())
+}
+
+/// Render a list of items in the requested output format and return it as a
+/// string.
+///
+/// This is the pure counterpart of [`print_vec_table`], so command output can
+/// be asserted on directly in tests.
+///
+/// # Arguments
+///
+/// * `data` - The rows to render.
+/// * `format` - The output format to render.
+///
+/// # Returns
+///
+/// The rendered text, without a trailing newline.
+///
+/// # Errors
+///
+/// Returns an error if `data` cannot be serialized as JSON.
+pub fn render_vec_table<T>(data: &[T], format: OutputFormat) -> Result<String>
+where
+    T: Serialize + Tabled,
+{
+    match format {
+        OutputFormat::Json => render_output(data, format),
+        OutputFormat::Table => Ok(render_table(data)),
+    }
 }
 
 // Specific implementation for vectors with Tabled items
@@ -148,10 +192,8 @@ pub fn print_vec_table<T>(data: &[T], format: OutputFormat) -> Result<()>
 where
     T: Serialize + Tabled,
 {
-    match format {
-        OutputFormat::Json => print_output(data, format),
-        OutputFormat::Table => print_table(data),
-    }
+    println!("{}", render_vec_table(data, format)?);
+    Ok(())
 }
 
 // General implementation for any serializable type
