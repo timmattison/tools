@@ -80,8 +80,13 @@ impl Credential {
     }
 }
 
-/// Resolve a credential with CLI flag > environment variable > config file
-/// precedence.
+/// Resolve a credential, preferring what the command line supplied over the
+/// configuration file.
+///
+/// `supplied` is whatever clap parsed for the credential's flag, which already
+/// carries CLI-over-environment precedence: the flag's `env = "..."` attribute
+/// makes clap fall back to the variable (including one loaded from `.env`)
+/// when the flag is absent.
 ///
 /// "Configured but unreadable" and "not configured anywhere" are different
 /// problems and get different answers: a configured credential that fails to
@@ -89,11 +94,10 @@ impl Credential {
 /// item renamed), because re-running the setup wizard cannot fix any of that.
 fn resolve_credential(
     credential: Credential,
-    cli: Option<String>,
-    env: Option<String>,
+    supplied: Option<String>,
     config: Option<&Config>,
 ) -> Result<String> {
-    if let Some(key) = cli.or(env) {
+    if let Some(key) = supplied {
         return Ok(key);
     }
 
@@ -243,7 +247,6 @@ async fn main() -> Result<()> {
         let sm_api_key = resolve_credential(
             Credential::SiteManager,
             site_manager_api_key.clone(),
-            std::env::var("UNIFI_SITE_MANAGER_API_KEY").ok(),
             file_config.as_ref(),
         )?;
 
@@ -254,26 +257,17 @@ async fn main() -> Result<()> {
     // Load configuration from file
     let file_config = Config::load()?;
 
-    // Determine final configuration values (CLI args > env vars > config file)
+    // Determine final configuration values. Each `args` field already resolves
+    // its flag against the matching UNIFI_* variable via clap's `env`
+    // attribute, so what remains here is the fall-through to the config file.
     let url = args.url
-        .or_else(|| std::env::var("UNIFI_URL").ok())
         .or_else(|| file_config.as_ref().and_then(|c| c.url.clone()))
         .context("UniFi URL not provided. Set it via --url, UNIFI_URL environment variable, or run 'ufa config setup' to create a configuration file.")?;
 
-    let api_key = resolve_credential(
-        Credential::Controller,
-        args.api_key,
-        std::env::var("UNIFI_API_KEY").ok(),
-        file_config.as_ref(),
-    )?;
+    let api_key = resolve_credential(Credential::Controller, args.api_key, file_config.as_ref())?;
 
     let insecure = args
         .insecure
-        .or_else(|| {
-            std::env::var("UNIFI_INSECURE")
-                .ok()
-                .and_then(|v| parse_bool_env(&v).ok())
-        })
         .or_else(|| file_config.as_ref().and_then(|c| c.insecure))
         .unwrap_or(false);
 
@@ -470,7 +464,7 @@ mod credential_tests {
     fn resolution_failure_reports_the_underlying_cause() {
         let config = config_with_unreadable_reference();
 
-        let error = resolve_credential(Credential::Controller, None, None, Some(&config))
+        let error = resolve_credential(Credential::Controller, None, Some(&config))
             .expect_err("an unreadable 1Password reference must not resolve");
         let report = format!("{error:#}");
 
@@ -487,7 +481,7 @@ mod credential_tests {
     /// The friendly advice still applies when nothing is configured anywhere.
     #[test]
     fn missing_credential_reports_the_configuration_advice() {
-        let error = resolve_credential(Credential::Controller, None, None, None)
+        let error = resolve_credential(Credential::Controller, None, None)
             .expect_err("no key anywhere must not resolve");
 
         assert!(
@@ -495,43 +489,30 @@ mod credential_tests {
             "an unconfigured key must point at setup, got {error:#}"
         );
 
-        let error = resolve_credential(
-            Credential::SiteManager,
-            None,
-            None,
-            Some(&Config::default()),
-        )
-        .expect_err("an empty config must not resolve a cloud key");
+        let error = resolve_credential(Credential::SiteManager, None, Some(&Config::default()))
+            .expect_err("an empty config must not resolve a cloud key");
         assert!(
             format!("{error:#}").contains("ufa config cloud"),
             "an unconfigured cloud key must point at cloud setup, got {error:#}"
         );
     }
 
-    /// CLI flag beats the environment, which beats the config file.
+    /// What the command line supplied — the flag itself, or the UNIFI_* value
+    /// clap resolved for it — beats the config file, and beats it without
+    /// touching 1Password: a config whose reference cannot be read still
+    /// resolves.
     #[test]
-    fn cli_argument_wins_over_environment_and_config_file() {
+    fn a_supplied_key_wins_over_the_config_file() {
         let config = config_with_unreadable_reference();
 
         assert_eq!(
             resolve_credential(
                 Credential::Controller,
-                Some("from-cli".to_string()),
-                Some("from-env".to_string()),
+                Some("from-the-command-line".to_string()),
                 Some(&config),
             )
-            .expect("the CLI argument must resolve"),
-            "from-cli"
-        );
-        assert_eq!(
-            resolve_credential(
-                Credential::Controller,
-                None,
-                Some("from-env".to_string()),
-                Some(&config),
-            )
-            .expect("the environment variable must resolve"),
-            "from-env"
+            .expect("a supplied key must resolve"),
+            "from-the-command-line"
         );
     }
 }
