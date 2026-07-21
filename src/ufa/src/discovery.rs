@@ -188,6 +188,43 @@ async fn resolve_address(host: &str, port: u16) -> String {
         .unwrap_or_else(|| host.to_string())
 }
 
+/// A background service that keeps running until it is told to stop.
+trait Stoppable {
+    /// Stop the service and let its thread finish.
+    fn stop(&self);
+}
+
+impl Stoppable for ServiceDaemon {
+    fn stop(&self) {
+        // The daemon is on its way out either way; a send failure here means
+        // it has already stopped.
+        let _ = self.shutdown();
+    }
+}
+
+/// Stops what it holds when it goes out of scope -- including when an early
+/// `?` is what takes the scope away.
+///
+/// `ServiceDaemon` runs a background thread for the life of the process
+/// unless it is shut down, and discovery creates one every time it runs, so
+/// forgetting on any one path leaks a thread for good.
+struct StopOnDrop<T: Stoppable>(T);
+
+impl<T: Stoppable> StopOnDrop<T> {
+    /// Take ownership of `service` so it cannot outlive this scope.
+    fn new(service: T) -> Self {
+        Self(service)
+    }
+}
+
+impl<T: Stoppable> std::ops::Deref for StopOnDrop<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 /// What a probe of a host says about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeVerdict {
@@ -311,6 +348,68 @@ mod probe_tests {
             judge_probe(200, r#"{"status":"ok","service":"printer"}"#),
             ProbeVerdict::NotController,
             "a 200 without the documented shape proves nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stop_on_drop_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// A stand-in for the mDNS daemon: it records being stopped instead of
+    /// binding a multicast socket, so the test never touches the network.
+    struct FakeService {
+        stopped: Rc<Cell<bool>>,
+    }
+
+    impl Stoppable for FakeService {
+        fn stop(&self) {
+            self.stopped.set(true);
+        }
+    }
+
+    /// Build a service alongside the flag that watches it.
+    fn watched_service() -> (StopOnDrop<FakeService>, Rc<Cell<bool>>) {
+        let stopped = Rc::new(Cell::new(false));
+        let service = FakeService {
+            stopped: Rc::clone(&stopped),
+        };
+        (StopOnDrop::new(service), stopped)
+    }
+
+    /// The ordinary path: the scope ends, the background thread ends with it.
+    #[test]
+    fn leaving_the_scope_stops_the_service() {
+        let (guard, stopped) = watched_service();
+
+        assert!(!stopped.get(), "the service runs while the guard is alive");
+        drop(guard);
+
+        assert!(
+            stopped.get(),
+            "the background thread must not outlive the guard"
+        );
+    }
+
+    /// The path that gets forgotten: an early `?` unwinds the scope before
+    /// any hand-written cleanup would have run.
+    #[test]
+    fn an_early_question_mark_still_stops_the_service() {
+        let stopped = Rc::new(Cell::new(false));
+
+        let outcome: Result<()> = (|| {
+            let _guard = StopOnDrop::new(FakeService {
+                stopped: Rc::clone(&stopped),
+            });
+            anyhow::bail!("browsing failed");
+        })();
+
+        assert!(outcome.is_err(), "the scope must have ended early");
+        assert!(
+            stopped.get(),
+            "an error path must stop the service too, or it leaks a thread"
         );
     }
 }
