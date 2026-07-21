@@ -23,12 +23,5 @@ indicatif.workspace = true
 futures.workspace = true
 op-cache.workspace = true
 
-[lints.clippy]
-# Byte-level string slicing (&s[..n]) panics when n is not a char boundary.
-# This is the UTF-8 safety rule from CLAUDE.md, enforced at author time.
-# Restriction-tier, so it must be enabled explicitly.
-string_slice = "deny"
-# Identical match arms are almost always a copy/paste bug: the distinction the
-# match claims to make does not exist. Pedantic-tier, so it must be enabled
-# explicitly.
-match_same_arms = "deny"
+[lints]
+workspace = true
