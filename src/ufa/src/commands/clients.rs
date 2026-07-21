@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     models::{Client, ClientAction, Page},
-    output::{print_single_item, print_vec_table, OutputFormat},
+    output::{print_output, print_vec_table, OutputFormat},
     site_helper::get_site_id_or_prompt,
 };
 
@@ -207,7 +207,7 @@ async fn list_clients(
 
     match output_format {
         OutputFormat::Json => {
-            print_single_item(&page, output_format)?;
+            print_output(&page, output_format)?;
         }
         OutputFormat::Table => {
             let rows: Vec<ClientRow> = page.data.iter().map(client_to_row).collect();
@@ -228,7 +228,7 @@ async fn get_client(
     let path = format!("sites/{}/clients/{}", site_id, client_id);
     let client_details: Client = client.get(&path).await?;
 
-    print_single_item(&client_details, output_format)?;
+    print_output(&client_details, output_format)?;
     Ok(())
 }
 

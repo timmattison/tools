@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
-    output::{print_single_item, print_vec_table, OutputFormat},
+    output::{print_output, print_vec_table, OutputFormat},
     pagination::fetch_all_matching,
     prompt::{self, Approval, Console},
     site_helper::get_site_id_or_prompt,
@@ -200,7 +200,7 @@ async fn list_vouchers(
 
     match output_format {
         OutputFormat::Json => {
-            print_single_item(&page, output_format)?;
+            print_output(&page, output_format)?;
         }
         OutputFormat::Table => {
             let rows: Vec<VoucherRow> = page.data.iter().map(VoucherRow::from).collect();
@@ -221,7 +221,7 @@ async fn get_voucher(
     let path = format!("sites/{}/hotspot/vouchers/{}", site_id, voucher_id);
     let voucher: Voucher = client.get(&path).await?;
 
-    print_single_item(&voucher, output_format)?;
+    print_output(&voucher, output_format)?;
     Ok(())
 }
 
@@ -238,7 +238,7 @@ async fn create_vouchers(
 
     match output_format {
         OutputFormat::Json => {
-            print_single_item(&response.vouchers, output_format)?;
+            print_output(&response.vouchers, output_format)?;
         }
         OutputFormat::Table => {
             let rows: Vec<VoucherRow> = response.vouchers.iter().map(VoucherRow::from).collect();
