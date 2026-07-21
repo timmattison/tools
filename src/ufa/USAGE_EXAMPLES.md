@@ -24,20 +24,25 @@ export UNIFI_SITE_MANAGER_API_KEY="your-api-key"
 ufa cloud hosts
 
 # JSON format for programmatic use
-ufa cloud hosts --output json
+ufa --output json cloud hosts
 ```
 
 Example output:
 ```
-ID                                                                Name           Model         Firmware  IP Address      Type     Owner  Last Seen           
-------------------------------------------------------------------------------------------------------------------------------------------------------
-70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:...  Home-UDM      UDM-Pro       3.2.9     192.168.1.1     console  true   2024-01-15 10:30:00 
-900A6F00301100000000074A6BA90000000007A3387E0000000063EC9853:...  Office-UDR    Dream Router  3.2.9     192.168.2.1     console  true   2024-01-15 10:45:00 
+┌─────────────────────────────┬────────────┬──────────────┬──────────┬─────────────┬─────────┬───────┬─────────────────────┐
+│ ID                          │ Name       │ Model        │ Firmware │ IP Address  │ Type    │ Owner │ Last Seen           │
+├─────────────────────────────┼────────────┼──────────────┼──────────┼─────────────┼─────────┼───────┼─────────────────────┤
+│ 70A741667C3000000000066D... │ Home-UDM   │ UDM-Pro      │ 3.2.9    │ 192.168.1.1 │ console │ true  │ 2024-01-15 10:30:00 │
+│ 900A6F00301100000000074A... │ Office-UDR │ Dream Router │ 3.2.9    │ 192.168.2.1 │ console │ true  │ 2024-01-15 10:45:00 │
+└─────────────────────────────┴────────────┴──────────────┴──────────┴─────────────┴─────────┴───────┴─────────────────────┘
 
 Total hosts: 2
 
 To get details for a specific host, use: ufa cloud host <id>
 ```
+
+The IDs are cut short for display; `--output json` answers with them in full, alongside every other
+field the API reported.
 
 ### Get Specific Console Details
 
@@ -46,7 +51,7 @@ To get details for a specific host, use: ufa cloud host <id>
 ufa cloud host "70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:1320847833"
 
 # JSON output
-ufa cloud host "70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:1320847833" --output json
+ufa --output json cloud host "70A741667C3000000000066DC7C00000000006BABC5A000000006289D202:1320847833"
 ```
 
 ## Understanding the Console ID
@@ -68,13 +73,13 @@ https://unifi.ui.com/consoles/[CONSOLE_ID]/network/default/dashboard
 
 ```bash
 # Get all console IDs
-ufa cloud hosts --output json | jq -r '.[] | .id'
+ufa --output json cloud hosts | jq -r '.[] | .id'
 
 # Get console ID by name
-ufa cloud hosts --output json | jq -r '.[] | select(.name=="Home-UDM") | .id'
+ufa --output json cloud hosts | jq -r '.[] | select(.name=="Home-UDM") | .id'
 
 # Get IP addresses of all consoles
-ufa cloud hosts --output json | jq -r '.[] | "\(.name): \(.ip_address)"'
+ufa --output json cloud hosts | jq -r '.[] | "\(.name): \(.ip_address)"'
 ```
 
 ### Shell Script Example
@@ -84,7 +89,7 @@ ufa cloud hosts --output json | jq -r '.[] | "\(.name): \(.ip_address)"'
 
 # Get console ID for a specific console name
 CONSOLE_NAME="Home-UDM"
-CONSOLE_ID=$(ufa cloud hosts --output json | jq -r ".[] | select(.name==\"$CONSOLE_NAME\") | .id")
+CONSOLE_ID=$(ufa --output json cloud hosts | jq -r ".[] | select(.name==\"$CONSOLE_NAME\") | .id")
 
 if [ -n "$CONSOLE_ID" ]; then
     echo "Console ID for $CONSOLE_NAME: $CONSOLE_ID"

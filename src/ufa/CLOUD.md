@@ -66,7 +66,7 @@ back to the plaintext key.
 ufa cloud hosts
 
 # With custom output format
-ufa cloud hosts --output json
+ufa --output json cloud hosts
 ```
 
 ### Get Console Details
