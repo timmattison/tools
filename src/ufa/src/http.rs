@@ -99,7 +99,28 @@ where
         return Err(response_error(api, status, &body));
     }
 
-    serde_json::from_str(&body)
+    parse_body(api, &body)
+}
+
+/// Deserialize a successful response body as `T`.
+///
+/// # Arguments
+///
+/// * `api` - Which API answered, which decides how the error names it.
+/// * `body` - The response body.
+///
+/// # Returns
+///
+/// The deserialized body.
+///
+/// # Errors
+///
+/// Returns an error if `body` is not the JSON `T` expects.
+fn parse_body<T>(api: Api, body: &str) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_str(body)
         .with_context(|| format!("Failed to parse {} response JSON: {body}", api.label()))
 }
 
@@ -125,4 +146,98 @@ fn response_error(api: Api, status: StatusCode, body: &str) -> anyhow::Error {
     }
 
     anyhow::anyhow!("{} HTTP error {status}: {body}", api.label())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A response body big enough that reproducing it in an error would fill
+    /// the terminal -- and, if the error is logged, the log.
+    const HUGE_BODY_CHARS: usize = 100_000;
+
+    /// The most an error message may reasonably grow to. Well above any
+    /// sensible excerpt budget, so this asserts "the body was cut short at
+    /// all" rather than pinning a particular budget.
+    const REASONABLE_ERROR_CHARS: usize = 4_000;
+
+    /// A server can answer a failed request with anything at all -- a stack
+    /// trace, an HTML error page, a database dump. Interpolating the lot into
+    /// the error floods the user's terminal, and lands in whatever collects
+    /// their logs.
+    #[test]
+    fn a_huge_error_body_is_quoted_only_in_part() {
+        let body = "x".repeat(HUGE_BODY_CHARS);
+
+        let rendered =
+            response_error(Api::Controller, StatusCode::INTERNAL_SERVER_ERROR, &body).to_string();
+
+        assert!(
+            rendered.chars().count() < REASONABLE_ERROR_CHARS,
+            "the error reproduced {} characters of a {HUGE_BODY_CHARS}-character body",
+            rendered.chars().count()
+        );
+        assert!(
+            rendered.contains("500"),
+            "the error must still report the status, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("xxxx"),
+            "the error must still quote the start of the body, got: {rendered}"
+        );
+    }
+
+    /// The same, for the body of a response that succeeded but did not carry
+    /// the JSON the caller expected.
+    #[test]
+    fn a_huge_unparseable_body_is_quoted_only_in_part() {
+        let body = "x".repeat(HUGE_BODY_CHARS);
+
+        let error = parse_body::<serde_json::Value>(Api::SiteManager, &body)
+            .expect_err("a body of x's is not JSON");
+        let rendered = format!("{error:#}");
+
+        assert!(
+            rendered.chars().count() < REASONABLE_ERROR_CHARS,
+            "the error reproduced {} characters of a {HUGE_BODY_CHARS}-character body",
+            rendered.chars().count()
+        );
+    }
+
+    /// Cutting a body short must count characters, not bytes: a body of
+    /// multi-byte characters would otherwise be split mid-character.
+    #[test]
+    fn a_multi_byte_error_body_is_cut_short_without_panicking() {
+        let body = "日本語🎉café".repeat(HUGE_BODY_CHARS);
+
+        let rendered = response_error(Api::SiteManager, StatusCode::BAD_GATEWAY, &body).to_string();
+
+        assert!(
+            rendered.chars().count() < REASONABLE_ERROR_CHARS,
+            "the error reproduced {} characters of a multi-byte body",
+            rendered.chars().count()
+        );
+        assert!(
+            rendered.contains('日'),
+            "the error must still quote the start of the body, got: {rendered}"
+        );
+    }
+
+    /// A body short enough to read in full is still shown in full, with no
+    /// ellipsis suggesting something was withheld.
+    #[test]
+    fn a_short_error_body_is_quoted_in_full() {
+        let body = "upstream connect error";
+
+        let rendered = response_error(Api::Controller, StatusCode::BAD_GATEWAY, body).to_string();
+
+        assert!(
+            rendered.contains(body),
+            "a short body must survive intact, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("..."),
+            "a body that was not cut short must not read as if it were, got: {rendered}"
+        );
+    }
 }
