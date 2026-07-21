@@ -7,8 +7,10 @@ use crate::{
     client::UnifiClient,
     models::{Page, Voucher, VoucherCreateRequest, VoucherCreateResponse, VoucherDeletionResults},
     output::{print_single_item, print_vec_table, OutputFormat},
+    prompt::{self, Approval, Console},
     site_helper::get_site_id_or_prompt,
 };
+use std::future::Future;
 
 #[derive(Subcommand, Debug)]
 pub enum VouchersCommand {
@@ -243,6 +245,60 @@ async fn delete_voucher(
     Ok(())
 }
 
+/// How much a filtered deletion is allowed to do on its own.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeleteOptions {
+    /// The user passed `--yes`: do not stop to ask.
+    assume_yes: bool,
+    /// The user passed `--dry-run`: list the matches, delete nothing.
+    dry_run: bool,
+}
+
+/// What a filtered deletion ended up doing.
+#[derive(Debug, PartialEq, Eq)]
+enum DeletionOutcome {
+    /// The filter matched no vouchers.
+    NoMatches,
+    /// `--dry-run`: the matches were listed and nothing was deleted.
+    Listed,
+    /// The deletion was approved and this many vouchers were destroyed.
+    Deleted(u32),
+    /// The user was asked and declined.
+    Aborted,
+}
+
+/// Run `delete` only once the user has agreed to lose `match_count` vouchers.
+///
+/// The deletion is passed in as a closure so the decision — ask, refuse,
+/// abort, delete — can be exercised without a controller, and so a test can
+/// prove that a declined confirmation never reaches the API at all.
+///
+/// # Arguments
+///
+/// * `match_count` - How many vouchers the filter matched.
+/// * `options` - The `--yes` / `--dry-run` flags.
+/// * `console` - Where the confirmation is put to the user.
+/// * `delete` - Performs the deletion, answering with the number destroyed.
+///
+/// # Errors
+///
+/// Returns an error if the confirmation cannot be obtained (a non-terminal
+/// stdin without `--yes`) or if the deletion itself fails.
+async fn confirm_then_delete<D, Fut>(
+    match_count: usize,
+    options: DeleteOptions,
+    console: &mut impl Console,
+    delete: D,
+) -> Result<DeletionOutcome>
+where
+    D: FnOnce() -> Fut,
+    Fut: Future<Output = Result<u32>>,
+{
+    // Skeleton: today the vouchers are gone before anyone is asked anything.
+    let _ = (match_count, options, console);
+    Ok(DeletionOutcome::Deleted(delete().await?))
+}
+
 async fn delete_vouchers_filtered(
     client: &UnifiClient,
     site_id: Option<Uuid>,
@@ -256,4 +312,150 @@ async fn delete_vouchers_filtered(
 
     println!("Deleted {} voucher(s)", result.vouchers_deleted);
     Ok(())
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    use crate::prompt::Scripted;
+    use std::cell::Cell;
+
+    /// How many vouchers the pretend controller holds.
+    const MATCHES: usize = 7;
+
+    /// A deletion that records whether it was ever reached.
+    fn recording_delete(reached: &Cell<bool>) -> impl FnOnce() -> std::future::Ready<Result<u32>> + '_
+    {
+        move || {
+            reached.set(true);
+            std::future::ready(Ok(u32::try_from(MATCHES).unwrap()))
+        }
+    }
+
+    /// `--yes` is how a script says "I already know": delete, ask nothing.
+    #[tokio::test]
+    async fn assume_yes_deletes_without_asking() {
+        let reached = Cell::new(false);
+        let mut console = Scripted::terminal(&[]);
+
+        let outcome = confirm_then_delete(
+            MATCHES,
+            DeleteOptions {
+                assume_yes: true,
+                dry_run: false,
+            },
+            &mut console,
+            recording_delete(&reached),
+        )
+        .await
+        .expect("--yes must be able to delete");
+
+        assert_eq!(outcome, DeletionOutcome::Deleted(MATCHES as u32));
+        assert!(reached.get(), "--yes must actually delete");
+        assert!(!console.was_asked(), "--yes must not stop to ask");
+    }
+
+    /// Saying no must leave every voucher alone.
+    #[tokio::test]
+    async fn a_declined_confirmation_deletes_nothing() {
+        let reached = Cell::new(false);
+        let mut console = Scripted::terminal(&["n"]);
+
+        let outcome = confirm_then_delete(
+            MATCHES,
+            DeleteOptions::default(),
+            &mut console,
+            recording_delete(&reached),
+        )
+        .await
+        .expect("declining is not an error");
+
+        assert_eq!(outcome, DeletionOutcome::Aborted);
+        assert!(!reached.get(), "a declined deletion must never reach the API");
+        assert!(console.was_asked(), "the user must have been asked");
+    }
+
+    /// Hitting return at a `[y/N]` prompt is a no, not a yes.
+    #[tokio::test]
+    async fn an_empty_answer_deletes_nothing() {
+        let reached = Cell::new(false);
+        let mut console = Scripted::terminal(&["\n"]);
+
+        let outcome = confirm_then_delete(
+            MATCHES,
+            DeleteOptions::default(),
+            &mut console,
+            recording_delete(&reached),
+        )
+        .await
+        .expect("declining is not an error");
+
+        assert_eq!(outcome, DeletionOutcome::Aborted);
+        assert!(!reached.get(), "an empty answer must not destroy anything");
+    }
+
+    /// Piped into, with no `--yes`, there is nobody to confirm: refuse.
+    #[tokio::test]
+    async fn a_pipe_without_yes_refuses_to_delete() {
+        let reached = Cell::new(false);
+        let mut console = Scripted::not_a_terminal();
+
+        let error = confirm_then_delete(
+            MATCHES,
+            DeleteOptions::default(),
+            &mut console,
+            recording_delete(&reached),
+        )
+        .await
+        .expect_err("a non-interactive bulk deletion must refuse");
+
+        assert!(
+            format!("{error:#}").contains("--yes"),
+            "the refusal must say how to proceed, got {error:#}"
+        );
+        assert!(!reached.get(), "a refused deletion must not reach the API");
+    }
+
+    /// A filter that matched nothing is not worth a question.
+    #[tokio::test]
+    async fn zero_matches_asks_nothing_and_deletes_nothing() {
+        let reached = Cell::new(false);
+        let mut console = Scripted::terminal(&[]);
+
+        let outcome = confirm_then_delete(
+            0,
+            DeleteOptions::default(),
+            &mut console,
+            recording_delete(&reached),
+        )
+        .await
+        .expect("an empty match is not an error");
+
+        assert_eq!(outcome, DeletionOutcome::NoMatches);
+        assert!(!reached.get(), "there is nothing to delete");
+        assert!(!console.was_asked(), "there is nothing to ask about");
+    }
+
+    /// `--dry-run` is how you find out what a filter matches, safely.
+    #[tokio::test]
+    async fn dry_run_lists_without_deleting() {
+        let reached = Cell::new(false);
+        let mut console = Scripted::terminal(&[]);
+
+        let outcome = confirm_then_delete(
+            MATCHES,
+            DeleteOptions {
+                assume_yes: false,
+                dry_run: true,
+            },
+            &mut console,
+            recording_delete(&reached),
+        )
+        .await
+        .expect("a dry run is not an error");
+
+        assert_eq!(outcome, DeletionOutcome::Listed);
+        assert!(!reached.get(), "a dry run must not delete anything");
+        assert!(!console.was_asked(), "a dry run has nothing to confirm");
+    }
 }
