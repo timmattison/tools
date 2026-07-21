@@ -8,6 +8,7 @@ use crate::{
     device_helper::get_device_id_or_prompt,
     models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
     output::{print_single_item, print_vec_table, OutputFormat},
+    pagination::fetch_all,
     site_helper::get_site_id_or_prompt,
 };
 
@@ -341,12 +342,10 @@ async fn get_all_device_stats(
     site_id: Uuid,
     _output_format: OutputFormat,
 ) -> Result<()> {
-    // Fetch all devices
-    let params: Vec<(&str, &dyn std::fmt::Display)> = vec![];
     let devices_path = format!("sites/{}/devices", site_id);
-    let devices_page: Page<Device> = client.get_with_params(&devices_path, &params).await?;
+    let devices: Vec<Device> = fetch_all(client, &devices_path).await?;
 
-    if devices_page.data.is_empty() {
+    if devices.is_empty() {
         println!("No devices found on this site.");
         return Ok(());
     }
@@ -355,7 +354,7 @@ async fn get_all_device_stats(
     let mut stats_rows = Vec::new();
 
     // Fetch statistics for each device (sequentially for now to avoid ownership issues)
-    for device in &devices_page.data {
+    for device in &devices {
         let stats_path = format!("sites/{}/devices/{}/statistics/latest", site_id, device.id);
         let stats = client.get::<DeviceStatistics>(&stats_path).await.ok();
         let row = DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref());

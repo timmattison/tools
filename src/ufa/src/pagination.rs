@@ -16,6 +16,14 @@ use std::future::Future;
 
 use crate::{client::UnifiClient, models::Page};
 
+/// Items requested per round trip.
+///
+/// The server is free to answer with fewer — the walk advances by what it
+/// actually received, so a server-side cap costs extra requests rather than
+/// correctness — but asking for a full page keeps a large site down to a
+/// handful of requests instead of dozens.
+const PAGE_SIZE: u32 = 200;
+
 /// Fetch every item of the paginated collection at `path`.
 ///
 /// # Arguments
@@ -37,8 +45,10 @@ where
 {
     collect_pages(|offset| {
         let offset = offset.to_string();
+        let limit = PAGE_SIZE.to_string();
         async move {
-            let params: Vec<(&str, &dyn std::fmt::Display)> = vec![("offset", &offset)];
+            let params: Vec<(&str, &dyn std::fmt::Display)> =
+                vec![("limit", &limit), ("offset", &offset)];
             client.get_with_params(path, &params).await
         }
     })
@@ -50,13 +60,45 @@ where
 /// `fetch_page` is called with the offset of the next item wanted, which makes
 /// the walking logic independent of the transport and therefore testable
 /// without a network.
+///
+/// The walk advances by the number of items actually received rather than by
+/// the page size it asked for, so a server that caps or ignores the requested
+/// limit still yields a complete answer. A page that comes back empty while
+/// the server's own `totalCount` says more items exist means the server has
+/// stopped making progress; that is reported as an error instead of being
+/// looped on forever or quietly truncated.
 async fn collect_pages<T, F, Fut>(mut fetch_page: F) -> Result<Vec<T>>
 where
     F: FnMut(u64) -> Fut,
     Fut: Future<Output = Result<Page<T>>>,
 {
-    let page = fetch_page(0).await?;
-    Ok(page.data)
+    let mut items: Vec<T> = Vec::new();
+
+    loop {
+        let page = fetch_page(collected(&items)).await?;
+
+        if page.data.is_empty() {
+            anyhow::ensure!(
+                collected(&items) >= page.total_count,
+                "The server returned an empty page after {} of {} items. \
+                 It is not making progress through the collection, so the answer would be incomplete.",
+                collected(&items),
+                page.total_count
+            );
+            return Ok(items);
+        }
+
+        items.extend(page.data);
+
+        if collected(&items) >= page.total_count {
+            return Ok(items);
+        }
+    }
+}
+
+/// How many items have been collected so far, as an offset.
+fn collected<T>(items: &[T]) -> u64 {
+    u64::try_from(items.len()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
