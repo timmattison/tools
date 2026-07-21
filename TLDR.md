@@ -28,6 +28,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `htmlboard` | Pretty-prints HTML on the clipboard and puts it back. |
 | `ic` | Fast terminal image/video display utility (an `imgcat` alternative; video needs ffmpeg). |
 | `idear` | IDEA Reaper — cleans up orphaned `.idea` directories left by JetBrains IDEs. |
+| `install-bin` | Installs a locally built binary onto a fresh inode so macOS's signature cache can't SIGKILL it, then verifies it execs. |
 | `inscribe` | Generates git commit messages from staged changes using Claude AI. |
 | `jsonboard` | Pretty-prints JSON on the clipboard and puts it back. |
 | `kitchen-sync` | Installs every Rust binary from a git repo with one command. |

@@ -425,6 +425,15 @@ containers/CI).
     serialized via `.git/swt.lock`. Drop a `./.swt-check` script to override the default green check.
   - To install: symlink `swt/swt.ts` from a clone of this repo into your `PATH`
     (e.g. `ln -s "$PWD/swt/swt.ts" ~/.local/bin/swt`). Requires `npx`/`tsx`.
+- install-bin
+  - Installs a locally built binary into `~/.local/bin` (or `--dest <dir>`) without tripping macOS's
+    per-vnode code-signature cache: `cp` over an existing binary keeps the destination inode, so the
+    kernel SIGKILLs every exec of the new bytes ("Killed", exit 137) even though `codesign -vv` passes.
+    `install-bin` unlinks the destination first so the copy always lands on a fresh inode, then execs
+    the installed binary once (`--verify-arg`, default `--version`) to prove the kernel accepts it,
+    re-signing ad-hoc and retrying once on a SIGKILL. Usage: `install-bin target/release/mytool`.
+  - To install: symlink `install-bin/install-bin.ts` from a clone of this repo into your `PATH`
+    (e.g. `ln -s "$PWD/install-bin/install-bin.ts" ~/.local/bin/install-bin`). Requires `npx`/`tsx`.
 
 ## dirhash
 
