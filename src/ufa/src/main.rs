@@ -56,6 +56,14 @@ impl Credential {
         }
     }
 
+    /// How the credential is named when a resolution failure is reported.
+    fn description(self) -> &'static str {
+        match self {
+            Self::Controller => "API key",
+            Self::SiteManager => "Site Manager API key",
+        }
+    }
+
     /// The advice shown when no source for this credential exists at all.
     fn missing_message(self) -> &'static str {
         match self {
@@ -67,15 +75,27 @@ impl Credential {
 
 /// Resolve a credential with CLI flag > environment variable > config file
 /// precedence.
+///
+/// "Configured but unreadable" and "not configured anywhere" are different
+/// problems and get different answers: a configured credential that fails to
+/// resolve reports the underlying cause (1Password CLI missing, prompt denied,
+/// item renamed), because re-running the setup wizard cannot fix any of that.
 fn resolve_credential(
     credential: Credential,
     cli: Option<String>,
     env: Option<String>,
     config: Option<&Config>,
 ) -> Result<String> {
-    cli.or(env)
-        .or_else(|| config.and_then(|config| credential.resolve(config).ok()))
-        .context(credential.missing_message())
+    if let Some(key) = cli.or(env) {
+        return Ok(key);
+    }
+
+    match config {
+        Some(config) if credential.is_configured(config) => credential
+            .resolve(config)
+            .with_context(|| format!("Failed to read the configured {}", credential.description())),
+        _ => anyhow::bail!(credential.missing_message()),
+    }
 }
 
 /// UniFi API CLI tool for managing UniFi Network applications
