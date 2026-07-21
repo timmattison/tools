@@ -27,6 +27,57 @@ fn parse_bool_env(s: &str) -> Result<bool, String> {
     }
 }
 
+/// A credential `ufa` needs, resolvable from a CLI flag, an environment
+/// variable, or the configuration file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Credential {
+    /// The UniFi controller API key.
+    Controller,
+    /// The UniFi Site Manager (cloud) API key.
+    SiteManager,
+}
+
+impl Credential {
+    /// Whether the configuration file names a source for this credential —
+    /// either a 1Password reference or an in-file value.
+    fn is_configured(self, config: &Config) -> bool {
+        match self {
+            Self::Controller => config.has_api_key(),
+            Self::SiteManager => config.has_site_manager_key(),
+        }
+    }
+
+    /// Read the credential from the configuration file, which may mean
+    /// fetching it from 1Password.
+    fn resolve(self, config: &Config) -> Result<String> {
+        match self {
+            Self::Controller => config.resolve_api_key(),
+            Self::SiteManager => config.resolve_site_manager_api_key(),
+        }
+    }
+
+    /// The advice shown when no source for this credential exists at all.
+    fn missing_message(self) -> &'static str {
+        match self {
+            Self::Controller => "API key not provided. Set it via --api-key, UNIFI_API_KEY environment variable, or run 'ufa config setup' to create a configuration file.",
+            Self::SiteManager => "Site Manager API key not provided. Set it via --site-manager-api-key, UNIFI_SITE_MANAGER_API_KEY environment variable, or run 'ufa config cloud' to set it up.",
+        }
+    }
+}
+
+/// Resolve a credential with CLI flag > environment variable > config file
+/// precedence.
+fn resolve_credential(
+    credential: Credential,
+    cli: Option<String>,
+    env: Option<String>,
+    config: Option<&Config>,
+) -> Result<String> {
+    cli.or(env)
+        .or_else(|| config.and_then(|config| credential.resolve(config).ok()))
+        .context(credential.missing_message())
+}
+
 /// UniFi API CLI tool for managing UniFi Network applications
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!(), about)]
@@ -162,16 +213,12 @@ async fn main() -> Result<()> {
     {
         let file_config = Config::load()?;
 
-        let sm_api_key = match site_manager_api_key
-            .clone()
-            .or_else(|| std::env::var("UNIFI_SITE_MANAGER_API_KEY").ok())
-        {
-            Some(key) => key,
-            None => file_config
-                .as_ref()
-                .context("Site Manager API key not provided. Set it via --site-manager-api-key, UNIFI_SITE_MANAGER_API_KEY environment variable, or run 'ufa config cloud' to set it up.")?
-                .resolve_site_manager_api_key()?,
-        };
+        let sm_api_key = resolve_credential(
+            Credential::SiteManager,
+            site_manager_api_key.clone(),
+            std::env::var("UNIFI_SITE_MANAGER_API_KEY").ok(),
+            file_config.as_ref(),
+        )?;
 
         let sm_client = site_manager::SiteManagerClient::new(&sm_api_key).await?;
         return site_manager::handle_cloud_command(command.clone(), &sm_client, args.output).await;
@@ -186,10 +233,12 @@ async fn main() -> Result<()> {
         .or_else(|| file_config.as_ref().and_then(|c| c.url.clone()))
         .context("UniFi URL not provided. Set it via --url, UNIFI_URL environment variable, or run 'ufa config setup' to create a configuration file.")?;
 
-    let api_key = args.api_key
-        .or_else(|| std::env::var("UNIFI_API_KEY").ok())
-        .or_else(|| file_config.as_ref().and_then(|c| c.resolve_api_key().ok()))
-        .context("API key not provided. Set it via --api-key, UNIFI_API_KEY environment variable, or run 'ufa config setup' to create a configuration file.")?;
+    let api_key = resolve_credential(
+        Credential::Controller,
+        args.api_key,
+        std::env::var("UNIFI_API_KEY").ok(),
+        file_config.as_ref(),
+    )?;
 
     let insecure = args
         .insecure
@@ -228,6 +277,96 @@ async fn main() -> Result<()> {
         Commands::Info => info::handle_info_command(&client, args.output).await,
         Commands::Config { .. } => unreachable!("Config commands handled above"),
         Commands::Cloud { .. } => unreachable!("Cloud commands handled above"),
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::{resolve_credential, Config, Credential};
+
+    /// A config whose 1Password reference cannot be read.
+    ///
+    /// The reference is deliberately not an `op://` path: op-cache rejects it
+    /// locally, so the test never shells out to the `op` CLI (no biometric
+    /// prompt, no network, no dependency on the developer's vault).
+    fn config_with_unreadable_reference() -> Config {
+        Config {
+            op_path: Some("not-an-op-path".to_string()),
+            ..Config::default()
+        }
+    }
+
+    /// When a key *is* configured but resolving it fails — 1Password CLI
+    /// missing, biometric prompt denied, item renamed — the user must be told
+    /// what actually went wrong. "API key not provided… run 'ufa config
+    /// setup'" sends them to re-run a wizard that cannot fix any of that.
+    #[test]
+    fn resolution_failure_reports_the_underlying_cause() {
+        let config = config_with_unreadable_reference();
+
+        let error = resolve_credential(Credential::Controller, None, None, Some(&config))
+            .expect_err("an unreadable 1Password reference must not resolve");
+        let report = format!("{error:#}");
+
+        assert!(
+            report.contains("not-an-op-path"),
+            "the failure must name the 1Password reference it could not read, got {report}"
+        );
+        assert!(
+            !report.contains("not provided"),
+            "a configured-but-unreadable key must not be reported as missing, got {report}"
+        );
+    }
+
+    /// The friendly advice still applies when nothing is configured anywhere.
+    #[test]
+    fn missing_credential_reports_the_configuration_advice() {
+        let error = resolve_credential(Credential::Controller, None, None, None)
+            .expect_err("no key anywhere must not resolve");
+
+        assert!(
+            format!("{error:#}").contains("ufa config setup"),
+            "an unconfigured key must point at setup, got {error:#}"
+        );
+
+        let error = resolve_credential(
+            Credential::SiteManager,
+            None,
+            None,
+            Some(&Config::default()),
+        )
+        .expect_err("an empty config must not resolve a cloud key");
+        assert!(
+            format!("{error:#}").contains("ufa config cloud"),
+            "an unconfigured cloud key must point at cloud setup, got {error:#}"
+        );
+    }
+
+    /// CLI flag beats the environment, which beats the config file.
+    #[test]
+    fn cli_argument_wins_over_environment_and_config_file() {
+        let config = config_with_unreadable_reference();
+
+        assert_eq!(
+            resolve_credential(
+                Credential::Controller,
+                Some("from-cli".to_string()),
+                Some("from-env".to_string()),
+                Some(&config),
+            )
+            .expect("the CLI argument must resolve"),
+            "from-cli"
+        );
+        assert_eq!(
+            resolve_credential(
+                Credential::Controller,
+                None,
+                Some("from-env".to_string()),
+                Some(&config),
+            )
+            .expect("the environment variable must resolve"),
+            "from-env"
+        );
     }
 }
 
