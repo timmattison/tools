@@ -13,6 +13,14 @@ use crate::{
     site_helper::get_site_id_or_prompt,
 };
 
+/// Shown in place of a figure the controller did not report.
+const NO_DATA: &str = "N/A";
+
+/// Shown in place of every figure of a device whose statistics request
+/// failed, so an unreachable device or a permissions problem cannot be
+/// mistaken for a device that simply had nothing to report.
+const FETCH_FAILED: &str = "ERROR";
+
 #[derive(Subcommand, Debug)]
 pub enum DevicesCommand {
     /// List devices on a site
@@ -122,7 +130,7 @@ fn format_uptime(seconds: Option<u64>) -> String {
                 format!("{}m", minutes)
             }
         }
-        None => "N/A".to_string(),
+        None => NO_DATA.to_string(),
     }
 }
 
@@ -139,21 +147,21 @@ fn format_rate(bps: Option<u64>) -> String {
                 format!("{} bps", rate)
             }
         }
-        None => "N/A".to_string(),
+        None => NO_DATA.to_string(),
     }
 }
 
 fn format_percentage(pct: Option<f64>) -> String {
     match pct {
         Some(p) => format!("{:.1}%", p),
-        None => "N/A".to_string(),
+        None => NO_DATA.to_string(),
     }
 }
 
 fn format_load_avg(load: Option<f64>) -> String {
     match load {
         Some(l) => format!("{:.2}", l),
-        None => "N/A".to_string(),
+        None => NO_DATA.to_string(),
     }
 }
 
@@ -216,12 +224,12 @@ impl DeviceStatsRowWithName {
             Err(_) => Self {
                 name: device.name.clone(),
                 model: device.model.clone(),
-                uptime: "N/A".to_string(),
-                cpu_pct: "N/A".to_string(),
-                memory_pct: "N/A".to_string(),
-                load_avg_1m: "N/A".to_string(),
-                tx_rate: "N/A".to_string(),
-                rx_rate: "N/A".to_string(),
+                uptime: FETCH_FAILED.to_string(),
+                cpu_pct: FETCH_FAILED.to_string(),
+                memory_pct: FETCH_FAILED.to_string(),
+                load_avg_1m: FETCH_FAILED.to_string(),
+                tx_rate: FETCH_FAILED.to_string(),
+                rx_rate: FETCH_FAILED.to_string(),
             },
         }
     }
@@ -366,6 +374,12 @@ async fn get_all_device_stats(
         .iter()
         .zip(&statistics)
         .map(|(device, stats)| {
+            if let Err(error) = stats {
+                eprintln!(
+                    "Failed to fetch statistics for {} ({}): {error:#}",
+                    device.name, device.id
+                );
+            }
             DeviceStatsRowWithName::from_device_and_stats(device, stats.as_ref())
         })
         .collect();
@@ -544,7 +558,7 @@ mod tests {
         let failed = DeviceStatsRowWithName::from_device_and_stats(&device, Err(&failure));
 
         assert_eq!(
-            no_figures.uptime, "N/A",
+            no_figures.uptime, NO_DATA,
             "a device with nothing to report keeps reading N/A"
         );
         assert_ne!(
