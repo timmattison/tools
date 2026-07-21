@@ -7,7 +7,7 @@ use crate::{
     client::UnifiClient,
     device_helper::get_device_id_or_prompt,
     models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
-    output::{print_single_item, print_vec_table, OutputFormat},
+    output::{print_single_item, print_vec_table, render_vec_table, OutputFormat},
     pagination::fetch_all,
     site_helper::get_site_id_or_prompt,
 };
@@ -340,7 +340,7 @@ async fn get_single_device_stats(
 async fn get_all_device_stats(
     client: &UnifiClient,
     site_id: Uuid,
-    _output_format: OutputFormat,
+    output_format: OutputFormat,
 ) -> Result<()> {
     let devices_path = format!("sites/{}/devices", site_id);
     let devices: Vec<Device> = fetch_all(client, &devices_path).await?;
@@ -361,10 +361,31 @@ async fn get_all_device_stats(
         stats_rows.push(row);
     }
 
-    // Always show table format for --all (JSON would be too verbose)
-    print_vec_table(&stats_rows, OutputFormat::Table)?;
+    println!("{}", render_all_device_stats(&stats_rows, output_format)?);
 
     Ok(())
+}
+
+/// Render the per-device statistics of `devices stats --all`.
+///
+/// # Arguments
+///
+/// * `rows` - One row per device, in device order.
+/// * `format` - The output format the user asked for.
+///
+/// # Returns
+///
+/// The rendered text, without a trailing newline.
+///
+/// # Errors
+///
+/// Returns an error if the rows cannot be serialized.
+fn render_all_device_stats(
+    rows: &[DeviceStatsRowWithName],
+    format: OutputFormat,
+) -> Result<String> {
+    let _ = format;
+    render_vec_table(rows, OutputFormat::Table)
 }
 
 async fn restart_device(
@@ -397,4 +418,79 @@ async fn power_cycle_port(
     let _: serde_json::Value = client.post(&path, &action).await?;
     println!("Port power cycle initiated successfully");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{DeviceFeature, DeviceInterface, DeviceState};
+
+    /// Box-drawing corner produced by the table renderer.
+    const TABLE_CORNER: char = '┌';
+
+    /// A device with just enough shape to build a statistics row from.
+    fn test_device(name: &str) -> Device {
+        Device {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            model: "U6-LR".to_string(),
+            mac_address: "00:11:22:33:44:55".to_string(),
+            ip_address: "192.168.1.2".to_string(),
+            state: DeviceState::Online,
+            features: vec![DeviceFeature::AccessPoint],
+            interfaces: vec![DeviceInterface::Radios],
+        }
+    }
+
+    fn rows_for(names: &[&str]) -> Vec<DeviceStatsRowWithName> {
+        names
+            .iter()
+            .map(|name| DeviceStatsRowWithName::from_device_and_stats(&test_device(name), None))
+            .collect()
+    }
+
+    /// `--output json` is an explicit request from the user, usually because
+    /// the output is being piped into something. Answering it with a table
+    /// silently breaks that pipeline.
+    #[test]
+    fn all_device_stats_honour_the_json_output_format() {
+        let rows = rows_for(&["ap-lr", "switch-8"]);
+
+        let rendered = render_all_device_stats(&rows, OutputFormat::Json)
+            .expect("rendering the all-devices stats must succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap_or_else(|error| {
+            panic!("--output json must produce JSON ({error}), got:\n{rendered}")
+        });
+
+        let entries = parsed
+            .as_array()
+            .unwrap_or_else(|| panic!("--output json must produce an array, got:\n{rendered}"));
+        assert_eq!(entries.len(), 2, "every device must appear:\n{rendered}");
+        assert_eq!(
+            entries[0]["name"], "ap-lr",
+            "wrong first device:\n{rendered}"
+        );
+        assert_eq!(
+            entries[1]["name"], "switch-8",
+            "wrong second device:\n{rendered}"
+        );
+    }
+
+    /// The table stays the default rendering.
+    #[test]
+    fn all_device_stats_default_to_a_table() {
+        let rows = rows_for(&["ap-lr"]);
+
+        let rendered = render_all_device_stats(&rows, OutputFormat::Table)
+            .expect("rendering the all-devices stats must succeed");
+
+        assert!(
+            rendered.contains(TABLE_CORNER),
+            "the default rendering must stay a table, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("ap-lr"),
+            "the table must name the device, got:\n{rendered}"
+        );
+    }
 }
