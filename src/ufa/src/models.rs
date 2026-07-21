@@ -1,6 +1,71 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Declare an enum whose values arrive from the UniFi API as bare strings.
+///
+/// The controller is a third-party product on its own release schedule: a
+/// firmware update can introduce a device state, a connector type or a Wi-Fi
+/// standard that this build has never heard of. A plain `#[derive(Deserialize)]`
+/// enum rejects such a value, and because it is one field of one item of a
+/// paged response, that rejection fails the *whole* listing.
+///
+/// Every enum declared through this macro instead keeps the unrecognized text
+/// in an `Unknown` variant, so:
+///
+/// * the rest of the response still reaches the user,
+/// * `--output json` hands the value back exactly as the controller sent it,
+/// * `Display` shows the controller's own spelling, for known and unknown
+///   values alike.
+///
+/// The wire spelling is written once per variant and drives serialization,
+/// deserialization and display together, so they cannot drift apart.
+///
+/// # Examples
+///
+/// ```ignore
+/// api_enum! {
+///     /// How the controller says a port is doing.
+///     pub enum PortState {
+///         Up => "UP",
+///         Down => "DOWN",
+///     }
+/// }
+/// ```
+macro_rules! api_enum {
+    (
+        $(#[$enum_meta:meta])*
+        $visibility:vis enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident => $wire:literal
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+        $visibility enum $name {
+            $(
+                $(#[$variant_meta])*
+                #[serde(rename = $wire)]
+                $variant,
+            )*
+            /// A value this build does not know, kept verbatim so it can still
+            /// be shown and written back out.
+            #[serde(untagged)]
+            Unknown(String),
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $( Self::$variant => formatter.write_str($wire), )*
+                    Self::Unknown(value) => formatter.write_str(value),
+                }
+            }
+        }
+    };
+}
+
 // Common pagination types
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Page<T> {
@@ -25,7 +90,12 @@ pub struct Site {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Device {
     pub id: Uuid,
+    /// A device the controller has not named yet -- one part way through
+    /// adoption, say -- must still appear in the listing, so an absent name
+    /// is empty rather than fatal.
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub model: String,
     #[serde(rename = "macAddress")]
     pub mac_address: String,
@@ -39,7 +109,10 @@ pub struct Device {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DeviceDetails {
     pub id: Uuid,
+    /// Absent for the same reason as [`Device::name`].
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub model: String,
     pub supported: bool,
     #[serde(rename = "macAddress")]
@@ -62,33 +135,36 @@ pub struct DeviceDetails {
     pub interfaces: DeviceInterfaces,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum DeviceState {
-    Online,
-    Offline,
-    PendingAdoption,
-    Updating,
-    GettingReady,
-    Adopting,
-    Deleting,
-    ConnectionInterrupted,
-    Isolated,
+api_enum! {
+    /// What the controller says a device is doing.
+    pub enum DeviceState {
+        Online => "ONLINE",
+        Offline => "OFFLINE",
+        PendingAdoption => "PENDING_ADOPTION",
+        Updating => "UPDATING",
+        GettingReady => "GETTING_READY",
+        Adopting => "ADOPTING",
+        Deleting => "DELETING",
+        ConnectionInterrupted => "CONNECTION_INTERRUPTED",
+        Isolated => "ISOLATED",
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum DeviceFeature {
-    Switching,
-    AccessPoint,
-    Gateway,
+api_enum! {
+    /// A capability the controller reports a device as having.
+    pub enum DeviceFeature {
+        Switching => "switching",
+        AccessPoint => "accessPoint",
+        Gateway => "gateway",
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum DeviceInterface {
-    Ports,
-    Radios,
+api_enum! {
+    /// A kind of interface the controller reports a device as having.
+    pub enum DeviceInterface {
+        Ports => "ports",
+        Radios => "radios",
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -115,22 +191,26 @@ pub struct Port {
     pub poe: Option<PortPoE>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PortState {
-    Up,
-    Down,
-    Unknown,
+api_enum! {
+    /// What the controller says a port is doing.
+    pub enum PortState {
+        Up => "UP",
+        Down => "DOWN",
+        /// The controller's own "UNKNOWN": it has no state to report. This is
+        /// a value we recognize, unlike the generated `Unknown` fallback.
+        Unspecified => "UNKNOWN",
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PortConnector {
-    Rj45,
-    Sfp,
-    Sfpplus,
-    Sfp28,
-    Qsfp28,
+api_enum! {
+    /// The physical connector of a port.
+    pub enum PortConnector {
+        Rj45 => "RJ45",
+        Sfp => "SFP",
+        Sfpplus => "SFPPLUS",
+        Sfp28 => "SFP28",
+        Qsfp28 => "QSFP28",
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -142,23 +222,25 @@ pub struct PortPoE {
     pub state: PoEState,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub enum PoEStandard {
-    #[serde(rename = "802.3af")]
-    Af,
-    #[serde(rename = "802.3at")]
-    At,
-    #[serde(rename = "802.3bt")]
-    Bt,
+api_enum! {
+    /// The PoE standard a port supplies power under.
+    pub enum PoEStandard {
+        Af => "802.3af",
+        At => "802.3at",
+        Bt => "802.3bt",
+    }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PoEState {
-    Up,
-    Down,
-    Limited,
-    Unknown,
+api_enum! {
+    /// What the controller says the PoE supply of a port is doing.
+    pub enum PoEState {
+        Up => "UP",
+        Down => "DOWN",
+        Limited => "LIMITED",
+        /// The controller's own "UNKNOWN": it has no state to report. This is
+        /// a value we recognize, unlike the generated `Unknown` fallback.
+        Unspecified => "UNKNOWN",
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -172,22 +254,17 @@ pub struct WirelessRadio {
     pub channel: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-pub enum WlanStandard {
-    #[serde(rename = "802.11a")]
-    A,
-    #[serde(rename = "802.11b")]
-    B,
-    #[serde(rename = "802.11g")]
-    G,
-    #[serde(rename = "802.11n")]
-    N,
-    #[serde(rename = "802.11ac")]
-    Ac,
-    #[serde(rename = "802.11ax")]
-    Ax,
-    #[serde(rename = "802.11be")]
-    Be,
+api_enum! {
+    /// The Wi-Fi standard a radio is operating under.
+    pub enum WlanStandard {
+        A => "802.11a",
+        B => "802.11b",
+        G => "802.11g",
+        N => "802.11n",
+        Ac => "802.11ac",
+        Ax => "802.11ax",
+        Be => "802.11be",
+    }
 }
 
 // Device statistics
@@ -246,6 +323,43 @@ pub enum Client {
     Vpn(VpnClient),
     #[serde(rename = "TELEPORT")]
     Teleport(TeleportClient),
+    /// A client of a kind this build does not know, or one whose fields do
+    /// not match the shape we expect. Keeping it costs the user nothing;
+    /// rejecting it would cost them the entire client listing.
+    #[serde(untagged)]
+    Unknown(UnknownClient),
+}
+
+/// A client whose `type` this build does not recognize.
+///
+/// Only the fields every client kind shares are named; everything else is
+/// carried through untouched so `--output json` still reports the client
+/// exactly as the controller described it.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UnknownClient {
+    #[serde(rename = "type")]
+    pub client_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(
+        rename = "connectedAt",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub connected_at: Option<String>,
+    #[serde(rename = "ipAddress", default, skip_serializing_if = "Option::is_none")]
+    pub ip_address: Option<String>,
+    #[serde(
+        rename = "macAddress",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mac_address: Option<String>,
+    /// Everything else the controller sent, kept verbatim.
+    #[serde(flatten)]
+    pub other_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -307,6 +421,21 @@ pub enum ClientAccess {
     Default,
     #[serde(rename = "GUEST")]
     Guest { authorized: bool },
+    /// An access tier this build does not know, kept verbatim.
+    #[serde(untagged)]
+    Unknown(UnknownTaggedObject),
+}
+
+/// A `type`-tagged object whose type this build does not recognize.
+///
+/// The tag is named so it can be shown; the remaining fields are carried
+/// through untouched so nothing the controller said is lost.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct UnknownTaggedObject {
+    #[serde(rename = "type")]
+    pub object_type: String,
+    #[serde(flatten)]
+    pub other_fields: serde_json::Map<String, serde_json::Value>,
 }
 
 // Voucher models
@@ -424,6 +553,9 @@ mod tests {
     /// Where the production half of this file ends and the tests begin.
     const TEST_MODULE_ATTRIBUTE: &str = "#[cfg(test)]";
 
+    /// One enum to exercise: its name, and a round trip through it.
+    type EnumCheck = (&'static str, fn(&str) -> String);
+
     /// Deserialize `raw` as a bare JSON string into `T` and serialize it back.
     ///
     /// # Arguments
@@ -447,7 +579,10 @@ mod tests {
         });
         let written = serde_json::to_string(&parsed).expect("writing the value back must succeed");
         serde_json::from_str(&written).unwrap_or_else(|error| {
-            panic!("{} must serialize back to a string: {error}", std::any::type_name::<T>())
+            panic!(
+                "{} must serialize back to a string: {error}",
+                std::any::type_name::<T>()
+            )
         })
     }
 
@@ -481,7 +616,7 @@ mod tests {
     /// json` stays faithful to what the controller actually said.
     #[test]
     fn unknown_values_round_trip_through_every_api_enum() {
-        let checks: &[(&str, fn(&str) -> String)] = &[
+        let checks: &[EnumCheck] = &[
             ("DeviceState", round_trip::<DeviceState>),
             ("DeviceFeature", round_trip::<DeviceFeature>),
             ("DeviceInterface", round_trip::<DeviceInterface>),
@@ -505,7 +640,7 @@ mod tests {
     /// up cannot quietly rewrite what `--output json` emits.
     #[test]
     fn known_values_keep_their_wire_spelling() {
-        let checks: &[(&str, fn(&str) -> String)] = &[
+        let checks: &[EnumCheck] = &[
             ("ONLINE", round_trip::<DeviceState>),
             ("accessPoint", round_trip::<DeviceFeature>),
             ("radios", round_trip::<DeviceInterface>),
@@ -531,7 +666,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("the listing must still parse: {error}"));
 
         assert_eq!(page.data.len(), 2, "every device must survive the parse");
-        assert_eq!(page.data[1].name, "switch-8", "the known device must survive");
+        assert_eq!(
+            page.data[1].name, "switch-8",
+            "the known device must survive"
+        );
         let written = serde_json::to_value(&page.data[0]).expect("writing the device back");
         assert_eq!(
             written["state"], FUTURE_VALUE,
@@ -726,9 +864,7 @@ mod tests {
             let fallback_variant = lines[index + 1..]
                 .iter()
                 .take_while(|body| body.trim() != "}")
-                .any(|body| {
-                    body.contains("serde(untagged)") || body.contains("serde(other)")
-                });
+                .any(|body| body.contains("serde(untagged)") || body.contains("serde(other)"));
 
             declarations.push(EnumDeclaration {
                 name,

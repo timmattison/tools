@@ -10,6 +10,10 @@ use crate::{
     site_helper::get_site_id_or_prompt,
 };
 
+/// Shown in place of a value the client kind does not have at all, such as
+/// the MAC address of a VPN client.
+const NOT_APPLICABLE: &str = "N/A";
+
 #[derive(Subcommand, Debug)]
 pub enum ClientsCommand {
     /// List connected clients on a site
@@ -101,7 +105,7 @@ fn client_to_row(client: &Client) -> ClientRow {
             name: c.name.clone(),
             client_type: "VPN".to_string(),
             ip_address: c.ip_address.clone().unwrap_or_default(),
-            mac_address: "N/A".to_string(),
+            mac_address: NOT_APPLICABLE.to_string(),
             connected_at: c.connected_at.clone().unwrap_or_default(),
         },
         Client::Teleport(c) => ClientRow {
@@ -109,7 +113,20 @@ fn client_to_row(client: &Client) -> ClientRow {
             name: c.name.clone(),
             client_type: "TELEPORT".to_string(),
             ip_address: c.ip_address.clone().unwrap_or_default(),
-            mac_address: "N/A".to_string(),
+            mac_address: NOT_APPLICABLE.to_string(),
+            connected_at: c.connected_at.clone().unwrap_or_default(),
+        },
+        // A client kind this build does not know still belongs in the
+        // listing, described with whatever the controller did say about it.
+        Client::Unknown(c) => ClientRow {
+            id: c.id.map(|id| id.to_string()).unwrap_or_default(),
+            name: c.name.clone().unwrap_or_default(),
+            client_type: c.client_type.clone(),
+            ip_address: c.ip_address.clone().unwrap_or_default(),
+            mac_address: c
+                .mac_address
+                .clone()
+                .unwrap_or_else(|| NOT_APPLICABLE.to_string()),
             connected_at: c.connected_at.clone().unwrap_or_default(),
         },
     }
