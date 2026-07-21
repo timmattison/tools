@@ -151,6 +151,22 @@ impl Config {
         Ok(Some(config))
     }
 
+    /// Apply an edit to the saved configuration and write it back.
+    ///
+    /// This is the only way the interactive commands change what is on disk,
+    /// so a command that asks about one credential can never clear another.
+    fn edit(edit: impl FnOnce(&mut Self)) -> Result<Self> {
+        Self::edit_at(&Self::config_file_path()?, edit)
+    }
+
+    /// [`Config::edit`] against an explicit path.
+    fn edit_at(config_path: &Path, edit: impl FnOnce(&mut Self)) -> Result<Self> {
+        let mut config = Self::default();
+        edit(&mut config);
+        config.save_to(config_path)?;
+        Ok(config)
+    }
+
     /// Record the controller answers gathered during interactive setup.
     ///
     /// Fields the controller step does not ask about are left untouched.
@@ -367,11 +383,10 @@ impl Config {
         let sm_answer = prompt_for_site_manager_key()?;
 
         // Save configuration
-        let mut config = Config::default();
-        config.set_controller(controller_url, &credential, insecure);
-        config.set_site_manager(&sm_answer);
-
-        config.save()?;
+        let config = Self::edit(|config| {
+            config.set_controller(controller_url, &credential, insecure);
+            config.set_site_manager(&sm_answer);
+        })?;
 
         println!("\n🎉 Configuration complete!");
         println!("You can now use ufa commands without specifying connection details.");
@@ -682,6 +697,72 @@ mod tests {
         assert!(
             error.to_string().contains("not-an-op-path"),
             "the failure must name the 1Password reference it could not read, got {error}"
+        );
+    }
+
+    /// `ufa config cloud` announces that it configures cloud credentials, so
+    /// it must leave the controller configuration exactly as it found it.
+    #[test]
+    fn configuring_the_cloud_key_preserves_the_controller_configuration() {
+        let temp = TempConfigDir::new("cloud-preserves");
+        let existing = Config {
+            url: Some("https://192.168.1.1".to_string()),
+            op_path: Some("op://Private/ufa/key - 192.168.1.1 port 443".to_string()),
+            insecure: Some(true),
+            ..Config::default()
+        };
+        existing
+            .save_to(&temp.config_file())
+            .expect("saving the existing config must succeed");
+
+        Config::edit_at(&temp.config_file(), |config| {
+            config.set_site_manager("op://Private/ufa/site manager key");
+        })
+        .expect("configuring the cloud key must succeed");
+
+        let loaded = Config::load_from(&temp.config_file())
+            .expect("loading the config must succeed")
+            .expect("the config file must still exist");
+
+        assert_eq!(loaded.url, existing.url, "controller URL must survive");
+        assert_eq!(
+            loaded.op_path, existing.op_path,
+            "controller 1Password reference must survive"
+        );
+        assert_eq!(
+            loaded.insecure, existing.insecure,
+            "TLS verification choice must survive"
+        );
+        assert_eq!(
+            loaded.sm_op_path.as_deref(),
+            Some("op://Private/ufa/site manager key"),
+            "the cloud credential must actually be recorded"
+        );
+    }
+
+    /// Pressing Enter at the Site Manager prompt means "leave it alone", not
+    /// "delete the key I set last time".
+    #[test]
+    fn skipping_the_site_manager_prompt_preserves_the_existing_key() {
+        let temp = TempConfigDir::new("cloud-skip");
+        let existing = Config {
+            sm_op_path: Some("op://Private/ufa/site manager key".to_string()),
+            ..Config::default()
+        };
+        existing
+            .save_to(&temp.config_file())
+            .expect("saving the existing config must succeed");
+
+        Config::edit_at(&temp.config_file(), |config| config.set_site_manager(""))
+            .expect("skipping the prompt must succeed");
+
+        let loaded = Config::load_from(&temp.config_file())
+            .expect("loading the config must succeed")
+            .expect("the config file must still exist");
+
+        assert_eq!(
+            loaded.sm_op_path, existing.sm_op_path,
+            "an empty answer must not clear the configured cloud credential"
         );
     }
 
