@@ -89,8 +89,8 @@ impl From<&Device> for DeviceRow {
             id: device.id.to_string(),
             name: device.name.clone(),
             model: device.model.clone(),
-            mac_address: device.mac_address.clone(),
-            ip_address: device.ip_address.clone(),
+            mac_address: device.mac_address.to_string(),
+            ip_address: device.ip_address.to_string(),
             // The controller's own spelling, which is the only rendering that
             // still says something when the state is one this build has never
             // seen.
@@ -485,7 +485,8 @@ async fn power_cycle_port(
 mod tests {
     use super::*;
     use crate::models::{
-        DeviceFeature, DeviceInterface, DeviceInterfaceStatistics, DeviceState, UplinkStatistics,
+        DeviceFeature, DeviceInterface, DeviceInterfaceStatistics, DeviceState, IpAddress,
+        MacAddress, UplinkStatistics,
     };
     use clap::Parser;
     use std::cell::Cell;
@@ -499,8 +500,8 @@ mod tests {
             id: Uuid::new_v4(),
             name: name.to_string(),
             model: "U6-LR".to_string(),
-            mac_address: "00:11:22:33:44:55".to_string(),
-            ip_address: "192.168.1.2".to_string(),
+            mac_address: MacAddress::from("00:11:22:33:44:55"),
+            ip_address: IpAddress::from("192.168.1.2"),
             state: DeviceState::Online,
             features: vec![DeviceFeature::AccessPoint],
             interfaces: vec![DeviceInterface::Radios],

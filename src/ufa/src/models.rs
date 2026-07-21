@@ -66,6 +66,60 @@ macro_rules! api_enum {
     };
 }
 
+/// Declare a newtype over a string the UniFi API reports.
+///
+/// The value is kept exactly as the controller sent it and is never
+/// validated: it arrives *from* the controller, so rejecting a spelling we
+/// did not expect would turn a cosmetic surprise into a failed command. What
+/// the type buys is that two strings describing different things can no
+/// longer stand in for one another -- a MAC address handed to something
+/// expecting an IP address is a compile error rather than a wrong column.
+///
+/// The inner string is private and the type is `#[serde(transparent)]`, so
+/// the wire format is unchanged and the only ways to read the value back out
+/// are `Display` and serialization.
+macro_rules! api_string {
+    (
+        $(#[$meta:meta])*
+        $visibility:vis struct $name:ident;
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+        #[serde(transparent)]
+        $visibility struct $name(String);
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self(value.to_string())
+            }
+        }
+    };
+}
+
+api_string! {
+    /// The hardware address of a device or client, as the controller
+    /// reported it.
+    pub struct MacAddress;
+}
+
+api_string! {
+    /// The network address of a device or client, as the controller reported
+    /// it. Both IPv4 and IPv6 arrive here.
+    pub struct IpAddress;
+}
+
 // Common pagination types
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Page<T> {
@@ -98,9 +152,9 @@ pub struct Device {
     #[serde(default)]
     pub model: String,
     #[serde(rename = "macAddress")]
-    pub mac_address: String,
+    pub mac_address: MacAddress,
     #[serde(rename = "ipAddress")]
-    pub ip_address: String,
+    pub ip_address: IpAddress,
     pub state: DeviceState,
     pub features: Vec<DeviceFeature>,
     pub interfaces: Vec<DeviceInterface>,
@@ -116,9 +170,9 @@ pub struct DeviceDetails {
     pub model: String,
     pub supported: bool,
     #[serde(rename = "macAddress")]
-    pub mac_address: String,
+    pub mac_address: MacAddress,
     #[serde(rename = "ipAddress")]
-    pub ip_address: String,
+    pub ip_address: IpAddress,
     pub state: DeviceState,
     #[serde(rename = "firmwareVersion")]
     pub firmware_version: String,
@@ -350,13 +404,13 @@ pub struct UnknownClient {
     )]
     pub connected_at: Option<String>,
     #[serde(rename = "ipAddress", default, skip_serializing_if = "Option::is_none")]
-    pub ip_address: Option<String>,
+    pub ip_address: Option<IpAddress>,
     #[serde(
         rename = "macAddress",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub mac_address: Option<String>,
+    pub mac_address: Option<MacAddress>,
     /// Everything else the controller sent, kept verbatim.
     #[serde(flatten)]
     pub other_fields: serde_json::Map<String, serde_json::Value>,
@@ -369,9 +423,9 @@ pub struct WiredClient {
     #[serde(rename = "connectedAt")]
     pub connected_at: Option<String>,
     #[serde(rename = "ipAddress")]
-    pub ip_address: Option<String>,
+    pub ip_address: Option<IpAddress>,
     #[serde(rename = "macAddress")]
-    pub mac_address: String,
+    pub mac_address: MacAddress,
     #[serde(rename = "uplinkDeviceId")]
     pub uplink_device_id: Uuid,
     pub access: ClientAccess,
@@ -384,9 +438,9 @@ pub struct WirelessClient {
     #[serde(rename = "connectedAt")]
     pub connected_at: Option<String>,
     #[serde(rename = "ipAddress")]
-    pub ip_address: Option<String>,
+    pub ip_address: Option<IpAddress>,
     #[serde(rename = "macAddress")]
-    pub mac_address: String,
+    pub mac_address: MacAddress,
     #[serde(rename = "uplinkDeviceId")]
     pub uplink_device_id: Uuid,
     pub access: ClientAccess,
@@ -399,7 +453,7 @@ pub struct VpnClient {
     #[serde(rename = "connectedAt")]
     pub connected_at: Option<String>,
     #[serde(rename = "ipAddress")]
-    pub ip_address: Option<String>,
+    pub ip_address: Option<IpAddress>,
     pub access: ClientAccess,
 }
 
@@ -410,7 +464,7 @@ pub struct TeleportClient {
     #[serde(rename = "connectedAt")]
     pub connected_at: Option<String>,
     #[serde(rename = "ipAddress")]
-    pub ip_address: Option<String>,
+    pub ip_address: Option<IpAddress>,
     pub access: ClientAccess,
 }
 
