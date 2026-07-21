@@ -5,7 +5,7 @@ use dirs::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A controller discovered from the 1Password `ufa` item.
 #[derive(Debug, Clone)]
@@ -70,6 +70,28 @@ pub fn discover_op_controllers() -> Result<Vec<OpController>> {
     Ok(controllers)
 }
 
+/// The controller credential gathered during interactive setup.
+///
+/// Either the key already lives in 1Password (and setup merely read it to
+/// verify the reference works), or the user pasted it in because no 1Password
+/// entry exists for this controller.
+#[derive(Debug, Clone)]
+pub enum ControllerCredential {
+    /// The key is stored in 1Password at `op_path`; `key` is its current value.
+    OnePassword { op_path: String, key: String },
+    /// The key was pasted during setup and exists nowhere else.
+    Pasted { key: String },
+}
+
+impl ControllerCredential {
+    /// The API key value, used to test the connection during setup.
+    pub fn key(&self) -> &str {
+        match self {
+            Self::OnePassword { key, .. } | Self::Pasted { key } => key,
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub url: Option<String>,
@@ -96,19 +118,43 @@ impl Config {
 
     /// Load configuration from the default location
     pub fn load() -> Result<Option<Self>> {
-        let config_path = Self::config_file_path()?;
+        Self::load_from(&Self::config_file_path()?)
+    }
 
+    /// Load configuration from an explicit path.
+    ///
+    /// Returns `Ok(None)` when the file does not exist.
+    fn load_from(config_path: &Path) -> Result<Option<Self>> {
         if !config_path.exists() {
             return Ok(None);
         }
 
-        let contents = fs::read_to_string(&config_path)
+        let contents = fs::read_to_string(config_path)
             .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
 
         let config: Config = toml::from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
 
         Ok(Some(config))
+    }
+
+    /// Record the controller answers gathered during interactive setup.
+    ///
+    /// Fields the controller step does not ask about are left untouched.
+    fn set_controller(&mut self, url: String, credential: &ControllerCredential, insecure: bool) {
+        self.url = Some(url);
+        self.insecure = Some(insecure);
+
+        match credential {
+            ControllerCredential::OnePassword { op_path, .. } => {
+                self.op_path = Some(op_path.clone());
+                self.api_key = None;
+            }
+            ControllerCredential::Pasted { .. } => {
+                self.op_path = None;
+                self.api_key = None;
+            }
+        }
     }
 
     /// Read the API key from 1Password via op-cache, falling back to the
@@ -130,18 +176,23 @@ impl Config {
 
     /// Save configuration to the default location
     pub fn save(&self) -> Result<()> {
-        let config_dir = Self::config_dir()?;
-        fs::create_dir_all(&config_dir).with_context(|| {
-            format!(
-                "Failed to create config directory: {}",
-                config_dir.display()
-            )
-        })?;
+        self.save_to(&Self::config_file_path()?)
+    }
 
-        let config_path = Self::config_file_path()?;
+    /// Save configuration to an explicit path, creating parent directories.
+    fn save_to(&self, config_path: &Path) -> Result<()> {
+        if let Some(config_dir) = config_path.parent() {
+            fs::create_dir_all(config_dir).with_context(|| {
+                format!(
+                    "Failed to create config directory: {}",
+                    config_dir.display()
+                )
+            })?;
+        }
+
         let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
 
-        fs::write(&config_path, contents)
+        fs::write(config_path, contents)
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
 
         println!("Configuration saved to: {}", config_path.display());
@@ -204,7 +255,7 @@ impl Config {
             Selection::Network(network_discover_and_select().await?)
         };
 
-        let (controller_url, op_path, api_key) = match selection {
+        let (controller_url, credential) = match selection {
             Selection::Op(c) => {
                 // Read the key via op-cache to verify it works
                 let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -212,13 +263,20 @@ impl Config {
                 let key = cache
                     .read(&path, None)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
-                (c.url(), Some(c.op_path), key)
+                (
+                    c.url(),
+                    ControllerCredential::OnePassword {
+                        op_path: c.op_path,
+                        key,
+                    },
+                )
             }
             Selection::Network(url) => {
                 let key = prompt_for_api_key(&url)?;
-                (url, None, key)
+                (url, ControllerCredential::Pasted { key })
             }
         };
+        let api_key = credential.key().to_string();
 
         // Ask about certificate verification
         print!("\nSkip TLS certificate verification? (needed for self-signed certs) [y/N]: ");
@@ -263,16 +321,12 @@ impl Config {
         let sm_api_key = sm_api_key.trim();
 
         // Save configuration
-        let config = Config {
-            url: Some(controller_url),
-            api_key: None,
-            insecure: Some(insecure),
-            site_manager_api_key: if sm_api_key.is_empty() {
-                None
-            } else {
-                Some(sm_api_key.to_string())
-            },
-            op_path,
+        let mut config = Config::default();
+        config.set_controller(controller_url, &credential, insecure);
+        config.site_manager_api_key = if sm_api_key.is_empty() {
+            None
+        } else {
+            Some(sm_api_key.to_string())
         };
 
         config.save()?;
@@ -405,4 +459,70 @@ fn prompt_for_api_key(controller_url: &str) -> Result<String> {
     }
 
     Ok(api_key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// A throwaway config directory that never touches the developer's real
+    /// `~/.config/ufa`.
+    ///
+    /// The directory name is keyed on the process id *and* a nanosecond
+    /// timestamp so two concurrent `cargo test` runs — or two tests inside one
+    /// run — can never collide on the same file.
+    struct TempConfigDir {
+        dir: PathBuf,
+    }
+
+    impl TempConfigDir {
+        fn new(label: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock is after the Unix epoch")
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("ufa-config-{label}-{}-{nanos}", std::process::id()));
+            Self { dir }
+        }
+
+        fn config_file(&self) -> PathBuf {
+            self.dir.join("config.toml")
+        }
+    }
+
+    impl Drop for TempConfigDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A user with no 1Password `Private/ufa` item goes through the network
+    /// discovery branch of `setup()` and pastes an API key. That key is the
+    /// only copy in existence, so it has to survive the round trip to disk —
+    /// otherwise every subsequent `ufa` command fails with "No API key
+    /// configured. Run 'ufa config setup'", which just re-runs this wizard.
+    #[test]
+    fn pasted_api_key_survives_the_round_trip_to_disk() {
+        let temp = TempConfigDir::new("pasted-key");
+        let credential = ControllerCredential::Pasted {
+            key: "pasted-api-key".to_string(),
+        };
+
+        let mut config = Config::default();
+        config.set_controller("https://192.168.1.1".to_string(), &credential, true);
+        config
+            .save_to(&temp.config_file())
+            .expect("saving the config must succeed");
+
+        let loaded = Config::load_from(&temp.config_file())
+            .expect("loading the config must succeed")
+            .expect("the config file must exist after saving");
+
+        let resolved = loaded
+            .resolve_api_key()
+            .expect("the key pasted during setup must still resolve after saving");
+        assert_eq!(resolved, "pasted-api-key");
+    }
 }
