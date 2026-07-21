@@ -82,29 +82,42 @@ struct ClientRow {
     connected_at: String,
 }
 
+/// Render an address a client may not have at all.
+///
+/// # Arguments
+///
+/// * `address` - The address the controller reported, if it reported one.
+///
+/// # Returns
+///
+/// The address as the controller spelled it, or an empty cell.
+fn address_or_blank<A: std::fmt::Display>(address: Option<&A>) -> String {
+    address.map(ToString::to_string).unwrap_or_default()
+}
+
 fn client_to_row(client: &Client) -> ClientRow {
     match client {
         Client::Wired(c) => ClientRow {
             id: c.id.to_string(),
             name: c.name.clone(),
             client_type: "WIRED".to_string(),
-            ip_address: c.ip_address.clone().unwrap_or_default(),
-            mac_address: c.mac_address.clone(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
+            mac_address: c.mac_address.to_string(),
             connected_at: c.connected_at.clone().unwrap_or_default(),
         },
         Client::Wireless(c) => ClientRow {
             id: c.id.to_string(),
             name: c.name.clone(),
             client_type: "WIRELESS".to_string(),
-            ip_address: c.ip_address.clone().unwrap_or_default(),
-            mac_address: c.mac_address.clone(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
+            mac_address: c.mac_address.to_string(),
             connected_at: c.connected_at.clone().unwrap_or_default(),
         },
         Client::Vpn(c) => ClientRow {
             id: c.id.to_string(),
             name: c.name.clone(),
             client_type: "VPN".to_string(),
-            ip_address: c.ip_address.clone().unwrap_or_default(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
             mac_address: NOT_APPLICABLE.to_string(),
             connected_at: c.connected_at.clone().unwrap_or_default(),
         },
@@ -112,7 +125,7 @@ fn client_to_row(client: &Client) -> ClientRow {
             id: c.id.to_string(),
             name: c.name.clone(),
             client_type: "TELEPORT".to_string(),
-            ip_address: c.ip_address.clone().unwrap_or_default(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
             mac_address: NOT_APPLICABLE.to_string(),
             connected_at: c.connected_at.clone().unwrap_or_default(),
         },
@@ -122,11 +135,11 @@ fn client_to_row(client: &Client) -> ClientRow {
             id: c.id.map(|id| id.to_string()).unwrap_or_default(),
             name: c.name.clone().unwrap_or_default(),
             client_type: c.client_type.clone(),
-            ip_address: c.ip_address.clone().unwrap_or_default(),
+            ip_address: address_or_blank(c.ip_address.as_ref()),
             mac_address: c
                 .mac_address
-                .clone()
-                .unwrap_or_else(|| NOT_APPLICABLE.to_string()),
+                .as_ref()
+                .map_or_else(|| NOT_APPLICABLE.to_string(), ToString::to_string),
             connected_at: c.connected_at.clone().unwrap_or_default(),
         },
     }
