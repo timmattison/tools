@@ -109,14 +109,17 @@ fn resolve_credential(
     }
 }
 
+// The connection and output options are `global = true`, so they are accepted
+// at any position: `ufa devices list --output json` and `ufa --output json
+// devices list` are the same command. Nothing about the leading position was
+// discoverable from the help text, and `--output` is the flag people reach for
+// while scripting, so requiring it to come first made the natural spelling
+// fail. `global` also lists the options in every subcommand's `--help`.
+//
+// This is a plain comment rather than a doc comment on purpose: a second
+// paragraph on `Args` would become clap's `long_about` and print this rationale
+// to users running `ufa --help`.
 /// UniFi API CLI tool for managing UniFi Network applications
-///
-/// The connection and output options are `global`, so they are accepted at any
-/// position: `ufa devices list --output json` and `ufa --output json devices
-/// list` are the same command. Nothing about the leading position is
-/// discoverable from the help text, and `--output` in particular is the flag
-/// people reach for while scripting, so requiring it to come first would make
-/// the natural spelling fail.
 #[derive(Parser, Debug)]
 #[clap(author, version = version_string!(), about)]
 struct Args {
