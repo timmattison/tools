@@ -1,11 +1,11 @@
+use crate::client::UnifiClient;
+use crate::discovery::{discover_controllers, validate_user_url};
 use anyhow::{Context, Result};
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use crate::discovery::{discover_controllers, validate_user_url};
-use crate::client::UnifiClient;
 
 /// A controller discovered from the 1Password `ufa` item.
 #[derive(Debug, Clone)]
@@ -26,7 +26,9 @@ impl OpController {
 /// Fields with labels matching `key - <host> port <port>` are parsed.
 pub fn discover_op_controllers() -> Result<Vec<OpController>> {
     let output = std::process::Command::new("op")
-        .args(["item", "get", "ufa", "--vault", "Private", "--format", "json"])
+        .args([
+            "item", "get", "ufa", "--vault", "Private", "--format", "json",
+        ])
         .output()
         .context("Failed to run 'op' CLI — is 1Password CLI installed?")?;
 
@@ -37,8 +39,8 @@ pub fn discover_op_controllers() -> Result<Vec<OpController>> {
         );
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("Failed to parse 1Password item JSON")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("Failed to parse 1Password item JSON")?;
 
     let fields = json["fields"]
         .as_array()
@@ -82,8 +84,8 @@ pub struct Config {
 impl Config {
     /// Get the OS-specific configuration directory
     pub fn config_dir() -> Result<PathBuf> {
-        let base_dir = config_dir()
-            .context("Could not determine configuration directory for your OS")?;
+        let base_dir =
+            config_dir().context("Could not determine configuration directory for your OS")?;
         Ok(base_dir.join("ufa"))
     }
 
@@ -95,17 +97,17 @@ impl Config {
     /// Load configuration from the default location
     pub fn load() -> Result<Option<Self>> {
         let config_path = Self::config_file_path()?;
-        
+
         if !config_path.exists() {
             return Ok(None);
         }
 
         let contents = fs::read_to_string(&config_path)
             .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
-        
+
         let config: Config = toml::from_str(&contents)
             .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?;
-        
+
         Ok(Some(config))
     }
 
@@ -113,11 +115,11 @@ impl Config {
     /// plaintext `api_key` field for backward compatibility.
     pub fn resolve_api_key(&self) -> Result<String> {
         if let Some(op_path) = &self.op_path {
-            let cache =
-                op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-            let path =
-                op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let key = cache.read(&path, None).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let path = op_cache::OpPath::new(op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let key = cache
+                .read(&path, None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             return Ok(key);
         }
         if let Some(key) = &self.api_key {
@@ -129,16 +131,19 @@ impl Config {
     /// Save configuration to the default location
     pub fn save(&self) -> Result<()> {
         let config_dir = Self::config_dir()?;
-        fs::create_dir_all(&config_dir)
-            .with_context(|| format!("Failed to create config directory: {}", config_dir.display()))?;
-        
+        fs::create_dir_all(&config_dir).with_context(|| {
+            format!(
+                "Failed to create config directory: {}",
+                config_dir.display()
+            )
+        })?;
+
         let config_path = Self::config_file_path()?;
-        let contents = toml::to_string_pretty(self)
-            .context("Failed to serialize configuration")?;
-        
+        let contents = toml::to_string_pretty(self).context("Failed to serialize configuration")?;
+
         fs::write(&config_path, contents)
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
-        
+
         println!("Configuration saved to: {}", config_path.display());
         Ok(())
     }
@@ -190,9 +195,7 @@ impl Config {
                     } else if choice == manual_idx {
                         break Selection::Network(get_manual_controller_url().await?);
                     } else if choice == network_idx {
-                        break Selection::Network(
-                            network_discover_and_select().await?,
-                        );
+                        break Selection::Network(network_discover_and_select().await?);
                     }
                 }
                 println!("Invalid choice. Please try again.");
@@ -204,10 +207,8 @@ impl Config {
         let (controller_url, op_path, api_key) = match selection {
             Selection::Op(c) => {
                 // Read the key via op-cache to verify it works
-                let cache =
-                    op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
-                let path =
-                    op_cache::OpPath::new(&c.op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let cache = op_cache::OpCache::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+                let path = op_cache::OpPath::new(&c.op_path).map_err(|e| anyhow::anyhow!("{e}"))?;
                 let key = cache
                     .read(&path, None)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -230,20 +231,16 @@ impl Config {
         // Test the connection
         println!("\n🔍 Testing connection...");
         match UnifiClient::new(&controller_url, &api_key, insecure).await {
-            Ok(client) => {
-                match client.get::<crate::models::ApplicationInfo>("info").await {
-                    Ok(info) => {
-                        println!("✅ Successfully connected to UniFi controller!");
-                        println!("   Version: {}", info.application_version);
-                    }
-                    Err(e) => {
-                        println!("⚠️  Connected but couldn't fetch info: {e}");
-                        println!(
-                            "   This might be normal if the API key has limited permissions."
-                        );
-                    }
+            Ok(client) => match client.get::<crate::models::ApplicationInfo>("info").await {
+                Ok(info) => {
+                    println!("✅ Successfully connected to UniFi controller!");
+                    println!("   Version: {}", info.application_version);
                 }
-            }
+                Err(e) => {
+                    println!("⚠️  Connected but couldn't fetch info: {e}");
+                    println!("   This might be normal if the API key has limited permissions.");
+                }
+            },
             Err(e) => {
                 println!("❌ Failed to connect: {e}");
                 print!("\nSave configuration anyway? [y/N]: ");
@@ -299,7 +296,10 @@ async fn network_discover_and_select() -> Result<String> {
         return get_manual_controller_url().await;
     }
 
-    println!("\nFound {} controller(s) on the network:", controllers.len());
+    println!(
+        "\nFound {} controller(s) on the network:",
+        controllers.len()
+    );
     for (i, c) in controllers.iter().enumerate() {
         println!(
             "  {}. {} {}",

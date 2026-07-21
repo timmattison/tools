@@ -17,7 +17,6 @@ impl DiscoveredController {
     pub fn url(&self) -> String {
         format!("https://{}:{}", self.ip, self.port)
     }
-    
 }
 
 /// Discover UniFi controllers on the local network
@@ -78,10 +77,10 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
 async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
     let mdns = ServiceDaemon::new()?;
     let mut controllers = Vec::new();
-    
+
     // Browse for UniFi services
     let receiver = mdns.browse("_unifi._tcp.local.")?;
-    
+
     // Collect responses for a short time
     let browse_duration = Duration::from_secs(2);
     let _ = timeout(browse_duration, async {
@@ -98,8 +97,9 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
                 }
             }
         }
-    }).await;
-    
+    })
+    .await;
+
     // Verify each discovered controller
     let mut verified_controllers = Vec::new();
     for mut controller in controllers {
@@ -109,32 +109,32 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
             verified_controllers.push(controller);
         }
     }
-    
+
     Ok(verified_controllers)
 }
 
 /// Validate that a given host:port is a UniFi controller
 pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredController> {
     let url = format!("https://{}:{}", host, port);
-    
+
     // Create a client that accepts self-signed certificates
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(3))
         .build()?;
-    
+
     // Try to fetch the root page
     let response = client.get(&url).send().await?;
-    
+
     // Check if it's a UniFi controller by looking at the response
     let text = response.text().await?;
-    
+
     // Look for UniFi-specific markers
-    if text.contains("window.UNIFI_") || 
-       text.contains("UniFi") || 
-       text.contains("ui-icon") ||
-       text.contains("/api/login") {
-        
+    if text.contains("window.UNIFI_")
+        || text.contains("UniFi")
+        || text.contains("ui-icon")
+        || text.contains("/api/login")
+    {
         // Try to resolve the IP if we were given a hostname
         let ip = if host.parse::<std::net::IpAddr>().is_ok() {
             host.to_string()
@@ -147,7 +147,7 @@ pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredCont
                 .map(|s| s.ip().to_string())
                 .unwrap_or_else(|| host.to_string())
         };
-        
+
         Ok(DiscoveredController {
             ip,
             port,
@@ -161,13 +161,13 @@ pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredCont
 
 /// Validate a controller URL provided by the user
 pub async fn validate_user_url(url: &str) -> Result<DiscoveredController> {
-    let parsed = url::Url::parse(url)
-        .context("Invalid URL format")?;
-    
-    let host = parsed.host_str()
-        .context("URL must have a host")?;
-    
-    let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
-    
+    let parsed = url::Url::parse(url).context("Invalid URL format")?;
+
+    let host = parsed.host_str().context("URL must have a host")?;
+
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+
     validate_controller(host, port).await
 }

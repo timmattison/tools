@@ -5,10 +5,10 @@ use uuid::Uuid;
 
 use crate::{
     client::UnifiClient,
-    models::{Device, DeviceDetails, DeviceStatistics, DeviceAction, PortAction, Page},
-    output::{OutputFormat, print_vec_table, print_single_item},
-    site_helper::get_site_id_or_prompt,
     device_helper::get_device_id_or_prompt,
+    models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
+    output::{print_single_item, print_vec_table, OutputFormat},
+    site_helper::get_site_id_or_prompt,
 };
 
 #[derive(Subcommand, Debug)]
@@ -34,7 +34,7 @@ pub enum DevicesCommand {
     Stats {
         /// Device ID (if not provided, will show device list)
         device_id: Option<Uuid>,
-        
+
         /// Show statistics for all devices
         #[clap(long)]
         all: bool,
@@ -111,7 +111,7 @@ fn format_uptime(seconds: Option<u64>) -> String {
             let days = secs / 86400;
             let hours = (secs % 86400) / 3600;
             let minutes = (secs % 3600) / 60;
-            
+
             if days > 0 {
                 format!("{}d {}h {}m", days, hours, minutes)
             } else if hours > 0 {
@@ -191,7 +191,10 @@ pub struct DeviceStatsRowWithName {
 }
 
 impl DeviceStatsRowWithName {
-    fn from_device_and_stats(device: &Device, stats: Option<&crate::models::DeviceStatistics>) -> Self {
+    fn from_device_and_stats(
+        device: &Device,
+        stats: Option<&crate::models::DeviceStatistics>,
+    ) -> Self {
         match stats {
             Some(s) => Self {
                 name: device.name.clone(),
@@ -233,12 +236,11 @@ pub async fn handle_devices_command(
         DevicesCommand::Stats { device_id, all } => {
             get_device_stats(client, site_id, device_id, all, output_format).await
         }
-        DevicesCommand::Restart { device_id } => {
-            restart_device(client, site_id, device_id).await
-        }
-        DevicesCommand::PowerCyclePort { device_id, port_idx } => {
-            power_cycle_port(client, site_id, device_id, port_idx).await
-        }
+        DevicesCommand::Restart { device_id } => restart_device(client, site_id, device_id).await,
+        DevicesCommand::PowerCyclePort {
+            device_id,
+            port_idx,
+        } => power_cycle_port(client, site_id, device_id, port_idx).await,
     }
 }
 
@@ -251,10 +253,8 @@ async fn list_devices(
 ) -> Result<()> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
-    let params: Vec<(&str, &dyn std::fmt::Display)> = vec![
-        ("limit", &limit_str),
-        ("offset", &offset_str),
-    ];
+    let params: Vec<(&str, &dyn std::fmt::Display)> =
+        vec![("limit", &limit_str), ("offset", &offset_str)];
 
     let site_id = get_site_id_or_prompt(client, site_id).await?;
     let path = format!("sites/{}/devices", site_id);
@@ -332,7 +332,7 @@ async fn get_single_device_stats(
             print_vec_table(&[stats_row], output_format)?;
         }
     }
-    
+
     Ok(())
 }
 
@@ -353,7 +353,7 @@ async fn get_all_device_stats(
 
     // Create rows with device information and stats
     let mut stats_rows = Vec::new();
-    
+
     // Fetch statistics for each device (sequentially for now to avoid ownership issues)
     for device in &devices_page.data {
         let stats_path = format!("sites/{}/devices/{}/statistics/latest", site_id, device.id);
@@ -364,7 +364,7 @@ async fn get_all_device_stats(
 
     // Always show table format for --all (JSON would be too verbose)
     print_vec_table(&stats_rows, OutputFormat::Table)?;
-    
+
     Ok(())
 }
 
@@ -389,7 +389,10 @@ async fn power_cycle_port(
     port_idx: u32,
 ) -> Result<()> {
     let site_id = get_site_id_or_prompt(client, site_id).await?;
-    let path = format!("sites/{}/devices/{}/interfaces/ports/{}/actions", site_id, device_id, port_idx);
+    let path = format!(
+        "sites/{}/devices/{}/interfaces/ports/{}/actions",
+        site_id, device_id, port_idx
+    );
     let action = PortAction::PowerCycle;
 
     let _: serde_json::Value = client.post(&path, &action).await?;

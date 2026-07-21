@@ -1,7 +1,11 @@
+use crate::{
+    client::UnifiClient,
+    models::{Page, Site},
+    output::{print_single_item, print_vec_table, OutputFormat},
+};
 use anyhow::Result;
 use clap::Subcommand;
 use tabled::Tabled;
-use crate::{client::UnifiClient, models::{Page, Site}, output::{OutputFormat, print_vec_table, print_single_item}};
 
 #[derive(Subcommand, Debug)]
 pub enum SitesCommand {
@@ -47,9 +51,11 @@ pub async fn handle_sites_command(
     output_format: OutputFormat,
 ) -> Result<()> {
     match command {
-        SitesCommand::List { limit, offset, filter } => {
-            list_sites(client, limit, offset, filter, output_format).await
-        }
+        SitesCommand::List {
+            limit,
+            offset,
+            filter,
+        } => list_sites(client, limit, offset, filter, output_format).await,
     }
 }
 
@@ -62,10 +68,8 @@ async fn list_sites(
 ) -> Result<()> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
-    let mut params: Vec<(&str, &dyn std::fmt::Display)> = vec![
-        ("limit", &limit_str),
-        ("offset", &offset_str),
-    ];
+    let mut params: Vec<(&str, &dyn std::fmt::Display)> =
+        vec![("limit", &limit_str), ("offset", &offset_str)];
 
     if let Some(f) = &filter {
         params.push(("filter", f));

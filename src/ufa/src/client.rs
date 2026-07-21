@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use reqwest::{Client, header, Url};
+use reqwest::{header, Client, Url};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -21,21 +21,23 @@ impl UnifiClient {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::HeaderName::from_static("x-api-key"),
-            header::HeaderValue::from_str(api_key)
-                .context("Invalid API key")?
+            header::HeaderValue::from_str(api_key).context("Invalid API key")?,
         );
-        headers.insert(header::ACCEPT, header::HeaderValue::from_static("application/json"));
+        headers.insert(
+            header::ACCEPT,
+            header::HeaderValue::from_static("application/json"),
+        );
 
         let client_builder = Client::builder()
             .default_headers(headers)
             .danger_accept_invalid_certs(insecure);
 
-        let client = client_builder.build()
+        let client = client_builder
+            .build()
             .context("Failed to create HTTP client")?;
 
-        let mut base_url = Url::parse(base_url)
-            .context("Invalid UniFi controller URL")?;
-        
+        let mut base_url = Url::parse(base_url).context("Invalid UniFi controller URL")?;
+
         // Set the path to exactly what we need, ensuring it ends with a slash
         if base_url.path() == "/" || base_url.path().is_empty() {
             base_url.set_path("/proxy/network/integration/v1/");
@@ -45,22 +47,20 @@ impl UnifiClient {
             base_url.set_path(&format!("{}/proxy/network/integration/v1/", current_path));
         }
 
-        
-        Ok(Self {
-            client,
-            base_url,
-        })
+        Ok(Self { client, base_url })
     }
 
     pub async fn get<T>(&self, path: &str) -> Result<T>
     where
         T: DeserializeOwned,
     {
-        let url = self.base_url.join(path)
+        let url = self
+            .base_url
+            .join(path)
             .context("Failed to construct request URL")?;
 
-
-        let response = self.client
+        let response = self
+            .client
             .get(url)
             .send()
             .await
@@ -69,11 +69,17 @@ impl UnifiClient {
         self.handle_response(response).await
     }
 
-    pub async fn get_with_params<T>(&self, path: &str, params: &[(&str, &dyn std::fmt::Display)]) -> Result<T>
+    pub async fn get_with_params<T>(
+        &self,
+        path: &str,
+        params: &[(&str, &dyn std::fmt::Display)],
+    ) -> Result<T>
     where
         T: DeserializeOwned,
     {
-        let mut url = self.base_url.join(path)
+        let mut url = self
+            .base_url
+            .join(path)
             .context("Failed to construct request URL")?;
 
         {
@@ -83,8 +89,8 @@ impl UnifiClient {
             }
         }
 
-
-        let response = self.client
+        let response = self
+            .client
             .get(url)
             .send()
             .await
@@ -98,10 +104,13 @@ impl UnifiClient {
         T: DeserializeOwned,
         B: serde::Serialize,
     {
-        let url = self.base_url.join(path)
+        let url = self
+            .base_url
+            .join(path)
             .context("Failed to construct request URL")?;
 
-        let response = self.client
+        let response = self
+            .client
             .post(url)
             .json(body)
             .send()
@@ -115,10 +124,13 @@ impl UnifiClient {
     where
         T: DeserializeOwned,
     {
-        let url = self.base_url.join(path)
+        let url = self
+            .base_url
+            .join(path)
             .context("Failed to construct request URL")?;
 
-        let response = self.client
+        let response = self
+            .client
             .delete(url)
             .send()
             .await
@@ -127,11 +139,17 @@ impl UnifiClient {
         self.handle_response(response).await
     }
 
-    pub async fn delete_with_params<T>(&self, path: &str, params: &[(&str, &dyn std::fmt::Display)]) -> Result<T>
+    pub async fn delete_with_params<T>(
+        &self,
+        path: &str,
+        params: &[(&str, &dyn std::fmt::Display)],
+    ) -> Result<T>
     where
         T: DeserializeOwned,
     {
-        let mut url = self.base_url.join(path)
+        let mut url = self
+            .base_url
+            .join(path)
             .context("Failed to construct request URL")?;
 
         {
@@ -141,7 +159,8 @@ impl UnifiClient {
             }
         }
 
-        let response = self.client
+        let response = self
+            .client
             .delete(url)
             .send()
             .await
@@ -155,17 +174,21 @@ impl UnifiClient {
         T: DeserializeOwned,
     {
         let status = response.status();
-        let text = response.text().await
+        let text = response
+            .text()
+            .await
             .context("Failed to read response body")?;
 
         if !status.is_success() {
-            if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
                 anyhow::bail!(
                     "Authentication failed (HTTP {}). Please check your API key or generate a new one in Settings -> Control Plane -> Integrations",
                     status
                 );
             }
-            
+
             if let Ok(error_response) = serde_json::from_str::<Value>(&text) {
                 if let Some(message) = error_response.get("message").and_then(|m| m.as_str()) {
                     anyhow::bail!("API error: {} (HTTP {})", message, status);
@@ -180,11 +203,12 @@ impl UnifiClient {
 
     fn handle_request_error(&self, error: reqwest::Error, method: &str) -> anyhow::Error {
         let error_str = error.to_string();
-        if error_str.contains("UnknownIssuer") || 
-           error_str.contains("certificate") ||
-           error_str.contains("CertificateRequired") ||
-           error_str.contains("self-signed") ||
-           error_str.contains("self signed") {
+        if error_str.contains("UnknownIssuer")
+            || error_str.contains("certificate")
+            || error_str.contains("CertificateRequired")
+            || error_str.contains("self-signed")
+            || error_str.contains("self signed")
+        {
             anyhow::anyhow!(
                 "TLS certificate error: {}\n\nTo connect to a UniFi controller with a self-signed certificate:\n  - Use the --insecure flag\n  - Or set UNIFI_INSECURE=true in your .env file\n\nNote: This disables certificate verification and should only be used for trusted networks.",
                 error

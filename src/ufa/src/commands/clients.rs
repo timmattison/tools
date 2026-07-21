@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     client::UnifiClient,
     models::{Client, ClientAction, Page},
-    output::{OutputFormat, print_vec_table, print_single_item},
+    output::{print_single_item, print_vec_table, OutputFormat},
     site_helper::get_site_id_or_prompt,
 };
 
@@ -122,28 +122,31 @@ pub async fn handle_clients_command(
     output_format: OutputFormat,
 ) -> Result<()> {
     match command {
-        ClientsCommand::List { limit, offset, filter } => {
-            list_clients(client, site_id, limit, offset, filter, output_format).await
-        }
+        ClientsCommand::List {
+            limit,
+            offset,
+            filter,
+        } => list_clients(client, site_id, limit, offset, filter, output_format).await,
         ClientsCommand::Get { client_id } => {
             get_client(client, site_id, client_id, output_format).await
         }
-        ClientsCommand::AuthorizeGuest { 
-            client_id, 
+        ClientsCommand::AuthorizeGuest {
+            client_id,
             time_limit_minutes,
             data_usage_limit_mbytes,
             rx_rate_limit_kbps,
             tx_rate_limit_kbps,
         } => {
             authorize_guest(
-                client, 
-                site_id, 
-                client_id, 
+                client,
+                site_id,
+                client_id,
                 time_limit_minutes,
                 data_usage_limit_mbytes,
                 rx_rate_limit_kbps,
                 tx_rate_limit_kbps,
-            ).await
+            )
+            .await
         }
         ClientsCommand::UnauthorizeGuest { client_id } => {
             unauthorize_guest(client, site_id, client_id).await
@@ -161,10 +164,8 @@ async fn list_clients(
 ) -> Result<()> {
     let limit_str = limit.to_string();
     let offset_str = offset.to_string();
-    let mut params: Vec<(&str, &dyn std::fmt::Display)> = vec![
-        ("limit", &limit_str),
-        ("offset", &offset_str),
-    ];
+    let mut params: Vec<(&str, &dyn std::fmt::Display)> =
+        vec![("limit", &limit_str), ("offset", &offset_str)];
 
     if let Some(f) = &filter {
         params.push(("filter", f));

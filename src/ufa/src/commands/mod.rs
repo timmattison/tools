@@ -1,5 +1,5 @@
-pub mod sites;
-pub mod devices;
 pub mod clients;
-pub mod vouchers;
+pub mod devices;
 pub mod info;
+pub mod sites;
+pub mod vouchers;
