@@ -1,7 +1,7 @@
 use crate::{
     client::UnifiClient,
     models::{Page, Site},
-    output::{print_single_item, print_vec_table, OutputFormat},
+    output::{print_output, print_vec_table, OutputFormat},
 };
 use anyhow::Result;
 use clap::Subcommand;
@@ -79,7 +79,7 @@ async fn list_sites(
 
     match output_format {
         OutputFormat::Json => {
-            print_single_item(&page, output_format)?;
+            print_output(&page, output_format)?;
         }
         OutputFormat::Table => {
             let rows: Vec<SiteRow> = page.data.iter().map(SiteRow::from).collect();

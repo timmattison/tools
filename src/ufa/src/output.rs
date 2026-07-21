@@ -188,14 +188,6 @@ where
     Ok(())
 }
 
-// General implementation for any serializable type
-pub fn print_single_item<T>(data: &T, format: OutputFormat) -> Result<()>
-where
-    T: Serialize,
-{
-    print_output(data, format)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

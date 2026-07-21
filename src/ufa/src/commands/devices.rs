@@ -8,7 +8,7 @@ use crate::{
     client::UnifiClient,
     device_helper::get_device_id_or_prompt,
     models::{Device, DeviceAction, DeviceDetails, DeviceStatistics, Page, PortAction},
-    output::{print_single_item, print_vec_table, render_vec_table, OutputFormat},
+    output::{print_output, print_vec_table, render_vec_table, OutputFormat},
     pagination::fetch_all,
     site_helper::get_site_id_or_prompt,
 };
@@ -281,7 +281,7 @@ async fn list_devices(
 
     match output_format {
         OutputFormat::Json => {
-            print_single_item(&page, output_format)?;
+            print_output(&page, output_format)?;
         }
         OutputFormat::Table => {
             let rows: Vec<DeviceRow> = page.data.iter().map(DeviceRow::from).collect();
@@ -302,7 +302,7 @@ async fn get_device(
     let path = format!("sites/{}/devices/{}", site_id, device_id);
     let device: DeviceDetails = client.get(&path).await?;
 
-    print_single_item(&device, output_format)?;
+    print_output(&device, output_format)?;
     Ok(())
 }
 
@@ -342,7 +342,7 @@ async fn get_single_device_stats(
 
     match output_format {
         OutputFormat::Json => {
-            print_single_item(&stats, output_format)?;
+            print_output(&stats, output_format)?;
         }
         OutputFormat::Table => {
             let stats_row = DeviceStatsRow::from(&stats);
