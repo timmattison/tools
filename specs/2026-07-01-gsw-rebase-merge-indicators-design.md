@@ -25,7 +25,7 @@ states, so at most one indicator ever shows.
 
 Clean tree (unchanged):
 
-```
+```text
 gsw • feat • 4 commits ahead of main • last commit 2m ago
 ────────────────────────────────────────────────────────
  M src/foo.rs
@@ -33,7 +33,7 @@ gsw • feat • 4 commits ahead of main • last commit 2m ago
 
 Rebase in progress (indicator line yellow + bold; conflict count red + bold):
 
-```
+```text
 gsw • feat • 4 commits ahead of main • last commit 2m ago
 ⚠ rebase 3/10 · 2 conflicts to resolve
 ────────────────────────────────────────────────────────
@@ -42,7 +42,7 @@ gsw • feat • 4 commits ahead of main • last commit 2m ago
 
 Merge in progress:
 
-```
+```text
 gsw • main • 1 commit ahead of main • last commit 2m ago
 ⚠ merge · 2 conflicts to resolve
 ────────────────────────────────────────────────────────
@@ -80,11 +80,11 @@ which is modeled on git's own `wt-status.c` / `git-prompt.sh` logic (it inspects
 worktree-aware and takes no locks — consistent with gsw's read-only, gix-only
 philosophy):
 
-| `repo.state()`                                       | `operation_state` result                 |
-| ---------------------------------------------------- | ---------------------------------------- |
-| `Merge`                                              | `Operation::Merge { conflicts }`         |
-| `Rebase` / `RebaseInteractive` / `ApplyMailboxRebase`| `Operation::Rebase { step, conflicts }`  |
-| `ApplyMailbox` (plain `git am`), `CherryPick*`, `Revert*`, `Bisect`, `None` | `None` (out of scope) |
+| `repo.state()`                                                              | `operation_state` result                |
+| --------------------------------------------------------------------------- | --------------------------------------- |
+| `Merge`                                                                     | `Operation::Merge { conflicts }`        |
+| `Rebase` / `RebaseInteractive` / `ApplyMailboxRebase`                       | `Operation::Rebase { step, conflicts }` |
+| `ApplyMailbox` (plain `git am`), `CherryPick*`, `Revert*`, `Bisect`, `None` | `None` (out of scope)                   |
 
 `ApplyMailboxRebase` is gix's name for the ambiguous state — a bare
 `rebase-apply/` directory with neither the `applying` nor the `rebasing` marker
