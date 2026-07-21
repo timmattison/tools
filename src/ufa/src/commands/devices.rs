@@ -384,8 +384,7 @@ fn render_all_device_stats(
     rows: &[DeviceStatsRowWithName],
     format: OutputFormat,
 ) -> Result<String> {
-    let _ = format;
-    render_vec_table(rows, OutputFormat::Table)
+    render_vec_table(rows, format)
 }
 
 async fn restart_device(

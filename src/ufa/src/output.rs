@@ -151,14 +151,6 @@ where
     table.to_string()
 }
 
-pub fn print_table<T>(data: &[T]) -> Result<()>
-where
-    T: Tabled,
-{
-    println!("{}", render_table(data));
-    Ok(())
-}
-
 /// Render a list of items in the requested output format and return it as a
 /// string.
 ///
