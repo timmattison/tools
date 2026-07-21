@@ -181,7 +181,30 @@ impl UnifiClient {
     }
 }
 
+/// How far down a chain of causes to look for the TLS layer.
+///
+/// A real rejection sits three links down; the bound only exists so a chain
+/// that somehow refers back to itself cannot spin forever.
+const MAX_ERROR_CHAIN_DEPTH: usize = 16;
+
 /// Decide whether `error` is the TLS layer refusing the connection.
+///
+/// The TLS stack reports a peer it will not talk to as an I/O error of kind
+/// [`std::io::ErrorKind::InvalidData`], wrapped in the connector's own I/O
+/// error. That kind is the signal this looks for, walking both the chain of
+/// causes and the errors nested inside I/O errors -- which the chain alone
+/// does not reach, because [`std::io::Error`]'s `source` returns the source
+/// *of* the error it carries rather than that error itself.
+///
+/// Matching on the rendered message instead would break on any rewording by
+/// reqwest or rustls, and on any locale that is not English. Matching on
+/// `rustls::Error` itself would be narrower still -- it would separate a
+/// rejected certificate, which `--insecure` can get past, from a protocol
+/// failure, which it cannot -- but rustls reaches this crate only through
+/// reqwest's private dependency on it. Naming the type here would mean
+/// pinning a second copy of rustls to whatever version reqwest resolves to,
+/// and a reqwest upgrade that moved to another major version of rustls would
+/// silently stop matching, with nothing failing to compile to say so.
 ///
 /// # Arguments
 ///
@@ -191,12 +214,28 @@ impl UnifiClient {
 ///
 /// `true` if the connection failed in the TLS layer.
 fn is_tls_failure(error: &(dyn std::error::Error + 'static)) -> bool {
-    let text = error.to_string();
-    text.contains("UnknownIssuer")
-        || text.contains("certificate")
-        || text.contains("CertificateRequired")
-        || text.contains("self-signed")
-        || text.contains("self signed")
+    fn search(error: &(dyn std::error::Error + 'static), depth: usize) -> bool {
+        if depth == 0 {
+            return false;
+        }
+
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+            if io_error.kind() == std::io::ErrorKind::InvalidData {
+                return true;
+            }
+            if let Some(nested) = io_error.get_ref() {
+                if search(nested, depth - 1) {
+                    return true;
+                }
+            }
+        }
+
+        error
+            .source()
+            .is_some_and(|source| search(source, depth - 1))
+    }
+
+    search(error, MAX_ERROR_CHAIN_DEPTH)
 }
 
 #[cfg(test)]
