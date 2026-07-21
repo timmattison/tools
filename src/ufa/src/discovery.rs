@@ -159,6 +159,40 @@ pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredCont
     }
 }
 
+/// What a probe of a host says about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeVerdict {
+    /// The host answers the integration API: it is a controller.
+    Controller,
+    /// Whatever is listening there, it is not a controller.
+    NotController,
+}
+
+/// Decide whether the answer to an integration-API probe came from a UniFi
+/// controller.
+///
+/// # Arguments
+///
+/// * `status` - The HTTP status the probe came back with.
+/// * `body` - The response body.
+///
+/// # Returns
+///
+/// [`ProbeVerdict::Controller`] only when the answer could not have come from
+/// something else.
+fn judge_probe(_status: u16, body: &str) -> ProbeVerdict {
+    // Skeleton: today any page whose markup so much as mentions UniFi counts.
+    if body.contains("window.UNIFI_")
+        || body.contains("UniFi")
+        || body.contains("ui-icon")
+        || body.contains("/api/login")
+    {
+        ProbeVerdict::Controller
+    } else {
+        ProbeVerdict::NotController
+    }
+}
+
 /// Validate a controller URL provided by the user
 pub async fn validate_user_url(url: &str) -> Result<DiscoveredController> {
     let parsed = url::Url::parse(url).context("Invalid URL format")?;
@@ -170,4 +204,76 @@ pub async fn validate_user_url(url: &str) -> Result<DiscoveredController> {
         .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
 
     validate_controller(host, port).await
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    /// What a controller's integration API answers an unauthenticated `info`
+    /// request with once a key is supplied.
+    const CONTROLLER_INFO: &str = r#"{"applicationVersion":"9.0.108"}"#;
+
+    /// A router's own status page, a documentation page, a search result --
+    /// anything that merely says the word.
+    const A_PAGE_THAT_MENTIONS_UNIFI: &str = r#"<!doctype html><html><head>
+        <title>Best UniFi deals</title></head><body>
+        <div class="ui-icon"></div><a href="/api/login">Sign in</a>
+        <p>Our UniFi controller review</p></body></html>"#;
+
+    /// The genuine article: the endpoint answers with the shape the API
+    /// documents.
+    #[test]
+    fn a_controllers_info_response_is_a_controller() {
+        assert_eq!(
+            judge_probe(200, CONTROLLER_INFO),
+            ProbeVerdict::Controller,
+            "the integration API's own answer must be recognised"
+        );
+    }
+
+    /// "You need a key for this" can only come from something that has the
+    /// endpoint, which is itself the evidence.
+    #[test]
+    fn an_unauthenticated_rejection_is_a_controller() {
+        for status in [401, 403] {
+            assert_eq!(
+                judge_probe(status, r#"{"statusCode":401,"message":"Unauthorized"}"#),
+                ProbeVerdict::Controller,
+                "a {status} from the integration API means the endpoint is there"
+            );
+        }
+    }
+
+    /// The setup wizard offers what discovery found, so a page that merely
+    /// contains the word must not become a "found controller".
+    #[test]
+    fn a_page_that_merely_mentions_unifi_is_not_a_controller() {
+        assert_eq!(
+            judge_probe(200, A_PAGE_THAT_MENTIONS_UNIFI),
+            ProbeVerdict::NotController,
+            "markup mentioning UniFi is not evidence of a controller"
+        );
+    }
+
+    /// No such endpoint is evidence *against*, however friendly the 404 body.
+    #[test]
+    fn a_missing_endpoint_is_not_a_controller() {
+        assert_eq!(
+            judge_probe(404, r#"{"statusCode":404,"message":"UniFi not found"}"#),
+            ProbeVerdict::NotController,
+            "a missing integration API means this is not a controller"
+        );
+    }
+
+    /// Some other JSON API answering happily on the same port is still not a
+    /// controller.
+    #[test]
+    fn unrelated_json_is_not_a_controller() {
+        assert_eq!(
+            judge_probe(200, r#"{"status":"ok","service":"printer"}"#),
+            ProbeVerdict::NotController,
+            "a 200 without the documented shape proves nothing"
+        );
+    }
 }
