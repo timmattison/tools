@@ -898,4 +898,179 @@ pub enum NewlyAddedState {
             "a closed enum read from the API must be reported as closed"
         );
     }
+
+    /// A device carrying both kinds of address.
+    const DEVICE_JSON: &str = r#"{
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "ap-lr", "model": "U6-LR",
+        "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+        "state": "ONLINE",
+        "features": [], "interfaces": []
+    }"#;
+
+    /// The same device, in the shape `devices get` returns.
+    const DEVICE_DETAILS_JSON: &str = r#"{
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "ap-lr", "model": "U6-LR", "supported": true,
+        "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+        "state": "ONLINE",
+        "firmwareVersion": "7.0.0", "firmwareUpdatable": false,
+        "configurationId": "abc",
+        "features": {}, "interfaces": {}
+    }"#;
+
+    /// One client of each kind that carries an address.
+    const CLIENTS_JSON: &str = r#"[
+        {
+            "type": "WIRED",
+            "id": "00000000-0000-0000-0000-000000000002",
+            "name": "nas",
+            "ipAddress": "192.168.1.10", "macAddress": "00:11:22:33:44:10",
+            "uplinkDeviceId": "00000000-0000-0000-0000-000000000009",
+            "access": { "type": "DEFAULT" }
+        },
+        {
+            "type": "WIRELESS",
+            "id": "00000000-0000-0000-0000-000000000003",
+            "name": "phone",
+            "ipAddress": "192.168.1.11", "macAddress": "00:11:22:33:44:11",
+            "uplinkDeviceId": "00000000-0000-0000-0000-000000000009",
+            "access": { "type": "DEFAULT" }
+        },
+        {
+            "type": "VPN",
+            "id": "00000000-0000-0000-0000-000000000004",
+            "name": "laptop-vpn",
+            "ipAddress": "192.168.1.12",
+            "access": { "type": "DEFAULT" }
+        },
+        {
+            "type": "TELEPORT",
+            "id": "00000000-0000-0000-0000-000000000005",
+            "name": "laptop-teleport",
+            "ipAddress": "192.168.1.13",
+            "access": { "type": "DEFAULT" }
+        }
+    ]"#;
+
+    /// A MAC address and an IP address are different things, and the model
+    /// must say so: as long as both are plain `String`s, one can be passed
+    /// wherever the other is expected and nothing complains until a user sees
+    /// a MAC address in the IP column.
+    #[test]
+    fn mac_and_ip_addresses_are_not_interchangeable() {
+        let device: Device = serde_json::from_str(DEVICE_JSON).expect("the device must parse");
+        let details: DeviceDetails =
+            serde_json::from_str(DEVICE_DETAILS_JSON).expect("the device details must parse");
+        let clients: Vec<Client> =
+            serde_json::from_str(CLIENTS_JSON).expect("the clients must parse");
+        let mut wired = None;
+        let mut wireless = None;
+        let mut vpn = None;
+        let mut teleport = None;
+        for client in &clients {
+            match client {
+                Client::Wired(c) => wired = Some(c),
+                Client::Wireless(c) => wireless = Some(c),
+                Client::Vpn(c) => vpn = Some(c),
+                Client::Teleport(c) => teleport = Some(c),
+                Client::Unknown(c) => panic!("unexpected client kind {}", c.client_type),
+            }
+        }
+        let wired = wired.expect("the wired client must parse as one");
+        let wireless = wireless.expect("the wireless client must parse as one");
+        let vpn = vpn.expect("the VPN client must parse as one");
+        let teleport = teleport.expect("the teleport client must parse as one");
+
+        let checks: &[(&str, &str, &str)] = &[
+            (
+                "Device.mac_address",
+                std::any::type_name_of_val(&device.mac_address),
+                "MacAddress",
+            ),
+            (
+                "Device.ip_address",
+                std::any::type_name_of_val(&device.ip_address),
+                "IpAddress",
+            ),
+            (
+                "DeviceDetails.mac_address",
+                std::any::type_name_of_val(&details.mac_address),
+                "MacAddress",
+            ),
+            (
+                "DeviceDetails.ip_address",
+                std::any::type_name_of_val(&details.ip_address),
+                "IpAddress",
+            ),
+            (
+                "WiredClient.mac_address",
+                std::any::type_name_of_val(&wired.mac_address),
+                "MacAddress",
+            ),
+            (
+                "WiredClient.ip_address",
+                std::any::type_name_of_val(&wired.ip_address),
+                "IpAddress",
+            ),
+            (
+                "WirelessClient.mac_address",
+                std::any::type_name_of_val(&wireless.mac_address),
+                "MacAddress",
+            ),
+            (
+                "WirelessClient.ip_address",
+                std::any::type_name_of_val(&wireless.ip_address),
+                "IpAddress",
+            ),
+            (
+                "VpnClient.ip_address",
+                std::any::type_name_of_val(&vpn.ip_address),
+                "IpAddress",
+            ),
+            (
+                "TeleportClient.ip_address",
+                std::any::type_name_of_val(&teleport.ip_address),
+                "IpAddress",
+            ),
+        ];
+
+        for (field, actual, expected) in checks {
+            assert!(
+                actual.contains(expected),
+                "{field} must be carried as a {expected} of its own so it cannot be \
+                 passed where the other kind of address belongs, but it is a {actual}"
+            );
+        }
+    }
+
+    /// Distinguishing the two kinds of address is an internal matter: what
+    /// goes out over the wire, and out through `--output json`, must be the
+    /// same plain string the controller sent.
+    #[test]
+    fn addresses_round_trip_as_the_plain_strings_the_controller_sent() {
+        let device: Device = serde_json::from_str(DEVICE_JSON).expect("the device must parse");
+        let clients: Vec<Client> =
+            serde_json::from_str(CLIENTS_JSON).expect("the clients must parse");
+
+        let written = serde_json::to_value(&device).expect("writing the device back");
+        assert_eq!(
+            written["macAddress"], "00:11:22:33:44:55",
+            "the MAC address must be written back as a plain string"
+        );
+        assert_eq!(
+            written["ipAddress"], "192.168.1.2",
+            "the IP address must be written back as a plain string"
+        );
+
+        let written = serde_json::to_value(&clients).expect("writing the clients back");
+        assert_eq!(
+            written[0]["macAddress"], "00:11:22:33:44:10",
+            "a client MAC address must be written back as a plain string"
+        );
+        assert_eq!(
+            written[2]["ipAddress"], "192.168.1.12",
+            "a client IP address must be written back as a plain string"
+        );
+    }
 }
