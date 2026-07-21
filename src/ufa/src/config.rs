@@ -231,8 +231,13 @@ impl Config {
         }
     }
 
-    /// Whether any Site Manager credential is configured.
-    fn has_site_manager_key(&self) -> bool {
+    /// Whether the config file names a source for the controller API key.
+    pub fn has_api_key(&self) -> bool {
+        self.op_path.is_some() || self.api_key.is_some()
+    }
+
+    /// Whether the config file names a source for the Site Manager API key.
+    pub fn has_site_manager_key(&self) -> bool {
         self.sm_op_path.is_some() || self.site_manager_api_key.is_some()
     }
 
