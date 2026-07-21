@@ -211,7 +211,11 @@ indicator appears, updates its step/conflict counts, and disappears live.
   (`init_repo`, isolated config, parallel-safe unique dirs): a real merge
   conflict → `Operation::Merge { conflicts: 1 }`; a real rebase conflict →
   `Operation::Rebase { step: Some(_), conflicts: 1 }` with the expected
-  `current/total`; a clean repo → `None`. `rebase_step` returns the parsed
+  `current/total`; a clean repo → `None`; and a real cherry-pick conflict →
+  `None`. The cherry-pick fixture is what actually guards the out-of-scope
+  mapping: a clean repo has no in-progress state at all, so it would still pass
+  if the classifier wrongly reported a cherry-pick (or revert, bisect, plain
+  `git am`) as `Operation::Merge`. `rebase_step` returns the parsed
   `current/total` for a `rebase-merge` dir and `None` when the files are absent.
 - **`render_frame` test (`main.rs`):** when `operation.is_some()`, the chrome
   budget reserves one extra row so the file list is not over-truncated versus
