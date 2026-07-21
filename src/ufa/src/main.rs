@@ -163,11 +163,16 @@ async fn main() -> Result<()> {
     {
         let file_config = Config::load()?;
 
-        let sm_api_key = site_manager_api_key
+        let sm_api_key = match site_manager_api_key
             .clone()
             .or_else(|| std::env::var("UNIFI_SITE_MANAGER_API_KEY").ok())
-            .or_else(|| file_config.as_ref().and_then(|c| c.site_manager_api_key.clone()))
-            .context("Site Manager API key not provided. Set it via --site-manager-api-key, UNIFI_SITE_MANAGER_API_KEY environment variable, or run 'ufa config cloud' to set it up.")?;
+        {
+            Some(key) => key,
+            None => file_config
+                .as_ref()
+                .context("Site Manager API key not provided. Set it via --site-manager-api-key, UNIFI_SITE_MANAGER_API_KEY environment variable, or run 'ufa config cloud' to set it up.")?
+                .resolve_site_manager_api_key()?,
+        };
 
         let sm_client = site_manager::SiteManagerClient::new(&sm_api_key).await?;
         return site_manager::handle_cloud_command(command.clone(), &sm_client, args.output).await;

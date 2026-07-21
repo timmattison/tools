@@ -19,16 +19,36 @@ ufa config setup
 ufa config cloud
 ```
 
+Both prompts accept either the key itself or a 1Password secret reference
+(anything starting with `op://`). A reference is recommended: the key stays in
+1Password and is read on demand through `op-cache`, so it never lands in a file
+on disk.
+
 ### Option 2: Environment Variables
 ```bash
 export UNIFI_SITE_MANAGER_API_KEY="your-site-manager-api-key"
 ```
 
-### Option 3: Configuration File
-Add to your config file at `~/.config/ufa/config.toml`:
+### Option 3: Configuration File — 1Password reference (recommended)
+Store the key in 1Password and point the config file at it:
+```toml
+sm_op_path = "op://Private/ufa/site manager key"
+```
+
+### Option 4: Configuration File — plaintext (legacy)
 ```toml
 site_manager_api_key = "your-site-manager-api-key"
 ```
+
+> **Security caveat:** this writes the key in cleartext to
+> `~/.config/ufa/config.toml`. `ufa` restricts that file to mode `0600`
+> (owner-only) whenever it saves it, but the key is still readable by anything
+> running as you, and by anyone who can read your backups. It is kept only for
+> backward compatibility with existing configs — prefer `sm_op_path`.
+
+`sm_op_path` takes precedence over `site_manager_api_key`. If the reference is
+set but cannot be read, `ufa` reports that failure instead of silently falling
+back to the plaintext key.
 
 ## Getting Your Site Manager API Key
 

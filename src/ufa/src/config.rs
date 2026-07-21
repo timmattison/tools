@@ -7,6 +7,9 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Prefix identifying a 1Password secret reference.
+const OP_REFERENCE_PREFIX: &str = "op://";
+
 /// A controller discovered from the 1Password `ufa` item.
 #[derive(Debug, Clone)]
 pub struct OpController {
@@ -184,10 +187,35 @@ impl Config {
     /// falling back to the plaintext `site_manager_api_key` field for
     /// backward compatibility.
     pub fn resolve_site_manager_api_key(&self) -> Result<String> {
-        if let Some(key) = &self.site_manager_api_key {
-            return Ok(key.clone());
+        resolve_secret(
+            self.sm_op_path.as_deref(),
+            self.site_manager_api_key.as_deref(),
+            "No Site Manager API key configured. Run 'ufa config cloud'.",
+        )
+    }
+
+    /// Record the Site Manager answer gathered during interactive setup.
+    ///
+    /// An `op://` reference is stored as a 1Password path; anything else is
+    /// treated as the key itself.
+    fn set_site_manager(&mut self, answer: &str) {
+        let answer = answer.trim();
+
+        if answer.starts_with(OP_REFERENCE_PREFIX) {
+            self.sm_op_path = Some(answer.to_string());
+            self.site_manager_api_key = None;
+        } else if answer.is_empty() {
+            self.sm_op_path = None;
+            self.site_manager_api_key = None;
+        } else {
+            self.sm_op_path = None;
+            self.site_manager_api_key = Some(answer.to_string());
         }
-        anyhow::bail!("No Site Manager API key configured. Run 'ufa config cloud'.")
+    }
+
+    /// Whether any Site Manager credential is configured.
+    fn has_site_manager_key(&self) -> bool {
+        self.sm_op_path.is_some() || self.site_manager_api_key.is_some()
     }
 
     /// Save configuration to the default location
@@ -210,6 +238,13 @@ impl Config {
 
         fs::write(config_path, contents)
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
+
+        restrict_to_owner(config_path).with_context(|| {
+            format!(
+                "Failed to restrict permissions on config file: {}",
+                config_path.display()
+            )
+        })?;
 
         println!("Configuration saved to: {}", config_path.display());
         Ok(())
@@ -329,21 +364,12 @@ impl Config {
         }
 
         // Site Manager API Key (optional)
-        println!("\n\nOptional: UniFi Site Manager (Cloud) Configuration");
-        print!("Site Manager API Key (from unifi.ui.com API section) [skip]: ");
-        io::stdout().flush()?;
-        let mut sm_api_key = String::new();
-        io::stdin().read_line(&mut sm_api_key)?;
-        let sm_api_key = sm_api_key.trim();
+        let sm_answer = prompt_for_site_manager_key()?;
 
         // Save configuration
         let mut config = Config::default();
         config.set_controller(controller_url, &credential, insecure);
-        config.site_manager_api_key = if sm_api_key.is_empty() {
-            None
-        } else {
-            Some(sm_api_key.to_string())
-        };
+        config.set_site_manager(&sm_answer);
 
         config.save()?;
 
@@ -358,12 +384,48 @@ impl Config {
                 "To keep it in 1Password instead, add it to the Private/ufa item and re-run setup."
             );
         }
-        if config.site_manager_api_key.is_some() {
+        if config.has_site_manager_key() {
             println!("Cloud commands are available: try 'ufa cloud hosts'");
         }
 
         Ok(())
     }
+}
+
+/// Prompt for the optional Site Manager (cloud) credential.
+///
+/// The answer is either an `op://` reference, the key itself, or empty to skip.
+fn prompt_for_site_manager_key() -> Result<String> {
+    println!("\n\nOptional: UniFi Site Manager (Cloud) Configuration");
+    println!(
+        "Paste the key from the unifi.ui.com API section, or a 1Password reference \
+         ({OP_REFERENCE_PREFIX}Private/ufa/site manager key) to keep it out of the config file."
+    );
+    print!("Site Manager API key or 1Password reference [skip]: ");
+    io::stdout().flush()?;
+
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    Ok(answer.trim().to_string())
+}
+
+/// Restrict a file that may contain secrets to its owner (mode 0600).
+///
+/// The config file can hold an API key the user pasted during setup and a
+/// legacy plaintext Site Manager key, and it is created with the process umask
+/// — typically 0644 — so it has to be tightened after writing.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+/// Windows has no umask and no mode bits to tighten; the file inherits the
+/// containing directory's ACL, which is already per-user under `%APPDATA%`.
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Resolve a secret that may live in 1Password.
