@@ -95,7 +95,11 @@ impl ControllerCredential {
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub url: Option<String>,
-    /// Deprecated: use op_path instead. Kept for backward compatibility.
+    /// API key stored directly in the config file.
+    ///
+    /// `op_path` is preferred; this field is used only when the key is not in
+    /// 1Password — for example when the user pasted it during setup because no
+    /// `Private/ufa` item exists.
     pub api_key: Option<String>,
     pub insecure: Option<bool>,
     pub site_manager_api_key: Option<String>,
@@ -150,9 +154,12 @@ impl Config {
                 self.op_path = Some(op_path.clone());
                 self.api_key = None;
             }
-            ControllerCredential::Pasted { .. } => {
+            ControllerCredential::Pasted { key } => {
+                // The pasted key exists nowhere else, so the config file is
+                // the only place it can live. `resolve_api_key` falls back to
+                // this field when no 1Password reference is configured.
                 self.op_path = None;
-                self.api_key = None;
+                self.api_key = Some(key.clone());
             }
         }
     }
@@ -333,6 +340,15 @@ impl Config {
 
         println!("\n🎉 Configuration complete!");
         println!("You can now use ufa commands without specifying connection details.");
+        if config.op_path.is_none() {
+            println!(
+                "The API key is stored in {}.",
+                Self::config_file_path()?.display()
+            );
+            println!(
+                "To keep it in 1Password instead, add it to the Private/ufa item and re-run setup."
+            );
+        }
         if config.site_manager_api_key.is_some() {
             println!("Cloud commands are available: try 'ufa cloud hosts'");
         }
