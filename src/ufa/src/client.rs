@@ -170,13 +170,7 @@ impl UnifiClient {
     }
 
     fn handle_request_error(&self, error: reqwest::Error, method: &str) -> anyhow::Error {
-        let error_str = error.to_string();
-        if error_str.contains("UnknownIssuer")
-            || error_str.contains("certificate")
-            || error_str.contains("CertificateRequired")
-            || error_str.contains("self-signed")
-            || error_str.contains("self signed")
-        {
+        if is_tls_failure(&error) {
             anyhow::anyhow!(
                 "TLS certificate error: {}\n\nTo connect to a UniFi controller with a self-signed certificate:\n  - Use the --insecure flag\n  - Or set UNIFI_INSECURE=true in your .env file\n\nNote: This disables certificate verification and should only be used for trusted networks.",
                 error
@@ -184,5 +178,85 @@ impl UnifiClient {
         } else {
             anyhow::anyhow!("Failed to send {} request: {}", method, error)
         }
+    }
+}
+
+/// Decide whether `error` is the TLS layer refusing the connection.
+///
+/// # Arguments
+///
+/// * `error` - The failure to classify, usually a `reqwest::Error`.
+///
+/// # Returns
+///
+/// `true` if the connection failed in the TLS layer.
+fn is_tls_failure(error: &(dyn std::error::Error + 'static)) -> bool {
+    let text = error.to_string();
+    text.contains("UnknownIssuer")
+        || text.contains("certificate")
+        || text.contains("CertificateRequired")
+        || text.contains("self-signed")
+        || text.contains("self signed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    /// The shape reqwest hands back when rustls rejects a peer: the rustls
+    /// failure inside an `InvalidData` I/O error, inside the connector's own
+    /// I/O error. Captured from a real request to a self-signed host.
+    fn tls_rejection(message: &'static str) -> io::Error {
+        io::Error::other(io::Error::new(io::ErrorKind::InvalidData, message))
+    }
+
+    /// A TLS rejection must be recognised by what it *is*, not by the English
+    /// wording rustls happened to use for it: the message is rustls's to
+    /// change, and it is not the user's language.
+    #[test]
+    fn a_tls_rejection_is_recognised_whatever_it_says() {
+        let error = tls_rejection("certificat du pair invalide : émetteur inconnu");
+
+        assert!(
+            is_tls_failure(&error),
+            "a TLS rejection must be recognised regardless of its wording"
+        );
+    }
+
+    /// The wording rustls uses today must keep working too.
+    #[test]
+    fn todays_rustls_certificate_rejection_is_recognised() {
+        let error = tls_rejection("invalid peer certificate: UnknownIssuer");
+
+        assert!(
+            is_tls_failure(&error),
+            "the certificate rejection rustls raises today must be recognised"
+        );
+    }
+
+    /// Advising `--insecure` for a failure that has nothing to do with TLS
+    /// sends the user to disable certificate verification over a problem it
+    /// cannot fix -- and the word "certificate" can turn up in a hostname, a
+    /// proxy's message or a path.
+    #[test]
+    fn a_non_tls_failure_that_merely_says_certificate_is_not_a_tls_failure() {
+        let error = io::Error::other("no route to host: certificates.example.com");
+
+        assert!(
+            !is_tls_failure(&error),
+            "only a failure from the TLS layer may be reported as one"
+        );
+    }
+
+    /// The ordinary connection failures must stay ordinary.
+    #[test]
+    fn a_refused_connection_is_not_a_tls_failure() {
+        let error = io::Error::from(io::ErrorKind::ConnectionRefused);
+
+        assert!(
+            !is_tls_failure(&error),
+            "a refused connection is not a TLS problem"
+        );
     }
 }
