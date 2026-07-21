@@ -91,7 +91,10 @@ impl From<&Device> for DeviceRow {
             model: device.model.clone(),
             mac_address: device.mac_address.clone(),
             ip_address: device.ip_address.clone(),
-            state: format!("{:?}", device.state),
+            // The controller's own spelling, which is the only rendering that
+            // still says something when the state is one this build has never
+            // seen.
+            state: device.state.to_string(),
         }
     }
 }
