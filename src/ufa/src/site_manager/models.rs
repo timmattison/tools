@@ -55,10 +55,3 @@ pub struct HostsResponse {
     pub hosts: Vec<Host>,
     pub total: Option<u32>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ErrorResponse {
-    pub message: String,
-    pub code: Option<String>,
-}
