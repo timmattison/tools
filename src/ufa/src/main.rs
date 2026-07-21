@@ -13,6 +13,8 @@ mod pagination;
 mod prompt;
 mod site_helper;
 mod site_manager;
+#[cfg(test)]
+mod test_support;
 mod text;
 
 use anyhow::{Context, Result};
