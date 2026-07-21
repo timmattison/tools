@@ -316,7 +316,12 @@ mod environment_tests {
 
     /// The process environment is shared by every thread in the test binary,
     /// so the tests that write to it take turns.
-    fn env_lock() -> MutexGuard<'static, ()> {
+    ///
+    /// Tests that merely *read* the environment — anything calling
+    /// `Args::try_parse_from`, since clap consults `UNIFI_*` on every parse —
+    /// take the same lock, so a `ScopedVar` set by one test cannot bleed into
+    /// another test's parse.
+    pub(super) fn env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
@@ -437,6 +442,179 @@ mod environment_tests {
             .expect("ufa info must parse");
 
         assert_eq!(args.url.as_deref(), Some("https://from-the-flag"));
+    }
+}
+
+/// Pins the claim that the connection and output options are accepted
+/// *anywhere* on the command line, not only ahead of the subcommand.
+///
+/// `ufa devices list --output json` is the shape everyone reaches for when
+/// scripting, and the position of a global-looking flag is not discoverable
+/// from the help text — so rejecting the trailing spelling is a usability
+/// defect, not a style preference.
+#[cfg(test)]
+mod flag_position_tests {
+    use super::{environment_tests::env_lock, Args, Commands};
+    use crate::output::OutputFormat;
+    use clap::Parser;
+
+    /// Every argv spelling that must yield `--output json`, with the flag
+    /// placed after the subcommand it applies to.
+    const TRAILING_OUTPUT_ARGV: &[&[&str]] = &[
+        &["ufa", "cloud", "hosts", "--output", "json"],
+        &["ufa", "devices", "list", "--output", "json"],
+        &["ufa", "sites", "--output", "json"],
+        &["ufa", "info", "--output", "json"],
+        &["ufa", "clients", "list", "--output", "json"],
+    ];
+
+    fn parse(argv: &[&str]) -> Args {
+        Args::try_parse_from(argv)
+            .unwrap_or_else(|error| panic!("`{}` must parse, got {error}", argv.join(" ")))
+    }
+
+    fn is_json(format: OutputFormat) -> bool {
+        matches!(format, OutputFormat::Json)
+    }
+
+    #[test]
+    fn output_is_accepted_after_the_subcommand() {
+        let _guard = env_lock();
+
+        for argv in TRAILING_OUTPUT_ARGV {
+            let args = parse(argv);
+            assert!(
+                is_json(args.output),
+                "`{}` must select JSON output",
+                argv.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn output_is_still_accepted_before_the_subcommand() {
+        let _guard = env_lock();
+
+        for argv in [
+            ["ufa", "--output", "json", "cloud", "hosts"].as_slice(),
+            ["ufa", "--output", "json", "devices", "list"].as_slice(),
+            ["ufa", "--output", "json", "sites"].as_slice(),
+        ] {
+            let args = parse(argv);
+            assert!(
+                is_json(args.output),
+                "`{}` must select JSON output",
+                argv.join(" ")
+            );
+        }
+    }
+
+    /// The classic global-argument pitfall: the subcommand's own copy of the
+    /// option carries the `table` default, which can silently overwrite the
+    /// value the user gave earlier on the line.
+    #[test]
+    fn a_leading_output_is_not_overwritten_by_the_default() {
+        let _guard = env_lock();
+
+        let args = parse(&["ufa", "--output", "json", "devices", "list", "--limit", "5"]);
+
+        assert!(
+            is_json(args.output),
+            "a leading --output must survive a subcommand that takes further flags"
+        );
+    }
+
+    #[test]
+    fn output_defaults_to_table_in_both_positions() {
+        let _guard = env_lock();
+
+        for argv in [
+            ["ufa", "sites"].as_slice(),
+            ["ufa", "devices", "list"].as_slice(),
+            ["ufa", "cloud", "hosts"].as_slice(),
+        ] {
+            let args = parse(argv);
+            assert!(
+                matches!(args.output, OutputFormat::Table),
+                "`{}` must fall back to the table default",
+                argv.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn connection_flags_are_accepted_after_the_subcommand() {
+        let _guard = env_lock();
+
+        let args = parse(&[
+            "ufa",
+            "devices",
+            "list",
+            "--url",
+            "https://controller.example",
+            "--api-key",
+            "trailing-key",
+            "--insecure",
+            "true",
+        ]);
+
+        assert_eq!(args.url.as_deref(), Some("https://controller.example"));
+        assert_eq!(args.api_key.as_deref(), Some("trailing-key"));
+        assert_eq!(args.insecure, Some(true));
+        assert!(
+            matches!(args.command, Commands::Devices { .. }),
+            "the trailing connection flags must not disturb the parsed subcommand"
+        );
+    }
+
+    /// A subcommand nested two levels deep still sees the options, and a
+    /// subcommand-specific flag alongside them still binds to the subcommand.
+    #[test]
+    fn connection_flags_are_accepted_beside_subcommand_flags() {
+        let _guard = env_lock();
+
+        let args = parse(&[
+            "ufa",
+            "devices",
+            "list",
+            "--limit",
+            "7",
+            "--insecure",
+            "false",
+            "--output",
+            "json",
+        ]);
+
+        assert_eq!(args.insecure, Some(false));
+        assert!(is_json(args.output));
+
+        let Commands::Devices { command, .. } = args.command else {
+            panic!("`ufa devices list` must parse as the devices command");
+        };
+        assert!(
+            matches!(
+                command,
+                crate::commands::devices::DevicesCommand::List { limit: 7, .. }
+            ),
+            "the subcommand's own --limit must still bind to the subcommand"
+        );
+    }
+
+    #[test]
+    fn connection_flags_are_still_accepted_before_the_subcommand() {
+        let _guard = env_lock();
+
+        let args = parse(&[
+            "ufa",
+            "--url",
+            "https://leading.example",
+            "--insecure",
+            "true",
+            "sites",
+        ]);
+
+        assert_eq!(args.url.as_deref(), Some("https://leading.example"));
+        assert_eq!(args.insecure, Some(true));
     }
 }
 
