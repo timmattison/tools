@@ -9088,6 +9088,7 @@ name = "ufa"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "buildinfo",
  "chrono",
  "clap",
  "dirs 5.0.1",

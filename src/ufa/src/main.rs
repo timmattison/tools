@@ -9,6 +9,7 @@ mod site_helper;
 mod site_manager;
 
 use anyhow::{Context, Result};
+use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use client::UnifiClient;
 use commands::*;
@@ -28,7 +29,7 @@ fn parse_bool_env(s: &str) -> Result<bool, String> {
 
 /// UniFi API CLI tool for managing UniFi Network applications
 #[derive(Parser, Debug)]
-#[clap(author, version, about)]
+#[clap(author, version = version_string!(), about)]
 struct Args {
     /// UniFi controller URL (e.g., https://192.168.1.1)
     #[clap(long, env = "UNIFI_URL")]
