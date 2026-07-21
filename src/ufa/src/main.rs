@@ -5,6 +5,7 @@ mod device_helper;
 mod discovery;
 mod models;
 mod output;
+mod pagination;
 mod site_helper;
 mod site_manager;
 
