@@ -9092,6 +9092,8 @@ dependencies = [
  "clap",
  "dirs 5.0.1",
  "dotenvy",
+ "futures",
+ "indicatif",
  "mdns-sd",
  "op-cache",
  "open",
