@@ -225,3 +225,51 @@ async fn main() -> Result<()> {
         Commands::Cloud { .. } => unreachable!("Cloud commands handled above"),
     }
 }
+
+#[cfg(test)]
+mod version_tests {
+    use super::Args;
+    use clap::CommandFactory;
+
+    /// CLAUDE.md mandates that every tool in this repository report its git
+    /// commit hash and dirty status from `--version`/`-V`, in the form
+    /// `toolname 0.1.0 (abc1234, clean)`.
+    ///
+    /// The assertion is structural rather than literal: hardcoding today's
+    /// commit hash would make the test fail on every subsequent commit. It
+    /// inspects the version clap will actually print, so it fails if the
+    /// derive falls back to the bare `CARGO_PKG_VERSION`.
+    #[test]
+    fn version_reports_git_hash_and_dirty_status() {
+        let version = Args::command()
+            .get_version()
+            .expect("ufa must declare a --version string")
+            .to_string();
+
+        let (package_version, suffix) = version.split_once(" (").unwrap_or_else(|| {
+            panic!("--version must be `<version> (<hash>, <clean|dirty>)`, got {version:?}")
+        });
+
+        assert_eq!(
+            package_version,
+            env!("CARGO_PKG_VERSION"),
+            "--version must lead with the package version, got {version:?}"
+        );
+
+        let suffix = suffix.strip_suffix(')').unwrap_or_else(|| {
+            panic!("--version build-info suffix must be parenthesised, got {version:?}")
+        });
+        let (hash, status) = suffix.split_once(", ").unwrap_or_else(|| {
+            panic!("--version suffix must be `(<hash>, <clean|dirty>)`, got {version:?}")
+        });
+
+        assert!(
+            hash == "unknown" || (hash.len() == 7 && hash.chars().all(|c| c.is_ascii_hexdigit())),
+            "--version must carry a 7-character git hash (or \"unknown\"), got {hash:?}"
+        );
+        assert!(
+            matches!(status, "clean" | "dirty" | "unknown"),
+            "--version must carry the working-tree status, got {status:?}"
+        );
+    }
+}
