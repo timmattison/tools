@@ -86,6 +86,11 @@ philosophy):
 | `Rebase` / `RebaseInteractive` / `ApplyMailboxRebase`| `Operation::Rebase { step, conflicts }`  |
 | `ApplyMailbox` (plain `git am`), `CherryPick*`, `Revert*`, `Bisect`, `None` | `None` (out of scope) |
 
+`ApplyMailboxRebase` is gix's name for the ambiguous state — a bare
+`rebase-apply/` directory with neither the `applying` nor the `rebasing` marker
+file — so it cannot be told apart from a rebase and is treated as one. A real
+apply-backend rebase writes `rebase-apply/rebasing` and classifies as `Rebase`.
+
 **Step counts** are not exposed by gix, so read them directly from the git dir
 (`repo.path()`, the same base gix's `state()` uses), exactly as git's prompt
 does:
@@ -182,7 +187,7 @@ indicator appears, updates its step/conflict counts, and disappears live.
 | Rebase, steps readable, 0 conflicts | `⚠ rebase C/T` (e.g. stopped for `edit`/`reword`) |
 | Rebase, step files missing/unparseable | `⚠ rebase[ · N conflict[s] to resolve]` (no `C/T`) |
 | Interactive rebase | Treated as rebase (`RebaseInteractive`) |
-| Apply-backend rebase (`git rebase --apply`) | Treated as rebase (`ApplyMailboxRebase`) |
+| Apply-backend rebase (`git rebase --apply`) | Treated as rebase (`Rebase`, from the `rebase-apply/rebasing` marker) |
 | Plain `git am` (not a rebase) | `None` — no indicator (out of scope) |
 | Cherry-pick / revert / bisect | `None` — out of scope for this feature |
 | `1` conflict | Singular: `1 conflict to resolve` |
