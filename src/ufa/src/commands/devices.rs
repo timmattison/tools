@@ -583,6 +583,45 @@ mod tests {
         }
     }
 
+    /// A state this build has never heard of still means something to the
+    /// user -- it is whatever the controller called it -- so the listing must
+    /// show that word rather than a placeholder or a debug rendering of the
+    /// wrapper it landed in.
+    #[test]
+    fn an_unknown_device_state_is_listed_as_the_controller_spelled_it() {
+        const FUTURE_STATE: &str = "FUTURE_FIRMWARE_VALUE";
+        let json = format!(
+            r#"{{
+                "id": "00000000-0000-0000-0000-000000000001",
+                "name": "ap-lr", "model": "U6-LR",
+                "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+                "state": "{FUTURE_STATE}",
+                "features": [], "interfaces": []
+            }}"#
+        );
+        let device: Device = serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("an unfamiliar state must still parse: {error}"));
+
+        let row = DeviceRow::from(&device);
+
+        assert_eq!(
+            row.state, FUTURE_STATE,
+            "the listing must show the state the controller reported"
+        );
+    }
+
+    /// A state this build does know keeps the controller's own spelling too,
+    /// so the column reads consistently whichever kind of value it holds.
+    #[test]
+    fn a_known_device_state_is_listed_as_the_controller_spells_it() {
+        let row = DeviceRow::from(&test_device("ap-lr"));
+
+        assert_eq!(
+            row.state, "ONLINE",
+            "the listing must show the state the controller reported"
+        );
+    }
+
     /// A device id together with `--all` is a contradiction, and it is one
     /// clap can see before anything talks to the controller. Catching it at
     /// runtime instead means resolving the site first -- a round trip that can

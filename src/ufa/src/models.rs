@@ -411,3 +411,355 @@ pub enum ClientAction {
     #[serde(rename = "UNAUTHORIZE_GUEST_ACCESS")]
     UnauthorizeGuestAccess,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::de::DeserializeOwned;
+
+    /// A value no build of this tool knows about, standing in for whatever
+    /// Ubiquiti ships in the next firmware.
+    const FUTURE_VALUE: &str = "FUTURE_FIRMWARE_VALUE";
+
+    /// Where the production half of this file ends and the tests begin.
+    const TEST_MODULE_ATTRIBUTE: &str = "#[cfg(test)]";
+
+    /// Deserialize `raw` as a bare JSON string into `T` and serialize it back.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The value the controller sent, without JSON quoting.
+    ///
+    /// # Returns
+    ///
+    /// Whatever `T` serializes back to, without JSON quoting.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value cannot be read into `T` or written back out.
+    fn round_trip<T: DeserializeOwned + Serialize>(raw: &str) -> String {
+        let json = serde_json::to_string(raw).expect("quoting a string must succeed");
+        let parsed: T = serde_json::from_str(&json).unwrap_or_else(|error| {
+            panic!(
+                "{} must accept the unrecognized value {raw}: {error}",
+                std::any::type_name::<T>()
+            )
+        });
+        let written = serde_json::to_string(&parsed).expect("writing the value back must succeed");
+        serde_json::from_str(&written).unwrap_or_else(|error| {
+            panic!("{} must serialize back to a string: {error}", std::any::type_name::<T>())
+        })
+    }
+
+    /// A device listing holding one device whose state is `state`.
+    fn device_page_json(state: &str) -> String {
+        format!(
+            r#"{{
+                "offset": 0, "limit": 25, "count": 2, "totalCount": 2,
+                "data": [
+                    {{
+                        "id": "00000000-0000-0000-0000-000000000001",
+                        "name": "ap-lr", "model": "U6-LR",
+                        "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+                        "state": "{state}",
+                        "features": ["accessPoint"], "interfaces": ["radios"]
+                    }},
+                    {{
+                        "id": "00000000-0000-0000-0000-000000000002",
+                        "name": "switch-8", "model": "USW-8",
+                        "macAddress": "00:11:22:33:44:66", "ipAddress": "192.168.1.3",
+                        "state": "ONLINE",
+                        "features": ["switching"], "interfaces": ["ports"]
+                    }}
+                ]
+            }}"#
+        )
+    }
+
+    /// Every enum read from the controller must survive a value this build
+    /// does not know, and must hand that value back unchanged so `--output
+    /// json` stays faithful to what the controller actually said.
+    #[test]
+    fn unknown_values_round_trip_through_every_api_enum() {
+        let checks: &[(&str, fn(&str) -> String)] = &[
+            ("DeviceState", round_trip::<DeviceState>),
+            ("DeviceFeature", round_trip::<DeviceFeature>),
+            ("DeviceInterface", round_trip::<DeviceInterface>),
+            ("PortState", round_trip::<PortState>),
+            ("PortConnector", round_trip::<PortConnector>),
+            ("PoEStandard", round_trip::<PoEStandard>),
+            ("PoEState", round_trip::<PoEState>),
+            ("WlanStandard", round_trip::<WlanStandard>),
+        ];
+
+        for (name, check) in checks {
+            assert_eq!(
+                check(FUTURE_VALUE),
+                FUTURE_VALUE,
+                "{name} must hand an unrecognized value back unchanged"
+            );
+        }
+    }
+
+    /// Known values must keep their exact wire spelling, so opening the enums
+    /// up cannot quietly rewrite what `--output json` emits.
+    #[test]
+    fn known_values_keep_their_wire_spelling() {
+        let checks: &[(&str, fn(&str) -> String)] = &[
+            ("ONLINE", round_trip::<DeviceState>),
+            ("accessPoint", round_trip::<DeviceFeature>),
+            ("radios", round_trip::<DeviceInterface>),
+            ("UP", round_trip::<PortState>),
+            ("SFP28", round_trip::<PortConnector>),
+            ("802.3bt", round_trip::<PoEStandard>),
+            ("LIMITED", round_trip::<PoEState>),
+            ("802.11be", round_trip::<WlanStandard>),
+        ];
+
+        for (value, check) in checks {
+            assert_eq!(check(value), *value, "{value} must round trip unchanged");
+        }
+    }
+
+    /// One device in an unfamiliar state must not cost the user the whole
+    /// listing.
+    #[test]
+    fn a_device_in_an_unknown_state_does_not_kill_the_listing() {
+        let json = device_page_json(FUTURE_VALUE);
+
+        let page: Page<Device> = serde_json::from_str(&json)
+            .unwrap_or_else(|error| panic!("the listing must still parse: {error}"));
+
+        assert_eq!(page.data.len(), 2, "every device must survive the parse");
+        assert_eq!(page.data[1].name, "switch-8", "the known device must survive");
+        let written = serde_json::to_value(&page.data[0]).expect("writing the device back");
+        assert_eq!(
+            written["state"], FUTURE_VALUE,
+            "the unrecognized state must be reported as the controller sent it"
+        );
+    }
+
+    /// A device the controller reports without a name is a device the user
+    /// still needs to see -- and still must not cost them the whole listing.
+    #[test]
+    fn a_device_without_a_name_does_not_kill_the_listing() {
+        let json = r#"{
+            "offset": 0, "limit": 25, "count": 1, "totalCount": 1,
+            "data": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "macAddress": "00:11:22:33:44:55", "ipAddress": "192.168.1.2",
+                    "state": "PENDING_ADOPTION",
+                    "features": [], "interfaces": []
+                }
+            ]
+        }"#;
+
+        let page: Page<Device> = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("a nameless device must still parse: {error}"));
+
+        assert_eq!(page.data.len(), 1, "the nameless device must survive");
+    }
+
+    /// A client type this build has never heard of must not cost the user the
+    /// whole client listing, and what is known about it must still come back.
+    #[test]
+    fn an_unknown_client_type_does_not_kill_the_listing() {
+        let json = r#"{
+            "offset": 0, "limit": 25, "count": 2, "totalCount": 2,
+            "data": [
+                {
+                    "type": "MESH",
+                    "id": "00000000-0000-0000-0000-000000000001",
+                    "name": "mesh-node",
+                    "ipAddress": "192.168.1.9",
+                    "macAddress": "00:11:22:33:44:99",
+                    "connectedAt": "2026-07-21T00:00:00Z"
+                },
+                {
+                    "type": "WIRED",
+                    "id": "00000000-0000-0000-0000-000000000002",
+                    "name": "nas",
+                    "ipAddress": "192.168.1.10",
+                    "macAddress": "00:11:22:33:44:10",
+                    "uplinkDeviceId": "00000000-0000-0000-0000-000000000003",
+                    "access": { "type": "DEFAULT" }
+                }
+            ]
+        }"#;
+
+        let page: Page<Client> = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("the client listing must still parse: {error}"));
+
+        assert_eq!(page.data.len(), 2, "every client must survive the parse");
+        let written = serde_json::to_value(&page.data[0]).expect("writing the client back");
+        assert_eq!(
+            written["type"], "MESH",
+            "the unrecognized client type must be reported as the controller sent it"
+        );
+        assert_eq!(
+            written["name"], "mesh-node",
+            "what is known about an unfamiliar client must still be reported"
+        );
+    }
+
+    /// A new access tier must not cost the user the client it belongs to.
+    #[test]
+    fn an_unknown_client_access_type_does_not_kill_the_client() {
+        let json = r#"{
+            "type": "WIRED",
+            "id": "00000000-0000-0000-0000-000000000002",
+            "name": "nas",
+            "macAddress": "00:11:22:33:44:10",
+            "uplinkDeviceId": "00000000-0000-0000-0000-000000000003",
+            "access": { "type": "HOTSPOT", "authorized": true }
+        }"#;
+
+        let client: Client = serde_json::from_str(json)
+            .unwrap_or_else(|error| panic!("the client must still parse: {error}"));
+
+        let written = serde_json::to_value(&client).expect("writing the client back");
+        assert_eq!(
+            written["access"]["type"], "HOTSPOT",
+            "the unrecognized access type must be reported as the controller sent it"
+        );
+    }
+
+    /// The guardrail for this whole class of bug: an enum read from the
+    /// controller that has no unknown-value fallback breaks every command
+    /// that touches it the day Ubiquiti ships a new value, so adding one must
+    /// fail here rather than in the field.
+    ///
+    /// An enum is exempt only if it is never deserialized (request bodies we
+    /// author ourselves cannot surprise us).
+    #[test]
+    fn no_api_enum_is_closed_to_unknown_values() {
+        const SOURCE: &str = include_str!("models.rs");
+
+        // Only the production half of the file: the test module below holds
+        // sample declarations that are text, not types.
+        let production = SOURCE.split(TEST_MODULE_ATTRIBUTE).next().unwrap_or(SOURCE);
+
+        let closed: Vec<String> = enum_declarations(production)
+            .into_iter()
+            .filter(|declaration| declaration.needs_fallback() && !declaration.has_fallback())
+            .map(|declaration| declaration.name)
+            .collect();
+
+        assert!(
+            closed.is_empty(),
+            "these enums are read from the UniFi API but reject values this build \
+             does not know, which fails the whole response instead of the one odd \
+             item: {closed:?}. Declare them with api_enum! (bare string values) or \
+             give them an untagged fallback variant (tagged objects)."
+        );
+    }
+
+    /// One enum declaration found in the source of this file.
+    struct EnumDeclaration {
+        name: String,
+        /// Declared through `api_enum!`, which supplies the fallback itself.
+        from_api_enum_macro: bool,
+        /// Read from the controller, as opposed to only ever written.
+        deserialized: bool,
+        /// Carries a variant that swallows anything unrecognized.
+        fallback_variant: bool,
+    }
+
+    impl EnumDeclaration {
+        fn needs_fallback(&self) -> bool {
+            self.deserialized
+        }
+
+        fn has_fallback(&self) -> bool {
+            self.from_api_enum_macro || self.fallback_variant
+        }
+    }
+
+    /// Find every enum declared in `source`.
+    ///
+    /// This reads the source text rather than the compiled types because the
+    /// point is to catch an enum somebody *adds*, which no amount of testing
+    /// the existing types can do.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - The Rust source to scan.
+    ///
+    /// # Returns
+    ///
+    /// One entry per enum declaration, in source order.
+    fn enum_declarations(source: &str) -> Vec<EnumDeclaration> {
+        const MACRO_OPENER: &str = "api_enum! {";
+
+        let lines: Vec<&str> = source.lines().collect();
+        let mut declarations = Vec::new();
+
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if !trimmed.ends_with('{') {
+                continue;
+            }
+            let Some(rest) = trimmed
+                .strip_prefix("pub enum ")
+                .or_else(|| trimmed.strip_prefix("enum "))
+            else {
+                continue;
+            };
+            let name = rest.trim_end_matches('{').trim().to_string();
+
+            let mut from_api_enum_macro = false;
+            let mut deserialized = false;
+            for earlier in lines[..index].iter().rev() {
+                let earlier = earlier.trim();
+                if earlier.starts_with("#[") || earlier.starts_with("///") {
+                    deserialized |= earlier.contains("derive") && earlier.contains("Deserialize");
+                    continue;
+                }
+                from_api_enum_macro = earlier.ends_with(MACRO_OPENER);
+                break;
+            }
+            if from_api_enum_macro {
+                deserialized = true;
+            }
+
+            let fallback_variant = lines[index + 1..]
+                .iter()
+                .take_while(|body| body.trim() != "}")
+                .any(|body| {
+                    body.contains("serde(untagged)") || body.contains("serde(other)")
+                });
+
+            declarations.push(EnumDeclaration {
+                name,
+                from_api_enum_macro,
+                deserialized,
+                fallback_variant,
+            });
+        }
+
+        declarations
+    }
+
+    /// The source scan above is only worth anything if it can actually fail,
+    /// so feed it an enum of exactly the shape it is meant to catch.
+    #[test]
+    fn the_closed_enum_guard_can_fail() {
+        let closed_enum_source = "\
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = \"SCREAMING_SNAKE_CASE\")]
+pub enum NewlyAddedState {
+    Online,
+    Offline,
+}
+";
+
+        let declarations = enum_declarations(closed_enum_source);
+
+        assert_eq!(declarations.len(), 1, "the scan must find the enum at all");
+        assert!(
+            declarations[0].needs_fallback() && !declarations[0].has_fallback(),
+            "a closed enum read from the API must be reported as closed"
+        );
+    }
+}
