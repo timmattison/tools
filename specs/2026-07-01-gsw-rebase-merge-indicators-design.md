@@ -51,11 +51,14 @@ gsw • main • 1 commit ahead of main • last commit 2m ago
 
 ### Indicator text
 
-- **Merge:** `⚠ merge` followed by ` · {n} conflict[s] to resolve` **only when
+The pieces below are concatenated in order, each joined to the previous one by
+a single space:
+
+- **Merge:** `⚠ merge` followed by `· {n} conflict[s] to resolve` **only when
   `n > 0`**. A merge stopped with no conflicts (e.g. `--no-commit` on a clean
   merge) shows just `⚠ merge`.
-- **Rebase:** `⚠ rebase` followed by ` {current}/{total}` **when the step
-  counts are readable**, then ` · {n} conflict[s] to resolve` **only when
+- **Rebase:** `⚠ rebase` followed by `{current}/{total}` **when the step
+  counts are readable**, then `· {n} conflict[s] to resolve` **only when
   `n > 0`**. Steps are git's own `current/total` form (step 3 of 10 →
   `3/10`), matching `git status` and the shell prompt.
 - Pluralization: `1 conflict` vs `2 conflicts`.
@@ -158,11 +161,11 @@ lines.push(render_separator(opts.terminal_width));
 
 `render_operation_line` composes the styled pieces: the `⚠ rebase 3/10` /
 `⚠ merge` label as `.yellow().bold()` (the same warning convention as the
-existing "behind" segment), and the ` · {n} conflict[s] to resolve` clause as
-`.red().bold()` to flag the pending action. Like the header, the line is free
-text and is **not** width-truncated. `NO_COLOR` / non-TTY handling falls out of
-the `colored` crate exactly as today (the global override is already set in
-`main`).
+existing "behind" segment), and the `· {n} conflict[s] to resolve` clause — the
+space separating it from the label included — as `.red().bold()` to flag the
+pending action. Like the header, the line is free text and is **not**
+width-truncated. `NO_COLOR` / non-TTY handling falls out of the `colored` crate
+exactly as today (the global override is already set in `main`).
 
 ### Layout budget (`src/gsw/src/main.rs`, `render_frame`)
 
