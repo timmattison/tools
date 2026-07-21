@@ -1,0 +1,9 @@
+# `Args::try_parse_from` reads the process environment as well as argv --
+# clap consults UNIFI_URL, UNIFI_API_KEY, UNIFI_INSECURE and
+# UNIFI_SITE_MANAGER_API_KEY on every parse -- so tests that call it directly
+# race the tests that write those variables. Parse through
+# `crate::test_support::parse_args_for_test`, which holds the environment lock.
+disallowed-methods = [
+    { path = "clap::Parser::try_parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+    { path = "clap::Parser::parse_from", reason = "parse through crate::test_support::parse_args_for_test, which holds the environment lock" },
+]

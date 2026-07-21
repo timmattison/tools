@@ -14,6 +14,171 @@
 //! here takes it internally — and the guard test below fails the build if a
 //! parse appears anywhere else in the crate.
 
+use crate::Args;
+use clap::Parser;
+use std::cell::Cell;
+use std::ffi::OsString;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// The one lock guarding the process environment for the whole test binary.
+fn environment_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+thread_local! {
+    /// Whether an [`EnvironmentGuard`] on *this* thread already owns the lock.
+    ///
+    /// A `std::sync::Mutex` is not reentrant, so a test that sets a variable
+    /// (holding the guard for its whole body) and then parses would deadlock
+    /// against itself if the parse tried to lock again. Tracking ownership
+    /// per thread makes the nested acquisition a no-op instead.
+    static HELD_BY_THIS_THREAD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Exclusive access to the process environment, held for as long as it lives.
+///
+/// Nesting is allowed: an inner guard taken on a thread that already holds
+/// one borrows the outer guard's ownership and releases nothing when dropped.
+struct EnvironmentGuard {
+    /// The lock itself, or `None` when an enclosing guard already owns it.
+    _owned: Option<MutexGuard<'static, ()>>,
+    /// Whether dropping this guard hands ownership back.
+    owner: bool,
+}
+
+impl EnvironmentGuard {
+    /// Take the environment lock, blocking until it is free.
+    ///
+    /// # Returns
+    ///
+    /// A guard that releases the lock when dropped, unless this thread was
+    /// already holding it.
+    fn acquire() -> Self {
+        if HELD_BY_THIS_THREAD.with(Cell::get) {
+            return Self {
+                _owned: None,
+                owner: false,
+            };
+        }
+
+        // A test that panics while holding the lock poisons it, which says
+        // nothing about the environment itself -- so take it either way
+        // rather than turning one failure into a cascade of them.
+        let owned = environment_mutex()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        HELD_BY_THIS_THREAD.with(|held| held.set(true));
+
+        Self {
+            _owned: Some(owned),
+            owner: true,
+        }
+    }
+}
+
+impl Drop for EnvironmentGuard {
+    fn drop(&mut self) {
+        if self.owner {
+            HELD_BY_THIS_THREAD.with(|held| held.set(false));
+        }
+    }
+}
+
+/// Parse a command line the way `main` does, without racing the environment.
+///
+/// This is the only way a test may reach clap's argv parsers: it takes the
+/// environment lock itself, so no caller can forget to, and the guard test
+/// below rejects any parse written anywhere else in the crate.
+///
+/// # Arguments
+///
+/// * `argv` - The argument vector, including the program name.
+///
+/// # Returns
+///
+/// The parsed arguments, or the error clap raised for them.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one sanctioned parse: the environment lock is held above it"
+)]
+pub(crate) fn parse_args_for_test<I, T>(argv: I) -> Result<Args, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
+    let _environment = EnvironmentGuard::acquire();
+
+    Args::try_parse_from(argv)
+}
+
+/// Sets an environment variable for as long as it is held, then removes it —
+/// so a failing assertion cannot leak state into the next test.
+///
+/// Holding one also holds the environment lock, which is what keeps the
+/// variable invisible to every other test's parse.
+pub(crate) struct ScopedVar {
+    name: &'static str,
+    _environment: EnvironmentGuard,
+}
+
+impl ScopedVar {
+    /// Set `name` to `value` until the returned value is dropped.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The environment variable to set.
+    /// * `value` - The value to give it.
+    ///
+    /// # Returns
+    ///
+    /// A guard that removes the variable, and releases the environment lock,
+    /// when dropped.
+    pub(crate) fn set(name: &'static str, value: &str) -> Self {
+        let environment = EnvironmentGuard::acquire();
+        std::env::set_var(name, value);
+
+        Self {
+            name,
+            _environment: environment,
+        }
+    }
+}
+
+impl Drop for ScopedVar {
+    fn drop(&mut self) {
+        std::env::remove_var(self.name);
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::{parse_args_for_test, ScopedVar};
+
+    /// The whole point of the lock: a variable one test sets is gone again by
+    /// the time anybody else can parse, so no parse fails for a reason that
+    /// belongs to another test.
+    #[test]
+    fn a_scoped_variable_is_removed_once_the_lock_is_released() {
+        drop(ScopedVar::set("UNIFI_INSECURE", "maybe"));
+
+        parse_args_for_test(["ufa", "devices", "stats", "--all"])
+            .expect("a released ScopedVar must leave nothing behind for the next parse");
+    }
+
+    /// Setting a variable and then parsing is the shape most of these tests
+    /// take, and the lock is not reentrant — so the helper must nest inside a
+    /// `ScopedVar` rather than deadlock against it.
+    #[test]
+    fn parsing_nests_inside_a_scoped_variable_without_deadlocking() {
+        let _var = ScopedVar::set("UNIFI_URL", "https://nested.example");
+
+        let args = parse_args_for_test(["ufa", "info"]).expect("ufa info must parse");
+
+        assert_eq!(args.url.as_deref(), Some("https://nested.example"));
+    }
+}
+
 #[cfg(test)]
 mod guard_tests {
     use std::fs;
@@ -70,8 +235,9 @@ mod guard_tests {
     /// remembering to register it.
     fn scannable_sources() -> Vec<(String, String)> {
         fn walk(directory: &Path, root: &Path, found: &mut Vec<(String, String)>) {
-            let entries = fs::read_dir(directory)
-                .unwrap_or_else(|error| panic!("{} must be readable: {error}", directory.display()));
+            let entries = fs::read_dir(directory).unwrap_or_else(|error| {
+                panic!("{} must be readable: {error}", directory.display())
+            });
 
             for entry in entries {
                 let path = entry.expect("a directory entry must be readable").path();
