@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Subcommand;
+use futures::stream::StreamExt;
 use tabled::Tabled;
 use uuid::Uuid;
 
@@ -390,7 +391,8 @@ const MAX_CONCURRENT_STAT_REQUESTS: usize = 8;
 ///
 /// # Returns
 ///
-/// One result per device, in the same order as `devices`.
+/// One result per device, in the same order as `devices`, however the
+/// individual requests happened to finish.
 async fn fetch_device_statistics<F, Fut>(
     devices: &[Device],
     fetch: F,
@@ -399,11 +401,10 @@ where
     F: Fn(&Device) -> Fut,
     Fut: std::future::Future<Output = Result<DeviceStatistics>>,
 {
-    let mut results = Vec::with_capacity(devices.len());
-    for device in devices {
-        results.push(fetch(device).await);
-    }
-    results
+    futures::stream::iter(devices.iter().map(&fetch))
+        .buffered(MAX_CONCURRENT_STAT_REQUESTS)
+        .collect()
+        .await
 }
 
 /// Render the per-device statistics of `devices stats --all`.
