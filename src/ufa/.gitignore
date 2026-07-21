@@ -1,0 +1,16 @@
+# Build outputs
+/target/
+
+# Environment files
+.env
+
+# IDE files
+.vscode/
+.idea/
+
+# Temporary files
+*.swp
+*.swo
+*~
+
+.env*
