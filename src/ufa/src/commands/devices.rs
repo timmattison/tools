@@ -485,6 +485,7 @@ mod tests {
     use crate::models::{
         DeviceFeature, DeviceInterface, DeviceInterfaceStatistics, DeviceState, UplinkStatistics,
     };
+    use clap::Parser;
     use std::cell::Cell;
 
     /// Box-drawing corner produced by the table renderer.
@@ -581,6 +582,35 @@ mod tests {
             uptime_sec: None,
             ..stats_with_uptime(0)
         }
+    }
+
+    /// A device id together with `--all` is a contradiction, and it is one
+    /// clap can see before anything talks to the controller. Catching it at
+    /// runtime instead means resolving the site first -- a round trip that can
+    /// fail on its own and report the wrong problem entirely.
+    #[test]
+    fn stats_rejects_a_device_id_together_with_all_at_parse_time() {
+        let device_id = Uuid::new_v4().to_string();
+
+        let error = crate::Args::try_parse_from(["ufa", "devices", "stats", "--all", &device_id])
+            .expect_err("--all and a device id are mutually exclusive");
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "the contradiction must be rejected by the parser, got {error}"
+        );
+    }
+
+    /// Neither half of the constraint may be broken on its own.
+    #[test]
+    fn stats_accepts_all_and_a_device_id_separately() {
+        let device_id = Uuid::new_v4().to_string();
+
+        crate::Args::try_parse_from(["ufa", "devices", "stats", "--all"])
+            .expect("--all on its own is valid");
+        crate::Args::try_parse_from(["ufa", "devices", "stats", &device_id])
+            .expect("a device id on its own is valid");
     }
 
     /// Statistics carrying `uptime` as their only identifying value.
