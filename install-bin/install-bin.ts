@@ -34,7 +34,7 @@ import {
 } from "node:fs";
 import { homedir, platform } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 export class InstallError extends Error {}
 
@@ -153,7 +153,20 @@ export function main(argv: string[]): number {
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+// Realpath both sides: the tool is deployed as a PATH symlink, so argv[1]
+// (the symlink) and import.meta.url (the resolved file) only agree after
+// symlink resolution.
+const invokedDirectly = (() => {
+  const argv1 = process.argv[1];
+  if (!argv1) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv1);
+  } catch {
+    return false;
+  }
+})();
+
+if (invokedDirectly) {
   try {
     process.exit(main(process.argv.slice(2)));
   } catch (err) {
