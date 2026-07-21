@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod device_helper;
 mod discovery;
+mod http;
 mod models;
 mod output;
 mod pagination;

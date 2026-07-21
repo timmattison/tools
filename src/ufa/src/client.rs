@@ -1,7 +1,7 @@
+use crate::http::{read_json_response, Api};
 use anyhow::{Context, Result};
 use reqwest::{header, Client, Url};
 use serde::de::DeserializeOwned;
-use serde_json::Value;
 
 pub struct UnifiClient {
     client: Client,
@@ -66,7 +66,7 @@ impl UnifiClient {
             .await
             .map_err(|e| self.handle_request_error(e, "GET"))?;
 
-        self.handle_response(response).await
+        read_json_response(Api::Controller, response).await
     }
 
     pub async fn get_with_params<T>(
@@ -96,7 +96,7 @@ impl UnifiClient {
             .await
             .map_err(|e| self.handle_request_error(e, "GET"))?;
 
-        self.handle_response(response).await
+        read_json_response(Api::Controller, response).await
     }
 
     pub async fn post<T, B>(&self, path: &str, body: &B) -> Result<T>
@@ -117,7 +117,7 @@ impl UnifiClient {
             .await
             .map_err(|e| self.handle_request_error(e, "POST"))?;
 
-        self.handle_response(response).await
+        read_json_response(Api::Controller, response).await
     }
 
     pub async fn delete<T>(&self, path: &str) -> Result<T>
@@ -136,7 +136,7 @@ impl UnifiClient {
             .await
             .map_err(|e| self.handle_request_error(e, "DELETE"))?;
 
-        self.handle_response(response).await
+        read_json_response(Api::Controller, response).await
     }
 
     pub async fn delete_with_params<T>(
@@ -166,39 +166,7 @@ impl UnifiClient {
             .await
             .map_err(|e| self.handle_request_error(e, "DELETE"))?;
 
-        self.handle_response(response).await
-    }
-
-    async fn handle_response<T>(&self, response: reqwest::Response) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        let status = response.status();
-        let text = response
-            .text()
-            .await
-            .context("Failed to read response body")?;
-
-        if !status.is_success() {
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                anyhow::bail!(
-                    "Authentication failed (HTTP {}). Please check your API key or generate a new one in Settings -> Control Plane -> Integrations",
-                    status
-                );
-            }
-
-            if let Ok(error_response) = serde_json::from_str::<Value>(&text) {
-                if let Some(message) = error_response.get("message").and_then(|m| m.as_str()) {
-                    anyhow::bail!("API error: {} (HTTP {})", message, status);
-                }
-            }
-            anyhow::bail!("HTTP error {}: {}", status, text);
-        }
-
-        serde_json::from_str(&text)
-            .with_context(|| format!("Failed to parse response JSON: {}", text))
+        read_json_response(Api::Controller, response).await
     }
 
     fn handle_request_error(&self, error: reqwest::Error, method: &str) -> anyhow::Error {
