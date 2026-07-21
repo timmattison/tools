@@ -192,6 +192,29 @@ pub fn select_one(
     }
 }
 
+/// Put `question` to the terminal and return the trimmed answer.
+///
+/// # Errors
+///
+/// Returns an error if the answer stream ends before a line arrives.
+pub fn ask_line(question: &str) -> Result<String> {
+    let mut console = Stdio;
+    Ok(console.ask(question)?.trim().to_string())
+}
+
+/// Ask a yes/no question at the terminal that defaults to no.
+///
+/// # Arguments
+///
+/// * `question` - The question, without the `[y/N]` suffix.
+///
+/// # Errors
+///
+/// Returns an error if the answer stream ends before a line arrives.
+pub fn confirm(question: &str) -> Result<bool> {
+    Ok(answered_yes(&ask_line(&format!("{question} [y/N]: "))?))
+}
+
 /// A [`Console`] with its answers written in advance.
 ///
 /// Records every question so a test can assert that nothing was asked.

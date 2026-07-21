@@ -1,14 +1,22 @@
 use crate::client::UnifiClient;
 use crate::discovery::{discover_controllers, validate_user_url};
+use crate::prompt::{self, Stdio};
 use anyhow::{Context, Result};
 use dirs::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Prefix identifying a 1Password secret reference.
 const OP_REFERENCE_PREFIX: &str = "op://";
+
+/// Said when setup has a choice to make and no terminal to make it at.
+///
+/// The wizard exists to be answered; a piped run used to sit in a read loop
+/// that could never be satisfied.
+const NEEDS_A_TERMINAL: &str = "Setup needs a terminal to ask which controller to use. \
+     Run 'ufa config setup' interactively, or pass --url and --api-key.";
 
 /// A controller discovered from the 1Password `ufa` item.
 #[derive(Debug, Clone)]
@@ -306,23 +314,17 @@ impl Config {
             println!("  {manual_idx}. Enter URL manually");
             println!("  {network_idx}. Search network instead\n");
 
-            loop {
-                print!("Select a controller [1-{network_idx}]: ");
-                io::stdout().flush()?;
-
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-
-                if let Ok(choice) = input.trim().parse::<usize>() {
-                    if choice > 0 && choice <= op_controllers.len() {
-                        break Selection::Op(op_controllers[choice - 1].clone());
-                    } else if choice == manual_idx {
-                        break Selection::Network(get_manual_controller_url().await?);
-                    } else if choice == network_idx {
-                        break Selection::Network(network_discover_and_select().await?);
-                    }
+            match prompt::select_one(&mut Stdio, "Select a controller", network_idx)?
+                .map(|index| index + 1)
+            {
+                Some(choice) if choice <= op_controllers.len() => {
+                    Selection::Op(op_controllers[choice - 1].clone())
                 }
-                println!("Invalid choice. Please try again.");
+                Some(choice) if choice == manual_idx => {
+                    Selection::Network(get_manual_controller_url().await?)
+                }
+                Some(_) => Selection::Network(network_discover_and_select().await?),
+                None => anyhow::bail!(NEEDS_A_TERMINAL),
             }
         } else {
             Selection::Network(network_discover_and_select().await?)
@@ -352,12 +354,8 @@ impl Config {
         let api_key = credential.key().to_string();
 
         // Ask about certificate verification
-        print!("\nSkip TLS certificate verification? (needed for self-signed certs) [y/N]: ");
-        io::stdout().flush()?;
-
-        let mut insecure_input = String::new();
-        io::stdin().read_line(&mut insecure_input)?;
-        let insecure = matches!(insecure_input.trim().to_lowercase().as_str(), "y" | "yes");
+        let insecure =
+            prompt::confirm("\nSkip TLS certificate verification? (needed for self-signed certs)")?;
 
         // Test the connection
         println!("\n🔍 Testing connection...");
@@ -374,12 +372,7 @@ impl Config {
             },
             Err(e) => {
                 println!("❌ Failed to connect: {e}");
-                print!("\nSave configuration anyway? [y/N]: ");
-                io::stdout().flush()?;
-
-                let mut save_anyway = String::new();
-                io::stdin().read_line(&mut save_anyway)?;
-                if !matches!(save_anyway.trim().to_lowercase().as_str(), "y" | "yes") {
+                if !prompt::confirm("\nSave configuration anyway?")? {
                     anyhow::bail!("Configuration not saved");
                 }
             }
@@ -442,12 +435,7 @@ fn prompt_for_site_manager_key() -> Result<String> {
         "Paste the key from the unifi.ui.com API section, or a 1Password reference \
          ({OP_REFERENCE_PREFIX}Private/ufa/site manager key) to keep it out of the config file."
     );
-    print!("Site Manager API key or 1Password reference [skip]: ");
-    io::stdout().flush()?;
-
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    Ok(answer.trim().to_string())
+    prompt::ask_line("Site Manager API key or 1Password reference [skip]: ")
 }
 
 /// Restrict a file that may contain secrets to its owner (mode 0600).
@@ -515,32 +503,18 @@ async fn network_discover_and_select() -> Result<String> {
     let manual_idx = controllers.len() + 1;
     println!("  {manual_idx}. Enter URL manually\n");
 
-    loop {
-        print!("Select a controller [1-{manual_idx}]: ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-
-        if let Ok(choice) = input.trim().parse::<usize>() {
-            if choice > 0 && choice <= controllers.len() {
-                return Ok(controllers[choice - 1].url());
-            } else if choice == manual_idx {
-                return get_manual_controller_url().await;
-            }
-        }
-        println!("Invalid choice. Please try again.");
+    match prompt::select_one(&mut Stdio, "Select a controller", manual_idx)? {
+        Some(index) if index < controllers.len() => Ok(controllers[index].url()),
+        Some(_) => get_manual_controller_url().await,
+        None => anyhow::bail!(NEEDS_A_TERMINAL),
     }
 }
 
 async fn get_manual_controller_url() -> Result<String> {
     loop {
-        print!("Enter your UniFi controller URL (e.g., https://192.168.1.1): ");
-        io::stdout().flush()?;
-
-        let mut url = String::new();
-        io::stdin().read_line(&mut url)?;
-        let url = url.trim();
+        let url =
+            prompt::ask_line("Enter your UniFi controller URL (e.g., https://192.168.1.1): ")?;
+        let url = url.as_str();
 
         if url.is_empty() {
             println!("URL cannot be empty. Please try again.");
@@ -554,7 +528,7 @@ async fn get_manual_controller_url() -> Result<String> {
         };
 
         print!("Validating controller...");
-        io::stdout().flush()?;
+        std::io::stdout().flush()?;
 
         match validate_user_url(&url).await {
             Ok(controller) => {
@@ -564,12 +538,7 @@ async fn get_manual_controller_url() -> Result<String> {
             Err(e) => {
                 println!(" ✗");
                 println!("Failed to validate controller: {e}");
-                print!("Use this URL anyway? [y/N]: ");
-                io::stdout().flush()?;
-
-                let mut use_anyway = String::new();
-                io::stdin().read_line(&mut use_anyway)?;
-                if matches!(use_anyway.trim().to_lowercase().as_str(), "y" | "yes") {
+                if prompt::confirm("Use this URL anyway?")? {
                     return Ok(url);
                 }
             }
@@ -597,12 +566,7 @@ fn prompt_for_api_key(controller_url: &str) -> Result<String> {
         println!("Could not open browser automatically. Please visit the URL above.");
     }
 
-    print!("\nPaste your API key here: ");
-    io::stdout().flush()?;
-
-    let mut api_key = String::new();
-    io::stdin().read_line(&mut api_key)?;
-    let api_key = api_key.trim().to_string();
+    let api_key = prompt::ask_line("\nPaste your API key here: ")?;
 
     if api_key.is_empty() {
         anyhow::bail!("API key cannot be empty");
