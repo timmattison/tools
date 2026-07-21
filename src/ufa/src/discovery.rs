@@ -81,9 +81,18 @@ pub async fn discover_controllers() -> Result<Vec<DiscoveredController>> {
     Ok(controllers)
 }
 
-/// Discover controllers via mDNS
+/// Discover controllers via mDNS.
+///
+/// # Returns
+///
+/// Every controller that answered the browse and then passed a probe.
+///
+/// # Errors
+///
+/// Returns an error if the mDNS daemon cannot be started or cannot browse.
+/// The daemon is stopped on every path out, including those errors.
 async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
-    let mdns = ServiceDaemon::new()?;
+    let mdns = StopOnDrop::new(ServiceDaemon::new()?);
     let mut controllers = Vec::new();
 
     // Browse for UniFi services
@@ -214,6 +223,12 @@ impl<T: Stoppable> StopOnDrop<T> {
     /// Take ownership of `service` so it cannot outlive this scope.
     fn new(service: T) -> Self {
         Self(service)
+    }
+}
+
+impl<T: Stoppable> Drop for StopOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.stop();
     }
 }
 
