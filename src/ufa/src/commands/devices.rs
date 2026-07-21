@@ -43,6 +43,7 @@ pub enum DevicesCommand {
     /// Get device statistics
     Stats {
         /// Device ID (if not provided, will show device list)
+        #[clap(conflicts_with = "all")]
         device_id: Option<Uuid>,
 
         /// Show statistics for all devices
@@ -309,12 +310,10 @@ async fn get_device_stats(
     all: bool,
     output_format: OutputFormat,
 ) -> Result<()> {
+    // `--all` and a device id are declared as conflicting arguments, so an
+    // invocation carrying both never reaches this point and no request is
+    // issued to reject it.
     let site_id = get_site_id_or_prompt(client, site_id).await?;
-
-    // Validate that --all and device_id are mutually exclusive
-    if all && device_id.is_some() {
-        anyhow::bail!("Cannot specify both --all and a device ID. Use either --all to show all devices or specify a single device ID.");
-    }
 
     if all {
         // Get stats for all devices
@@ -323,8 +322,8 @@ async fn get_device_stats(
         // Get stats for specific device
         get_single_device_stats(client, site_id, device_id, output_format).await
     } else {
-        // Show device selection prompt
-        let device_id = get_device_id_or_prompt(client, site_id, device_id).await?;
+        // No device named: let the user pick one
+        let device_id = get_device_id_or_prompt(client, site_id, None).await?;
         get_single_device_stats(client, site_id, device_id, output_format).await
     }
 }
