@@ -33,7 +33,95 @@ where
 {
     match format {
         OutputFormat::Json => Ok(serde_json::to_string_pretty(data)?),
-        OutputFormat::Table => Ok(serde_json::to_string_pretty(data)?),
+        OutputFormat::Table => Ok(render_key_value_table(&serde_json::to_value(data)?)),
+    }
+}
+
+/// A single `Field` / `Value` line of a key/value table.
+#[derive(Tabled)]
+struct KeyValueRow {
+    #[tabled(rename = "Field")]
+    field: String,
+    #[tabled(rename = "Value")]
+    value: String,
+}
+
+/// Render an arbitrary JSON value as a two-column key/value table.
+///
+/// Nested objects are flattened into dotted keys (`features.switching.enabled`)
+/// and array elements are indexed (`uplinks[0]`), so an arbitrarily deep API
+/// response still renders as a flat, scannable list of fields.
+///
+/// # Arguments
+///
+/// * `value` - The JSON representation of the item to render.
+///
+/// # Returns
+///
+/// The rendered table, without a trailing newline.
+fn render_key_value_table(value: &serde_json::Value) -> String {
+    // `flatten_into_rows` always emits at least one row: an empty object or
+    // array at the root is itself treated as a leaf.
+    let mut rows = Vec::new();
+    flatten_into_rows(String::new(), value, &mut rows);
+
+    let mut table = Table::new(rows);
+    table.with(Style::modern());
+    table.to_string()
+}
+
+/// Recursively flatten `value` into `rows`, prefixing each key with `prefix`.
+///
+/// # Arguments
+///
+/// * `prefix` - Dotted/indexed path accumulated so far; empty at the root.
+/// * `value` - The JSON value to flatten.
+/// * `rows` - Accumulator the flattened rows are appended to.
+fn flatten_into_rows(prefix: String, value: &serde_json::Value, rows: &mut Vec<KeyValueRow>) {
+    match value {
+        serde_json::Value::Object(map) if !map.is_empty() => {
+            for (key, child) in map {
+                let child_prefix = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                flatten_into_rows(child_prefix, child, rows);
+            }
+        }
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            for (index, child) in items.iter().enumerate() {
+                flatten_into_rows(format!("{prefix}[{index}]"), child, rows);
+            }
+        }
+        leaf => rows.push(KeyValueRow {
+            field: if prefix.is_empty() {
+                "value".to_string()
+            } else {
+                prefix
+            },
+            value: leaf_to_string(leaf),
+        }),
+    }
+}
+
+/// Render a JSON leaf (or an empty container) as a display string.
+///
+/// Strings are rendered without their surrounding quotes so the table reads
+/// naturally; everything else keeps its JSON spelling (`null`, `true`, `12`,
+/// `[]`, `{}`).
+///
+/// # Arguments
+///
+/// * `value` - The leaf value to render.
+///
+/// # Returns
+///
+/// The display string for `value`.
+fn leaf_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
     }
 }
 
