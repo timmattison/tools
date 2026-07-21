@@ -24,8 +24,11 @@ export UNIFI_SITE_MANAGER_API_KEY="your-api-key"
 ufa cloud hosts
 
 # JSON format for programmatic use
-ufa --output json cloud hosts
+ufa cloud hosts --output json
 ```
+
+`--output` is a global option, so `ufa --output json cloud hosts` is the same command — put it
+wherever it reads best.
 
 Example output:
 ```
@@ -73,13 +76,13 @@ https://unifi.ui.com/consoles/[CONSOLE_ID]/network/default/dashboard
 
 ```bash
 # Get all console IDs
-ufa --output json cloud hosts | jq -r '.[] | .id'
+ufa cloud hosts --output json | jq -r '.[] | .id'
 
 # Get console ID by name
-ufa --output json cloud hosts | jq -r '.[] | select(.name=="Home-UDM") | .id'
+ufa cloud hosts --output json | jq -r '.[] | select(.name=="Home-UDM") | .id'
 
 # Get IP addresses of all consoles
-ufa --output json cloud hosts | jq -r '.[] | "\(.name): \(.ip_address)"'
+ufa cloud hosts --output json | jq -r '.[] | "\(.name): \(.ip_address)"'
 ```
 
 ### Shell Script Example
@@ -89,7 +92,7 @@ ufa --output json cloud hosts | jq -r '.[] | "\(.name): \(.ip_address)"'
 
 # Get console ID for a specific console name
 CONSOLE_NAME="Home-UDM"
-CONSOLE_ID=$(ufa --output json cloud hosts | jq -r ".[] | select(.name==\"$CONSOLE_NAME\") | .id")
+CONSOLE_ID=$(ufa cloud hosts --output json | jq -r ".[] | select(.name==\"$CONSOLE_NAME\") | .id")
 
 if [ -n "$CONSOLE_ID" ]; then
     echo "Console ID for $CONSOLE_NAME: $CONSOLE_ID"

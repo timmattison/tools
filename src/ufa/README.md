@@ -40,11 +40,8 @@ outside a git checkout reports `(unknown, unknown)`.
 
 ## Command-line shape
 
-Two things trip people up, so they are worth stating before the examples:
+One thing trips people up, so it is worth stating before the examples:
 
-- **Global options come before the subcommand.** `--url`, `--api-key`, `--insecure` and `--output`
-  belong to `ufa` itself, not to its subcommands. `ufa --output json sites` works;
-  `ufa sites --output json` is rejected.
 - **`--site-id` belongs to the command group.** It sits on `devices` / `clients` / `vouchers`,
   before the leaf subcommand: `ufa devices --site-id <SITE_ID> list`, not
   `ufa devices list --site-id <SITE_ID>`. It is optional — see
@@ -53,6 +50,10 @@ Two things trip people up, so they are worth stating before the examples:
 ```
 ufa [--url URL] [--api-key KEY] [--insecure BOOL] [--output json|table] <COMMAND>
 ```
+
+`--url`, `--api-key`, `--insecure` and `--output` are global, so they may appear anywhere on the
+line — before the subcommand or after it. `ufa devices list --output json` and
+`ufa --output json devices list` are the same command, and every subcommand's `--help` lists them.
 
 ## Getting API keys
 
@@ -327,8 +328,8 @@ the controller key. It works without a controller URL.
 # List every console on your Ubiquiti account
 ufa cloud hosts
 
-# JSON (note: --output precedes the subcommand)
-ufa --output json cloud hosts
+# JSON
+ufa cloud hosts --output json
 
 # Look one up, including its unifi.ui.com dashboard URL
 ufa cloud host "70A741667C30...6289D202:1320847833"
@@ -364,7 +365,8 @@ automatically and several are offered as a prompt.
 
 ## Output formats
 
-`--output` is a global option, so it precedes the subcommand.
+`--output` is a global option, so it is accepted at any position — `ufa devices list --output json`
+and `ufa --output json devices list` are equivalent.
 
 - `--output table` (default): human-readable tables drawn with box-drawing characters. Listings get
   one row per item; a single item — `devices get`, `clients get`, `vouchers get`, `info`,
@@ -376,7 +378,7 @@ Listings answer in JSON with the controller's own pagination envelope rather tha
 nothing the API said is lost — the items are under `.data`:
 
 ```bash
-$ ufa --output json devices list
+$ ufa devices list --output json
 {
   "offset": 0,
   "limit": 25,
@@ -385,7 +387,7 @@ $ ufa --output json devices list
   "data": [ ... ]
 }
 
-$ ufa --output json devices list | jq '.data[] | select(.state == "OFFLINE")'
+$ ufa devices list --output json | jq '.data[] | select(.state == "OFFLINE")'
 ```
 
 Two commands answer with a bare array instead, because neither is paginated: `ufa cloud hosts` and
@@ -552,7 +554,7 @@ ufa vouchers delete-filtered --filter "expired.eq(true)"
 
 ```bash
 # Find offline devices
-ufa --output json devices list | jq '.data[] | select(.state == "OFFLINE")'
+ufa devices list --output json | jq '.data[] | select(.state == "OFFLINE")'
 
 # Check one device's statistics
 ufa devices stats <DEVICE_ID>
