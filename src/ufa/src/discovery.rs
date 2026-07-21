@@ -1,9 +1,17 @@
+use crate::{client::INTEGRATION_API_PATH, models::ApplicationInfo};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::timeout;
+
+/// The integration API endpoint every controller answers, relative to
+/// [`INTEGRATION_API_PATH`].
+const INFO_ENDPOINT: &str = "info";
+
+/// How long a single host gets to answer a probe.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredController {
@@ -113,50 +121,71 @@ async fn discover_via_mdns() -> Result<Vec<DiscoveredController>> {
     Ok(verified_controllers)
 }
 
-/// Validate that a given host:port is a UniFi controller
+/// Validate that a given host:port is a UniFi controller.
+///
+/// The host is asked for the integration API's `info` endpoint -- the one
+/// thing only a controller has -- rather than for its front page, because a
+/// front page proves nothing: any host that merely *mentions* UniFi would
+/// otherwise be offered to the user as a controller to configure.
+///
+/// # Arguments
+///
+/// * `host` - Hostname or IP address to probe.
+/// * `port` - HTTPS port to probe.
+///
+/// # Returns
+///
+/// The controller, with `host` resolved to an address where it was a name.
+///
+/// # Errors
+///
+/// Returns an error if the host cannot be reached or does not answer the
+/// integration API.
 pub async fn validate_controller(host: &str, port: u16) -> Result<DiscoveredController> {
-    let url = format!("https://{}:{}", host, port);
+    let url = format!("https://{host}:{port}{INTEGRATION_API_PATH}{INFO_ENDPOINT}");
 
-    // Create a client that accepts self-signed certificates
+    // Controllers ship a self-signed certificate out of the box, so discovery
+    // -- which runs before any trust decision has been made -- cannot insist
+    // on a valid one.
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(3))
+        .timeout(PROBE_TIMEOUT)
         .build()?;
 
-    // Try to fetch the root page
     let response = client.get(&url).send().await?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
 
-    // Check if it's a UniFi controller by looking at the response
-    let text = response.text().await?;
-
-    // Look for UniFi-specific markers
-    if text.contains("window.UNIFI_")
-        || text.contains("UniFi")
-        || text.contains("ui-icon")
-        || text.contains("/api/login")
-    {
-        // Try to resolve the IP if we were given a hostname
-        let ip = if host.parse::<std::net::IpAddr>().is_ok() {
-            host.to_string()
-        } else {
-            // Resolve hostname to IP
-            use std::net::ToSocketAddrs;
-            let addr = format!("{}:{}", host, port);
-            addr.to_socket_addrs()?
-                .next()
-                .map(|s| s.ip().to_string())
-                .unwrap_or_else(|| host.to_string())
-        };
-
-        Ok(DiscoveredController {
-            ip,
+    match judge_probe(status, &body) {
+        ProbeVerdict::NotController => {
+            anyhow::bail!("{host}:{port} does not answer the UniFi integration API")
+        }
+        ProbeVerdict::Controller => Ok(DiscoveredController {
+            ip: resolve_address(host, port).await,
             port,
             name: None,
             is_verified: true,
-        })
-    } else {
-        anyhow::bail!("Not a UniFi controller")
+        }),
     }
+}
+
+/// Resolve `host` to an address, falling back to the name itself.
+///
+/// Name resolution blocks, and discovery probes eight addresses at once on
+/// the async runtime, so this uses tokio's resolver rather than
+/// [`std::net::ToSocketAddrs`] -- the blocking one would park a runtime
+/// worker per probe for however long the resolver takes to give up.
+async fn resolve_address(host: &str, port: u16) -> String {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
+
+    tokio::net::lookup_host((host, port))
+        .await
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| host.to_string())
 }
 
 /// What a probe of a host says about it.
@@ -180,17 +209,25 @@ pub enum ProbeVerdict {
 ///
 /// [`ProbeVerdict::Controller`] only when the answer could not have come from
 /// something else.
-fn judge_probe(_status: u16, body: &str) -> ProbeVerdict {
-    // Skeleton: today any page whose markup so much as mentions UniFi counts.
-    if body.contains("window.UNIFI_")
-        || body.contains("UniFi")
-        || body.contains("ui-icon")
-        || body.contains("/api/login")
-    {
-        ProbeVerdict::Controller
-    } else {
-        ProbeVerdict::NotController
+fn judge_probe(status: u16, body: &str) -> ProbeVerdict {
+    /// The endpoint is there but wants a key. Nothing else serves a
+    /// challenge at this path, so the challenge is the evidence.
+    const NEEDS_CREDENTIALS: std::ops::RangeInclusive<u16> = 401..=403;
+    /// Answers the request outright.
+    const SUCCEEDED: std::ops::RangeInclusive<u16> = 200..=299;
+
+    if NEEDS_CREDENTIALS.contains(&status) {
+        return ProbeVerdict::Controller;
     }
+
+    // A success has to carry the shape the API documents: some other service
+    // answering 200 on the same port is not a controller, and neither is a
+    // captive portal that rewrote the request into an HTML page.
+    if SUCCEEDED.contains(&status) && serde_json::from_str::<ApplicationInfo>(body).is_ok() {
+        return ProbeVerdict::Controller;
+    }
+
+    ProbeVerdict::NotController
 }
 
 /// Validate a controller URL provided by the user

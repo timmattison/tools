@@ -3,6 +3,13 @@ use anyhow::{Context, Result};
 use reqwest::{header, Client, Url};
 use serde::de::DeserializeOwned;
 
+/// Where the controller serves the integration API, relative to its origin.
+///
+/// Discovery probes this path directly to tell a controller from anything
+/// else that happens to answer on the same port, so it lives next to the
+/// client that talks to it rather than being spelled out twice.
+pub const INTEGRATION_API_PATH: &str = "/proxy/network/integration/v1/";
+
 pub struct UnifiClient {
     client: Client,
     base_url: Url,
@@ -40,11 +47,11 @@ impl UnifiClient {
 
         // Set the path to exactly what we need, ensuring it ends with a slash
         if base_url.path() == "/" || base_url.path().is_empty() {
-            base_url.set_path("/proxy/network/integration/v1/");
+            base_url.set_path(INTEGRATION_API_PATH);
         } else {
             // If there's already a path, append to it
             let current_path = base_url.path().trim_end_matches('/');
-            base_url.set_path(&format!("{}/proxy/network/integration/v1/", current_path));
+            base_url.set_path(&format!("{current_path}{INTEGRATION_API_PATH}"));
         }
 
         Ok(Self { client, base_url })
