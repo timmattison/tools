@@ -112,11 +112,19 @@ No new git work. `collect_changes` already surfaces every unmerged path as
 those rows and feed the total into `operation_state`:
 
 ```rust
-let conflicts = snapshot.files.iter()
-    .filter(|f| f.status == FileStatus::Conflicted)
-    .count() as u32;
+let conflicts = u32::try_from(
+    snapshot.files.iter()
+        .filter(|f| f.status == FileStatus::Conflicted)
+        .count(),
+)
+.unwrap_or(u32::MAX);
 snapshot.operation = repo::operation_state(repo, conflicts);
 ```
+
+The `usize` → `u32` narrowing uses the same `u32::try_from(..)
+.unwrap_or(u32::MAX)` idiom as `ahead_behind` in `repo.rs`, not an `as` cast:
+the workspace lints set `cast_possible_truncation = "warn"`, so a cast here
+would not compile clean.
 
 ### Snapshot / data model (`src/gsw/src/render.rs`)
 
