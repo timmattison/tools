@@ -11,6 +11,34 @@ use std::process::Command;
 const BIN: &str = env!("CARGO_BIN_EXE_install-bin");
 
 #[test]
+fn reports_a_missing_source_and_exits_nonzero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("was-never-built");
+
+    let out = Command::new(BIN)
+        .arg(&missing)
+        .arg("--dest")
+        .arg(dir.path())
+        .output()
+        .expect("run install-bin");
+
+    assert!(
+        !out.status.success(),
+        "a missing source must fail the install; stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("install-bin:"),
+        "the error must be prefixed with the tool name: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("does not exist"),
+        "the error must explain the missing source: {stderr:?}"
+    );
+}
+
+#[test]
 fn prints_version_with_git_metadata() {
     let out = Command::new(BIN)
         .arg("--version")
