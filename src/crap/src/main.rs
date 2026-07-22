@@ -64,12 +64,12 @@ mod exit_codes {
     pub const NEW_SESSION_ID_EXISTS: i32 = 10;
 }
 
-/// Why a session id could not be resolved to an existing directory.
+/// Why a located session transcript could not be resolved to an existing
+/// directory. (Id validity is checked separately, before a transcript is even
+/// located, so it is not represented here.)
 #[derive(Debug)]
 enum ResolveError {
-    /// The session id contained path separators or traversal sequences.
-    InvalidSessionId,
-    /// No `<session_id>.jsonl` file was found under any project directory.
+    /// The transcript could not be read.
     SessionNotFound,
     /// The session file exists but records no working directory.
     NoCwdInSession,
@@ -145,10 +145,6 @@ fn find_session_file(projects_dir: &Path, session_id: &str) -> Option<PathBuf> {
 /// flag lets the resume logic pick "resume in place" (the current user's own
 /// session) versus "copy into my tree and fork" (another user's session).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "consumed by the cross-user resume wiring in a later commit"
-)]
 struct UserProjects {
     /// The account name (the home directory's file name).
     user: String,
@@ -163,10 +159,6 @@ struct UserProjects {
 /// `home` is passed explicitly rather than read from the environment here, so
 /// the mapping stays tempdir-testable; the one place that reads
 /// `dirs::home_dir()` is `main`.
-#[allow(
-    dead_code,
-    reason = "consumed by the cross-user resume wiring in a later commit"
-)]
 fn self_projects(home: &Path) -> UserProjects {
     let user = home
         .file_name()
@@ -199,10 +191,6 @@ fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjec
 
 /// The outcome of searching an ordered list of roots for a session id.
 #[derive(Debug)]
-#[allow(
-    dead_code,
-    reason = "consumed by the cross-user resume wiring in a later commit"
-)]
 enum FoundSession {
     /// The transcript, and which root (hence user / `is_self`) it came from.
     Found {
@@ -222,10 +210,6 @@ enum FoundSession {
 /// whether it is the current user's own tree). Roots are searched in order and
 /// the search short-circuits on the first match, so a self-first ordering makes
 /// a session the current user already owns always win.
-#[allow(
-    dead_code,
-    reason = "consumed by the cross-user resume wiring in a later commit"
-)]
 fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
     for root in roots {
         if let Some(path) = find_session_file(&root.projects_dir, id) {
@@ -364,19 +348,19 @@ fn classify_session_state(contents: &str) -> SessionState {
     state
 }
 
-/// Resolves a session id to the existing directory the session ran in.
+/// Reads the existing directory a session ran in out of its located transcript.
+///
+/// The transcript's first non-empty `cwd` is taken as the working directory; the
+/// call fails if the transcript cannot be read, records no `cwd`, or names a
+/// directory that no longer exists.
 ///
 /// # Errors
 ///
-/// Returns a [`ResolveError`] when the id is invalid, no session file matches,
-/// the session records no working directory, or that directory no longer
-/// exists.
-fn resolve_session_dir(projects_dir: &Path, session_id: &str) -> Result<PathBuf, ResolveError> {
-    if !is_valid_session_id(session_id) {
-        return Err(ResolveError::InvalidSessionId);
-    }
-    let file = find_session_file(projects_dir, session_id).ok_or(ResolveError::SessionNotFound)?;
-    let contents = std::fs::read_to_string(&file).map_err(|_| ResolveError::SessionNotFound)?;
+/// Returns a [`ResolveError`] when the transcript cannot be read, records no
+/// working directory, or that directory no longer exists.
+fn session_dir_from_transcript(transcript: &Path) -> Result<PathBuf, ResolveError> {
+    let contents =
+        std::fs::read_to_string(transcript).map_err(|_| ResolveError::SessionNotFound)?;
     let cwd = extract_cwd(&contents).ok_or(ResolveError::NoCwdInSession)?;
     let path = PathBuf::from(cwd);
     if !path.is_dir() {
@@ -405,12 +389,6 @@ fn encode_project_dir(path: &Path) -> String {
         .collect()
 }
 
-/// Returns the `~/.claude/projects` directory, or `None` if the home directory
-/// cannot be determined.
-fn claude_projects_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".claude").join("projects"))
-}
-
 /// How [`prepare_import`] should make a session's transcript resolvable from a
 /// target directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -421,10 +399,6 @@ enum ImportMode {
     /// Copy the source into the target folder (cross-user): a self-contained
     /// snapshot owned by the current user, so nothing under another user's home
     /// is written and the import survives the source moving.
-    #[allow(
-        dead_code,
-        reason = "constructed by the cross-user resume wiring in a later commit"
-    )]
     Copy,
 }
 
@@ -941,10 +915,6 @@ const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 /// (which stays in the current directory), this tells the shell function to
 /// `cd` into the session's original recorded directory *and then* fork, so a
 /// foreign session resumes where it originally ran.
-#[allow(
-    dead_code,
-    reason = "consumed by the cross-user resume wiring in a later commit"
-)]
 const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
@@ -981,10 +951,6 @@ fn format_here_output(
 /// UUIDs (or sentinels), and the link path lives under
 /// `~/.claude/projects/<encoded>`, whose encoding maps every non-alphanumeric
 /// character (including newline) to `-`.
-#[allow(
-    dead_code,
-    reason = "consumed by the cross-user resume wiring in a later commit"
-)]
 fn format_fork_at_output(
     session_id: &str,
     new_session_id: Option<&str>,
@@ -1415,6 +1381,94 @@ fn run_dir_status(projects_dir: &Path, json: bool) -> ! {
     exit(0);
 }
 
+/// Handles the default resume (`crap <id> [--user X]`): locate the session
+/// across `roots`, then resume it and exit.
+///
+/// A hit in the current user's own tree (`is_self`) resumes in place — `cd` to
+/// the recorded directory and `claude --resume <id>` — exactly as before. A hit
+/// in another user's tree is copied into the current user's tree
+/// (`dest_projects_dir`, always our own) and forked at its original directory:
+/// the foreign transcript is only ever read, and every write lands under the
+/// current user's home. Emits the output the shell function consumes.
+fn run_resume(
+    roots: &[UserProjects],
+    dest_projects_dir: &Path,
+    session_id: &str,
+    force: bool,
+) -> ! {
+    if !is_valid_session_id(session_id) {
+        eprintln!(
+            "{} '{session_id}' is not a valid session id",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::INVALID_SESSION_ID);
+    }
+
+    let FoundSession::Found { path, root } = find_session_across(roots, session_id) else {
+        eprintln!(
+            "{} no Claude session found with id '{session_id}'",
+            "Error:".red().bold()
+        );
+        for root in roots {
+            eprintln!("       looked under {}", root.projects_dir.display());
+        }
+        exit(exit_codes::SESSION_NOT_FOUND);
+    };
+
+    let dir = match session_dir_from_transcript(&path) {
+        Ok(dir) => dir,
+        Err(ResolveError::SessionNotFound) => {
+            eprintln!(
+                "{} no Claude session found with id '{session_id}'",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::SESSION_NOT_FOUND);
+        }
+        Err(ResolveError::NoCwdInSession) => {
+            eprintln!(
+                "{} session '{session_id}' has no recorded working directory",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::NO_CWD_IN_SESSION);
+        }
+        Err(ResolveError::DirectoryMissing(missing)) => {
+            eprintln!(
+                "{} the directory for session '{session_id}' no longer exists:",
+                "Error:".red().bold()
+            );
+            eprintln!("       {}", missing.display());
+            exit(exit_codes::DIRECTORY_MISSING);
+        }
+    };
+
+    if root.is_self {
+        // Same-user hit: resume the very session in place, as today.
+        abort_if_session_live(session_id, false, force);
+        print!("{}", format_output(&dir, session_id));
+        exit(0);
+    }
+
+    // Cross-user hit: copy the foreign transcript into our own tree at the
+    // original directory's project folder, then fork it there. The fork only
+    // reads the copy, so a live original is never blocked and never corrupted.
+    match prepare_import(dest_projects_dir, &path, &dir, session_id, ImportMode::Copy) {
+        Ok(link) => {
+            print!(
+                "{}",
+                format_fork_at_output(session_id, None, link.as_deref(), &dir)
+            );
+            exit(0);
+        }
+        Err(err) => {
+            eprintln!(
+                "{} could not import session '{session_id}': {err}",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::HERE_LINK_ERROR);
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1428,13 +1482,14 @@ fn main() {
         }
     }
 
-    let Some(projects_dir) = claude_projects_dir() else {
+    let Some(home) = dirs::home_dir() else {
         eprintln!(
             "{} could not determine your home directory",
             "Error:".red().bold()
         );
         exit(exit_codes::NO_HOME_DIR);
     };
+    let projects_dir = home.join(".claude").join("projects");
 
     if cli.status {
         match cli.session_id.as_deref() {
@@ -1458,42 +1513,8 @@ fn main() {
         );
     }
 
-    match resolve_session_dir(&projects_dir, &session_id) {
-        Ok(dir) => {
-            abort_if_session_live(&session_id, false, cli.force);
-            print!("{}", format_output(&dir, &session_id));
-        }
-        Err(ResolveError::InvalidSessionId) => {
-            eprintln!(
-                "{} '{session_id}' is not a valid session id",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::INVALID_SESSION_ID);
-        }
-        Err(ResolveError::SessionNotFound) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            eprintln!("       looked under {}", projects_dir.display());
-            exit(exit_codes::SESSION_NOT_FOUND);
-        }
-        Err(ResolveError::NoCwdInSession) => {
-            eprintln!(
-                "{} session '{session_id}' has no recorded working directory",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::NO_CWD_IN_SESSION);
-        }
-        Err(ResolveError::DirectoryMissing(path)) => {
-            eprintln!(
-                "{} the directory for session '{session_id}' no longer exists:",
-                "Error:".red().bold()
-            );
-            eprintln!("       {}", path.display());
-            exit(exit_codes::DIRECTORY_MISSING);
-        }
-    }
+    let roots = vec![self_projects(&home)];
+    run_resume(&roots, &projects_dir, &session_id, cli.force);
 }
 
 #[cfg(test)]
@@ -2128,68 +2149,50 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_invalid_id() {
+    fn session_dir_from_transcript_errors_when_unreadable() {
         let dir = tempdir().unwrap();
+        // A transcript that cannot be read resolves to SessionNotFound.
+        let missing = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
         assert!(matches!(
-            resolve_session_dir(dir.path(), "../escape"),
-            Err(ResolveError::InvalidSessionId)
-        ));
-    }
-
-    #[test]
-    fn resolve_errors_when_session_missing() {
-        let dir = tempdir().unwrap();
-        assert!(matches!(
-            resolve_session_dir(dir.path(), SAMPLE_ID),
+            session_dir_from_transcript(&missing),
             Err(ResolveError::SessionNotFound)
         ));
     }
 
     #[test]
-    fn resolve_errors_when_no_cwd_in_session() {
+    fn session_dir_from_transcript_errors_when_no_cwd() {
         let dir = tempdir().unwrap();
-        let proj = dir.path().join("proj");
-        fs::create_dir_all(&proj).unwrap();
-        fs::write(proj.join(format!("{SAMPLE_ID}.jsonl")), "{\"cwd\":null}\n").unwrap();
+        let file = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&file, "{\"cwd\":null}\n").unwrap();
 
         assert!(matches!(
-            resolve_session_dir(dir.path(), SAMPLE_ID),
+            session_dir_from_transcript(&file),
             Err(ResolveError::NoCwdInSession)
         ));
     }
 
     #[test]
-    fn resolve_errors_when_directory_missing() {
+    fn session_dir_from_transcript_errors_when_directory_missing() {
         let dir = tempdir().unwrap();
-        let proj = dir.path().join("proj");
-        fs::create_dir_all(&proj).unwrap();
+        let file = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
         let missing = dir.path().join("gone");
-        fs::write(
-            proj.join(format!("{SAMPLE_ID}.jsonl")),
-            cwd_line(missing.to_str().unwrap()),
-        )
-        .unwrap();
+        fs::write(&file, cwd_line(missing.to_str().unwrap())).unwrap();
 
-        match resolve_session_dir(dir.path(), SAMPLE_ID) {
+        match session_dir_from_transcript(&file) {
             Err(ResolveError::DirectoryMissing(path)) => assert_eq!(path, missing),
             other => panic!("expected DirectoryMissing, got {other:?}"),
         }
     }
 
     #[test]
-    fn resolve_returns_existing_directory() {
+    fn session_dir_from_transcript_returns_existing_directory() {
         let dir = tempdir().unwrap();
-        let proj = dir.path().join("proj");
-        fs::create_dir_all(&proj).unwrap();
+        let file = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
         let cwd = dir.path().join("real-cwd");
         fs::create_dir_all(&cwd).unwrap();
-        fs::write(
-            proj.join(format!("{SAMPLE_ID}.jsonl")),
-            cwd_line(cwd.to_str().unwrap()),
-        )
-        .unwrap();
+        fs::write(&file, cwd_line(cwd.to_str().unwrap())).unwrap();
 
-        assert_eq!(resolve_session_dir(dir.path(), SAMPLE_ID).unwrap(), cwd);
+        assert_eq!(session_dir_from_transcript(&file).unwrap(), cwd);
     }
 
     /// A real session record as written by Claude Code.
