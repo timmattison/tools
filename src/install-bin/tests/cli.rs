@@ -39,6 +39,32 @@ fn reports_a_missing_source_and_exits_nonzero() {
 }
 
 #[test]
+fn installs_and_verifies_a_binary_that_execs_cleanly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // install-bin itself answers `--version` cleanly, so install it onto a fresh
+    // inode and let the real post-install exec check run (this is exactly the
+    // macOS signature-cache path the tool exists to survive).
+    let out = Command::new(BIN)
+        .arg(BIN)
+        .arg("--dest")
+        .arg(dir.path())
+        .output()
+        .expect("run install-bin");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "installing a cleanly-exec'ing binary must succeed; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(stdout.contains("installed"), "must report the install: {stdout:?}");
+    assert!(
+        stdout.contains("verified"),
+        "must report the post-install exec check: {stdout:?}"
+    );
+}
+
+#[test]
 fn prints_version_with_git_metadata() {
     let out = Command::new(BIN)
         .arg("--version")
