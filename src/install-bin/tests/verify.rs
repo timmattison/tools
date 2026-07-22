@@ -12,6 +12,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use install_bin::{verify_exec, ExecVerdict, DEFAULT_VERIFY_TIMEOUT};
 
@@ -61,4 +62,24 @@ fn verify_exec_reports_a_binary_that_execs_normally_as_ok() {
         other => panic!("expected ExecVerdict::Ok for a normally-exiting binary, got: {other:?}"),
     }
     assert!(verdict.is_ok(), "a normally-exiting binary is ok");
+}
+
+#[test]
+fn verify_exec_times_out_a_binary_that_hangs() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A binary that never returns must not wedge the installer: verify_exec
+    // kills it after the timeout and reports a Timeout verdict.
+    let bin = write_script(dir.path(), "hangs", "#!/bin/sh\nsleep 5\n");
+
+    // Use a short timeout so the test returns in well under a second rather than
+    // waiting out the 15s default.
+    let verdict = verify_exec(&bin, "--version", Duration::from_millis(300));
+
+    match &verdict {
+        ExecVerdict::Timeout { hint } => {
+            assert!(!hint.is_empty(), "a timeout verdict must carry a hint");
+        }
+        other => panic!("expected ExecVerdict::Timeout for a hanging binary, got: {other:?}"),
+    }
+    assert!(!verdict.is_ok(), "a hanging binary is not ok");
 }
