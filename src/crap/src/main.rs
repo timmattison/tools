@@ -991,7 +991,15 @@ fn format_fork_at_output(
     link_to_cleanup: Option<&Path>,
     dir: &Path,
 ) -> String {
-    todo!()
+    let new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
+    let link = match link_to_cleanup {
+        Some(path) => path.display().to_string(),
+        None => NO_LINK_SENTINEL.to_string(),
+    };
+    format!(
+        "{FORK_AT_SENTINEL}\n{session_id}\n{new_id}\n{link}\n{}\n",
+        dir.display()
+    )
 }
 
 /// The shell function installed by `crap --shell-setup`.
