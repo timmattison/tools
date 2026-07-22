@@ -4157,8 +4157,12 @@ dependencies = [
 
 [[package]]
 name = "install-bin"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "dirs",
  "tempfile",
  "thiserror 2.0.19",
  "wait-timeout",
