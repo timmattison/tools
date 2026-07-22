@@ -8,7 +8,9 @@
 //! the destination before copying so the installed file always lands on a fresh
 //! inode the kernel has never cached.
 
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, Permissions};
+use std::io;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -35,6 +37,9 @@ pub enum InstallError {
     /// destroy the source.
     #[error("source and destination are the same file: {0}")]
     SameFile(PathBuf),
+    /// An underlying filesystem operation failed.
+    #[error(transparent)]
+    Io(#[from] io::Error),
 }
 
 /// Copy `source` to `dest` such that `dest` always ends up on a fresh inode:
@@ -43,11 +48,28 @@ pub enum InstallError {
 ///
 /// # Errors
 ///
-/// Returns [`InstallError::SourceMissing`] if `source` does not exist,
-/// [`InstallError::SourceNotRegularFile`] if `source` is not a regular file,
-/// and [`InstallError::SameFile`] if `source` and `dest` resolve to the same
-/// file (which would otherwise destroy the source).
+/// Returns [`InstallError::SourceMissing`] if `source` does not exist, or
+/// [`InstallError::Io`] if an underlying filesystem operation (unlink, copy, or
+/// permission change) fails.
 pub fn install_binary(source: &Path, dest: &Path) -> Result<InstallResult, InstallError> {
-    let _ = (source, dest);
-    todo!("install_binary behavior not yet implemented")
+    let source_meta =
+        fs::metadata(source).map_err(|_| InstallError::SourceMissing(source.to_path_buf()))?;
+
+    let replaced_existing = dest.exists();
+
+    // Unlink the destination before copying so the installed file always lands
+    // on a fresh inode the kernel has never cached (the macOS SIGKILL fix).
+    // Ignore a NotFound error — nothing to remove is fine.
+    match fs::remove_file(dest) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(InstallError::from(err)),
+    }
+    fs::copy(source, dest)?;
+    fs::set_permissions(dest, Permissions::from_mode(source_meta.mode() & 0o7777))?;
+
+    Ok(InstallResult {
+        dest: dest.to_path_buf(),
+        replaced_existing,
+    })
 }
