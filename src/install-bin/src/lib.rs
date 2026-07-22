@@ -12,6 +12,7 @@ use std::fs::{self, Permissions};
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -95,4 +96,70 @@ pub fn install_binary(source: &Path, dest: &Path) -> Result<InstallResult, Insta
         dest: dest.to_path_buf(),
         replaced_existing,
     })
+}
+
+/// Default timeout for the post-install exec verification performed by
+/// [`verify_exec`]: long enough for any real CLI to print `--version`, short
+/// enough that a hung binary can't wedge the installer.
+pub const DEFAULT_VERIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The signal number for `SIGKILL` (9). A `SIGKILL` at exec on macOS is the
+/// tell-tale code-signature-cache rejection this whole tool exists to prevent.
+const SIGKILL: i32 = 9;
+
+/// Guidance shown when a freshly installed binary is `SIGKILL`ed at exec on
+/// macOS, which almost always means the kernel rejected its code signature.
+/// Ported verbatim from the `SIGKILL_DARWIN_HINT` constant in `install-bin.ts`.
+const SIGKILL_DARWIN_HINT: &str = "SIGKILL at exec on macOS usually means the kernel rejected the code signature (stale per-vnode signature cache from an in-place overwrite, or an unsigned/modified binary). Reinstalling onto a fresh inode or `codesign -f -s - <path>` fixes it.";
+
+/// The outcome of exec'ing a freshly installed binary once to prove the kernel
+/// will actually run it. A normal exit (any code) means exec succeeded — the
+/// signature check already passed — so only signal deaths, timeouts, and spawn
+/// failures are verdicts against the binary.
+#[derive(Debug)]
+pub enum ExecVerdict {
+    /// The binary exec'd and exited normally with this code. Any exit code
+    /// counts as OK because reaching exit at all proves exec (and thus the
+    /// signature check) succeeded.
+    Ok {
+        /// The process's exit code.
+        exit_code: i32,
+    },
+    /// The binary died from a signal. `signal` is the raw signal number
+    /// (`9` == `SIGKILL`), and `hint` explains the likely cause.
+    Signal {
+        /// The raw signal number that killed the process (`9` == `SIGKILL`).
+        signal: i32,
+        /// Human-readable guidance about the likely cause.
+        hint: String,
+    },
+    /// The binary did not finish within the timeout and was killed.
+    Timeout {
+        /// Human-readable description of the timeout.
+        hint: String,
+    },
+    /// The binary could not be spawned or waited on.
+    SpawnError {
+        /// Human-readable description of the spawn/wait failure.
+        hint: String,
+    },
+}
+
+impl ExecVerdict {
+    /// Whether the binary exec'd cleanly — i.e. this is an [`ExecVerdict::Ok`].
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        matches!(self, ExecVerdict::Ok { .. })
+    }
+}
+
+/// Exec the installed binary once to prove the kernel will actually run it.
+///
+/// Spawns `bin arg` with stdio fully redirected to null and waits up to
+/// `timeout`. A normal exit (any code) is [`ExecVerdict::Ok`]; a signal death is
+/// [`ExecVerdict::Signal`]; exceeding `timeout` kills the child and yields
+/// [`ExecVerdict::Timeout`]; a spawn or wait failure yields
+/// [`ExecVerdict::SpawnError`].
+pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
+    todo!()
 }

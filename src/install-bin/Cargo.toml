@@ -6,6 +6,7 @@ description = "Install a locally built binary onto a fresh inode without trippin
 
 [dependencies]
 thiserror.workspace = true
+wait-timeout.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
