@@ -57,6 +57,11 @@ pub fn install_binary(source: &Path, dest: &Path) -> Result<InstallResult, Insta
 
     let replaced_existing = dest.exists();
 
+    // Create the destination directory tree if it does not exist yet.
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     // Unlink the destination before copying so the installed file always lands
     // on a fresh inode the kernel has never cached (the macOS SIGKILL fix).
     // Ignore a NotFound error — nothing to remove is fine.

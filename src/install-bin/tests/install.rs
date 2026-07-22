@@ -52,6 +52,10 @@ fn installed_file_matches_source_content_and_is_executable() {
 
     assert_eq!(fs::read_to_string(&dest).expect("read dest"), payload);
     let mode = fs::metadata(&dest).expect("stat dest").permissions().mode();
-    assert_ne!(mode & 0o111, 0, "installed file must have an executable bit");
+    assert_ne!(
+        mode & 0o111,
+        0,
+        "installed file must have an executable bit"
+    );
     assert!(!result.replaced_existing, "nothing existed at dest yet");
 }
