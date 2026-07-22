@@ -10,9 +10,8 @@
 //! cannot reach because `run_resume` calls `exit`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A foreign session id planted under another user's tree.
 const FOREIGN_ID: &str = "11111111-2222-3333-4444-555555555555";
@@ -25,16 +24,15 @@ const SELF_ID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
 const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 
-/// A process-unique temp directory, keyed on pid + nanoseconds so concurrent
-/// runs of this test never share state.
-fn unique_root(tag: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+/// A process-unique temp directory that removes itself on drop — including when
+/// a test panics — so failing runs never leak directories under `$TMPDIR`. The
+/// `tag` is preserved in the directory name for debuggability while `O_EXCL`
+/// creation guarantees uniqueness across concurrent runs.
+fn unique_root(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("crap-cu-{tag}-"))
+        .tempdir()
         .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("crap-cu-{tag}-{}-{nanos}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 /// Writes a transcript recording `cwd` for `id` under
@@ -64,7 +62,8 @@ fn run_crap(root: &Path, args: &[&str]) -> Output {
 
 #[test]
 fn user_flag_cross_user_forks_at_original_dir() {
-    let root = unique_root("fork-at");
+    let tmp = unique_root("fork-at");
+    let root = tmp.path();
     // A readable session under the sibling user `other`, whose recorded cwd is a
     // real (shared) directory both users can reach.
     let shared = root.join("shared-cwd");
@@ -80,7 +79,7 @@ fn user_flag_cross_user_forks_at_original_dir() {
     )
     .unwrap();
 
-    let out = run_crap(&root, &[FOREIGN_ID, "--user", "other"]);
+    let out = run_crap(root, &[FOREIGN_ID, "--user", "other"]);
     assert!(
         out.status.success(),
         "exit {:?}, stderr: {}",
@@ -123,13 +122,12 @@ fn user_flag_cross_user_forks_at_original_dir() {
         foreign_before,
         "the foreign transcript must be left untouched"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn user_flag_self_resumes_in_place() {
-    let root = unique_root("self");
+    let tmp = unique_root("self");
+    let root = tmp.path();
     // `--user home` names the current account (home dir file name is "home"), so
     // it is a same-user hit: resume in place, no copy, no fork.
     let self_cwd = root.join("self-cwd");
@@ -137,7 +135,7 @@ fn user_flag_self_resumes_in_place() {
     let home_projects = root.join("home/.claude/projects");
     plant_session(&home_projects, "-proj", SELF_ID, &self_cwd);
 
-    let out = run_crap(&root, &[SELF_ID, "--user", "home"]);
+    let out = run_crap(root, &[SELF_ID, "--user", "home"]);
     assert!(
         out.status.success(),
         "exit {:?}, stderr: {}",
@@ -153,13 +151,12 @@ fn user_flag_self_resumes_in_place() {
         !stdout.contains(FORK_AT_SENTINEL),
         "a same-user hit must not fork: {stdout}"
     );
-
-    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
 fn user_flag_skips_current_user_tree() {
-    let root = unique_root("skip-self");
+    let tmp = unique_root("skip-self");
+    let root = tmp.path();
     // The SAME id exists under both users, with different recorded cwds. With
     // `--user other`, only the sibling's tree is searched, so the resume must
     // land in the sibling's cwd — proving the current user's tree is skipped.
@@ -180,7 +177,7 @@ fn user_flag_skips_current_user_tree() {
         &other_cwd,
     );
 
-    let out = run_crap(&root, &[FOREIGN_ID, "--user", "other"]);
+    let out = run_crap(root, &[FOREIGN_ID, "--user", "other"]);
     assert!(
         out.status.success(),
         "exit {:?}, stderr: {}",
@@ -192,6 +189,4 @@ fn user_flag_skips_current_user_tree() {
     assert_eq!(lines.first().copied(), Some(FORK_AT_SENTINEL));
     // The directory (last field) is the SIBLING's cwd, not the current user's.
     assert_eq!(lines.get(4).copied(), Some(other_cwd.to_str().unwrap()));
-
-    let _ = fs::remove_dir_all(&root);
 }
