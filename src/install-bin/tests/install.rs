@@ -99,3 +99,18 @@ fn refuses_a_source_that_is_not_a_regular_file() {
         ),
     }
 }
+
+#[test]
+fn refuses_a_missing_source_with_a_clear_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("nope");
+    let dest = dir.path().join("dest");
+
+    match install_binary(&source, &dest) {
+        Ok(_) => panic!("must refuse a missing source"),
+        Err(err) => assert!(
+            err.to_string().to_lowercase().contains("does not exist"),
+            "expected a 'does not exist' error, got: {err}",
+        ),
+    }
+}
