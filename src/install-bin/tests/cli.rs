@@ -151,9 +151,8 @@ fn verify_arg_is_passed_to_the_exec_check() {
     // with --verify-arg. `install-bin --help` exits 0 (clap prints help), so the
     // check passes, and the success line echoes the verify arg — proving the
     // override was threaded through.
-    // Use the `--flag=value` form: clap will not consume a dash-prefixed value
-    // (`--help`) as a separate argument, so `--verify-arg=--help` is how a value
-    // that itself looks like a flag must be supplied.
+    // Both --verify-arg=--help and --verify-arg --help work (allow_hyphen_values);
+    // this uses the = form.
     let out = Command::new(BIN)
         .arg(BIN)
         .arg("--dest")

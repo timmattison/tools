@@ -31,7 +31,7 @@ struct Args {
     dest: Option<PathBuf>,
 
     /// Argument passed to the post-install exec check.
-    #[arg(long, default_value = "--version")]
+    #[arg(long, default_value = "--version", allow_hyphen_values = true)]
     verify_arg: String,
 
     /// Skip the post-install exec check.
