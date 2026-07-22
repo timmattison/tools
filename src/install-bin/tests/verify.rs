@@ -1,5 +1,5 @@
 //! Behavioral tests for `verify_exec`, ported from the `verifyExec` function in
-//! `install-bin.ts`.
+//! the original TypeScript `install-bin`.
 //!
 //! `verify_exec` exec's a freshly installed binary once to prove the kernel will
 //! actually run it: a signal death (especially `SIGKILL` from a stale macOS

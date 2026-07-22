@@ -1,5 +1,5 @@
 //! End-to-end tests that drive the compiled `install-bin` binary, ported from
-//! the CLI behaviors of `install-bin.ts`.
+//! the CLI behaviors of the original TypeScript `install-bin`.
 //!
 //! Parallel-safety: every test gets its own `tempfile::tempdir()` sandbox, so
 //! concurrent runs never share a path.

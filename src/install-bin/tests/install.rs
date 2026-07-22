@@ -1,4 +1,5 @@
-//! Behavioral tests for `install_binary`, ported from `install-bin.test.ts`.
+//! Behavioral tests for `install_binary`, ported from the original TypeScript
+//! `install-bin` test suite.
 //!
 //! The core regression under test: installing over an existing destination MUST
 //! give the destination a new inode. A naive in-place copy (cp semantics) keeps

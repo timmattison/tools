@@ -112,7 +112,8 @@ const SIGKILL: i32 = 9;
 
 /// Guidance shown when a freshly installed binary is `SIGKILL`ed at exec on
 /// macOS, which almost always means the kernel rejected its code signature.
-/// Ported verbatim from the `SIGKILL_DARWIN_HINT` constant in `install-bin.ts`.
+/// Ported verbatim from the `SIGKILL_DARWIN_HINT` constant in the original
+/// TypeScript `install-bin`.
 const SIGKILL_DARWIN_HINT: &str = "SIGKILL at exec on macOS usually means the kernel rejected the code signature (stale per-vnode signature cache from an in-place overwrite, or an unsigned/modified binary). Reinstalling onto a fresh inode or `codesign -f -s - <path>` fixes it.";
 
 /// The outcome of exec'ing a freshly installed binary once to prove the kernel
