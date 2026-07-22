@@ -38,3 +38,20 @@ fn installing_over_an_existing_destination_allocates_a_new_inode() {
     );
     assert!(result.replaced_existing);
 }
+
+#[test]
+fn installed_file_matches_source_content_and_is_executable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let source = dir.path().join("source-bin");
+    // Destination lives under directories that do not exist yet.
+    let dest = dir.path().join("sub").join("dir").join("dest-bin");
+    let payload = "#!/bin/sh\necho payload\n";
+    write_executable(&source, payload);
+
+    let result = install_binary(&source, &dest).expect("install");
+
+    assert_eq!(fs::read_to_string(&dest).expect("read dest"), payload);
+    let mode = fs::metadata(&dest).expect("stat dest").permissions().mode();
+    assert_ne!(mode & 0o111, 0, "installed file must have an executable bit");
+    assert!(!result.replaced_existing, "nothing existed at dest yet");
+}
