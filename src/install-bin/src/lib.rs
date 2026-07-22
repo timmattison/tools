@@ -154,6 +154,14 @@ impl ExecVerdict {
     pub fn is_ok(&self) -> bool {
         matches!(self, ExecVerdict::Ok { .. })
     }
+
+    /// Whether the binary was killed by `SIGKILL` (signal 9). On macOS this is
+    /// the tell-tale code-signature-cache rejection, and the CLI uses it to
+    /// decide whether to re-sign ad-hoc and retry the exec check once.
+    #[must_use]
+    pub fn is_sigkill(&self) -> bool {
+        false
+    }
 }
 
 /// Exec the installed binary once to prove the kernel will actually run it.
@@ -210,5 +218,39 @@ pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
         Err(err) => ExecVerdict::SpawnError {
             hint: format!("waiting on exec failed: {err}"),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_sigkill_is_true_only_for_signal_nine() {
+        assert!(
+            ExecVerdict::Signal {
+                signal: SIGKILL,
+                hint: String::new(),
+            }
+            .is_sigkill(),
+            "a signal-9 death is a SIGKILL"
+        );
+        assert!(
+            !ExecVerdict::Signal {
+                signal: 15,
+                hint: String::new(),
+            }
+            .is_sigkill(),
+            "SIGTERM (15) is not a SIGKILL"
+        );
+        assert!(!ExecVerdict::Ok { exit_code: 0 }.is_sigkill());
+        assert!(!ExecVerdict::Timeout {
+            hint: String::new()
+        }
+        .is_sigkill());
+        assert!(!ExecVerdict::SpawnError {
+            hint: String::new()
+        }
+        .is_sigkill());
     }
 }
