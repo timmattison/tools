@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use buildinfo::version_string;
 use clap::Parser;
 
 /// Install a locally built binary onto `PATH` without tripping macOS's
@@ -11,6 +12,7 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(
     name = "install-bin",
+    version = version_string!(),
     about = "Install a locally built binary onto a fresh inode without tripping macOS's code-signature cache"
 )]
 struct Args {
