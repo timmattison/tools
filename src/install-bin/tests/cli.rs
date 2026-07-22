@@ -4,6 +4,7 @@
 //! Parallel-safety: every test gets its own `tempfile::tempdir()` sandbox, so
 //! concurrent runs never share a path.
 
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 /// Path to the freshly built `install-bin` binary, provided by Cargo to
@@ -57,10 +58,48 @@ fn installs_and_verifies_a_binary_that_execs_cleanly() {
         out.status.success(),
         "installing a cleanly-exec'ing binary must succeed; stdout: {stdout}\nstderr: {stderr}"
     );
-    assert!(stdout.contains("installed"), "must report the install: {stdout:?}");
+    assert!(
+        stdout.contains("installed"),
+        "must report the install: {stdout:?}"
+    );
     assert!(
         stdout.contains("verified"),
         "must report the post-install exec check: {stdout:?}"
+    );
+}
+
+#[test]
+fn no_verify_skips_the_exec_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A source that the exec check would SIGKILL: with --no-verify the install
+    // must still succeed precisely because the check is skipped. (Without
+    // --no-verify this same binary would fail the install, so a clean exit here
+    // proves the check never ran.)
+    let src = dir.path().join("suicidal");
+    std::fs::write(&src, "#!/bin/sh\nkill -KILL $$\n").expect("write source");
+    std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).expect("chmod source");
+
+    let out = Command::new(BIN)
+        .arg(&src)
+        .arg("--dest")
+        .arg(dir.path().join("bin"))
+        .arg("--no-verify")
+        .output()
+        .expect("run install-bin");
+
+    assert!(
+        out.status.success(),
+        "--no-verify must skip the exec check and succeed; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("installed"),
+        "must still install: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("verified"),
+        "--no-verify must not run the exec check: {stdout:?}"
     );
 }
 
