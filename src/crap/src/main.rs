@@ -411,42 +411,71 @@ fn claude_projects_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".claude").join("projects"))
 }
 
-/// Makes the session `original_jsonl` resolvable by `claude --resume` from
-/// `pwd`, by symlinking it into `pwd`'s project folder under `projects_dir`.
+/// How [`prepare_import`] should make a session's transcript resolvable from a
+/// target directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportMode {
+    /// Symlink the target name to the source (same-user `--here`): the original
+    /// is only ever read, and the link is cheap and trivially removable.
+    Symlink,
+    /// Copy the source into the target folder (cross-user): a self-contained
+    /// snapshot owned by the current user, so nothing under another user's home
+    /// is written and the import survives the source moving.
+    #[allow(
+        dead_code,
+        reason = "constructed by the cross-user resume wiring in a later commit"
+    )]
+    Copy,
+}
+
+/// Makes the session `source_jsonl` resolvable by `claude --resume` from
+/// `target_dir`, by placing it into `target_dir`'s project folder under
+/// `dest_projects_dir` — either as a symlink to the original ([`ImportMode::Symlink`])
+/// or as a self-contained copy ([`ImportMode::Copy`]).
 ///
-/// Returns the path of the symlink that was created (so the caller can remove it
-/// once the session ends), or `None` when the session is *already* resolvable
-/// from `pwd` — because `pwd` is its own directory, or an earlier `--here`
-/// already linked it. Anything already at the target name is left untouched: a
-/// session id is a UUID, so a file there can only be this very session, and
-/// clobbering it would never be correct.
+/// `dest_projects_dir` is always the current user's tree, so every write lands
+/// under the current user's home even when `source_jsonl` belongs to another
+/// user.
+///
+/// Returns the path that was created (so the caller can remove it once the
+/// session ends), or `None` when the session is *already* resolvable from
+/// `target_dir` — because `target_dir` is its own directory, or an earlier
+/// import already placed it. Anything already at the target name is left
+/// untouched: a session id is a UUID, so a file there can only be this very
+/// session, and clobbering it would never be correct.
 ///
 /// # Errors
 ///
-/// Returns the underlying [`std::io::Error`] if the project folder or the
-/// symlink cannot be created.
-fn prepare_here_link(
-    projects_dir: &Path,
-    original_jsonl: &Path,
-    pwd: &Path,
+/// Returns the underlying [`std::io::Error`] if the project folder cannot be
+/// created or the symlink/copy cannot be made.
+fn prepare_import(
+    dest_projects_dir: &Path,
+    source_jsonl: &Path,
+    target_dir: &Path,
     session_id: &str,
+    mode: ImportMode,
 ) -> std::io::Result<Option<PathBuf>> {
-    let folder = projects_dir.join(encode_project_dir(pwd));
+    let folder = dest_projects_dir.join(encode_project_dir(target_dir));
     let link_path = folder.join(format!("{session_id}.jsonl"));
 
     // Anything already at this name means the session resolves from here
     // already. `symlink_metadata` does not follow links, so even a dangling
-    // symlink left by an earlier `--here` counts as "present".
+    // symlink left by an earlier import counts as "present".
     if link_path.symlink_metadata().is_ok() {
         return Ok(None);
     }
 
     std::fs::create_dir_all(&folder)?;
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(original_jsonl, &link_path)?;
-    #[cfg(not(unix))]
-    std::os::windows::fs::symlink_file(original_jsonl, &link_path)?;
+    match mode {
+        ImportMode::Symlink => {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(source_jsonl, &link_path)?;
+            #[cfg(not(unix))]
+            std::os::windows::fs::symlink_file(source_jsonl, &link_path)?;
+        }
+        ImportMode::Copy => todo!(),
+    }
 
     Ok(Some(link_path))
 }
@@ -481,7 +510,14 @@ fn resolve_here_link(
     }
     let original =
         find_session_file(projects_dir, session_id).ok_or(HereResolveError::SessionNotFound)?;
-    prepare_here_link(projects_dir, &original, pwd, session_id).map_err(HereResolveError::Io)
+    prepare_import(
+        projects_dir,
+        &original,
+        pwd,
+        session_id,
+        ImportMode::Symlink,
+    )
+    .map_err(HereResolveError::Io)
 }
 
 /// A caller-supplied `--here` new-session id that is not a valid UUID.
@@ -1747,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_here_link_creates_symlink_in_pwd_project_folder() {
+    fn prepare_import_symlink_creates_symlink_in_target_project_folder() {
         let dir = tempdir().unwrap();
         let projects = dir.path();
         let orig = projects.join("-orig");
@@ -1755,9 +1791,9 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        // A pwd whose encoded project folder does not exist yet.
-        let pwd = Path::new("/Volumes/x/here-cwd");
-        let link = prepare_here_link(projects, &original, pwd, SAMPLE_ID)
+        // A target dir whose encoded project folder does not exist yet.
+        let target = Path::new("/Volumes/x/here-cwd");
+        let link = prepare_import(projects, &original, target, SAMPLE_ID, ImportMode::Symlink)
             .expect("should succeed")
             .expect("a symlink should be created");
 
@@ -1775,25 +1811,31 @@ mod tests {
     }
 
     #[test]
-    fn prepare_here_link_returns_none_when_already_in_session_folder() {
+    fn prepare_import_symlink_returns_none_when_already_in_session_folder() {
         let dir = tempdir().unwrap();
         let projects = dir.path();
-        // encode_project_dir("/orig") == "-orig", so pwd resolves to the folder
-        // the session already lives in: no symlink is needed.
+        // encode_project_dir("/orig") == "-orig", so target resolves to the
+        // folder the session already lives in: no symlink is needed.
         let orig = projects.join("-orig");
         fs::create_dir_all(&orig).unwrap();
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let result =
-            prepare_here_link(projects, &original, Path::new("/orig"), SAMPLE_ID).expect("ok");
+        let result = prepare_import(
+            projects,
+            &original,
+            Path::new("/orig"),
+            SAMPLE_ID,
+            ImportMode::Symlink,
+        )
+        .expect("ok");
         assert_eq!(result, None);
         assert!(original.is_file(), "original must be left untouched");
     }
 
     #[cfg(unix)]
     #[test]
-    fn prepare_here_link_leaves_an_existing_link_in_place() {
+    fn prepare_import_symlink_leaves_an_existing_link_in_place() {
         // A symlink dropped by an earlier `--here` already makes the session
         // resolvable here, so a repeat returns `None` (nothing to clean up) and
         // does not disturb the existing link.
@@ -1804,21 +1846,22 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let pwd = Path::new("/Volumes/x/here");
+        let target = Path::new("/Volumes/x/here");
         let folder = projects.join("-Volumes-x-here");
         fs::create_dir_all(&folder).unwrap();
         let link = folder.join(format!("{SAMPLE_ID}.jsonl"));
         std::os::unix::fs::symlink(&original, &link).unwrap();
 
         assert_eq!(
-            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            prepare_import(projects, &original, target, SAMPLE_ID, ImportMode::Symlink)
+                .expect("ok"),
             None
         );
         assert_eq!(fs::read_link(&link).unwrap(), original);
     }
 
     #[test]
-    fn prepare_here_link_returns_none_when_a_real_file_is_already_present() {
+    fn prepare_import_symlink_returns_none_when_a_real_file_is_already_present() {
         // A session id is a UUID, so a real file at the target name can only be
         // this very session living here already: resolve it in place, untouched.
         let dir = tempdir().unwrap();
@@ -1828,20 +1871,64 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let pwd = Path::new("/Volumes/x/here");
+        let target = Path::new("/Volumes/x/here");
         let folder = projects.join("-Volumes-x-here");
         fs::create_dir_all(&folder).unwrap();
         let real = folder.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&real, "a real session").unwrap();
 
         assert_eq!(
-            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            prepare_import(projects, &original, target, SAMPLE_ID, ImportMode::Symlink)
+                .expect("ok"),
             None
         );
         assert_eq!(
             fs::read_to_string(&real).unwrap(),
             "a real session",
             "the real file must be left untouched"
+        );
+    }
+
+    #[test]
+    fn prepare_import_copy_snapshots_source_and_is_idempotent() {
+        // Cross-user import copies the transcript into the current user's tree:
+        // a self-contained regular file (not a symlink) with identical bytes,
+        // and a repeat import is a no-op.
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("dest/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        // The source lives under a *different* tree (another user's home).
+        let src_dir = dir.path().join("other/.claude/projects/-orig");
+        fs::create_dir_all(&src_dir).unwrap();
+        let source = src_dir.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&source, "{\"cwd\":\"/work\"}\n").unwrap();
+
+        let target = Path::new("/Volumes/x/work");
+        let copy = prepare_import(&projects, &source, target, SAMPLE_ID, ImportMode::Copy)
+            .expect("should succeed")
+            .expect("a copy should be created");
+
+        assert_eq!(
+            copy,
+            projects
+                .join("-Volumes-x-work")
+                .join(format!("{SAMPLE_ID}.jsonl"))
+        );
+        // A real file, not a symlink pointing back into the other user's tree.
+        assert!(
+            !fs::symlink_metadata(&copy).unwrap().file_type().is_symlink(),
+            "cross-user import must be a copy, not a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            "{\"cwd\":\"/work\"}\n",
+            "the copy must snapshot the source bytes"
+        );
+
+        // A second import finds the file already present and is a no-op.
+        assert_eq!(
+            prepare_import(&projects, &source, target, SAMPLE_ID, ImportMode::Copy).expect("ok"),
+            None
         );
     }
 
