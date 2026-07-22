@@ -80,3 +80,20 @@ fn refuses_to_install_a_file_onto_itself() {
         "refusal must not destroy the file",
     );
 }
+
+#[test]
+fn refuses_a_source_that_is_not_a_regular_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A directory is not a regular file.
+    let source = dir.path().join("a-directory");
+    fs::create_dir(&source).expect("mkdir source");
+    let dest = dir.path().join("dest");
+
+    match install_binary(&source, &dest) {
+        Ok(_) => panic!("must refuse a non-regular-file source"),
+        Err(err) => assert!(
+            err.to_string().to_lowercase().contains("not a regular file"),
+            "expected a 'not a regular file' error, got: {err}",
+        ),
+    }
+}
