@@ -7,9 +7,7 @@ edition.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 dirs.workspace = true
-serde.workspace = true
 thiserror.workspace = true
-toml.workspace = true
 
 [lints]
 workspace = true

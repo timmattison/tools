@@ -432,8 +432,9 @@ containers/CI).
     `install-bin` unlinks the destination first so the copy always lands on a fresh inode, then execs
     the installed binary once (`--verify-arg`, default `--version`) to prove the kernel accepts it,
     re-signing ad-hoc and retrying once on a SIGKILL. Usage: `install-bin target/release/mytool`.
-  - To install: symlink `install-bin/install-bin.ts` from a clone of this repo into your `PATH`
-    (e.g. `ln -s "$PWD/install-bin/install-bin.ts" ~/.local/bin/install-bin`). Requires `npx`/`tsx`.
+  - To install: `cargo install --git https://github.com/timmattison/tools install-bin`. Because it's
+    a single binary with no runtime dependency, it can also install itself:
+    `cargo build --release -p install-bin && ./target/release/install-bin ./target/release/install-bin`.
 
 ## dirhash
 

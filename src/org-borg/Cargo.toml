@@ -8,12 +8,10 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 colored.workspace = true
-dirs.workspace = true
 git2.workspace = true
 indicatif.workspace = true
 reqwest.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 termbar.workspace = true
 tokio.workspace = true
 

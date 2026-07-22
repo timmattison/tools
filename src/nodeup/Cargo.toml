@@ -11,7 +11,6 @@ path = "src/main.rs"
 buildinfo.workspace = true
 clap.workspace = true
 repowalker.workspace = true
-walkdir.workspace = true
 
 [lints]
 workspace = true
