@@ -104,6 +104,81 @@ fn no_verify_skips_the_exec_check() {
 }
 
 #[test]
+fn name_positional_installs_under_the_given_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The optional `name` positional overrides the installed file name: install
+    // install-bin itself (it answers `--version` cleanly, so the exec check
+    // passes) as `renamed-tool` and confirm the override — not the source
+    // basename — is what lands on disk.
+    let out = Command::new(BIN)
+        .arg(BIN)
+        .arg("renamed-tool")
+        .arg("--dest")
+        .arg(dir.path())
+        .output()
+        .expect("run install-bin");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "installing under an explicit name must succeed; stdout: {stdout}\nstderr: {stderr}"
+    );
+
+    assert!(
+        dir.path().join("renamed-tool").exists(),
+        "the binary must be installed under the given name"
+    );
+
+    let source_basename = std::path::Path::new(BIN)
+        .file_name()
+        .expect("BIN has a file name");
+    assert!(
+        !dir.path().join(source_basename).exists(),
+        "the source basename must NOT be installed when a name is given: {source_basename:?}"
+    );
+
+    assert!(
+        stdout.contains("renamed-tool"),
+        "must report the overridden name: {stdout:?}"
+    );
+}
+
+#[test]
+fn verify_arg_is_passed_to_the_exec_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // The exec check's argument defaults to `--version` but can be overridden
+    // with --verify-arg. `install-bin --help` exits 0 (clap prints help), so the
+    // check passes, and the success line echoes the verify arg — proving the
+    // override was threaded through.
+    // Use the `--flag=value` form: clap will not consume a dash-prefixed value
+    // (`--help`) as a separate argument, so `--verify-arg=--help` is how a value
+    // that itself looks like a flag must be supplied.
+    let out = Command::new(BIN)
+        .arg(BIN)
+        .arg("--dest")
+        .arg(dir.path())
+        .arg("--verify-arg=--help")
+        .output()
+        .expect("run install-bin");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the exec check with --verify-arg --help must succeed; stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("verified"),
+        "must report the post-install exec check: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("--help"),
+        "the verify line must echo the overridden verify arg: {stdout:?}"
+    );
+}
+
+#[test]
 fn prints_version_with_git_metadata() {
     let out = Command::new(BIN)
         .arg("--version")
