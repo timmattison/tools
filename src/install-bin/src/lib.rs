@@ -4,9 +4,12 @@
 //! Why this exists: on Apple Silicon macOS, copying over an *existing* binary
 //! reuses the destination inode, and the kernel caches code signatures per
 //! vnode. The cache still holds the old build's signature, so every exec of the
-//! new bytes dies with SIGKILL (Code Signature Invalid). The fix is to unlink
-//! the destination before copying so the installed file always lands on a fresh
-//! inode the kernel has never cached.
+//! new bytes dies with SIGKILL (Code Signature Invalid). The fix is to copy the
+//! new bytes to a temp file in the destination directory and then atomically
+//! `rename` it over the destination: rename swaps in the temp's brand-new inode
+//! (which the kernel has never cached) and, being atomic, never leaves the
+//! destination missing or half-written — a failed copy leaves any existing
+//! destination untouched.
 
 use std::fs::{self, Permissions};
 use std::io;
@@ -24,7 +27,8 @@ pub struct InstallResult {
     /// The path the binary was installed to.
     pub dest: PathBuf,
     /// Whether an existing file at `dest` was replaced (always onto a fresh
-    /// inode — the old file is unlinked, never overwritten in place).
+    /// inode — the atomic rename swaps in the temp file's fresh inode, never
+    /// overwriting the old file in place).
     pub replaced_existing: bool,
 }
 
@@ -47,8 +51,11 @@ pub enum InstallError {
 }
 
 /// Copy `source` to `dest` such that `dest` always ends up on a fresh inode:
-/// the destination is unlinked first, never overwritten in place. Creates the
-/// destination directory if needed and carries over the source's file mode.
+/// the bytes are written to a temp file in the destination directory and then
+/// atomically renamed over `dest`, giving `dest` the temp's brand-new inode
+/// rather than overwriting the old file in place. The rename is atomic, so a
+/// failed copy leaves any existing `dest` untouched. Creates the destination
+/// directory if needed and carries over the source's file mode.
 ///
 /// # Errors
 ///
@@ -56,8 +63,8 @@ pub enum InstallError {
 /// [`InstallError::SourceNotRegularFile`] if `source` exists but is not a
 /// regular file, [`InstallError::SameFile`] if `source` and `dest` resolve to
 /// the same file (which would otherwise destroy the source), or
-/// [`InstallError::Io`] if an underlying filesystem operation (unlink, copy, or
-/// permission change) fails.
+/// [`InstallError::Io`] if an underlying filesystem operation (copy, permission
+/// change, or rename) fails.
 pub fn install_binary(source: &Path, dest: &Path) -> Result<InstallResult, InstallError> {
     let source_meta =
         fs::metadata(source).map_err(|_| InstallError::SourceMissing(source.to_path_buf()))?;
@@ -84,16 +91,41 @@ pub fn install_binary(source: &Path, dest: &Path) -> Result<InstallResult, Insta
         fs::create_dir_all(parent)?;
     }
 
-    // Unlink the destination before copying so the installed file always lands
-    // on a fresh inode the kernel has never cached (the macOS SIGKILL fix).
-    // Ignore a NotFound error — nothing to remove is fine.
-    match fs::remove_file(dest) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(InstallError::from(err)),
+    // Copy to a temp file in the destination directory, then atomically rename
+    // it over dest. rename() gives dest the temp's brand-new inode (the macOS
+    // signature-cache fix) AND is atomic — dest is never left missing or
+    // partially written, and a failed copy leaves any existing dest untouched.
+    let dest_dir = dest.parent().unwrap_or_else(|| Path::new("."));
+    let stem = dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "install".into());
+    // Parallel-safe unique temp name (per CLAUDE.md: key on pid + nanos so
+    // concurrent installs never collide).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dest_dir.join(format!(
+        ".{stem}.install-tmp-{}-{nanos}",
+        std::process::id()
+    ));
+
+    // On any failure, best-effort remove the temp so we don't litter, and leave
+    // any existing dest untouched.
+    if let Err(err) = fs::copy(source, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(InstallError::from(err));
     }
-    fs::copy(source, dest)?;
-    fs::set_permissions(dest, Permissions::from_mode(source_meta.mode() & 0o7777))?;
+    if let Err(err) = fs::set_permissions(&tmp, Permissions::from_mode(source_meta.mode() & 0o7777))
+    {
+        let _ = fs::remove_file(&tmp);
+        return Err(InstallError::from(err));
+    }
+    if let Err(err) = fs::rename(&tmp, dest) {
+        let _ = fs::remove_file(&tmp);
+        return Err(InstallError::from(err));
+    }
 
     Ok(InstallResult {
         dest: dest.to_path_buf(),

@@ -113,7 +113,10 @@ fn a_failed_copy_leaves_the_existing_destination_intact() {
 
     let result = install_binary(&source, &dest);
 
-    assert!(result.is_err(), "an unreadable source must fail the install");
+    assert!(
+        result.is_err(),
+        "an unreadable source must fail the install"
+    );
     // The pre-existing binary must survive a failed install — atomic replace,
     // not unlink-then-copy. This is the whole point of the fix.
     assert_eq!(
