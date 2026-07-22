@@ -3,9 +3,11 @@
 //! the kernel will actually run it.
 
 use std::path::PathBuf;
+use std::process;
 
 use buildinfo::version_string;
 use clap::Parser;
+use install_bin::{install_binary, InstallResult};
 
 /// Install a locally built binary onto `PATH` without tripping macOS's
 /// code-signature cache.
@@ -35,8 +37,54 @@ struct Args {
     no_verify: bool,
 }
 
+/// The default destination directory, `~/.local/bin`, matching the TS tool.
+/// Exits with a diagnostic if the home directory can't be determined.
+fn default_dest_dir() -> PathBuf {
+    match dirs::home_dir() {
+        Some(home) => home.join(".local").join("bin"),
+        None => {
+            eprintln!("install-bin: could not determine your home directory; pass --dest <dir>");
+            process::exit(1);
+        }
+    }
+}
+
+/// The installed file name: the explicit `name` argument, else the source's own
+/// file name. UTF-8-safe via `to_string_lossy`.
+fn installed_name(args: &Args) -> String {
+    if let Some(name) = &args.name {
+        return name.clone();
+    }
+    args.source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 fn main() {
-    // The install orchestration is not wired up yet; this cycle only proves the
-    // CLI parses and (once the version attribute is added) reports its version.
-    let _args = Args::parse();
+    let args = Args::parse();
+
+    let dest_dir = args.dest.clone().unwrap_or_else(default_dest_dir);
+    let dest = dest_dir.join(installed_name(&args));
+
+    let InstallResult {
+        replaced_existing, ..
+    } = match install_binary(&args.source, &dest) {
+        Ok(result) => result,
+        Err(err) => {
+            eprintln!("install-bin: {err}");
+            process::exit(1);
+        }
+    };
+
+    let note = if replaced_existing {
+        " (replaced existing, fresh inode)"
+    } else {
+        ""
+    };
+    println!(
+        "installed {} → {}{note}",
+        args.source.display(),
+        dest.display()
+    );
 }
