@@ -937,6 +937,16 @@ const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 /// fresh random id (`--fork-session`) instead of pinning one (`--session-id`).
 const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 
+/// Leading token marking cross-user default-resume output: unlike [`HERE_SENTINEL`]
+/// (which stays in the current directory), this tells the shell function to
+/// `cd` into the session's original recorded directory *and then* fork, so a
+/// foreign session resumes where it originally ran.
+#[allow(
+    dead_code,
+    reason = "consumed by the cross-user resume wiring in a later commit"
+)]
+const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
+
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
 /// the session id, then the caller-supplied forked-session id (or
 /// [`NO_NEW_ID_SENTINEL`] when none was given), then the symlink to remove once
@@ -957,6 +967,31 @@ fn format_here_output(
         None => NO_LINK_SENTINEL.to_string(),
     };
     format!("{HERE_SENTINEL}\n{session_id}\n{new_id}\n{link}\n")
+}
+
+/// Formats cross-user default-resume output for the shell function: the
+/// [`FORK_AT_SENTINEL`], then the session id, then the forked-session id (or
+/// [`NO_NEW_ID_SENTINEL`]), then the imported transcript to remove once the
+/// session ends (or [`NO_LINK_SENTINEL`]), and finally the session's original
+/// directory to `cd` into before forking.
+///
+/// The directory is emitted **last** so — like [`format_output`] — a path
+/// containing a newline survives intact as "everything after the final field
+/// separator". The middle fields are all newline-free: the ids are validated
+/// UUIDs (or sentinels), and the link path lives under
+/// `~/.claude/projects/<encoded>`, whose encoding maps every non-alphanumeric
+/// character (including newline) to `-`.
+#[allow(
+    dead_code,
+    reason = "consumed by the cross-user resume wiring in a later commit"
+)]
+fn format_fork_at_output(
+    session_id: &str,
+    new_session_id: Option<&str>,
+    link_to_cleanup: Option<&Path>,
+    dir: &Path,
+) -> String {
+    todo!()
 }
 
 /// The shell function installed by `crap --shell-setup`.
@@ -2344,6 +2379,58 @@ mod tests {
 
         let rest = out.splitn(4, '\n').nth(3).unwrap();
         assert_eq!(rest.trim_end_matches('\n'), link.to_str().unwrap());
+    }
+
+    #[test]
+    fn fork_at_output_emits_dir_last_with_sentinels_in_slots() {
+        // Cross-user default resume: sentinel, session, new-id slot, link slot,
+        // then the original directory last.
+        let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
+        let dir = Path::new("/Volumes/x/work");
+        let out = format_fork_at_output(SAMPLE_ID, None, Some(link), dir);
+
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(FORK_AT_SENTINEL));
+        assert_eq!(lines.next(), Some(SAMPLE_ID));
+        // No forced id: the new-id slot is the sentinel.
+        assert_eq!(lines.next(), Some(NO_NEW_ID_SENTINEL));
+        assert_eq!(lines.next(), Some(link.to_str().unwrap()));
+        // Everything after the fourth newline is the directory, intact.
+        let rest = out.splitn(5, '\n').nth(4).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn fork_at_output_uses_no_link_sentinel_when_nothing_to_clean() {
+        // When the import was a no-op (already resolvable), the link slot is the
+        // sentinel so the shell knows there is nothing to remove.
+        let dir = Path::new("/Volumes/x/work");
+        let out = format_fork_at_output(SAMPLE_ID, None, None, dir);
+        assert_eq!(out.lines().nth(3), Some(NO_LINK_SENTINEL));
+    }
+
+    #[test]
+    fn fork_at_output_carries_forced_new_id() {
+        // A caller-supplied forked id rides in the new-id slot for the shell's
+        // `--session-id`, while the directory still comes last.
+        let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
+        let dir = Path::new("/Volumes/x/work");
+        let out = format_fork_at_output(SAMPLE_ID, Some(ID_B), Some(link), dir);
+        assert_eq!(out.lines().nth(2), Some(ID_B));
+        let rest = out.splitn(5, '\n').nth(4).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn fork_at_output_preserves_newline_in_dir() {
+        // The directory lives last, so a newline inside it can't be mistaken for
+        // a field boundary — the invariant the whole layout is designed around.
+        let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
+        let dir = Path::new("/Volumes/x/od\ndd");
+        let out = format_fork_at_output(SAMPLE_ID, None, Some(link), dir);
+
+        let rest = out.splitn(5, '\n').nth(4).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
     }
 
     #[test]
