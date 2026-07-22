@@ -1,0 +1,14 @@
+[package]
+name = "install-bin"
+edition.workspace = true
+license.workspace = true
+description = "Install a locally built binary onto a fresh inode without tripping macOS's code-signature cache"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
