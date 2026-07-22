@@ -83,3 +83,20 @@ fn verify_exec_times_out_a_binary_that_hangs() {
     }
     assert!(!verdict.is_ok(), "a hanging binary is not ok");
 }
+
+#[test]
+fn verify_exec_reports_a_missing_binary_as_a_spawn_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Nothing was ever created at this path, so the exec can't even start.
+    let missing = dir.path().join("was-never-installed");
+
+    let verdict = verify_exec(&missing, "--version", DEFAULT_VERIFY_TIMEOUT);
+
+    match &verdict {
+        ExecVerdict::SpawnError { hint } => {
+            assert!(!hint.is_empty(), "a spawn-error verdict must carry a hint");
+        }
+        other => panic!("expected ExecVerdict::SpawnError for a missing binary, got: {other:?}"),
+    }
+    assert!(!verdict.is_ok(), "a binary that can't be spawned is not ok");
+}
