@@ -92,7 +92,9 @@ fn refuses_a_source_that_is_not_a_regular_file() {
     match install_binary(&source, &dest) {
         Ok(_) => panic!("must refuse a non-regular-file source"),
         Err(err) => assert!(
-            err.to_string().to_lowercase().contains("not a regular file"),
+            err.to_string()
+                .to_lowercase()
+                .contains("not a regular file"),
             "expected a 'not a regular file' error, got: {err}",
         ),
     }

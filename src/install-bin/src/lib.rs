@@ -49,12 +49,17 @@ pub enum InstallError {
 /// # Errors
 ///
 /// Returns [`InstallError::SourceMissing`] if `source` does not exist,
-/// [`InstallError::SameFile`] if `source` and `dest` resolve to the same file
-/// (which would otherwise destroy the source), or [`InstallError::Io`] if an
-/// underlying filesystem operation (unlink, copy, or permission change) fails.
+/// [`InstallError::SourceNotRegularFile`] if `source` exists but is not a
+/// regular file, [`InstallError::SameFile`] if `source` and `dest` resolve to
+/// the same file (which would otherwise destroy the source), or
+/// [`InstallError::Io`] if an underlying filesystem operation (unlink, copy, or
+/// permission change) fails.
 pub fn install_binary(source: &Path, dest: &Path) -> Result<InstallResult, InstallError> {
     let source_meta =
         fs::metadata(source).map_err(|_| InstallError::SourceMissing(source.to_path_buf()))?;
+    if !source_meta.file_type().is_file() {
+        return Err(InstallError::SourceNotRegularFile(source.to_path_buf()));
+    }
 
     let replaced_existing = dest.exists();
 
