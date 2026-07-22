@@ -13,7 +13,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use install_bin::{DEFAULT_VERIFY_TIMEOUT, ExecVerdict, verify_exec};
+use install_bin::{verify_exec, ExecVerdict, DEFAULT_VERIFY_TIMEOUT};
 
 /// Write `body` as an executable `#!/bin/sh` script at `<dir>/<name>` (mode
 /// `0o755`) and return its path.

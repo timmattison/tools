@@ -11,10 +11,13 @@
 use std::fs::{self, Permissions};
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use thiserror::Error;
+use wait_timeout::ChildExt;
 
 /// Outcome of a successful [`install_binary`] call.
 pub struct InstallResult {
@@ -161,5 +164,47 @@ impl ExecVerdict {
 /// [`ExecVerdict::Timeout`]; a spawn or wait failure yields
 /// [`ExecVerdict::SpawnError`].
 pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
-    todo!()
+    // stdin/stdout/stderr all go to null: the verified binary's output must not
+    // pollute install-bin's own output, and an unread pipe could otherwise
+    // deadlock the timed wait below.
+    let mut child = match Command::new(bin)
+        .arg(arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        // Placeholder until the SpawnError branch is driven by its own test.
+        Err(_) => {
+            return ExecVerdict::Ok {
+                exit_code: i32::MIN,
+            }
+        }
+    };
+
+    match child.wait_timeout(timeout) {
+        Ok(Some(status)) => match status.signal() {
+            Some(sig) => {
+                let hint = if sig == SIGKILL && cfg!(target_os = "macos") {
+                    SIGKILL_DARWIN_HINT.to_string()
+                } else {
+                    format!("process died from signal {sig}")
+                };
+                ExecVerdict::Signal { signal: sig, hint }
+            }
+            // Placeholder until the Ok branch is driven by its own test.
+            None => ExecVerdict::Ok {
+                exit_code: i32::MIN,
+            },
+        },
+        // Placeholder until the Timeout branch is driven by its own test.
+        Ok(None) => ExecVerdict::Ok {
+            exit_code: i32::MIN,
+        },
+        // Placeholder until the SpawnError branch is driven by its own test.
+        Err(_) => ExecVerdict::Ok {
+            exit_code: i32::MIN,
+        },
+    }
 }
