@@ -240,16 +240,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d92bec98840b8f03a5ff5413de5293bfcd8bf96467cf5452609f939ec6f5de16"
 
 [[package]]
-name = "assert-json-diff"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47e4f2b81832e72834d7518d8487a0396a28cc408186a2e8854c0f98011faf12"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "assert_cmd"
 version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -810,9 +800,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "dirs",
- "serde",
  "thiserror 2.0.19",
- "toml",
 ]
 
 [[package]]
@@ -867,10 +855,8 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook 0.3.18",
- "terminal_size",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "vte",
 ]
 
@@ -1270,7 +1256,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
- "env_logger",
  "log",
 ]
 
@@ -2501,15 +2486,10 @@ dependencies = [
  "chrono",
  "chrono-english",
  "clap",
- "crossbeam",
  "crossterm",
- "dirs",
  "git2",
- "indicatif",
- "mockito",
  "parking_lot",
  "ratatui",
- "rayon",
  "reqwest",
  "serde",
  "serde_json",
@@ -3479,7 +3459,6 @@ dependencies = [
  "buildinfo",
  "clap",
  "repowalker",
- "walkdir",
 ]
 
 [[package]]
@@ -3489,7 +3468,6 @@ dependencies = [
  "anyhow",
  "buildinfo",
  "chrono",
- "colored",
  "comfy-table",
  "serde",
  "serde_json",
@@ -3770,7 +3748,6 @@ dependencies = [
  "http 1.4.2",
  "http-body 1.1.0",
  "httparse",
- "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -4159,7 +4136,6 @@ dependencies = [
 name = "install-bin"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "buildinfo",
  "clap",
  "dirs",
@@ -4767,31 +4743,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mockito"
-version = "1.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90820618712cab19cfc46b274c6c22546a82affcb3c3bdf0f29e3db8e1bb92c0"
-dependencies = [
- "assert-json-diff",
- "bytes",
- "colored",
- "futures-core",
- "http 1.4.2",
- "http-body 1.1.0",
- "http-body-util",
- "hyper",
- "hyper-util",
- "log",
- "pin-project-lite",
- "rand 0.9.5",
- "regex",
- "serde_json",
- "serde_urlencoded",
- "similar",
- "tokio",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4939,7 +4890,6 @@ dependencies = [
  "buildinfo",
  "clap",
  "repowalker",
- "walkdir",
 ]
 
 [[package]]
@@ -5377,12 +5327,10 @@ dependencies = [
  "buildinfo",
  "clap",
  "colored",
- "dirs",
  "git2",
  "indicatif",
  "reqwest",
  "serde",
- "serde_json",
  "termbar",
  "tokio",
 ]
@@ -5644,7 +5592,6 @@ dependencies = [
  "buildinfo",
  "clap",
  "repowalker",
- "walkdir",
 ]
 
 [[package]]
@@ -6975,12 +6922,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
-
-[[package]]
 name = "siphasher"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7532,7 +7473,6 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
- "futures-io",
  "futures-sink",
  "futures-util",
  "pin-project-lite",
@@ -7696,7 +7636,6 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 name = "tsm"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "assert_cmd",
  "buildinfo",
  "chrono",
@@ -7940,8 +7879,6 @@ dependencies = [
  "clap",
  "colored",
  "op-cache",
- "serde",
- "serde_json",
  "which",
 ]
 
