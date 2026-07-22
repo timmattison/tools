@@ -4,16 +4,24 @@
 # when a staged change touches that language's files (see the trigger regexes
 # below), so a Go-only commit never pays for the Rust toolchain and vice versa.
 #
-# The three Rust gates run cheapest-first so a commit fails fast on the
+# The four Rust gates run cheapest-first so a commit fails fast on the
 # quickest check:
 #
 #   1. cargo fmt --check  - formatting drift; no compile, so it is fastest.
-#   2. cargo clippy       - lints as hard errors. --all-targets covers tests/
+#   2. cargo machete      - unused-dependency detector. Like fmt it compiles
+#                           nothing (it parses Cargo manifests and sources), so
+#                           it runs before clippy. Plain mode is used (not
+#                           --with-metadata) so it never touches Cargo.lock; the
+#                           crates with known false positives carry
+#                           [package.metadata.cargo-machete] ignored entries.
+#                           A non-zero exit means an unused dependency slipped
+#                           into a manifest, which fails the commit.
+#   3. cargo clippy       - lints as hard errors. --all-targets covers tests/
 #                           and benches/, where lints like
 #                           unseparated_literal_suffix would otherwise slip
 #                           through, and -D warnings turns every workspace lint
 #                           into a hard error.
-#   3. cargo test         - the workspace test suite. Slowest, so it runs last;
+#   4. cargo test         - the workspace test suite. Slowest, so it runs last;
 #                           clippy's --all-targets has already compiled the test
 #                           targets, so this pass is mostly incremental + run.
 #
@@ -21,7 +29,7 @@
 # repo root: a commit that bumps the toolchain or style config is the scenario
 # most likely to introduce drift, so the gate must run on those changes too.
 #
-# All three checks read the WORKING TREE, not the staged index, so a partially
+# All four checks read the WORKING TREE, not the staged index, so a partially
 # staged file (or one staged then edited) is checked in its on-disk state, not
 # the version being committed. This is a deliberate trade-off: index-only
 # checking (stash --keep-index dances) is fragile, and the workspace-wide cargo
@@ -31,6 +39,12 @@ set -euo pipefail
 if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$|^(rustfmt|rust-toolchain)\.toml$'; then
     echo "pre-commit: running cargo fmt --all -- --check"
     cargo fmt --all -- --check
+    echo "pre-commit: running cargo machete (unused dependency check)"
+    if ! command -v cargo-machete >/dev/null 2>&1; then
+        echo "pre-commit: cargo-machete not found; installing it once (cargo install cargo-machete --locked)…"
+        cargo install cargo-machete --locked
+    fi
+    cargo machete
     echo "pre-commit: running cargo clippy --all-targets --workspace -- -D warnings"
     cargo clippy --all-targets --workspace -- -D warnings
     echo "pre-commit: running cargo test --workspace"
