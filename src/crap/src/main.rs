@@ -474,7 +474,9 @@ fn prepare_import(
             #[cfg(not(unix))]
             std::os::windows::fs::symlink_file(source_jsonl, &link_path)?;
         }
-        ImportMode::Copy => todo!(),
+        ImportMode::Copy => {
+            std::fs::copy(source_jsonl, &link_path)?;
+        }
     }
 
     Ok(Some(link_path))
@@ -1916,7 +1918,10 @@ mod tests {
         );
         // A real file, not a symlink pointing back into the other user's tree.
         assert!(
-            !fs::symlink_metadata(&copy).unwrap().file_type().is_symlink(),
+            !fs::symlink_metadata(&copy)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
             "cross-user import must be a copy, not a symlink"
         );
         assert_eq!(
