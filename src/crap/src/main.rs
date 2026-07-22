@@ -2679,6 +2679,99 @@ mod tests {
         assert!(SHELL_CODE.contains("--session-id"));
     }
 
+    #[test]
+    fn shell_code_detects_fork_at_sentinel() {
+        // The shell function branches on the exact cross-user sentinel the
+        // binary emits for a resume at the session's original directory.
+        assert!(SHELL_CODE.contains(FORK_AT_SENTINEL));
+    }
+
+    /// Sources `SHELL_CODE` in a real `bash` with a fake `crap` that emits
+    /// cross-user `__CRAP_FORK_AT__` output naming a real `orig-cwd` directory
+    /// (and `__CRAP_NO_LINK__`, so no watcher/cleanup runs), plus a fake
+    /// `claude`/`clauded` that records both the arguments it was resumed with
+    /// and the working directory it ran in. Returns `(recorded_args,
+    /// recorded_pwd, orig_dir)`.
+    ///
+    /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
+    /// concurrent runs never share a directory.
+    #[cfg(unix)]
+    fn run_fork_at_shell_function() -> (String, String, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        // The session id the fake binary reports as the foreign original.
+        const FORK_SESSION: &str = "33333333-4444-5555-6666-777777777777";
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+
+        let args_file = dir.join("claude_args");
+        let pwd_file = dir.join("claude_pwd");
+        // The session's original recorded directory: the fork must land here.
+        let orig = dir.join("orig-cwd");
+        fs::create_dir_all(&orig).unwrap();
+
+        // Fake `crap`: emit a fork-at output naming `orig` as the last field.
+        let fake_crap = format!(
+            "#!/bin/sh\nprintf '{FORK_AT_SENTINEL}\\n%s\\n%s\\n%s\\n%s\\n' '{FORK_SESSION}' '{NO_NEW_ID_SENTINEL}' '{NO_LINK_SENTINEL}' '{}'\n",
+            orig.display()
+        );
+        // Fake `claude`/`clauded`: record the resume argv and the cwd it ran in.
+        let fake_claude = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\npwd > {:?}\n",
+            args_file, pwd_file
+        );
+
+        for (name, body) in [
+            ("crap", fake_crap),
+            ("claude", fake_claude.clone()),
+            ("clauded", fake_claude),
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{base_path}", dir.display());
+        let script = format!("{SHELL_CODE}\ncrap {FORK_SESSION} --user someone\n");
+
+        let output = Command::new("bash")
+            .env("PATH", new_path)
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash should be available");
+
+        let args = fs::read_to_string(&args_file).unwrap_or_default();
+        let pwd = fs::read_to_string(&pwd_file).unwrap_or_default();
+        // `temp` drops at end of scope, removing the directory — read `orig`
+        // through a canonicalized copy first so the caller can still compare it.
+        let orig = std::fs::canonicalize(&orig).unwrap();
+        let _ = output;
+        (args, pwd, orig)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_forks_at_original_dir_for_cross_user() {
+        // Cross-user default resume: the function must `cd` into the session's
+        // original directory and then fork it (`--resume <id> --fork-session`),
+        // leaving the foreign transcript untouched.
+        let (args, pwd, orig) = run_fork_at_shell_function();
+        let args: Vec<&str> = args.lines().collect();
+        assert!(
+            args.contains(&"--resume") && args.contains(&"--fork-session"),
+            "must fork-resume the original id; got {args:?}"
+        );
+        assert_eq!(
+            std::fs::canonicalize(pwd.trim()).unwrap(),
+            orig,
+            "the fork must run in the session's original directory"
+        );
+    }
+
     // Two distinct session ids for the per-directory listing tests.
     const ID_A: &str = "aaaaaaaa-1111-2222-3333-444444444444";
     const ID_B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
