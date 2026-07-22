@@ -48,14 +48,27 @@ pub enum InstallError {
 ///
 /// # Errors
 ///
-/// Returns [`InstallError::SourceMissing`] if `source` does not exist, or
-/// [`InstallError::Io`] if an underlying filesystem operation (unlink, copy, or
-/// permission change) fails.
+/// Returns [`InstallError::SourceMissing`] if `source` does not exist,
+/// [`InstallError::SameFile`] if `source` and `dest` resolve to the same file
+/// (which would otherwise destroy the source), or [`InstallError::Io`] if an
+/// underlying filesystem operation (unlink, copy, or permission change) fails.
 pub fn install_binary(source: &Path, dest: &Path) -> Result<InstallResult, InstallError> {
     let source_meta =
         fs::metadata(source).map_err(|_| InstallError::SourceMissing(source.to_path_buf()))?;
 
     let replaced_existing = dest.exists();
+
+    // Refuse a self-install before any destructive op: if dest already exists
+    // and resolves to the same file as source, unlinking dest would destroy the
+    // source. Both canonicalizations must succeed for the paths to be equal.
+    if replaced_existing {
+        if let (Ok(source_real), Ok(dest_real)) = (fs::canonicalize(source), fs::canonicalize(dest))
+        {
+            if source_real == dest_real {
+                return Err(InstallError::SameFile(source_real));
+            }
+        }
+    }
 
     // Create the destination directory tree if it does not exist yet.
     if let Some(parent) = dest.parent() {
