@@ -193,9 +193,8 @@ pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
                 };
                 ExecVerdict::Signal { signal: sig, hint }
             }
-            // Placeholder until the Ok branch is driven by its own test.
             None => ExecVerdict::Ok {
-                exit_code: i32::MIN,
+                exit_code: status.code().unwrap_or(0),
             },
         },
         // Placeholder until the Timeout branch is driven by its own test.
