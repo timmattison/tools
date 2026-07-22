@@ -139,6 +139,84 @@ fn find_session_file(projects_dir: &Path, session_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// One user's `~/.claude/projects` directory, tagged with who owns it.
+///
+/// Cross-user discovery searches an ordered list of these roots; the `is_self`
+/// flag lets the resume logic pick "resume in place" (the current user's own
+/// session) versus "copy into my tree and fork" (another user's session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "consumed by the cross-user resume wiring in a later commit"
+)]
+struct UserProjects {
+    /// The account name (the home directory's file name).
+    user: String,
+    /// That user's `.../.claude/projects` directory.
+    projects_dir: PathBuf,
+    /// Whether this is the invoking user's own tree.
+    is_self: bool,
+}
+
+/// The current user's own `~/.claude/projects` root (`is_self = true`).
+///
+/// `home` is passed explicitly rather than read from the environment here, so
+/// the mapping stays tempdir-testable; the one place that reads
+/// `dirs::home_dir()` is `main`.
+#[allow(
+    dead_code,
+    reason = "consumed by the cross-user resume wiring in a later commit"
+)]
+fn self_projects(home: &Path) -> UserProjects {
+    todo!()
+}
+
+/// A sibling user's `~/.claude/projects` root, resolved as `users_parent/name`.
+///
+/// `is_self` is set when `name` equals `self_name` (the invoking user), so a
+/// `--user` that names the current account is treated as a same-user hit. Like
+/// [`self_projects`], every input is explicit so the mapping is tempdir-testable.
+#[allow(
+    dead_code,
+    reason = "consumed by the cross-user resume wiring in a later commit"
+)]
+fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjects {
+    todo!()
+}
+
+/// The outcome of searching an ordered list of roots for a session id.
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "consumed by the cross-user resume wiring in a later commit"
+)]
+enum FoundSession {
+    /// The transcript, and which root (hence user / `is_self`) it came from.
+    Found {
+        /// The `<id>.jsonl` transcript that matched.
+        path: PathBuf,
+        /// The root it was found under, carrying the owning user and `is_self`.
+        root: UserProjects,
+    },
+    /// The id was not found in any of the searched roots.
+    NotFound,
+}
+
+/// Searches an ordered list of roots for a session id, first match winning.
+///
+/// Within each root it reuses [`find_session_file`] as the per-root inner loop,
+/// so a hit is tagged with the root it came from (hence its owning user and
+/// whether it is the current user's own tree). Roots are searched in order and
+/// the search short-circuits on the first match, so a self-first ordering makes
+/// a session the current user already owns always win.
+#[allow(
+    dead_code,
+    reason = "consumed by the cross-user resume wiring in a later commit"
+)]
+fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
+    todo!()
+}
+
 /// The conversational state of a session, inferred from its transcript.
 ///
 /// Claude Code never writes an explicit "turn finished, waiting for input"
@@ -1762,6 +1840,80 @@ mod tests {
     fn find_session_file_returns_none_when_absent() {
         let dir = tempdir().unwrap();
         assert_eq!(find_session_file(dir.path(), SAMPLE_ID), None);
+    }
+
+    #[test]
+    fn user_projects_sets_is_self_for_self_and_other() {
+        let parent = Path::new("/Users");
+        // A `--user` naming the current account is a same-user hit.
+        let me = user_projects(parent, "timmattison", "timmattison");
+        assert_eq!(me.user, "timmattison");
+        assert_eq!(
+            me.projects_dir,
+            Path::new("/Users/timmattison/.claude/projects")
+        );
+        assert!(me.is_self);
+
+        // A different account is a cross-user root.
+        let other = user_projects(parent, "scyloswork", "timmattison");
+        assert_eq!(other.user, "scyloswork");
+        assert_eq!(
+            other.projects_dir,
+            Path::new("/Users/scyloswork/.claude/projects")
+        );
+        assert!(!other.is_self);
+    }
+
+    #[test]
+    fn self_projects_marks_the_current_users_tree() {
+        let home = Path::new("/Users/timmattison");
+        let mine = self_projects(home);
+        assert_eq!(mine.user, "timmattison");
+        assert_eq!(
+            mine.projects_dir,
+            Path::new("/Users/timmattison/.claude/projects")
+        );
+        assert!(mine.is_self);
+    }
+
+    #[test]
+    fn find_session_across_finds_id_in_a_single_root() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("home/.claude/projects");
+        let proj = projects.join("-some-proj");
+        fs::create_dir_all(&proj).unwrap();
+        let file = proj.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&file, "{}\n").unwrap();
+
+        let root = UserProjects {
+            user: "me".to_string(),
+            projects_dir: projects,
+            is_self: true,
+        };
+        match find_session_across(std::slice::from_ref(&root), SAMPLE_ID) {
+            FoundSession::Found { path, root: found } => {
+                assert_eq!(path, file);
+                assert_eq!(found.user, "me");
+                assert!(found.is_self);
+            }
+            FoundSession::NotFound => panic!("expected the id to be found"),
+        }
+    }
+
+    #[test]
+    fn find_session_across_reports_not_found_when_absent() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("home/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        let root = UserProjects {
+            user: "me".to_string(),
+            projects_dir: projects,
+            is_self: true,
+        };
+        assert!(matches!(
+            find_session_across(&[root], SAMPLE_ID),
+            FoundSession::NotFound
+        ));
     }
 
     #[test]
