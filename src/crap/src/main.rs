@@ -168,7 +168,16 @@ struct UserProjects {
     reason = "consumed by the cross-user resume wiring in a later commit"
 )]
 fn self_projects(home: &Path) -> UserProjects {
-    todo!()
+    let user = home
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    UserProjects {
+        user,
+        projects_dir: home.join(".claude").join("projects"),
+        is_self: true,
+    }
 }
 
 /// A sibling user's `~/.claude/projects` root, resolved as `users_parent/name`.
@@ -181,7 +190,11 @@ fn self_projects(home: &Path) -> UserProjects {
     reason = "consumed by the cross-user resume wiring in a later commit"
 )]
 fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjects {
-    todo!()
+    UserProjects {
+        user: name.to_string(),
+        projects_dir: users_parent.join(name).join(".claude").join("projects"),
+        is_self: name == self_name,
+    }
 }
 
 /// The outcome of searching an ordered list of roots for a session id.
@@ -214,7 +227,15 @@ enum FoundSession {
     reason = "consumed by the cross-user resume wiring in a later commit"
 )]
 fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
-    todo!()
+    for root in roots {
+        if let Some(path) = find_session_file(&root.projects_dir, id) {
+            return FoundSession::Found {
+                path,
+                root: root.clone(),
+            };
+        }
+    }
+    FoundSession::NotFound
 }
 
 /// The conversational state of a session, inferred from its transcript.
