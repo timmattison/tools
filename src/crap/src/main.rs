@@ -1012,7 +1012,7 @@ fn format_fork_at_output(
 /// the binary exits non-zero (session not found, already running, …) its message
 /// is shown and the function does nothing further.
 ///
-/// The binary speaks one of two output shapes:
+/// The binary speaks one of three output shapes:
 ///
 /// * **default** — `<session-id>\n<dir>`: the function `cd`s into the original
 ///   directory (splitting on the first newline so a path containing newlines
@@ -1025,6 +1025,11 @@ fn format_fork_at_output(
 ///   none was created because this already is the session's own directory. When
 ///   the new-id field is not `__CRAP_NO_NEW_ID__`, the fork is pinned to that id
 ///   via `--session-id` instead of a random one.
+/// * **cross-user** — `__CRAP_FORK_AT__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>\n<dir>`:
+///   the binary has *copied* another user's transcript into our own tree, so the
+///   function `cd`s into the session's original directory (the trailing `<dir>`,
+///   emitted last so a newline in the path survives) and then runs the same
+///   fork + cleanup sequence as `--here`.
 const SHELL_CODE: &str = r#"
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
@@ -1075,6 +1080,56 @@ function crap() {
         # --session-id instead of letting Claude mint a random one. The earlier
         # "command crap" call has already consumed the function's own arguments,
         # so reusing the positional parameters here is safe.
+        set -- --resume "$__crap_session" --fork-session
+        if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
+            set -- "$@" --session-id "$__crap_newid"
+        fi
+        if command -v clauded >/dev/null 2>&1; then
+            eval 'clauded "$@"'
+        else
+            claude "$@"
+        fi
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            kill "$__crap_watcher" 2>/dev/null
+            rm -f -- "$__crap_link"
+        fi
+        return
+    fi
+    if [ "${__crap_out%%$'\n'*}" = "__CRAP_FORK_AT__" ]; then
+        # Cross-user resume: the binary copied a foreign transcript into our own
+        # tree and wants it forked at the session's ORIGINAL directory. The wire
+        # shape adds a trailing <dir> field to the here-mode layout —
+        # "__CRAP_FORK_AT__\n<session>\n<new-id>\n<link>\n<dir>" — with <dir>
+        # last so a path containing newlines survives as the final field. We cd
+        # there, then run the same fork + cleanup sequence as --here.
+        local __crap_rest __crap_session __crap_newid __crap_link __crap_dir __crap_folder __crap_n0 __crap_watcher
+        __crap_rest=${__crap_out#*$'\n'}
+        __crap_session=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_newid=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_link=${__crap_rest%%$'\n'*}
+        __crap_dir=${__crap_rest#*$'\n'}
+        cd -- "$__crap_dir" || return 1
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            # As in --here: drop the imported copy the moment Claude writes the
+            # forked session file, rather than letting it linger.
+            __crap_folder=$(dirname -- "$__crap_link")
+            __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
+            (
+                __crap_i=0
+                while [ "$__crap_i" -lt 600 ]; do
+                    if [ "$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')" -gt "$__crap_n0" ]; then
+                        rm -f -- "$__crap_link"
+                        exit 0
+                    fi
+                    __crap_i=$((__crap_i + 1))
+                    sleep 0.1
+                done
+            ) &
+            __crap_watcher=$!
+            disown 2>/dev/null
+        fi
         set -- --resume "$__crap_session" --fork-session
         if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
             set -- "$@" --session-id "$__crap_newid"
@@ -2691,12 +2746,14 @@ mod tests {
     /// (and `__CRAP_NO_LINK__`, so no watcher/cleanup runs), plus a fake
     /// `claude`/`clauded` that records both the arguments it was resumed with
     /// and the working directory it ran in. Returns `(recorded_args,
-    /// recorded_pwd, orig_dir)`.
+    /// resumed_in_dir, orig_dir)`, where both directories are canonicalized
+    /// **before** the temp dir is dropped so the caller can compare them without
+    /// touching a filesystem path that no longer exists.
     ///
     /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
     /// concurrent runs never share a directory.
     #[cfg(unix)]
-    fn run_fork_at_shell_function() -> (String, String, PathBuf) {
+    fn run_fork_at_shell_function() -> (String, PathBuf, PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
@@ -2746,11 +2803,18 @@ mod tests {
 
         let args = fs::read_to_string(&args_file).unwrap_or_default();
         let pwd = fs::read_to_string(&pwd_file).unwrap_or_default();
-        // `temp` drops at end of scope, removing the directory — read `orig`
-        // through a canonicalized copy first so the caller can still compare it.
+        assert!(
+            output.status.success(),
+            "fork-at shell function failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Canonicalize both directories while `temp` is still alive — it drops
+        // (removing the tree) at the end of this scope, so the caller must not
+        // depend on either path still existing on disk.
+        let resumed_in = std::fs::canonicalize(pwd.trim())
+            .expect("claude should have recorded the directory it forked in");
         let orig = std::fs::canonicalize(&orig).unwrap();
-        let _ = output;
-        (args, pwd, orig)
+        (args, resumed_in, orig)
     }
 
     #[cfg(unix)]
@@ -2759,15 +2823,14 @@ mod tests {
         // Cross-user default resume: the function must `cd` into the session's
         // original directory and then fork it (`--resume <id> --fork-session`),
         // leaving the foreign transcript untouched.
-        let (args, pwd, orig) = run_fork_at_shell_function();
+        let (args, resumed_in, orig) = run_fork_at_shell_function();
         let args: Vec<&str> = args.lines().collect();
         assert!(
             args.contains(&"--resume") && args.contains(&"--fork-session"),
             "must fork-resume the original id; got {args:?}"
         );
         assert_eq!(
-            std::fs::canonicalize(pwd.trim()).unwrap(),
-            orig,
+            resumed_in, orig,
             "the fork must run in the session's original directory"
         );
     }
