@@ -42,3 +42,19 @@ fn verify_exec_reports_a_binary_the_kernel_sigkills_as_not_ok() {
     }
     assert!(!verdict.is_ok(), "a SIGKILLed binary is not ok");
 }
+
+#[test]
+fn verify_exec_reports_a_binary_that_execs_normally_as_ok() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = write_script(dir.path(), "prints-version", "#!/bin/sh\necho v1.2.3\nexit 0\n");
+
+    let verdict = verify_exec(&bin, "--version", DEFAULT_VERIFY_TIMEOUT);
+
+    match &verdict {
+        ExecVerdict::Ok { exit_code } => {
+            assert_eq!(*exit_code, 0, "a clean `exit 0` is exit code 0");
+        }
+        other => panic!("expected ExecVerdict::Ok for a normally-exiting binary, got: {other:?}"),
+    }
+    assert!(verdict.is_ok(), "a normally-exiting binary is ok");
+}
