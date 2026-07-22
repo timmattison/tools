@@ -160,7 +160,7 @@ impl ExecVerdict {
     /// decide whether to re-sign ad-hoc and retry the exec check once.
     #[must_use]
     pub fn is_sigkill(&self) -> bool {
-        false
+        matches!(self, ExecVerdict::Signal { signal, .. } if *signal == SIGKILL)
     }
 }
 
