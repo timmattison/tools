@@ -59,3 +59,24 @@ fn installed_file_matches_source_content_and_is_executable() {
     );
     assert!(!result.replaced_existing, "nothing existed at dest yet");
 }
+
+#[test]
+fn refuses_to_install_a_file_onto_itself() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = dir.path().join("the-bin");
+    let content = "#!/bin/sh\necho hi\n";
+    write_executable(&p, content);
+
+    match install_binary(&p, &p) {
+        Ok(_) => panic!("must refuse installing a file onto itself"),
+        Err(err) => assert!(
+            err.to_string().to_lowercase().contains("same file"),
+            "expected a 'same file' error, got: {err}",
+        ),
+    }
+    assert_eq!(
+        fs::read_to_string(&p).expect("read source"),
+        content,
+        "refusal must not destroy the file",
+    );
+}
