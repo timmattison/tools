@@ -178,6 +178,32 @@ fn verify_arg_is_passed_to_the_exec_check() {
     );
 }
 
+// The space-separated form `--verify-arg --help` must work, not just the
+// `--verify-arg=--help` equals form. install-bin --help exits 0, so the exec
+// check passes; a clap parse error here is the regression this guards against.
+#[test]
+fn verify_arg_accepts_a_hyphen_prefixed_value_in_space_form() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = Command::new(BIN)
+        .arg(BIN)
+        .arg("--dest")
+        .arg(dir.path())
+        .arg("--verify-arg")
+        .arg("--help")
+        .output()
+        .expect("run install-bin");
+    assert!(
+        out.status.success(),
+        "`--verify-arg --help` (space form) must be accepted; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("verified") && stdout.contains("--help"),
+        "the custom verify arg must thread through to the exec check: {stdout:?}"
+    );
+}
+
 #[test]
 fn prints_version_with_git_metadata() {
     let out = Command::new(BIN)
