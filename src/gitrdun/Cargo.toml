@@ -11,14 +11,10 @@ buildinfo.workspace = true
 chrono.workspace = true
 chrono-english.workspace = true
 clap.workspace = true
-crossbeam.workspace = true
 crossterm.workspace = true
-dirs.workspace = true
 git2.workspace = true
-indicatif.workspace = true
 parking_lot.workspace = true
 ratatui.workspace = true
-rayon.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -27,7 +23,6 @@ tokio-util.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
-mockito.workspace = true
 tempfile.workspace = true
 
 [lints]

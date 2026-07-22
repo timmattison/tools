@@ -10,7 +10,6 @@ name = "tsm"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 buildinfo.workspace = true
 chrono.workspace = true
 clap.workspace = true
