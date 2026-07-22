@@ -73,9 +73,12 @@ fn user_flag_cross_user_forks_at_original_dir() {
     plant_session(&other_projects, "-proj", FOREIGN_ID, &shared);
     // The current user's own tree exists but does not contain this id.
     fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
-    let foreign_before =
-        fs::read_to_string(other_projects.join("-proj").join(format!("{FOREIGN_ID}.jsonl")))
-            .unwrap();
+    let foreign_before = fs::read_to_string(
+        other_projects
+            .join("-proj")
+            .join(format!("{FOREIGN_ID}.jsonl")),
+    )
+    .unwrap();
 
     let out = run_crap(&root, &[FOREIGN_ID, "--user", "other"]);
     assert!(
@@ -111,8 +114,12 @@ fn user_flag_cross_user_forks_at_original_dir() {
 
     // The foreign original was only read, never written.
     assert_eq!(
-        fs::read_to_string(other_projects.join("-proj").join(format!("{FOREIGN_ID}.jsonl")))
-            .unwrap(),
+        fs::read_to_string(
+            other_projects
+                .join("-proj")
+                .join(format!("{FOREIGN_ID}.jsonl"))
+        )
+        .unwrap(),
         foreign_before,
         "the foreign transcript must be left untouched"
     );

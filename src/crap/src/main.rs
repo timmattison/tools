@@ -24,6 +24,18 @@
 //! directory, each with its state and the times its transcript was started and
 //! last written (read from the transcript's own timestamps, not file mtimes).
 //!
+//! With `--user <name>`, it reaches across accounts. Every lookup is normally
+//! anchored on the current user's home, so a session started under another
+//! account is invisible; `--user` instead searches only that sibling user's
+//! `~/.claude/projects` tree (resolved as `<home>/../<name>`). Because the
+//! transcript belongs to another user, `claude --resume` run by *you* could
+//! never find it there, so `crap` copies it into your own tree and resumes it as
+//! a `--fork-session` (a fresh id) at its original recorded directory — the
+//! foreign transcript is only ever read, and every write lands under your home.
+//! The transient copy is removed once Claude writes the forked transcript, the
+//! same way `--here` cleans up its symlink. A `--user` that names your own
+//! account is a same-user hit and resumes in place as usual.
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
@@ -177,10 +189,6 @@ fn self_projects(home: &Path) -> UserProjects {
 /// `is_self` is set when `name` equals `self_name` (the invoking user), so a
 /// `--user` that names the current account is treated as a same-user hit. Like
 /// [`self_projects`], every input is explicit so the mapping is tempdir-testable.
-#[allow(
-    dead_code,
-    reason = "consumed by the cross-user resume wiring in a later commit"
-)]
 fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjects {
     UserProjects {
         user: name.to_string(),
@@ -1183,6 +1191,19 @@ struct Cli {
     #[arg(long)]
     here: bool,
 
+    /// Resume a session that belongs to another user.
+    ///
+    /// `<name>` is resolved as a sibling of your own home (`<home>/../<name>`,
+    /// i.e. `/Users/<name>` on macOS or `/home/<name>` on Linux). Only that
+    /// user's `~/.claude/projects` tree is searched — your own is skipped, so
+    /// `--user` is also how you disambiguate an id on purpose. A readable
+    /// foreign transcript is copied into your own tree and resumed as a fork (a
+    /// fresh id) at its original directory; the original is only ever read, so
+    /// this is safe even while that session is live elsewhere. A `--user`
+    /// naming your own account is a same-user hit and resumes in place.
+    #[arg(long, value_name = "NAME", conflicts_with = "shell_setup")]
+    user: Option<String>,
+
     /// Print the session's conversational state and exit, without resuming.
     ///
     /// With a session id, emits one scriptable token: `waiting-for-user`
@@ -1513,7 +1534,27 @@ fn main() {
         );
     }
 
-    let roots = vec![self_projects(&home)];
+    // Build the search roots. This is the one place that reads the env-coupled
+    // home layout — `home.file_name()` (our account name) and `home.parent()`
+    // (the users' parent directory) — so `self_projects`/`user_projects` stay
+    // pure. With no `--user` we search our own tree; with `--user <name>` we
+    // search only that sibling's tree.
+    let roots = match cli.user.as_deref() {
+        None => vec![self_projects(&home)],
+        Some(name) => {
+            let (Some(self_name), Some(users_parent)) =
+                (home.file_name().and_then(|n| n.to_str()), home.parent())
+            else {
+                eprintln!(
+                    "{} could not resolve sibling users from your home {}",
+                    "Error:".red().bold(),
+                    home.display()
+                );
+                exit(exit_codes::NO_HOME_DIR);
+            };
+            vec![user_projects(users_parent, name, self_name)]
+        }
+    };
     run_resume(&roots, &projects_dir, &session_id, cli.force);
 }
 
@@ -3216,5 +3257,29 @@ mod tests {
     fn cli_still_requires_session_id_without_flags() {
         use clap::Parser;
         assert!(Cli::try_parse_from(["crap"]).is_err());
+    }
+
+    #[test]
+    fn cli_user_parses_and_carries_value() {
+        use clap::Parser;
+        let cli =
+            Cli::try_parse_from(["crap", SAMPLE_ID, "--user", "scyloswork"]).expect("should parse");
+        assert_eq!(cli.session_id.as_deref(), Some(SAMPLE_ID));
+        assert_eq!(cli.user.as_deref(), Some("scyloswork"));
+    }
+
+    #[test]
+    fn cli_user_rejected_with_shell_setup() {
+        use clap::Parser;
+        // Cross-user discovery makes no sense while installing the shell
+        // function, so the two flags must be mutually exclusive.
+        assert!(Cli::try_parse_from(["crap", "--shell-setup", "--user", "x"]).is_err());
+    }
+
+    #[test]
+    fn cli_bare_user_is_a_parse_error() {
+        use clap::Parser;
+        // `--user` requires a NAME; a bare flag is rejected.
+        assert!(Cli::try_parse_from(["crap", SAMPLE_ID, "--user"]).is_err());
     }
 }
