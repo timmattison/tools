@@ -197,10 +197,15 @@ pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
                 exit_code: status.code().unwrap_or(0),
             },
         },
-        // Placeholder until the Timeout branch is driven by its own test.
-        Ok(None) => ExecVerdict::Ok {
-            exit_code: i32::MIN,
-        },
+        Ok(None) => {
+            // The child outlived the timeout: kill it and reap the zombie so the
+            // installer doesn't wedge waiting on a binary that never returns.
+            let _ = child.kill();
+            let _ = child.wait();
+            ExecVerdict::Timeout {
+                hint: format!("exec did not finish within {timeout:?}"),
+            }
+        }
         // Placeholder until the SpawnError branch is driven by its own test.
         Err(_) => ExecVerdict::Ok {
             exit_code: i32::MIN,
