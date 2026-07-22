@@ -175,10 +175,9 @@ pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
         .spawn()
     {
         Ok(child) => child,
-        // Placeholder until the SpawnError branch is driven by its own test.
-        Err(_) => {
-            return ExecVerdict::Ok {
-                exit_code: i32::MIN,
+        Err(err) => {
+            return ExecVerdict::SpawnError {
+                hint: format!("exec failed: {err}"),
             }
         }
     };
@@ -206,9 +205,10 @@ pub fn verify_exec(bin: &Path, arg: &str, timeout: Duration) -> ExecVerdict {
                 hint: format!("exec did not finish within {timeout:?}"),
             }
         }
-        // Placeholder until the SpawnError branch is driven by its own test.
-        Err(_) => ExecVerdict::Ok {
-            exit_code: i32::MIN,
+        // Waiting on the child itself failed — treat it like a spawn failure
+        // rather than silently claiming the binary is fine.
+        Err(err) => ExecVerdict::SpawnError {
+            hint: format!("waiting on exec failed: {err}"),
         },
     }
 }
