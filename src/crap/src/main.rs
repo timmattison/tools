@@ -53,6 +53,7 @@
 //! id — printing the original directory to resume from, or (for `--here`)
 //! preparing the import and printing what the function should run and clean up.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -208,8 +209,23 @@ fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjec
     }
 }
 
+/// The canonical form of `path`, falling back to `path` verbatim when it cannot
+/// be resolved.
+///
+/// [`std::fs::canonicalize`] resolves symlinks and `.`/`..` components, but only
+/// for a path that actually exists — and the roots this compares include the
+/// current user's `~/.claude/projects`, which is frequently absent (they have
+/// never run Claude). A failure therefore has to mean "no better answer than the
+/// path I was given" rather than "drop this root": two non-existent paths still
+/// compare equal when they are literally the same path, which is exactly the
+/// self-versus-self case that must dedupe.
+fn canonical_or_verbatim(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Every `~/.claude/projects` root worth searching for a no-flag `crap <id>`,
-/// ordered self-first for a stable, deterministic scan.
+/// ordered self-first for a stable, deterministic scan, with each physical tree
+/// appearing exactly once.
 ///
 /// The current user's own entry is always included and comes first, so a
 /// self-first search short-circuits on a session the current user already owns
@@ -219,6 +235,18 @@ fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjec
 /// directory (an account that never ran Claude is not a search root), and are
 /// ordered after self by account name so the result never depends on the order
 /// the filesystem happens to list the parent directory in.
+///
+/// Roots are then deduped on their *canonical* `projects_dir` (see
+/// [`canonical_or_verbatim`]) rather than on account name, because one home can
+/// answer to several names: a symlinked alias (`/Users/me-alias -> /Users/me`),
+/// or a `HOME` whose case differs from the on-disk directory on a
+/// case-insensitive filesystem. Name comparison misses both, so the same tree
+/// would be searched twice and the second copy — self included — would be
+/// mislabelled as another user's, sending a hit down the foreign-user fork path
+/// for a session the current user already owns. Because self is inserted first
+/// and siblings are deduped against self *and* against each other, the surviving
+/// entry for any tree is self when self is one of its names, and otherwise the
+/// alphabetically first sibling name.
 ///
 /// Every input is explicit (no `home_dir()` read here) so the enumeration is
 /// tempdir-testable; the sole env-coupled caller in `main` derives `users_parent`
@@ -231,11 +259,6 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
             let Some(name) = name.to_str() else {
                 continue;
             };
-            // Self is added first, unconditionally, below — skip it in the scan
-            // so it is never duplicated or knocked out of the leading slot.
-            if name == self_name {
-                continue;
-            }
             let root = user_projects(users_parent, name, self_name);
             // Only accounts that have actually run Claude are search roots;
             // `is_dir` follows symlinks, so a symlinked home still counts.
@@ -249,8 +272,17 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
     others.sort_by(|a, b| a.user.cmp(&b.user));
 
     let mut roots = Vec::with_capacity(others.len() + 1);
-    roots.push(user_projects(users_parent, self_name, self_name));
-    roots.extend(others);
+    // Self goes in first and unconditionally, claiming its canonical tree, so it
+    // stays root zero and is the only entry that can ever carry `is_self`.
+    let me = user_projects(users_parent, self_name, self_name);
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    seen.insert(canonical_or_verbatim(&me.projects_dir));
+    roots.push(me);
+    for root in others {
+        if seen.insert(canonical_or_verbatim(&root.projects_dir)) {
+            roots.push(root);
+        }
+    }
     roots
 }
 
