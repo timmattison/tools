@@ -501,17 +501,18 @@ fn resolve_here_import(
     if !is_valid_session_id(session_id) {
         return Err(HereResolveError::InvalidSessionId);
     }
-    let FoundSession::Found { path, .. } = find_session_across(roots, session_id) else {
+    let FoundSession::Found { path, root } = find_session_across(roots, session_id) else {
         return Err(HereResolveError::SessionNotFound);
     };
-    prepare_import(
-        dest_projects_dir,
-        &path,
-        pwd,
-        session_id,
-        ImportMode::Symlink,
-    )
-    .map_err(HereResolveError::Io)
+    // Same-user hit → symlink (unchanged). Cross-user hit → copy, so nothing is
+    // symlinked into another user's home and the import is a self-contained
+    // snapshot owned by the current user.
+    let mode = if root.is_self {
+        ImportMode::Symlink
+    } else {
+        ImportMode::Copy
+    };
+    prepare_import(dest_projects_dir, &path, pwd, session_id, mode).map_err(HereResolveError::Io)
 }
 
 /// A caller-supplied `--here` new-session id that is not a valid UUID.
@@ -2462,7 +2463,7 @@ mod tests {
 
         let roots = vec![UserProjects {
             user: "them".to_string(),
-            projects_dir: foreign.clone(),
+            projects_dir: foreign,
             is_self: false,
         }];
         let pwd = Path::new("/Volumes/x/here");
