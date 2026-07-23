@@ -1339,6 +1339,16 @@ crap --here 57570685-2d64-4431-8ab6-c021a12fa1af 9f8e7d6c-5b4a-3210-fedc-ba98765
 
 The new id must be a valid UUID, and `crap` refuses it if it already names a session (so the fork can never overwrite an unrelated transcript). This is handy when a script needs to know the resumed session's id in advance — generate a UUID, hand it to `crap --here`, and you already know where the new transcript will live. Omit it to keep the random-id behavior.
 
+### Resume another user's session: `--user`
+
+Every lookup is normally anchored on your own home, so a session started under a different account is invisible. Point `crap` at that account with `--user <name>` and it searches only that user's `~/.claude/projects` tree instead:
+
+```bash
+crap 57570685-2d64-4431-8ab6-c021a12fa1af --user alice
+```
+
+The name resolves as a sibling of your home (`<home>/../<name>` — `/Users/alice` on macOS, `/home/alice` on Linux). Because a transcript that belongs to another user can never be found by a `claude --resume` you run yourself, `crap` copies it into your own tree and resumes it as a `--fork-session` (a fresh id) at its original recorded directory — the foreign transcript is only ever read, and every write lands under your home. The transient copy is removed once Claude writes the forked transcript, the same way `--here` cleans up its symlink. Because the fork only reads the original, `--user` is safe even while that session is still live in the other user's account. A `--user` naming your own account is a same-user hit and simply resumes in place.
+
 ### Don't attach twice
 
 Claude Code records every live CLI session under `~/.claude/sessions/<pid>.json` and removes it on clean exit. Before resuming, `crap` checks that registry: if the session you asked for is already open in another running `claude` process, it refuses and tells you where:
@@ -1427,6 +1437,7 @@ crap --status --json | jq -r '.[] | select(.state == "waiting-for-user") | .sess
 - `[SESSION_ID]`: The Claude session id to resume (optional with `--status`, which then lists every session for the current directory)
 - `-f, --force`: Resume even if the session appears to be running in another process
 - `--here`: Resume the session in the current directory (as a forked, new-id session) instead of its original one
+- `--user <name>`: Resume another user's session. `<name>` is resolved as a sibling of your home (`<home>/../<name>` — `/Users/<name>` on macOS, `/home/<name>` on Linux), and only that user's `~/.claude/projects` tree is searched (your own is skipped, so `--user` also disambiguates an id on purpose). The foreign transcript is copied into your own tree and resumed as a fork (fresh id) at its original directory — the original is only ever read. Naming your own account is a same-user hit and resumes in place
 - `--status`: Print the session's conversational state (`waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`; or `<status> (live, pid <pid>)` when open elsewhere) and exit, without resuming. With no id, lists every session for the current directory with its state and start/last times
 - `--json`: With `--status`, emit JSON instead of text (one object for an id, an array for the directory listing)
 - `--shell-setup`: Add the `crap` shell function to your ~/.zshrc or ~/.bashrc
@@ -1502,7 +1513,7 @@ function crap() {
 }
 ```
 
-The binary speaks one of two output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already symlinked the session into the current directory's project folder — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes the symlink as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+The binary speaks one of three output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already symlinked the session into the current directory's project folder — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes the symlink as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. For a cross-user `--user` resume it leads with a `__CRAP_FORK_AT__` marker instead — the binary has already *copied* the foreign transcript into your own tree, and the wire layout appends the session's original directory as a trailing field, so the function `cd`s into that original directory and then runs the same `--fork-session` plus background-watcher cleanup sequence as `--here`. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
 
 ### Exit Codes
 
@@ -1514,7 +1525,7 @@ The binary speaks one of two output shapes. By default it prints the session id 
 - `5`: Shell setup failed
 - `6`: Could not determine your home directory
 - `7`: The session is already running in another process (use `--force` to override)
-- `8`: `--here`: could not create the project folder or symlink
+- `8`: `--here`/`--user`: could not import the session into the project folder (create the folder or symlink for `--here`, or copy the transcript for `--user`)
 - `9`: `--here`: could not determine the current working directory
 
 ## bm (bulk move)

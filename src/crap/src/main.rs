@@ -24,6 +24,18 @@
 //! directory, each with its state and the times its transcript was started and
 //! last written (read from the transcript's own timestamps, not file mtimes).
 //!
+//! With `--user <name>`, it reaches across accounts. Every lookup is normally
+//! anchored on the current user's home, so a session started under another
+//! account is invisible; `--user` instead searches only that sibling user's
+//! `~/.claude/projects` tree (resolved as `<home>/../<name>`). Because the
+//! transcript belongs to another user, `claude --resume` run by *you* could
+//! never find it there, so `crap` copies it into your own tree and resumes it as
+//! a `--fork-session` (a fresh id) at its original recorded directory — the
+//! foreign transcript is only ever read, and every write lands under your home.
+//! The transient copy is removed once Claude writes the forked transcript, the
+//! same way `--here` cleans up its symlink. A `--user` that names your own
+//! account is a same-user hit and resumes in place as usual.
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
@@ -64,12 +76,12 @@ mod exit_codes {
     pub const NEW_SESSION_ID_EXISTS: i32 = 10;
 }
 
-/// Why a session id could not be resolved to an existing directory.
+/// Why a located session transcript could not be resolved to an existing
+/// directory. (Id validity is checked separately, before a transcript is even
+/// located, so it is not represented here.)
 #[derive(Debug)]
 enum ResolveError {
-    /// The session id contained path separators or traversal sequences.
-    InvalidSessionId,
-    /// No `<session_id>.jsonl` file was found under any project directory.
+    /// The transcript could not be read.
     SessionNotFound,
     /// The session file exists but records no working directory.
     NoCwdInSession,
@@ -137,6 +149,85 @@ fn find_session_file(projects_dir: &Path, session_id: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// One user's `~/.claude/projects` directory, tagged with who owns it.
+///
+/// Cross-user discovery searches an ordered list of these roots; the `is_self`
+/// flag lets the resume logic pick "resume in place" (the current user's own
+/// session) versus "copy into my tree and fork" (another user's session).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UserProjects {
+    /// The account name (the home directory's file name).
+    user: String,
+    /// That user's `.../.claude/projects` directory.
+    projects_dir: PathBuf,
+    /// Whether this is the invoking user's own tree.
+    is_self: bool,
+}
+
+/// The current user's own `~/.claude/projects` root (`is_self = true`).
+///
+/// `home` is passed explicitly rather than read from the environment here, so
+/// the mapping stays tempdir-testable; the one place that reads
+/// `dirs::home_dir()` is `main`.
+fn self_projects(home: &Path) -> UserProjects {
+    let user = home
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    UserProjects {
+        user,
+        projects_dir: home.join(".claude").join("projects"),
+        is_self: true,
+    }
+}
+
+/// A sibling user's `~/.claude/projects` root, resolved as `users_parent/name`.
+///
+/// `is_self` is set when `name` equals `self_name` (the invoking user), so a
+/// `--user` that names the current account is treated as a same-user hit. Like
+/// [`self_projects`], every input is explicit so the mapping is tempdir-testable.
+fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjects {
+    UserProjects {
+        user: name.to_string(),
+        projects_dir: users_parent.join(name).join(".claude").join("projects"),
+        is_self: name == self_name,
+    }
+}
+
+/// The outcome of searching an ordered list of roots for a session id.
+#[derive(Debug)]
+enum FoundSession {
+    /// The transcript, and which root (hence user / `is_self`) it came from.
+    Found {
+        /// The `<id>.jsonl` transcript that matched.
+        path: PathBuf,
+        /// The root it was found under, carrying the owning user and `is_self`.
+        root: UserProjects,
+    },
+    /// The id was not found in any of the searched roots.
+    NotFound,
+}
+
+/// Searches an ordered list of roots for a session id, first match winning.
+///
+/// Within each root it reuses [`find_session_file`] as the per-root inner loop,
+/// so a hit is tagged with the root it came from (hence its owning user and
+/// whether it is the current user's own tree). Roots are searched in order and
+/// the search short-circuits on the first match, so a self-first ordering makes
+/// a session the current user already owns always win.
+fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
+    for root in roots {
+        if let Some(path) = find_session_file(&root.projects_dir, id) {
+            return FoundSession::Found {
+                path,
+                root: root.clone(),
+            };
+        }
+    }
+    FoundSession::NotFound
 }
 
 /// The conversational state of a session, inferred from its transcript.
@@ -265,19 +356,19 @@ fn classify_session_state(contents: &str) -> SessionState {
     state
 }
 
-/// Resolves a session id to the existing directory the session ran in.
+/// Reads the existing directory a session ran in out of its located transcript.
+///
+/// The transcript's first non-empty `cwd` is taken as the working directory; the
+/// call fails if the transcript cannot be read, records no `cwd`, or names a
+/// directory that no longer exists.
 ///
 /// # Errors
 ///
-/// Returns a [`ResolveError`] when the id is invalid, no session file matches,
-/// the session records no working directory, or that directory no longer
-/// exists.
-fn resolve_session_dir(projects_dir: &Path, session_id: &str) -> Result<PathBuf, ResolveError> {
-    if !is_valid_session_id(session_id) {
-        return Err(ResolveError::InvalidSessionId);
-    }
-    let file = find_session_file(projects_dir, session_id).ok_or(ResolveError::SessionNotFound)?;
-    let contents = std::fs::read_to_string(&file).map_err(|_| ResolveError::SessionNotFound)?;
+/// Returns a [`ResolveError`] when the transcript cannot be read, records no
+/// working directory, or that directory no longer exists.
+fn session_dir_from_transcript(transcript: &Path) -> Result<PathBuf, ResolveError> {
+    let contents =
+        std::fs::read_to_string(transcript).map_err(|_| ResolveError::SessionNotFound)?;
     let cwd = extract_cwd(&contents).ok_or(ResolveError::NoCwdInSession)?;
     let path = PathBuf::from(cwd);
     if !path.is_dir() {
@@ -306,48 +397,69 @@ fn encode_project_dir(path: &Path) -> String {
         .collect()
 }
 
-/// Returns the `~/.claude/projects` directory, or `None` if the home directory
-/// cannot be determined.
-fn claude_projects_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".claude").join("projects"))
+/// How [`prepare_import`] should make a session's transcript resolvable from a
+/// target directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportMode {
+    /// Symlink the target name to the source (same-user `--here`): the original
+    /// is only ever read, and the link is cheap and trivially removable.
+    Symlink,
+    /// Copy the source into the target folder (cross-user): a self-contained
+    /// snapshot owned by the current user, so nothing under another user's home
+    /// is written and the import survives the source moving.
+    Copy,
 }
 
-/// Makes the session `original_jsonl` resolvable by `claude --resume` from
-/// `pwd`, by symlinking it into `pwd`'s project folder under `projects_dir`.
+/// Makes the session `source_jsonl` resolvable by `claude --resume` from
+/// `target_dir`, by placing it into `target_dir`'s project folder under
+/// `dest_projects_dir` — either as a symlink to the original ([`ImportMode::Symlink`])
+/// or as a self-contained copy ([`ImportMode::Copy`]).
 ///
-/// Returns the path of the symlink that was created (so the caller can remove it
-/// once the session ends), or `None` when the session is *already* resolvable
-/// from `pwd` — because `pwd` is its own directory, or an earlier `--here`
-/// already linked it. Anything already at the target name is left untouched: a
-/// session id is a UUID, so a file there can only be this very session, and
-/// clobbering it would never be correct.
+/// `dest_projects_dir` is always the current user's tree, so every write lands
+/// under the current user's home even when `source_jsonl` belongs to another
+/// user.
+///
+/// Returns the path that was created (so the caller can remove it once the
+/// session ends), or `None` when the session is *already* resolvable from
+/// `target_dir` — because `target_dir` is its own directory, or an earlier
+/// import already placed it. Anything already at the target name is left
+/// untouched: a session id is a UUID, so a file there can only be this very
+/// session, and clobbering it would never be correct.
 ///
 /// # Errors
 ///
-/// Returns the underlying [`std::io::Error`] if the project folder or the
-/// symlink cannot be created.
-fn prepare_here_link(
-    projects_dir: &Path,
-    original_jsonl: &Path,
-    pwd: &Path,
+/// Returns the underlying [`std::io::Error`] if the project folder cannot be
+/// created or the symlink/copy cannot be made.
+fn prepare_import(
+    dest_projects_dir: &Path,
+    source_jsonl: &Path,
+    target_dir: &Path,
     session_id: &str,
+    mode: ImportMode,
 ) -> std::io::Result<Option<PathBuf>> {
-    let folder = projects_dir.join(encode_project_dir(pwd));
+    let folder = dest_projects_dir.join(encode_project_dir(target_dir));
     let link_path = folder.join(format!("{session_id}.jsonl"));
 
     // Anything already at this name means the session resolves from here
     // already. `symlink_metadata` does not follow links, so even a dangling
-    // symlink left by an earlier `--here` counts as "present".
+    // symlink left by an earlier import counts as "present".
     if link_path.symlink_metadata().is_ok() {
         return Ok(None);
     }
 
     std::fs::create_dir_all(&folder)?;
 
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(original_jsonl, &link_path)?;
-    #[cfg(not(unix))]
-    std::os::windows::fs::symlink_file(original_jsonl, &link_path)?;
+    match mode {
+        ImportMode::Symlink => {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(source_jsonl, &link_path)?;
+            #[cfg(not(unix))]
+            std::os::windows::fs::symlink_file(source_jsonl, &link_path)?;
+        }
+        ImportMode::Copy => {
+            std::fs::copy(source_jsonl, &link_path)?;
+        }
+    }
 
     Ok(Some(link_path))
 }
@@ -382,7 +494,14 @@ fn resolve_here_link(
     }
     let original =
         find_session_file(projects_dir, session_id).ok_or(HereResolveError::SessionNotFound)?;
-    prepare_here_link(projects_dir, &original, pwd, session_id).map_err(HereResolveError::Io)
+    prepare_import(
+        projects_dir,
+        &original,
+        pwd,
+        session_id,
+        ImportMode::Symlink,
+    )
+    .map_err(HereResolveError::Io)
 }
 
 /// A caller-supplied `--here` new-session id that is not a valid UUID.
@@ -800,6 +919,12 @@ const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 /// fresh random id (`--fork-session`) instead of pinning one (`--session-id`).
 const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
 
+/// Leading token marking cross-user default-resume output: unlike [`HERE_SENTINEL`]
+/// (which stays in the current directory), this tells the shell function to
+/// `cd` into the session's original recorded directory *and then* fork, so a
+/// foreign session resumes where it originally ran.
+const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
+
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
 /// the session id, then the caller-supplied forked-session id (or
 /// [`NO_NEW_ID_SENTINEL`] when none was given), then the symlink to remove once
@@ -822,6 +947,35 @@ fn format_here_output(
     format!("{HERE_SENTINEL}\n{session_id}\n{new_id}\n{link}\n")
 }
 
+/// Formats cross-user default-resume output for the shell function: the
+/// [`FORK_AT_SENTINEL`], then the session id, then the forked-session id (or
+/// [`NO_NEW_ID_SENTINEL`]), then the imported transcript to remove once the
+/// session ends (or [`NO_LINK_SENTINEL`]), and finally the session's original
+/// directory to `cd` into before forking.
+///
+/// The directory is emitted **last** so — like [`format_output`] — a path
+/// containing a newline survives intact as "everything after the final field
+/// separator". The middle fields are all newline-free: the ids are validated
+/// UUIDs (or sentinels), and the link path lives under
+/// `~/.claude/projects/<encoded>`, whose encoding maps every non-alphanumeric
+/// character (including newline) to `-`.
+fn format_fork_at_output(
+    session_id: &str,
+    new_session_id: Option<&str>,
+    link_to_cleanup: Option<&Path>,
+    dir: &Path,
+) -> String {
+    let new_id = new_session_id.unwrap_or(NO_NEW_ID_SENTINEL);
+    let link = match link_to_cleanup {
+        Some(path) => path.display().to_string(),
+        None => NO_LINK_SENTINEL.to_string(),
+    };
+    format!(
+        "{FORK_AT_SENTINEL}\n{session_id}\n{new_id}\n{link}\n{}\n",
+        dir.display()
+    )
+}
+
 /// The shell function installed by `crap --shell-setup`.
 ///
 /// `crap` shadows the binary, so the function reaches the binary explicitly via
@@ -832,7 +986,7 @@ fn format_here_output(
 /// the binary exits non-zero (session not found, already running, …) its message
 /// is shown and the function does nothing further.
 ///
-/// The binary speaks one of two output shapes:
+/// The binary speaks one of three output shapes:
 ///
 /// * **default** — `<session-id>\n<dir>`: the function `cd`s into the original
 ///   directory (splitting on the first newline so a path containing newlines
@@ -845,6 +999,11 @@ fn format_here_output(
 ///   none was created because this already is the session's own directory. When
 ///   the new-id field is not `__CRAP_NO_NEW_ID__`, the fork is pinned to that id
 ///   via `--session-id` instead of a random one.
+/// * **cross-user** — `__CRAP_FORK_AT__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>\n<dir>`:
+///   the binary has *copied* another user's transcript into our own tree, so the
+///   function `cd`s into the session's original directory (the trailing `<dir>`,
+///   emitted last so a newline in the path survives) and then runs the same
+///   fork + cleanup sequence as `--here`.
 const SHELL_CODE: &str = r#"
 function crap() {
     # These flags make the binary print to stdout and exit 0 without mutating
@@ -895,6 +1054,56 @@ function crap() {
         # --session-id instead of letting Claude mint a random one. The earlier
         # "command crap" call has already consumed the function's own arguments,
         # so reusing the positional parameters here is safe.
+        set -- --resume "$__crap_session" --fork-session
+        if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
+            set -- "$@" --session-id "$__crap_newid"
+        fi
+        if command -v clauded >/dev/null 2>&1; then
+            eval 'clauded "$@"'
+        else
+            claude "$@"
+        fi
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            kill "$__crap_watcher" 2>/dev/null
+            rm -f -- "$__crap_link"
+        fi
+        return
+    fi
+    if [ "${__crap_out%%$'\n'*}" = "__CRAP_FORK_AT__" ]; then
+        # Cross-user resume: the binary copied a foreign transcript into our own
+        # tree and wants it forked at the session's ORIGINAL directory. The wire
+        # shape adds a trailing <dir> field to the here-mode layout —
+        # "__CRAP_FORK_AT__\n<session>\n<new-id>\n<link>\n<dir>" — with <dir>
+        # last so a path containing newlines survives as the final field. We cd
+        # there, then run the same fork + cleanup sequence as --here.
+        local __crap_rest __crap_session __crap_newid __crap_link __crap_dir __crap_folder __crap_n0 __crap_watcher
+        __crap_rest=${__crap_out#*$'\n'}
+        __crap_session=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_newid=${__crap_rest%%$'\n'*}
+        __crap_rest=${__crap_rest#*$'\n'}
+        __crap_link=${__crap_rest%%$'\n'*}
+        __crap_dir=${__crap_rest#*$'\n'}
+        cd -- "$__crap_dir" || return 1
+        if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
+            # As in --here: drop the imported copy the moment Claude writes the
+            # forked session file, rather than letting it linger.
+            __crap_folder=$(dirname -- "$__crap_link")
+            __crap_n0=$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')
+            (
+                __crap_i=0
+                while [ "$__crap_i" -lt 600 ]; do
+                    if [ "$(find "$__crap_folder" -maxdepth 1 -name '*.jsonl' 2>/dev/null | wc -l | tr -dc '0-9')" -gt "$__crap_n0" ]; then
+                        rm -f -- "$__crap_link"
+                        exit 0
+                    fi
+                    __crap_i=$((__crap_i + 1))
+                    sleep 0.1
+                done
+            ) &
+            __crap_watcher=$!
+            disown 2>/dev/null
+        fi
         set -- --resume "$__crap_session" --fork-session
         if [ "$__crap_newid" != "__CRAP_NO_NEW_ID__" ]; then
             set -- "$@" --session-id "$__crap_newid"
@@ -981,6 +1190,19 @@ struct Cli {
     /// carry a conversation's context into a different working directory.
     #[arg(long)]
     here: bool,
+
+    /// Resume a session that belongs to another user.
+    ///
+    /// `<name>` is resolved as a sibling of your own home (`<home>/../<name>`,
+    /// i.e. `/Users/<name>` on macOS or `/home/<name>` on Linux). Only that
+    /// user's `~/.claude/projects` tree is searched — your own is skipped, so
+    /// `--user` is also how you disambiguate an id on purpose. A readable
+    /// foreign transcript is copied into your own tree and resumed as a fork (a
+    /// fresh id) at its original directory; the original is only ever read, so
+    /// this is safe even while that session is live elsewhere. A `--user`
+    /// naming your own account is a same-user hit and resumes in place.
+    #[arg(long, value_name = "NAME", conflicts_with = "shell_setup")]
+    user: Option<String>,
 
     /// Print the session's conversational state and exit, without resuming.
     ///
@@ -1180,6 +1402,94 @@ fn run_dir_status(projects_dir: &Path, json: bool) -> ! {
     exit(0);
 }
 
+/// Handles the default resume (`crap <id> [--user X]`): locate the session
+/// across `roots`, then resume it and exit.
+///
+/// A hit in the current user's own tree (`is_self`) resumes in place — `cd` to
+/// the recorded directory and `claude --resume <id>` — exactly as before. A hit
+/// in another user's tree is copied into the current user's tree
+/// (`dest_projects_dir`, always our own) and forked at its original directory:
+/// the foreign transcript is only ever read, and every write lands under the
+/// current user's home. Emits the output the shell function consumes.
+fn run_resume(
+    roots: &[UserProjects],
+    dest_projects_dir: &Path,
+    session_id: &str,
+    force: bool,
+) -> ! {
+    if !is_valid_session_id(session_id) {
+        eprintln!(
+            "{} '{session_id}' is not a valid session id",
+            "Error:".red().bold()
+        );
+        exit(exit_codes::INVALID_SESSION_ID);
+    }
+
+    let FoundSession::Found { path, root } = find_session_across(roots, session_id) else {
+        eprintln!(
+            "{} no Claude session found with id '{session_id}'",
+            "Error:".red().bold()
+        );
+        for root in roots {
+            eprintln!("       looked under {}", root.projects_dir.display());
+        }
+        exit(exit_codes::SESSION_NOT_FOUND);
+    };
+
+    let dir = match session_dir_from_transcript(&path) {
+        Ok(dir) => dir,
+        Err(ResolveError::SessionNotFound) => {
+            eprintln!(
+                "{} no Claude session found with id '{session_id}'",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::SESSION_NOT_FOUND);
+        }
+        Err(ResolveError::NoCwdInSession) => {
+            eprintln!(
+                "{} session '{session_id}' has no recorded working directory",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::NO_CWD_IN_SESSION);
+        }
+        Err(ResolveError::DirectoryMissing(missing)) => {
+            eprintln!(
+                "{} the directory for session '{session_id}' no longer exists:",
+                "Error:".red().bold()
+            );
+            eprintln!("       {}", missing.display());
+            exit(exit_codes::DIRECTORY_MISSING);
+        }
+    };
+
+    if root.is_self {
+        // Same-user hit: resume the very session in place, as today.
+        abort_if_session_live(session_id, false, force);
+        print!("{}", format_output(&dir, session_id));
+        exit(0);
+    }
+
+    // Cross-user hit: copy the foreign transcript into our own tree at the
+    // original directory's project folder, then fork it there. The fork only
+    // reads the copy, so a live original is never blocked and never corrupted.
+    match prepare_import(dest_projects_dir, &path, &dir, session_id, ImportMode::Copy) {
+        Ok(link) => {
+            print!(
+                "{}",
+                format_fork_at_output(session_id, None, link.as_deref(), &dir)
+            );
+            exit(0);
+        }
+        Err(err) => {
+            eprintln!(
+                "{} could not import session '{session_id}': {err}",
+                "Error:".red().bold()
+            );
+            exit(exit_codes::HERE_LINK_ERROR);
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -1193,13 +1503,14 @@ fn main() {
         }
     }
 
-    let Some(projects_dir) = claude_projects_dir() else {
+    let Some(home) = dirs::home_dir() else {
         eprintln!(
             "{} could not determine your home directory",
             "Error:".red().bold()
         );
         exit(exit_codes::NO_HOME_DIR);
     };
+    let projects_dir = home.join(".claude").join("projects");
 
     if cli.status {
         match cli.session_id.as_deref() {
@@ -1223,42 +1534,28 @@ fn main() {
         );
     }
 
-    match resolve_session_dir(&projects_dir, &session_id) {
-        Ok(dir) => {
-            abort_if_session_live(&session_id, false, cli.force);
-            print!("{}", format_output(&dir, &session_id));
+    // Build the search roots. This is the one place that reads the env-coupled
+    // home layout — `home.file_name()` (our account name) and `home.parent()`
+    // (the users' parent directory) — so `self_projects`/`user_projects` stay
+    // pure. With no `--user` we search our own tree; with `--user <name>` we
+    // search only that sibling's tree.
+    let roots = match cli.user.as_deref() {
+        None => vec![self_projects(&home)],
+        Some(name) => {
+            let (Some(self_name), Some(users_parent)) =
+                (home.file_name().and_then(|n| n.to_str()), home.parent())
+            else {
+                eprintln!(
+                    "{} could not resolve sibling users from your home {}",
+                    "Error:".red().bold(),
+                    home.display()
+                );
+                exit(exit_codes::NO_HOME_DIR);
+            };
+            vec![user_projects(users_parent, name, self_name)]
         }
-        Err(ResolveError::InvalidSessionId) => {
-            eprintln!(
-                "{} '{session_id}' is not a valid session id",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::INVALID_SESSION_ID);
-        }
-        Err(ResolveError::SessionNotFound) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            eprintln!("       looked under {}", projects_dir.display());
-            exit(exit_codes::SESSION_NOT_FOUND);
-        }
-        Err(ResolveError::NoCwdInSession) => {
-            eprintln!(
-                "{} session '{session_id}' has no recorded working directory",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::NO_CWD_IN_SESSION);
-        }
-        Err(ResolveError::DirectoryMissing(path)) => {
-            eprintln!(
-                "{} the directory for session '{session_id}' no longer exists:",
-                "Error:".red().bold()
-            );
-            eprintln!("       {}", path.display());
-            exit(exit_codes::DIRECTORY_MISSING);
-        }
-    }
+    };
+    run_resume(&roots, &projects_dir, &session_id, cli.force);
 }
 
 #[cfg(test)]
@@ -1648,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_here_link_creates_symlink_in_pwd_project_folder() {
+    fn prepare_import_symlink_creates_symlink_in_target_project_folder() {
         let dir = tempdir().unwrap();
         let projects = dir.path();
         let orig = projects.join("-orig");
@@ -1656,9 +1953,9 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        // A pwd whose encoded project folder does not exist yet.
-        let pwd = Path::new("/Volumes/x/here-cwd");
-        let link = prepare_here_link(projects, &original, pwd, SAMPLE_ID)
+        // A target dir whose encoded project folder does not exist yet.
+        let target = Path::new("/Volumes/x/here-cwd");
+        let link = prepare_import(projects, &original, target, SAMPLE_ID, ImportMode::Symlink)
             .expect("should succeed")
             .expect("a symlink should be created");
 
@@ -1676,25 +1973,31 @@ mod tests {
     }
 
     #[test]
-    fn prepare_here_link_returns_none_when_already_in_session_folder() {
+    fn prepare_import_symlink_returns_none_when_already_in_session_folder() {
         let dir = tempdir().unwrap();
         let projects = dir.path();
-        // encode_project_dir("/orig") == "-orig", so pwd resolves to the folder
-        // the session already lives in: no symlink is needed.
+        // encode_project_dir("/orig") == "-orig", so target resolves to the
+        // folder the session already lives in: no symlink is needed.
         let orig = projects.join("-orig");
         fs::create_dir_all(&orig).unwrap();
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let result =
-            prepare_here_link(projects, &original, Path::new("/orig"), SAMPLE_ID).expect("ok");
+        let result = prepare_import(
+            projects,
+            &original,
+            Path::new("/orig"),
+            SAMPLE_ID,
+            ImportMode::Symlink,
+        )
+        .expect("ok");
         assert_eq!(result, None);
         assert!(original.is_file(), "original must be left untouched");
     }
 
     #[cfg(unix)]
     #[test]
-    fn prepare_here_link_leaves_an_existing_link_in_place() {
+    fn prepare_import_symlink_leaves_an_existing_link_in_place() {
         // A symlink dropped by an earlier `--here` already makes the session
         // resolvable here, so a repeat returns `None` (nothing to clean up) and
         // does not disturb the existing link.
@@ -1705,21 +2008,22 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let pwd = Path::new("/Volumes/x/here");
+        let target = Path::new("/Volumes/x/here");
         let folder = projects.join("-Volumes-x-here");
         fs::create_dir_all(&folder).unwrap();
         let link = folder.join(format!("{SAMPLE_ID}.jsonl"));
         std::os::unix::fs::symlink(&original, &link).unwrap();
 
         assert_eq!(
-            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            prepare_import(projects, &original, target, SAMPLE_ID, ImportMode::Symlink)
+                .expect("ok"),
             None
         );
         assert_eq!(fs::read_link(&link).unwrap(), original);
     }
 
     #[test]
-    fn prepare_here_link_returns_none_when_a_real_file_is_already_present() {
+    fn prepare_import_symlink_returns_none_when_a_real_file_is_already_present() {
         // A session id is a UUID, so a real file at the target name can only be
         // this very session living here already: resolve it in place, untouched.
         let dir = tempdir().unwrap();
@@ -1729,20 +2033,67 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let pwd = Path::new("/Volumes/x/here");
+        let target = Path::new("/Volumes/x/here");
         let folder = projects.join("-Volumes-x-here");
         fs::create_dir_all(&folder).unwrap();
         let real = folder.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&real, "a real session").unwrap();
 
         assert_eq!(
-            prepare_here_link(projects, &original, pwd, SAMPLE_ID).expect("ok"),
+            prepare_import(projects, &original, target, SAMPLE_ID, ImportMode::Symlink)
+                .expect("ok"),
             None
         );
         assert_eq!(
             fs::read_to_string(&real).unwrap(),
             "a real session",
             "the real file must be left untouched"
+        );
+    }
+
+    #[test]
+    fn prepare_import_copy_snapshots_source_and_is_idempotent() {
+        // Cross-user import copies the transcript into the current user's tree:
+        // a self-contained regular file (not a symlink) with identical bytes,
+        // and a repeat import is a no-op.
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("dest/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        // The source lives under a *different* tree (another user's home).
+        let src_dir = dir.path().join("other/.claude/projects/-orig");
+        fs::create_dir_all(&src_dir).unwrap();
+        let source = src_dir.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&source, "{\"cwd\":\"/work\"}\n").unwrap();
+
+        let target = Path::new("/Volumes/x/work");
+        let copy = prepare_import(&projects, &source, target, SAMPLE_ID, ImportMode::Copy)
+            .expect("should succeed")
+            .expect("a copy should be created");
+
+        assert_eq!(
+            copy,
+            projects
+                .join("-Volumes-x-work")
+                .join(format!("{SAMPLE_ID}.jsonl"))
+        );
+        // A real file, not a symlink pointing back into the other user's tree.
+        assert!(
+            !fs::symlink_metadata(&copy)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "cross-user import must be a copy, not a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            "{\"cwd\":\"/work\"}\n",
+            "the copy must snapshot the source bytes"
+        );
+
+        // A second import finds the file already present and is a no-op.
+        assert_eq!(
+            prepare_import(&projects, &source, target, SAMPLE_ID, ImportMode::Copy).expect("ok"),
+            None
         );
     }
 
@@ -1765,68 +2116,124 @@ mod tests {
     }
 
     #[test]
-    fn resolve_rejects_invalid_id() {
+    fn user_projects_sets_is_self_for_self_and_other() {
+        let parent = Path::new("/Users");
+        // A `--user` naming the current account is a same-user hit.
+        let me = user_projects(parent, "timmattison", "timmattison");
+        assert_eq!(me.user, "timmattison");
+        assert_eq!(
+            me.projects_dir,
+            Path::new("/Users/timmattison/.claude/projects")
+        );
+        assert!(me.is_self);
+
+        // A different account is a cross-user root.
+        let other = user_projects(parent, "scyloswork", "timmattison");
+        assert_eq!(other.user, "scyloswork");
+        assert_eq!(
+            other.projects_dir,
+            Path::new("/Users/scyloswork/.claude/projects")
+        );
+        assert!(!other.is_self);
+    }
+
+    #[test]
+    fn self_projects_marks_the_current_users_tree() {
+        let home = Path::new("/Users/timmattison");
+        let mine = self_projects(home);
+        assert_eq!(mine.user, "timmattison");
+        assert_eq!(
+            mine.projects_dir,
+            Path::new("/Users/timmattison/.claude/projects")
+        );
+        assert!(mine.is_self);
+    }
+
+    #[test]
+    fn find_session_across_finds_id_in_a_single_root() {
         let dir = tempdir().unwrap();
+        let projects = dir.path().join("home/.claude/projects");
+        let proj = projects.join("-some-proj");
+        fs::create_dir_all(&proj).unwrap();
+        let file = proj.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&file, "{}\n").unwrap();
+
+        let root = UserProjects {
+            user: "me".to_string(),
+            projects_dir: projects,
+            is_self: true,
+        };
+        match find_session_across(std::slice::from_ref(&root), SAMPLE_ID) {
+            FoundSession::Found { path, root: found } => {
+                assert_eq!(path, file);
+                assert_eq!(found.user, "me");
+                assert!(found.is_self);
+            }
+            FoundSession::NotFound => panic!("expected the id to be found"),
+        }
+    }
+
+    #[test]
+    fn find_session_across_reports_not_found_when_absent() {
+        let dir = tempdir().unwrap();
+        let projects = dir.path().join("home/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        let root = UserProjects {
+            user: "me".to_string(),
+            projects_dir: projects,
+            is_self: true,
+        };
         assert!(matches!(
-            resolve_session_dir(dir.path(), "../escape"),
-            Err(ResolveError::InvalidSessionId)
+            find_session_across(&[root], SAMPLE_ID),
+            FoundSession::NotFound
         ));
     }
 
     #[test]
-    fn resolve_errors_when_session_missing() {
+    fn session_dir_from_transcript_errors_when_unreadable() {
         let dir = tempdir().unwrap();
+        // A transcript that cannot be read resolves to SessionNotFound.
+        let missing = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
         assert!(matches!(
-            resolve_session_dir(dir.path(), SAMPLE_ID),
+            session_dir_from_transcript(&missing),
             Err(ResolveError::SessionNotFound)
         ));
     }
 
     #[test]
-    fn resolve_errors_when_no_cwd_in_session() {
+    fn session_dir_from_transcript_errors_when_no_cwd() {
         let dir = tempdir().unwrap();
-        let proj = dir.path().join("proj");
-        fs::create_dir_all(&proj).unwrap();
-        fs::write(proj.join(format!("{SAMPLE_ID}.jsonl")), "{\"cwd\":null}\n").unwrap();
+        let file = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&file, "{\"cwd\":null}\n").unwrap();
 
         assert!(matches!(
-            resolve_session_dir(dir.path(), SAMPLE_ID),
+            session_dir_from_transcript(&file),
             Err(ResolveError::NoCwdInSession)
         ));
     }
 
     #[test]
-    fn resolve_errors_when_directory_missing() {
+    fn session_dir_from_transcript_errors_when_directory_missing() {
         let dir = tempdir().unwrap();
-        let proj = dir.path().join("proj");
-        fs::create_dir_all(&proj).unwrap();
+        let file = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
         let missing = dir.path().join("gone");
-        fs::write(
-            proj.join(format!("{SAMPLE_ID}.jsonl")),
-            cwd_line(missing.to_str().unwrap()),
-        )
-        .unwrap();
+        fs::write(&file, cwd_line(missing.to_str().unwrap())).unwrap();
 
-        match resolve_session_dir(dir.path(), SAMPLE_ID) {
+        match session_dir_from_transcript(&file) {
             Err(ResolveError::DirectoryMissing(path)) => assert_eq!(path, missing),
             other => panic!("expected DirectoryMissing, got {other:?}"),
         }
     }
 
     #[test]
-    fn resolve_returns_existing_directory() {
+    fn session_dir_from_transcript_returns_existing_directory() {
         let dir = tempdir().unwrap();
-        let proj = dir.path().join("proj");
-        fs::create_dir_all(&proj).unwrap();
+        let file = dir.path().join(format!("{SAMPLE_ID}.jsonl"));
         let cwd = dir.path().join("real-cwd");
         fs::create_dir_all(&cwd).unwrap();
-        fs::write(
-            proj.join(format!("{SAMPLE_ID}.jsonl")),
-            cwd_line(cwd.to_str().unwrap()),
-        )
-        .unwrap();
+        fs::write(&file, cwd_line(cwd.to_str().unwrap())).unwrap();
 
-        assert_eq!(resolve_session_dir(dir.path(), SAMPLE_ID).unwrap(), cwd);
+        assert_eq!(session_dir_from_transcript(&file).unwrap(), cwd);
     }
 
     /// A real session record as written by Claude Code.
@@ -2082,6 +2489,58 @@ mod tests {
     }
 
     #[test]
+    fn fork_at_output_emits_dir_last_with_sentinels_in_slots() {
+        // Cross-user default resume: sentinel, session, new-id slot, link slot,
+        // then the original directory last.
+        let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
+        let dir = Path::new("/Volumes/x/work");
+        let out = format_fork_at_output(SAMPLE_ID, None, Some(link), dir);
+
+        let mut lines = out.lines();
+        assert_eq!(lines.next(), Some(FORK_AT_SENTINEL));
+        assert_eq!(lines.next(), Some(SAMPLE_ID));
+        // No forced id: the new-id slot is the sentinel.
+        assert_eq!(lines.next(), Some(NO_NEW_ID_SENTINEL));
+        assert_eq!(lines.next(), Some(link.to_str().unwrap()));
+        // Everything after the fourth newline is the directory, intact.
+        let rest = out.splitn(5, '\n').nth(4).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn fork_at_output_uses_no_link_sentinel_when_nothing_to_clean() {
+        // When the import was a no-op (already resolvable), the link slot is the
+        // sentinel so the shell knows there is nothing to remove.
+        let dir = Path::new("/Volumes/x/work");
+        let out = format_fork_at_output(SAMPLE_ID, None, None, dir);
+        assert_eq!(out.lines().nth(3), Some(NO_LINK_SENTINEL));
+    }
+
+    #[test]
+    fn fork_at_output_carries_forced_new_id() {
+        // A caller-supplied forked id rides in the new-id slot for the shell's
+        // `--session-id`, while the directory still comes last.
+        let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
+        let dir = Path::new("/Volumes/x/work");
+        let out = format_fork_at_output(SAMPLE_ID, Some(ID_B), Some(link), dir);
+        assert_eq!(out.lines().nth(2), Some(ID_B));
+        let rest = out.splitn(5, '\n').nth(4).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
+    }
+
+    #[test]
+    fn fork_at_output_preserves_newline_in_dir() {
+        // The directory lives last, so a newline inside it can't be mistaken for
+        // a field boundary — the invariant the whole layout is designed around.
+        let link = Path::new("/Users/tim/.claude/projects/-work/abc.jsonl");
+        let dir = Path::new("/Volumes/x/od\ndd");
+        let out = format_fork_at_output(SAMPLE_ID, None, Some(link), dir);
+
+        let rest = out.splitn(5, '\n').nth(4).unwrap();
+        assert_eq!(rest.trim_end_matches('\n'), dir.to_str().unwrap());
+    }
+
+    #[test]
     fn shell_code_guards_cd_against_dash_prefixed_dirs() {
         // `cd -- "$dir"` stops option parsing, so a directory whose name begins
         // with '-' is treated as a path rather than a flag.
@@ -2317,6 +2776,107 @@ mod tests {
         // the fork's id via `claude --session-id`.
         assert!(SHELL_CODE.contains(NO_NEW_ID_SENTINEL));
         assert!(SHELL_CODE.contains("--session-id"));
+    }
+
+    #[test]
+    fn shell_code_detects_fork_at_sentinel() {
+        // The shell function branches on the exact cross-user sentinel the
+        // binary emits for a resume at the session's original directory.
+        assert!(SHELL_CODE.contains(FORK_AT_SENTINEL));
+    }
+
+    /// Sources `SHELL_CODE` in a real `bash` with a fake `crap` that emits
+    /// cross-user `__CRAP_FORK_AT__` output naming a real `orig-cwd` directory
+    /// (and `__CRAP_NO_LINK__`, so no watcher/cleanup runs), plus a fake
+    /// `claude`/`clauded` that records both the arguments it was resumed with
+    /// and the working directory it ran in. Returns `(recorded_args,
+    /// resumed_in_dir, orig_dir)`, where both directories are canonicalized
+    /// **before** the temp dir is dropped so the caller can compare them without
+    /// touching a filesystem path that no longer exists.
+    ///
+    /// Each call gets its own `tempfile::TempDir` (an `O_EXCL` random name) so
+    /// concurrent runs never share a directory.
+    #[cfg(unix)]
+    fn run_fork_at_shell_function() -> (String, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        // The session id the fake binary reports as the foreign original.
+        const FORK_SESSION: &str = "33333333-4444-5555-6666-777777777777";
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+
+        let args_file = dir.join("claude_args");
+        let pwd_file = dir.join("claude_pwd");
+        // The session's original recorded directory: the fork must land here.
+        let orig = dir.join("orig-cwd");
+        fs::create_dir_all(&orig).unwrap();
+
+        // Fake `crap`: emit a fork-at output naming `orig` as the last field.
+        let fake_crap = format!(
+            "#!/bin/sh\nprintf '{FORK_AT_SENTINEL}\\n%s\\n%s\\n%s\\n%s\\n' '{FORK_SESSION}' '{NO_NEW_ID_SENTINEL}' '{NO_LINK_SENTINEL}' '{}'\n",
+            orig.display()
+        );
+        // Fake `claude`/`clauded`: record the resume argv and the cwd it ran in.
+        let fake_claude = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {:?}\npwd > {:?}\n",
+            args_file, pwd_file
+        );
+
+        for (name, body) in [
+            ("crap", fake_crap),
+            ("claude", fake_claude.clone()),
+            ("clauded", fake_claude),
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, body).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let base_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{base_path}", dir.display());
+        let script = format!("{SHELL_CODE}\ncrap {FORK_SESSION} --user someone\n");
+
+        let output = Command::new("bash")
+            .env("PATH", new_path)
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash should be available");
+
+        let args = fs::read_to_string(&args_file).unwrap_or_default();
+        let pwd = fs::read_to_string(&pwd_file).unwrap_or_default();
+        assert!(
+            output.status.success(),
+            "fork-at shell function failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Canonicalize both directories while `temp` is still alive — it drops
+        // (removing the tree) at the end of this scope, so the caller must not
+        // depend on either path still existing on disk.
+        let resumed_in = std::fs::canonicalize(pwd.trim())
+            .expect("claude should have recorded the directory it forked in");
+        let orig = std::fs::canonicalize(&orig).unwrap();
+        (args, resumed_in, orig)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_function_forks_at_original_dir_for_cross_user() {
+        // Cross-user default resume: the function must `cd` into the session's
+        // original directory and then fork it (`--resume <id> --fork-session`),
+        // leaving the foreign transcript untouched.
+        let (args, resumed_in, orig) = run_fork_at_shell_function();
+        let args: Vec<&str> = args.lines().collect();
+        assert!(
+            args.contains(&"--resume") && args.contains(&"--fork-session"),
+            "must fork-resume the original id; got {args:?}"
+        );
+        assert_eq!(
+            resumed_in, orig,
+            "the fork must run in the session's original directory"
+        );
     }
 
     // Two distinct session ids for the per-directory listing tests.
@@ -2697,5 +3257,29 @@ mod tests {
     fn cli_still_requires_session_id_without_flags() {
         use clap::Parser;
         assert!(Cli::try_parse_from(["crap"]).is_err());
+    }
+
+    #[test]
+    fn cli_user_parses_and_carries_value() {
+        use clap::Parser;
+        let cli =
+            Cli::try_parse_from(["crap", SAMPLE_ID, "--user", "scyloswork"]).expect("should parse");
+        assert_eq!(cli.session_id.as_deref(), Some(SAMPLE_ID));
+        assert_eq!(cli.user.as_deref(), Some("scyloswork"));
+    }
+
+    #[test]
+    fn cli_user_rejected_with_shell_setup() {
+        use clap::Parser;
+        // Cross-user discovery makes no sense while installing the shell
+        // function, so the two flags must be mutually exclusive.
+        assert!(Cli::try_parse_from(["crap", "--shell-setup", "--user", "x"]).is_err());
+    }
+
+    #[test]
+    fn cli_bare_user_is_a_parse_error() {
+        use clap::Parser;
+        // `--user` requires a NAME; a bare flag is rejected.
+        assert!(Cli::try_parse_from(["crap", SAMPLE_ID, "--user"]).is_err());
     }
 }
