@@ -2383,6 +2383,45 @@ mod tests {
         assert!(roots.iter().any(|r| r.user == "alice" && !r.is_self));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn enumerate_user_projects_drops_an_aliased_home_pointing_back_at_self() {
+        // A symlinked home alias (`me-alias -> me`) is the same physical tree as
+        // the current user's own home, so it must not be searched a second time
+        // — and certainly not tagged as another user's tree.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        std::os::unix::fs::symlink(parent.join("me"), parent.join("me-alias")).unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        // Only the real self root survives: the alias resolves to the same
+        // canonical projects dir and is deduped away.
+        assert_eq!(users, ["me"]);
+        assert!(roots[0].is_self);
+        assert_eq!(roots.iter().filter(|r| r.is_self).count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enumerate_user_projects_drops_sibling_aliases_of_one_another() {
+        // Two names for one sibling home (`zoe -> alice`) are one search root,
+        // not two. The alphabetically first name wins, so the survivor is stable
+        // no matter how the filesystem enumerated the parent.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me")).unwrap(); // no .claude/projects
+        fs::create_dir_all(parent.join("alice").join(".claude").join("projects")).unwrap();
+        std::os::unix::fs::symlink(parent.join("alice"), parent.join("zoe")).unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        assert_eq!(users, ["me", "alice"]);
+        assert!(roots[0].is_self);
+        assert!(roots[1..].iter().all(|r| !r.is_self));
+    }
+
     #[test]
     fn session_dir_from_transcript_errors_when_unreadable() {
         let dir = tempdir().unwrap();
