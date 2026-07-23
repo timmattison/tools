@@ -2445,6 +2445,55 @@ mod tests {
     }
 
     #[test]
+    fn resolve_here_import_copies_a_cross_user_source() {
+        // `--here <id> --user <name>`: the source lives under another user's
+        // tree, so it must be COPIED into our own tree (a real file), never
+        // symlinked into their home. The copy lands at pwd's encoded folder
+        // under our own dest tree and snapshots the foreign bytes.
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("me/.claude/projects");
+        fs::create_dir_all(&dest).unwrap();
+        // A foreign root: another user's `.claude/projects` tree.
+        let foreign = dir.path().join("them/.claude/projects");
+        let foreign_proj = foreign.join("-orig");
+        fs::create_dir_all(&foreign_proj).unwrap();
+        let source = foreign_proj.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&source, "{\"cwd\":\"/work\"}\n").unwrap();
+
+        let roots = vec![UserProjects {
+            user: "them".to_string(),
+            projects_dir: foreign.clone(),
+            is_self: false,
+        }];
+        let pwd = Path::new("/Volumes/x/here");
+        let link = resolve_here_import(&roots, &dest, pwd, SAMPLE_ID)
+            .expect("ok")
+            .expect("a copy should be created");
+
+        // The import lands in OUR tree, at pwd's encoded project folder.
+        assert_eq!(
+            link,
+            dest.join("-Volumes-x-here")
+                .join(format!("{SAMPLE_ID}.jsonl"))
+        );
+        // It is a real copy, not a symlink pointing back into the foreign home.
+        assert!(
+            !fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "cross-user `--here` must copy, not symlink into another user's home"
+        );
+        assert_eq!(
+            fs::read_to_string(&link).unwrap(),
+            "{\"cwd\":\"/work\"}\n",
+            "the copy must snapshot the foreign transcript bytes"
+        );
+        // The foreign original is left untouched.
+        assert!(source.is_file());
+    }
+
+    #[test]
     fn resolve_here_import_returns_none_when_session_already_here() {
         // The session already lives in the current directory's folder, so no
         // import is needed and there is nothing to clean up afterwards.
