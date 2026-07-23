@@ -58,6 +58,58 @@ fn plant_session(projects: &Path, project_folder: &str, id: &str, cwd: &Path) {
     .unwrap();
 }
 
+/// Sets `dir`'s permission bits, used to make a project directory owner-only and
+/// to put it back afterwards.
+#[cfg(unix)]
+fn set_mode(dir: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(dir, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Asserts the guidance printed for a miss whose scan was refused entry to
+/// owner-only project directories: the hedged headline, a count line naming the
+/// owning account, and a copy-paste remedy ending in a resume of the copy.
+///
+/// `crap` only ever *prints* these commands — the assertions pin the text, and
+/// nothing here (or in the binary) executes `sudo`.
+fn assert_owner_only_guidance(stderr: &str) {
+    // "readable" is the whole point: the scan cannot claim the id is absent from
+    // a machine when it was refused entry to part of it.
+    assert!(
+        stderr.contains("no readable Claude session found"),
+        "the headline must hedge on what was unreadable: {stderr}"
+    );
+    // One count line per account with skipped dirs, correctly pluralized.
+    assert!(
+        stderr.contains("1 project dir under user 'other' is owner-only and was skipped."),
+        "must count the skipped dirs and name whose they are: {stderr}"
+    );
+    // The remedy names the owning account in both halves: locate, then copy.
+    assert!(
+        stderr.contains("sudo -u other find"),
+        "must show how to locate the transcript as that account: {stderr}"
+    );
+    assert!(
+        stderr.contains("sudo -u other cat"),
+        "must show how to copy the transcript into our own tree: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("crap --here {MISSING_ID}")),
+        "must end by resuming the copy that was just made: {stderr}"
+    );
+    // The copy lands in the project folder for the directory the user is standing
+    // in. The test deliberately does not recompute that encoding: on macOS
+    // `$TMPDIR` lives under `/var`, which `getcwd` resolves to `/private/var`, so
+    // a recomputed name would not match. Pin the shape instead.
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains("> ~/.claude/projects/")
+                && line.ends_with(&format!("/{MISSING_ID}.jsonl"))),
+        "the remedy must write into our own project folder for this directory: {stderr}"
+    );
+}
+
 /// Runs the real `crap` binary with `HOME` set to `root/home` and the given
 /// arguments, from a fresh working directory under `root`.
 fn run_crap(root: &Path, args: &[&str]) -> Output {
@@ -409,6 +461,106 @@ fn no_flag_not_found_summarizes_the_extra_search_roots() {
             .count(),
         1,
         "exactly one `looked under` line however many roots were searched: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn not_found_with_owner_only_dirs_prints_actionable_guidance() {
+    let tmp = unique_root("owner-only");
+    let root = tmp.path();
+    // Our own tree is empty and sibling `other` has exactly one project folder,
+    // owner-only. The scan can list `other`'s tree but is refused entry to that
+    // folder, so the id being absent from everything readable is NOT the same as
+    // the id being absent from the machine. The miss must say so and hand back a
+    // remedy naming the account — never run `sudo` on the user's behalf.
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    let locked = root.join("other/.claude/projects/-locked");
+    fs::create_dir_all(&locked).unwrap();
+    set_mode(&locked, 0o000);
+    // A privileged process reads straight through `0o000`, which makes the
+    // refusal — the entire subject of this test — unobservable. Probe for that
+    // directly rather than taking a uid dependency, and skip when it happens.
+    if fs::metadata(locked.join("probe")).err().map(|e| e.kind())
+        != Some(std::io::ErrorKind::PermissionDenied)
+    {
+        set_mode(&locked, 0o755);
+        return;
+    }
+
+    // No flag: the auto-fallback enumerates sibling homes, so `other` is scanned.
+    let out = run_crap(root, &[MISSING_ID]);
+    // Restore before asserting anything, so a failing assertion still leaves the
+    // TempDir removable on drop.
+    set_mode(&locked, 0o755);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(SESSION_NOT_FOUND_EXIT),
+        "stderr: {stderr}"
+    );
+    assert_owner_only_guidance(&stderr);
+}
+
+#[test]
+#[cfg(unix)]
+fn here_not_found_with_owner_only_dirs_prints_actionable_guidance() {
+    let tmp = unique_root("owner-only-here");
+    let root = tmp.path();
+    // The same layout, reached through `--here`: both not-found call sites owe
+    // the user the same guidance, and `--here` additionally owes them the same
+    // discretion about other accounts as the default resume.
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    let locked = root.join("other/.claude/projects/-locked");
+    fs::create_dir_all(&locked).unwrap();
+    set_mode(&locked, 0o000);
+    // Skip under a privileged process, which bypasses the mode bits entirely.
+    if fs::metadata(locked.join("probe")).err().map(|e| e.kind())
+        != Some(std::io::ErrorKind::PermissionDenied)
+    {
+        set_mode(&locked, 0o755);
+        return;
+    }
+
+    let out = run_crap(root, &["--here", MISSING_ID]);
+    // Restore before asserting, so the TempDir can always clean itself up.
+    set_mode(&locked, 0o755);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(SESSION_NOT_FOUND_EXIT),
+        "stderr: {stderr}"
+    );
+    assert_owner_only_guidance(&stderr);
+    // A `--here` miss must summarize the other accounts searched, not recite
+    // them: one `looked under` line, and no sibling root path in the output.
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.contains("looked under"))
+            .count(),
+        1,
+        "exactly one `looked under` line however many roots were searched: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "looked under {}",
+            root.join("home/.claude/projects").display()
+        )),
+        "the one named root must be our own tree: {stderr}"
+    );
+    // The sibling's root may only appear inside the remedy — that account is
+    // already named because its directories were skipped, and the path is what
+    // makes the remedy runnable. It must never appear as a `looked under` line,
+    // which is how the roster of accounts on a shared machine used to leak.
+    assert!(
+        !stderr.contains(&format!(
+            "looked under {}",
+            root.join("other/.claude/projects").display()
+        )),
+        "must not recite the sibling's search root: {stderr}"
     );
 }
 
