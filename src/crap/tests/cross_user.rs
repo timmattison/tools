@@ -304,3 +304,48 @@ fn user_flag_skips_current_user_tree() {
     // The directory (last field) is the SIBLING's cwd, not the current user's.
     assert_eq!(lines.get(4).copied(), Some(other_cwd.to_str().unwrap()));
 }
+
+#[test]
+fn no_flag_falls_back_to_sibling_on_self_miss() {
+    let tmp = unique_root("fallback");
+    let root = tmp.path();
+    // A readable session under sibling `other`, whose recorded cwd is a real
+    // (shared) directory both users can reach. The current user's own tree
+    // exists but does NOT contain this id, so a self-only search would miss it.
+    let shared = root.join("shared-cwd");
+    fs::create_dir_all(&shared).unwrap();
+    let other_projects = root.join("other/.claude/projects");
+    plant_session(&other_projects, "-proj", FOREIGN_ID, &shared);
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    // No `--user`: on a self-miss `crap` must automatically fall back to the
+    // sibling home, copy the foreign transcript into our own tree, and fork it
+    // at its original recorded directory.
+    let out = run_crap(root, &[FOREIGN_ID]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first().copied(), Some(FORK_AT_SENTINEL));
+    assert_eq!(lines.get(1).copied(), Some(FOREIGN_ID));
+    assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+    // The copy lives under the CURRENT user's tree, and is a real file.
+    let link = Path::new(lines.get(3).copied().expect("a link field"));
+    assert!(
+        link.starts_with(root.join("home/.claude/projects")),
+        "the copy must live under the current user's tree, got {}",
+        link.display()
+    );
+    assert!(fs::symlink_metadata(link).unwrap().file_type().is_file());
+    // The directory field (last) is the sibling session's original recorded cwd.
+    assert_eq!(lines.get(4).copied(), Some(shared.to_str().unwrap()));
+    // The foreign original was only ever read.
+    assert!(other_projects
+        .join("-proj")
+        .join(format!("{FOREIGN_ID}.jsonl"))
+        .is_file());
+}
