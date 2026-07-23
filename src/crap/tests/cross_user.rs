@@ -17,6 +17,13 @@ use std::process::{Command, Output};
 const FOREIGN_ID: &str = "11111111-2222-3333-4444-555555555555";
 /// A session id planted under the current user's own tree.
 const SELF_ID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
+/// A well-formed session id that is never planted anywhere.
+const MISSING_ID: &str = "99999999-8888-7777-6666-555555555555";
+
+/// `crap`'s exit code for "no session with that id" (`exit_codes::SESSION_NOT_FOUND`
+/// in `main.rs`); re-stated here rather than reaching into the binary's private
+/// constants.
+const SESSION_NOT_FOUND_EXIT: i32 = 1;
 
 // These mirror the binary's cross-user wire protocol (see `format_fork_at_output`
 // in `main.rs`); an integration test re-states the contract it is pinning rather
@@ -303,4 +310,147 @@ fn user_flag_skips_current_user_tree() {
     assert_eq!(lines.first().copied(), Some(FORK_AT_SENTINEL));
     // The directory (last field) is the SIBLING's cwd, not the current user's.
     assert_eq!(lines.get(4).copied(), Some(other_cwd.to_str().unwrap()));
+}
+
+#[test]
+fn no_flag_falls_back_to_sibling_on_self_miss() {
+    let tmp = unique_root("fallback");
+    let root = tmp.path();
+    // A readable session under sibling `other`, whose recorded cwd is a real
+    // (shared) directory both users can reach. The current user's own tree
+    // exists but does NOT contain this id, so a self-only search would miss it.
+    let shared = root.join("shared-cwd");
+    fs::create_dir_all(&shared).unwrap();
+    let other_projects = root.join("other/.claude/projects");
+    plant_session(&other_projects, "-proj", FOREIGN_ID, &shared);
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    // No `--user`: on a self-miss `crap` must automatically fall back to the
+    // sibling home, copy the foreign transcript into our own tree, and fork it
+    // at its original recorded directory.
+    let out = run_crap(root, &[FOREIGN_ID]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first().copied(), Some(FORK_AT_SENTINEL));
+    assert_eq!(lines.get(1).copied(), Some(FOREIGN_ID));
+    assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+    // The copy lives under the CURRENT user's tree, and is a real file.
+    let link = Path::new(lines.get(3).copied().expect("a link field"));
+    assert!(
+        link.starts_with(root.join("home/.claude/projects")),
+        "the copy must live under the current user's tree, got {}",
+        link.display()
+    );
+    assert!(fs::symlink_metadata(link).unwrap().file_type().is_file());
+    // The directory field (last) is the sibling session's original recorded cwd.
+    assert_eq!(lines.get(4).copied(), Some(shared.to_str().unwrap()));
+    // The foreign original was only ever read.
+    assert!(other_projects
+        .join("-proj")
+        .join(format!("{FOREIGN_ID}.jsonl"))
+        .is_file());
+}
+
+#[test]
+fn no_flag_not_found_summarizes_the_extra_search_roots() {
+    let tmp = unique_root("not-found");
+    let root = tmp.path();
+    // Three search roots — the current user plus two siblings that have run
+    // Claude — and the id is planted in none of them, so this is the plain
+    // not-found path. The auto-fallback must not turn that into a per-account
+    // recital of every home on the machine.
+    for user in ["home", "alice", "bob"] {
+        fs::create_dir_all(root.join(user).join(".claude/projects")).unwrap();
+    }
+
+    let out = run_crap(root, &[MISSING_ID]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(SESSION_NOT_FOUND_EXIT),
+        "stderr: {stderr}"
+    );
+    // The current user's own tree is named in full — the one path they can act on.
+    assert!(
+        stderr.contains(&format!(
+            "looked under {}",
+            root.join("home/.claude/projects").display()
+        )),
+        "must name the current user's tree: {stderr}"
+    );
+    // The two siblings collapse into a single count, correctly pluralized.
+    assert!(
+        stderr.contains("…and 2 other accounts on this machine"),
+        "must summarize the sibling roots: {stderr}"
+    );
+    // No sibling root is listed individually, and no account name leaks.
+    for user in ["alice", "bob"] {
+        assert!(
+            !stderr.contains(
+                &root
+                    .join(user)
+                    .join(".claude/projects")
+                    .display()
+                    .to_string()
+            ),
+            "must not list the sibling root for {user}: {stderr}"
+        );
+    }
+    assert_eq!(
+        stderr
+            .lines()
+            .filter(|l| l.contains("looked under"))
+            .count(),
+        1,
+        "exactly one `looked under` line however many roots were searched: {stderr}"
+    );
+}
+
+#[test]
+fn no_flag_prefers_self_when_id_exists_in_both_trees() {
+    let tmp = unique_root("prefer-self");
+    let root = tmp.path();
+    // The SAME id exists under both the current user and a sibling, with
+    // different recorded cwds. With no flag, self-first ordering must win: the
+    // search short-circuits on our own copy and resumes it in place (the default
+    // `<id>\n<dir>` shape, no fork), at the CURRENT user's recorded cwd.
+    let self_cwd = root.join("self-cwd");
+    let other_cwd = root.join("other-cwd");
+    fs::create_dir_all(&self_cwd).unwrap();
+    fs::create_dir_all(&other_cwd).unwrap();
+    plant_session(
+        &root.join("home/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &self_cwd,
+    );
+    plant_session(
+        &root.join("other/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &other_cwd,
+    );
+
+    let out = run_crap(root, &[FOREIGN_ID]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // Default same-user resume shape: id then dir, no fork sentinel, self's cwd.
+    assert_eq!(lines.first().copied(), Some(FOREIGN_ID));
+    assert_eq!(lines.get(1).copied(), Some(self_cwd.to_str().unwrap()));
+    assert!(
+        !stdout.contains(FORK_AT_SENTINEL),
+        "a self hit must resume in place, not fork: {stdout}"
+    );
 }

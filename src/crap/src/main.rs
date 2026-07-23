@@ -27,25 +27,35 @@
 //! directory, each with its state and the times its transcript was started and
 //! last written (read from the transcript's own timestamps, not file mtimes).
 //!
-//! With `--user <name>`, it reaches across accounts. Every lookup is normally
-//! anchored on the current user's home, so a session started under another
-//! account is invisible; `--user` instead searches only that sibling user's
-//! `~/.claude/projects` tree (resolved as `<home>/../<name>`). Because the
-//! transcript belongs to another user, `claude --resume` run by *you* could
-//! never find it there, so `crap` copies it into your own tree and resumes it as
-//! a `--fork-session` (a fresh id) at its original recorded directory — the
-//! foreign transcript is only ever read, and every write lands under your home.
-//! The transient copy is removed once Claude writes the forked transcript, the
-//! same way `--here` cleans up its import (a symlink for a same-user source, a
-//! copy for a cross-user one). A `--user` that names your own account is a
-//! same-user hit and resumes in place as usual.
+//! A session that belongs to another account is found automatically, with no
+//! flag at all: `crap <id>` searches your own tree first (the fast path,
+//! unchanged) and, only on a miss, falls back to scanning every sibling home
+//! that has run Claude, resuming the first readable match. The lookup is
+//! self-first, so an id that exists in two accounts always resolves to your own
+//! copy. A foreign hit cannot be resumed in place — the transcript belongs to
+//! another user, so a `claude --resume` run by *you* could never find it.
+//! Instead, `crap` copies it into your own tree and resumes it as a
+//! `--fork-session` (a fresh id) at its original recorded directory: the foreign
+//! transcript is only ever read, every write lands under your home, and the
+//! transient copy is removed once Claude writes the forked transcript, the same
+//! way `--here` cleans up its import (a symlink for a same-user source, a copy
+//! for a cross-user one).
+//!
+//! `--user <name>` forces that cross-user path onto one specific account: it
+//! searches only that sibling home's `~/.claude/projects` tree (resolved as
+//! `<home>/../<name>`) and skips your own entirely, which is also how you
+//! disambiguate an id on purpose. The resume itself is the same copy-and-fork.
+//! A `--user` that names your own account is a same-user hit and resumes in
+//! place as usual.
 //!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
-//! id — printing the original directory to resume from, or (for `--here`)
-//! preparing the import and printing what the function should run and clean up.
+//! id — printing the original directory to resume from, or (for `--here`, and
+//! for a cross-user hit) importing the transcript into the right project folder
+//! and printing what the function should run and clean up.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
@@ -201,6 +211,83 @@ fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjec
     }
 }
 
+/// The canonical form of `path`, falling back to `path` verbatim when it cannot
+/// be resolved.
+///
+/// [`std::fs::canonicalize`] resolves symlinks and `.`/`..` components, but only
+/// for a path that actually exists — and the roots this compares include the
+/// current user's `~/.claude/projects`, which is frequently absent (they have
+/// never run Claude). A failure therefore has to mean "no better answer than the
+/// path I was given" rather than "drop this root": two non-existent paths still
+/// compare equal when they are literally the same path, which is exactly the
+/// self-versus-self case that must dedupe.
+fn canonical_or_verbatim(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Every `~/.claude/projects` root worth searching for a no-flag `crap <id>`,
+/// ordered self-first for a stable, deterministic scan, with each physical tree
+/// appearing exactly once.
+///
+/// The current user's own entry is always included and comes first, so a
+/// self-first search short-circuits on a session the current user already owns
+/// before ever reaching into another home — today's fast path, preserved even
+/// when the current user has never run Claude (their entry is still root zero).
+/// Sibling entries are included only when they actually have a `.claude/projects`
+/// directory (an account that never ran Claude is not a search root), and are
+/// ordered after self by account name so the result never depends on the order
+/// the filesystem happens to list the parent directory in.
+///
+/// Roots are then deduped on their *canonical* `projects_dir` (see
+/// [`canonical_or_verbatim`]) rather than on account name, because one home can
+/// answer to several names: a symlinked alias (`/Users/me-alias -> /Users/me`),
+/// or a `HOME` whose case differs from the on-disk directory on a
+/// case-insensitive filesystem. Name comparison misses both, so the same tree
+/// would be searched twice and the second copy — self included — would be
+/// mislabelled as another user's, sending a hit down the foreign-user fork path
+/// for a session the current user already owns. Because self is inserted first
+/// and siblings are deduped against self *and* against each other, the surviving
+/// entry for any tree is self when self is one of its names, and otherwise the
+/// alphabetically first sibling name.
+///
+/// Every input is explicit (no `home_dir()` read here) so the enumeration is
+/// tempdir-testable; the sole env-coupled caller in `main` derives `users_parent`
+/// from `home.parent()` and `self_name` from `home.file_name()`.
+fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProjects> {
+    let mut others: Vec<UserProjects> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(users_parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let root = user_projects(users_parent, name, self_name);
+            // Only accounts that have actually run Claude are search roots;
+            // `is_dir` follows symlinks, so a symlinked home still counts.
+            if root.projects_dir.is_dir() {
+                others.push(root);
+            }
+        }
+    }
+    // Sort the siblings by account name so the order is independent of however
+    // the filesystem enumerated the parent directory.
+    others.sort_by(|a, b| a.user.cmp(&b.user));
+
+    let mut roots = Vec::with_capacity(others.len() + 1);
+    // Self goes in first and unconditionally, claiming its canonical tree, so it
+    // stays root zero and is the only entry that can ever carry `is_self`.
+    let me = user_projects(users_parent, self_name, self_name);
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    seen.insert(canonical_or_verbatim(&me.projects_dir));
+    roots.push(me);
+    for root in others {
+        if seen.insert(canonical_or_verbatim(&root.projects_dir)) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
 /// The outcome of searching an ordered list of roots for a session id.
 #[derive(Debug)]
 enum FoundSession {
@@ -232,6 +319,39 @@ fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
         }
     }
     FoundSession::NotFound
+}
+
+/// The "where I looked" detail lines for a not-found session, indented to hang
+/// under the `Error:` line that precedes them.
+///
+/// The first root is named in full — on the no-flag path that is always the
+/// current user's own tree, and on the `--user <name>` path it is the only root
+/// there is — because it is the one location the user can act on. Any remaining
+/// roots collapse into a single count, deliberately *without* their account
+/// names: the automatic cross-user fallback searches every sibling home that has
+/// ever run Claude, so naming them would turn a mistyped id on a shared machine
+/// into a roster of who else has an account there. The block is therefore never
+/// more than two lines, however many accounts were searched.
+///
+/// Returns an empty string for an empty root list. No caller can produce one
+/// (the current user is always root zero), but keeping the function total means
+/// the not-found path can never print a dangling `Error:` with a stray indent.
+fn format_searched_roots(roots: &[UserProjects]) -> String {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix.
+    const INDENT: &str = "       ";
+
+    let Some(first) = roots.first() else {
+        return String::new();
+    };
+    let mut lines = format!("{INDENT}looked under {}\n", first.projects_dir.display());
+    let others = roots.len() - 1;
+    if others > 0 {
+        let account = if others == 1 { "account" } else { "accounts" };
+        lines.push_str(&format!(
+            "{INDENT}…and {others} other {account} on this machine\n"
+        ));
+    }
+    lines
 }
 
 /// The conversational state of a session, inferred from its transcript.
@@ -1171,6 +1291,11 @@ struct Cli {
     /// The Claude session id to resume (the `.jsonl` filename under
     /// `~/.claude/projects`).
     ///
+    /// The lookup is self-first: your own tree is searched first and, only if
+    /// the id isn't there, every sibling home that has run Claude — so an id
+    /// that belongs to another account is found without any flag, copied into
+    /// your own tree and forked there (see `--user`).
+    ///
     /// Optional with `--status`: given no id, `--status` lists every session
     /// recorded for the current directory instead of resolving one.
     #[arg(
@@ -1214,7 +1339,7 @@ struct Cli {
     #[arg(long)]
     here: bool,
 
-    /// Resume a session that belongs to another user.
+    /// Resume another user's session from a specific account.
     ///
     /// `<name>` is resolved as a sibling of your own home (`<home>/../<name>`,
     /// i.e. `/Users/<name>` on macOS or `/home/<name>` on Linux). Only that
@@ -1226,6 +1351,10 @@ struct Cli {
     /// naming your own account is a same-user hit and resumes in place. With
     /// `--here`, the fork lands in the current directory instead of the
     /// session's original one.
+    ///
+    /// Not required for a cross-user resume: with no `--user` the lookup is
+    /// self-first and falls back to the sibling homes on its own, so the flag
+    /// is only for forcing one particular account.
     #[arg(long, value_name = "NAME", conflicts_with = "shell_setup")]
     user: Option<String>,
 
@@ -1471,9 +1600,7 @@ fn run_resume(
             "{} no Claude session found with id '{session_id}'",
             "Error:".red().bold()
         );
-        for root in roots {
-            eprintln!("       looked under {}", root.projects_dir.display());
-        }
+        eprint!("{}", format_searched_roots(roots));
         exit(exit_codes::SESSION_NOT_FOUND);
     };
 
@@ -1573,7 +1700,17 @@ fn main() {
     // search only that sibling's tree. Both `--here` and the default resume
     // search the same roots, so a cross-user source is reachable either way.
     let roots = match cli.user.as_deref() {
-        None => vec![self_projects(&home)],
+        None => match (home.file_name().and_then(|n| n.to_str()), home.parent()) {
+            // No flag: search our own tree first, then fall back to every
+            // sibling home that has run Claude — self-first, so an id we already
+            // own always wins and the common case never reaches another home.
+            (Some(self_name), Some(users_parent)) => {
+                enumerate_user_projects(users_parent, self_name)
+            }
+            // A home with no resolvable parent/name (unusual): keep today's
+            // single-user behavior exactly, with no cross-user fallback.
+            _ => vec![self_projects(&home)],
+        },
         Some(name) => {
             let (Some(self_name), Some(users_parent)) =
                 (home.file_name().and_then(|n| n.to_str()), home.parent())
@@ -2231,6 +2368,200 @@ mod tests {
             find_session_across(&[root], SAMPLE_ID),
             FoundSession::NotFound
         ));
+    }
+
+    #[test]
+    fn find_session_across_prefers_self_when_id_exists_in_two_roots() {
+        // The same id lives under both the current user's tree and a foreign
+        // one. With the roots ordered self-first, the search must short-circuit
+        // on the self copy and never resolve to the foreign transcript — the
+        // guarantee that a UUID present in two trees always resumes as our own.
+        let tmp = tempdir().unwrap();
+        let self_projects = tmp.path().join("me/.claude/projects");
+        let other_projects = tmp.path().join("other/.claude/projects");
+        let self_proj = self_projects.join("-proj");
+        let other_proj = other_projects.join("-proj");
+        fs::create_dir_all(&self_proj).unwrap();
+        fs::create_dir_all(&other_proj).unwrap();
+        let self_file = self_proj.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&self_file, "{}\n").unwrap();
+        fs::write(other_proj.join(format!("{SAMPLE_ID}.jsonl")), "{}\n").unwrap();
+
+        let roots = vec![
+            UserProjects {
+                user: "me".to_string(),
+                projects_dir: self_projects,
+                is_self: true,
+            },
+            UserProjects {
+                user: "other".to_string(),
+                projects_dir: other_projects,
+                is_self: false,
+            },
+        ];
+        match find_session_across(&roots, SAMPLE_ID) {
+            FoundSession::Found { path, root } => {
+                assert_eq!(path, self_file, "must resolve to the self copy");
+                assert!(root.is_self);
+                assert_eq!(root.user, "me");
+            }
+            FoundSession::NotFound => panic!("expected the id to be found in self"),
+        }
+    }
+
+    #[test]
+    fn enumerate_user_projects_lists_self_first_then_siblings_with_projects() {
+        // Layout under a fake `/Users` parent:
+        //   me    -> has .claude/projects (the current user)
+        //   alice -> has .claude/projects (a search root)
+        //   bob   -> has .claude/projects (a search root)
+        //   carol -> no .claude/projects  (never ran Claude -> excluded)
+        //   notes.txt -> a regular file   (not a home at all -> excluded)
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        for user in ["me", "alice", "bob"] {
+            fs::create_dir_all(parent.join(user).join(".claude").join("projects")).unwrap();
+        }
+        fs::create_dir_all(parent.join("carol")).unwrap();
+        fs::write(parent.join("notes.txt"), "x").unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        // Self is first; the other roots follow sorted by name; carol (no
+        // projects dir) and the regular file are excluded.
+        assert_eq!(users, ["me", "alice", "bob"]);
+        // Only the self entry is marked is_self, and it points at the current
+        // user's own projects dir.
+        assert!(roots[0].is_self);
+        assert!(roots[1..].iter().all(|r| !r.is_self));
+        assert_eq!(
+            roots[0].projects_dir,
+            parent.join("me").join(".claude").join("projects")
+        );
+    }
+
+    #[test]
+    fn enumerate_user_projects_always_includes_self_even_without_a_projects_dir() {
+        // The current user is always root zero, even if they have not run Claude
+        // yet, so today's self-first fast path is preserved verbatim. A sibling
+        // that has run Claude is still discovered.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me")).unwrap(); // no .claude/projects
+        fs::create_dir_all(parent.join("alice").join(".claude").join("projects")).unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        assert_eq!(roots[0].user, "me");
+        assert!(roots[0].is_self);
+        assert_eq!(roots.iter().filter(|r| r.is_self).count(), 1);
+        assert!(roots.iter().any(|r| r.user == "alice" && !r.is_self));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enumerate_user_projects_drops_an_aliased_home_pointing_back_at_self() {
+        // A symlinked home alias (`me-alias -> me`) is the same physical tree as
+        // the current user's own home, so it must not be searched a second time
+        // — and certainly not tagged as another user's tree.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        std::os::unix::fs::symlink(parent.join("me"), parent.join("me-alias")).unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        // Only the real self root survives: the alias resolves to the same
+        // canonical projects dir and is deduped away.
+        assert_eq!(users, ["me"]);
+        assert!(roots[0].is_self);
+        assert_eq!(roots.iter().filter(|r| r.is_self).count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enumerate_user_projects_drops_sibling_aliases_of_one_another() {
+        // Two names for one sibling home (`zoe -> alice`) are one search root,
+        // not two. The alphabetically first name wins, so the survivor is stable
+        // no matter how the filesystem enumerated the parent.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me")).unwrap(); // no .claude/projects
+        fs::create_dir_all(parent.join("alice").join(".claude").join("projects")).unwrap();
+        std::os::unix::fs::symlink(parent.join("alice"), parent.join("zoe")).unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        assert_eq!(users, ["me", "alice"]);
+        assert!(roots[0].is_self);
+        assert!(roots[1..].iter().all(|r| !r.is_self));
+    }
+
+    /// A search root for the not-found message tests. Only `projects_dir` and
+    /// how many roots there are can affect the message, so the paths are plain
+    /// literals rather than tempdirs.
+    fn search_root(user: &str, is_self: bool) -> UserProjects {
+        UserProjects {
+            user: user.to_string(),
+            projects_dir: Path::new("/Users").join(user).join(".claude/projects"),
+            is_self,
+        }
+    }
+
+    #[test]
+    fn format_searched_roots_names_the_only_root_searched() {
+        // A single root is both today's self-only case and the `--user <name>`
+        // case: one plain `looked under` line, and no summary to append.
+        let roots = [search_root("me", true)];
+        assert_eq!(
+            format_searched_roots(&roots),
+            format!("       looked under {}\n", roots[0].projects_dir.display())
+        );
+    }
+
+    #[test]
+    fn format_searched_roots_summarizes_a_single_extra_account() {
+        // Two roots: the first is named, the second is counted — and the count
+        // is singular.
+        let roots = [search_root("me", true), search_root("alice", false)];
+        assert_eq!(
+            format_searched_roots(&roots),
+            format!(
+                "       looked under {}\n       …and 1 other account on this machine\n",
+                roots[0].projects_dir.display()
+            )
+        );
+    }
+
+    #[test]
+    fn format_searched_roots_summarizes_extra_accounts_without_naming_them() {
+        // The auto-fallback can search every home on a shared machine, so the
+        // remainder is a plural count only: two detail lines no matter how many
+        // accounts exist, and no sibling account name is ever disclosed.
+        let roots = [
+            search_root("me", true),
+            search_root("alice", false),
+            search_root("bob", false),
+            search_root("carol", false),
+        ];
+        let out = format_searched_roots(&roots);
+        assert_eq!(
+            out,
+            format!(
+                "       looked under {}\n       …and 3 other accounts on this machine\n",
+                roots[0].projects_dir.display()
+            )
+        );
+        assert_eq!(out.lines().count(), 2, "at most two detail lines: {out}");
+        for name in ["alice", "bob", "carol"] {
+            assert!(!out.contains(name), "must not name {name}: {out}");
+        }
+    }
+
+    #[test]
+    fn format_searched_roots_is_empty_without_any_roots() {
+        // Unreachable in practice (the current user is always root zero), but a
+        // total function keeps a stray indent off the not-found output.
+        assert_eq!(format_searched_roots(&[]), "");
     }
 
     #[test]
