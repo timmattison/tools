@@ -433,6 +433,117 @@ fn format_searched_roots(roots: &[UserProjects]) -> String {
     lines
 }
 
+/// The actionable guidance for a miss whose scan was refused entry to owner-only
+/// project directories, indented to hang under the `Error:` line.
+///
+/// Returns an empty string when nothing was skipped, so the not-found path can
+/// print it unconditionally: a genuine "that id is not on this machine" gains
+/// nothing, and a caller never has to branch on the shape of the miss.
+///
+/// The guidance stops at *telling the user what to run*. `crap` searches other
+/// homes with exactly the privileges it was invoked with, and reading a `0o700`
+/// directory owned by someone else needs more than that — but escalating on the
+/// user's behalf is not a tool's call to make, so `crap` never runs `sudo`
+/// itself. Printing the exact commands is the most it can do and still leave the
+/// decision (and the audit trail) with the person at the keyboard.
+///
+/// Every account with skipped directories gets a count line, in scan order, so
+/// nobody has to guess how much of the machine was opaque. The remedy that
+/// follows is keyed on the *first* such account — one worked example beats four
+/// near-identical ones — and names that account explicitly whenever there is more
+/// than one, so the reader can tell which of the counts above the commands are
+/// for.
+///
+/// The remedy anchors on `pwd` rather than on the session's own recorded
+/// directory for the reason the guidance exists at all: the transcript is
+/// unreadable, so the directory recorded inside it cannot be known. The current
+/// directory is the one location that is both knowable and almost certainly what
+/// the user wants — they typed the id while standing where they intend to work —
+/// so the copy lands in that directory's project folder and the trailing
+/// `crap --here <id>` picks it straight back up.
+fn format_owner_only_guidance(
+    session_id: &str,
+    roots: &[UserProjects],
+    skipped: &[SkippedDir],
+    pwd: &Path,
+) -> String {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix.
+    const INDENT: &str = "       ";
+    /// Commands are indented one step further so they read as a copy-paste block
+    /// rather than as prose.
+    const COMMAND_INDENT: &str = "         ";
+
+    let Some(first) = skipped.first() else {
+        return String::new();
+    };
+    let owner = first.user.as_str();
+
+    // Count per account, keeping first-seen (scan) order: the roots were searched
+    // in a deliberate order (self first, then siblings by name), and reporting in
+    // that same order keeps the message stable run to run.
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for dir in skipped {
+        match counts.iter_mut().find(|(user, _)| *user == dir.user) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((dir.user.as_str(), 1)),
+        }
+    }
+
+    let mut out = String::new();
+    for &(user, count) in &counts {
+        let (noun, verb) = if count == 1 {
+            ("project dir", "is owner-only and was skipped")
+        } else {
+            ("project dirs", "are owner-only and were skipped")
+        };
+        out.push_str(&format!(
+            "{INDENT}{count} {noun} under user '{user}' {verb}.\n"
+        ));
+    }
+
+    out.push_str(&format!(
+        "{INDENT}if the session is in one of those, crap cannot read it — and crap never\n"
+    ));
+    if counts.len() > 1 {
+        out.push_str(&format!(
+            "{INDENT}runs sudo itself. copy it into your own tree first — for user '{owner}',\n\
+             {INDENT}for example:\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{INDENT}runs sudo itself. copy it into your own tree first, for example:\n"
+        ));
+    }
+
+    // Search the owning account's whole tree, since which project folder holds
+    // the session is exactly what could not be seen. The root is looked up by
+    // account name; a skipped directory always came from a root, so the lookup
+    // cannot really miss — but keeping it total (falling back to the skipped
+    // directory itself, a real path inside that same tree) means a future caller
+    // that assembles the two lists separately degrades to a narrower `find`
+    // rather than panicking on a message that only exists to be helpful.
+    let search_root = roots
+        .iter()
+        .find(|root| root.user == owner)
+        .map_or(first.dir.as_path(), |root| root.projects_dir.as_path());
+    // The project folder for the current directory. An unavailable `pwd` encodes
+    // to the empty string, which leaves a still-runnable `mkdir -p` the user can
+    // point wherever they like.
+    let folder = encode_project_dir(pwd);
+    out.push_str(&format!(
+        "{COMMAND_INDENT}SRC=$(sudo -u {owner} find {} -name '{session_id}.jsonl')\n",
+        search_root.display()
+    ));
+    out.push_str(&format!(
+        "{COMMAND_INDENT}mkdir -p ~/.claude/projects/{folder}\n"
+    ));
+    out.push_str(&format!(
+        "{COMMAND_INDENT}sudo -u {owner} cat \"$SRC\" > ~/.claude/projects/{folder}/{session_id}.jsonl\n"
+    ));
+    out.push_str(&format!("{COMMAND_INDENT}crap --here {session_id}\n"));
+    out
+}
+
 /// The conversational state of a session, inferred from its transcript.
 ///
 /// Claude Code never writes an explicit "turn finished, waiting for input"
@@ -680,10 +791,6 @@ enum HereResolveError {
     /// not on this machine" from "it is not anywhere I was allowed to look".
     SessionNotFound {
         /// The owner-only directories skipped while searching, in scan order.
-        #[expect(
-            dead_code,
-            reason = "carried now so the scan and the error agree on the shape of a miss; the `--here` failure message that reads it lands in the guidance slice, at which point this attribute goes unfulfilled and must be removed"
-        )]
         skipped: Vec<SkippedDir>,
     },
     /// Creating the project folder, or the symlink/copy, failed.
@@ -1521,6 +1628,37 @@ fn abort_if_session_live(session_id: &str, here: bool, force: bool) {
     }
 }
 
+/// Reports a session id that was not found under any searched root, and exits
+/// with [`exit_codes::SESSION_NOT_FOUND`].
+///
+/// Every not-found path goes through here so the message is assembled in exactly
+/// one place: the headline, the "where I looked" summary, and the owner-only
+/// guidance are three facets of one answer, and splitting them across call sites
+/// is how they drift. The headline hedges — "no *readable* Claude session" —
+/// precisely when the scan was refused entry somewhere, because with an opaque
+/// directory in the way "it is not here" is a certainty `crap` does not have; a
+/// clean miss keeps the flat wording it has always had.
+///
+/// The working directory is resolved here rather than threaded in from the
+/// callers, because it is only ever needed for the guidance. A failure is
+/// harmless: it costs the `mkdir` line its destination, while the count lines,
+/// the account name, and the `sudo -u <user> find` that actually locates the
+/// transcript are all still there.
+fn exit_session_not_found(session_id: &str, roots: &[UserProjects], skipped: &[SkippedDir]) -> ! {
+    let pwd = std::env::current_dir().unwrap_or_default();
+    let qualifier = if skipped.is_empty() { "" } else { "readable " };
+    eprintln!(
+        "{} no {qualifier}Claude session found with id '{session_id}'",
+        "Error:".red().bold()
+    );
+    eprint!("{}", format_searched_roots(roots));
+    eprint!(
+        "{}",
+        format_owner_only_guidance(session_id, roots, skipped, &pwd)
+    );
+    exit(exit_codes::SESSION_NOT_FOUND);
+}
+
 /// Handles `crap --here <id> [<new-id>] [--user <name>]`: import the session
 /// into the current directory's project folder and emit the here-mode output
 /// the shell function consumes, optionally pinning the forked session's id to
@@ -1591,15 +1729,8 @@ fn run_here(
             );
             exit(exit_codes::INVALID_SESSION_ID);
         }
-        Err(HereResolveError::SessionNotFound { skipped: _ }) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            for root in roots {
-                eprintln!("       looked under {}", root.projects_dir.display());
-            }
-            exit(exit_codes::SESSION_NOT_FOUND);
+        Err(HereResolveError::SessionNotFound { skipped }) => {
+            exit_session_not_found(session_id, roots, &skipped);
         }
         Err(HereResolveError::Io(err)) => {
             eprintln!(
@@ -1691,13 +1822,8 @@ fn run_resume(
 
     let (path, root) = match find_session_across(roots, session_id) {
         FoundSession::Found { path, root } => (path, root),
-        FoundSession::NotFound { skipped: _ } => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            eprint!("{}", format_searched_roots(roots));
-            exit(exit_codes::SESSION_NOT_FOUND);
+        FoundSession::NotFound { skipped } => {
+            exit_session_not_found(session_id, roots, &skipped);
         }
     };
 
@@ -2803,6 +2929,156 @@ mod tests {
         // Unreachable in practice (the current user is always root zero), but a
         // total function keeps a stray indent off the not-found output.
         assert_eq!(format_searched_roots(&[]), "");
+    }
+
+    /// A project directory under `user`'s tree that the scan was refused. Like
+    /// [`search_root`], plain literals: only the account name, the count, and the
+    /// owning root's path can affect the guidance.
+    fn skipped_dir(user: &str, folder: &str) -> SkippedDir {
+        SkippedDir {
+            user: user.to_string(),
+            dir: Path::new("/Users")
+                .join(user)
+                .join(".claude/projects")
+                .join(folder),
+        }
+    }
+
+    #[test]
+    fn format_owner_only_guidance_is_empty_when_nothing_was_skipped() {
+        // A clean miss — everything was readable and the id simply is not here —
+        // earns no guidance, so the not-found path can print the block
+        // unconditionally instead of branching on the shape of the miss.
+        let roots = [search_root("me", true)];
+        assert_eq!(
+            format_owner_only_guidance(SAMPLE_ID, &roots, &[], Path::new("/work")),
+            ""
+        );
+    }
+
+    #[test]
+    fn format_owner_only_guidance_counts_a_single_dir_in_the_singular() {
+        // One skipped directory reads as one, not as "1 project dirs ... were".
+        let roots = [search_root("me", true), search_root("alice", false)];
+        let skipped = [skipped_dir("alice", "-proj")];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        assert!(
+            out.contains(
+                "       1 project dir under user 'alice' is owner-only and was skipped.\n"
+            ),
+            "singular count line: {out}"
+        );
+        assert!(!out.contains("project dirs"), "no plural noun: {out}");
+    }
+
+    #[test]
+    fn format_owner_only_guidance_counts_several_dirs_in_the_plural() {
+        // Three skipped directories under one account: one line, pluralized.
+        let roots = [search_root("me", true), search_root("alice", false)];
+        let skipped = [
+            skipped_dir("alice", "-one"),
+            skipped_dir("alice", "-two"),
+            skipped_dir("alice", "-three"),
+        ];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        assert!(
+            out.contains(
+                "       3 project dirs under user 'alice' are owner-only and were skipped.\n"
+            ),
+            "plural count line: {out}"
+        );
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.contains("owner-only and were skipped"))
+                .count(),
+            1,
+            "one count line per account, not per directory: {out}"
+        );
+    }
+
+    #[test]
+    fn format_owner_only_guidance_counts_each_account_in_scan_order() {
+        // Two accounts were opaque, and `alice`'s directories bracket `bob`'s in
+        // the scan. Each account gets exactly one count line, in first-seen
+        // order, and the single worked remedy is keyed on the first of them —
+        // naming that account explicitly, so the reader knows which count the
+        // commands belong to.
+        let roots = [
+            search_root("me", true),
+            search_root("alice", false),
+            search_root("bob", false),
+        ];
+        let skipped = [
+            skipped_dir("alice", "-one"),
+            skipped_dir("bob", "-x"),
+            skipped_dir("alice", "-two"),
+        ];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        let alice = out
+            .find("2 project dirs under user 'alice' are owner-only and were skipped.")
+            .expect("a count line for alice");
+        let bob = out
+            .find("1 project dir under user 'bob' is owner-only and was skipped.")
+            .expect("a count line for bob");
+        assert!(alice < bob, "accounts are listed in scan order: {out}");
+        assert!(
+            out.contains("for user 'alice',"),
+            "the remedy must say which account it is for: {out}"
+        );
+        // Exactly one remedy, and every command in it is `alice`'s.
+        assert_eq!(
+            out.lines().filter(|l| l.contains("sudo -u ")).count(),
+            2,
+            "one remedy: a `find` and a `cat`: {out}"
+        );
+        assert!(!out.contains("sudo -u bob"), "not keyed on bob too: {out}");
+    }
+
+    #[test]
+    fn format_owner_only_guidance_remedy_reads_that_tree_and_writes_this_directory() {
+        // The `find` searches the owning account's whole tree — which project
+        // folder holds the session is exactly what could not be seen — and the
+        // copy lands in OUR project folder for the current directory, which is
+        // what the trailing `crap --here` then resumes.
+        let roots = [search_root("me", true), search_root("alice", false)];
+        let skipped = [skipped_dir("alice", "-proj")];
+        let out =
+            format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/Volumes/code/foo"));
+        assert!(
+            out.contains(&format!(
+                "SRC=$(sudo -u alice find /Users/alice/.claude/projects -name '{SAMPLE_ID}.jsonl')"
+            )),
+            "the find must cover alice's whole tree: {out}"
+        );
+        assert!(
+            out.contains("mkdir -p ~/.claude/projects/-Volumes-code-foo\n"),
+            "the destination is this directory's project folder: {out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "sudo -u alice cat \"$SRC\" > ~/.claude/projects/-Volumes-code-foo/{SAMPLE_ID}.jsonl"
+            )),
+            "the copy must land in our own tree: {out}"
+        );
+        assert!(
+            out.contains(&format!("crap --here {SAMPLE_ID}\n")),
+            "the remedy must end by resuming the copy: {out}"
+        );
+    }
+
+    #[test]
+    fn format_owner_only_guidance_falls_back_when_the_owner_has_no_root() {
+        // Every skipped directory came from a root, so the lookup cannot really
+        // miss — but the function stays total: with no matching root it narrows
+        // the `find` to the skipped directory itself rather than panicking on a
+        // message whose only job is to be helpful.
+        let roots = [search_root("me", true)];
+        let skipped = [skipped_dir("ghost", "-proj")];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        assert!(
+            out.contains("SRC=$(sudo -u ghost find /Users/ghost/.claude/projects/-proj -name '"),
+            "the find falls back to the directory that was refused: {out}"
+        );
     }
 
     #[test]

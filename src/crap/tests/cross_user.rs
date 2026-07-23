@@ -462,6 +462,16 @@ fn no_flag_not_found_summarizes_the_extra_search_roots() {
         1,
         "exactly one `looked under` line however many roots were searched: {stderr}"
     );
+    // Every root was readable, so this is a flat miss: the headline does not
+    // hedge with "readable", and none of the owner-only guidance appears.
+    assert!(
+        stderr.contains("no Claude session found"),
+        "a fully readable miss keeps the plain headline: {stderr}"
+    );
+    assert!(
+        !stderr.contains("owner-only") && !stderr.contains("sudo"),
+        "nothing was skipped, so there is nothing to guide around: {stderr}"
+    );
 }
 
 #[test]
