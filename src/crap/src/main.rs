@@ -469,34 +469,44 @@ fn prepare_import(
 enum HereResolveError {
     /// The session id was not a valid UUID.
     InvalidSessionId,
-    /// No `<session_id>.jsonl` file was found under any project directory.
+    /// No `<session_id>.jsonl` file was found under any searched root.
     SessionNotFound,
-    /// Creating the project folder or the symlink failed.
+    /// Creating the project folder, or the symlink/copy, failed.
     Io(std::io::Error),
 }
 
-/// Validates `session_id`, locates its transcript, and symlinks it into `pwd`'s
-/// project folder so `claude --resume` will find it from there.
+/// Validates `session_id`, locates its transcript across `roots`, and imports it
+/// into `pwd`'s project folder under `dest_projects_dir` so `claude --resume`
+/// will find it from there.
 ///
-/// Returns the path of the symlink to clean up afterwards, or `None` when the
-/// session is already resolvable from `pwd` (no symlink needed).
+/// A hit in the current user's own tree (`is_self`) is symlinked, exactly as
+/// before. A hit in another user's tree (`--here <id> --user <name>`) is
+/// *copied* instead, so nothing is symlinked into another user's home and the
+/// import is a self-contained snapshot owned by the current user.
+/// `dest_projects_dir` is always the current user's tree, so every write lands
+/// under the current user's home even when the source is foreign.
+///
+/// Returns the path of the symlink or copy to clean up afterwards, or `None`
+/// when the session is already resolvable from `pwd` (no import needed).
 ///
 /// # Errors
 ///
 /// See [`HereResolveError`].
-fn resolve_here_link(
-    projects_dir: &Path,
+fn resolve_here_import(
+    roots: &[UserProjects],
+    dest_projects_dir: &Path,
     pwd: &Path,
     session_id: &str,
 ) -> Result<Option<PathBuf>, HereResolveError> {
     if !is_valid_session_id(session_id) {
         return Err(HereResolveError::InvalidSessionId);
     }
-    let original =
-        find_session_file(projects_dir, session_id).ok_or(HereResolveError::SessionNotFound)?;
+    let FoundSession::Found { path, .. } = find_session_across(roots, session_id) else {
+        return Err(HereResolveError::SessionNotFound);
+    };
     prepare_import(
-        projects_dir,
-        &original,
+        dest_projects_dir,
+        &path,
         pwd,
         session_id,
         ImportMode::Symlink,
@@ -1273,10 +1283,23 @@ fn abort_if_session_live(session_id: &str, here: bool, force: bool) {
     }
 }
 
-/// Handles `crap --here <id> [<new-id>]`: symlink the session into the current
-/// directory's project folder and emit the here-mode output the shell function
-/// consumes, optionally pinning the forked session's id to `new_session_id`.
-fn run_here(projects_dir: &Path, session_id: &str, new_session_id: Option<&str>, force: bool) -> ! {
+/// Handles `crap --here <id> [<new-id>] [--user <name>]`: import the session
+/// into the current directory's project folder and emit the here-mode output
+/// the shell function consumes, optionally pinning the forked session's id to
+/// `new_session_id`.
+///
+/// The session is located across `roots` (the current user's own tree, or a
+/// sibling's tree when `--user` was given). A same-user hit is symlinked; a
+/// cross-user hit is copied into `dest_projects_dir` (always the current user's
+/// tree). Either way `--here` stays in the current directory and forks, so a
+/// live original is never blocked or corrupted.
+fn run_here(
+    roots: &[UserProjects],
+    dest_projects_dir: &Path,
+    session_id: &str,
+    new_session_id: Option<&str>,
+    force: bool,
+) -> ! {
     let Ok(pwd) = std::env::current_dir() else {
         eprintln!(
             "{} could not determine the current directory",
@@ -1300,8 +1323,9 @@ fn run_here(projects_dir: &Path, session_id: &str, new_session_id: Option<&str>,
     };
 
     // Refuse to pin the fork to an id that already names a transcript: that
-    // would let `claude --session-id` overwrite an unrelated session.
-    if new_session_id_collides(projects_dir, new_id) {
+    // would let `claude --session-id` overwrite an unrelated session. The fork
+    // lands in our own tree, so the collision is checked there.
+    if new_session_id_collides(dest_projects_dir, new_id) {
         eprintln!(
             "{} a session with id '{}' already exists",
             "Error:".red().bold(),
@@ -1314,7 +1338,7 @@ fn run_here(projects_dir: &Path, session_id: &str, new_session_id: Option<&str>,
     // Guard before creating anything, so an aborted resume leaves no stray link.
     abort_if_session_live(session_id, true, force);
 
-    match resolve_here_link(projects_dir, &pwd, session_id) {
+    match resolve_here_import(roots, dest_projects_dir, &pwd, session_id) {
         Ok(link) => {
             print!(
                 "{}",
@@ -1334,7 +1358,9 @@ fn run_here(projects_dir: &Path, session_id: &str, new_session_id: Option<&str>,
                 "{} no Claude session found with id '{session_id}'",
                 "Error:".red().bold()
             );
-            eprintln!("       looked under {}", projects_dir.display());
+            for root in roots {
+                eprintln!("       looked under {}", root.projects_dir.display());
+            }
             exit(exit_codes::SESSION_NOT_FOUND);
         }
         Err(HereResolveError::Io(err)) => {
@@ -1525,20 +1551,12 @@ fn main() {
         .session_id
         .expect("session id is required without --shell-setup or --status");
 
-    if cli.here {
-        run_here(
-            &projects_dir,
-            &session_id,
-            cli.new_session_id.as_deref(),
-            cli.force,
-        );
-    }
-
     // Build the search roots. This is the one place that reads the env-coupled
     // home layout — `home.file_name()` (our account name) and `home.parent()`
     // (the users' parent directory) — so `self_projects`/`user_projects` stay
     // pure. With no `--user` we search our own tree; with `--user <name>` we
-    // search only that sibling's tree.
+    // search only that sibling's tree. Both `--here` and the default resume
+    // search the same roots, so a cross-user source is reachable either way.
     let roots = match cli.user.as_deref() {
         None => vec![self_projects(&home)],
         Some(name) => {
@@ -1555,6 +1573,17 @@ fn main() {
             vec![user_projects(users_parent, name, self_name)]
         }
     };
+
+    if cli.here {
+        run_here(
+            &roots,
+            &projects_dir,
+            &session_id,
+            cli.new_session_id.as_deref(),
+            cli.force,
+        );
+    }
+
     run_resume(&roots, &projects_dir, &session_id, cli.force);
 }
 
@@ -2342,26 +2371,48 @@ mod tests {
         assert_eq!(rest.trim_end_matches('\n'), weird_dir.to_str().unwrap());
     }
 
+    /// A single self-owned search root over `projects`, for the `--here` import
+    /// tests. `is_self` is true, so imports through it symlink (same-user).
+    fn self_root(projects: &Path) -> Vec<UserProjects> {
+        vec![UserProjects {
+            user: "me".to_string(),
+            projects_dir: projects.to_path_buf(),
+            is_self: true,
+        }]
+    }
+
     #[test]
-    fn resolve_here_link_rejects_invalid_id() {
+    fn resolve_here_import_rejects_invalid_id() {
         let dir = tempdir().unwrap();
         assert!(matches!(
-            resolve_here_link(dir.path(), Path::new("/x"), "../escape"),
+            resolve_here_import(
+                &self_root(dir.path()),
+                dir.path(),
+                Path::new("/x"),
+                "../escape"
+            ),
             Err(HereResolveError::InvalidSessionId)
         ));
     }
 
     #[test]
-    fn resolve_here_link_errors_when_session_missing() {
+    fn resolve_here_import_errors_when_session_missing() {
         let dir = tempdir().unwrap();
         assert!(matches!(
-            resolve_here_link(dir.path(), Path::new("/x"), SAMPLE_ID),
+            resolve_here_import(
+                &self_root(dir.path()),
+                dir.path(),
+                Path::new("/x"),
+                SAMPLE_ID
+            ),
             Err(HereResolveError::SessionNotFound)
         ));
     }
 
     #[test]
-    fn resolve_here_link_links_an_existing_session_into_pwd() {
+    fn resolve_here_import_symlinks_a_same_user_source() {
+        // Same-user `--here` must still symlink, exactly as before: the import
+        // is a link back to the original in our own tree (regression guard).
         let dir = tempdir().unwrap();
         let projects = dir.path();
         let orig = projects.join("-orig");
@@ -2369,22 +2420,34 @@ mod tests {
         let original = orig.join(format!("{SAMPLE_ID}.jsonl"));
         fs::write(&original, "{}\n").unwrap();
 
-        let link = resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID)
-            .expect("ok")
-            .expect("a symlink should be created");
+        let link = resolve_here_import(
+            &self_root(projects),
+            projects,
+            Path::new("/Volumes/x/here"),
+            SAMPLE_ID,
+        )
+        .expect("ok")
+        .expect("a symlink should be created");
         assert_eq!(
             link,
             projects
                 .join("-Volumes-x-here")
                 .join(format!("{SAMPLE_ID}.jsonl"))
         );
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "same-user `--here` must symlink"
+        );
         assert_eq!(fs::read_link(&link).unwrap(), original);
     }
 
     #[test]
-    fn resolve_here_link_returns_none_when_session_already_here() {
+    fn resolve_here_import_returns_none_when_session_already_here() {
         // The session already lives in the current directory's folder, so no
-        // symlink is needed and there is nothing to clean up afterwards.
+        // import is needed and there is nothing to clean up afterwards.
         let dir = tempdir().unwrap();
         let projects = dir.path();
         let folder = projects.join("-Volumes-x-here");
@@ -2392,7 +2455,13 @@ mod tests {
         fs::write(folder.join(format!("{SAMPLE_ID}.jsonl")), "{}\n").unwrap();
 
         assert_eq!(
-            resolve_here_link(projects, Path::new("/Volumes/x/here"), SAMPLE_ID).expect("ok"),
+            resolve_here_import(
+                &self_root(projects),
+                projects,
+                Path::new("/Volumes/x/here"),
+                SAMPLE_ID
+            )
+            .expect("ok"),
             None
         );
     }
