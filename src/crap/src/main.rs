@@ -332,25 +332,72 @@ enum FoundSession {
     },
 }
 
-/// Searches an ordered list of roots for a session id, first match winning.
+/// Searches an ordered list of roots for a session id, first match winning, and
+/// records every directory it was refused.
 ///
-/// Within each root it reuses [`find_session_file`] as the per-root inner loop,
-/// so a hit is tagged with the root it came from (hence its owning user and
-/// whether it is the current user's own tree). Roots are searched in order and
-/// the search short-circuits on the first match, so a self-first ordering makes
-/// a session the current user already owns always win.
+/// Roots are searched in order and the search short-circuits on the first match,
+/// so a self-first ordering makes a session the current user already owns always
+/// win, and a hit is tagged with the root it came from (hence its owning user
+/// and whether it is the current user's own tree).
+///
+/// The per-root inner loop is spelled out here rather than delegated to
+/// [`find_session_file`] because that function answers a strictly smaller
+/// question: it can only say "no `<id>.jsonl` here", collapsing "I looked and it
+/// is absent" together with "I was not allowed to look". Across users those are
+/// different answers. A `0o700` project directory owned by another account is
+/// completely opaque without `sudo` — we cannot list it, and we cannot say
+/// whether the session is inside — and `crap` must never run `sudo` itself: it
+/// searches other homes with exactly the privileges it was invoked with, and
+/// escalating on the user's behalf is not its call to make. Given that, the only
+/// useful thing it can do with a refusal is remember it, so a miss can tell the
+/// user precisely what it could not see and let them decide. Hence a
+/// `PermissionDenied` probe becomes a [`SkippedDir`] tagged with the root's
+/// user; every other IO error stays ignored, since a vanished or malformed entry
+/// says nothing the user could act on.
+///
+/// A root whose `projects_dir` cannot even be listed is the same failure one
+/// level up, and is recorded as a single skip naming the root itself.
 fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
+    let file_name = format!("{id}.jsonl");
+    let mut skipped = Vec::new();
     for root in roots {
-        if let Some(path) = find_session_file(&root.projects_dir, id) {
-            return FoundSession::Found {
-                path,
-                root: root.clone(),
-            };
+        let entries = match std::fs::read_dir(&root.projects_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                skipped.push(SkippedDir {
+                    user: root.user.clone(),
+                    dir: root.projects_dir.clone(),
+                });
+                continue;
+            }
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let dir = entry.path();
+            let candidate = dir.join(&file_name);
+            match std::fs::metadata(&candidate) {
+                Ok(meta) if meta.is_file() => {
+                    return FoundSession::Found {
+                        path: candidate,
+                        root: root.clone(),
+                    };
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    skipped.push(SkippedDir {
+                        user: root.user.clone(),
+                        dir,
+                    });
+                }
+                // A non-file `<id>.jsonl`, or any other IO error, is a plain
+                // miss: nothing here the user could be told to act on.
+                Ok(_) | Err(_) => {}
+            }
         }
     }
-    FoundSession::NotFound {
-        skipped: Vec::new(),
-    }
+    FoundSession::NotFound { skipped }
 }
 
 /// The "where I looked" detail lines for a not-found session, indented to hang
