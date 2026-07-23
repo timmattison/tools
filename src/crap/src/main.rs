@@ -1289,6 +1289,11 @@ struct Cli {
     /// The Claude session id to resume (the `.jsonl` filename under
     /// `~/.claude/projects`).
     ///
+    /// The lookup is self-first: your own tree is searched first and, only if
+    /// the id isn't there, every sibling home that has run Claude — so an id
+    /// that belongs to another account is found without any flag, copied into
+    /// your own tree and forked there (see `--user`).
+    ///
     /// Optional with `--status`: given no id, `--status` lists every session
     /// recorded for the current directory instead of resolving one.
     #[arg(
@@ -1332,7 +1337,7 @@ struct Cli {
     #[arg(long)]
     here: bool,
 
-    /// Resume a session that belongs to another user.
+    /// Resume another user's session from a specific account.
     ///
     /// `<name>` is resolved as a sibling of your own home (`<home>/../<name>`,
     /// i.e. `/Users/<name>` on macOS or `/home/<name>` on Linux). Only that
@@ -1344,6 +1349,10 @@ struct Cli {
     /// naming your own account is a same-user hit and resumes in place. With
     /// `--here`, the fork lands in the current directory instead of the
     /// session's original one.
+    ///
+    /// Not required for a cross-user resume: with no `--user` the lookup is
+    /// self-first and falls back to the sibling homes on its own, so the flag
+    /// is only for forcing one particular account.
     #[arg(long, value_name = "NAME", conflicts_with = "shell_setup")]
     user: Option<String>,
 
