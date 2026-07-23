@@ -27,31 +27,33 @@
 //! directory, each with its state and the times its transcript was started and
 //! last written (read from the transcript's own timestamps, not file mtimes).
 //!
-//! With `--user <name>`, it reaches across accounts. Every lookup is normally
-//! anchored on the current user's home, so a session started under another
-//! account is invisible; `--user` instead searches only that sibling user's
-//! `~/.claude/projects` tree (resolved as `<home>/../<name>`). Because the
-//! transcript belongs to another user, `claude --resume` run by *you* could
-//! never find it there, so `crap` copies it into your own tree and resumes it as
-//! a `--fork-session` (a fresh id) at its original recorded directory — the
-//! foreign transcript is only ever read, and every write lands under your home.
-//! The transient copy is removed once Claude writes the forked transcript, the
-//! same way `--here` cleans up its import (a symlink for a same-user source, a
-//! copy for a cross-user one). A `--user` that names your own account is a
-//! same-user hit and resumes in place as usual.
-//!
-//! Without `--user`, that cross-user discovery is automatic: `crap <id>`
-//! searches your own tree first (today's fast path, unchanged) and, only on a
-//! miss, falls back to scanning every sibling home that has run Claude, resuming
-//! the first readable match exactly as `--user` would. The fallback is
+//! A session that belongs to another account is found automatically, with no
+//! flag at all: `crap <id>` searches your own tree first (the fast path,
+//! unchanged) and, only on a miss, falls back to scanning every sibling home
+//! that has run Claude, resuming the first readable match. The lookup is
 //! self-first, so an id that exists in two accounts always resolves to your own
-//! copy; `--user` is how you override that to force a specific foreign account.
+//! copy. A foreign hit cannot be resumed in place — the transcript belongs to
+//! another user, so a `claude --resume` run by *you* could never find it.
+//! Instead, `crap` copies it into your own tree and resumes it as a
+//! `--fork-session` (a fresh id) at its original recorded directory: the foreign
+//! transcript is only ever read, every write lands under your home, and the
+//! transient copy is removed once Claude writes the forked transcript, the same
+//! way `--here` cleans up its import (a symlink for a same-user source, a copy
+//! for a cross-user one).
+//!
+//! `--user <name>` forces that cross-user path onto one specific account: it
+//! searches only that sibling home's `~/.claude/projects` tree (resolved as
+//! `<home>/../<name>`) and skips your own entirely, which is also how you
+//! disambiguate an id on purpose. The resume itself is the same copy-and-fork.
+//! A `--user` that names your own account is a same-user hit and resumes in
+//! place as usual.
 //!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
-//! id — printing the original directory to resume from, or (for `--here`)
-//! preparing the import and printing what the function should run and clean up.
+//! id — printing the original directory to resume from, or (for `--here`, and
+//! for a cross-user hit) importing the transcript into the right project folder
+//! and printing what the function should run and clean up.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
