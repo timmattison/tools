@@ -36,14 +36,15 @@
 //! a `--fork-session` (a fresh id) at its original recorded directory — the
 //! foreign transcript is only ever read, and every write lands under your home.
 //! The transient copy is removed once Claude writes the forked transcript, the
-//! same way `--here` cleans up its symlink. A `--user` that names your own
-//! account is a same-user hit and resumes in place as usual.
+//! same way `--here` cleans up its import (a symlink for a same-user source, a
+//! copy for a cross-user one). A `--user` that names your own account is a
+//! same-user hit and resumes in place as usual.
 //!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
 //! id — printing the original directory to resume from, or (for `--here`)
-//! preparing the symlink and printing what the function should run and clean up.
+//! preparing the import and printing what the function should run and clean up.
 
 use std::path::{Path, PathBuf};
 use std::process::exit;
@@ -71,7 +72,7 @@ mod exit_codes {
     pub const NO_HOME_DIR: i32 = 6;
     /// The session is already running in another process.
     pub const SESSION_ALREADY_RUNNING: i32 = 7;
-    /// `--here`: the project folder or symlink could not be created.
+    /// `--here`: the project folder or the symlink/copy could not be created.
     pub const HERE_LINK_ERROR: i32 = 8;
     /// `--here`: the current working directory could not be determined.
     pub const HERE_PWD_UNAVAILABLE: i32 = 9;
@@ -923,8 +924,9 @@ fn format_output(dir: &Path, session_id: &str) -> String {
 /// `<session-id>\n<dir>` resume output the shell function otherwise expects.
 const HERE_SENTINEL: &str = "__CRAP_HERE__";
 
-/// Placeholder used in the link field when `--here` created no symlink (because
-/// the current directory already is the session's own folder), so the shell
+/// Placeholder used in the link field when no import was created — because
+/// `--here`'s target directory already is the session's own folder, or, via
+/// [`format_fork_at_output`], a cross-user resume needed none — so the shell
 /// function can tell "nothing to clean up" apart from a real path.
 const NO_LINK_SENTINEL: &str = "__CRAP_NO_LINK__";
 
@@ -941,7 +943,7 @@ const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 
 /// Formats `--here` output for the shell function: the [`HERE_SENTINEL`], then
 /// the session id, then the caller-supplied forked-session id (or
-/// [`NO_NEW_ID_SENTINEL`] when none was given), then the symlink to remove once
+/// [`NO_NEW_ID_SENTINEL`] when none was given), then the import to remove once
 /// the session ends (or [`NO_LINK_SENTINEL`] when none was created).
 ///
 /// The cleanup path is emitted last so that — like [`format_output`] — a path
@@ -1006,13 +1008,15 @@ fn format_fork_at_output(
 ///   directory (splitting on the first newline so a path containing newlines
 ///   survives intact) and resumes.
 /// * **`--here`** — `__CRAP_HERE__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>`:
-///   the binary has already symlinked the session into the *current* directory's
-///   project folder, so the function stays put, resumes with `--fork-session` (a
-///   fresh session id, leaving the original transcript untouched), and finally
-///   removes that symlink — unless the link field is `__CRAP_NO_LINK__`, meaning
-///   none was created because this already is the session's own directory. When
-///   the new-id field is not `__CRAP_NO_NEW_ID__`, the fork is pinned to that id
-///   via `--session-id` instead of a random one.
+///   the binary has already imported the session into the *current* directory's
+///   project folder — a symlink for a same-user source, or a copy for a
+///   cross-user `--user` source — so the function stays put, resumes with
+///   `--fork-session` (a fresh session id, leaving the original transcript
+///   untouched), and finally removes that import — unless the link field is
+///   `__CRAP_NO_LINK__`, meaning none was created because this already is the
+///   session's own directory. When the new-id field is not
+///   `__CRAP_NO_NEW_ID__`, the fork is pinned to that id via `--session-id`
+///   instead of a random one.
 /// * **cross-user** — `__CRAP_FORK_AT__\n<session-id>\n<new-id-or-sentinel>\n<link-or-sentinel>\n<dir>`:
 ///   the binary has *copied* another user's transcript into our own tree, so the
 ///   function `cd`s into the session's original directory (the trailing `<dir>`,
@@ -1042,8 +1046,9 @@ function crap() {
         __crap_newid=${__crap_rest%%$'\n'*}
         __crap_link=${__crap_rest#*$'\n'}
         if [ "$__crap_link" != "__CRAP_NO_LINK__" ]; then
-            # Claude only needs the symlink while it reads the transcript at
-            # startup; once it writes the forked session file the symlink is
+            # Claude only needs the import (a symlink, or a copy for a
+            # cross-user source) while it reads the transcript at startup;
+            # once it writes the forked session file, the import is
             # vestigial. Watch the folder and drop it the moment a new .jsonl
             # appears, rather than letting it linger for the whole session.
             __crap_folder=$(dirname -- "$__crap_link")
@@ -1319,7 +1324,7 @@ fn run_here(
     };
 
     // Validate the optional forced id before creating anything, so a bad id
-    // aborts without leaving a stray symlink behind.
+    // aborts without leaving a stray import behind.
     let new_id = match resolve_new_session_id(new_session_id) {
         Ok(id) => id,
         Err(InvalidNewSessionId) => {
