@@ -23,6 +23,10 @@ const SELF_ID: &str = "aaaaaaaa-1111-2222-3333-444444444444";
 // than reaching into private constants.
 const FORK_AT_SENTINEL: &str = "__CRAP_FORK_AT__";
 const NO_NEW_ID_SENTINEL: &str = "__CRAP_NO_NEW_ID__";
+/// The `--here` wire sentinel (see `format_here_output` in `main.rs`). Unlike
+/// `__CRAP_FORK_AT__`, `--here` stays in the current directory, so its output
+/// leads with this and carries no trailing directory field.
+const HERE_SENTINEL: &str = "__CRAP_HERE__";
 
 /// A process-unique temp directory that removes itself on drop — including when
 /// a test panics — so failing runs never leak directories under `$TMPDIR`. The
@@ -150,6 +154,116 @@ fn user_flag_self_resumes_in_place() {
     assert!(
         !stdout.contains(FORK_AT_SENTINEL),
         "a same-user hit must not fork: {stdout}"
+    );
+}
+
+#[test]
+fn here_user_cross_user_copies_into_current_tree() {
+    let tmp = unique_root("here-cross");
+    let root = tmp.path();
+    // A readable session under the sibling user `other`.
+    let shared = root.join("shared-cwd");
+    fs::create_dir_all(&shared).unwrap();
+    let other_projects = root.join("other/.claude/projects");
+    plant_session(&other_projects, "-proj", FOREIGN_ID, &shared);
+    // Our own tree exists but does not contain this id.
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    let foreign_before = fs::read_to_string(
+        other_projects
+            .join("-proj")
+            .join(format!("{FOREIGN_ID}.jsonl")),
+    )
+    .unwrap();
+
+    let out = run_crap(root, &["--here", FOREIGN_ID, "--user", "other"]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // `--here` stays put: the here sentinel, never the `cd`-first fork-at one.
+    assert_eq!(lines.first().copied(), Some(HERE_SENTINEL));
+    assert!(
+        !stdout.contains(FORK_AT_SENTINEL),
+        "--here must not cd into the original directory: {stdout}"
+    );
+    assert_eq!(lines.get(1).copied(), Some(FOREIGN_ID));
+    assert_eq!(lines.get(2).copied(), Some(NO_NEW_ID_SENTINEL));
+    // The link field is a real copy under the CURRENT user's tree (never a
+    // symlink into the foreign home), snapshotting the foreign transcript.
+    let link = Path::new(lines.get(3).copied().expect("a link field"));
+    assert!(
+        link.starts_with(root.join("home/.claude/projects")),
+        "the copy must live under the current user's tree, got {}",
+        link.display()
+    );
+    assert!(
+        fs::symlink_metadata(link).unwrap().file_type().is_file(),
+        "cross-user --here import must be a real copy, not a symlink"
+    );
+    assert_eq!(
+        fs::read_to_string(link).unwrap(),
+        foreign_before,
+        "the copy must snapshot the foreign transcript"
+    );
+    // `--here` emits no trailing directory field (it does not cd).
+    assert_eq!(lines.get(4).copied(), None);
+
+    // The foreign original was only read, never written.
+    assert_eq!(
+        fs::read_to_string(
+            other_projects
+                .join("-proj")
+                .join(format!("{FOREIGN_ID}.jsonl"))
+        )
+        .unwrap(),
+        foreign_before,
+        "the foreign transcript must be left untouched"
+    );
+}
+
+#[test]
+fn here_user_same_user_still_symlinks() {
+    let tmp = unique_root("here-self");
+    let root = tmp.path();
+    // `--user home` names the current account, so `--here` is a same-user hit and
+    // must still SYMLINK (regression guard), not copy. Plant the session in a
+    // project folder that is not the current working directory's, so an import is
+    // actually created rather than resolving in place.
+    let home_projects = root.join("home/.claude/projects");
+    let shared = root.join("shared-cwd");
+    fs::create_dir_all(&shared).unwrap();
+    plant_session(&home_projects, "-elsewhere", FOREIGN_ID, &shared);
+
+    let out = run_crap(root, &["--here", FOREIGN_ID, "--user", "home"]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.first().copied(), Some(HERE_SENTINEL));
+    let link = Path::new(lines.get(3).copied().expect("a link field"));
+    // Same-user: a symlink, not a copy — and it resolves to the original bytes.
+    assert!(
+        fs::symlink_metadata(link).unwrap().file_type().is_symlink(),
+        "same-user --here must symlink, got a non-symlink at {}",
+        link.display()
+    );
+    assert_eq!(
+        fs::read_to_string(link).unwrap(),
+        fs::read_to_string(
+            home_projects
+                .join("-elsewhere")
+                .join(format!("{FOREIGN_ID}.jsonl"))
+        )
+        .unwrap(),
+        "the symlink must resolve to the original transcript"
     );
 }
 
