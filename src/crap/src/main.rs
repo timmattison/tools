@@ -40,6 +40,13 @@
 //! copy for a cross-user one). A `--user` that names your own account is a
 //! same-user hit and resumes in place as usual.
 //!
+//! Without `--user`, that cross-user discovery is automatic: `crap <id>`
+//! searches your own tree first (today's fast path, unchanged) and, only on a
+//! miss, falls back to scanning every sibling home that has run Claude, resuming
+//! the first readable match exactly as `--user` would. The fallback is
+//! self-first, so an id that exists in two accounts always resolves to your own
+//! copy; `--user` is how you override that to force a specific foreign account.
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session

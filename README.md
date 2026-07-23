@@ -349,7 +349,10 @@ containers/CI).
     and stops, and it refuses to resume a session that's already open in another running process
     (pass `--force` to override) so two processes can't corrupt the same session log. With
     `--here` it brings the session into the *current* directory instead, resuming it as a forked
-    (new-id) session so you can carry its context into a different working tree. `--status <id>`
+    (new-id) session so you can carry its context into a different working tree. If the id belongs
+    to another account on the machine, `crap` finds it automatically — searching your own sessions
+    first, then other users' as a self-first fallback — and resumes a private fork of it (or target
+    a specific account with `--user <name>`). `--status <id>`
     reports where a session left off (`waiting-for-user`, `busy`, `awaiting-assistant`, …) without
     resuming; `--status` with no id lists every session for the current directory (as a table, or
     JSON with `--json`) showing each one's state and start/last times. Run `crap --shell-setup`
@@ -1350,6 +1353,8 @@ crap 57570685-2d64-4431-8ab6-c021a12fa1af --user alice
 ```
 
 The name resolves as a sibling of your home (`<home>/../<name>` — `/Users/alice` on macOS, `/home/alice` on Linux). Because a transcript that belongs to another user can never be found by a `claude --resume` you run yourself, `crap` copies it into your own tree and resumes it as a `--fork-session` (a fresh id) at its original recorded directory — the foreign transcript is only ever read, and every write lands under your home. The transient copy is removed once Claude writes the forked transcript, the same way `--here` cleans up its import (a symlink for a same-user source, a copy for a cross-user one). Because the fork only reads the original, `--user` is safe even while that session is still live in the other user's account. A `--user` naming your own account is a same-user hit and simply resumes in place.
+
+Most of the time you don't need the flag at all. With no `--user`, `crap <id>` searches **your own** tree first — byte-for-byte the same fast path as always — and only if the id isn't there does it automatically fall back to scanning every sibling home that has run Claude, resuming the first readable match exactly as `--user` would (copy into your own tree, fork at the original directory). The fallback is **self-first**, so an id that happens to exist in two accounts always resolves to *your* copy, never the foreign one. Reach for `--user <name>` only when you want to force a specific account — it skips your own tree entirely, which is also how you disambiguate on purpose.
 
 ### Don't attach twice
 
