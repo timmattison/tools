@@ -335,11 +335,21 @@ fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
 /// (the current user is always root zero), but keeping the function total means
 /// the not-found path can never print a dangling `Error:` with a stray indent.
 fn format_searched_roots(roots: &[UserProjects]) -> String {
-    // Placeholder: today's shape, one full line per searched root.
-    roots
-        .iter()
-        .map(|root| format!("       looked under {}\n", root.projects_dir.display()))
-        .collect()
+    /// The hanging indent that aligns a detail line under the `Error:` prefix.
+    const INDENT: &str = "       ";
+
+    let Some(first) = roots.first() else {
+        return String::new();
+    };
+    let mut lines = format!("{INDENT}looked under {}\n", first.projects_dir.display());
+    let others = roots.len() - 1;
+    if others > 0 {
+        let account = if others == 1 { "account" } else { "accounts" };
+        lines.push_str(&format!(
+            "{INDENT}…and {others} other {account} on this machine\n"
+        ));
+    }
+    lines
 }
 
 /// The conversational state of a session, inferred from its transcript.
