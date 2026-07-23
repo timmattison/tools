@@ -288,6 +288,26 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
     roots
 }
 
+/// A project directory the scan could not enter, tagged with the account that
+/// owns the tree it was found in.
+///
+/// A cross-user scan reaches into other people's homes, where a `0o700` project
+/// directory is completely opaque to us: we cannot list it, and we cannot tell
+/// whether the session we are hunting for is sitting inside it. That is a
+/// materially different answer from "the id is not on this machine", and the
+/// difference is only actionable if the scan remembers *which* directories it
+/// could not see and *whose* they were — the user name is what turns a dead end
+/// into a remedy the caller can name ("resume it as that account"). Carrying the
+/// pair together means the miss itself contains everything guidance needs, so no
+/// caller has to re-walk the tree to work out what it was denied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkippedDir {
+    /// The account whose `~/.claude/projects` tree the directory belongs to.
+    user: String,
+    /// The directory itself, unreadable to the invoking user.
+    dir: PathBuf,
+}
+
 /// The outcome of searching an ordered list of roots for a session id.
 #[derive(Debug)]
 enum FoundSession {
@@ -298,8 +318,18 @@ enum FoundSession {
         /// The root it was found under, carrying the owning user and `is_self`.
         root: UserProjects,
     },
-    /// The id was not found in any of the searched roots.
-    NotFound,
+    /// The id was not found in any *readable* location under the searched roots.
+    ///
+    /// This is deliberately not a bare unit variant: a miss on a cross-user scan
+    /// is only half an answer until you also know what the scan was not allowed
+    /// to look at, so the variant carries the owner-only directories it stepped
+    /// over. An empty `skipped` therefore means "the id genuinely is not here",
+    /// while a non-empty one means "not in anything I could read" — and the
+    /// caller can say so instead of asserting a certainty it does not have.
+    NotFound {
+        /// The owner-only directories skipped during the scan, in scan order.
+        skipped: Vec<SkippedDir>,
+    },
 }
 
 /// Searches an ordered list of roots for a session id, first match winning.
@@ -318,7 +348,9 @@ fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
             };
         }
     }
-    FoundSession::NotFound
+    FoundSession::NotFound {
+        skipped: Vec::new(),
+    }
 }
 
 /// The "where I looked" detail lines for a not-found session, indented to hang
@@ -593,8 +625,20 @@ fn prepare_import(
 enum HereResolveError {
     /// The session id was not a valid UUID.
     InvalidSessionId,
-    /// No `<session_id>.jsonl` file was found under any searched root.
-    SessionNotFound,
+    /// No `<session_id>.jsonl` file was found under any *readable* location in
+    /// the searched roots.
+    ///
+    /// Carries the owner-only directories the scan had to step over (see
+    /// [`SkippedDir`]), so the failure the user sees can distinguish "that id is
+    /// not on this machine" from "it is not anywhere I was allowed to look".
+    SessionNotFound {
+        /// The owner-only directories skipped while searching, in scan order.
+        #[expect(
+            dead_code,
+            reason = "carried now so the scan and the error agree on the shape of a miss; the `--here` failure message that reads it lands in the guidance slice, at which point this attribute goes unfulfilled and must be removed"
+        )]
+        skipped: Vec<SkippedDir>,
+    },
     /// Creating the project folder, or the symlink/copy, failed.
     Io(std::io::Error),
 }
@@ -625,8 +669,11 @@ fn resolve_here_import(
     if !is_valid_session_id(session_id) {
         return Err(HereResolveError::InvalidSessionId);
     }
-    let FoundSession::Found { path, root } = find_session_across(roots, session_id) else {
-        return Err(HereResolveError::SessionNotFound);
+    let (path, root) = match find_session_across(roots, session_id) {
+        FoundSession::Found { path, root } => (path, root),
+        FoundSession::NotFound { skipped } => {
+            return Err(HereResolveError::SessionNotFound { skipped });
+        }
     };
     // Same-user hit → symlink (unchanged). Cross-user hit → copy, so nothing is
     // symlinked into another user's home and the import is a self-contained
@@ -1497,7 +1544,7 @@ fn run_here(
             );
             exit(exit_codes::INVALID_SESSION_ID);
         }
-        Err(HereResolveError::SessionNotFound) => {
+        Err(HereResolveError::SessionNotFound { skipped: _ }) => {
             eprintln!(
                 "{} no Claude session found with id '{session_id}'",
                 "Error:".red().bold()
@@ -1595,13 +1642,16 @@ fn run_resume(
         exit(exit_codes::INVALID_SESSION_ID);
     }
 
-    let FoundSession::Found { path, root } = find_session_across(roots, session_id) else {
-        eprintln!(
-            "{} no Claude session found with id '{session_id}'",
-            "Error:".red().bold()
-        );
-        eprint!("{}", format_searched_roots(roots));
-        exit(exit_codes::SESSION_NOT_FOUND);
+    let (path, root) = match find_session_across(roots, session_id) {
+        FoundSession::Found { path, root } => (path, root),
+        FoundSession::NotFound { skipped: _ } => {
+            eprintln!(
+                "{} no Claude session found with id '{session_id}'",
+                "Error:".red().bold()
+            );
+            eprint!("{}", format_searched_roots(roots));
+            exit(exit_codes::SESSION_NOT_FOUND);
+        }
     };
 
     let dir = match session_dir_from_transcript(&path) {
@@ -2350,7 +2400,7 @@ mod tests {
                 assert_eq!(found.user, "me");
                 assert!(found.is_self);
             }
-            FoundSession::NotFound => panic!("expected the id to be found"),
+            FoundSession::NotFound { .. } => panic!("expected the id to be found"),
         }
     }
 
@@ -2366,7 +2416,7 @@ mod tests {
         };
         assert!(matches!(
             find_session_across(&[root], SAMPLE_ID),
-            FoundSession::NotFound
+            FoundSession::NotFound { .. }
         ));
     }
 
@@ -2405,7 +2455,7 @@ mod tests {
                 assert!(root.is_self);
                 assert_eq!(root.user, "me");
             }
-            FoundSession::NotFound => panic!("expected the id to be found in self"),
+            FoundSession::NotFound { .. } => panic!("expected the id to be found in self"),
         }
     }
 
@@ -2751,7 +2801,7 @@ mod tests {
                 Path::new("/x"),
                 SAMPLE_ID
             ),
-            Err(HereResolveError::SessionNotFound)
+            Err(HereResolveError::SessionNotFound { .. })
         ));
     }
 
