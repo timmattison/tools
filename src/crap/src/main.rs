@@ -14,7 +14,10 @@
 //! process. The symlink is removed once the session ends. A second argument
 //! (`crap --here <id> <new-id>`) pins the fork to a chosen UUID via
 //! `claude --session-id` instead of a random one, provided it does not already
-//! name an existing session.
+//! name an existing session. `--here` also accepts a cross-user source
+//! (`crap --here <id> --user <name>`): the foreign transcript is *copied* into
+//! your own tree instead of symlinked, so nothing is ever linked into another
+//! user's home, and the copy is cleaned up the same way the symlink is.
 //!
 //! With `--status`, it resumes nothing: it classifies where the session left
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
@@ -1199,6 +1202,10 @@ struct Cli {
     /// (new-id) session — the original transcript is only read, never written,
     /// so this works even if the original session is still live. Use this to
     /// carry a conversation's context into a different working directory.
+    ///
+    /// Composes with `--user <name>`: a cross-user source is *copied* into your
+    /// own tree rather than symlinked, so nothing is linked into another user's
+    /// home; a same-user source is symlinked exactly as above.
     #[arg(long)]
     here: bool,
 
@@ -1211,7 +1218,9 @@ struct Cli {
     /// foreign transcript is copied into your own tree and resumed as a fork (a
     /// fresh id) at its original directory; the original is only ever read, so
     /// this is safe even while that session is live elsewhere. A `--user`
-    /// naming your own account is a same-user hit and resumes in place.
+    /// naming your own account is a same-user hit and resumes in place. With
+    /// `--here`, the fork lands in the current directory instead of the
+    /// session's original one.
     #[arg(long, value_name = "NAME", conflicts_with = "shell_setup")]
     user: Option<String>,
 

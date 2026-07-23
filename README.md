@@ -1329,6 +1329,8 @@ A couple of things to know:
 - The replayed history still references the *original* directory's paths. Claude works in your current directory from here on, but the conversation it inherits talks about the old one.
 - It still won't resume a session that's open elsewhere unless you pass `--force` (forking reads the live transcript, which can be mid-write).
 
+`--here` also accepts a cross-user source. Combine it with [`--user`](#resume-another-users-session---user) — `crap --here <id> --user alice` — to fork another account's session right here in your current directory. Because a transcript in someone else's home can never be found by a `claude --resume` you run yourself, `crap` **copies** it into your own tree rather than symlinking (nothing is ever linked into another user's home), then forks and cleans the copy up the same way it removes the symlink. A same-user `--here` still symlinks exactly as before. This is the escape hatch when the session's original directory is gone or you can't enter it: `--here` ignores that directory entirely.
+
 #### Choosing the forked session's id
 
 By default the fork gets a random new id, which you only learn after Claude starts. Pass a second argument to choose it yourself:
@@ -1513,7 +1515,7 @@ function crap() {
 }
 ```
 
-The binary speaks one of three output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already symlinked the session into the current directory's project folder — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes the symlink as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. For a cross-user `--user` resume it leads with a `__CRAP_FORK_AT__` marker instead — the binary has already *copied* the foreign transcript into your own tree, and the wire layout appends the session's original directory as a trailing field, so the function `cd`s into that original directory and then runs the same `--fork-session` plus background-watcher cleanup sequence as `--here`. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
+The binary speaks one of three output shapes. By default it prints the session id on the first line and the original directory on the rest; the function takes the first line as the session id and everything after it as the directory (so a path containing a newline stays intact), `cd`s there, and resumes. For `--here` it leads with a `__CRAP_HERE__` marker — having already imported the session into the current directory's project folder (a symlink for a same-user source, or a copy for a cross-user `--user` source) — so the function stays put and resumes with `--fork-session`. A backgrounded watcher counts the `.jsonl` files in that folder and removes that import as soon as a new (forked) one appears, so it doesn't linger for the whole session; a `kill` plus `rm` after Claude exits stops the watcher and serves as a safety net. If the link field is `__CRAP_NO_LINK__`, no symlink was needed and the watcher is skipped. For a cross-user `--user` resume it leads with a `__CRAP_FORK_AT__` marker instead — the binary has already *copied* the foreign transcript into your own tree, and the wire layout appends the session's original directory as a trailing field, so the function `cd`s into that original directory and then runs the same `--fork-session` plus background-watcher cleanup sequence as `--here`. Forwarding `"$@"` lets flags like `--force` and `--here` reach the binary. The `eval` is intentional: shell aliases aren't expanded inside function bodies, so it ensures a `clauded` alias is honored at call time. The `command crap` calls reach the binary past the function of the same name.
 
 ### Exit Codes
 
@@ -1525,7 +1527,7 @@ The binary speaks one of three output shapes. By default it prints the session i
 - `5`: Shell setup failed
 - `6`: Could not determine your home directory
 - `7`: The session is already running in another process (use `--force` to override)
-- `8`: `--here`/`--user`: could not import the session into the project folder (create the folder or symlink for `--here`, or copy the transcript for `--user`)
+- `8`: `--here`/`--user`: could not import the session into the project folder (create the folder, or make the symlink for a same-user source / copy the transcript for a cross-user source)
 - `9`: `--here`: could not determine the current working directory
 
 ## bm (bulk move)
