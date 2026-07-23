@@ -319,6 +319,29 @@ fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
     FoundSession::NotFound
 }
 
+/// The "where I looked" detail lines for a not-found session, indented to hang
+/// under the `Error:` line that precedes them.
+///
+/// The first root is named in full — on the no-flag path that is always the
+/// current user's own tree, and on the `--user <name>` path it is the only root
+/// there is — because it is the one location the user can act on. Any remaining
+/// roots collapse into a single count, deliberately *without* their account
+/// names: the automatic cross-user fallback searches every sibling home that has
+/// ever run Claude, so naming them would turn a mistyped id on a shared machine
+/// into a roster of who else has an account there. The block is therefore never
+/// more than two lines, however many accounts were searched.
+///
+/// Returns an empty string for an empty root list. No caller can produce one
+/// (the current user is always root zero), but keeping the function total means
+/// the not-found path can never print a dangling `Error:` with a stray indent.
+fn format_searched_roots(roots: &[UserProjects]) -> String {
+    // Placeholder: today's shape, one full line per searched root.
+    roots
+        .iter()
+        .map(|root| format!("       looked under {}\n", root.projects_dir.display()))
+        .collect()
+}
+
 /// The conversational state of a session, inferred from its transcript.
 ///
 /// Claude Code never writes an explicit "turn finished, waiting for input"
@@ -1556,9 +1579,7 @@ fn run_resume(
             "{} no Claude session found with id '{session_id}'",
             "Error:".red().bold()
         );
-        for root in roots {
-            eprintln!("       looked under {}", root.projects_dir.display());
-        }
+        eprint!("{}", format_searched_roots(roots));
         exit(exit_codes::SESSION_NOT_FOUND);
     };
 
@@ -2452,6 +2473,74 @@ mod tests {
         assert_eq!(users, ["me", "alice"]);
         assert!(roots[0].is_self);
         assert!(roots[1..].iter().all(|r| !r.is_self));
+    }
+
+    /// A search root for the not-found message tests. Only `projects_dir` and
+    /// how many roots there are can affect the message, so the paths are plain
+    /// literals rather than tempdirs.
+    fn search_root(user: &str, is_self: bool) -> UserProjects {
+        UserProjects {
+            user: user.to_string(),
+            projects_dir: Path::new("/Users").join(user).join(".claude/projects"),
+            is_self,
+        }
+    }
+
+    #[test]
+    fn format_searched_roots_names_the_only_root_searched() {
+        // A single root is both today's self-only case and the `--user <name>`
+        // case: one plain `looked under` line, and no summary to append.
+        let roots = [search_root("me", true)];
+        assert_eq!(
+            format_searched_roots(&roots),
+            format!("       looked under {}\n", roots[0].projects_dir.display())
+        );
+    }
+
+    #[test]
+    fn format_searched_roots_summarizes_a_single_extra_account() {
+        // Two roots: the first is named, the second is counted — and the count
+        // is singular.
+        let roots = [search_root("me", true), search_root("alice", false)];
+        assert_eq!(
+            format_searched_roots(&roots),
+            format!(
+                "       looked under {}\n       …and 1 other account on this machine\n",
+                roots[0].projects_dir.display()
+            )
+        );
+    }
+
+    #[test]
+    fn format_searched_roots_summarizes_extra_accounts_without_naming_them() {
+        // The auto-fallback can search every home on a shared machine, so the
+        // remainder is a plural count only: two detail lines no matter how many
+        // accounts exist, and no sibling account name is ever disclosed.
+        let roots = [
+            search_root("me", true),
+            search_root("alice", false),
+            search_root("bob", false),
+            search_root("carol", false),
+        ];
+        let out = format_searched_roots(&roots);
+        assert_eq!(
+            out,
+            format!(
+                "       looked under {}\n       …and 3 other accounts on this machine\n",
+                roots[0].projects_dir.display()
+            )
+        );
+        assert_eq!(out.lines().count(), 2, "at most two detail lines: {out}");
+        for name in ["alice", "bob", "carol"] {
+            assert!(!out.contains(name), "must not name {name}: {out}");
+        }
+    }
+
+    #[test]
+    fn format_searched_roots_is_empty_without_any_roots() {
+        // Unreachable in practice (the current user is always root zero), but a
+        // total function keeps a stray indent off the not-found output.
+        assert_eq!(format_searched_roots(&[]), "");
     }
 
     #[test]
