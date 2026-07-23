@@ -217,8 +217,34 @@ fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjec
 /// tempdir-testable; the sole env-coupled caller in `main` derives `users_parent`
 /// from `home.parent()` and `self_name` from `home.file_name()`.
 fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProjects> {
-    let _ = (users_parent, self_name);
-    Vec::new()
+    let mut others: Vec<UserProjects> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(users_parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            // Self is added first, unconditionally, below — skip it in the scan
+            // so it is never duplicated or knocked out of the leading slot.
+            if name == self_name {
+                continue;
+            }
+            let root = user_projects(users_parent, name, self_name);
+            // Only accounts that have actually run Claude are search roots;
+            // `is_dir` follows symlinks, so a symlinked home still counts.
+            if root.projects_dir.is_dir() {
+                others.push(root);
+            }
+        }
+    }
+    // Sort the siblings by account name so the order is independent of however
+    // the filesystem enumerated the parent directory.
+    others.sort_by(|a, b| a.user.cmp(&b.user));
+
+    let mut roots = Vec::with_capacity(others.len() + 1);
+    roots.push(user_projects(users_parent, self_name, self_name));
+    roots.extend(others);
+    roots
 }
 
 /// The outcome of searching an ordered list of roots for a session id.
@@ -1593,7 +1619,17 @@ fn main() {
     // search only that sibling's tree. Both `--here` and the default resume
     // search the same roots, so a cross-user source is reachable either way.
     let roots = match cli.user.as_deref() {
-        None => vec![self_projects(&home)],
+        None => match (home.file_name().and_then(|n| n.to_str()), home.parent()) {
+            // No flag: search our own tree first, then fall back to every
+            // sibling home that has run Claude — self-first, so an id we already
+            // own always wins and the common case never reaches another home.
+            (Some(self_name), Some(users_parent)) => {
+                enumerate_user_projects(users_parent, self_name)
+            }
+            // A home with no resolvable parent/name (unusual): keep today's
+            // single-user behavior exactly, with no cross-user fallback.
+            _ => vec![self_projects(&home)],
+        },
         Some(name) => {
             let (Some(self_name), Some(users_parent)) =
                 (home.file_name().and_then(|n| n.to_str()), home.parent())
@@ -2251,6 +2287,45 @@ mod tests {
             find_session_across(&[root], SAMPLE_ID),
             FoundSession::NotFound
         ));
+    }
+
+    #[test]
+    fn find_session_across_prefers_self_when_id_exists_in_two_roots() {
+        // The same id lives under both the current user's tree and a foreign
+        // one. With the roots ordered self-first, the search must short-circuit
+        // on the self copy and never resolve to the foreign transcript — the
+        // guarantee that a UUID present in two trees always resumes as our own.
+        let tmp = tempdir().unwrap();
+        let self_projects = tmp.path().join("me/.claude/projects");
+        let other_projects = tmp.path().join("other/.claude/projects");
+        let self_proj = self_projects.join("-proj");
+        let other_proj = other_projects.join("-proj");
+        fs::create_dir_all(&self_proj).unwrap();
+        fs::create_dir_all(&other_proj).unwrap();
+        let self_file = self_proj.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&self_file, "{}\n").unwrap();
+        fs::write(other_proj.join(format!("{SAMPLE_ID}.jsonl")), "{}\n").unwrap();
+
+        let roots = vec![
+            UserProjects {
+                user: "me".to_string(),
+                projects_dir: self_projects,
+                is_self: true,
+            },
+            UserProjects {
+                user: "other".to_string(),
+                projects_dir: other_projects,
+                is_self: false,
+            },
+        ];
+        match find_session_across(&roots, SAMPLE_ID) {
+            FoundSession::Found { path, root } => {
+                assert_eq!(path, self_file, "must resolve to the self copy");
+                assert!(root.is_self);
+                assert_eq!(root.user, "me");
+            }
+            FoundSession::NotFound => panic!("expected the id to be found in self"),
+        }
     }
 
     #[test]

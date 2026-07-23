@@ -349,3 +349,46 @@ fn no_flag_falls_back_to_sibling_on_self_miss() {
         .join(format!("{FOREIGN_ID}.jsonl"))
         .is_file());
 }
+
+#[test]
+fn no_flag_prefers_self_when_id_exists_in_both_trees() {
+    let tmp = unique_root("prefer-self");
+    let root = tmp.path();
+    // The SAME id exists under both the current user and a sibling, with
+    // different recorded cwds. With no flag, self-first ordering must win: the
+    // search short-circuits on our own copy and resumes it in place (the default
+    // `<id>\n<dir>` shape, no fork), at the CURRENT user's recorded cwd.
+    let self_cwd = root.join("self-cwd");
+    let other_cwd = root.join("other-cwd");
+    fs::create_dir_all(&self_cwd).unwrap();
+    fs::create_dir_all(&other_cwd).unwrap();
+    plant_session(
+        &root.join("home/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &self_cwd,
+    );
+    plant_session(
+        &root.join("other/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &other_cwd,
+    );
+
+    let out = run_crap(root, &[FOREIGN_ID]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // Default same-user resume shape: id then dir, no fork sentinel, self's cwd.
+    assert_eq!(lines.first().copied(), Some(FOREIGN_ID));
+    assert_eq!(lines.get(1).copied(), Some(self_cwd.to_str().unwrap()));
+    assert!(
+        !stdout.contains(FORK_AT_SENTINEL),
+        "a self hit must resume in place, not fork: {stdout}"
+    );
+}
