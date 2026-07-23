@@ -2459,6 +2459,150 @@ mod tests {
         }
     }
 
+    /// Makes `dir` unreadable (`0o000`) and reports whether the invoking user is
+    /// genuinely locked out of it.
+    ///
+    /// Returns `false` when the caller can still see inside. Root ignores the
+    /// permission bits entirely, so under `sudo` — or in a container that runs
+    /// every process as uid 0 — an owner-only directory is perfectly readable
+    /// and the behavior these tests describe is simply not observable; a test
+    /// that asserted it anyway would fail for a reason that has nothing to do
+    /// with the code. Establishing that without adding a `libc`/`nix` dependency
+    /// just to call `geteuid` means asking the filesystem the same question the
+    /// scan will ask: probe a path inside the locked directory and see whether
+    /// the answer really is `PermissionDenied`.
+    #[cfg(unix)]
+    fn lock_dir(dir: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::metadata(dir.join("probe")).err().map(|e| e.kind())
+            == Some(std::io::ErrorKind::PermissionDenied)
+    }
+
+    /// Restores `dir` to a normal readable mode after [`lock_dir`].
+    ///
+    /// Every caller must do this *before* running any assertion that can panic:
+    /// `TempDir`'s `Drop` is a recursive delete, and a `0o000` directory defeats
+    /// it — so an unrestored lock leaks the tempdir and buries the real
+    /// assertion failure under a cleanup error.
+    #[cfg(unix)]
+    fn unlock_dir(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_session_across_records_an_owner_only_subdir_as_skipped() {
+        // A `0o700` project dir in someone else's home is opaque to us: the scan
+        // cannot rule the session out, so stepping over it silently would turn
+        // "I was not allowed to look" into a confident "it does not exist".
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("other/.claude/projects");
+        let locked = projects.join("-locked");
+        fs::create_dir_all(&locked).unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        let root = UserProjects {
+            user: "other".to_string(),
+            projects_dir: projects,
+            is_self: false,
+        };
+        // Capture first, unlock second, assert last — a panic before the unlock
+        // would strand an undeletable directory inside the tempdir.
+        let found = find_session_across(std::slice::from_ref(&root), SAMPLE_ID);
+        unlock_dir(&locked);
+
+        match found {
+            FoundSession::NotFound { skipped } => assert_eq!(
+                skipped,
+                vec![SkippedDir {
+                    user: "other".to_string(),
+                    dir: locked,
+                }],
+                "the unreadable dir must be recorded against the user who owns it"
+            ),
+            FoundSession::Found { .. } => panic!("the id exists nowhere; it cannot be found"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_session_across_still_matches_a_readable_dir_when_another_is_owner_only() {
+        // Recording a skip must never cost us a hit: one unreadable neighbour in
+        // the same tree cannot be allowed to make a session that is right there,
+        // readable, unfindable.
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("other/.claude/projects");
+        let readable = projects.join("-readable");
+        let locked = projects.join("-locked");
+        fs::create_dir_all(&readable).unwrap();
+        fs::create_dir_all(&locked).unwrap();
+        let file = readable.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&file, "{}\n").unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        let root = UserProjects {
+            user: "other".to_string(),
+            projects_dir: projects,
+            is_self: false,
+        };
+        let found = find_session_across(std::slice::from_ref(&root), SAMPLE_ID);
+        unlock_dir(&locked);
+
+        match found {
+            FoundSession::Found { path, root: found } => {
+                assert_eq!(path, file);
+                assert_eq!(found.user, "other");
+            }
+            FoundSession::NotFound { .. } => {
+                panic!("an unreadable neighbour must not hide a readable session")
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_session_across_records_an_unreadable_projects_root_as_skipped() {
+        // The whole `~/.claude/projects` tree can be the thing we cannot open,
+        // and it is the same class of miss as a single opaque project dir: one
+        // skip, naming the root itself, so the user learns the tree exists and
+        // is closed rather than being told the id is nowhere on the machine.
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("other/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        if !lock_dir(&projects) {
+            unlock_dir(&projects);
+            return;
+        }
+
+        let root = UserProjects {
+            user: "other".to_string(),
+            projects_dir: projects.clone(),
+            is_self: false,
+        };
+        let found = find_session_across(std::slice::from_ref(&root), SAMPLE_ID);
+        unlock_dir(&projects);
+
+        match found {
+            FoundSession::NotFound { skipped } => assert_eq!(
+                skipped,
+                vec![SkippedDir {
+                    user: "other".to_string(),
+                    dir: projects,
+                }],
+                "an unlistable root is one skip, named by the root itself"
+            ),
+            FoundSession::Found { .. } => panic!("nothing is readable here; nothing can be found"),
+        }
+    }
+
     #[test]
     fn enumerate_user_projects_lists_self_first_then_siblings_with_projects() {
         // Layout under a fake `/Users` parent:
