@@ -4263,4 +4263,143 @@ mod tests {
         // `--user` requires a NAME; a bare flag is rejected.
         assert!(Cli::try_parse_from(["crap", SAMPLE_ID, "--user"]).is_err());
     }
+
+    /// Extracts every program literal handed to a process spawn in `source` —
+    /// the string inside each `Command::new(…)` call, however the type is
+    /// qualified at the call site.
+    ///
+    /// The needle is assembled at runtime rather than written as one literal so
+    /// that this function's own text cannot satisfy the scan. Spelled out, the
+    /// guard would find itself in every file it reads, and a matcher that
+    /// reports its own source is indistinguishable from one that reports
+    /// nothing.
+    ///
+    /// Splitting on the needle and reading characters up to the closing quote
+    /// keeps this free of byte offsets entirely — the workspace denies
+    /// `clippy::string_slice`, and slicing a source file (which may hold
+    /// multi-byte characters anywhere) is exactly the panic that lint exists to
+    /// prevent.
+    fn spawned_programs(source: &str) -> Vec<String> {
+        let needle = ["Command", "::new(\""].concat();
+        source
+            .split(&needle)
+            // The first chunk is whatever preceded the first spawn, so it never
+            // begins with a program name.
+            .skip(1)
+            .map(|rest| rest.chars().take_while(|c| *c != '"').collect())
+            .collect()
+    }
+
+    /// The privilege-escalation binaries `crap` must never run.
+    ///
+    /// Assembled at runtime for the same reason as the spawn needle: the
+    /// guard's vocabulary stays out of the text the guard reads, so no check
+    /// here can ever be satisfied — or defeated — by this test's own source.
+    fn escalation_binaries() -> Vec<String> {
+        vec![
+            ["su", "do"].concat(),
+            ["s", "u"].concat(),
+            ["do", "as"].concat(),
+            ["pk", "exec"].concat(),
+            ["run", "0"].concat(),
+        ]
+    }
+
+    /// Every escalation binary named as a bare word in `shell`.
+    ///
+    /// Words, not substrings: `--resume` and `sure` both contain `su`, and a
+    /// naive `contains` would report the shell function's own `claude --resume`
+    /// as an escalation. Splitting on everything that cannot be part of a
+    /// command name also catches path-qualified forms, since `/usr/bin/sudo`
+    /// tokenises to `usr`, `bin`, `sudo`.
+    fn shell_escalations(shell: &str, escalators: &[String]) -> Vec<String> {
+        shell
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|word| escalators.iter().any(|e| e == word))
+            .map(String::from)
+            .collect()
+    }
+
+    /// `crap`'s whole answer to a session it cannot read — another account's
+    /// `0o700` project directory — is *detect and guide, never escalate*. It
+    /// names the owning account and prints the `sudo -u <account> …` commands
+    /// that would recover the transcript, for the user to read, weigh, and run
+    /// themselves. It never runs one. That line is what keeps the person at the
+    /// keyboard the one who authorizes the privilege, and keeps the audit trail
+    /// pointing at them rather than at a tool that escalated quietly on their
+    /// behalf.
+    ///
+    /// Nothing in the type system holds that line, and the source now carries
+    /// the word `sudo` in guidance text, so a future edit could slide from
+    /// *printing* a command to *running* one without anyone noticing. This test
+    /// is the enforcement point. Every program the binary spawns must appear in
+    /// `ALLOWED` below — `ps`, the liveness probe in `pid_is_alive`, and `bash`,
+    /// which the shell-integration tests use to source the real function — so
+    /// adding a spawn is a deliberate act that has to edit this list, in a diff
+    /// a reviewer will see. None of them may be an escalation binary. The shell
+    /// function `--shell-setup` writes into the user's rc file is held to the
+    /// same rule: an escalation there would be `crap` escalating just as surely
+    /// as spawning one, only with the user's own shell doing it.
+    ///
+    /// Both matchers are mutation-tested against synthetic violations before
+    /// they are pointed at the real thing, because a guard that has never been
+    /// shown to fire is indistinguishable from one that is broken.
+    #[test]
+    fn crap_never_escalates_privilege_itself() {
+        let escalators = escalation_binaries();
+        let escalator = escalators[0].clone();
+
+        // Mutation test 1: a source snippet that really does spawn an
+        // escalation binary must be extracted and classified as one.
+        let needle = ["Command", "::new(\""].concat();
+        let violating_source = format!("fn oops() {{ let _ = {needle}{escalator}\").status(); }}");
+        let caught = spawned_programs(&violating_source);
+        assert_eq!(
+            caught,
+            vec![escalator.clone()],
+            "the spawn matcher must extract the program from a known violation"
+        );
+        assert!(
+            escalators.contains(&caught[0]),
+            "a known violation must classify as an escalation binary"
+        );
+
+        // Mutation test 2: the same for shell text, which is scanned by words.
+        let violating_shell = format!("function crap() {{ {escalator} -u someone claude; }}");
+        assert_eq!(
+            shell_escalations(&violating_shell, &escalators),
+            vec![escalator],
+            "the shell matcher must flag a known violation"
+        );
+
+        // The real source. `include_str!` is relative to this file, so this is
+        // the very text being compiled.
+        let programs = spawned_programs(include_str!("main.rs"));
+        assert!(
+            !programs.is_empty(),
+            "the scan found no spawns at all — `crap` does spawn `ps`, so the matcher is broken"
+        );
+
+        const ALLOWED: [&str; 2] = ["ps", "bash"];
+        for program in &programs {
+            assert!(
+                ALLOWED.contains(&program.as_str()),
+                "`crap` spawns `{program}`, which is not in the allowlist {ALLOWED:?}; \
+                 every new spawn must be added here deliberately"
+            );
+            assert!(
+                !escalators.contains(program),
+                "`crap` spawns `{program}`, a privilege-escalation binary; \
+                 `crap` detects and guides, it never escalates itself"
+            );
+        }
+
+        // The shell function installed by `--shell-setup` runs in the user's
+        // own shell, so it is held to the same rule.
+        assert!(
+            shell_escalations(SHELL_CODE, &escalators).is_empty(),
+            "the shell function installed by --shell-setup names an escalation binary: {:?}",
+            shell_escalations(SHELL_CODE, &escalators)
+        );
+    }
 }
