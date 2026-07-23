@@ -201,6 +201,26 @@ fn user_projects(users_parent: &Path, name: &str, self_name: &str) -> UserProjec
     }
 }
 
+/// Every `~/.claude/projects` root worth searching for a no-flag `crap <id>`,
+/// ordered self-first for a stable, deterministic scan.
+///
+/// The current user's own entry is always included and comes first, so a
+/// self-first search short-circuits on a session the current user already owns
+/// before ever reaching into another home — today's fast path, preserved even
+/// when the current user has never run Claude (their entry is still root zero).
+/// Sibling entries are included only when they actually have a `.claude/projects`
+/// directory (an account that never ran Claude is not a search root), and are
+/// ordered after self by account name so the result never depends on the order
+/// the filesystem happens to list the parent directory in.
+///
+/// Every input is explicit (no `home_dir()` read here) so the enumeration is
+/// tempdir-testable; the sole env-coupled caller in `main` derives `users_parent`
+/// from `home.parent()` and `self_name` from `home.file_name()`.
+fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProjects> {
+    let _ = (users_parent, self_name);
+    Vec::new()
+}
+
 /// The outcome of searching an ordered list of roots for a session id.
 #[derive(Debug)]
 enum FoundSession {
@@ -2231,6 +2251,54 @@ mod tests {
             find_session_across(&[root], SAMPLE_ID),
             FoundSession::NotFound
         ));
+    }
+
+    #[test]
+    fn enumerate_user_projects_lists_self_first_then_siblings_with_projects() {
+        // Layout under a fake `/Users` parent:
+        //   me    -> has .claude/projects (the current user)
+        //   alice -> has .claude/projects (a search root)
+        //   bob   -> has .claude/projects (a search root)
+        //   carol -> no .claude/projects  (never ran Claude -> excluded)
+        //   notes.txt -> a regular file   (not a home at all -> excluded)
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        for user in ["me", "alice", "bob"] {
+            fs::create_dir_all(parent.join(user).join(".claude").join("projects")).unwrap();
+        }
+        fs::create_dir_all(parent.join("carol")).unwrap();
+        fs::write(parent.join("notes.txt"), "x").unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        let users: Vec<&str> = roots.iter().map(|r| r.user.as_str()).collect();
+        // Self is first; the other roots follow sorted by name; carol (no
+        // projects dir) and the regular file are excluded.
+        assert_eq!(users, ["me", "alice", "bob"]);
+        // Only the self entry is marked is_self, and it points at the current
+        // user's own projects dir.
+        assert!(roots[0].is_self);
+        assert!(roots[1..].iter().all(|r| !r.is_self));
+        assert_eq!(
+            roots[0].projects_dir,
+            parent.join("me").join(".claude").join("projects")
+        );
+    }
+
+    #[test]
+    fn enumerate_user_projects_always_includes_self_even_without_a_projects_dir() {
+        // The current user is always root zero, even if they have not run Claude
+        // yet, so today's self-first fast path is preserved verbatim. A sibling
+        // that has run Claude is still discovered.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me")).unwrap(); // no .claude/projects
+        fs::create_dir_all(parent.join("alice").join(".claude").join("projects")).unwrap();
+
+        let roots = enumerate_user_projects(parent, "me");
+        assert_eq!(roots[0].user, "me");
+        assert!(roots[0].is_self);
+        assert_eq!(roots.iter().filter(|r| r.is_self).count(), 1);
+        assert!(roots.iter().any(|r| r.user == "alice" && !r.is_self));
     }
 
     #[test]
