@@ -70,6 +70,46 @@ fn plant_session(projects: &Path, project_folder: &str, id: &str, cwd: &Path) {
     .unwrap();
 }
 
+/// Writes a transcript for `id` under `<projects>/<project_folder>/` whose
+/// single assistant turn ended cleanly, so `crap --status` classifies it as
+/// `waiting-for-user` — a deterministic token to assert against, unlike the
+/// cwd-only transcript [`plant_session`] leaves (which classifies as `empty`).
+fn plant_waiting_session(projects: &Path, project_folder: &str, id: &str) {
+    let folder = projects.join(project_folder);
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join(format!("{id}.jsonl")),
+        "{\"type\":\"assistant\",\"message\":{\"stop_reason\":\"end_turn\",\
+         \"content\":[{\"type\":\"text\"}]}}\n",
+    )
+    .unwrap();
+}
+
+/// Whether any `<id>.jsonl` exists anywhere under the current user's own
+/// projects tree (`root/home/.claude/projects`).
+///
+/// `--status` is read-only, so a cross-user query must never leave a copy of the
+/// foreign transcript behind in our tree — this walks the tree to prove it.
+fn own_tree_has_session(root: &Path, id: &str) -> bool {
+    fn walk(dir: &Path, file: &str) -> bool {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if walk(&path, file) {
+                    return true;
+                }
+            } else if path.file_name().and_then(|n| n.to_str()) == Some(file) {
+                return true;
+            }
+        }
+        false
+    }
+    walk(&root.join("home/.claude/projects"), &format!("{id}.jsonl"))
+}
+
 /// Sets `dir`'s permission bits, used to make a project directory owner-only and
 /// to put it back afterwards.
 #[cfg(unix)]
@@ -786,4 +826,133 @@ fn here_user_nonexistent_account_is_invalid_not_not_found() {
         stderr.contains("ghost"),
         "must name the bad --user value: {stderr}"
     );
+}
+
+#[test]
+fn status_user_flag_reports_foreign_state() {
+    let tmp = unique_root("status-user");
+    let root = tmp.path();
+    // A readable session under sibling `other`; our own tree exists but does not
+    // hold this id.
+    let other_projects = root.join("other/.claude/projects");
+    plant_waiting_session(&other_projects, "-proj", FOREIGN_ID);
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    let foreign_path = other_projects
+        .join("-proj")
+        .join(format!("{FOREIGN_ID}.jsonl"));
+    let foreign_before = fs::read_to_string(&foreign_path).unwrap();
+
+    // `--status <id> --user other` reports the sibling session's state.
+    let out = run_crap(root, &["--status", FOREIGN_ID, "--user", "other"]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim_end(),
+        "waiting-for-user"
+    );
+
+    // Read-only: the foreign transcript is untouched and nothing was copied into
+    // our own tree — status classifies in place, it never imports or forks.
+    assert_eq!(
+        fs::read_to_string(&foreign_path).unwrap(),
+        foreign_before,
+        "the foreign transcript must be left untouched"
+    );
+    assert!(
+        !own_tree_has_session(root, FOREIGN_ID),
+        "status must not copy the foreign transcript into our own tree"
+    );
+}
+
+#[test]
+fn status_no_flag_falls_back_to_sibling_state() {
+    let tmp = unique_root("status-fallback");
+    let root = tmp.path();
+    // The session lives only under sibling `other`, and our own tree misses it.
+    let other_projects = root.join("other/.claude/projects");
+    plant_waiting_session(&other_projects, "-proj", FOREIGN_ID);
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    // No `--user`: a self-miss must fall back to the sibling home (self-first)
+    // and report the foreign session's state.
+    let out = run_crap(root, &["--status", FOREIGN_ID]);
+    assert!(
+        out.status.success(),
+        "exit {:?}, stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim_end(),
+        "waiting-for-user"
+    );
+    assert!(
+        !own_tree_has_session(root, FOREIGN_ID),
+        "a read-only status query must leave no copy behind"
+    );
+}
+
+#[test]
+fn status_no_id_stays_current_user_only() {
+    let tmp = unique_root("status-no-id");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    // A session under `other` must never surface in the no-id listing, which is
+    // scoped to the current directory under the current user's own tree. `--user`
+    // is out of scope for the no-id form, so it must not change the output at all.
+    plant_waiting_session(&root.join("other/.claude/projects"), "-proj", FOREIGN_ID);
+
+    let plain = run_crap(root, &["--status"]);
+    let with_user = run_crap(root, &["--status", "--user", "other"]);
+    assert!(
+        plain.status.success() && with_user.status.success(),
+        "no-id --status must succeed with and without --user"
+    );
+    assert_eq!(
+        plain.stdout, with_user.stdout,
+        "--user must not affect the no-id listing (it is current-user-only)"
+    );
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains(FOREIGN_ID),
+        "the no-id listing must not reach into the sibling's tree"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn status_owner_only_miss_prints_guidance() {
+    let tmp = unique_root("status-owner-only");
+    let root = tmp.path();
+    // Our own tree is empty and sibling `other` has one owner-only project
+    // folder. A `--status <id>` miss that was refused entry there owes the user
+    // the same hedged, copy-it-first guidance a resume miss does.
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    let locked = root.join("other/.claude/projects/-locked");
+    fs::create_dir_all(&locked).unwrap();
+    set_mode(&locked, 0o000);
+    // A privileged process reads straight through `0o000`, making the refusal
+    // unobservable; probe for that and skip when it happens.
+    if fs::metadata(locked.join("probe")).err().map(|e| e.kind())
+        != Some(std::io::ErrorKind::PermissionDenied)
+    {
+        set_mode(&locked, 0o755);
+        return;
+    }
+
+    let out = run_crap(root, &["--status", MISSING_ID]);
+    // Restore before asserting, so a failing assertion still leaves the TempDir
+    // removable on drop.
+    set_mode(&locked, 0o755);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(SESSION_NOT_FOUND_EXIT),
+        "stderr: {stderr}"
+    );
+    assert_owner_only_guidance(&stderr);
 }

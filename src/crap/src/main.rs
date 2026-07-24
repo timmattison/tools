@@ -4938,6 +4938,18 @@ mod tests {
     }
 
     #[test]
+    fn cli_status_user_composes() {
+        use clap::Parser;
+        // `--user` scopes a `--status <id>` query to one account, so the two must
+        // parse together alongside the id.
+        let cli = Cli::try_parse_from(["crap", "--status", SAMPLE_ID, "--user", "scyloswork"])
+            .expect("--status with --user and an id should parse");
+        assert!(cli.status);
+        assert_eq!(cli.session_id.as_deref(), Some(SAMPLE_ID));
+        assert_eq!(cli.user.as_deref(), Some("scyloswork"));
+    }
+
+    #[test]
     fn cli_user_rejected_with_shell_setup() {
         use clap::Parser;
         // Cross-user discovery makes no sense while installing the shell
