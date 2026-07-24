@@ -373,7 +373,11 @@ containers/CI).
 - gsw (git status watch)
   - Compact one-shot pretty output of branch state, designed to be wrapped by `viddy` (or `watch`)
     for a continuously refreshing dashboard. Shows branch, ahead/behind, working-tree changes, and
-    a `git log --oneline` tail. Respects `COLUMNS` and preserves colors under watch wrappers.
+    a `git log --oneline` tail. Ages use two units and get coarser as they grow — `5m23s`,
+    `2h14m`, `3d12h`, `5y6mo` — so a repo untouched for years stays readable. Respects `COLUMNS`
+    and preserves colors under watch wrappers. Nothing it prints ever wraps: the age column is
+    fixed-width by contract, and the header shrinks to fit by dropping the tracking ref's name and
+    shortening the branch, always keeping the `last commit {age} ago` tail.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —
