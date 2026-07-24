@@ -106,6 +106,9 @@ mod exit_codes {
     /// The recorded working directory exists but cannot be entered from this
     /// account.
     pub const DIRECTORY_UNREADABLE: i32 = 11;
+    /// `--user <name>` named a sibling that does not exist, or exists but has no
+    /// `.claude/projects` tree — so there is nothing for `--user` to search.
+    pub const INVALID_USER: i32 = 12;
 }
 
 /// Why a located session transcript could not be resolved to an existing
@@ -315,6 +318,118 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
         }
     }
     roots
+}
+
+/// The roots to search for `--user <name>`, or the error to print when the named
+/// account is not a resumable target.
+///
+/// `--user` narrows the search to exactly one tree, with none of the self-first
+/// fallback that rescues a no-flag miss — so a `<name>` that points at nothing
+/// has nowhere else to be found and can only ever surface as a bare "session not
+/// found". That is the wrong diagnosis: it sends the user to re-check the id when
+/// the account they typed is the thing that is wrong. Making the account check
+/// its own outcome, distinct from a session miss, is what lets `main` say so up
+/// front.
+enum UserRoots {
+    /// `<name>` resolved to a real projects tree (possibly owner-only); search it.
+    Resolved(Vec<UserProjects>),
+    /// `<name>` names no account with a `.claude/projects` tree. Carries the
+    /// accounts that DO have one, for the message.
+    Invalid {
+        /// The `--user` value that did not resolve.
+        name: String,
+        /// Accounts on this machine that have a `.claude/projects` tree, in
+        /// [`enumerate_user_projects`] order (self first, then siblings by name).
+        available: Vec<String>,
+    },
+}
+
+/// Validates a `--user <name>` target against the sibling homes, returning the
+/// single root to search or the accounts that *are* resumable when it names none.
+///
+/// A target counts as resumable exactly when `<name>/.claude/projects` is a
+/// directory — the same test [`enumerate_user_projects`] uses to decide a sibling
+/// is a search root, so `--user <self>` and `--user <sibling>` agree with the
+/// no-flag enumeration and a same-user `--user` stays a valid in-place hit.
+///
+/// The classification is deliberately four-way, mirroring
+/// [`session_dir_from_transcript`], because "the tree is not there" and "the tree
+/// is there but sealed to me" are different realities that a plain `is_dir()`
+/// (which reports `false` for a path it may not even `stat`) collapses into one
+/// wrong answer:
+///
+/// - `Ok` + directory → a real, readable tree: resolve it.
+/// - `PermissionDenied` → the tree, or an ancestor of it, is opaque to us. Only a
+///   genuine account with real data can refuse us like that, so this is a *valid*
+///   target: resolve it and let the normal search re-hit the refusal, record the
+///   owner-only skip, and print the copy-it-first guidance. Calling it "invalid"
+///   here would be a lie — the account plainly exists — and would swap the
+///   actionable owner-only remedy for a dead end.
+/// - `Ok` + not a directory (a stray file at that name), or any other error
+///   (`NotFound` and the rest) → there is no tree to search and none we were
+///   merely refused: the account is not a resumable target.
+fn resolve_user_roots(users_parent: &Path, name: &str, self_name: &str) -> UserRoots {
+    let root = user_projects(users_parent, name, self_name);
+    match std::fs::metadata(&root.projects_dir) {
+        // A real, readable projects tree: the ordinary cross-user (or same-user)
+        // target.
+        Ok(meta) if meta.is_dir() => UserRoots::Resolved(vec![root]),
+        // Refused before we could learn anything — an ancestor is owner-only.
+        // Being locked out is proof the account is real, not proof it is absent,
+        // so treat it as valid and defer to the search's owner-only handling.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            UserRoots::Resolved(vec![root])
+        }
+        // Absent, or something that is not a directory sitting at the name: no
+        // tree to search and none we were refused. Report the accounts that *are*
+        // resumable, best-effort, from the same sibling scan the no-flag path uses.
+        Ok(_) | Err(_) => UserRoots::Invalid {
+            name: name.to_string(),
+            available: enumerate_user_projects(users_parent, self_name)
+                .into_iter()
+                .map(|root| root.user)
+                .collect(),
+        },
+    }
+}
+
+/// The message body for a `--user <name>` that names no resumable account,
+/// carried as plain text with the caller colorizing the `Error:` prefix — like
+/// every other formatter in this file — so the mapping stays unit-testable
+/// without spawning a subprocess.
+///
+/// The headline names the bad `<name>`; the detail then either lists the accounts
+/// that *do* have a projects tree (one per line under the same hanging indent the
+/// other multi-account messages use) or, when none do, says so plainly rather
+/// than printing an empty list under a heading that promises entries. No `sudo`
+/// remedy appears here: this is "you named the wrong account", not "the account's
+/// data is sealed" — that guidance belongs to the owner-only path, which a
+/// `PermissionDenied` target reaches instead of this one.
+fn format_invalid_user(name: &str, available: &[String]) -> String {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix,
+    /// matching every other multi-line message in this binary.
+    const INDENT: &str = "       ";
+    /// Account names are indented one step further so they read as a list under
+    /// the heading rather than as prose.
+    const ITEM_INDENT: &str = "         ";
+
+    let mut out =
+        format!("--user '{name}' does not name an account with a Claude projects tree.\n");
+    if available.is_empty() {
+        // Nothing to point them at: neither our own tree nor any sibling home has
+        // ever run Claude, so there is no resumable account to suggest instead.
+        out.push_str(&format!(
+            "{INDENT}no account on this machine has a Claude projects tree to resume from.\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{INDENT}accounts you can resume from with --user:\n"
+        ));
+        for account in available {
+            out.push_str(&format!("{ITEM_INDENT}{account}\n"));
+        }
+    }
+    out
 }
 
 /// A project directory the scan could not enter, tagged with the account that
@@ -2086,7 +2201,25 @@ fn main() {
                 );
                 exit(exit_codes::NO_HOME_DIR);
             };
-            vec![user_projects(users_parent, name, self_name)]
+            // Validate the named account up front. `--user` searches only this one
+            // tree, so a `<name>` that resolves to nothing would otherwise miss
+            // and print a misleading "no session found" — pointing the user at the
+            // id when the account is what is wrong. Failing here, before either
+            // `run_here` or `run_resume`, also makes `--here --user <ghost>` reject
+            // for free. An owner-only tree is a *valid* target (it is a real
+            // account we are merely locked out of), so it resolves and the search's
+            // owner-only guidance handles it, not this error.
+            match resolve_user_roots(users_parent, name, self_name) {
+                UserRoots::Resolved(roots) => roots,
+                UserRoots::Invalid { name, available } => {
+                    eprint!(
+                        "{} {}",
+                        "Error:".red().bold(),
+                        format_invalid_user(&name, &available)
+                    );
+                    exit(exit_codes::INVALID_USER);
+                }
+            }
         }
     };
 
