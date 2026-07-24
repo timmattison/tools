@@ -83,8 +83,13 @@ pub fn format_age_detailed(age: Duration) -> String {
     }
     // Off the scale: keep the column honest and say so rather than print a
     // count that doesn't fit. `>` plus the widest value that still fits.
-    let digits = AGE_WIDTH - 1 - major_unit.len();
-    let saturated = 10_u64.pow(u32::try_from(digits).unwrap_or(u32::MAX)) - 1;
+    //
+    // Only the years arm can exceed AGE_WIDTH, so `major_unit` is "y" here and
+    // `digits` is AGE_WIDTH - 2 = 5 — the conversion is exact. The `0` fallback
+    // is unreachable, but keeps the field within width if the constants ever
+    // change, rather than handing `pow()` an exponent that would overflow.
+    let digits = u32::try_from(AGE_WIDTH - 1 - major_unit.len()).unwrap_or(0);
+    let saturated = 10_u64.pow(digits) - 1;
     format!(">{saturated}{major_unit}")
 }
 
