@@ -23,9 +23,17 @@
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
 //! from the last conversational turn in the transcript (or the live process's
 //! own status when one is attached) — and prints that one scriptable token.
+//! `--status <id>` gets the same cross-user discovery as a resume: it honors
+//! `--user <name>`, and with no flag falls back self-first to the sibling homes,
+//! so a session under another account is reported without any flag. Status only
+//! ever *reads* — a foreign hit is classified in place, never copied or forked,
+//! and no tree is written — and a cross-user miss that stepped over an owner-only
+//! directory prints the same copy-it-first guidance the resume forms do.
 //! Given no id, `--status` instead lists every session recorded for the current
 //! directory, each with its state and the times its transcript was started and
 //! last written (read from the transcript's own timestamps, not file mtimes).
+//! That per-directory listing is inherently the current user's, so it stays
+//! current-user-only and ignores `--user`.
 //!
 //! A session that belongs to another account is found automatically, with no
 //! flag at all: `crap <id>` searches your own tree first (the fast path,
@@ -1187,8 +1195,17 @@ fn pid_is_alive(pid: u32) -> bool {
 enum StatusError {
     /// The session id was not a valid UUID.
     InvalidSessionId,
-    /// No `<session_id>.jsonl` file was found under any project directory.
-    SessionNotFound,
+    /// No `<session_id>.jsonl` file was found under any *readable* location in
+    /// the searched roots.
+    ///
+    /// Carries the owner-only directories the cross-user scan had to step over
+    /// (see [`SkippedDir`]), so a status miss can hand back the same "it is not
+    /// anywhere I was allowed to look" guidance the resume forms do, rather than
+    /// asserting a "not on this machine" certainty an opaque directory denies it.
+    SessionNotFound {
+        /// The owner-only directories skipped while searching, in scan order.
+        skipped: Vec<SkippedDir>,
+    },
 }
 
 /// Returns the state line for a session that is open in a live `claude`
@@ -1332,19 +1349,27 @@ where
     reports
 }
 
-/// Resolves the full [`SessionStatusReport`] for a single session id.
+/// Resolves the full [`SessionStatusReport`] for a single session id, searching
+/// the given `roots` in order.
 ///
 /// Unlike the bare token, this also carries the transcript's time span, so the
 /// JSON form of `crap --status <id>` can include start/last times. A live
 /// process's status still takes precedence for the `state` field; the
 /// transcript is read (best-effort) for the times either way.
 ///
+/// Status only ever *reads*: it reports where a session left off without copying
+/// or forking, so a foreign hit under another user's root is simply classified
+/// in place. The current user's own `~/.claude/sessions` registry is the only one
+/// consulted for liveness, so a foreign session that is live in another account's
+/// process is reported from its transcript rather than as live — the registry
+/// under another home is typically unreadable anyway, and status never writes.
+///
 /// # Errors
 ///
 /// Returns [`StatusError::InvalidSessionId`] for a malformed id, or
 /// [`StatusError::SessionNotFound`] when the id is neither live nor on disk.
 fn resolve_status_report<F>(
-    projects_dir: &Path,
+    roots: &[UserProjects],
     sessions_dir: &Path,
     session_id: &str,
     is_alive: F,
@@ -1356,8 +1381,15 @@ where
         return Err(StatusError::InvalidSessionId);
     }
     let live = live_state_string(sessions_dir, session_id, is_alive);
-    let contents =
-        find_session_file(projects_dir, session_id).and_then(|f| std::fs::read_to_string(f).ok());
+    // Locate the transcript across the roots (self first, then siblings, or one
+    // sibling for `--user`), so a session under another user is reported in
+    // place. The match is only ever read here — status copies and forks nothing.
+    // A miss keeps the owner-only directories the scan stepped over, so a
+    // not-found can carry the same guidance the resume forms print.
+    let (contents, skipped) = match find_session_across(roots, session_id) {
+        FoundSession::Found { path, .. } => (std::fs::read_to_string(&path).ok(), Vec::new()),
+        FoundSession::NotFound { skipped } => (None, skipped),
+    };
     let (started, last) = contents
         .as_deref()
         .map_or((None, None), transcript_time_span);
@@ -1365,7 +1397,7 @@ where
         Some(line) => line,
         None => {
             // Not live: the transcript is the only evidence, so it must exist.
-            let contents = contents.ok_or(StatusError::SessionNotFound)?;
+            let contents = contents.ok_or(StatusError::SessionNotFound { skipped })?;
             classify_session_state(&contents).as_token().to_string()
         }
     };
@@ -1950,13 +1982,20 @@ fn run_here(
     }
 }
 
-/// Handles `crap --status <id>`: print the session's state to stdout and exit.
+/// Handles `crap --status <id> [--user <name>]`: print the session's state to
+/// stdout and exit.
 ///
-/// Prints the bare state token by default, or the full report as JSON when
-/// `json` is set.
-fn run_status(projects_dir: &Path, session_id: &str, json: bool) -> ! {
+/// The session is located across `roots` — the current user's own tree (self
+/// first, then sibling homes on a miss), or a single sibling's tree when `--user`
+/// was given — exactly like the resume forms, so a foreign session's state is
+/// reported without ever copying, forking, or writing anywhere. Prints the bare
+/// state token by default, or the full report as JSON when `json` is set. A miss
+/// goes through the shared not-found path, so an id that turned up in nothing
+/// readable while owner-only directories were skipped gets the same actionable
+/// guidance the resume forms print.
+fn run_status(roots: &[UserProjects], session_id: &str, json: bool) -> ! {
     let sessions_dir = claude_sessions_dir().unwrap_or_default();
-    match resolve_status_report(projects_dir, &sessions_dir, session_id, pid_is_alive) {
+    match resolve_status_report(roots, &sessions_dir, session_id, pid_is_alive) {
         Ok(report) => {
             if json {
                 println!("{}", format_status_json(&report));
@@ -1972,13 +2011,8 @@ fn run_status(projects_dir: &Path, session_id: &str, json: bool) -> ! {
             );
             exit(exit_codes::INVALID_SESSION_ID);
         }
-        Err(StatusError::SessionNotFound) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            eprintln!("       looked under {}", projects_dir.display());
-            exit(exit_codes::SESSION_NOT_FOUND);
+        Err(StatusError::SessionNotFound { skipped }) => {
+            exit_session_not_found(session_id, roots, &skipped);
         }
     }
 }
@@ -2152,6 +2186,63 @@ fn run_resume(
     }
 }
 
+/// Builds the ordered search roots for a session lookup, honoring `--user`.
+///
+/// This is the one place that reads the env-coupled home layout —
+/// `home.file_name()` (the current account name) and `home.parent()` (the users'
+/// parent directory) — so [`self_projects`], [`user_projects`], and
+/// [`enumerate_user_projects`] stay pure and tempdir-testable. The default
+/// resume, `--here`, and `--status <id>` all resolve their roots through here, so
+/// a cross-user source is reachable identically from every form.
+///
+/// With no `--user`, the current user's own tree is searched first and, only on a
+/// miss, every sibling home that has run Claude (self-first, so an id the current
+/// user already owns always wins and the common case never reaches another home).
+/// With `--user <name>`, only that sibling's tree is searched — the current user's
+/// is skipped, which is also how an id is disambiguated on purpose.
+///
+/// A `--user` naming no account with a `.claude/projects` tree (a typo, or an
+/// account that never ran Claude) exits with [`exit_codes::INVALID_USER`] *here*,
+/// before any lookup, so the message points at the account rather than at the id.
+/// An owner-only tree is a valid target — a real account merely sealed to us — so
+/// it resolves and the search's owner-only guidance handles it. A home with no
+/// resolvable parent/name keeps today's single-user behavior with no fallback.
+fn resolve_search_roots(home: &Path, user: Option<&str>) -> Vec<UserProjects> {
+    match user {
+        None => match (home.file_name().and_then(|n| n.to_str()), home.parent()) {
+            (Some(self_name), Some(users_parent)) => {
+                enumerate_user_projects(users_parent, self_name)
+            }
+            // A home with no resolvable parent/name (unusual): keep today's
+            // single-user behavior exactly, with no cross-user fallback.
+            _ => vec![self_projects(home)],
+        },
+        Some(name) => {
+            let (Some(self_name), Some(users_parent)) =
+                (home.file_name().and_then(|n| n.to_str()), home.parent())
+            else {
+                eprintln!(
+                    "{} could not resolve sibling users from your home {}",
+                    "Error:".red().bold(),
+                    home.display()
+                );
+                exit(exit_codes::NO_HOME_DIR);
+            };
+            match resolve_user_roots(users_parent, name, self_name) {
+                UserRoots::Resolved(roots) => roots,
+                UserRoots::Invalid { name, available } => {
+                    eprint!(
+                        "{} {}",
+                        "Error:".red().bold(),
+                        format_invalid_user(&name, &available)
+                    );
+                    exit(exit_codes::INVALID_USER);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -2176,7 +2267,15 @@ fn main() {
 
     if cli.status {
         match cli.session_id.as_deref() {
-            Some(id) => run_status(&projects_dir, id, cli.json),
+            // `--status <id>` gains the same cross-user discovery as resume: build
+            // the search roots (self-first, or one sibling for `--user`) and look
+            // the id up across them, read-only. The no-id form lists sessions for
+            // the current directory, which is inherently the current user's, so it
+            // stays self-only and ignores `--user`.
+            Some(id) => {
+                let roots = resolve_search_roots(&home, cli.user.as_deref());
+                run_status(&roots, id, cli.json);
+            }
             None => run_dir_status(&projects_dir, cli.json),
         }
     }
@@ -2187,56 +2286,12 @@ fn main() {
         .session_id
         .expect("session id is required without --shell-setup or --status");
 
-    // Build the search roots. This is the one place that reads the env-coupled
-    // home layout — `home.file_name()` (our account name) and `home.parent()`
-    // (the users' parent directory) — so `self_projects`/`user_projects` stay
-    // pure. With no `--user` we search our own tree; with `--user <name>` we
-    // search only that sibling's tree. Both `--here` and the default resume
-    // search the same roots, so a cross-user source is reachable either way.
-    let roots = match cli.user.as_deref() {
-        None => match (home.file_name().and_then(|n| n.to_str()), home.parent()) {
-            // No flag: search our own tree first, then fall back to every
-            // sibling home that has run Claude — self-first, so an id we already
-            // own always wins and the common case never reaches another home.
-            (Some(self_name), Some(users_parent)) => {
-                enumerate_user_projects(users_parent, self_name)
-            }
-            // A home with no resolvable parent/name (unusual): keep today's
-            // single-user behavior exactly, with no cross-user fallback.
-            _ => vec![self_projects(&home)],
-        },
-        Some(name) => {
-            let (Some(self_name), Some(users_parent)) =
-                (home.file_name().and_then(|n| n.to_str()), home.parent())
-            else {
-                eprintln!(
-                    "{} could not resolve sibling users from your home {}",
-                    "Error:".red().bold(),
-                    home.display()
-                );
-                exit(exit_codes::NO_HOME_DIR);
-            };
-            // Validate the named account up front. `--user` searches only this one
-            // tree, so a `<name>` that resolves to nothing would otherwise miss
-            // and print a misleading "no session found" — pointing the user at the
-            // id when the account is what is wrong. Failing here, before either
-            // `run_here` or `run_resume`, also makes `--here --user <ghost>` reject
-            // for free. An owner-only tree is a *valid* target (it is a real
-            // account we are merely locked out of), so it resolves and the search's
-            // owner-only guidance handles it, not this error.
-            match resolve_user_roots(users_parent, name, self_name) {
-                UserRoots::Resolved(roots) => roots,
-                UserRoots::Invalid { name, available } => {
-                    eprint!(
-                        "{} {}",
-                        "Error:".red().bold(),
-                        format_invalid_user(&name, &available)
-                    );
-                    exit(exit_codes::INVALID_USER);
-                }
-            }
-        }
-    };
+    // Build the search roots (self-first, or one sibling for `--user`); a bad
+    // `--user` exits here, before either `run_here` or `run_resume`, so
+    // `--here --user <ghost>` rejects for free. Both `--here` and the default
+    // resume search the same roots, so a cross-user source is reachable either
+    // way.
+    let roots = resolve_search_roots(&home, cli.user.as_deref());
 
     if cli.here {
         run_here(
@@ -3768,9 +3823,12 @@ mod tests {
         // ...but the session is live, so the live status wins for `state`.
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        let report = resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| {
-            pid == 17041
-        })
+        let report = resolve_status_report(
+            &self_root(projects.path()),
+            sessions.path(),
+            LIVE_ID,
+            |pid| pid == 17041,
+        )
         .unwrap();
         assert_eq!(report.state, "busy (live, pid 17041)");
     }
@@ -4727,8 +4785,13 @@ mod tests {
         );
         fs::write(proj.join(format!("{SAMPLE_ID}.jsonl")), line).unwrap();
 
-        let report =
-            resolve_status_report(projects.path(), sessions.path(), SAMPLE_ID, |_| false).unwrap();
+        let report = resolve_status_report(
+            &self_root(projects.path()),
+            sessions.path(),
+            SAMPLE_ID,
+            |_| false,
+        )
+        .unwrap();
         assert_eq!(report.session_id, SAMPLE_ID);
         assert_eq!(report.state, "waiting-for-user");
         assert_eq!(report.started.as_deref(), Some("2026-05-25T10:00:00.000Z"));
@@ -4741,9 +4804,12 @@ mod tests {
         let sessions = tempdir().unwrap();
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        let report = resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| {
-            pid == 17041
-        })
+        let report = resolve_status_report(
+            &self_root(projects.path()),
+            sessions.path(),
+            LIVE_ID,
+            |pid| pid == 17041,
+        )
         .unwrap();
         assert_eq!(report.state, "busy (live, pid 17041)");
     }
@@ -4752,7 +4818,7 @@ mod tests {
     fn resolve_status_report_rejects_invalid_id() {
         let dir = tempdir().unwrap();
         assert!(matches!(
-            resolve_status_report(dir.path(), dir.path(), "../escape", |_| true),
+            resolve_status_report(&self_root(dir.path()), dir.path(), "../escape", |_| true),
             Err(StatusError::InvalidSessionId)
         ));
     }
@@ -4761,9 +4827,84 @@ mod tests {
     fn resolve_status_report_errors_when_session_missing() {
         let dir = tempdir().unwrap();
         assert!(matches!(
-            resolve_status_report(dir.path(), dir.path(), SAMPLE_ID, |_| false),
-            Err(StatusError::SessionNotFound)
+            resolve_status_report(&self_root(dir.path()), dir.path(), SAMPLE_ID, |_| false),
+            Err(StatusError::SessionNotFound { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_status_report_carries_skipped_owner_only_dirs_on_a_miss() {
+        // A cross-user status miss that stepped over an owner-only project dir
+        // must carry that skip, so run_status can print the same copy-it-first
+        // guidance the resume forms do. A bare "not found" would assert a
+        // certainty an opaque directory denies the scan.
+        let self_projects = tempdir().unwrap();
+        let sibling_projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let locked = sibling_projects.path().join("-locked");
+        fs::create_dir_all(&locked).unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        let roots = vec![
+            UserProjects {
+                user: "me".to_string(),
+                projects_dir: self_projects.path().to_path_buf(),
+                is_self: true,
+            },
+            UserProjects {
+                user: "other".to_string(),
+                projects_dir: sibling_projects.path().to_path_buf(),
+                is_self: false,
+            },
+        ];
+        // Capture first, unlock second, assert last: a panic before the unlock
+        // would strand a 0o000 directory that defeats the tempdir's cleanup.
+        let result = resolve_status_report(&roots, sessions.path(), SAMPLE_ID, |_| false);
+        unlock_dir(&locked);
+
+        match result {
+            Err(StatusError::SessionNotFound { skipped }) => assert_eq!(
+                skipped,
+                vec![SkippedDir {
+                    user: "other".to_string(),
+                    dir: locked,
+                }],
+                "the miss must record the owner-only dir against the user who owns it"
+            ),
+            other => panic!("expected SessionNotFound with a skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_status_report_finds_a_session_in_a_sibling_root() {
+        // The id lives only under a *sibling* root; the current user's own tree
+        // (root zero) is empty. `--status <id>` must fall through to the sibling
+        // and report its state — reading it in place, never copying or forking.
+        let self_projects = tempdir().unwrap();
+        let sibling_projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        write_waiting_transcript(sibling_projects.path(), SAMPLE_ID);
+
+        let roots = vec![
+            UserProjects {
+                user: "me".to_string(),
+                projects_dir: self_projects.path().to_path_buf(),
+                is_self: true,
+            },
+            UserProjects {
+                user: "other".to_string(),
+                projects_dir: sibling_projects.path().to_path_buf(),
+                is_self: false,
+            },
+        ];
+
+        let report = resolve_status_report(&roots, sessions.path(), SAMPLE_ID, |_| false).unwrap();
+        assert_eq!(report.session_id, SAMPLE_ID);
+        assert_eq!(report.state, "waiting-for-user");
     }
 
     #[test]
@@ -4800,6 +4941,18 @@ mod tests {
         use clap::Parser;
         let cli =
             Cli::try_parse_from(["crap", SAMPLE_ID, "--user", "scyloswork"]).expect("should parse");
+        assert_eq!(cli.session_id.as_deref(), Some(SAMPLE_ID));
+        assert_eq!(cli.user.as_deref(), Some("scyloswork"));
+    }
+
+    #[test]
+    fn cli_status_user_composes() {
+        use clap::Parser;
+        // `--user` scopes a `--status <id>` query to one account, so the two must
+        // parse together alongside the id.
+        let cli = Cli::try_parse_from(["crap", "--status", SAMPLE_ID, "--user", "scyloswork"])
+            .expect("--status with --user and an id should parse");
+        assert!(cli.status);
         assert_eq!(cli.session_id.as_deref(), Some(SAMPLE_ID));
         assert_eq!(cli.user.as_deref(), Some("scyloswork"));
     }

@@ -359,9 +359,13 @@ containers/CI).
     prints the commands to copy the transcript over — `crap` never runs `sudo` itself.
     `--status <id>`
     reports where a session left off (`waiting-for-user`, `busy`, `awaiting-assistant`, …) without
-    resuming; `--status` with no id lists every session for the current directory (as a table, or
-    JSON with `--json`) showing each one's state and start/last times. Run `crap --shell-setup`
-    once to install the shell function.
+    resuming — and finds a session under another account the same way a resume does, honoring
+    `--user <name>` or falling back self-first, but only ever *reading* it (no copy, no fork); a
+    cross-user miss that stepped over an owner-only directory prints the same copy-it-first
+    guidance. `--status` with no id lists every session for the current directory (as a table, or
+    JSON with `--json`) showing each one's state and start/last times; that per-directory listing is
+    inherently your own, so it stays current-user-only. Run `crap --shell-setup` once to install the
+    shell function.
   - To install: `cargo install --git https://github.com/timmattison/tools crap`
 - ng (navel-gaze)
   - Watches JS/TS source files in the current directory and re-runs `pnpm lint` on change. Pass
