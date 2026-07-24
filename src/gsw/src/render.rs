@@ -1422,12 +1422,26 @@ mod tests {
 
     #[test]
     fn header_keeps_the_age_tail_when_squeezed() {
-        // Whatever else the header sheds to fit, the age survives intact.
-        let header = header_of(&snap_with_overlong_header(), &opts());
-        assert!(
-            header.ends_with("• last commit 5m23s ago"),
-            "squeezed header should still end with the age tail: {header:?}",
-        );
+        // Whatever else the header sheds to fit, the age survives intact —
+        // at every width where the tail fits on the line at all. Past the
+        // point where shaving names can pay for the overflow, the cut has to
+        // come out of the branch and the ahead-count text, not out of the
+        // one field the header exists to carry.
+        let snap = snap_with_overlong_header();
+        for terminal_width in [100, 80, 60, 45, 40] {
+            let mut o = opts();
+            o.terminal_width = terminal_width;
+            let header = header_of(&snap, &o);
+            assert!(
+                header.ends_with("• last commit 5m23s ago"),
+                "header squeezed to {terminal_width} columns dropped the age tail: {header:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= terminal_width,
+                "header is {} columns, past the {terminal_width}-column terminal: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
     }
 
     #[test]
