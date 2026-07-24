@@ -956,3 +956,26 @@ fn status_owner_only_miss_prints_guidance() {
     );
     assert_owner_only_guidance(&stderr);
 }
+
+#[test]
+fn status_user_flag_nonexistent_account_is_invalid_not_not_found() {
+    let tmp = unique_root("status-invalid-user");
+    let root = tmp.path();
+    // The `--user` account check happens in `main` (via `resolve_search_roots`)
+    // before `run_status` is dispatched, so `--status <id>` composes with it for
+    // free: naming a ghost account is invalid whether or not `--status` is
+    // present, exactly like `--here` does.
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    let out = run_crap(root, &["--status", MISSING_ID, "--user", "ghost"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(INVALID_USER_EXIT),
+        "--status <id> must still reject a --user that names no resumable account: {stderr}"
+    );
+    assert!(
+        stderr.contains("ghost"),
+        "must name the bad --user value: {stderr}"
+    );
+}
