@@ -32,6 +32,10 @@ const DIRECTORY_MISSING_EXIT: i32 = 3;
 /// re-stated rather than imported.
 #[cfg(unix)]
 const DIRECTORY_UNREADABLE_EXIT: i32 = 11;
+/// `crap`'s exit code for "`--user` named a sibling that does not exist or has
+/// no `.claude/projects` tree" (`exit_codes::INVALID_USER`), re-stated here
+/// rather than reaching into the binary's private constants.
+const INVALID_USER_EXIT: i32 = 12;
 
 // These mirror the binary's cross-user wire protocol (see `format_fork_at_output`
 // in `main.rs`); an integration test re-states the contract it is pinning rather
@@ -720,5 +724,66 @@ fn unenterable_original_dir_errors_with_the_here_escape_hatch() {
     assert!(
         stderr.contains("in the current directory instead"),
         "must say what --here does differently: {stderr}"
+    );
+}
+
+#[test]
+fn user_flag_nonexistent_account_is_invalid_not_not_found() {
+    let tmp = unique_root("invalid-user");
+    let root = tmp.path();
+    // The current user's own tree has really run Claude, so the sibling scan that
+    // builds the "accounts you could resume from" list can genuinely see `home`.
+    let self_cwd = root.join("self-cwd");
+    fs::create_dir_all(&self_cwd).unwrap();
+    plant_session(
+        &root.join("home/.claude/projects"),
+        "-proj",
+        SELF_ID,
+        &self_cwd,
+    );
+
+    // `ghost` is a sibling name with no home at all, so `<home>/../ghost` has no
+    // `.claude/projects` tree. `--user` searches only that one tree, so absent a
+    // real account the search can only miss — and a bare "no session with that
+    // id" would send the user to re-check the id when the account is what is
+    // wrong. It must instead fail up front as an invalid user.
+    let out = run_crap(root, &[MISSING_ID, "--user", "ghost"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(INVALID_USER_EXIT),
+        "a --user naming no resumable account must be INVALID_USER, not a session miss: {stderr}"
+    );
+    assert!(
+        stderr.contains("ghost"),
+        "must name the bad --user value: {stderr}"
+    );
+    // The message points at an account that genuinely has a projects tree — the
+    // current user's own — so the user learns what they *can* resume from.
+    assert!(
+        stderr.contains("home"),
+        "must list an account that does have a projects tree: {stderr}"
+    );
+}
+
+#[test]
+fn here_user_nonexistent_account_is_invalid_not_not_found() {
+    let tmp = unique_root("invalid-user-here");
+    let root = tmp.path();
+    // The `--user` account check happens in `main` before `--here` is dispatched,
+    // so `--here` composes with it for free: naming a ghost account is invalid
+    // whether or not `--here` is present.
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    let out = run_crap(root, &["--here", MISSING_ID, "--user", "ghost"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(INVALID_USER_EXIT),
+        "--here must still reject a --user that names no resumable account: {stderr}"
+    );
+    assert!(
+        stderr.contains("ghost"),
+        "must name the bad --user value: {stderr}"
     );
 }
