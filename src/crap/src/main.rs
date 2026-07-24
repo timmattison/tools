@@ -103,6 +103,9 @@ mod exit_codes {
     pub const HERE_PWD_UNAVAILABLE: i32 = 9;
     /// `--here`: the requested new session id already names a transcript.
     pub const NEW_SESSION_ID_EXISTS: i32 = 10;
+    /// The recorded working directory exists but cannot be entered from this
+    /// account.
+    pub const DIRECTORY_UNREADABLE: i32 = 11;
 }
 
 /// Why a located session transcript could not be resolved to an existing
@@ -116,6 +119,17 @@ enum ResolveError {
     NoCwdInSession,
     /// The recorded working directory no longer exists on disk.
     DirectoryMissing(PathBuf),
+    /// The recorded working directory is still there, but this account cannot
+    /// enter it — either an ancestor is opaque to us, so even asking about the
+    /// directory is refused, or the directory itself lacks the search (`x`) bit
+    /// that `cd` needs.
+    ///
+    /// Deliberately distinct from [`ResolveError::DirectoryMissing`]: we were
+    /// *refused*, not told the directory is gone. Reporting "no longer exists"
+    /// for a directory that is sitting right there sends the user hunting for
+    /// the wrong problem, and treating it as usable would hand the shell
+    /// function a `cd` that fails only after `crap` has already exited 0.
+    DirectoryUnreadable(PathBuf),
 }
 
 /// Returns `true` if `id` is a canonical UUID (`8-4-4-4-12` hex digits).
@@ -1866,6 +1880,14 @@ fn run_resume(
             eprintln!("       {}", missing.display());
             exit(exit_codes::DIRECTORY_MISSING);
         }
+        Err(ResolveError::DirectoryUnreadable(unreadable)) => {
+            eprintln!(
+                "{} the directory for session '{session_id}' cannot be entered from this account:",
+                "Error:".red().bold()
+            );
+            eprintln!("       {}", unreadable.display());
+            exit(exit_codes::DIRECTORY_UNREADABLE);
+        }
     };
 
     if root.is_self {
@@ -3129,6 +3151,35 @@ mod tests {
         match session_dir_from_transcript(&file) {
             Err(ResolveError::DirectoryMissing(path)) => assert_eq!(path, missing),
             other => panic!("expected DirectoryMissing, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_dir_from_transcript_errors_when_directory_unreadable() {
+        // A recorded cwd that still exists but cannot be entered is neither a
+        // missing directory nor a usable one. Resolving it as usable is the
+        // damaging case: `crap` would print a resume and exit 0, and the shell
+        // function's `cd` would fail afterwards, with the binary that knew
+        // better already gone.
+        let tmp = tempdir().unwrap();
+        let file = tmp.path().join(format!("{SAMPLE_ID}.jsonl"));
+        let locked = tmp.path().join("locked-cwd");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(&file, cwd_line(locked.to_str().unwrap())).unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        // Capture first, unlock second, assert last — a panic before the unlock
+        // would strand an undeletable directory inside the tempdir.
+        let resolved = session_dir_from_transcript(&file);
+        unlock_dir(&locked);
+
+        match resolved {
+            Err(ResolveError::DirectoryUnreadable(path)) => assert_eq!(path, locked),
+            other => panic!("expected DirectoryUnreadable, got {other:?}"),
         }
     }
 
