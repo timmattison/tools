@@ -1364,12 +1364,13 @@ where
         return Err(StatusError::InvalidSessionId);
     }
     let live = live_state_string(sessions_dir, session_id, is_alive);
-    // Search only the current user's own tree (root zero) for now; cross-user
-    // discovery arrives in the next slice.
-    let contents = roots
-        .first()
-        .and_then(|root| find_session_file(&root.projects_dir, session_id))
-        .and_then(|f| std::fs::read_to_string(f).ok());
+    // Locate the transcript across the roots (self first, then siblings, or one
+    // sibling for `--user`), so a session under another user is reported in
+    // place. The match is only ever read here — status copies and forks nothing.
+    let contents = match find_session_across(roots, session_id) {
+        FoundSession::Found { path, .. } => std::fs::read_to_string(&path).ok(),
+        FoundSession::NotFound { .. } => None,
+    };
     let (started, last) = contents
         .as_deref()
         .map_or((None, None), transcript_time_span);
