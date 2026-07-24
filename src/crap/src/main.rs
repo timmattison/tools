@@ -46,7 +46,22 @@
 //! `<home>/../<name>`) and skips your own entirely, which is also how you
 //! disambiguate an id on purpose. The resume itself is the same copy-and-fork.
 //! A `--user` that names your own account is a same-user hit and resumes in
-//! place as usual.
+//! place as usual. A `--user` that names no account with a `.claude/projects`
+//! tree — a typo, or an account that never ran Claude — fails up front with
+//! `INVALID_USER`, listing the accounts you *can* resume from, rather than
+//! searching a phantom tree and reporting a misleading "no session found". (An
+//! account whose tree is merely unreadable to you is real, not invalid: it
+//! resolves, and the owner-only guidance below takes over.)
+//!
+//! A cross-user default resume lands at the session's *original* recorded
+//! directory, and refuses rather than silently substituting the current one when
+//! that directory is unusable — exactly as a same-user resume already does. If
+//! the directory no longer exists the miss is `DIRECTORY_MISSING`; if it exists
+//! but cannot be entered from your account (a sealed parent, or a missing search
+//! bit) it is `DIRECTORY_UNREADABLE`, kept distinct because "gone" and "sealed"
+//! are different facts. Both point you at the escape hatch that works precisely
+//! when the recorded directory does not: `crap --here <id>` ignores it and forks
+//! in the current directory instead.
 //!
 //! Scanning another account's tree runs with exactly the privileges `crap` was
 //! invoked with, so a project directory it is refused — typically `0o700` and
@@ -103,6 +118,12 @@ mod exit_codes {
     pub const HERE_PWD_UNAVAILABLE: i32 = 9;
     /// `--here`: the requested new session id already names a transcript.
     pub const NEW_SESSION_ID_EXISTS: i32 = 10;
+    /// The recorded working directory exists but cannot be entered from this
+    /// account.
+    pub const DIRECTORY_UNREADABLE: i32 = 11;
+    /// `--user <name>` named a sibling that does not exist, or exists but has no
+    /// `.claude/projects` tree — so there is nothing for `--user` to search.
+    pub const INVALID_USER: i32 = 12;
 }
 
 /// Why a located session transcript could not be resolved to an existing
@@ -116,6 +137,17 @@ enum ResolveError {
     NoCwdInSession,
     /// The recorded working directory no longer exists on disk.
     DirectoryMissing(PathBuf),
+    /// The recorded working directory is still there, but this account cannot
+    /// enter it — either an ancestor is opaque to us, so even asking about the
+    /// directory is refused, or the directory itself lacks the search (`x`) bit
+    /// that `cd` needs.
+    ///
+    /// Deliberately distinct from [`ResolveError::DirectoryMissing`]: we were
+    /// *refused*, not told the directory is gone. Reporting "no longer exists"
+    /// for a directory that is sitting right there sends the user hunting for
+    /// the wrong problem, and treating it as usable would hand the shell
+    /// function a `cd` that fails only after `crap` has already exited 0.
+    DirectoryUnreadable(PathBuf),
 }
 
 /// Returns `true` if `id` is a canonical UUID (`8-4-4-4-12` hex digits).
@@ -301,6 +333,118 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
         }
     }
     roots
+}
+
+/// The roots to search for `--user <name>`, or the error to print when the named
+/// account is not a resumable target.
+///
+/// `--user` narrows the search to exactly one tree, with none of the self-first
+/// fallback that rescues a no-flag miss — so a `<name>` that points at nothing
+/// has nowhere else to be found and can only ever surface as a bare "session not
+/// found". That is the wrong diagnosis: it sends the user to re-check the id when
+/// the account they typed is the thing that is wrong. Making the account check
+/// its own outcome, distinct from a session miss, is what lets `main` say so up
+/// front.
+enum UserRoots {
+    /// `<name>` resolved to a real projects tree (possibly owner-only); search it.
+    Resolved(Vec<UserProjects>),
+    /// `<name>` names no account with a `.claude/projects` tree. Carries the
+    /// accounts that DO have one, for the message.
+    Invalid {
+        /// The `--user` value that did not resolve.
+        name: String,
+        /// Accounts on this machine that have a `.claude/projects` tree, in
+        /// [`enumerate_user_projects`] order (self first, then siblings by name).
+        available: Vec<String>,
+    },
+}
+
+/// Validates a `--user <name>` target against the sibling homes, returning the
+/// single root to search or the accounts that *are* resumable when it names none.
+///
+/// A target counts as resumable exactly when `<name>/.claude/projects` is a
+/// directory — the same test [`enumerate_user_projects`] uses to decide a sibling
+/// is a search root, so `--user <self>` and `--user <sibling>` agree with the
+/// no-flag enumeration and a same-user `--user` stays a valid in-place hit.
+///
+/// The classification is deliberately four-way, mirroring
+/// [`session_dir_from_transcript`], because "the tree is not there" and "the tree
+/// is there but sealed to me" are different realities that a plain `is_dir()`
+/// (which reports `false` for a path it may not even `stat`) collapses into one
+/// wrong answer:
+///
+/// - `Ok` + directory → a real, readable tree: resolve it.
+/// - `PermissionDenied` → the tree, or an ancestor of it, is opaque to us. Only a
+///   genuine account with real data can refuse us like that, so this is a *valid*
+///   target: resolve it and let the normal search re-hit the refusal, record the
+///   owner-only skip, and print the copy-it-first guidance. Calling it "invalid"
+///   here would be a lie — the account plainly exists — and would swap the
+///   actionable owner-only remedy for a dead end.
+/// - `Ok` + not a directory (a stray file at that name), or any other error
+///   (`NotFound` and the rest) → there is no tree to search and none we were
+///   merely refused: the account is not a resumable target.
+fn resolve_user_roots(users_parent: &Path, name: &str, self_name: &str) -> UserRoots {
+    let root = user_projects(users_parent, name, self_name);
+    match std::fs::metadata(&root.projects_dir) {
+        // A real, readable projects tree: the ordinary cross-user (or same-user)
+        // target.
+        Ok(meta) if meta.is_dir() => UserRoots::Resolved(vec![root]),
+        // Refused before we could learn anything — an ancestor is owner-only.
+        // Being locked out is proof the account is real, not proof it is absent,
+        // so treat it as valid and defer to the search's owner-only handling.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            UserRoots::Resolved(vec![root])
+        }
+        // Absent, or something that is not a directory sitting at the name: no
+        // tree to search and none we were refused. Report the accounts that *are*
+        // resumable, best-effort, from the same sibling scan the no-flag path uses.
+        Ok(_) | Err(_) => UserRoots::Invalid {
+            name: name.to_string(),
+            available: enumerate_user_projects(users_parent, self_name)
+                .into_iter()
+                .map(|root| root.user)
+                .collect(),
+        },
+    }
+}
+
+/// The message body for a `--user <name>` that names no resumable account,
+/// carried as plain text with the caller colorizing the `Error:` prefix — like
+/// every other formatter in this file — so the mapping stays unit-testable
+/// without spawning a subprocess.
+///
+/// The headline names the bad `<name>`; the detail then either lists the accounts
+/// that *do* have a projects tree (one per line under the same hanging indent the
+/// other multi-account messages use) or, when none do, says so plainly rather
+/// than printing an empty list under a heading that promises entries. No `sudo`
+/// remedy appears here: this is "you named the wrong account", not "the account's
+/// data is sealed" — that guidance belongs to the owner-only path, which a
+/// `PermissionDenied` target reaches instead of this one.
+fn format_invalid_user(name: &str, available: &[String]) -> String {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix,
+    /// matching every other multi-line message in this binary.
+    const INDENT: &str = "       ";
+    /// Account names are indented one step further so they read as a list under
+    /// the heading rather than as prose.
+    const ITEM_INDENT: &str = "         ";
+
+    let mut out =
+        format!("--user '{name}' does not name an account with a Claude projects tree.\n");
+    if available.is_empty() {
+        // Nothing to point them at: neither our own tree nor any sibling home has
+        // ever run Claude, so there is no resumable account to suggest instead.
+        out.push_str(&format!(
+            "{INDENT}no account on this machine has a Claude projects tree to resume from.\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{INDENT}accounts you can resume from with --user:\n"
+        ));
+        for account in available {
+            out.push_str(&format!("{ITEM_INDENT}{account}\n"));
+        }
+    }
+    out
 }
 
 /// A project directory the scan could not enter, tagged with the account that
@@ -689,21 +833,70 @@ fn classify_session_state(contents: &str) -> SessionState {
 ///
 /// The transcript's first non-empty `cwd` is taken as the working directory; the
 /// call fails if the transcript cannot be read, records no `cwd`, or names a
-/// directory that no longer exists.
+/// directory that no longer exists or cannot be entered.
+///
+/// "Gone" and "refused" are answered separately because they are separate
+/// realities, and the obvious `path.is_dir()` gets both of them wrong in a
+/// cross-user world. A directory behind an ancestor that is opaque to this
+/// account cannot even be `stat`ed, so `is_dir()` reports `false` and we would
+/// tell the user a directory that is sitting right there is gone. A directory
+/// that `stat`s fine but carries no search (`x`) bit reports `true`, so we would
+/// print a resume, exit 0, and leave the shell function's `cd` to fail with the
+/// binary that knew better already gone. `crap` must never hand the shell a
+/// directory it cannot enter, so entering is *probed* rather than inferred.
+///
+/// The probe is what `cd` itself needs and nothing more: `0o600` (readable but
+/// not searchable) is correctly unreadable, while `0o100` (searchable but not
+/// listable) is correctly usable.
 ///
 /// # Errors
 ///
 /// Returns a [`ResolveError`] when the transcript cannot be read, records no
-/// working directory, or that directory no longer exists.
+/// working directory, or names a directory that no longer exists
+/// ([`ResolveError::DirectoryMissing`]) or cannot be entered from this account
+/// ([`ResolveError::DirectoryUnreadable`]).
 fn session_dir_from_transcript(transcript: &Path) -> Result<PathBuf, ResolveError> {
     let contents =
         std::fs::read_to_string(transcript).map_err(|_| ResolveError::SessionNotFound)?;
     let cwd = extract_cwd(&contents).ok_or(ResolveError::NoCwdInSession)?;
     let path = PathBuf::from(cwd);
-    if !path.is_dir() {
-        return Err(ResolveError::DirectoryMissing(path));
+
+    match std::fs::metadata(&path) {
+        // Refused before we learned anything: an ancestor is opaque to us. Not
+        // being allowed to look is not the same as knowing there is nothing
+        // there, and only one of those two is the user's actual problem.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(ResolveError::DirectoryUnreadable(path))
+        }
+        // `NotFound`, and every other error too: none of them leaves a directory
+        // we could hand to `cd`, and "no longer exists" is the useful summary.
+        Err(_) => Err(ResolveError::DirectoryMissing(path)),
+        // Something is at that path, but it is a file, a socket, …: the recorded
+        // directory is not there any more even though the name is taken.
+        Ok(meta) if !meta.is_dir() => Err(ResolveError::DirectoryMissing(path)),
+        Ok(_) => {
+            // A successful `stat` only proves the *parent* let us look; it says
+            // nothing about whether we may enter. Resolving a path *inside* the
+            // directory does, because that is the lookup the search (`x`) bit
+            // guards — exactly the permission `cd` needs.
+            //
+            // This works because `Path::join(".")` appends a literal `.`
+            // component (Rust does not normalize it away) and `std::fs::metadata`
+            // passes the path straight to `stat(2)`, so the trailing `.` really
+            // is resolved through the directory by the kernel. Do not "simplify"
+            // this back to `metadata(&path)`: that is precisely the check that
+            // cannot tell an enterable directory from a sealed one.
+            match std::fs::metadata(path.join(".")) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    Err(ResolveError::DirectoryUnreadable(path))
+                }
+                // Either the probe succeeded, or it failed for some reason that
+                // is not a refusal — in which case we were allowed to traverse,
+                // which is all `cd` asks for.
+                _ => Ok(path),
+            }
+        }
     }
-    Ok(path)
 }
 
 /// Encodes a working directory into the project-folder name Claude Code uses
@@ -1812,6 +2005,80 @@ fn run_dir_status(projects_dir: &Path, json: bool) -> ! {
     exit(0);
 }
 
+/// What `crap` should print, and exit with, for a session it located but could
+/// not resolve to a usable working directory.
+///
+/// Bundling the three facets of one answer — headline, detail, exit code — is
+/// what keeps them from drifting: the `--here` hint is only ever true advice
+/// when the *directory* is the problem (the transcript read fine, only its cwd
+/// is gone or sealed), and welding "print the hint" to "exit `DIRECTORY_MISSING`
+/// / `DIRECTORY_UNREADABLE`" in a single value is what guarantees the two always
+/// travel together. Carried as plain text with the caller colorizing the
+/// `Error:` prefix, matching every other formatter in this file, so the mapping
+/// stays unit-testable without spawning a subprocess.
+struct ResolveFailure {
+    /// The headline, printed after the red `Error:` prefix.
+    headline: String,
+    /// The indented detail lines that follow it, already newline-terminated —
+    /// empty when there is nothing more to say.
+    detail: String,
+    /// The process exit code.
+    code: i32,
+}
+
+/// Maps a [`ResolveError`] to the failure it should produce.
+///
+/// The two directory variants carry the `crap --here <id>` escape hatch because
+/// `--here` ignores the recorded directory entirely, so it succeeds in exactly
+/// the case that just failed. The two non-directory variants deliberately do
+/// not: a transcript that could not be read, or that records no cwd at all, is
+/// not something `--here` can route around, and dangling the hint there would
+/// be a false lead. That "only the directory failures get the hint" rule lives
+/// here, in one place, precisely so it cannot be half-applied.
+fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix,
+    /// matching every other multi-line message in this binary.
+    const INDENT: &str = "       ";
+
+    // Both directory failures share one detail body: the offending path, then the
+    // escape hatch. Only the headline distinguishes "gone" from "sealed", so the
+    // shared shape is built once and the two arms supply just the headline.
+    let directory_failure = |headline: String, path: &Path, code: i32| ResolveFailure {
+        headline,
+        detail: format!(
+            "{INDENT}{}\n\
+             {INDENT}use 'crap --here {session_id}' to fork it in the current directory instead.\n",
+            path.display()
+        ),
+        code,
+    };
+
+    match err {
+        ResolveError::SessionNotFound => ResolveFailure {
+            headline: format!("no Claude session found with id '{session_id}'"),
+            detail: String::new(),
+            code: exit_codes::SESSION_NOT_FOUND,
+        },
+        ResolveError::NoCwdInSession => ResolveFailure {
+            headline: format!("session '{session_id}' has no recorded working directory"),
+            detail: String::new(),
+            code: exit_codes::NO_CWD_IN_SESSION,
+        },
+        ResolveError::DirectoryMissing(path) => directory_failure(
+            format!("the directory for session '{session_id}' no longer exists:"),
+            path,
+            exit_codes::DIRECTORY_MISSING,
+        ),
+        ResolveError::DirectoryUnreadable(path) => directory_failure(
+            format!(
+                "the directory for session '{session_id}' cannot be entered from this account:"
+            ),
+            path,
+            exit_codes::DIRECTORY_UNREADABLE,
+        ),
+    }
+}
+
 /// Handles the default resume (`crap <id> [--user X]`): locate the session
 /// across `roots`, then resume it and exit.
 ///
@@ -1844,27 +2111,16 @@ fn run_resume(
 
     let dir = match session_dir_from_transcript(&path) {
         Ok(dir) => dir,
-        Err(ResolveError::SessionNotFound) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::SESSION_NOT_FOUND);
-        }
-        Err(ResolveError::NoCwdInSession) => {
-            eprintln!(
-                "{} session '{session_id}' has no recorded working directory",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::NO_CWD_IN_SESSION);
-        }
-        Err(ResolveError::DirectoryMissing(missing)) => {
-            eprintln!(
-                "{} the directory for session '{session_id}' no longer exists:",
-                "Error:".red().bold()
-            );
-            eprintln!("       {}", missing.display());
-            exit(exit_codes::DIRECTORY_MISSING);
+        // One decision function owns which message, which detail, and which exit
+        // code every resolve failure gets; the call site only colorizes the
+        // `Error:` prefix and prints what it is handed. Keeping the mapping out of
+        // this `match` is what stops the four cases — and in particular the
+        // `--here` hint that only two of them carry — from drifting apart.
+        Err(err) => {
+            let failure = describe_resolve_error(session_id, &err);
+            eprintln!("{} {}", "Error:".red().bold(), failure.headline);
+            eprint!("{}", failure.detail);
+            exit(failure.code);
         }
     };
 
@@ -1960,7 +2216,25 @@ fn main() {
                 );
                 exit(exit_codes::NO_HOME_DIR);
             };
-            vec![user_projects(users_parent, name, self_name)]
+            // Validate the named account up front. `--user` searches only this one
+            // tree, so a `<name>` that resolves to nothing would otherwise miss
+            // and print a misleading "no session found" — pointing the user at the
+            // id when the account is what is wrong. Failing here, before either
+            // `run_here` or `run_resume`, also makes `--here --user <ghost>` reject
+            // for free. An owner-only tree is a *valid* target (it is a real
+            // account we are merely locked out of), so it resolves and the search's
+            // owner-only guidance handles it, not this error.
+            match resolve_user_roots(users_parent, name, self_name) {
+                UserRoots::Resolved(roots) => roots,
+                UserRoots::Invalid { name, available } => {
+                    eprint!(
+                        "{} {}",
+                        "Error:".red().bold(),
+                        format_invalid_user(&name, &available)
+                    );
+                    exit(exit_codes::INVALID_USER);
+                }
+            }
         }
     };
 
@@ -2878,6 +3152,155 @@ mod tests {
         assert!(roots[1..].iter().all(|r| !r.is_self));
     }
 
+    #[test]
+    fn resolve_user_roots_resolves_a_real_sibling_to_a_single_root() {
+        // A sibling with a real projects tree resolves to exactly one root — that
+        // sibling's, tagged as another user's — because `--user` searches only the
+        // named tree and never the current user's.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        let other_projects = parent.join("other").join(".claude").join("projects");
+        fs::create_dir_all(&other_projects).unwrap();
+
+        match resolve_user_roots(parent, "other", "me") {
+            UserRoots::Resolved(roots) => {
+                assert_eq!(roots.len(), 1, "--user searches only the named tree");
+                assert_eq!(roots[0].user, "other");
+                assert_eq!(roots[0].projects_dir, other_projects);
+                assert!(!roots[0].is_self);
+            }
+            UserRoots::Invalid { .. } => panic!("a real sibling tree must resolve"),
+        }
+    }
+
+    #[test]
+    fn resolve_user_roots_resolves_the_current_users_own_name_as_self() {
+        // `--user <self>` names the current account: a valid same-user target that
+        // resolves in place with `is_self` set — the pure counterpart of the
+        // `user_flag_self_resumes_in_place` integration test.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+
+        match resolve_user_roots(parent, "me", "me") {
+            UserRoots::Resolved(roots) => {
+                assert_eq!(roots.len(), 1);
+                assert_eq!(roots[0].user, "me");
+                assert!(roots[0].is_self, "--user <self> is a same-user hit");
+            }
+            UserRoots::Invalid { .. } => panic!("the current user's own tree must resolve"),
+        }
+    }
+
+    #[test]
+    fn resolve_user_roots_invalid_lists_available_accounts_for_a_ghost() {
+        // A name with no home at all under the parent names no projects tree: the
+        // result must be Invalid and carry the accounts that DO have one — self
+        // (always) plus any sibling with a `.claude/projects` dir — in
+        // enumerate_user_projects order (self first, then siblings by name).
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        fs::create_dir_all(parent.join("alice").join(".claude").join("projects")).unwrap();
+
+        match resolve_user_roots(parent, "ghost", "me") {
+            UserRoots::Invalid { name, available } => {
+                assert_eq!(
+                    name, "ghost",
+                    "carries the bad --user value for the message"
+                );
+                assert_eq!(available, vec!["me".to_string(), "alice".to_string()]);
+            }
+            UserRoots::Resolved(_) => panic!("a ghost account has no tree to resolve"),
+        }
+    }
+
+    #[test]
+    fn resolve_user_roots_invalid_when_a_real_home_never_ran_claude() {
+        // The account exists but has no `.claude/projects` tree, so there is
+        // nothing for `--user` to search: invalid, exactly like a ghost account.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        fs::create_dir_all(parent.join("bob")).unwrap(); // a home, but no projects tree
+
+        assert!(matches!(
+            resolve_user_roots(parent, "bob", "me"),
+            UserRoots::Invalid { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_user_roots_treats_an_owner_only_tree_as_a_valid_target() {
+        // The account is real and has run Claude, but its `.claude` is opaque to
+        // us, so we cannot even `stat` the projects dir. That is "locked out", not
+        // "absent": it must resolve (letting the normal search's owner-only
+        // guidance handle the refusal), never a misleading INVALID_USER.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        let claude = parent.join("other").join(".claude");
+        fs::create_dir_all(claude.join("projects")).unwrap();
+        // Sealing `.claude` makes `stat`ing `.claude/projects` fail with
+        // PermissionDenied — the exact refusal resolve_user_roots must treat as a
+        // valid, real account rather than an absent one.
+        if !lock_dir(&claude) {
+            unlock_dir(&claude);
+            return;
+        }
+        // Capture first, unlock second, assert last — a panic before the unlock
+        // would strand an undeletable directory inside the tempdir.
+        let resolved = resolve_user_roots(parent, "other", "me");
+        unlock_dir(&claude);
+
+        match resolved {
+            UserRoots::Resolved(roots) => {
+                assert_eq!(roots.len(), 1);
+                assert_eq!(roots[0].user, "other");
+                assert!(!roots[0].is_self);
+            }
+            UserRoots::Invalid { .. } => {
+                panic!("an owner-only tree is a real account, not an invalid user")
+            }
+        }
+    }
+
+    #[test]
+    fn format_invalid_user_names_the_bad_account_and_lists_the_available_ones() {
+        let msg = format_invalid_user("ghost", &["me".to_string(), "alice".to_string()]);
+        assert!(msg.contains("ghost"), "must name the bad account: {msg}");
+        // Each available account appears on its own line under the list heading.
+        assert!(
+            msg.lines().any(|l| l.trim() == "me"),
+            "must list 'me' on its own line: {msg}"
+        );
+        assert!(
+            msg.lines().any(|l| l.trim() == "alice"),
+            "must list 'alice' on its own line: {msg}"
+        );
+        // Never a sudo remedy: this is the wrong-account case, not a sealed tree.
+        assert!(
+            !msg.contains("sudo"),
+            "no sudo remedy on the invalid-user path: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_invalid_user_empty_available_reads_sensibly() {
+        // No account on the machine has a projects tree: there is nothing to list,
+        // so say so plainly rather than printing a heading over an empty list.
+        let msg = format_invalid_user("ghost", &[]);
+        assert!(msg.contains("ghost"), "still names the bad account: {msg}");
+        assert!(
+            msg.contains("no account on this machine"),
+            "must say plainly that nothing is resumable: {msg}"
+        );
+        assert!(
+            !msg.contains("accounts you can resume from"),
+            "no list heading when there is nothing to list: {msg}"
+        );
+    }
+
     /// A search root for the not-found message tests. Only `projects_dir` and
     /// how many roots there are can affect the message, so the paths are plain
     /// literals rather than tempdirs.
@@ -3130,6 +3553,123 @@ mod tests {
             Err(ResolveError::DirectoryMissing(path)) => assert_eq!(path, missing),
             other => panic!("expected DirectoryMissing, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_dir_from_transcript_errors_when_directory_unreadable() {
+        // A recorded cwd that still exists but cannot be entered is neither a
+        // missing directory nor a usable one. Resolving it as usable is the
+        // damaging case: `crap` would print a resume and exit 0, and the shell
+        // function's `cd` would fail afterwards, with the binary that knew
+        // better already gone.
+        let tmp = tempdir().unwrap();
+        let file = tmp.path().join(format!("{SAMPLE_ID}.jsonl"));
+        let locked = tmp.path().join("locked-cwd");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(&file, cwd_line(locked.to_str().unwrap())).unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        // Capture first, unlock second, assert last — a panic before the unlock
+        // would strand an undeletable directory inside the tempdir.
+        let resolved = session_dir_from_transcript(&file);
+        unlock_dir(&locked);
+
+        match resolved {
+            Err(ResolveError::DirectoryUnreadable(path)) => assert_eq!(path, locked),
+            other => panic!("expected DirectoryUnreadable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn describe_resolve_error_session_not_found_is_plain_with_no_hint() {
+        // A transcript that could not be read at all is not a problem `--here`
+        // can route around — it would fork the same unreadable session — so the
+        // hint would be a false lead. Exit code and headline only.
+        let failure = describe_resolve_error(SAMPLE_ID, &ResolveError::SessionNotFound);
+        assert_eq!(failure.code, exit_codes::SESSION_NOT_FOUND);
+        assert!(
+            failure.headline.contains(SAMPLE_ID),
+            "headline names the id: {}",
+            failure.headline
+        );
+        assert!(
+            failure.detail.is_empty(),
+            "no directory failed, so nothing points at --here: {:?}",
+            failure.detail
+        );
+    }
+
+    #[test]
+    fn describe_resolve_error_no_cwd_is_plain_with_no_hint() {
+        // A session that recorded no working directory has no directory to fork
+        // *to*, so `--here` (which forks in the current directory) is not the
+        // answer either; withholding the hint keeps it honest.
+        let failure = describe_resolve_error(SAMPLE_ID, &ResolveError::NoCwdInSession);
+        assert_eq!(failure.code, exit_codes::NO_CWD_IN_SESSION);
+        assert!(
+            !failure.detail.contains("crap --here"),
+            "a transcript with no cwd earns no --here hint: {:?}",
+            failure.detail
+        );
+    }
+
+    #[test]
+    fn describe_resolve_error_missing_directory_names_it_and_points_at_here() {
+        // A gone directory is a dead end escaped only via --here, so the failure
+        // must name the path, carry the hint keyed to this id, and select the
+        // exit code that means "gone".
+        let missing = PathBuf::from("/was/here/once");
+        let failure =
+            describe_resolve_error(SAMPLE_ID, &ResolveError::DirectoryMissing(missing.clone()));
+        assert_eq!(failure.code, exit_codes::DIRECTORY_MISSING);
+        assert!(
+            failure.detail.contains(missing.to_str().unwrap()),
+            "must name the gone directory: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains(&format!("crap --here {SAMPLE_ID}")),
+            "must hand back the escape hatch with this id: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains("in the current directory instead"),
+            "must say what --here does differently: {:?}",
+            failure.detail
+        );
+    }
+
+    #[test]
+    fn describe_resolve_error_unreadable_directory_names_it_and_points_at_here() {
+        // The harder-to-diagnose directory failure — sitting right there but
+        // sealed — is the one most in need of the hint, and selects the
+        // DIRECTORY_UNREADABLE code that distinguishes it from "gone". This is
+        // the pure test #308's acceptance criteria call for.
+        let sealed = PathBuf::from("/locked/out");
+        let failure = describe_resolve_error(
+            SAMPLE_ID,
+            &ResolveError::DirectoryUnreadable(sealed.clone()),
+        );
+        assert_eq!(failure.code, exit_codes::DIRECTORY_UNREADABLE);
+        assert!(
+            failure.detail.contains(sealed.to_str().unwrap()),
+            "must name the directory it cannot enter: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains(&format!("crap --here {SAMPLE_ID}")),
+            "must hand back the escape hatch with this id: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains("in the current directory instead"),
+            "must say what --here does differently: {:?}",
+            failure.detail
+        );
     }
 
     #[test]

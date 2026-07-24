@@ -24,6 +24,18 @@ const MISSING_ID: &str = "99999999-8888-7777-6666-555555555555";
 /// in `main.rs`); re-stated here rather than reaching into the binary's private
 /// constants.
 const SESSION_NOT_FOUND_EXIT: i32 = 1;
+/// `crap`'s exit code for "the recorded working directory no longer exists"
+/// (`exit_codes::DIRECTORY_MISSING`), re-stated here for the same reason.
+const DIRECTORY_MISSING_EXIT: i32 = 3;
+/// `crap`'s exit code for "the recorded working directory is still there but
+/// this account cannot enter it" (`exit_codes::DIRECTORY_UNREADABLE`), likewise
+/// re-stated rather than imported.
+#[cfg(unix)]
+const DIRECTORY_UNREADABLE_EXIT: i32 = 11;
+/// `crap`'s exit code for "`--user` named a sibling that does not exist or has
+/// no `.claude/projects` tree" (`exit_codes::INVALID_USER`), re-stated here
+/// rather than reaching into the binary's private constants.
+const INVALID_USER_EXIT: i32 = 12;
 
 // These mirror the binary's cross-user wire protocol (see `format_fork_at_output`
 // in `main.rs`); an integration test re-states the contract it is pinning rather
@@ -614,5 +626,164 @@ fn no_flag_prefers_self_when_id_exists_in_both_trees() {
     assert!(
         !stdout.contains(FORK_AT_SENTINEL),
         "a self hit must resume in place, not fork: {stdout}"
+    );
+}
+
+#[test]
+fn missing_original_dir_errors_with_the_here_escape_hatch() {
+    let tmp = unique_root("dir-missing");
+    let root = tmp.path();
+    // A readable sibling session whose recorded cwd was deleted since it ran.
+    // Cross-user resume forks at the *original* directory, so there is nowhere to
+    // land: `crap` must refuse rather than silently substituting the current
+    // directory. Refusing alone leaves the user stuck, though — the one command
+    // that still works is `--here`, which ignores the recorded cwd entirely, so
+    // the error has to name it. Without this the user's only route out is reading
+    // the source.
+    let gone = root.join("deleted-cwd");
+    plant_session(
+        &root.join("other/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &gone,
+    );
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    let out = run_crap(root, &[FOREIGN_ID, "--user", "other"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(DIRECTORY_MISSING_EXIT),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&gone.display().to_string()),
+        "must name the directory that is gone: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("crap --here {FOREIGN_ID}")),
+        "must hand back the escape hatch, with this session's id: {stderr}"
+    );
+    assert!(
+        stderr.contains("in the current directory instead"),
+        "must say what --here does differently: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn unenterable_original_dir_errors_with_the_here_escape_hatch() {
+    let tmp = unique_root("dir-unreadable");
+    let root = tmp.path();
+    // The other half of "there is nowhere to land": the recorded directory is
+    // sitting right there, but this account may not enter it — the sibling's
+    // session ran somewhere we are locked out of. That is a different diagnosis
+    // from "no longer exists" (exit 11, not 3), and the user is just as stuck, so
+    // it owes the same escape hatch. A regression that dropped the hint here
+    // would leave the harder-to-diagnose of the two failures as the dead end.
+    let locked = root.join("locked-cwd");
+    fs::create_dir_all(&locked).unwrap();
+    plant_session(
+        &root.join("other/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &locked,
+    );
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    set_mode(&locked, 0o000);
+    // A privileged process walks straight through `0o000`, which makes the
+    // refusal — the entire subject of this test — unobservable. Ask the
+    // filesystem the same question the binary will, rather than taking a uid
+    // dependency, and skip when the answer is not a refusal.
+    if fs::metadata(locked.join("probe")).err().map(|e| e.kind())
+        != Some(std::io::ErrorKind::PermissionDenied)
+    {
+        set_mode(&locked, 0o755);
+        return;
+    }
+
+    let out = run_crap(root, &[FOREIGN_ID, "--user", "other"]);
+    // Restore before asserting anything, so a failing assertion still leaves the
+    // TempDir removable on drop.
+    set_mode(&locked, 0o755);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(DIRECTORY_UNREADABLE_EXIT),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&locked.display().to_string()),
+        "must name the directory it cannot enter: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("crap --here {FOREIGN_ID}")),
+        "must hand back the escape hatch, with this session's id: {stderr}"
+    );
+    assert!(
+        stderr.contains("in the current directory instead"),
+        "must say what --here does differently: {stderr}"
+    );
+}
+
+#[test]
+fn user_flag_nonexistent_account_is_invalid_not_not_found() {
+    let tmp = unique_root("invalid-user");
+    let root = tmp.path();
+    // The current user's own tree has really run Claude, so the sibling scan that
+    // builds the "accounts you could resume from" list can genuinely see `home`.
+    let self_cwd = root.join("self-cwd");
+    fs::create_dir_all(&self_cwd).unwrap();
+    plant_session(
+        &root.join("home/.claude/projects"),
+        "-proj",
+        SELF_ID,
+        &self_cwd,
+    );
+
+    // `ghost` is a sibling name with no home at all, so `<home>/../ghost` has no
+    // `.claude/projects` tree. `--user` searches only that one tree, so absent a
+    // real account the search can only miss — and a bare "no session with that
+    // id" would send the user to re-check the id when the account is what is
+    // wrong. It must instead fail up front as an invalid user.
+    let out = run_crap(root, &[MISSING_ID, "--user", "ghost"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(INVALID_USER_EXIT),
+        "a --user naming no resumable account must be INVALID_USER, not a session miss: {stderr}"
+    );
+    assert!(
+        stderr.contains("ghost"),
+        "must name the bad --user value: {stderr}"
+    );
+    // The message points at an account that genuinely has a projects tree — the
+    // current user's own — so the user learns what they *can* resume from.
+    assert!(
+        stderr.contains("home"),
+        "must list an account that does have a projects tree: {stderr}"
+    );
+}
+
+#[test]
+fn here_user_nonexistent_account_is_invalid_not_not_found() {
+    let tmp = unique_root("invalid-user-here");
+    let root = tmp.path();
+    // The `--user` account check happens in `main` before `--here` is dispatched,
+    // so `--here` composes with it for free: naming a ghost account is invalid
+    // whether or not `--here` is present.
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    let out = run_crap(root, &["--here", MISSING_ID, "--user", "ghost"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(INVALID_USER_EXIT),
+        "--here must still reject a --user that names no resumable account: {stderr}"
+    );
+    assert!(
+        stderr.contains("ghost"),
+        "must name the bad --user value: {stderr}"
     );
 }

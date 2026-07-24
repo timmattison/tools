@@ -345,14 +345,16 @@ containers/CI).
   - Resume a Claude Code session from wherever you are. Given a session id, `crap` looks the
     session up under `~/.claude/projects`, recovers the directory it originally ran in, `cd`s
     there, and re-launches Claude with `--resume <id>` — preferring your `clauded` alias if you
-    have one, otherwise plain `claude`. If the original directory no longer exists it tells you
-    and stops, and it refuses to resume a session that's already open in another running process
-    (pass `--force` to override) so two processes can't corrupt the same session log. With
-    `--here` it brings the session into the *current* directory instead, resuming it as a forked
-    (new-id) session so you can carry its context into a different working tree. If the id belongs
-    to another account on the machine, `crap` finds it automatically — searching your own sessions
-    first, then other users' as a self-first fallback — and resumes a private fork of it (or target
-    a specific account with `--user <name>`). A project directory it isn't allowed to read is
+    have one, otherwise plain `claude`. If the original directory no longer exists — or exists but
+    can't be entered from your account — it tells you and stops, pointing you at `crap --here <id>`
+    to fork it where you stand instead; and it refuses to resume a session that's already open in
+    another running process (pass `--force` to override) so two processes can't corrupt the same
+    session log. With `--here` it brings the session into the *current* directory instead, resuming
+    it as a forked (new-id) session so you can carry its context into a different working tree. If
+    the id belongs to another account on the machine, `crap` finds it automatically — searching your
+    own sessions first, then other users' as a self-first fallback — and resumes a private fork of
+    it (or target a specific account with `--user <name>`, which fails up front and lists the real
+    accounts if you name one that never ran Claude). A project directory it isn't allowed to read is
     skipped rather than fatal, and if the session was hiding in one the miss names the account and
     prints the commands to copy the transcript over — `crap` never runs `sudo` itself.
     `--status <id>`
@@ -1388,6 +1390,29 @@ That is where `crap` stops. It prints the escalation for you to read, weigh, and
 
 A miss with nothing skipped is unchanged: `crap` looked everywhere it can look, so it still says plainly that no session has that id.
 
+### When the original directory is gone or sealed, or the account is wrong
+
+A cross-user resume lands you at the session's **original** recorded directory (`--here` is the exception — it deliberately ignores that directory and forks where you stand). When the original directory can't be used, `crap` refuses rather than silently dropping you in the current directory — the same contract a same-user resume has always had — and points you straight at the escape hatch that works precisely then:
+
+```text
+Error: the directory for session '57570685-…' no longer exists:
+       /Volumes/code/old-worktree
+       use 'crap --here 57570685-…' to fork it in the current directory instead.
+```
+
+There are two distinct versions of this, because "gone" and "sealed" are different facts. If the directory simply isn't there any more, that's the `no longer exists` message above (exit code `3`). If it *is* there but your account can't enter it — a parent folder you lack permission on, or the directory missing its search bit — you get `cannot be entered from this account:` instead (exit code `11`), never a silent fall-back to wherever you happened to be. Either way, `crap --here <id>` is the fix: it never touches the original directory, so it succeeds exactly when the original directory is the problem.
+
+Separately, if `--user <name>` names an account that isn't there — a typo, or a real account that has simply never run Claude — `crap` says so up front instead of searching a phantom tree and reporting a misleading "no session found". It lists the accounts you *can* resume from (exit code `12`):
+
+```text
+Error: --user 'alcie' does not name an account with a Claude projects tree.
+       accounts you can resume from with --user:
+         me
+         alice
+```
+
+An account whose projects tree merely *exists but is unreadable* to you is **not** treated as invalid — it's a real account, so `crap` resolves it and the [owner-only guidance](#when-a-project-directory-is-owner-only) above takes over (which, unlike this message, does show you the `sudo` remedy). `--user` reports a wrong *name*; owner-only reports sealed *data*.
+
 ### Don't attach twice
 
 Claude Code records every live CLI session under `~/.claude/sessions/<pid>.json` and removes it on clean exit. Before resuming, `crap` checks that registry: if the session you asked for is already open in another running `claude` process, it refuses and tells you where:
@@ -1566,6 +1591,9 @@ The binary speaks one of three output shapes. By default it prints the session i
 - `7`: The session is already running in another process (use `--force` to override)
 - `8`: `--here` or a cross-user resume (whether `--user` asked for one or the automatic fallback found it): could not import the session into the project folder (create the folder, or make the symlink for a same-user source / copy the transcript for a cross-user source)
 - `9`: `--here`: could not determine the current working directory
+- `10`: `--here`: the requested new session id already names an existing session (choose a fresh id so the fork can't overwrite it)
+- `11`: The session's original directory exists but can't be entered from this account (a sealed parent, or a missing search bit) — use `crap --here <id>` to fork it in the current directory instead
+- `12`: `--user <name>` named no account with a `.claude/projects` tree (a typo, or an account that never ran Claude); the message lists the accounts you can resume from
 
 ## bm (bulk move)
 
