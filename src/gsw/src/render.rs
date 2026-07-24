@@ -1147,6 +1147,45 @@ mod tests {
         );
     }
 
+    /// An age old enough to overflow the pre-years age format: `2015d12h`
+    /// is eight columns, two more than the field used to reserve.
+    fn ancient() -> Duration {
+        Duration::from_secs(2015 * 24 * 60 * 60 + 12 * 60 * 60)
+    }
+
+    #[test]
+    fn no_line_exceeds_the_terminal_width_when_the_repo_is_ancient() {
+        // Regression: on a repo untouched for years every age rendered as
+        // `2015d12h`, two columns wider than the age field. Because the age
+        // is the last thing on the line, those two columns spilled past the
+        // terminal edge and wrapped onto the next row, shearing the display.
+        // Nothing gsw prints may be wider than the terminal.
+        let mut stale_file = entry("src/main.rs", FileStatus::Modified, false, 12, 3);
+        stale_file.age = Some(ancient());
+        let mut stale_untracked = entry("scratch/notes.txt", FileStatus::Untracked, false, 0, 0);
+        stale_untracked.age = Some(ancient());
+
+        let mut snap = snap_with(vec![stale_file, stale_untracked]);
+        snap.last_commit_age = Some(ancient());
+        snap.log = vec![LogEntry {
+            hash: "52ef922".into(),
+            subject: "an old commit that has been sitting here for a very long time".into(),
+            age: ancient(),
+        }];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        for line in out.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= o.terminal_width,
+                "line is {} columns wide, past the {}-column terminal — it will wrap:\n  {line:?}",
+                UnicodeWidthStr::width(line),
+                o.terminal_width,
+            );
+        }
+    }
+
     #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));

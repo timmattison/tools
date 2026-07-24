@@ -15,6 +15,15 @@ pub enum AgeDim {
     Stale,
 }
 
+/// Maximum display width, in terminal columns, of any string
+/// [`format_age_detailed`] can return.
+///
+/// The age column is a fixed-width field, so this is a hard contract rather
+/// than a hint: a single column of overflow pushes the row past the terminal
+/// width and wraps its tail onto the next line. Every age — including ages
+/// derived from corrupt commit timestamps — must fit.
+pub const AGE_WIDTH: usize = 7;
+
 /// Format a duration with two units, e.g. `5m23s`, `2h14m`, `3d12h`.
 pub fn format_age_detailed(age: Duration) -> String {
     let secs = age.as_secs();
@@ -124,6 +133,93 @@ mod tests {
             format_age_detailed(Duration::from_secs(3 * 86400 + 12 * 3600)),
             "3d12h",
         );
+    }
+
+    /// Durations in the units the assertions below are written in. Kept
+    /// deliberately independent of the formatter's own constants so a wrong
+    /// constant in the implementation shows up as a failing expectation
+    /// rather than cancelling itself out.
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    #[test]
+    fn detailed_age_years_and_months() {
+        // A repo untouched since early 2021 used to render as `2015d12h` —
+        // a four-digit day count nobody can convert in their head, and two
+        // columns wider than the age field. Years and months read at a
+        // glance and fit.
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(2015 * DAY + 12 * HOUR)),
+            "5y6mo",
+        );
+        // 700d = 1 Julian year (365.25d) + 334.75d, i.e. 10 whole months.
+        assert_eq!(format_age_detailed(Duration::from_secs(700 * DAY)), "1y10mo");
+    }
+
+    #[test]
+    fn detailed_age_switches_from_days_to_years_at_one_year() {
+        // A Julian year is 365.25 days, so 365d is still the day/hour pair
+        // and the first full year lands just past it.
+        assert_eq!(format_age_detailed(Duration::from_secs(365 * DAY)), "365d0h");
+        assert_eq!(format_age_detailed(Duration::from_secs(366 * DAY)), "1y0mo");
+    }
+
+    #[test]
+    fn detailed_age_keeps_both_units_out_to_ninety_nine_years() {
+        // The month remainder tops out at 11, so two-digit years still leave
+        // room for both units. `10y11mo` is the widest two-unit form.
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(10 * 31_557_600 + 11 * 2_629_800)),
+            "10y11mo",
+        );
+    }
+
+    #[test]
+    fn detailed_age_drops_the_minor_unit_rather_than_overflow() {
+        // Past 99 years the pair no longer fits the field. Dropping the
+        // months keeps the column honest; overflowing it would wrap the row.
+        let secs = 150 * 31_557_600 + 11 * 2_629_800;
+        assert_eq!(format_age_detailed(Duration::from_secs(secs)), "150y");
+    }
+
+    #[test]
+    fn detailed_age_saturates_on_an_implausible_timestamp() {
+        // A corrupt commit date can hand us an age of geologic proportions.
+        // It still has to fit the column, so it saturates with a `>` marker
+        // instead of printing all thirteen digits.
+        assert_eq!(format_age_detailed(Duration::from_secs(u64::MAX)), ">99999y");
+    }
+
+    #[test]
+    fn detailed_age_never_exceeds_the_age_column() {
+        // The contract behind AGE_WIDTH: no age, however old or however
+        // corrupt its timestamp, may be wider than the field it is printed
+        // into. Sweep every second through the first two hours (where the
+        // seconds/minutes forms live), then coarser steps out past 500 years,
+        // using odd strides so every digit-count regime gets sampled.
+        let check = |secs: u64| {
+            let formatted = format_age_detailed(Duration::from_secs(secs));
+            assert!(
+                formatted.chars().count() <= AGE_WIDTH,
+                "age {secs}s formatted as {formatted:?} ({} columns), wider than the \
+                 {AGE_WIDTH}-column age field — this wraps the row it sits in",
+                formatted.chars().count(),
+            );
+        };
+        for secs in 0..2 * HOUR {
+            check(secs);
+        }
+        for secs in (0..2 * 366 * DAY).step_by(59 * MINUTE as usize + 1) {
+            check(secs);
+        }
+        for secs in (0..500 * 366 * DAY).step_by(13 * HOUR as usize + 7) {
+            check(secs);
+        }
+        // The extremes, which no stride is guaranteed to land on.
+        for secs in [u64::MAX, u64::MAX - 1, 999_999 * 31_557_600] {
+            check(secs);
+        }
     }
 
     #[test]
