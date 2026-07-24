@@ -1190,6 +1190,144 @@ mod tests {
         }
     }
 
+    /// A branch name far too long for an 80-column header, with a
+    /// distinguishing tail so middle-truncation is visible.
+    const LONG_BRANCH: &str = "feature/really-long-branch-name-that-goes-on-forever";
+
+    /// A snapshot whose header cannot possibly fit: long branch, long
+    /// tracking ref, and a behind segment on top.
+    fn snap_with_overlong_header() -> Snapshot {
+        let mut snap = snap_with(vec![]);
+        snap.branch = LONG_BRANCH.into();
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LONG_BRANCH}"),
+            ahead: 2,
+            behind: 0,
+        });
+        snap
+    }
+
+    /// The header line of a rendered frame, ANSI stripped.
+    fn header_of(snap: &Snapshot, opts: &RenderOptions) -> String {
+        strip_ansi(&render(snap, opts))
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn header_never_exceeds_the_terminal_width() {
+        // The header is the one line gsw draws as free text, so a long branch
+        // or tracking-ref name used to run straight past the terminal edge —
+        // dropping the `last commit {age} ago` tail, the very thing the eye
+        // goes to, onto a second line.
+        let header = header_of(&snap_with_overlong_header(), &opts());
+        assert!(
+            UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
+            "header is {} columns wide, past the {}-column terminal:\n  {header:?}",
+            UnicodeWidthStr::width(header.as_str()),
+            opts().terminal_width,
+        );
+    }
+
+    #[test]
+    fn header_keeps_the_age_tail_when_squeezed() {
+        // Whatever else the header sheds to fit, the age survives intact.
+        let header = header_of(&snap_with_overlong_header(), &opts());
+        assert!(
+            header.ends_with("• last commit 5m23s ago"),
+            "squeezed header should still end with the age tail: {header:?}",
+        );
+    }
+
+    #[test]
+    fn header_truncates_the_branch_from_the_middle() {
+        // Branch names share long prefixes (`feature/…`) and carry the part
+        // that identifies them at the end, so a squeezed name keeps both ends
+        // rather than either alone.
+        let header = header_of(&snap_with_overlong_header(), &opts());
+        assert!(
+            header.contains("feature") && header.contains("forever"),
+            "truncated branch should keep both ends: {header:?}",
+        );
+        assert!(
+            header.contains('…'),
+            "truncated branch should be marked with an ellipsis: {header:?}",
+        );
+    }
+
+    #[test]
+    fn header_sheds_the_upstream_name_before_shaving_the_branch() {
+        // The tracking ref's name is almost always `origin/{branch}` — pure
+        // duplication — so it goes first. The ahead/behind counts are small
+        // and actionable, so they stay, and a branch name that fits is left
+        // untouched.
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LONG_BRANCH}"),
+            ahead: 2,
+            behind: 1,
+        });
+        let header = header_of(&snap, &opts());
+        assert!(
+            !header.contains(LONG_BRANCH),
+            "the redundant tracking-ref name should be the first thing dropped: {header:?}",
+        );
+        assert!(
+            header.contains("↑2 ↓1"),
+            "the ahead/behind counts should survive the name being dropped: {header:?}",
+        );
+        assert!(
+            header.contains("gsw • gsv •") && !header.contains('…'),
+            "a branch that already fits should not be truncated: {header:?}",
+        );
+    }
+
+    #[test]
+    fn header_fits_a_multibyte_branch_name() {
+        // Double-width glyphs cost two columns each while counting as one
+        // char, so a fitting routine that measures chars instead of columns
+        // overflows here — and one that slices bytes panics outright.
+        let mut snap = snap_with_overlong_header();
+        snap.branch = "feature/日本語のとても長い名前のブランチ/forever".into();
+        let header = header_of(&snap, &opts());
+        assert!(
+            UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
+            "header with double-width glyphs is {} columns, past the {}-column terminal:\n  {header:?}",
+            UnicodeWidthStr::width(header.as_str()),
+            opts().terminal_width,
+        );
+    }
+
+    #[test]
+    fn no_line_exceeds_a_very_narrow_terminal() {
+        // Past the point where shedding fields and shaving names can help,
+        // the header and the operation line are cut rather than allowed to
+        // spill. A 30-column terminal is well past that point.
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 87;
+        snap.operation = Some(Operation::Rebase {
+            step: Some(StepProgress {
+                current: 3,
+                total: 10,
+            }),
+            conflicts: 12,
+        });
+        let mut o = opts();
+        o.terminal_width = 30;
+
+        let out = strip_ansi(&render(&snap, &o));
+        for line in out.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= o.terminal_width,
+                "line is {} columns wide, past the {}-column terminal — it will wrap:\n  {line:?}",
+                UnicodeWidthStr::width(line),
+                o.terminal_width,
+            );
+        }
+    }
+
     #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
