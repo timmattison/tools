@@ -1187,8 +1187,17 @@ fn pid_is_alive(pid: u32) -> bool {
 enum StatusError {
     /// The session id was not a valid UUID.
     InvalidSessionId,
-    /// No `<session_id>.jsonl` file was found under any project directory.
-    SessionNotFound,
+    /// No `<session_id>.jsonl` file was found under any *readable* location in
+    /// the searched roots.
+    ///
+    /// Carries the owner-only directories the cross-user scan had to step over
+    /// (see [`SkippedDir`]), so a status miss can hand back the same "it is not
+    /// anywhere I was allowed to look" guidance the resume forms do, rather than
+    /// asserting a "not on this machine" certainty an opaque directory denies it.
+    SessionNotFound {
+        /// The owner-only directories skipped while searching, in scan order.
+        skipped: Vec<SkippedDir>,
+    },
 }
 
 /// Returns the state line for a session that is open in a live `claude`
@@ -1378,7 +1387,9 @@ where
         Some(line) => line,
         None => {
             // Not live: the transcript is the only evidence, so it must exist.
-            let contents = contents.ok_or(StatusError::SessionNotFound)?;
+            let contents = contents.ok_or(StatusError::SessionNotFound {
+                skipped: Vec::new(),
+            })?;
             classify_session_state(&contents).as_token().to_string()
         }
     };
@@ -1992,7 +2003,7 @@ fn run_status(roots: &[UserProjects], session_id: &str, json: bool) -> ! {
             );
             exit(exit_codes::INVALID_SESSION_ID);
         }
-        Err(StatusError::SessionNotFound) => {
+        Err(StatusError::SessionNotFound { .. }) => {
             exit_session_not_found(session_id, roots, &[]);
         }
     }
@@ -4809,8 +4820,55 @@ mod tests {
         let dir = tempdir().unwrap();
         assert!(matches!(
             resolve_status_report(&self_root(dir.path()), dir.path(), SAMPLE_ID, |_| false),
-            Err(StatusError::SessionNotFound)
+            Err(StatusError::SessionNotFound { .. })
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_status_report_carries_skipped_owner_only_dirs_on_a_miss() {
+        // A cross-user status miss that stepped over an owner-only project dir
+        // must carry that skip, so run_status can print the same copy-it-first
+        // guidance the resume forms do. A bare "not found" would assert a
+        // certainty an opaque directory denies the scan.
+        let self_projects = tempdir().unwrap();
+        let sibling_projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        let locked = sibling_projects.path().join("-locked");
+        fs::create_dir_all(&locked).unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        let roots = vec![
+            UserProjects {
+                user: "me".to_string(),
+                projects_dir: self_projects.path().to_path_buf(),
+                is_self: true,
+            },
+            UserProjects {
+                user: "other".to_string(),
+                projects_dir: sibling_projects.path().to_path_buf(),
+                is_self: false,
+            },
+        ];
+        // Capture first, unlock second, assert last: a panic before the unlock
+        // would strand a 0o000 directory that defeats the tempdir's cleanup.
+        let result = resolve_status_report(&roots, sessions.path(), SAMPLE_ID, |_| false);
+        unlock_dir(&locked);
+
+        match result {
+            Err(StatusError::SessionNotFound { skipped }) => assert_eq!(
+                skipped,
+                vec![SkippedDir {
+                    user: "other".to_string(),
+                    dir: locked,
+                }],
+                "the miss must record the owner-only dir against the user who owns it"
+            ),
+            other => panic!("expected SessionNotFound with a skip, got {other:?}"),
+        }
     }
 
     #[test]
