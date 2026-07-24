@@ -46,7 +46,22 @@
 //! `<home>/../<name>`) and skips your own entirely, which is also how you
 //! disambiguate an id on purpose. The resume itself is the same copy-and-fork.
 //! A `--user` that names your own account is a same-user hit and resumes in
-//! place as usual.
+//! place as usual. A `--user` that names no account with a `.claude/projects`
+//! tree — a typo, or an account that never ran Claude — fails up front with
+//! `INVALID_USER`, listing the accounts you *can* resume from, rather than
+//! searching a phantom tree and reporting a misleading "no session found". (An
+//! account whose tree is merely unreadable to you is real, not invalid: it
+//! resolves, and the owner-only guidance below takes over.)
+//!
+//! A cross-user default resume lands at the session's *original* recorded
+//! directory, and refuses rather than silently substituting the current one when
+//! that directory is unusable — exactly as a same-user resume already does. If
+//! the directory no longer exists the miss is `DIRECTORY_MISSING`; if it exists
+//! but cannot be entered from your account (a sealed parent, or a missing search
+//! bit) it is `DIRECTORY_UNREADABLE`, kept distinct because "gone" and "sealed"
+//! are different facts. Both point you at the escape hatch that works precisely
+//! when the recorded directory does not: `crap --here <id>` ignores it and forks
+//! in the current directory instead.
 //!
 //! Scanning another account's tree runs with exactly the privileges `crap` was
 //! invoked with, so a project directory it is refused — typically `0o700` and
