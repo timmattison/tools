@@ -1875,6 +1875,80 @@ fn run_dir_status(projects_dir: &Path, json: bool) -> ! {
     exit(0);
 }
 
+/// What `crap` should print, and exit with, for a session it located but could
+/// not resolve to a usable working directory.
+///
+/// Bundling the three facets of one answer — headline, detail, exit code — is
+/// what keeps them from drifting: the `--here` hint is only ever true advice
+/// when the *directory* is the problem (the transcript read fine, only its cwd
+/// is gone or sealed), and welding "print the hint" to "exit `DIRECTORY_MISSING`
+/// / `DIRECTORY_UNREADABLE`" in a single value is what guarantees the two always
+/// travel together. Carried as plain text with the caller colorizing the
+/// `Error:` prefix, matching every other formatter in this file, so the mapping
+/// stays unit-testable without spawning a subprocess.
+struct ResolveFailure {
+    /// The headline, printed after the red `Error:` prefix.
+    headline: String,
+    /// The indented detail lines that follow it, already newline-terminated —
+    /// empty when there is nothing more to say.
+    detail: String,
+    /// The process exit code.
+    code: i32,
+}
+
+/// Maps a [`ResolveError`] to the failure it should produce.
+///
+/// The two directory variants carry the `crap --here <id>` escape hatch because
+/// `--here` ignores the recorded directory entirely, so it succeeds in exactly
+/// the case that just failed. The two non-directory variants deliberately do
+/// not: a transcript that could not be read, or that records no cwd at all, is
+/// not something `--here` can route around, and dangling the hint there would
+/// be a false lead. That "only the directory failures get the hint" rule lives
+/// here, in one place, precisely so it cannot be half-applied.
+fn describe_resolve_error(session_id: &str, err: &ResolveError) -> ResolveFailure {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix,
+    /// matching every other multi-line message in this binary.
+    const INDENT: &str = "       ";
+
+    // Both directory failures share one detail body: the offending path, then the
+    // escape hatch. Only the headline distinguishes "gone" from "sealed", so the
+    // shared shape is built once and the two arms supply just the headline.
+    let directory_failure = |headline: String, path: &Path, code: i32| ResolveFailure {
+        headline,
+        detail: format!(
+            "{INDENT}{}\n\
+             {INDENT}use 'crap --here {session_id}' to fork it in the current directory instead.\n",
+            path.display()
+        ),
+        code,
+    };
+
+    match err {
+        ResolveError::SessionNotFound => ResolveFailure {
+            headline: format!("no Claude session found with id '{session_id}'"),
+            detail: String::new(),
+            code: exit_codes::SESSION_NOT_FOUND,
+        },
+        ResolveError::NoCwdInSession => ResolveFailure {
+            headline: format!("session '{session_id}' has no recorded working directory"),
+            detail: String::new(),
+            code: exit_codes::NO_CWD_IN_SESSION,
+        },
+        ResolveError::DirectoryMissing(path) => directory_failure(
+            format!("the directory for session '{session_id}' no longer exists:"),
+            path,
+            exit_codes::DIRECTORY_MISSING,
+        ),
+        ResolveError::DirectoryUnreadable(path) => directory_failure(
+            format!(
+                "the directory for session '{session_id}' cannot be entered from this account:"
+            ),
+            path,
+            exit_codes::DIRECTORY_UNREADABLE,
+        ),
+    }
+}
+
 /// Handles the default resume (`crap <id> [--user X]`): locate the session
 /// across `roots`, then resume it and exit.
 ///
@@ -1907,47 +1981,16 @@ fn run_resume(
 
     let dir = match session_dir_from_transcript(&path) {
         Ok(dir) => dir,
-        Err(ResolveError::SessionNotFound) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::SESSION_NOT_FOUND);
-        }
-        Err(ResolveError::NoCwdInSession) => {
-            eprintln!(
-                "{} session '{session_id}' has no recorded working directory",
-                "Error:".red().bold()
-            );
-            exit(exit_codes::NO_CWD_IN_SESSION);
-        }
-        Err(ResolveError::DirectoryMissing(missing)) => {
-            eprintln!(
-                "{} the directory for session '{session_id}' no longer exists:",
-                "Error:".red().bold()
-            );
-            eprintln!("       {}", missing.display());
-            // `--here` ignores the recorded directory altogether, so it succeeds
-            // in exactly the case that just failed. Refusing without naming it
-            // leaves the user with a dead end they can only escape by reading
-            // the source.
-            eprintln!(
-                "       use 'crap --here {session_id}' to fork it in the current directory instead."
-            );
-            exit(exit_codes::DIRECTORY_MISSING);
-        }
-        Err(ResolveError::DirectoryUnreadable(unreadable)) => {
-            eprintln!(
-                "{} the directory for session '{session_id}' cannot be entered from this account:",
-                "Error:".red().bold()
-            );
-            eprintln!("       {}", unreadable.display());
-            // Same dead end, same way out: `--here` never touches the recorded
-            // directory, so being locked out of it does not stop the fork.
-            eprintln!(
-                "       use 'crap --here {session_id}' to fork it in the current directory instead."
-            );
-            exit(exit_codes::DIRECTORY_UNREADABLE);
+        // One decision function owns which message, which detail, and which exit
+        // code every resolve failure gets; the call site only colorizes the
+        // `Error:` prefix and prints what it is handed. Keeping the mapping out of
+        // this `match` is what stops the four cases — and in particular the
+        // `--here` hint that only two of them carry — from drifting apart.
+        Err(err) => {
+            let failure = describe_resolve_error(session_id, &err);
+            eprintln!("{} {}", "Error:".red().bold(), failure.headline);
+            eprint!("{}", failure.detail);
+            exit(failure.code);
         }
     };
 
@@ -3242,6 +3285,94 @@ mod tests {
             Err(ResolveError::DirectoryUnreadable(path)) => assert_eq!(path, locked),
             other => panic!("expected DirectoryUnreadable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn describe_resolve_error_session_not_found_is_plain_with_no_hint() {
+        // A transcript that could not be read at all is not a problem `--here`
+        // can route around — it would fork the same unreadable session — so the
+        // hint would be a false lead. Exit code and headline only.
+        let failure = describe_resolve_error(SAMPLE_ID, &ResolveError::SessionNotFound);
+        assert_eq!(failure.code, exit_codes::SESSION_NOT_FOUND);
+        assert!(
+            failure.headline.contains(SAMPLE_ID),
+            "headline names the id: {}",
+            failure.headline
+        );
+        assert!(
+            failure.detail.is_empty(),
+            "no directory failed, so nothing points at --here: {:?}",
+            failure.detail
+        );
+    }
+
+    #[test]
+    fn describe_resolve_error_no_cwd_is_plain_with_no_hint() {
+        // A session that recorded no working directory has no directory to fork
+        // *to*, so `--here` (which forks in the current directory) is not the
+        // answer either; withholding the hint keeps it honest.
+        let failure = describe_resolve_error(SAMPLE_ID, &ResolveError::NoCwdInSession);
+        assert_eq!(failure.code, exit_codes::NO_CWD_IN_SESSION);
+        assert!(
+            !failure.detail.contains("crap --here"),
+            "a transcript with no cwd earns no --here hint: {:?}",
+            failure.detail
+        );
+    }
+
+    #[test]
+    fn describe_resolve_error_missing_directory_names_it_and_points_at_here() {
+        // A gone directory is a dead end escaped only via --here, so the failure
+        // must name the path, carry the hint keyed to this id, and select the
+        // exit code that means "gone".
+        let missing = PathBuf::from("/was/here/once");
+        let failure =
+            describe_resolve_error(SAMPLE_ID, &ResolveError::DirectoryMissing(missing.clone()));
+        assert_eq!(failure.code, exit_codes::DIRECTORY_MISSING);
+        assert!(
+            failure.detail.contains(missing.to_str().unwrap()),
+            "must name the gone directory: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains(&format!("crap --here {SAMPLE_ID}")),
+            "must hand back the escape hatch with this id: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains("in the current directory instead"),
+            "must say what --here does differently: {:?}",
+            failure.detail
+        );
+    }
+
+    #[test]
+    fn describe_resolve_error_unreadable_directory_names_it_and_points_at_here() {
+        // The harder-to-diagnose directory failure — sitting right there but
+        // sealed — is the one most in need of the hint, and selects the
+        // DIRECTORY_UNREADABLE code that distinguishes it from "gone". This is
+        // the pure test #308's acceptance criteria call for.
+        let sealed = PathBuf::from("/locked/out");
+        let failure = describe_resolve_error(
+            SAMPLE_ID,
+            &ResolveError::DirectoryUnreadable(sealed.clone()),
+        );
+        assert_eq!(failure.code, exit_codes::DIRECTORY_UNREADABLE);
+        assert!(
+            failure.detail.contains(sealed.to_str().unwrap()),
+            "must name the directory it cannot enter: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains(&format!("crap --here {SAMPLE_ID}")),
+            "must hand back the escape hatch with this id: {:?}",
+            failure.detail
+        );
+        assert!(
+            failure.detail.contains("in the current directory instead"),
+            "must say what --here does differently: {:?}",
+            failure.detail
+        );
     }
 
     #[test]
