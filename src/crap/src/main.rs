@@ -1376,9 +1376,11 @@ where
     // Locate the transcript across the roots (self first, then siblings, or one
     // sibling for `--user`), so a session under another user is reported in
     // place. The match is only ever read here — status copies and forks nothing.
-    let contents = match find_session_across(roots, session_id) {
-        FoundSession::Found { path, .. } => std::fs::read_to_string(&path).ok(),
-        FoundSession::NotFound { .. } => None,
+    // A miss keeps the owner-only directories the scan stepped over, so a
+    // not-found can carry the same guidance the resume forms print.
+    let (contents, skipped) = match find_session_across(roots, session_id) {
+        FoundSession::Found { path, .. } => (std::fs::read_to_string(&path).ok(), Vec::new()),
+        FoundSession::NotFound { skipped } => (None, skipped),
     };
     let (started, last) = contents
         .as_deref()
@@ -1387,9 +1389,7 @@ where
         Some(line) => line,
         None => {
             // Not live: the transcript is the only evidence, so it must exist.
-            let contents = contents.ok_or(StatusError::SessionNotFound {
-                skipped: Vec::new(),
-            })?;
+            let contents = contents.ok_or(StatusError::SessionNotFound { skipped })?;
             classify_session_state(&contents).as_token().to_string()
         }
     };
@@ -2003,8 +2003,8 @@ fn run_status(roots: &[UserProjects], session_id: &str, json: bool) -> ! {
             );
             exit(exit_codes::INVALID_SESSION_ID);
         }
-        Err(StatusError::SessionNotFound { .. }) => {
-            exit_session_not_found(session_id, roots, &[]);
+        Err(StatusError::SessionNotFound { skipped }) => {
+            exit_session_not_found(session_id, roots, &skipped);
         }
     }
 }
