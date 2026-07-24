@@ -308,21 +308,28 @@ impl HeaderSegments {
             + UnicodeWidthStr::width(self.suffix.as_str())
     }
 
-    /// Cut the line down to `width` columns, tail first.
+    /// Cut the line down to `width` columns, reserving the age tail.
     ///
     /// The ladder in [`header_segments`] normally lands inside the terminal
     /// without reaching this; it is the backstop for widths so narrow that
     /// even floored names don't fit, where something has to give. A cut line
     /// beats a wrapped one: wrapping shifts every row below it.
+    ///
+    /// What gives is the identity text — the branch name and the ahead-count
+    /// clause — because the `last commit {age} ago` tail is the field the
+    /// header exists to carry. Only a terminal too narrow for the tail alone
+    /// cuts into the tail itself.
     fn clamp(self, width: usize) -> Self {
-        let prefix = truncate_to_budget(&self.prefix, width);
-        let mut left = width - UnicodeWidthStr::width(prefix.as_str());
-        let behind = self.behind.map(|seg| {
-            let cut = truncate_to_budget(&seg, left);
-            left -= UnicodeWidthStr::width(cut.as_str());
-            cut
-        });
-        let suffix = truncate_to_budget(&self.suffix, left);
+        let suffix = truncate_to_budget(&self.suffix, width);
+        let identity_budget = width - UnicodeWidthStr::width(suffix.as_str());
+        let prefix = truncate_to_budget(&self.prefix, identity_budget);
+        let left = identity_budget - UnicodeWidthStr::width(prefix.as_str());
+        // A cut prefix ends mid-phrase, and `, 87 behind` hanging off an
+        // ellipsis reads as nonsense — so the segment survives whole or not
+        // at all.
+        let behind = self
+            .behind
+            .filter(|seg| UnicodeWidthStr::width(seg.as_str()) <= left);
         Self {
             prefix,
             behind,
