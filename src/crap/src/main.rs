@@ -1942,6 +1942,11 @@ fn run_resume(
                 "Error:".red().bold()
             );
             eprintln!("       {}", unreadable.display());
+            // Same dead end, same way out: `--here` never touches the recorded
+            // directory, so being locked out of it does not stop the fork.
+            eprintln!(
+                "       use 'crap --here {session_id}' to fork it in the current directory instead."
+            );
             exit(exit_codes::DIRECTORY_UNREADABLE);
         }
     };
