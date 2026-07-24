@@ -23,9 +23,17 @@
 //! off — `waiting-for-user`, `busy`, `awaiting-assistant`, or `empty`, inferred
 //! from the last conversational turn in the transcript (or the live process's
 //! own status when one is attached) — and prints that one scriptable token.
+//! `--status <id>` gets the same cross-user discovery as a resume: it honors
+//! `--user <name>`, and with no flag falls back self-first to the sibling homes,
+//! so a session under another account is reported without any flag. Status only
+//! ever *reads* — a foreign hit is classified in place, never copied or forked,
+//! and no tree is written — and a cross-user miss that stepped over an owner-only
+//! directory prints the same copy-it-first guidance the resume forms do.
 //! Given no id, `--status` instead lists every session recorded for the current
 //! directory, each with its state and the times its transcript was started and
 //! last written (read from the transcript's own timestamps, not file mtimes).
+//! That per-directory listing is inherently the current user's, so it stays
+//! current-user-only and ignores `--user`.
 //!
 //! A session that belongs to another account is found automatically, with no
 //! flag at all: `crap <id>` searches your own tree first (the fast path,
