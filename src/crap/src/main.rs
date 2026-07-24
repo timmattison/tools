@@ -1332,19 +1332,27 @@ where
     reports
 }
 
-/// Resolves the full [`SessionStatusReport`] for a single session id.
+/// Resolves the full [`SessionStatusReport`] for a single session id, searching
+/// the given `roots` in order.
 ///
 /// Unlike the bare token, this also carries the transcript's time span, so the
 /// JSON form of `crap --status <id>` can include start/last times. A live
 /// process's status still takes precedence for the `state` field; the
 /// transcript is read (best-effort) for the times either way.
 ///
+/// Status only ever *reads*: it reports where a session left off without copying
+/// or forking, so a foreign hit under another user's root is simply classified
+/// in place. The current user's own `~/.claude/sessions` registry is the only one
+/// consulted for liveness, so a foreign session that is live in another account's
+/// process is reported from its transcript rather than as live — the registry
+/// under another home is typically unreadable anyway, and status never writes.
+///
 /// # Errors
 ///
 /// Returns [`StatusError::InvalidSessionId`] for a malformed id, or
 /// [`StatusError::SessionNotFound`] when the id is neither live nor on disk.
 fn resolve_status_report<F>(
-    projects_dir: &Path,
+    roots: &[UserProjects],
     sessions_dir: &Path,
     session_id: &str,
     is_alive: F,
@@ -1356,8 +1364,12 @@ where
         return Err(StatusError::InvalidSessionId);
     }
     let live = live_state_string(sessions_dir, session_id, is_alive);
-    let contents =
-        find_session_file(projects_dir, session_id).and_then(|f| std::fs::read_to_string(f).ok());
+    // Search only the current user's own tree (root zero) for now; cross-user
+    // discovery arrives in the next slice.
+    let contents = roots
+        .first()
+        .and_then(|root| find_session_file(&root.projects_dir, session_id))
+        .and_then(|f| std::fs::read_to_string(f).ok());
     let (started, last) = contents
         .as_deref()
         .map_or((None, None), transcript_time_span);
@@ -1950,13 +1962,20 @@ fn run_here(
     }
 }
 
-/// Handles `crap --status <id>`: print the session's state to stdout and exit.
+/// Handles `crap --status <id> [--user <name>]`: print the session's state to
+/// stdout and exit.
 ///
-/// Prints the bare state token by default, or the full report as JSON when
-/// `json` is set.
-fn run_status(projects_dir: &Path, session_id: &str, json: bool) -> ! {
+/// The session is located across `roots` — the current user's own tree (self
+/// first, then sibling homes on a miss), or a single sibling's tree when `--user`
+/// was given — exactly like the resume forms, so a foreign session's state is
+/// reported without ever copying, forking, or writing anywhere. Prints the bare
+/// state token by default, or the full report as JSON when `json` is set. A miss
+/// goes through the shared not-found path, so an id that turned up in nothing
+/// readable while owner-only directories were skipped gets the same actionable
+/// guidance the resume forms print.
+fn run_status(roots: &[UserProjects], session_id: &str, json: bool) -> ! {
     let sessions_dir = claude_sessions_dir().unwrap_or_default();
-    match resolve_status_report(projects_dir, &sessions_dir, session_id, pid_is_alive) {
+    match resolve_status_report(roots, &sessions_dir, session_id, pid_is_alive) {
         Ok(report) => {
             if json {
                 println!("{}", format_status_json(&report));
@@ -1973,12 +1992,7 @@ fn run_status(projects_dir: &Path, session_id: &str, json: bool) -> ! {
             exit(exit_codes::INVALID_SESSION_ID);
         }
         Err(StatusError::SessionNotFound) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            eprintln!("       looked under {}", projects_dir.display());
-            exit(exit_codes::SESSION_NOT_FOUND);
+            exit_session_not_found(session_id, roots, &[]);
         }
     }
 }
@@ -2233,7 +2247,15 @@ fn main() {
 
     if cli.status {
         match cli.session_id.as_deref() {
-            Some(id) => run_status(&projects_dir, id, cli.json),
+            // `--status <id>` gains the same cross-user discovery as resume: build
+            // the search roots (self-first, or one sibling for `--user`) and look
+            // the id up across them, read-only. The no-id form lists sessions for
+            // the current directory, which is inherently the current user's, so it
+            // stays self-only and ignores `--user`.
+            Some(id) => {
+                let roots = resolve_search_roots(&home, cli.user.as_deref());
+                run_status(&roots, id, cli.json);
+            }
             None => run_dir_status(&projects_dir, cli.json),
         }
     }
@@ -3781,9 +3803,12 @@ mod tests {
         // ...but the session is live, so the live status wins for `state`.
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        let report = resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| {
-            pid == 17041
-        })
+        let report = resolve_status_report(
+            &self_root(projects.path()),
+            sessions.path(),
+            LIVE_ID,
+            |pid| pid == 17041,
+        )
         .unwrap();
         assert_eq!(report.state, "busy (live, pid 17041)");
     }
@@ -4740,8 +4765,13 @@ mod tests {
         );
         fs::write(proj.join(format!("{SAMPLE_ID}.jsonl")), line).unwrap();
 
-        let report =
-            resolve_status_report(projects.path(), sessions.path(), SAMPLE_ID, |_| false).unwrap();
+        let report = resolve_status_report(
+            &self_root(projects.path()),
+            sessions.path(),
+            SAMPLE_ID,
+            |_| false,
+        )
+        .unwrap();
         assert_eq!(report.session_id, SAMPLE_ID);
         assert_eq!(report.state, "waiting-for-user");
         assert_eq!(report.started.as_deref(), Some("2026-05-25T10:00:00.000Z"));
@@ -4754,9 +4784,12 @@ mod tests {
         let sessions = tempdir().unwrap();
         fs::write(sessions.path().join("17041.json"), SESSION_JSON).unwrap();
 
-        let report = resolve_status_report(projects.path(), sessions.path(), LIVE_ID, |pid| {
-            pid == 17041
-        })
+        let report = resolve_status_report(
+            &self_root(projects.path()),
+            sessions.path(),
+            LIVE_ID,
+            |pid| pid == 17041,
+        )
         .unwrap();
         assert_eq!(report.state, "busy (live, pid 17041)");
     }
@@ -4765,7 +4798,7 @@ mod tests {
     fn resolve_status_report_rejects_invalid_id() {
         let dir = tempdir().unwrap();
         assert!(matches!(
-            resolve_status_report(dir.path(), dir.path(), "../escape", |_| true),
+            resolve_status_report(&self_root(dir.path()), dir.path(), "../escape", |_| true),
             Err(StatusError::InvalidSessionId)
         ));
     }
@@ -4774,7 +4807,7 @@ mod tests {
     fn resolve_status_report_errors_when_session_missing() {
         let dir = tempdir().unwrap();
         assert!(matches!(
-            resolve_status_report(dir.path(), dir.path(), SAMPLE_ID, |_| false),
+            resolve_status_report(&self_root(dir.path()), dir.path(), SAMPLE_ID, |_| false),
             Err(StatusError::SessionNotFound)
         ));
     }
