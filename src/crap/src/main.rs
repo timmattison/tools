@@ -2152,6 +2152,63 @@ fn run_resume(
     }
 }
 
+/// Builds the ordered search roots for a session lookup, honoring `--user`.
+///
+/// This is the one place that reads the env-coupled home layout —
+/// `home.file_name()` (the current account name) and `home.parent()` (the users'
+/// parent directory) — so [`self_projects`], [`user_projects`], and
+/// [`enumerate_user_projects`] stay pure and tempdir-testable. The default
+/// resume, `--here`, and `--status <id>` all resolve their roots through here, so
+/// a cross-user source is reachable identically from every form.
+///
+/// With no `--user`, the current user's own tree is searched first and, only on a
+/// miss, every sibling home that has run Claude (self-first, so an id the current
+/// user already owns always wins and the common case never reaches another home).
+/// With `--user <name>`, only that sibling's tree is searched — the current user's
+/// is skipped, which is also how an id is disambiguated on purpose.
+///
+/// A `--user` naming no account with a `.claude/projects` tree (a typo, or an
+/// account that never ran Claude) exits with [`exit_codes::INVALID_USER`] *here*,
+/// before any lookup, so the message points at the account rather than at the id.
+/// An owner-only tree is a valid target — a real account merely sealed to us — so
+/// it resolves and the search's owner-only guidance handles it. A home with no
+/// resolvable parent/name keeps today's single-user behavior with no fallback.
+fn resolve_search_roots(home: &Path, user: Option<&str>) -> Vec<UserProjects> {
+    match user {
+        None => match (home.file_name().and_then(|n| n.to_str()), home.parent()) {
+            (Some(self_name), Some(users_parent)) => {
+                enumerate_user_projects(users_parent, self_name)
+            }
+            // A home with no resolvable parent/name (unusual): keep today's
+            // single-user behavior exactly, with no cross-user fallback.
+            _ => vec![self_projects(home)],
+        },
+        Some(name) => {
+            let (Some(self_name), Some(users_parent)) =
+                (home.file_name().and_then(|n| n.to_str()), home.parent())
+            else {
+                eprintln!(
+                    "{} could not resolve sibling users from your home {}",
+                    "Error:".red().bold(),
+                    home.display()
+                );
+                exit(exit_codes::NO_HOME_DIR);
+            };
+            match resolve_user_roots(users_parent, name, self_name) {
+                UserRoots::Resolved(roots) => roots,
+                UserRoots::Invalid { name, available } => {
+                    eprint!(
+                        "{} {}",
+                        "Error:".red().bold(),
+                        format_invalid_user(&name, &available)
+                    );
+                    exit(exit_codes::INVALID_USER);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -2187,56 +2244,12 @@ fn main() {
         .session_id
         .expect("session id is required without --shell-setup or --status");
 
-    // Build the search roots. This is the one place that reads the env-coupled
-    // home layout — `home.file_name()` (our account name) and `home.parent()`
-    // (the users' parent directory) — so `self_projects`/`user_projects` stay
-    // pure. With no `--user` we search our own tree; with `--user <name>` we
-    // search only that sibling's tree. Both `--here` and the default resume
-    // search the same roots, so a cross-user source is reachable either way.
-    let roots = match cli.user.as_deref() {
-        None => match (home.file_name().and_then(|n| n.to_str()), home.parent()) {
-            // No flag: search our own tree first, then fall back to every
-            // sibling home that has run Claude — self-first, so an id we already
-            // own always wins and the common case never reaches another home.
-            (Some(self_name), Some(users_parent)) => {
-                enumerate_user_projects(users_parent, self_name)
-            }
-            // A home with no resolvable parent/name (unusual): keep today's
-            // single-user behavior exactly, with no cross-user fallback.
-            _ => vec![self_projects(&home)],
-        },
-        Some(name) => {
-            let (Some(self_name), Some(users_parent)) =
-                (home.file_name().and_then(|n| n.to_str()), home.parent())
-            else {
-                eprintln!(
-                    "{} could not resolve sibling users from your home {}",
-                    "Error:".red().bold(),
-                    home.display()
-                );
-                exit(exit_codes::NO_HOME_DIR);
-            };
-            // Validate the named account up front. `--user` searches only this one
-            // tree, so a `<name>` that resolves to nothing would otherwise miss
-            // and print a misleading "no session found" — pointing the user at the
-            // id when the account is what is wrong. Failing here, before either
-            // `run_here` or `run_resume`, also makes `--here --user <ghost>` reject
-            // for free. An owner-only tree is a *valid* target (it is a real
-            // account we are merely locked out of), so it resolves and the search's
-            // owner-only guidance handles it, not this error.
-            match resolve_user_roots(users_parent, name, self_name) {
-                UserRoots::Resolved(roots) => roots,
-                UserRoots::Invalid { name, available } => {
-                    eprint!(
-                        "{} {}",
-                        "Error:".red().bold(),
-                        format_invalid_user(&name, &available)
-                    );
-                    exit(exit_codes::INVALID_USER);
-                }
-            }
-        }
-    };
+    // Build the search roots (self-first, or one sibling for `--user`); a bad
+    // `--user` exits here, before either `run_here` or `run_resume`, so
+    // `--here --user <ghost>` rejects for free. Both `--here` and the default
+    // resume search the same roots, so a cross-user source is reachable either
+    // way.
+    let roots = resolve_search_roots(&home, cli.user.as_deref());
 
     if cli.here {
         run_here(
