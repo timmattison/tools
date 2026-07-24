@@ -738,3 +738,72 @@ fn shows_merge_indicator_with_conflict_count_during_a_conflicted_merge() {
         "indicator should report the singular conflict count: {out}",
     );
 }
+
+/// Commit everything staged with both git dates pinned to `date`, so the
+/// commit's age is deterministic instead of "however old the fixture is".
+fn commit_dated(dir: &Path, message: &str, date: &str) {
+    let mut cmd = Command::new("git");
+    cmd.args(["commit", "-q", "-m", message])
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .current_dir(dir);
+    let status = scrub_git_env(&mut cmd)
+        .status()
+        .expect("failed to invoke git commit");
+    assert!(status.success(), "dated git commit failed");
+}
+
+#[test]
+fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
+    // Regression, end to end: a repo whose last commit is years old rendered
+    // its age as `2015d12h` — eight columns in a field sized for six. The age
+    // sits at the right edge of the header, the file rows and the commit-log
+    // rows, so the overflow spilled past the terminal edge and wrapped onto
+    // the next line, shearing every affected row. Drive the real binary at a
+    // fixed width and assert nothing is wider than the terminal.
+    let dir = setup_repo();
+    let p = dir.path();
+    fs::write(p.join("a.txt"), "changed\n").unwrap();
+    run_git(p, &["add", "a.txt"]);
+    commit_dated(
+        p,
+        "an old commit that has been sitting here for a very long time",
+        "2011-03-04T05:06:07",
+    );
+    // A dirty working tree so the file-row age column renders too.
+    fs::write(p.join("b.txt"), "untracked\n").unwrap();
+
+    const COLUMNS: usize = 80;
+    /// gsw reserves one column for a watch wrapper's scrollbar, so the
+    /// effective render width is one less than the terminal's.
+    const RENDER_WIDTH: usize = COLUMNS - 1;
+    let output = gsw_command(p)
+        .args(["--no-color", "--log-lines", "5"])
+        .env("COLUMNS", COLUMNS.to_string())
+        .output()
+        .expect("failed to invoke gsw");
+    assert!(output.status.success(), "gsw exited non-zero");
+    let out = String::from_utf8_lossy(&output.stdout).to_string();
+
+    for line in out.lines() {
+        let width = unicode_width::UnicodeWidthStr::width(line);
+        assert!(
+            width <= RENDER_WIDTH,
+            "line is {width} columns wide, past the {RENDER_WIDTH}-column render \
+             width — it wraps onto the next row:\n  {line:?}\nfull output:\n{out}",
+        );
+    }
+
+    // And the age itself reads in years+months rather than a day count. The
+    // fixture commit is from 2011, so this holds however long from now the
+    // suite runs.
+    let age = out
+        .split_once("last commit ")
+        .and_then(|(_, rest)| rest.split_once(" ago"))
+        .map(|(age, _)| age)
+        .expect("header should carry a `last commit {age} ago` field");
+    assert!(
+        age.contains('y') && age.ends_with("mo"),
+        "a commit from 2011 should render as years+months, got {age:?}",
+    );
+}

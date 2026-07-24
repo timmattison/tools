@@ -15,18 +15,82 @@ pub enum AgeDim {
     Stale,
 }
 
-/// Format a duration with two units, e.g. `5m23s`, `2h14m`, `3d12h`.
+/// Maximum display width, in terminal columns, of any string
+/// [`format_age_detailed`] can return.
+///
+/// The age column is a fixed-width field, so this is a hard contract rather
+/// than a hint: a single column of overflow pushes the row past the terminal
+/// width and wraps its tail onto the next line. Every age — including ages
+/// derived from corrupt commit timestamps — must fit.
+pub const AGE_WIDTH: usize = 7;
+
+const SECS_PER_MINUTE: u64 = 60;
+const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
+const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
+/// A Julian year — 365.25 days. Averaging the leap day in keeps `Ny` within a
+/// day of what a calendar would say, which a flat 365 drifts away from fast
+/// (a decade off by two and a half days).
+const SECS_PER_YEAR: u64 = 365 * SECS_PER_DAY + SECS_PER_DAY / 4;
+/// A twelfth of a Julian year, so twelve months are exactly one year and the
+/// month remainder can never reach 12.
+const SECS_PER_MONTH: u64 = SECS_PER_YEAR / 12;
+
+/// Format a duration with two units, e.g. `5m23s`, `2h14m`, `3d12h`, `5y6mo`.
+///
+/// The result is never wider than [`AGE_WIDTH`] columns. Where both units
+/// won't fit — a three-digit year count, say — the minor unit is dropped
+/// rather than allowed to overflow the age column and wrap the row it sits
+/// in. An age too large even for the major unit alone (only reachable from a
+/// corrupt commit timestamp) saturates to `>99999y`.
 pub fn format_age_detailed(age: Duration) -> String {
     let secs = age.as_secs();
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else if secs < 86400 {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    let (major, minor) = if secs < SECS_PER_MINUTE {
+        ((secs, "s"), None)
+    } else if secs < SECS_PER_HOUR {
+        (
+            (secs / SECS_PER_MINUTE, "m"),
+            Some((secs % SECS_PER_MINUTE, "s")),
+        )
+    } else if secs < SECS_PER_DAY {
+        (
+            (secs / SECS_PER_HOUR, "h"),
+            Some((secs % SECS_PER_HOUR / SECS_PER_MINUTE, "m")),
+        )
+    } else if secs < SECS_PER_YEAR {
+        (
+            (secs / SECS_PER_DAY, "d"),
+            Some((secs % SECS_PER_DAY / SECS_PER_HOUR, "h")),
+        )
     } else {
-        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
+        (
+            (secs / SECS_PER_YEAR, "y"),
+            Some((secs % SECS_PER_YEAR / SECS_PER_MONTH, "mo")),
+        )
+    };
+
+    // Every candidate below is ASCII (digits plus a unit suffix), so byte
+    // length is display width.
+    let (major_value, major_unit) = major;
+    if let Some((minor_value, minor_unit)) = minor {
+        let pair = format!("{major_value}{major_unit}{minor_value}{minor_unit}");
+        if pair.len() <= AGE_WIDTH {
+            return pair;
+        }
     }
+    let alone = format!("{major_value}{major_unit}");
+    if alone.len() <= AGE_WIDTH {
+        return alone;
+    }
+    // Off the scale: keep the column honest and say so rather than print a
+    // count that doesn't fit. `>` plus the widest value that still fits.
+    //
+    // Only the years arm can exceed AGE_WIDTH, so `major_unit` is "y" here and
+    // `digits` is AGE_WIDTH - 2 = 5 — the conversion is exact. The `0` fallback
+    // is unreachable, but keeps the field within width if the constants ever
+    // change, rather than handing `pow()` an exponent that would overflow.
+    let digits = u32::try_from(AGE_WIDTH - 1 - major_unit.len()).unwrap_or(0);
+    let saturated = 10_u64.pow(digits) - 1;
+    format!(">{saturated}{major_unit}")
 }
 
 /// Classify an age into a display brightness bucket.
@@ -124,6 +188,106 @@ mod tests {
             format_age_detailed(Duration::from_secs(3 * 86400 + 12 * 3600)),
             "3d12h",
         );
+    }
+
+    /// Durations in the units the assertions below are written in. Kept
+    /// deliberately independent of the formatter's own constants so a wrong
+    /// constant in the implementation shows up as a failing expectation
+    /// rather than cancelling itself out.
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    #[test]
+    fn detailed_age_years_and_months() {
+        // A repo untouched since early 2021 used to render as `2015d12h` —
+        // a four-digit day count nobody can convert in their head, and two
+        // columns wider than the age field. Years and months read at a
+        // glance and fit.
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(2015 * DAY + 12 * HOUR)),
+            "5y6mo",
+        );
+        // 700d = 1 Julian year (365.25d) + 334.75d, i.e. 10 whole months.
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(700 * DAY)),
+            "1y10mo"
+        );
+    }
+
+    #[test]
+    fn detailed_age_switches_from_days_to_years_at_one_year() {
+        // A Julian year is 365.25 days, so 365d is still the day/hour pair
+        // and the first full year lands just past it.
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(365 * DAY)),
+            "365d0h"
+        );
+        assert_eq!(format_age_detailed(Duration::from_secs(366 * DAY)), "1y0mo");
+    }
+
+    #[test]
+    fn detailed_age_keeps_both_units_out_to_ninety_nine_years() {
+        // The month remainder tops out at 11, so two-digit years still leave
+        // room for both units. `10y11mo` is the widest two-unit form.
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(10 * 31_557_600 + 11 * 2_629_800)),
+            "10y11mo",
+        );
+    }
+
+    #[test]
+    fn detailed_age_drops_the_minor_unit_rather_than_overflow() {
+        // Past 99 years the pair no longer fits the field. Dropping the
+        // months keeps the column honest; overflowing it would wrap the row.
+        let secs = 150 * 31_557_600 + 11 * 2_629_800;
+        assert_eq!(format_age_detailed(Duration::from_secs(secs)), "150y");
+    }
+
+    #[test]
+    fn detailed_age_saturates_on_an_implausible_timestamp() {
+        // A corrupt commit date can hand us an age of geologic proportions.
+        // It still has to fit the column, so it saturates with a `>` marker
+        // instead of printing all thirteen digits.
+        assert_eq!(
+            format_age_detailed(Duration::from_secs(u64::MAX)),
+            ">99999y"
+        );
+    }
+
+    #[test]
+    fn detailed_age_never_exceeds_the_age_column() {
+        // The contract behind AGE_WIDTH: no age, however old or however
+        // corrupt its timestamp, may be wider than the field it is printed
+        // into. Sweep every second through the first two hours (where the
+        // seconds/minutes forms live), then coarser steps out past 500 years,
+        // using odd strides so every digit-count regime gets sampled.
+        let check = |secs: u64| {
+            let formatted = format_age_detailed(Duration::from_secs(secs));
+            assert!(
+                formatted.chars().count() <= AGE_WIDTH,
+                "age {secs}s formatted as {formatted:?} ({} columns), wider than the \
+                 {AGE_WIDTH}-column age field — this wraps the row it sits in",
+                formatted.chars().count(),
+            );
+        };
+        for secs in 0..2 * HOUR {
+            check(secs);
+        }
+        // Odd strides so the sweep can't march in step with a unit boundary
+        // and skip a whole digit-count regime.
+        const NEAR_HOURLY: usize = 59 * 60 + 1;
+        const HALF_DAILY: usize = 13 * 60 * 60 + 7;
+        for secs in (0..2 * 366 * DAY).step_by(NEAR_HOURLY) {
+            check(secs);
+        }
+        for secs in (0..500 * 366 * DAY).step_by(HALF_DAILY) {
+            check(secs);
+        }
+        // The extremes, which no stride is guaranteed to land on.
+        for secs in [u64::MAX, u64::MAX - 1, 999_999 * 31_557_600] {
+            check(secs);
+        }
     }
 
     #[test]

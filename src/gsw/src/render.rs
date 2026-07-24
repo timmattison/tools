@@ -5,7 +5,9 @@ use std::time::Duration;
 use colored::{ColoredString, Colorize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::age::{age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim};
+use crate::age::{
+    age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim, AGE_WIDTH,
+};
 use crate::bar::render_bar;
 use crate::git::FileStatus;
 
@@ -127,8 +129,10 @@ pub struct RenderOptions {
 /// Width of the "+adds" / "-dels" / age column fields.
 const ADDS_FIELD: usize = 5;
 const DELS_FIELD: usize = 4;
-/// Wide enough for `59m59s`, `23h59m`, `99d23h`. Older files overflow slightly.
-const AGE_FIELD: usize = 6;
+/// Sized to [`AGE_WIDTH`] — the widest string [`format_age_detailed`] can
+/// return — so no age can push a row past the terminal width and wrap. The
+/// two constants are one and the same on purpose: they cannot drift.
+const AGE_FIELD: usize = AGE_WIDTH;
 
 /// Visible separator characters between columns.
 const SEP_BAR_ADDS: usize = 2;
@@ -163,7 +167,7 @@ pub(crate) fn render_with_offset(
         prefix,
         behind,
         suffix,
-    } = header_segments(snapshot, age_offset);
+    } = header_segments(snapshot, age_offset, opts.terminal_width);
     // The whole header is bold as before; the optional behind segment is
     // additionally warning-colored (yellow) to flag that the branch needs a
     // rebase. When `behind` is `None` the prefix+suffix reproduce today's
@@ -174,7 +178,7 @@ pub(crate) fn render_with_offset(
     };
     lines.push(header_line);
     if let Some(op) = &snapshot.operation {
-        lines.push(render_operation_line(op));
+        lines.push(render_operation_line(op, opts.terminal_width));
     }
     lines.push(render_separator(opts.terminal_width));
 
@@ -296,33 +300,139 @@ struct HeaderSegments {
     suffix: String,
 }
 
-/// Split the header into independently-styleable pieces.
+impl HeaderSegments {
+    /// Display width of the assembled line.
+    fn width(&self) -> usize {
+        UnicodeWidthStr::width(self.prefix.as_str())
+            + self.behind.as_deref().map_or(0, UnicodeWidthStr::width)
+            + UnicodeWidthStr::width(self.suffix.as_str())
+    }
+
+    /// Cut the line down to `width` columns, reserving the age tail.
+    ///
+    /// The ladder in [`header_segments`] normally lands inside the terminal
+    /// without reaching this; it is the backstop for widths so narrow that
+    /// even floored names don't fit, where something has to give. A cut line
+    /// beats a wrapped one: wrapping shifts every row below it.
+    ///
+    /// What gives is the identity text — the branch name and the ahead-count
+    /// clause — because the `last commit {age} ago` tail is the field the
+    /// header exists to carry. Only a terminal too narrow for the tail alone
+    /// cuts into the tail itself.
+    fn clamp(self, width: usize) -> Self {
+        let suffix = truncate_to_budget(&self.suffix, width);
+        let identity_budget = width - UnicodeWidthStr::width(suffix.as_str());
+        let prefix = truncate_to_budget(&self.prefix, identity_budget);
+        let left = identity_budget - UnicodeWidthStr::width(prefix.as_str());
+        // A cut prefix ends mid-phrase, and `, 87 behind` hanging off an
+        // ellipsis reads as nonsense — so the segment survives whole or not
+        // at all.
+        let behind = self
+            .behind
+            .filter(|seg| UnicodeWidthStr::width(seg.as_str()) <= left);
+        Self {
+            prefix,
+            behind,
+            suffix,
+        }
+    }
+}
+
+/// How much of the upstream field the header has room for.
+#[derive(Clone, Copy)]
+enum UpstreamDetail {
+    /// `• ↑2 ↓0 origin/topic` — the counts and the tracking ref's name.
+    Full,
+    /// `• ↑2 ↓0` — counts only. The name is nearly always `origin/{branch}`,
+    /// i.e. a second copy of something already on the line, so it is the
+    /// cheapest thing to give up.
+    CountsOnly,
+    /// Field omitted entirely.
+    Omitted,
+}
+
+/// Columns a branch or base name keeps when the header is squeezed. Below
+/// this a name stops being recognizable, so the header sheds whole fields
+/// instead of shaving further.
+const HEADER_NAME_FLOOR: usize = 10;
+
+/// Split the header into independently-styleable pieces, sized to fit
+/// `width` columns.
+///
+/// The header is a single line of free text with the last-commit age at its
+/// end, so anything that overflows takes the age with it onto a wrapped
+/// second line. When the natural header is too wide it is shrunk in order of
+/// what costs the reader least: the tracking ref's name (a duplicate of the
+/// branch), then the branch and base names shaved toward
+/// [`HEADER_NAME_FLOOR`] longest-first, then the upstream field entirely,
+/// then a hard cut. The `• last commit {age} ago` tail is never the thing
+/// that gives way.
 ///
 /// `age_offset` is added (saturating) to the last-commit age before it is
 /// formatted, so the header's `last commit {age} ago` advances in lockstep
 /// with the file and log ages. `Duration::ZERO` leaves the age unchanged. An
 /// unknown last-commit age (`None`) stays `?` regardless of the offset.
-fn header_segments(snap: &Snapshot, age_offset: Duration) -> HeaderSegments {
+fn header_segments(snap: &Snapshot, age_offset: Duration, width: usize) -> HeaderSegments {
+    let age = snap
+        .last_commit_age
+        .map(|a| a.saturating_add(age_offset))
+        .map_or_else(|| "?".to_string(), format_age_detailed);
+    let compose = |branch: &str, base: &str, detail: UpstreamDetail| {
+        compose_header(snap, branch, base, &age, detail)
+    };
+
+    let full = compose(&snap.branch, &snap.base, UpstreamDetail::Full);
+    if full.width() <= width {
+        return full;
+    }
+    let counts_only = compose(&snap.branch, &snap.base, UpstreamDetail::CountsOnly);
+    if counts_only.width() <= width {
+        return counts_only;
+    }
+
+    let (branch, base) = shave_names(
+        &snap.branch,
+        &snap.base,
+        counts_only.width().saturating_sub(width),
+    );
+    let shaved = compose(&branch, &base, UpstreamDetail::CountsOnly);
+    if shaved.width() <= width {
+        return shaved;
+    }
+    let bare = compose(&branch, &base, UpstreamDetail::Omitted);
+    if bare.width() <= width {
+        return bare;
+    }
+    bare.clamp(width)
+}
+
+/// Build the header segments from an already-sized branch name, base name and
+/// upstream detail level.
+fn compose_header(
+    snap: &Snapshot,
+    branch: &str,
+    base: &str,
+    age: &str,
+    detail: UpstreamDetail,
+) -> HeaderSegments {
     let commit_word = if snap.commits_ahead == 1 {
         "commit"
     } else {
         "commits"
     };
-    let age = snap
-        .last_commit_age
-        .map(|a| a.saturating_add(age_offset))
-        .map_or_else(|| "?".to_string(), format_age_detailed);
     let upstream_field = snap
         .upstream
         .as_ref()
-        .map(|u| format!(" • ↑{} ↓{} {}", u.ahead, u.behind, u.name))
+        .map(|u| match detail {
+            UpstreamDetail::Full => format!(" • ↑{} ↓{} {}", u.ahead, u.behind, u.name),
+            UpstreamDetail::CountsOnly => format!(" • ↑{} ↓{}", u.ahead, u.behind),
+            UpstreamDetail::Omitted => String::new(),
+        })
         .unwrap_or_default();
     let prefix = format!(
         "gsw • {branch} • {n} {word} ahead of {base}",
-        branch = snap.branch,
         n = snap.commits_ahead,
         word = commit_word,
-        base = snap.base,
     );
     let behind = (snap.commits_behind > 0).then(|| format!(", {} behind", snap.commits_behind));
     let suffix = format!("{upstream_field} • last commit {age} ago");
@@ -331,6 +441,31 @@ fn header_segments(snap: &Snapshot, age_offset: Duration) -> HeaderSegments {
         behind,
         suffix,
     }
+}
+
+/// Shave `branch` and `base` until they give back `over` columns between
+/// them, always taking from whichever is currently longer so the two converge
+/// on a similar length instead of one being cut to the bone while the other
+/// keeps every character. Neither drops below [`HEADER_NAME_FLOOR`]; when
+/// that leaves `over` unmet, the next rung of the caller's ladder covers it.
+fn shave_names(branch: &str, base: &str, over: usize) -> (String, String) {
+    let mut branch_width = UnicodeWidthStr::width(branch);
+    let mut base_width = UnicodeWidthStr::width(base);
+    for _ in 0..over {
+        let longer = if branch_width >= base_width {
+            &mut branch_width
+        } else {
+            &mut base_width
+        };
+        if *longer <= HEADER_NAME_FLOOR {
+            break;
+        }
+        *longer -= 1;
+    }
+    (
+        truncate_middle(branch, branch_width),
+        truncate_middle(base, base_width),
+    )
 }
 
 fn render_separator(width: usize) -> String {
@@ -343,10 +478,11 @@ fn render_separator(width: usize) -> String {
 /// The label (`⚠ merge`, `⚠ rebase 3/10`) is yellow + bold — matching the
 /// header's "behind" warning segment — and the trailing
 /// ` · {n} conflict[s] to resolve` clause, present only when `conflicts > 0`,
-/// is red + bold to flag the pending action. Like the header, the line is free
-/// text and is never width-truncated. Color/NO_COLOR handling falls out of the
-/// `colored` global override set in `main`.
-fn render_operation_line(op: &Operation) -> String {
+/// is red + bold to flag the pending action. The line is cut to `width` so it
+/// can't wrap and shift every row below it; the label outranks the clause for
+/// the columns available. Color/NO_COLOR handling falls out of the `colored`
+/// global override set in `main`.
+fn render_operation_line(op: &Operation, width: usize) -> String {
     let (label, conflicts) = match op {
         Operation::Merge { conflicts } => ("⚠ merge".to_string(), *conflicts),
         Operation::Rebase { step, conflicts } => {
@@ -357,6 +493,8 @@ fn render_operation_line(op: &Operation) -> String {
             (label, *conflicts)
         }
     };
+    let label = truncate_to_budget(&label, width);
+    let left = width - UnicodeWidthStr::width(label.as_str());
     let label_styled = label.yellow().bold();
     if conflicts > 0 {
         let word = if conflicts == 1 {
@@ -364,11 +502,13 @@ fn render_operation_line(op: &Operation) -> String {
         } else {
             "conflicts"
         };
-        let clause = format!(" · {conflicts} {word} to resolve").red().bold();
-        format!("{label_styled}{clause}")
-    } else {
-        label_styled.to_string()
+        let clause_text = truncate_to_budget(&format!(" · {conflicts} {word} to resolve"), left);
+        if !clause_text.is_empty() {
+            let clause = clause_text.red().bold();
+            return format!("{label_styled}{clause}");
+        }
     }
+    label_styled.to_string()
 }
 
 /// Render one file row.
@@ -846,6 +986,66 @@ fn truncate_left(s: &str, max_width: usize) -> String {
     result
 }
 
+/// Truncate `s` to `max_width` display columns by dropping from the middle,
+/// joining the head and tail that survive with `…`. Branch names share long
+/// prefixes (`feature/…`, `origin/…`) and carry the part that identifies them
+/// at the end, so keeping both ends beats keeping either one alone. UTF-8
+/// safe: budgets are spent in display columns, never bytes.
+fn truncate_middle(s: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let ellipsis_width = 1_usize;
+    let Some(keep) = max_width.checked_sub(ellipsis_width) else {
+        // Not even room for the marker.
+        return String::new();
+    };
+    // The odd column, if there is one, goes to the head: `feature/` prefixes
+    // are what the eye lands on first.
+    let head_budget = keep.div_ceil(2);
+    let tail_budget = keep - head_budget;
+
+    let mut head = String::new();
+    let mut spent = 0_usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if spent + cw > head_budget {
+            break;
+        }
+        spent += cw;
+        head.push(c);
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut tail_start = chars.len();
+    let mut spent = 0_usize;
+    for (i, c) in chars.iter().enumerate().rev() {
+        let cw = UnicodeWidthChar::width(*c).unwrap_or(0);
+        if spent + cw > tail_budget {
+            break;
+        }
+        spent += cw;
+        tail_start = i;
+    }
+    // Zero-width characters cost nothing, so both walks can run past each
+    // other and duplicate the middle. Keep the halves disjoint.
+    let tail_start = tail_start.max(head.chars().count());
+
+    let mut result = head;
+    result.push('…');
+    result.extend(&chars[tail_start..]);
+    result
+}
+
+/// [`truncate_right`], but a zero budget yields nothing rather than a lone
+/// `…` — which would itself be one column too wide.
+fn truncate_to_budget(s: &str, budget: usize) -> String {
+    if budget == 0 {
+        String::new()
+    } else {
+        truncate_right(s, budget)
+    }
+}
+
 /// Center `text` within `width` display columns, padding with spaces.
 fn center(text: &str, width: usize) -> String {
     let text_w = UnicodeWidthStr::width(text);
@@ -1147,6 +1347,197 @@ mod tests {
         );
     }
 
+    /// An age old enough to overflow the pre-years age format: `2015d12h`
+    /// is eight columns, two more than the field used to reserve.
+    fn ancient() -> Duration {
+        Duration::from_secs(2015 * 24 * 60 * 60 + 12 * 60 * 60)
+    }
+
+    #[test]
+    fn no_line_exceeds_the_terminal_width_when_the_repo_is_ancient() {
+        // Regression: on a repo untouched for years every age rendered as
+        // `2015d12h`, two columns wider than the age field. Because the age
+        // is the last thing on the line, those two columns spilled past the
+        // terminal edge and wrapped onto the next row, shearing the display.
+        // Nothing gsw prints may be wider than the terminal.
+        let mut stale_file = entry("src/main.rs", FileStatus::Modified, false, 12, 3);
+        stale_file.age = Some(ancient());
+        let mut stale_untracked = entry("scratch/notes.txt", FileStatus::Untracked, false, 0, 0);
+        stale_untracked.age = Some(ancient());
+
+        let mut snap = snap_with(vec![stale_file, stale_untracked]);
+        snap.last_commit_age = Some(ancient());
+        snap.log = vec![LogEntry {
+            hash: "52ef922".into(),
+            subject: "an old commit that has been sitting here for a very long time".into(),
+            age: ancient(),
+        }];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        for line in out.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= o.terminal_width,
+                "line is {} columns wide, past the {}-column terminal — it will wrap:\n  {line:?}",
+                UnicodeWidthStr::width(line),
+                o.terminal_width,
+            );
+        }
+    }
+
+    /// A branch name far too long for an 80-column header, with a
+    /// distinguishing tail so middle-truncation is visible.
+    const LONG_BRANCH: &str = "feature/really-long-branch-name-that-goes-on-forever";
+
+    /// A snapshot whose header cannot possibly fit: long branch, long
+    /// tracking ref, and a behind segment on top.
+    fn snap_with_overlong_header() -> Snapshot {
+        let mut snap = snap_with(vec![]);
+        snap.branch = LONG_BRANCH.into();
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LONG_BRANCH}"),
+            ahead: 2,
+            behind: 0,
+        });
+        snap
+    }
+
+    /// The header line of a rendered frame, ANSI stripped.
+    fn header_of(snap: &Snapshot, opts: &RenderOptions) -> String {
+        strip_ansi(&render(snap, opts))
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn header_never_exceeds_the_terminal_width() {
+        // The header is the one line gsw draws as free text, so a long branch
+        // or tracking-ref name used to run straight past the terminal edge —
+        // dropping the `last commit {age} ago` tail, the very thing the eye
+        // goes to, onto a second line.
+        let header = header_of(&snap_with_overlong_header(), &opts());
+        assert!(
+            UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
+            "header is {} columns wide, past the {}-column terminal:\n  {header:?}",
+            UnicodeWidthStr::width(header.as_str()),
+            opts().terminal_width,
+        );
+    }
+
+    #[test]
+    fn header_keeps_the_age_tail_when_squeezed() {
+        // Whatever else the header sheds to fit, the age survives intact —
+        // at every width where the tail fits on the line at all. Past the
+        // point where shaving names can pay for the overflow, the cut has to
+        // come out of the branch and the ahead-count text, not out of the
+        // one field the header exists to carry.
+        let snap = snap_with_overlong_header();
+        for terminal_width in [100, 80, 60, 45, 40] {
+            let mut o = opts();
+            o.terminal_width = terminal_width;
+            let header = header_of(&snap, &o);
+            assert!(
+                header.ends_with("• last commit 5m23s ago"),
+                "header squeezed to {terminal_width} columns dropped the age tail: {header:?}",
+            );
+            assert!(
+                UnicodeWidthStr::width(header.as_str()) <= terminal_width,
+                "header is {} columns, past the {terminal_width}-column terminal: {header:?}",
+                UnicodeWidthStr::width(header.as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn header_truncates_the_branch_from_the_middle() {
+        // Branch names share long prefixes (`feature/…`) and carry the part
+        // that identifies them at the end, so a squeezed name keeps both ends
+        // rather than either alone.
+        let header = header_of(&snap_with_overlong_header(), &opts());
+        assert!(
+            header.contains("feature") && header.contains("forever"),
+            "truncated branch should keep both ends: {header:?}",
+        );
+        assert!(
+            header.contains('…'),
+            "truncated branch should be marked with an ellipsis: {header:?}",
+        );
+    }
+
+    #[test]
+    fn header_sheds_the_upstream_name_before_shaving_the_branch() {
+        // The tracking ref's name is almost always `origin/{branch}` — pure
+        // duplication — so it goes first. The ahead/behind counts are small
+        // and actionable, so they stay, and a branch name that fits is left
+        // untouched.
+        let mut snap = snap_with(vec![]);
+        snap.upstream = Some(UpstreamStatus {
+            name: format!("origin/{LONG_BRANCH}"),
+            ahead: 2,
+            behind: 1,
+        });
+        let header = header_of(&snap, &opts());
+        assert!(
+            !header.contains(LONG_BRANCH),
+            "the redundant tracking-ref name should be the first thing dropped: {header:?}",
+        );
+        assert!(
+            header.contains("↑2 ↓1"),
+            "the ahead/behind counts should survive the name being dropped: {header:?}",
+        );
+        assert!(
+            header.contains("gsw • gsv •") && !header.contains('…'),
+            "a branch that already fits should not be truncated: {header:?}",
+        );
+    }
+
+    #[test]
+    fn header_fits_a_multibyte_branch_name() {
+        // Double-width glyphs cost two columns each while counting as one
+        // char, so a fitting routine that measures chars instead of columns
+        // overflows here — and one that slices bytes panics outright.
+        let mut snap = snap_with_overlong_header();
+        snap.branch = "feature/日本語のとても長い名前のブランチ/forever".into();
+        let header = header_of(&snap, &opts());
+        assert!(
+            UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
+            "header with double-width glyphs is {} columns, past the {}-column terminal:\n  {header:?}",
+            UnicodeWidthStr::width(header.as_str()),
+            opts().terminal_width,
+        );
+    }
+
+    #[test]
+    fn no_line_exceeds_a_very_narrow_terminal() {
+        // Past the point where shedding fields and shaving names can help,
+        // the header and the operation line are cut rather than allowed to
+        // spill. A 30-column terminal is well past that point.
+        let mut snap = snap_with_overlong_header();
+        snap.commits_behind = 87;
+        snap.operation = Some(Operation::Rebase {
+            step: Some(StepProgress {
+                current: 3,
+                total: 10,
+            }),
+            conflicts: 12,
+        });
+        let mut o = opts();
+        o.terminal_width = 30;
+
+        let out = strip_ansi(&render(&snap, &o));
+        for line in out.lines() {
+            assert!(
+                UnicodeWidthStr::width(line) <= o.terminal_width,
+                "line is {} columns wide, past the {}-column terminal — it will wrap:\n  {line:?}",
+                UnicodeWidthStr::width(line),
+                o.terminal_width,
+            );
+        }
+    }
+
     #[test]
     fn header_mentions_branch_commits_and_age() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
@@ -1377,6 +1768,74 @@ mod tests {
         );
         let stripped = strip_ansi(&out);
         assert!(stripped.contains(".rs"));
+    }
+
+    #[test]
+    fn truncate_middle_keeps_both_ends_and_fits_the_budget() {
+        assert_eq!(truncate_middle("feature/topic", 20), "feature/topic");
+        // 13 columns: the marker plus six to either side.
+        assert_eq!(truncate_middle("feature/some-topic", 13), "featur…-topic");
+        // 12 leaves an odd eleven to split, and the extra goes to the head.
+        assert_eq!(truncate_middle("feature/some-topic", 12), "featur…topic");
+    }
+
+    #[test]
+    fn truncate_middle_counts_columns_not_characters() {
+        // Each CJK glyph is one char but two columns. A routine that counted
+        // chars would hand back double the requested width, and one that
+        // sliced bytes would panic mid-codepoint.
+        let name = "日本語のとても長い名前";
+        for budget in 0..=UnicodeWidthStr::width(name) + 2 {
+            let cut = truncate_middle(name, budget);
+            assert!(
+                UnicodeWidthStr::width(cut.as_str()) <= budget,
+                "budget {budget} produced {cut:?} ({} columns)",
+                UnicodeWidthStr::width(cut.as_str()),
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_middle_degrades_to_nothing_before_overflowing() {
+        // One column has room for the marker alone; zero has room for
+        // nothing, and must not emit a marker that would itself overflow.
+        assert_eq!(truncate_middle("feature/topic", 1), "…");
+        assert_eq!(truncate_middle("feature/topic", 0), "");
+    }
+
+    #[test]
+    fn shave_names_takes_from_the_longer_name_first() {
+        // The base is short, so the branch absorbs the whole reduction.
+        let (branch, base) = shave_names("feature/a-very-long-branch-name", "main", 10);
+        assert_eq!(UnicodeWidthStr::width(branch.as_str()), 21);
+        assert_eq!(base, "main");
+
+        // Both are long: shaving alternates so they converge rather than one
+        // being cut to the floor while the other keeps every character.
+        let (branch, base) = shave_names(
+            "feature/a-very-long-branch-name",
+            "release/a-very-long-base-name",
+            20,
+        );
+        let (bw, sw) = (
+            UnicodeWidthStr::width(branch.as_str()),
+            UnicodeWidthStr::width(base.as_str()),
+        );
+        assert_eq!(bw + sw, 31 + 29 - 20, "the full reduction should be taken");
+        assert!(
+            bw.abs_diff(sw) <= 1,
+            "the two names should converge, got {bw} and {sw}",
+        );
+    }
+
+    #[test]
+    fn shave_names_stops_at_the_floor() {
+        // Past the floor a name stops being recognizable, so shaving stops
+        // and the caller's next rung (dropping whole fields, then cutting)
+        // takes over.
+        let (branch, base) = shave_names("feature/a-very-long-branch-name", "main", 1_000);
+        assert_eq!(UnicodeWidthStr::width(branch.as_str()), HEADER_NAME_FLOOR);
+        assert_eq!(base, "main", "a name already under the floor is untouched");
     }
 
     #[test]
