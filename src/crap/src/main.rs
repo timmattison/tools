@@ -703,21 +703,70 @@ fn classify_session_state(contents: &str) -> SessionState {
 ///
 /// The transcript's first non-empty `cwd` is taken as the working directory; the
 /// call fails if the transcript cannot be read, records no `cwd`, or names a
-/// directory that no longer exists.
+/// directory that no longer exists or cannot be entered.
+///
+/// "Gone" and "refused" are answered separately because they are separate
+/// realities, and the obvious `path.is_dir()` gets both of them wrong in a
+/// cross-user world. A directory behind an ancestor that is opaque to this
+/// account cannot even be `stat`ed, so `is_dir()` reports `false` and we would
+/// tell the user a directory that is sitting right there is gone. A directory
+/// that `stat`s fine but carries no search (`x`) bit reports `true`, so we would
+/// print a resume, exit 0, and leave the shell function's `cd` to fail with the
+/// binary that knew better already gone. `crap` must never hand the shell a
+/// directory it cannot enter, so entering is *probed* rather than inferred.
+///
+/// The probe is what `cd` itself needs and nothing more: `0o600` (readable but
+/// not searchable) is correctly unreadable, while `0o100` (searchable but not
+/// listable) is correctly usable.
 ///
 /// # Errors
 ///
 /// Returns a [`ResolveError`] when the transcript cannot be read, records no
-/// working directory, or that directory no longer exists.
+/// working directory, or names a directory that no longer exists
+/// ([`ResolveError::DirectoryMissing`]) or cannot be entered from this account
+/// ([`ResolveError::DirectoryUnreadable`]).
 fn session_dir_from_transcript(transcript: &Path) -> Result<PathBuf, ResolveError> {
     let contents =
         std::fs::read_to_string(transcript).map_err(|_| ResolveError::SessionNotFound)?;
     let cwd = extract_cwd(&contents).ok_or(ResolveError::NoCwdInSession)?;
     let path = PathBuf::from(cwd);
-    if !path.is_dir() {
-        return Err(ResolveError::DirectoryMissing(path));
+
+    match std::fs::metadata(&path) {
+        // Refused before we learned anything: an ancestor is opaque to us. Not
+        // being allowed to look is not the same as knowing there is nothing
+        // there, and only one of those two is the user's actual problem.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(ResolveError::DirectoryUnreadable(path))
+        }
+        // `NotFound`, and every other error too: none of them leaves a directory
+        // we could hand to `cd`, and "no longer exists" is the useful summary.
+        Err(_) => Err(ResolveError::DirectoryMissing(path)),
+        // Something is at that path, but it is a file, a socket, …: the recorded
+        // directory is not there any more even though the name is taken.
+        Ok(meta) if !meta.is_dir() => Err(ResolveError::DirectoryMissing(path)),
+        Ok(_) => {
+            // A successful `stat` only proves the *parent* let us look; it says
+            // nothing about whether we may enter. Resolving a path *inside* the
+            // directory does, because that is the lookup the search (`x`) bit
+            // guards — exactly the permission `cd` needs.
+            //
+            // This works because `Path::join(".")` appends a literal `.`
+            // component (Rust does not normalize it away) and `std::fs::metadata`
+            // passes the path straight to `stat(2)`, so the trailing `.` really
+            // is resolved through the directory by the kernel. Do not "simplify"
+            // this back to `metadata(&path)`: that is precisely the check that
+            // cannot tell an enterable directory from a sealed one.
+            match std::fs::metadata(path.join(".")) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    Err(ResolveError::DirectoryUnreadable(path))
+                }
+                // Either the probe succeeded, or it failed for some reason that
+                // is not a refusal — in which case we were allowed to traverse,
+                // which is all `cd` asks for.
+                _ => Ok(path),
+            }
+        }
     }
-    Ok(path)
 }
 
 /// Encodes a working directory into the project-folder name Claude Code uses
