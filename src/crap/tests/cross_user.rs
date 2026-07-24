@@ -24,6 +24,9 @@ const MISSING_ID: &str = "99999999-8888-7777-6666-555555555555";
 /// in `main.rs`); re-stated here rather than reaching into the binary's private
 /// constants.
 const SESSION_NOT_FOUND_EXIT: i32 = 1;
+/// `crap`'s exit code for "the recorded working directory no longer exists"
+/// (`exit_codes::DIRECTORY_MISSING`), re-stated here for the same reason.
+const DIRECTORY_MISSING_EXIT: i32 = 3;
 
 // These mirror the binary's cross-user wire protocol (see `format_fork_at_output`
 // in `main.rs`); an integration test re-states the contract it is pinning rather
@@ -614,5 +617,46 @@ fn no_flag_prefers_self_when_id_exists_in_both_trees() {
     assert!(
         !stdout.contains(FORK_AT_SENTINEL),
         "a self hit must resume in place, not fork: {stdout}"
+    );
+}
+
+#[test]
+fn missing_original_dir_errors_with_the_here_escape_hatch() {
+    let tmp = unique_root("dir-missing");
+    let root = tmp.path();
+    // A readable sibling session whose recorded cwd was deleted since it ran.
+    // Cross-user resume forks at the *original* directory, so there is nowhere to
+    // land: `crap` must refuse rather than silently substituting the current
+    // directory. Refusing alone leaves the user stuck, though — the one command
+    // that still works is `--here`, which ignores the recorded cwd entirely, so
+    // the error has to name it. Without this the user's only route out is reading
+    // the source.
+    let gone = root.join("deleted-cwd");
+    plant_session(
+        &root.join("other/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &gone,
+    );
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+
+    let out = run_crap(root, &[FOREIGN_ID, "--user", "other"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(DIRECTORY_MISSING_EXIT),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&gone.display().to_string()),
+        "must name the directory that is gone: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("crap --here {FOREIGN_ID}")),
+        "must hand back the escape hatch, with this session's id: {stderr}"
+    );
+    assert!(
+        stderr.contains("in the current directory instead"),
+        "must say what --here does differently: {stderr}"
     );
 }
