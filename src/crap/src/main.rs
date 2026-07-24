@@ -4813,6 +4813,34 @@ mod tests {
     }
 
     #[test]
+    fn resolve_status_report_finds_a_session_in_a_sibling_root() {
+        // The id lives only under a *sibling* root; the current user's own tree
+        // (root zero) is empty. `--status <id>` must fall through to the sibling
+        // and report its state — reading it in place, never copying or forking.
+        let self_projects = tempdir().unwrap();
+        let sibling_projects = tempdir().unwrap();
+        let sessions = tempdir().unwrap();
+        write_waiting_transcript(sibling_projects.path(), SAMPLE_ID);
+
+        let roots = vec![
+            UserProjects {
+                user: "me".to_string(),
+                projects_dir: self_projects.path().to_path_buf(),
+                is_self: true,
+            },
+            UserProjects {
+                user: "other".to_string(),
+                projects_dir: sibling_projects.path().to_path_buf(),
+                is_self: false,
+            },
+        ];
+
+        let report = resolve_status_report(&roots, sessions.path(), SAMPLE_ID, |_| false).unwrap();
+        assert_eq!(report.session_id, SAMPLE_ID);
+        assert_eq!(report.state, "waiting-for-user");
+    }
+
+    #[test]
     fn cli_json_requires_status() {
         use clap::Parser;
         // --json without --status is rejected.
