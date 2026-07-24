@@ -352,7 +352,10 @@ containers/CI).
     (new-id) session so you can carry its context into a different working tree. If the id belongs
     to another account on the machine, `crap` finds it automatically — searching your own sessions
     first, then other users' as a self-first fallback — and resumes a private fork of it (or target
-    a specific account with `--user <name>`). `--status <id>`
+    a specific account with `--user <name>`). A project directory it isn't allowed to read is
+    skipped rather than fatal, and if the session was hiding in one the miss names the account and
+    prints the commands to copy the transcript over — `crap` never runs `sudo` itself.
+    `--status <id>`
     reports where a session left off (`waiting-for-user`, `busy`, `awaiting-assistant`, …) without
     resuming; `--status` with no id lists every session for the current directory (as a table, or
     JSON with `--json`) showing each one's state and start/last times. Run `crap --shell-setup`
@@ -1355,6 +1358,35 @@ crap 57570685-2d64-4431-8ab6-c021a12fa1af --user alice
 The name resolves as a sibling of your home (`<home>/../<name>` — `/Users/alice` on macOS, `/home/alice` on Linux). Because a transcript that belongs to another user can never be found by a `claude --resume` you run yourself, `crap` copies it into your own tree and resumes it as a `--fork-session` (a fresh id) at its original recorded directory — the foreign transcript is only ever read, and every write lands under your home. The transient copy is removed once Claude writes the forked transcript, the same way `--here` cleans up its import (a symlink for a same-user source, a copy for a cross-user one). Because the fork only reads the original, `--user` is safe even while that session is still live in the other user's account. A `--user` naming your own account is a same-user hit and simply resumes in place.
 
 Most of the time you don't need the flag at all. With no `--user`, `crap <id>` searches **your own** tree first — byte-for-byte the same fast path as always — and only if the id isn't there does it automatically fall back to scanning every sibling home that has run Claude, resuming the first readable match exactly as `--user` would (copy into your own tree, fork at the original directory). The fallback is **self-first**, so an id that happens to exist in two accounts always resolves to *your* copy, never the foreign one. Reach for `--user <name>` only when you want to force a specific account — it skips your own tree entirely, which is also how you disambiguate on purpose.
+
+### When a project directory is owner-only
+
+Claude Code creates its project folders with whatever the owner's umask gives them, and on a shared machine that is often `0o700` — the owner may read, list, and enter; nobody else may do anything. Such a directory is *opaque*, not merely unreadable: `crap` can't list it, so it can't even tell whether the session you asked for is inside. Seeing inside would take `sudo`, and `crap` scans other homes with exactly the privileges you invoked it with.
+
+So a directory it is refused is **skipped and remembered** — along with the account that owns it — instead of ending the search. (The same goes one level up, when an entire account's `~/.claude/projects` can't be listed.) Treating a permission error as fatal would let one locked folder in someone else's home hide a session sitting perfectly readable two folders later; this way an unreadable neighbour never makes a readable session unfindable.
+
+If the id then turns up nowhere readable **and** at least one directory was skipped, `crap` doesn't flatly claim the session doesn't exist — a claim it isn't in a position to make. The headline hedges to "no *readable* Claude session", every account that refused it gets a count of what was stepped over, and you get the remedy as commands you can paste:
+
+```text
+Error: no readable Claude session found with id '99999999-8888-7777-6666-555555555555'
+       looked under /Users/me/.claude/projects
+       …and 2 other accounts on this machine
+       1 project dir under user 'alice' is owner-only and was skipped.
+       1 project dir under user 'scyloswork' is owner-only and was skipped.
+       if the session is in one of those, crap cannot read it — and crap never
+       runs sudo itself. copy it into your own tree first — for user 'alice',
+       for example:
+         SRC=$(sudo -u alice find /Users/alice/.claude/projects -name '99999999-8888-7777-6666-555555555555.jsonl')
+         mkdir -p ~/.claude/projects/-Users-me-code-foo
+         sudo -u alice cat "$SRC" > ~/.claude/projects/-Users-me-code-foo/99999999-8888-7777-6666-555555555555.jsonl
+         crap --here 99999999-8888-7777-6666-555555555555
+```
+
+Those four lines do exactly what `crap` would have done for you if it could see: find the transcript anywhere in the owning account's tree, copy it into your own, and resume it. The copy lands in the project folder for **the directory you're standing in**, and the last line is therefore [`crap --here`](#resume-in-the-current-directory---here) rather than a plain resume — with the transcript unreadable, the directory recorded inside it is precisely the thing that can't be known, and your current directory is both knowable and almost certainly where you meant to work, since it's where you typed the id. Counts are printed for every account, but the worked example is keyed to the first one named; if the session turns out to belong to a different account, swap the name in.
+
+That is where `crap` stops. It prints the escalation for you to read, weigh, and run yourself — it never runs one, not even to satisfy the request you just made. This isn't a convention a later change could quietly relax: a test scans the compiled source for every program the binary spawns and fails on anything outside a two-entry allowlist (`ps`, for the is-it-still-running check, and `bash`, which the shell-integration tests use), and it holds the shell function `--shell-setup` installs to the same rule. Escalating stays your decision, and the audit trail points at you rather than at a tool that reached for `sudo` on your behalf.
+
+A miss with nothing skipped is unchanged: `crap` looked everywhere it can look, so it still says plainly that no session has that id.
 
 ### Don't attach twice
 

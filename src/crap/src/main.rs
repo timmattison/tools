@@ -48,6 +48,21 @@
 //! A `--user` that names your own account is a same-user hit and resumes in
 //! place as usual.
 //!
+//! Scanning another account's tree runs with exactly the privileges `crap` was
+//! invoked with, so a project directory it is refused — typically `0o700` and
+//! owned by that account, which makes it opaque rather than merely unreadable:
+//! it cannot be listed, so whether the session is inside cannot be known — is
+//! skipped and *recorded* rather than fatal. One unreadable directory therefore
+//! never hides a session that is readable further along. If the id then turns up
+//! nowhere readable and at least one directory was skipped, the miss says so:
+//! it hedges to "no *readable* session", counts the skipped directories per
+//! owning account, and prints copy-paste `sudo -u <user> …` commands that locate
+//! the transcript, copy it into the current directory's project folder (the
+//! transcript being unreadable, its own recorded directory cannot be known), and
+//! resume it with `crap --here <id>`. That is where it stops: `crap` prints the
+//! escalation for the user to run and never runs one itself, which a test
+//! enforces by allowlisting every program the binary may spawn.
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
