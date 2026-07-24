@@ -3137,6 +3137,155 @@ mod tests {
         assert!(roots[1..].iter().all(|r| !r.is_self));
     }
 
+    #[test]
+    fn resolve_user_roots_resolves_a_real_sibling_to_a_single_root() {
+        // A sibling with a real projects tree resolves to exactly one root — that
+        // sibling's, tagged as another user's — because `--user` searches only the
+        // named tree and never the current user's.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        let other_projects = parent.join("other").join(".claude").join("projects");
+        fs::create_dir_all(&other_projects).unwrap();
+
+        match resolve_user_roots(parent, "other", "me") {
+            UserRoots::Resolved(roots) => {
+                assert_eq!(roots.len(), 1, "--user searches only the named tree");
+                assert_eq!(roots[0].user, "other");
+                assert_eq!(roots[0].projects_dir, other_projects);
+                assert!(!roots[0].is_self);
+            }
+            UserRoots::Invalid { .. } => panic!("a real sibling tree must resolve"),
+        }
+    }
+
+    #[test]
+    fn resolve_user_roots_resolves_the_current_users_own_name_as_self() {
+        // `--user <self>` names the current account: a valid same-user target that
+        // resolves in place with `is_self` set — the pure counterpart of the
+        // `user_flag_self_resumes_in_place` integration test.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+
+        match resolve_user_roots(parent, "me", "me") {
+            UserRoots::Resolved(roots) => {
+                assert_eq!(roots.len(), 1);
+                assert_eq!(roots[0].user, "me");
+                assert!(roots[0].is_self, "--user <self> is a same-user hit");
+            }
+            UserRoots::Invalid { .. } => panic!("the current user's own tree must resolve"),
+        }
+    }
+
+    #[test]
+    fn resolve_user_roots_invalid_lists_available_accounts_for_a_ghost() {
+        // A name with no home at all under the parent names no projects tree: the
+        // result must be Invalid and carry the accounts that DO have one — self
+        // (always) plus any sibling with a `.claude/projects` dir — in
+        // enumerate_user_projects order (self first, then siblings by name).
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        fs::create_dir_all(parent.join("alice").join(".claude").join("projects")).unwrap();
+
+        match resolve_user_roots(parent, "ghost", "me") {
+            UserRoots::Invalid { name, available } => {
+                assert_eq!(
+                    name, "ghost",
+                    "carries the bad --user value for the message"
+                );
+                assert_eq!(available, vec!["me".to_string(), "alice".to_string()]);
+            }
+            UserRoots::Resolved(_) => panic!("a ghost account has no tree to resolve"),
+        }
+    }
+
+    #[test]
+    fn resolve_user_roots_invalid_when_a_real_home_never_ran_claude() {
+        // The account exists but has no `.claude/projects` tree, so there is
+        // nothing for `--user` to search: invalid, exactly like a ghost account.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        fs::create_dir_all(parent.join("me").join(".claude").join("projects")).unwrap();
+        fs::create_dir_all(parent.join("bob")).unwrap(); // a home, but no projects tree
+
+        assert!(matches!(
+            resolve_user_roots(parent, "bob", "me"),
+            UserRoots::Invalid { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_user_roots_treats_an_owner_only_tree_as_a_valid_target() {
+        // The account is real and has run Claude, but its `.claude` is opaque to
+        // us, so we cannot even `stat` the projects dir. That is "locked out", not
+        // "absent": it must resolve (letting the normal search's owner-only
+        // guidance handle the refusal), never a misleading INVALID_USER.
+        let tmp = tempdir().unwrap();
+        let parent = tmp.path();
+        let claude = parent.join("other").join(".claude");
+        fs::create_dir_all(claude.join("projects")).unwrap();
+        // Sealing `.claude` makes `stat`ing `.claude/projects` fail with
+        // PermissionDenied — the exact refusal resolve_user_roots must treat as a
+        // valid, real account rather than an absent one.
+        if !lock_dir(&claude) {
+            unlock_dir(&claude);
+            return;
+        }
+        // Capture first, unlock second, assert last — a panic before the unlock
+        // would strand an undeletable directory inside the tempdir.
+        let resolved = resolve_user_roots(parent, "other", "me");
+        unlock_dir(&claude);
+
+        match resolved {
+            UserRoots::Resolved(roots) => {
+                assert_eq!(roots.len(), 1);
+                assert_eq!(roots[0].user, "other");
+                assert!(!roots[0].is_self);
+            }
+            UserRoots::Invalid { .. } => {
+                panic!("an owner-only tree is a real account, not an invalid user")
+            }
+        }
+    }
+
+    #[test]
+    fn format_invalid_user_names_the_bad_account_and_lists_the_available_ones() {
+        let msg = format_invalid_user("ghost", &["me".to_string(), "alice".to_string()]);
+        assert!(msg.contains("ghost"), "must name the bad account: {msg}");
+        // Each available account appears on its own line under the list heading.
+        assert!(
+            msg.lines().any(|l| l.trim() == "me"),
+            "must list 'me' on its own line: {msg}"
+        );
+        assert!(
+            msg.lines().any(|l| l.trim() == "alice"),
+            "must list 'alice' on its own line: {msg}"
+        );
+        // Never a sudo remedy: this is the wrong-account case, not a sealed tree.
+        assert!(
+            !msg.contains("sudo"),
+            "no sudo remedy on the invalid-user path: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_invalid_user_empty_available_reads_sensibly() {
+        // No account on the machine has a projects tree: there is nothing to list,
+        // so say so plainly rather than printing a heading over an empty list.
+        let msg = format_invalid_user("ghost", &[]);
+        assert!(msg.contains("ghost"), "still names the bad account: {msg}");
+        assert!(
+            msg.contains("no account on this machine"),
+            "must say plainly that nothing is resumable: {msg}"
+        );
+        assert!(
+            !msg.contains("accounts you can resume from"),
+            "no list heading when there is nothing to list: {msg}"
+        );
+    }
+
     /// A search root for the not-found message tests. Only `projects_dir` and
     /// how many roots there are can affect the message, so the paths are plain
     /// literals rather than tempdirs.
