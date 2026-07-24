@@ -1927,6 +1927,13 @@ fn run_resume(
                 "Error:".red().bold()
             );
             eprintln!("       {}", missing.display());
+            // `--here` ignores the recorded directory altogether, so it succeeds
+            // in exactly the case that just failed. Refusing without naming it
+            // leaves the user with a dead end they can only escape by reading
+            // the source.
+            eprintln!(
+                "       use 'crap --here {session_id}' to fork it in the current directory instead."
+            );
             exit(exit_codes::DIRECTORY_MISSING);
         }
         Err(ResolveError::DirectoryUnreadable(unreadable)) => {
