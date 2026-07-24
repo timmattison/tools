@@ -773,9 +773,10 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
     // A dirty working tree so the file-row age column renders too.
     fs::write(p.join("b.txt"), "untracked\n").unwrap();
 
-    // gsw reserves one column for a watch wrapper's scrollbar, so the
-    // effective render width is COLUMNS - 1.
     const COLUMNS: usize = 80;
+    /// gsw reserves one column for a watch wrapper's scrollbar, so the
+    /// effective render width is one less than the terminal's.
+    const RENDER_WIDTH: usize = COLUMNS - 1;
     let output = gsw_command(p)
         .args(["--no-color", "--log-lines", "5"])
         .env("COLUMNS", COLUMNS.to_string())
@@ -787,10 +788,9 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
     for line in out.lines() {
         let width = unicode_width::UnicodeWidthStr::width(line);
         assert!(
-            width <= COLUMNS - 1,
-            "line is {width} columns wide, past the {}-column render width — \
-             it wraps onto the next row:\n  {line:?}\nfull output:\n{out}",
-            COLUMNS - 1,
+            width <= RENDER_WIDTH,
+            "line is {width} columns wide, past the {RENDER_WIDTH}-column render \
+             width — it wraps onto the next row:\n  {line:?}\nfull output:\n{out}",
         );
     }
 

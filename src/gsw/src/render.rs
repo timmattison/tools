@@ -5,7 +5,9 @@ use std::time::Duration;
 use colored::{ColoredString, Colorize};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::age::{age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim};
+use crate::age::{
+    age_dim_level, age_fade_factor, fade_rgb, format_age_detailed, AgeDim, AGE_WIDTH,
+};
 use crate::bar::render_bar;
 use crate::git::FileStatus;
 
@@ -127,8 +129,10 @@ pub struct RenderOptions {
 /// Width of the "+adds" / "-dels" / age column fields.
 const ADDS_FIELD: usize = 5;
 const DELS_FIELD: usize = 4;
-/// Wide enough for `59m59s`, `23h59m`, `99d23h`. Older files overflow slightly.
-const AGE_FIELD: usize = 6;
+/// Sized to [`AGE_WIDTH`] — the widest string [`format_age_detailed`] can
+/// return — so no age can push a row past the terminal width and wrap. The
+/// two constants are one and the same on purpose: they cannot drift.
+const AGE_FIELD: usize = AGE_WIDTH;
 
 /// Visible separator characters between columns.
 const SEP_BAR_ADDS: usize = 2;
