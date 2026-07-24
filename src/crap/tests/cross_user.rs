@@ -27,6 +27,11 @@ const SESSION_NOT_FOUND_EXIT: i32 = 1;
 /// `crap`'s exit code for "the recorded working directory no longer exists"
 /// (`exit_codes::DIRECTORY_MISSING`), re-stated here for the same reason.
 const DIRECTORY_MISSING_EXIT: i32 = 3;
+/// `crap`'s exit code for "the recorded working directory is still there but
+/// this account cannot enter it" (`exit_codes::DIRECTORY_UNREADABLE`), likewise
+/// re-stated rather than imported.
+#[cfg(unix)]
+const DIRECTORY_UNREADABLE_EXIT: i32 = 11;
 
 // These mirror the binary's cross-user wire protocol (see `format_fork_at_output`
 // in `main.rs`); an integration test re-states the contract it is pinning rather
@@ -650,6 +655,63 @@ fn missing_original_dir_errors_with_the_here_escape_hatch() {
     assert!(
         stderr.contains(&gone.display().to_string()),
         "must name the directory that is gone: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("crap --here {FOREIGN_ID}")),
+        "must hand back the escape hatch, with this session's id: {stderr}"
+    );
+    assert!(
+        stderr.contains("in the current directory instead"),
+        "must say what --here does differently: {stderr}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn unenterable_original_dir_errors_with_the_here_escape_hatch() {
+    let tmp = unique_root("dir-unreadable");
+    let root = tmp.path();
+    // The other half of "there is nowhere to land": the recorded directory is
+    // sitting right there, but this account may not enter it — the sibling's
+    // session ran somewhere we are locked out of. That is a different diagnosis
+    // from "no longer exists" (exit 11, not 3), and the user is just as stuck, so
+    // it owes the same escape hatch. A regression that dropped the hint here
+    // would leave the harder-to-diagnose of the two failures as the dead end.
+    let locked = root.join("locked-cwd");
+    fs::create_dir_all(&locked).unwrap();
+    plant_session(
+        &root.join("other/.claude/projects"),
+        "-proj",
+        FOREIGN_ID,
+        &locked,
+    );
+    fs::create_dir_all(root.join("home/.claude/projects")).unwrap();
+    set_mode(&locked, 0o000);
+    // A privileged process walks straight through `0o000`, which makes the
+    // refusal — the entire subject of this test — unobservable. Ask the
+    // filesystem the same question the binary will, rather than taking a uid
+    // dependency, and skip when the answer is not a refusal.
+    if fs::metadata(locked.join("probe")).err().map(|e| e.kind())
+        != Some(std::io::ErrorKind::PermissionDenied)
+    {
+        set_mode(&locked, 0o755);
+        return;
+    }
+
+    let out = run_crap(root, &[FOREIGN_ID, "--user", "other"]);
+    // Restore before asserting anything, so a failing assertion still leaves the
+    // TempDir removable on drop.
+    set_mode(&locked, 0o755);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        out.status.code(),
+        Some(DIRECTORY_UNREADABLE_EXIT),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&locked.display().to_string()),
+        "must name the directory it cannot enter: {stderr}"
     );
     assert!(
         stderr.contains(&format!("crap --here {FOREIGN_ID}")),
