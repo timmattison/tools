@@ -48,6 +48,21 @@
 //! A `--user` that names your own account is a same-user hit and resumes in
 //! place as usual.
 //!
+//! Scanning another account's tree runs with exactly the privileges `crap` was
+//! invoked with, so a project directory it is refused — typically `0o700` and
+//! owned by that account, which makes it opaque rather than merely unreadable:
+//! it cannot be listed, so whether the session is inside cannot be known — is
+//! skipped and *recorded* rather than fatal. One unreadable directory therefore
+//! never hides a session that is readable further along. If the id then turns up
+//! nowhere readable and at least one directory was skipped, the miss says so:
+//! it hedges to "no *readable* session", counts the skipped directories per
+//! owning account, and prints copy-paste `sudo -u <user> …` commands that locate
+//! the transcript, copy it into the current directory's project folder (the
+//! transcript being unreadable, its own recorded directory cannot be known), and
+//! resume it with `crap --here <id>`. That is where it stops: `crap` prints the
+//! escalation for the user to run and never runs one itself, which a test
+//! enforces by allowlisting every program the binary may spawn.
+//!
 //! Because a binary cannot change its parent shell's working directory (nor see
 //! shell aliases such as `clauded`), the user-facing `crap` command is a shell
 //! function installed via `crap --shell-setup`. This binary resolves the session
@@ -288,6 +303,26 @@ fn enumerate_user_projects(users_parent: &Path, self_name: &str) -> Vec<UserProj
     roots
 }
 
+/// A project directory the scan could not enter, tagged with the account that
+/// owns the tree it was found in.
+///
+/// A cross-user scan reaches into other people's homes, where a `0o700` project
+/// directory is completely opaque to us: we cannot list it, and we cannot tell
+/// whether the session we are hunting for is sitting inside it. That is a
+/// materially different answer from "the id is not on this machine", and the
+/// difference is only actionable if the scan remembers *which* directories it
+/// could not see and *whose* they were — the user name is what turns a dead end
+/// into a remedy the caller can name ("resume it as that account"). Carrying the
+/// pair together means the miss itself contains everything guidance needs, so no
+/// caller has to re-walk the tree to work out what it was denied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkippedDir {
+    /// The account whose `~/.claude/projects` tree the directory belongs to.
+    user: String,
+    /// The directory itself, unreadable to the invoking user.
+    dir: PathBuf,
+}
+
 /// The outcome of searching an ordered list of roots for a session id.
 #[derive(Debug)]
 enum FoundSession {
@@ -298,27 +333,86 @@ enum FoundSession {
         /// The root it was found under, carrying the owning user and `is_self`.
         root: UserProjects,
     },
-    /// The id was not found in any of the searched roots.
-    NotFound,
+    /// The id was not found in any *readable* location under the searched roots.
+    ///
+    /// This is deliberately not a bare unit variant: a miss on a cross-user scan
+    /// is only half an answer until you also know what the scan was not allowed
+    /// to look at, so the variant carries the owner-only directories it stepped
+    /// over. An empty `skipped` therefore means "the id genuinely is not here",
+    /// while a non-empty one means "not in anything I could read" — and the
+    /// caller can say so instead of asserting a certainty it does not have.
+    NotFound {
+        /// The owner-only directories skipped during the scan, in scan order.
+        skipped: Vec<SkippedDir>,
+    },
 }
 
-/// Searches an ordered list of roots for a session id, first match winning.
+/// Searches an ordered list of roots for a session id, first match winning, and
+/// records every directory it was refused.
 ///
-/// Within each root it reuses [`find_session_file`] as the per-root inner loop,
-/// so a hit is tagged with the root it came from (hence its owning user and
-/// whether it is the current user's own tree). Roots are searched in order and
-/// the search short-circuits on the first match, so a self-first ordering makes
-/// a session the current user already owns always win.
+/// Roots are searched in order and the search short-circuits on the first match,
+/// so a self-first ordering makes a session the current user already owns always
+/// win, and a hit is tagged with the root it came from (hence its owning user
+/// and whether it is the current user's own tree).
+///
+/// The per-root inner loop is spelled out here rather than delegated to
+/// [`find_session_file`] because that function answers a strictly smaller
+/// question: it can only say "no `<id>.jsonl` here", collapsing "I looked and it
+/// is absent" together with "I was not allowed to look". Across users those are
+/// different answers. A `0o700` project directory owned by another account is
+/// completely opaque without `sudo` — we cannot list it, and we cannot say
+/// whether the session is inside — and `crap` must never run `sudo` itself: it
+/// searches other homes with exactly the privileges it was invoked with, and
+/// escalating on the user's behalf is not its call to make. Given that, the only
+/// useful thing it can do with a refusal is remember it, so a miss can tell the
+/// user precisely what it could not see and let them decide. Hence a
+/// `PermissionDenied` probe becomes a [`SkippedDir`] tagged with the root's
+/// user; every other IO error stays ignored, since a vanished or malformed entry
+/// says nothing the user could act on.
+///
+/// A root whose `projects_dir` cannot even be listed is the same failure one
+/// level up, and is recorded as a single skip naming the root itself.
 fn find_session_across(roots: &[UserProjects], id: &str) -> FoundSession {
+    let file_name = format!("{id}.jsonl");
+    let mut skipped = Vec::new();
     for root in roots {
-        if let Some(path) = find_session_file(&root.projects_dir, id) {
-            return FoundSession::Found {
-                path,
-                root: root.clone(),
-            };
+        let entries = match std::fs::read_dir(&root.projects_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                skipped.push(SkippedDir {
+                    user: root.user.clone(),
+                    dir: root.projects_dir.clone(),
+                });
+                continue;
+            }
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let dir = entry.path();
+            let candidate = dir.join(&file_name);
+            match std::fs::metadata(&candidate) {
+                Ok(meta) if meta.is_file() => {
+                    return FoundSession::Found {
+                        path: candidate,
+                        root: root.clone(),
+                    };
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    skipped.push(SkippedDir {
+                        user: root.user.clone(),
+                        dir,
+                    });
+                }
+                // A non-file `<id>.jsonl`, or any other IO error, is a plain
+                // miss: nothing here the user could be told to act on.
+                Ok(_) | Err(_) => {}
+            }
         }
     }
-    FoundSession::NotFound
+    FoundSession::NotFound { skipped }
 }
 
 /// The "where I looked" detail lines for a not-found session, indented to hang
@@ -352,6 +446,117 @@ fn format_searched_roots(roots: &[UserProjects]) -> String {
         ));
     }
     lines
+}
+
+/// The actionable guidance for a miss whose scan was refused entry to owner-only
+/// project directories, indented to hang under the `Error:` line.
+///
+/// Returns an empty string when nothing was skipped, so the not-found path can
+/// print it unconditionally: a genuine "that id is not on this machine" gains
+/// nothing, and a caller never has to branch on the shape of the miss.
+///
+/// The guidance stops at *telling the user what to run*. `crap` searches other
+/// homes with exactly the privileges it was invoked with, and reading a `0o700`
+/// directory owned by someone else needs more than that — but escalating on the
+/// user's behalf is not a tool's call to make, so `crap` never runs `sudo`
+/// itself. Printing the exact commands is the most it can do and still leave the
+/// decision (and the audit trail) with the person at the keyboard.
+///
+/// Every account with skipped directories gets a count line, in scan order, so
+/// nobody has to guess how much of the machine was opaque. The remedy that
+/// follows is keyed on the *first* such account — one worked example beats four
+/// near-identical ones — and names that account explicitly whenever there is more
+/// than one, so the reader can tell which of the counts above the commands are
+/// for.
+///
+/// The remedy anchors on `pwd` rather than on the session's own recorded
+/// directory for the reason the guidance exists at all: the transcript is
+/// unreadable, so the directory recorded inside it cannot be known. The current
+/// directory is the one location that is both knowable and almost certainly what
+/// the user wants — they typed the id while standing where they intend to work —
+/// so the copy lands in that directory's project folder and the trailing
+/// `crap --here <id>` picks it straight back up.
+fn format_owner_only_guidance(
+    session_id: &str,
+    roots: &[UserProjects],
+    skipped: &[SkippedDir],
+    pwd: &Path,
+) -> String {
+    /// The hanging indent that aligns a detail line under the `Error:` prefix.
+    const INDENT: &str = "       ";
+    /// Commands are indented one step further so they read as a copy-paste block
+    /// rather than as prose.
+    const COMMAND_INDENT: &str = "         ";
+
+    let Some(first) = skipped.first() else {
+        return String::new();
+    };
+    let owner = first.user.as_str();
+
+    // Count per account, keeping first-seen (scan) order: the roots were searched
+    // in a deliberate order (self first, then siblings by name), and reporting in
+    // that same order keeps the message stable run to run.
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for dir in skipped {
+        match counts.iter_mut().find(|(user, _)| *user == dir.user) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((dir.user.as_str(), 1)),
+        }
+    }
+
+    let mut out = String::new();
+    for &(user, count) in &counts {
+        let (noun, verb) = if count == 1 {
+            ("project dir", "is owner-only and was skipped")
+        } else {
+            ("project dirs", "are owner-only and were skipped")
+        };
+        out.push_str(&format!(
+            "{INDENT}{count} {noun} under user '{user}' {verb}.\n"
+        ));
+    }
+
+    out.push_str(&format!(
+        "{INDENT}if the session is in one of those, crap cannot read it — and crap never\n"
+    ));
+    if counts.len() > 1 {
+        out.push_str(&format!(
+            "{INDENT}runs sudo itself. copy it into your own tree first — for user '{owner}',\n\
+             {INDENT}for example:\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{INDENT}runs sudo itself. copy it into your own tree first, for example:\n"
+        ));
+    }
+
+    // Search the owning account's whole tree, since which project folder holds
+    // the session is exactly what could not be seen. The root is looked up by
+    // account name; a skipped directory always came from a root, so the lookup
+    // cannot really miss — but keeping it total (falling back to the skipped
+    // directory itself, a real path inside that same tree) means a future caller
+    // that assembles the two lists separately degrades to a narrower `find`
+    // rather than panicking on a message that only exists to be helpful.
+    let search_root = roots
+        .iter()
+        .find(|root| root.user == owner)
+        .map_or(first.dir.as_path(), |root| root.projects_dir.as_path());
+    // The project folder for the current directory. An unavailable `pwd` encodes
+    // to the empty string, which leaves a still-runnable `mkdir -p` the user can
+    // point wherever they like.
+    let folder = encode_project_dir(pwd);
+    out.push_str(&format!(
+        "{COMMAND_INDENT}SRC=$(sudo -u {owner} find {} -name '{session_id}.jsonl')\n",
+        search_root.display()
+    ));
+    out.push_str(&format!(
+        "{COMMAND_INDENT}mkdir -p ~/.claude/projects/{folder}\n"
+    ));
+    out.push_str(&format!(
+        "{COMMAND_INDENT}sudo -u {owner} cat \"$SRC\" > ~/.claude/projects/{folder}/{session_id}.jsonl\n"
+    ));
+    out.push_str(&format!("{COMMAND_INDENT}crap --here {session_id}\n"));
+    out
 }
 
 /// The conversational state of a session, inferred from its transcript.
@@ -593,8 +798,16 @@ fn prepare_import(
 enum HereResolveError {
     /// The session id was not a valid UUID.
     InvalidSessionId,
-    /// No `<session_id>.jsonl` file was found under any searched root.
-    SessionNotFound,
+    /// No `<session_id>.jsonl` file was found under any *readable* location in
+    /// the searched roots.
+    ///
+    /// Carries the owner-only directories the scan had to step over (see
+    /// [`SkippedDir`]), so the failure the user sees can distinguish "that id is
+    /// not on this machine" from "it is not anywhere I was allowed to look".
+    SessionNotFound {
+        /// The owner-only directories skipped while searching, in scan order.
+        skipped: Vec<SkippedDir>,
+    },
     /// Creating the project folder, or the symlink/copy, failed.
     Io(std::io::Error),
 }
@@ -625,8 +838,11 @@ fn resolve_here_import(
     if !is_valid_session_id(session_id) {
         return Err(HereResolveError::InvalidSessionId);
     }
-    let FoundSession::Found { path, root } = find_session_across(roots, session_id) else {
-        return Err(HereResolveError::SessionNotFound);
+    let (path, root) = match find_session_across(roots, session_id) {
+        FoundSession::Found { path, root } => (path, root),
+        FoundSession::NotFound { skipped } => {
+            return Err(HereResolveError::SessionNotFound { skipped });
+        }
     };
     // Same-user hit → symlink (unchanged). Cross-user hit → copy, so nothing is
     // symlinked into another user's home and the import is a self-contained
@@ -1427,6 +1643,37 @@ fn abort_if_session_live(session_id: &str, here: bool, force: bool) {
     }
 }
 
+/// Reports a session id that was not found under any searched root, and exits
+/// with [`exit_codes::SESSION_NOT_FOUND`].
+///
+/// Every not-found path goes through here so the message is assembled in exactly
+/// one place: the headline, the "where I looked" summary, and the owner-only
+/// guidance are three facets of one answer, and splitting them across call sites
+/// is how they drift. The headline hedges — "no *readable* Claude session" —
+/// precisely when the scan was refused entry somewhere, because with an opaque
+/// directory in the way "it is not here" is a certainty `crap` does not have; a
+/// clean miss keeps the flat wording it has always had.
+///
+/// The working directory is resolved here rather than threaded in from the
+/// callers, because it is only ever needed for the guidance. A failure is
+/// harmless: it costs the `mkdir` line its destination, while the count lines,
+/// the account name, and the `sudo -u <user> find` that actually locates the
+/// transcript are all still there.
+fn exit_session_not_found(session_id: &str, roots: &[UserProjects], skipped: &[SkippedDir]) -> ! {
+    let pwd = std::env::current_dir().unwrap_or_default();
+    let qualifier = if skipped.is_empty() { "" } else { "readable " };
+    eprintln!(
+        "{} no {qualifier}Claude session found with id '{session_id}'",
+        "Error:".red().bold()
+    );
+    eprint!("{}", format_searched_roots(roots));
+    eprint!(
+        "{}",
+        format_owner_only_guidance(session_id, roots, skipped, &pwd)
+    );
+    exit(exit_codes::SESSION_NOT_FOUND);
+}
+
 /// Handles `crap --here <id> [<new-id>] [--user <name>]`: import the session
 /// into the current directory's project folder and emit the here-mode output
 /// the shell function consumes, optionally pinning the forked session's id to
@@ -1497,15 +1744,8 @@ fn run_here(
             );
             exit(exit_codes::INVALID_SESSION_ID);
         }
-        Err(HereResolveError::SessionNotFound) => {
-            eprintln!(
-                "{} no Claude session found with id '{session_id}'",
-                "Error:".red().bold()
-            );
-            for root in roots {
-                eprintln!("       looked under {}", root.projects_dir.display());
-            }
-            exit(exit_codes::SESSION_NOT_FOUND);
+        Err(HereResolveError::SessionNotFound { skipped }) => {
+            exit_session_not_found(session_id, roots, &skipped);
         }
         Err(HereResolveError::Io(err)) => {
             eprintln!(
@@ -1595,13 +1835,11 @@ fn run_resume(
         exit(exit_codes::INVALID_SESSION_ID);
     }
 
-    let FoundSession::Found { path, root } = find_session_across(roots, session_id) else {
-        eprintln!(
-            "{} no Claude session found with id '{session_id}'",
-            "Error:".red().bold()
-        );
-        eprint!("{}", format_searched_roots(roots));
-        exit(exit_codes::SESSION_NOT_FOUND);
+    let (path, root) = match find_session_across(roots, session_id) {
+        FoundSession::Found { path, root } => (path, root),
+        FoundSession::NotFound { skipped } => {
+            exit_session_not_found(session_id, roots, &skipped);
+        }
     };
 
     let dir = match session_dir_from_transcript(&path) {
@@ -2350,7 +2588,7 @@ mod tests {
                 assert_eq!(found.user, "me");
                 assert!(found.is_self);
             }
-            FoundSession::NotFound => panic!("expected the id to be found"),
+            FoundSession::NotFound { .. } => panic!("expected the id to be found"),
         }
     }
 
@@ -2366,7 +2604,7 @@ mod tests {
         };
         assert!(matches!(
             find_session_across(&[root], SAMPLE_ID),
-            FoundSession::NotFound
+            FoundSession::NotFound { .. }
         ));
     }
 
@@ -2405,7 +2643,151 @@ mod tests {
                 assert!(root.is_self);
                 assert_eq!(root.user, "me");
             }
-            FoundSession::NotFound => panic!("expected the id to be found in self"),
+            FoundSession::NotFound { .. } => panic!("expected the id to be found in self"),
+        }
+    }
+
+    /// Makes `dir` unreadable (`0o000`) and reports whether the invoking user is
+    /// genuinely locked out of it.
+    ///
+    /// Returns `false` when the caller can still see inside. Root ignores the
+    /// permission bits entirely, so under `sudo` — or in a container that runs
+    /// every process as uid 0 — an owner-only directory is perfectly readable
+    /// and the behavior these tests describe is simply not observable; a test
+    /// that asserted it anyway would fail for a reason that has nothing to do
+    /// with the code. Establishing that without adding a `libc`/`nix` dependency
+    /// just to call `geteuid` means asking the filesystem the same question the
+    /// scan will ask: probe a path inside the locked directory and see whether
+    /// the answer really is `PermissionDenied`.
+    #[cfg(unix)]
+    fn lock_dir(dir: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::metadata(dir.join("probe")).err().map(|e| e.kind())
+            == Some(std::io::ErrorKind::PermissionDenied)
+    }
+
+    /// Restores `dir` to a normal readable mode after [`lock_dir`].
+    ///
+    /// Every caller must do this *before* running any assertion that can panic:
+    /// `TempDir`'s `Drop` is a recursive delete, and a `0o000` directory defeats
+    /// it — so an unrestored lock leaks the tempdir and buries the real
+    /// assertion failure under a cleanup error.
+    #[cfg(unix)]
+    fn unlock_dir(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_session_across_records_an_owner_only_subdir_as_skipped() {
+        // A `0o700` project dir in someone else's home is opaque to us: the scan
+        // cannot rule the session out, so stepping over it silently would turn
+        // "I was not allowed to look" into a confident "it does not exist".
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("other/.claude/projects");
+        let locked = projects.join("-locked");
+        fs::create_dir_all(&locked).unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        let root = UserProjects {
+            user: "other".to_string(),
+            projects_dir: projects,
+            is_self: false,
+        };
+        // Capture first, unlock second, assert last — a panic before the unlock
+        // would strand an undeletable directory inside the tempdir.
+        let found = find_session_across(std::slice::from_ref(&root), SAMPLE_ID);
+        unlock_dir(&locked);
+
+        match found {
+            FoundSession::NotFound { skipped } => assert_eq!(
+                skipped,
+                vec![SkippedDir {
+                    user: "other".to_string(),
+                    dir: locked,
+                }],
+                "the unreadable dir must be recorded against the user who owns it"
+            ),
+            FoundSession::Found { .. } => panic!("the id exists nowhere; it cannot be found"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_session_across_still_matches_a_readable_dir_when_another_is_owner_only() {
+        // Recording a skip must never cost us a hit: one unreadable neighbour in
+        // the same tree cannot be allowed to make a session that is right there,
+        // readable, unfindable.
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("other/.claude/projects");
+        let readable = projects.join("-readable");
+        let locked = projects.join("-locked");
+        fs::create_dir_all(&readable).unwrap();
+        fs::create_dir_all(&locked).unwrap();
+        let file = readable.join(format!("{SAMPLE_ID}.jsonl"));
+        fs::write(&file, "{}\n").unwrap();
+        if !lock_dir(&locked) {
+            unlock_dir(&locked);
+            return;
+        }
+
+        let root = UserProjects {
+            user: "other".to_string(),
+            projects_dir: projects,
+            is_self: false,
+        };
+        let found = find_session_across(std::slice::from_ref(&root), SAMPLE_ID);
+        unlock_dir(&locked);
+
+        match found {
+            FoundSession::Found { path, root: found } => {
+                assert_eq!(path, file);
+                assert_eq!(found.user, "other");
+            }
+            FoundSession::NotFound { .. } => {
+                panic!("an unreadable neighbour must not hide a readable session")
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_session_across_records_an_unreadable_projects_root_as_skipped() {
+        // The whole `~/.claude/projects` tree can be the thing we cannot open,
+        // and it is the same class of miss as a single opaque project dir: one
+        // skip, naming the root itself, so the user learns the tree exists and
+        // is closed rather than being told the id is nowhere on the machine.
+        let tmp = tempdir().unwrap();
+        let projects = tmp.path().join("other/.claude/projects");
+        fs::create_dir_all(&projects).unwrap();
+        if !lock_dir(&projects) {
+            unlock_dir(&projects);
+            return;
+        }
+
+        let root = UserProjects {
+            user: "other".to_string(),
+            projects_dir: projects.clone(),
+            is_self: false,
+        };
+        let found = find_session_across(std::slice::from_ref(&root), SAMPLE_ID);
+        unlock_dir(&projects);
+
+        match found {
+            FoundSession::NotFound { skipped } => assert_eq!(
+                skipped,
+                vec![SkippedDir {
+                    user: "other".to_string(),
+                    dir: projects,
+                }],
+                "an unlistable root is one skip, named by the root itself"
+            ),
+            FoundSession::Found { .. } => panic!("nothing is readable here; nothing can be found"),
         }
     }
 
@@ -2562,6 +2944,156 @@ mod tests {
         // Unreachable in practice (the current user is always root zero), but a
         // total function keeps a stray indent off the not-found output.
         assert_eq!(format_searched_roots(&[]), "");
+    }
+
+    /// A project directory under `user`'s tree that the scan was refused. Like
+    /// [`search_root`], plain literals: only the account name, the count, and the
+    /// owning root's path can affect the guidance.
+    fn skipped_dir(user: &str, folder: &str) -> SkippedDir {
+        SkippedDir {
+            user: user.to_string(),
+            dir: Path::new("/Users")
+                .join(user)
+                .join(".claude/projects")
+                .join(folder),
+        }
+    }
+
+    #[test]
+    fn format_owner_only_guidance_is_empty_when_nothing_was_skipped() {
+        // A clean miss — everything was readable and the id simply is not here —
+        // earns no guidance, so the not-found path can print the block
+        // unconditionally instead of branching on the shape of the miss.
+        let roots = [search_root("me", true)];
+        assert_eq!(
+            format_owner_only_guidance(SAMPLE_ID, &roots, &[], Path::new("/work")),
+            ""
+        );
+    }
+
+    #[test]
+    fn format_owner_only_guidance_counts_a_single_dir_in_the_singular() {
+        // One skipped directory reads as one, not as "1 project dirs ... were".
+        let roots = [search_root("me", true), search_root("alice", false)];
+        let skipped = [skipped_dir("alice", "-proj")];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        assert!(
+            out.contains(
+                "       1 project dir under user 'alice' is owner-only and was skipped.\n"
+            ),
+            "singular count line: {out}"
+        );
+        assert!(!out.contains("project dirs"), "no plural noun: {out}");
+    }
+
+    #[test]
+    fn format_owner_only_guidance_counts_several_dirs_in_the_plural() {
+        // Three skipped directories under one account: one line, pluralized.
+        let roots = [search_root("me", true), search_root("alice", false)];
+        let skipped = [
+            skipped_dir("alice", "-one"),
+            skipped_dir("alice", "-two"),
+            skipped_dir("alice", "-three"),
+        ];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        assert!(
+            out.contains(
+                "       3 project dirs under user 'alice' are owner-only and were skipped.\n"
+            ),
+            "plural count line: {out}"
+        );
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.contains("owner-only and were skipped"))
+                .count(),
+            1,
+            "one count line per account, not per directory: {out}"
+        );
+    }
+
+    #[test]
+    fn format_owner_only_guidance_counts_each_account_in_scan_order() {
+        // Two accounts were opaque, and `alice`'s directories bracket `bob`'s in
+        // the scan. Each account gets exactly one count line, in first-seen
+        // order, and the single worked remedy is keyed on the first of them —
+        // naming that account explicitly, so the reader knows which count the
+        // commands belong to.
+        let roots = [
+            search_root("me", true),
+            search_root("alice", false),
+            search_root("bob", false),
+        ];
+        let skipped = [
+            skipped_dir("alice", "-one"),
+            skipped_dir("bob", "-x"),
+            skipped_dir("alice", "-two"),
+        ];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        let alice = out
+            .find("2 project dirs under user 'alice' are owner-only and were skipped.")
+            .expect("a count line for alice");
+        let bob = out
+            .find("1 project dir under user 'bob' is owner-only and was skipped.")
+            .expect("a count line for bob");
+        assert!(alice < bob, "accounts are listed in scan order: {out}");
+        assert!(
+            out.contains("for user 'alice',"),
+            "the remedy must say which account it is for: {out}"
+        );
+        // Exactly one remedy, and every command in it is `alice`'s.
+        assert_eq!(
+            out.lines().filter(|l| l.contains("sudo -u ")).count(),
+            2,
+            "one remedy: a `find` and a `cat`: {out}"
+        );
+        assert!(!out.contains("sudo -u bob"), "not keyed on bob too: {out}");
+    }
+
+    #[test]
+    fn format_owner_only_guidance_remedy_reads_that_tree_and_writes_this_directory() {
+        // The `find` searches the owning account's whole tree — which project
+        // folder holds the session is exactly what could not be seen — and the
+        // copy lands in OUR project folder for the current directory, which is
+        // what the trailing `crap --here` then resumes.
+        let roots = [search_root("me", true), search_root("alice", false)];
+        let skipped = [skipped_dir("alice", "-proj")];
+        let out =
+            format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/Volumes/code/foo"));
+        assert!(
+            out.contains(&format!(
+                "SRC=$(sudo -u alice find /Users/alice/.claude/projects -name '{SAMPLE_ID}.jsonl')"
+            )),
+            "the find must cover alice's whole tree: {out}"
+        );
+        assert!(
+            out.contains("mkdir -p ~/.claude/projects/-Volumes-code-foo\n"),
+            "the destination is this directory's project folder: {out}"
+        );
+        assert!(
+            out.contains(&format!(
+                "sudo -u alice cat \"$SRC\" > ~/.claude/projects/-Volumes-code-foo/{SAMPLE_ID}.jsonl"
+            )),
+            "the copy must land in our own tree: {out}"
+        );
+        assert!(
+            out.contains(&format!("crap --here {SAMPLE_ID}\n")),
+            "the remedy must end by resuming the copy: {out}"
+        );
+    }
+
+    #[test]
+    fn format_owner_only_guidance_falls_back_when_the_owner_has_no_root() {
+        // Every skipped directory came from a root, so the lookup cannot really
+        // miss — but the function stays total: with no matching root it narrows
+        // the `find` to the skipped directory itself rather than panicking on a
+        // message whose only job is to be helpful.
+        let roots = [search_root("me", true)];
+        let skipped = [skipped_dir("ghost", "-proj")];
+        let out = format_owner_only_guidance(SAMPLE_ID, &roots, &skipped, Path::new("/work"));
+        assert!(
+            out.contains("SRC=$(sudo -u ghost find /Users/ghost/.claude/projects/-proj -name '"),
+            "the find falls back to the directory that was refused: {out}"
+        );
     }
 
     #[test]
@@ -2751,7 +3283,7 @@ mod tests {
                 Path::new("/x"),
                 SAMPLE_ID
             ),
-            Err(HereResolveError::SessionNotFound)
+            Err(HereResolveError::SessionNotFound { .. })
         ));
     }
 
@@ -3745,5 +4277,144 @@ mod tests {
         use clap::Parser;
         // `--user` requires a NAME; a bare flag is rejected.
         assert!(Cli::try_parse_from(["crap", SAMPLE_ID, "--user"]).is_err());
+    }
+
+    /// Extracts every program literal handed to a process spawn in `source` —
+    /// the string inside each `Command::new(…)` call, however the type is
+    /// qualified at the call site.
+    ///
+    /// The needle is assembled at runtime rather than written as one literal so
+    /// that this function's own text cannot satisfy the scan. Spelled out, the
+    /// guard would find itself in every file it reads, and a matcher that
+    /// reports its own source is indistinguishable from one that reports
+    /// nothing.
+    ///
+    /// Splitting on the needle and reading characters up to the closing quote
+    /// keeps this free of byte offsets entirely — the workspace denies
+    /// `clippy::string_slice`, and slicing a source file (which may hold
+    /// multi-byte characters anywhere) is exactly the panic that lint exists to
+    /// prevent.
+    fn spawned_programs(source: &str) -> Vec<String> {
+        let needle = ["Command", "::new(\""].concat();
+        source
+            .split(&needle)
+            // The first chunk is whatever preceded the first spawn, so it never
+            // begins with a program name.
+            .skip(1)
+            .map(|rest| rest.chars().take_while(|c| *c != '"').collect())
+            .collect()
+    }
+
+    /// The privilege-escalation binaries `crap` must never run.
+    ///
+    /// Assembled at runtime for the same reason as the spawn needle: the
+    /// guard's vocabulary stays out of the text the guard reads, so no check
+    /// here can ever be satisfied — or defeated — by this test's own source.
+    fn escalation_binaries() -> Vec<String> {
+        vec![
+            ["su", "do"].concat(),
+            ["s", "u"].concat(),
+            ["do", "as"].concat(),
+            ["pk", "exec"].concat(),
+            ["run", "0"].concat(),
+        ]
+    }
+
+    /// Every escalation binary named as a bare word in `shell`.
+    ///
+    /// Words, not substrings: `--resume` and `sure` both contain `su`, and a
+    /// naive `contains` would report the shell function's own `claude --resume`
+    /// as an escalation. Splitting on everything that cannot be part of a
+    /// command name also catches path-qualified forms, since `/usr/bin/sudo`
+    /// tokenises to `usr`, `bin`, `sudo`.
+    fn shell_escalations(shell: &str, escalators: &[String]) -> Vec<String> {
+        shell
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|word| escalators.iter().any(|e| e == word))
+            .map(String::from)
+            .collect()
+    }
+
+    /// `crap`'s whole answer to a session it cannot read — another account's
+    /// `0o700` project directory — is *detect and guide, never escalate*. It
+    /// names the owning account and prints the `sudo -u <account> …` commands
+    /// that would recover the transcript, for the user to read, weigh, and run
+    /// themselves. It never runs one. That line is what keeps the person at the
+    /// keyboard the one who authorizes the privilege, and keeps the audit trail
+    /// pointing at them rather than at a tool that escalated quietly on their
+    /// behalf.
+    ///
+    /// Nothing in the type system holds that line, and the source now carries
+    /// the word `sudo` in guidance text, so a future edit could slide from
+    /// *printing* a command to *running* one without anyone noticing. This test
+    /// is the enforcement point. Every program the binary spawns must appear in
+    /// `ALLOWED` below — `ps`, the liveness probe in `pid_is_alive`, and `bash`,
+    /// which the shell-integration tests use to source the real function — so
+    /// adding a spawn is a deliberate act that has to edit this list, in a diff
+    /// a reviewer will see. None of them may be an escalation binary. The shell
+    /// function `--shell-setup` writes into the user's rc file is held to the
+    /// same rule: an escalation there would be `crap` escalating just as surely
+    /// as spawning one, only with the user's own shell doing it.
+    ///
+    /// Both matchers are mutation-tested against synthetic violations before
+    /// they are pointed at the real thing, because a guard that has never been
+    /// shown to fire is indistinguishable from one that is broken.
+    #[test]
+    fn crap_never_escalates_privilege_itself() {
+        let escalators = escalation_binaries();
+        let escalator = escalators[0].clone();
+
+        // Mutation test 1: a source snippet that really does spawn an
+        // escalation binary must be extracted and classified as one.
+        let needle = ["Command", "::new(\""].concat();
+        let violating_source = format!("fn oops() {{ let _ = {needle}{escalator}\").status(); }}");
+        let caught = spawned_programs(&violating_source);
+        assert_eq!(
+            caught,
+            vec![escalator.clone()],
+            "the spawn matcher must extract the program from a known violation"
+        );
+        assert!(
+            escalators.contains(&caught[0]),
+            "a known violation must classify as an escalation binary"
+        );
+
+        // Mutation test 2: the same for shell text, which is scanned by words.
+        let violating_shell = format!("function crap() {{ {escalator} -u someone claude; }}");
+        assert_eq!(
+            shell_escalations(&violating_shell, &escalators),
+            vec![escalator],
+            "the shell matcher must flag a known violation"
+        );
+
+        // The real source. `include_str!` is relative to this file, so this is
+        // the very text being compiled.
+        let programs = spawned_programs(include_str!("main.rs"));
+        assert!(
+            !programs.is_empty(),
+            "the scan found no spawns at all — `crap` does spawn `ps`, so the matcher is broken"
+        );
+
+        const ALLOWED: [&str; 2] = ["ps", "bash"];
+        for program in &programs {
+            assert!(
+                ALLOWED.contains(&program.as_str()),
+                "`crap` spawns `{program}`, which is not in the allowlist {ALLOWED:?}; \
+                 every new spawn must be added here deliberately"
+            );
+            assert!(
+                !escalators.contains(program),
+                "`crap` spawns `{program}`, a privilege-escalation binary; \
+                 `crap` detects and guides, it never escalates itself"
+            );
+        }
+
+        // The shell function installed by `--shell-setup` runs in the user's
+        // own shell, so it is held to the same rule.
+        assert!(
+            shell_escalations(SHELL_CODE, &escalators).is_empty(),
+            "the shell function installed by --shell-setup names an escalation binary: {:?}",
+            shell_escalations(SHELL_CODE, &escalators)
+        );
     }
 }
