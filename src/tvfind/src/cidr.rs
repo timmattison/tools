@@ -112,4 +112,21 @@ mod tests {
     fn rejects_a_malformed_address() {
         assert!(hosts_in("not-an-ip/24").is_err());
     }
+
+    #[test]
+    fn refuses_a_block_too_large_to_scan() {
+        // A /8 is 16.7M addresses: hours of probing and gigabytes of Vec.
+        let error = hosts_in("10.0.0.0/8").unwrap_err().to_string();
+
+        assert!(
+            error.contains("too large"),
+            "error should explain the block is oversized, got: {error}"
+        );
+    }
+
+    #[test]
+    fn still_accepts_the_widest_supported_block() {
+        // Pins the cutoff so the size guard cannot creep tighter than a /16.
+        assert_eq!(hosts_in("10.1.0.0/16").unwrap().len(), 65_534);
+    }
 }
