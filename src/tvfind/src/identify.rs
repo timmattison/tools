@@ -104,8 +104,37 @@ pub fn parse_roku_device_info(ip: Ipv4Addr, xml: &str) -> Option<Tv> {
 /// Returns `None` when the payload is not a UPnP device description.
 #[must_use]
 pub fn parse_google_tv(ip: Ipv4Addr, desc_xml: &str, eureka_json: Option<&str>) -> Option<Tv> {
-    let _ = (ip, desc_xml, eureka_json);
-    None
+    let vendor = xml_tag(desc_xml, "manufacturer");
+    if vendor.is_empty() {
+        return None;
+    }
+
+    // Renaming a set updates its cast name but can leave the UPnP document
+    // holding the original, so the cast name wins when both are present.
+    let cast: Option<serde_json::Value> =
+        eureka_json.and_then(|json| serde_json::from_str(json).ok());
+    let cast_field = |key: &str| -> String {
+        cast.as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned()
+    };
+
+    let mut name = cast_field("name");
+    if name.is_empty() {
+        name = xml_tag(desc_xml, "friendlyName");
+    }
+
+    Some(Tv {
+        ip,
+        platform: Platform::GoogleTv,
+        vendor,
+        model: xml_tag(desc_xml, "modelName"),
+        name,
+        software: cast_field("cast_build_revision"),
+    })
 }
 
 #[cfg(test)]
