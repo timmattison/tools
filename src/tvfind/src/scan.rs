@@ -9,6 +9,8 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use reqwest::Client;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 use crate::identify::{parse_google_tv, parse_roku_device_info, Tv};
 
@@ -26,26 +28,38 @@ pub const HTTP_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Whether a TCP connection to `ip:port` completes within [`CONNECT_TIMEOUT`].
 pub async fn is_port_open(ip: Ipv4Addr, port: u16) -> bool {
-    let _ = (ip, port);
-    false
+    matches!(
+        timeout(CONNECT_TIMEOUT, TcpStream::connect((ip, port))).await,
+        Ok(Ok(_))
+    )
+}
+
+/// Body of a successful `GET`, or `None` for any transport or status failure.
+async fn get_text(client: &Client, url: &str) -> Option<String> {
+    let response = client.get(url).timeout(HTTP_TIMEOUT).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.text().await.ok()
 }
 
 /// Fetch and parse a Roku ECP device-info document from `base_url`.
 ///
 /// `base_url` is the scheme and authority only, e.g. `http://192.168.0.119:8060`.
 pub async fn fetch_roku(client: &Client, base_url: &str, ip: Ipv4Addr) -> Option<Tv> {
-    let _ = (client, base_url, ip);
-    let _ = parse_roku_device_info;
-    None
+    let xml = get_text(client, &format!("{base_url}/query/device-info")).await?;
+    parse_roku_device_info(ip, &xml)
 }
 
 /// Fetch and parse a Google TV UPnP description from `base_url`.
 ///
 /// `base_url` is the scheme and authority only, e.g. `http://192.168.1.165:8008`.
 pub async fn fetch_google_tv(client: &Client, base_url: &str, ip: Ipv4Addr) -> Option<Tv> {
-    let _ = (client, base_url, ip);
-    let _ = parse_google_tv;
-    None
+    let desc = get_text(client, &format!("{base_url}/ssdp/device-desc.xml")).await?;
+    // The cast endpoint only supplies a nicer name, so its failure is survivable.
+    let eureka = get_text(client, &format!("{base_url}/setup/eureka_info")).await;
+
+    parse_google_tv(ip, &desc, eureka.as_deref())
 }
 
 #[cfg(test)]
