@@ -7,6 +7,11 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+/// Octets of a MAC address that make up the vendor prefix.
+const OUI_OCTETS: usize = 3;
+/// Hex digits in a normalised OUI prefix.
+const OUI_PREFIX_LEN: usize = OUI_OCTETS * 2;
+
 /// Locations nmap's OUI database may live, newest Homebrew layout first.
 pub const OUI_DB_PATHS: &[&str] = &[
     "/opt/homebrew/share/nmap/nmap-mac-prefixes",
@@ -31,15 +36,33 @@ pub struct Neighbour {
 /// Returns `None` if `mac` does not have at least three hex octets.
 #[must_use]
 pub fn mac_prefix(mac: &str) -> Option<String> {
-    let _ = mac;
-    None
+    let mut prefix = String::with_capacity(OUI_PREFIX_LEN);
+
+    for octet in mac.split(':').take(OUI_OCTETS) {
+        if octet.is_empty() || octet.len() > 2 || !octet.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        // `arp` drops leading zeros, so 'f' has to become "0F".
+        for _ in octet.len()..2 {
+            prefix.push('0');
+        }
+        prefix.push_str(&octet.to_ascii_uppercase());
+    }
+
+    (prefix.len() == OUI_PREFIX_LEN).then_some(prefix)
 }
 
 /// Parse nmap's `nmap-mac-prefixes` into a prefix-to-vendor map.
 #[must_use]
 pub fn parse_db(text: &str) -> HashMap<String, String> {
-    let _ = text;
-    HashMap::new()
+    text.lines()
+        .filter_map(|line| line.trim().split_once(char::is_whitespace))
+        .filter(|(prefix, _)| {
+            // Longer MA-M/MA-S assignments cannot be resolved from three octets.
+            prefix.len() == OUI_PREFIX_LEN && prefix.chars().all(|c| c.is_ascii_hexdigit())
+        })
+        .map(|(prefix, vendor)| (prefix.to_ascii_uppercase(), vendor.trim().to_owned()))
+        .collect()
 }
 
 /// Parse the output of `arp -a -n` into neighbours.
