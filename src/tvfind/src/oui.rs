@@ -129,6 +129,53 @@ mod tests {
         assert!(!db.contains_key(""));
     }
 
+    /// Representative `arp -a -n` output from macOS.
+    const ARP_TABLE: &str = "? (192.168.0.1) at 70:a7:41:66:7c:39 on en0 ifscope [ethernet]
+? (192.168.1.50) at 0:f:e7:83:b8:eb on en0 ifscope [ethernet]
+? (192.168.0.43) at (incomplete) on en0 [ethernet]
+? (192.168.0.0) at ff:ff:ff:ff:ff:ff on en0 ifscope [ethernet]
+? (224.0.0.251) at 1:0:5e:0:0:fb on en0 ifscope permanent [ethernet]
+? (192.168.1.217) at d0:65:b3:a8:60:33 on en0 ifscope [ethernet]
+";
+
+    #[test]
+    fn reads_the_address_and_hardware_address_of_each_neighbour() {
+        let neighbours = parse_arp_table(ARP_TABLE);
+
+        assert_eq!(
+            neighbours.first(),
+            Some(&Neighbour {
+                ip: Ipv4Addr::new(192, 168, 0, 1),
+                mac: "70:a7:41:66:7c:39".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn skips_entries_whose_resolution_never_completed() {
+        let neighbours = parse_arp_table(ARP_TABLE);
+
+        assert!(!neighbours
+            .iter()
+            .any(|n| n.ip == Ipv4Addr::new(192, 168, 0, 43)));
+    }
+
+    #[test]
+    fn skips_broadcast_and_multicast_entries() {
+        let neighbours = parse_arp_table(ARP_TABLE);
+
+        // No host lives behind a group address, so probing one is wasted work.
+        assert!(!neighbours.iter().any(|n| n.mac.starts_with("ff:ff")));
+        assert!(!neighbours.iter().any(|n| n.mac.starts_with("1:0:5e")));
+    }
+
+    #[test]
+    fn keeps_every_genuine_unicast_neighbour() {
+        let neighbours = parse_arp_table(ARP_TABLE);
+
+        assert_eq!(neighbours.len(), 3);
+    }
+
     #[test]
     fn skips_longer_ma_m_assignments_that_are_not_oui_prefixes() {
         // 28-bit and 36-bit IEEE blocks appear with 7- or 9-character keys and
