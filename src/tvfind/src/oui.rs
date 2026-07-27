@@ -51,8 +51,21 @@ pub fn unresponsive_candidates(
     identified: &HashSet<Ipv4Addr>,
     vendor_filter: &str,
 ) -> Vec<Candidate> {
-    let _ = (arp_output, db, identified, vendor_filter);
-    Vec::new()
+    let mut candidates: Vec<Candidate> = parse_arp_table(arp_output)
+        .into_iter()
+        .filter(|neighbour| !identified.contains(&neighbour.ip))
+        .filter_map(|neighbour| {
+            let vendor = db.get(&mac_prefix(&neighbour.mac)?)?;
+            crate::vendor::matches(vendor, vendor_filter).then(|| Candidate {
+                ip: neighbour.ip,
+                mac: neighbour.mac,
+                vendor: vendor.clone(),
+            })
+        })
+        .collect();
+
+    candidates.sort_by_key(|candidate| candidate.ip);
+    candidates
 }
 
 /// Normalise a MAC address to its 6-hex-digit uppercase OUI prefix.
