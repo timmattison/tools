@@ -50,9 +50,19 @@ pub struct Tv {
 }
 
 /// Text of the first `<tag>…</tag>` in a flat XML document.
+///
+/// Discovery documents are machine-generated and single-level, so splitting on
+/// the delimiters is both sufficient and cheaper than a full parser. Splitting
+/// rather than slicing also keeps every boundary on a `char`, so multi-byte
+/// device names survive intact.
 fn xml_tag(xml: &str, tag: &str) -> String {
-    let _ = (xml, tag);
-    String::new()
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+
+    xml.split_once(open.as_str())
+        .and_then(|(_, rest)| rest.split_once(close.as_str()))
+        .map(|(value, _)| value.trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// Parse a Roku ECP `/query/device-info` response.
@@ -60,8 +70,30 @@ fn xml_tag(xml: &str, tag: &str) -> String {
 /// Returns `None` when the payload is not a Roku device-info document.
 #[must_use]
 pub fn parse_roku_device_info(ip: Ipv4Addr, xml: &str) -> Option<Tv> {
-    let _ = (ip, xml);
-    None
+    if !xml.contains("<device-info>") {
+        return None;
+    }
+
+    let vendor = xml_tag(xml, "vendor-name");
+    if vendor.is_empty() {
+        return None;
+    }
+
+    // A set the owner has named reports it in `user-device-name`; one still on
+    // factory defaults leaves that empty and only fills `friendly-device-name`.
+    let mut name = xml_tag(xml, "user-device-name");
+    if name.is_empty() {
+        name = xml_tag(xml, "friendly-device-name");
+    }
+
+    Some(Tv {
+        ip,
+        platform: Platform::RokuTv,
+        vendor,
+        model: xml_tag(xml, "model-name"),
+        name,
+        software: xml_tag(xml, "software-version"),
+    })
 }
 
 /// Parse a Google TV UPnP description, enriched with `/setup/eureka_info`.
