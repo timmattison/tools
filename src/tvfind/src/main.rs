@@ -68,6 +68,12 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Describe a host count for the scan banner, e.g. `1 host` or `510 hosts`.
+fn host_count(hosts: usize) -> String {
+    let _ = hosts;
+    String::new()
+}
+
 /// Probe every host on both TV ports and identify whatever answers.
 async fn find_tvs(hosts: &[Ipv4Addr], vendor_filter: &str) -> Vec<Tv> {
     let client = Client::new();
@@ -150,6 +156,26 @@ fn report_powered_off(tvs: &[Tv], vendor_filter: &str) {
             "  {:<16} {:<19} {}",
             candidate.ip, candidate.mac, candidate.vendor
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_count;
+
+    #[test]
+    fn describes_a_single_host_in_the_singular() {
+        assert_eq!(host_count(1), "1 host");
+    }
+
+    #[test]
+    fn describes_several_hosts_in_the_plural() {
+        assert_eq!(host_count(510), "510 hosts");
+    }
+
+    #[test]
+    fn describes_an_empty_range_in_the_plural() {
+        assert_eq!(host_count(0), "0 hosts");
     }
 }
 
