@@ -2,7 +2,10 @@
 
 use std::net::Ipv4Addr;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
+
+/// Number of address bits in an IPv4 address.
+const ADDRESS_BITS: u32 = 32;
 
 /// Expand a CIDR block into the host addresses worth probing.
 ///
@@ -13,8 +16,44 @@ use anyhow::Result;
 ///
 /// Returns an error if `cidr` is not `A.B.C.D/bits` with `bits` in `0..=32`.
 pub fn hosts_in(cidr: &str) -> Result<Vec<Ipv4Addr>> {
-    let _ = cidr;
-    Ok(Vec::new())
+    let (network, broadcast) = bounds_of(cidr)?;
+
+    // Anything wider than a /31 reserves its first and last address.
+    let (first, last) = if broadcast - network >= 2 {
+        (network + 1, broadcast - 1)
+    } else {
+        (network, broadcast)
+    };
+
+    Ok((first..=last).map(Ipv4Addr::from).collect())
+}
+
+/// The network and broadcast addresses of `cidr`, as host-order integers.
+fn bounds_of(cidr: &str) -> Result<(u32, u32)> {
+    let (base, prefix) = cidr
+        .split_once('/')
+        .with_context(|| format!("expected a CIDR of the form A.B.C.D/bits, got `{cidr}`"))?;
+
+    let base: Ipv4Addr = base
+        .parse()
+        .with_context(|| format!("`{base}` is not an IPv4 address"))?;
+    let prefix: u32 = prefix
+        .parse()
+        .with_context(|| format!("`{prefix}` is not a prefix length"))?;
+    if prefix > ADDRESS_BITS {
+        bail!("prefix length /{prefix} exceeds /{ADDRESS_BITS}");
+    }
+
+    // A /0 would shift by the full width, which overflows rather than yielding 0.
+    let host_bits = ADDRESS_BITS - prefix;
+    let mask = if host_bits == ADDRESS_BITS {
+        0
+    } else {
+        u32::MAX << host_bits
+    };
+
+    let network = u32::from(base) & mask;
+    Ok((network, network | !mask))
 }
 
 /// The CIDR of the first non-loopback IPv4 interface on this machine.
