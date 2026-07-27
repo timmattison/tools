@@ -7,6 +7,13 @@ use anyhow::{bail, Context, Result};
 /// Number of address bits in an IPv4 address.
 const ADDRESS_BITS: u32 = 32;
 
+/// Widest block that may be scanned, as an address count.
+///
+/// A `/16` is already 65k hosts and minutes of probing; anything wider is
+/// almost certainly a typo rather than an intent, and enumerating it would
+/// cost gigabytes before the first packet went out.
+const MAX_BLOCK_ADDRESSES: u64 = 1 << 16;
+
 /// Expand a CIDR block into the host addresses worth probing.
 ///
 /// The network and broadcast addresses are omitted for any block wider than a
@@ -14,9 +21,15 @@ const ADDRESS_BITS: u32 = 32;
 ///
 /// # Errors
 ///
-/// Returns an error if `cidr` is not `A.B.C.D/bits` with `bits` in `0..=32`.
+/// Returns an error if `cidr` is not `A.B.C.D/bits` with `bits` in `0..=32`,
+/// or if the block spans more than [`MAX_BLOCK_ADDRESSES`] addresses.
 pub fn hosts_in(cidr: &str) -> Result<Vec<Ipv4Addr>> {
     let (network, broadcast) = bounds_of(cidr)?;
+
+    let span = u64::from(broadcast - network) + 1;
+    if span > MAX_BLOCK_ADDRESSES {
+        bail!("`{cidr}` is too large to scan: {span} addresses, limit is {MAX_BLOCK_ADDRESSES}");
+    }
 
     // Anything wider than a /31 reserves its first and last address.
     let (first, last) = if broadcast - network >= 2 {
