@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         None => cidr::local_subnet()?,
     };
     let hosts = cidr::hosts_in(&subnet)?;
-    eprintln!("Scanning {subnet} ({} hosts) for TVs...", hosts.len());
+    eprintln!("Scanning {subnet} ({}) for TVs...", host_count(hosts.len()));
 
     let tvs = find_tvs(&hosts, &args.vendor).await;
     report_tvs(&tvs);
@@ -70,8 +70,8 @@ async fn main() -> Result<()> {
 
 /// Describe a host count for the scan banner, e.g. `1 host` or `510 hosts`.
 fn host_count(hosts: usize) -> String {
-    let _ = hosts;
-    String::new()
+    let plural = if hosts == 1 { "" } else { "s" };
+    format!("{hosts} host{plural}")
 }
 
 /// Probe every host on both TV ports and identify whatever answers.
@@ -159,6 +159,20 @@ fn report_powered_off(tvs: &[Tv], vendor_filter: &str) {
     }
 }
 
+/// The system ARP table, or `None` if `arp` is unavailable.
+fn arp_table() -> Option<String> {
+    let output = Command::new("arp").args(["-a", "-n"]).output().ok()?;
+    String::from_utf8(output.stdout).ok()
+}
+
+/// nmap's OUI database from the first path that exists.
+fn oui_database() -> Option<std::collections::HashMap<String, String>> {
+    oui::OUI_DB_PATHS
+        .iter()
+        .find_map(|path| fs::read_to_string(path).ok())
+        .map(|text| oui::parse_db(&text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::host_count;
@@ -177,18 +191,4 @@ mod tests {
     fn describes_an_empty_range_in_the_plural() {
         assert_eq!(host_count(0), "0 hosts");
     }
-}
-
-/// The system ARP table, or `None` if `arp` is unavailable.
-fn arp_table() -> Option<String> {
-    let output = Command::new("arp").args(["-a", "-n"]).output().ok()?;
-    String::from_utf8(output.stdout).ok()
-}
-
-/// nmap's OUI database from the first path that exists.
-fn oui_database() -> Option<std::collections::HashMap<String, String>> {
-    oui::OUI_DB_PATHS
-        .iter()
-        .find_map(|path| fs::read_to_string(path).ok())
-        .map(|text| oui::parse_db(&text))
 }
