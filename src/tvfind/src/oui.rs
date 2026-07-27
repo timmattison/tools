@@ -68,8 +68,31 @@ pub fn parse_db(text: &str) -> HashMap<String, String> {
 /// Parse the output of `arp -a -n` into neighbours.
 #[must_use]
 pub fn parse_arp_table(text: &str) -> Vec<Neighbour> {
-    let _ = text;
-    Vec::new()
+    text.lines()
+        .filter_map(|line| {
+            // `? (192.168.0.1) at 70:a7:41:66:7c:39 on en0 ifscope [ethernet]`
+            let (_, rest) = line.split_once('(')?;
+            let (address, rest) = rest.split_once(')')?;
+            let ip: Ipv4Addr = address.parse().ok()?;
+
+            let (_, rest) = rest.split_once(" at ")?;
+            let mac = rest.split_whitespace().next()?;
+            // Rejects placeholders such as `(incomplete)`.
+            mac_prefix(mac)?;
+
+            // Group addresses set the low bit of the first octet. Nothing sits
+            // behind broadcast or multicast, so probing them is wasted work.
+            let first_octet = u8::from_str_radix(mac.split(':').next()?, 16).ok()?;
+            if first_octet & 1 == 1 {
+                return None;
+            }
+
+            Some(Neighbour {
+                ip,
+                mac: mac.to_owned(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
