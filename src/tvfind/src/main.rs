@@ -118,14 +118,7 @@ fn report_tvs(tvs: &[Tv]) {
         ]);
 
     for tv in tvs {
-        table.add_row(vec![
-            tv.ip.to_string(),
-            tv.name.clone(),
-            tv.vendor.clone(),
-            tv.model.clone(),
-            tv.platform.label().to_owned(),
-            tv.software.clone(),
-        ]);
+        table.add_row(tv.display_row());
     }
 
     println!("{table}");
