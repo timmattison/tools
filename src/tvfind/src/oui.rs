@@ -258,64 +258,52 @@ mod tests {
 
     #[test]
     fn reports_a_neighbour_whose_mac_belongs_to_the_wanted_vendor() {
-        let found = unresponsive_candidates(
-            CANDIDATE_ARP,
-            &candidate_db(),
-            &HashSet::new(),
-            "tcl",
-        );
+        let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &HashSet::new(), "tcl");
 
-        assert!(found.iter().any(|c| c.ip == Ipv4Addr::new(192, 168, 1, 217)));
+        assert!(found
+            .iter()
+            .any(|c| c.ip == Ipv4Addr::new(192, 168, 1, 217)));
     }
 
     #[test]
     fn reports_a_neighbour_registered_to_the_contract_manufacturer() {
-        let found = unresponsive_candidates(
-            CANDIDATE_ARP,
-            &candidate_db(),
-            &HashSet::new(),
-            "tcl",
-        );
+        let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &HashSet::new(), "tcl");
 
-        assert!(found.iter().any(|c| c.ip == Ipv4Addr::new(192, 168, 0, 248)));
+        assert!(found
+            .iter()
+            .any(|c| c.ip == Ipv4Addr::new(192, 168, 0, 248)));
     }
 
     #[test]
     fn omits_a_neighbour_already_identified_as_a_television() {
         let identified = HashSet::from([Ipv4Addr::new(192, 168, 0, 248)]);
 
-        let found =
-            unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &identified, "tcl");
+        let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &identified, "tcl");
 
-        assert!(!found.iter().any(|c| c.ip == Ipv4Addr::new(192, 168, 0, 248)));
+        assert!(!found
+            .iter()
+            .any(|c| c.ip == Ipv4Addr::new(192, 168, 0, 248)));
     }
 
     #[test]
     fn omits_neighbours_belonging_to_other_vendors() {
-        let found = unresponsive_candidates(
-            CANDIDATE_ARP,
-            &candidate_db(),
-            &HashSet::new(),
-            "tcl",
-        );
+        let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &HashSet::new(), "tcl");
 
         assert_eq!(found.len(), 2, "only the two TCL-family MACs should remain");
     }
 
     #[test]
     fn names_the_vendor_the_prefix_is_registered_to() {
-        let found = unresponsive_candidates(
-            CANDIDATE_ARP,
-            &candidate_db(),
-            &HashSet::new(),
-            "tcl",
-        );
+        let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &HashSet::new(), "tcl");
         let tcl_king = found
             .iter()
             .find(|c| c.ip == Ipv4Addr::new(192, 168, 1, 217))
             .expect("the TCL King neighbour should be reported");
 
-        assert_eq!(tcl_king.vendor, "TCL King Electrical Appliances(Huizhou)Co.");
+        assert_eq!(
+            tcl_king.vendor,
+            "TCL King Electrical Appliances(Huizhou)Co."
+        );
     }
 
     #[test]

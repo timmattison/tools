@@ -89,7 +89,10 @@ mod tests {
     /// Bind an ephemeral port so concurrent runs of this suite never collide.
     fn ephemeral_port() -> (std::net::TcpListener, u16) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("should bind");
-        let port = listener.local_addr().expect("should have an address").port();
+        let port = listener
+            .local_addr()
+            .expect("should have an address")
+            .port();
         (listener, port)
     }
 
@@ -137,7 +140,9 @@ mod tests {
             .create_async()
             .await;
 
-        assert!(fetch_roku(&Client::new(), &server.url(), ip()).await.is_none());
+        assert!(fetch_roku(&Client::new(), &server.url(), ip())
+            .await
+            .is_none());
         mock.assert_async().await;
     }
 

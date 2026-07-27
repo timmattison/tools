@@ -165,7 +165,10 @@ mod tests {
     fn renders_a_non_octet_aligned_netmask_as_its_prefix_length() {
         // 255.255.254.0 is the /23 this machine's own network uses.
         assert_eq!(
-            subnet_from(Ipv4Addr::new(192, 168, 0, 128), Ipv4Addr::new(255, 255, 254, 0)),
+            subnet_from(
+                Ipv4Addr::new(192, 168, 0, 128),
+                Ipv4Addr::new(255, 255, 254, 0)
+            ),
             "192.168.0.0/23"
         );
     }
