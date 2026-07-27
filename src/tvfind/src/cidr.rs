@@ -69,6 +69,13 @@ fn bounds_of(cidr: &str) -> Result<(u32, u32)> {
     Ok((network, network | !mask))
 }
 
+/// Render the CIDR that `address` sits in, given its `netmask`.
+#[must_use]
+pub fn subnet_from(address: Ipv4Addr, netmask: Ipv4Addr) -> String {
+    let _ = (address, netmask);
+    String::new()
+}
+
 /// The CIDR of the first non-loopback IPv4 interface on this machine.
 ///
 /// # Errors
@@ -141,5 +148,43 @@ mod tests {
     fn still_accepts_the_widest_supported_block() {
         // Pins the cutoff so the size guard cannot creep tighter than a /16.
         assert_eq!(hosts_in("10.1.0.0/16").unwrap().len(), 65_534);
+    }
+
+    #[test]
+    fn renders_a_non_octet_aligned_netmask_as_its_prefix_length() {
+        // 255.255.254.0 is the /23 this machine's own network uses.
+        assert_eq!(
+            subnet_from(Ipv4Addr::new(192, 168, 0, 128), Ipv4Addr::new(255, 255, 254, 0)),
+            "192.168.0.0/23"
+        );
+    }
+
+    #[test]
+    fn renders_a_plain_class_c_netmask() {
+        assert_eq!(
+            subnet_from(Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(255, 255, 255, 0)),
+            "10.0.0.0/24"
+        );
+    }
+
+    #[test]
+    fn masks_the_address_down_when_rendering() {
+        assert_eq!(
+            subnet_from(Ipv4Addr::new(172, 16, 5, 9), Ipv4Addr::new(255, 240, 0, 0)),
+            "172.16.0.0/12"
+        );
+    }
+
+    #[test]
+    fn reports_a_local_subnet_that_can_actually_be_scanned() {
+        let Ok(cidr) = local_subnet() else {
+            // No usable IPv4 interface, e.g. an isolated build sandbox.
+            return;
+        };
+
+        assert!(
+            hosts_in(&cidr).is_ok(),
+            "local_subnet produced an unscannable CIDR: {cidr}"
+        );
     }
 }
