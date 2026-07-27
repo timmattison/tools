@@ -49,6 +49,16 @@ pub struct Tv {
     pub software: String,
 }
 
+impl Tv {
+    /// The cells describing this TV, in table-column order.
+    ///
+    /// A field the device left blank renders as a dash so columns stay legible.
+    #[must_use]
+    pub fn display_row(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
 /// Text of the first `<tag>…</tag>` in a flat XML document.
 ///
 /// Discovery documents are machine-generated and single-level, so splitting on
@@ -282,5 +292,43 @@ mod tests {
     #[test]
     fn rejects_a_payload_that_names_no_manufacturer() {
         assert!(parse_google_tv(google_ip(), "<html><body>404</body></html>", None).is_none());
+    }
+
+    #[test]
+    fn renders_every_field_of_a_roku_tv_in_column_order() {
+        let tv = parse_roku_device_info(ip(), ROKU_DEVICE_INFO).expect("should identify");
+
+        assert_eq!(
+            tv.display_row(),
+            [
+                "192.168.0.119",
+                "Office - top",
+                "TCL",
+                "43S435",
+                "Roku TV",
+                "15.0.4"
+            ]
+            .map(String::from)
+        );
+    }
+
+    #[test]
+    fn labels_a_google_tv_row_with_its_platform() {
+        let tv = parse_google_tv(google_ip(), GOOGLE_TV_DESC, None).expect("should identify");
+        let row = tv.display_row();
+
+        assert_eq!(row.get(4).map(String::as_str), Some("Google TV"));
+    }
+
+    #[test]
+    fn renders_a_field_the_device_left_blank_as_a_dash() {
+        let xml = ROKU_DEVICE_INFO.replace(
+            "<software-version>15.0.4</software-version>",
+            "<software-version></software-version>",
+        );
+        let tv = parse_roku_device_info(ip(), &xml).expect("should identify");
+        let row = tv.display_row();
+
+        assert_eq!(row.last().map(String::as_str), Some("-"));
     }
 }
