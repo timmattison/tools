@@ -75,3 +75,81 @@ pub fn parse_google_tv(ip: Ipv4Addr, desc_xml: &str, eureka_json: Option<&str>) 
     let _ = (ip, desc_xml, eureka_json);
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verbatim `/query/device-info` response from a TCL 43S435 Roku TV.
+    const ROKU_DEVICE_INFO: &str = r"<device-info>
+<udn>29badd40-cd5a-50ab-b7c8-1b1cd0834f2c</udn>
+<serial-number>X000002403FJ</serial-number>
+<device-id>S02ST0C403FJ</device-id>
+<vendor-name>TCL</vendor-name>
+<model-name>43S435</model-name>
+<model-number>C134X</model-number>
+<is-tv>true</is-tv>
+<screen-size>43</screen-size>
+<friendly-device-name>Office - top</friendly-device-name>
+<user-device-name>Office - top</user-device-name>
+<user-device-location>Office</user-device-location>
+<software-version>15.0.4</software-version>
+</device-info>";
+
+    fn ip() -> Ipv4Addr {
+        Ipv4Addr::new(192, 168, 0, 119)
+    }
+
+    #[test]
+    fn reads_vendor_model_name_and_version_from_a_roku_tv() {
+        let tv = parse_roku_device_info(ip(), ROKU_DEVICE_INFO).expect("should identify a Roku TV");
+
+        assert_eq!(tv.ip, ip());
+        assert_eq!(tv.platform, Platform::RokuTv);
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.model, "43S435");
+        assert_eq!(tv.name, "Office - top");
+        assert_eq!(tv.software, "15.0.4");
+    }
+
+    #[test]
+    fn prefers_the_user_assigned_name_over_the_friendly_name() {
+        let xml = ROKU_DEVICE_INFO.replace(
+            "<friendly-device-name>Office - top</friendly-device-name>",
+            "<friendly-device-name>Roku Express</friendly-device-name>",
+        );
+
+        let tv = parse_roku_device_info(ip(), &xml).expect("should identify a Roku TV");
+
+        assert_eq!(tv.name, "Office - top");
+    }
+
+    #[test]
+    fn falls_back_to_the_friendly_name_when_no_name_was_assigned() {
+        let xml = ROKU_DEVICE_INFO.replace(
+            "<user-device-name>Office - top</user-device-name>",
+            "<user-device-name></user-device-name>",
+        );
+
+        let tv = parse_roku_device_info(ip(), &xml).expect("should identify a Roku TV");
+
+        assert_eq!(tv.name, "Office - top");
+    }
+
+    #[test]
+    fn keeps_multibyte_device_names_intact() {
+        let xml = ROKU_DEVICE_INFO.replace(
+            "<user-device-name>Office - top</user-device-name>",
+            "<user-device-name>リビング 🎉</user-device-name>",
+        );
+
+        let tv = parse_roku_device_info(ip(), &xml).expect("should identify a Roku TV");
+
+        assert_eq!(tv.name, "リビング 🎉");
+    }
+
+    #[test]
+    fn rejects_a_payload_that_is_not_a_roku_device_info_document() {
+        assert!(parse_roku_device_info(ip(), "<html><body>404</body></html>").is_none());
+    }
+}
