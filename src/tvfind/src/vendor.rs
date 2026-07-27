@@ -15,8 +15,21 @@ const ODM_ALIASES: &[(&str, &[&str])] = &[("tcl", &["gaoshengda"])];
 /// aliases for the filter are matched too.
 #[must_use]
 pub fn matches(vendor: &str, filter: &str) -> bool {
-    let _ = (vendor, filter);
-    false
+    let filter = filter.trim().to_lowercase();
+    if filter.is_empty() {
+        return true;
+    }
+
+    let vendor = vendor.to_lowercase();
+    if vendor.contains(&filter) {
+        return true;
+    }
+
+    ODM_ALIASES
+        .iter()
+        .filter(|(brand, _)| *brand == filter)
+        .flat_map(|(_, factories)| factories.iter())
+        .any(|factory| vendor.contains(factory))
 }
 
 #[cfg(test)]
