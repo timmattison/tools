@@ -184,4 +184,74 @@ mod tests {
     fn rejects_a_payload_that_is_not_a_roku_device_info_document() {
         assert!(parse_roku_device_info(ip(), "<html><body>404</body></html>").is_none());
     }
+
+    /// Verbatim `/ssdp/device-desc.xml` from a TCL Google TV.
+    const GOOGLE_TV_DESC: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <specVersion><major>1</major><minor>0</minor></specVersion>
+  <URLBase>http://192.168.1.165:8008</URLBase>
+  <device>
+    <deviceType>urn:dial-multiscreen-org:device:dial:1</deviceType>
+    <friendlyName>Living Room</friendlyName>
+    <manufacturer>TCL</manufacturer>
+    <modelName>Smart TV Pro</modelName>
+    <UDN>uuid:1bee973d-e7a0-9858-38cd-a2a5a11119c1</UDN>
+  </device>
+</root>"#;
+
+    /// Trimmed `/setup/eureka_info` from the same set.
+    const GOOGLE_TV_EUREKA: &str =
+        r#"{"build_version":"446070","cast_build_revision":"3.72.446070","name":"Living Room"}"#;
+
+    fn google_ip() -> Ipv4Addr {
+        Ipv4Addr::new(192, 168, 1, 165)
+    }
+
+    #[test]
+    fn reads_vendor_model_and_cast_build_from_a_google_tv() {
+        let tv = parse_google_tv(google_ip(), GOOGLE_TV_DESC, Some(GOOGLE_TV_EUREKA))
+            .expect("should identify a Google TV");
+
+        assert_eq!(tv.ip, google_ip());
+        assert_eq!(tv.platform, Platform::GoogleTv);
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.model, "Smart TV Pro");
+        assert_eq!(tv.name, "Living Room");
+        assert_eq!(tv.software, "3.72.446070");
+    }
+
+    #[test]
+    fn prefers_the_cast_name_over_the_upnp_friendly_name() {
+        // A renamed set updates its cast name while UPnP keeps the old one.
+        let eureka = r#"{"name":"Den","cast_build_revision":"3.72.446070"}"#;
+
+        let tv = parse_google_tv(google_ip(), GOOGLE_TV_DESC, Some(eureka))
+            .expect("should identify a Google TV");
+
+        assert_eq!(tv.name, "Den");
+    }
+
+    #[test]
+    fn identifies_a_google_tv_even_when_the_cast_endpoint_is_unavailable() {
+        let tv = parse_google_tv(google_ip(), GOOGLE_TV_DESC, None)
+            .expect("UPnP alone should be enough to identify");
+
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.name, "Living Room");
+        assert_eq!(tv.software, "");
+    }
+
+    #[test]
+    fn survives_a_malformed_cast_payload() {
+        let tv = parse_google_tv(google_ip(), GOOGLE_TV_DESC, Some("not json at all"))
+            .expect("a bad cast payload must not lose the UPnP identification");
+
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.name, "Living Room");
+    }
+
+    #[test]
+    fn rejects_a_payload_that_names_no_manufacturer() {
+        assert!(parse_google_tv(google_ip(), "<html><body>404</body></html>", None).is_none());
+    }
 }
