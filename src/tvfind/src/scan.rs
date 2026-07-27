@@ -47,3 +47,135 @@ pub async fn fetch_google_tv(client: &Client, base_url: &str, ip: Ipv4Addr) -> O
     let _ = parse_google_tv;
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROKU_DEVICE_INFO: &str = r"<device-info>
+<vendor-name>TCL</vendor-name>
+<model-name>43S435</model-name>
+<is-tv>true</is-tv>
+<user-device-name>Office - top</user-device-name>
+<software-version>15.0.4</software-version>
+</device-info>";
+
+    const GOOGLE_TV_DESC: &str = r"<root>
+  <device>
+    <friendlyName>Living Room</friendlyName>
+    <manufacturer>TCL</manufacturer>
+    <modelName>Smart TV Pro</modelName>
+  </device>
+</root>";
+
+    fn ip() -> Ipv4Addr {
+        Ipv4Addr::new(192, 168, 0, 119)
+    }
+
+    /// Bind an ephemeral port so concurrent runs of this suite never collide.
+    fn ephemeral_port() -> (std::net::TcpListener, u16) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("should bind");
+        let port = listener.local_addr().expect("should have an address").port();
+        (listener, port)
+    }
+
+    #[tokio::test]
+    async fn sees_a_port_that_is_being_listened_on() {
+        let (_listener, port) = ephemeral_port();
+
+        assert!(is_port_open(Ipv4Addr::LOCALHOST, port).await);
+    }
+
+    #[tokio::test]
+    async fn sees_a_port_with_nothing_behind_it_as_closed() {
+        let (listener, port) = ephemeral_port();
+        drop(listener);
+
+        assert!(!is_port_open(Ipv4Addr::LOCALHOST, port).await);
+    }
+
+    #[tokio::test]
+    async fn fetches_and_identifies_a_roku_tv() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/query/device-info")
+            .with_status(200)
+            .with_body(ROKU_DEVICE_INFO)
+            .create_async()
+            .await;
+
+        let tv = fetch_roku(&Client::new(), &server.url(), ip())
+            .await
+            .expect("should identify the TV");
+
+        mock.assert_async().await;
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.name, "Office - top");
+        assert_eq!(tv.ip, ip());
+    }
+
+    #[tokio::test]
+    async fn treats_a_non_roku_responder_on_the_ecp_port_as_no_tv() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/query/device-info")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        assert!(fetch_roku(&Client::new(), &server.url(), ip()).await.is_none());
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn fetches_and_identifies_a_google_tv() {
+        let mut server = mockito::Server::new_async().await;
+        let desc = server
+            .mock("GET", "/ssdp/device-desc.xml")
+            .with_status(200)
+            .with_body(GOOGLE_TV_DESC)
+            .create_async()
+            .await;
+        let eureka = server
+            .mock("GET", "/setup/eureka_info")
+            .with_status(200)
+            .with_body(r#"{"name":"Living Room","cast_build_revision":"3.72.446070"}"#)
+            .create_async()
+            .await;
+
+        let tv = fetch_google_tv(&Client::new(), &server.url(), ip())
+            .await
+            .expect("should identify the TV");
+
+        desc.assert_async().await;
+        eureka.assert_async().await;
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.model, "Smart TV Pro");
+        assert_eq!(tv.software, "3.72.446070");
+    }
+
+    #[tokio::test]
+    async fn identifies_a_google_tv_whose_cast_endpoint_refuses() {
+        let mut server = mockito::Server::new_async().await;
+        let desc = server
+            .mock("GET", "/ssdp/device-desc.xml")
+            .with_status(200)
+            .with_body(GOOGLE_TV_DESC)
+            .create_async()
+            .await;
+        let eureka = server
+            .mock("GET", "/setup/eureka_info")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let tv = fetch_google_tv(&Client::new(), &server.url(), ip())
+            .await
+            .expect("UPnP alone should be enough");
+
+        desc.assert_async().await;
+        eureka.assert_async().await;
+        assert_eq!(tv.vendor, "TCL");
+        assert_eq!(tv.name, "Living Room");
+    }
+}
