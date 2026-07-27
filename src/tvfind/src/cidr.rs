@@ -72,8 +72,10 @@ fn bounds_of(cidr: &str) -> Result<(u32, u32)> {
 /// Render the CIDR that `address` sits in, given its `netmask`.
 #[must_use]
 pub fn subnet_from(address: Ipv4Addr, netmask: Ipv4Addr) -> String {
-    let _ = (address, netmask);
-    String::new()
+    let mask = u32::from(netmask);
+    let network = Ipv4Addr::from(u32::from(address) & mask);
+
+    format!("{network}/{}", mask.count_ones())
 }
 
 /// The CIDR of the first non-loopback IPv4 interface on this machine.
@@ -82,7 +84,16 @@ pub fn subnet_from(address: Ipv4Addr, netmask: Ipv4Addr) -> String {
 ///
 /// Returns an error if no usable IPv4 interface is present.
 pub fn local_subnet() -> Result<String> {
-    Ok(String::new())
+    let interfaces = get_if_addrs::get_if_addrs().context("could not enumerate interfaces")?;
+
+    interfaces
+        .iter()
+        .filter(|interface| !interface.is_loopback())
+        .find_map(|interface| match interface.addr {
+            get_if_addrs::IfAddr::V4(ref v4) => Some(subnet_from(v4.ip, v4.netmask)),
+            get_if_addrs::IfAddr::V6(_) => None,
+        })
+        .context("no non-loopback IPv4 interface found; pass --subnet explicitly")
 }
 
 #[cfg(test)]
