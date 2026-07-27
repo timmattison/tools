@@ -55,7 +55,22 @@ impl Tv {
     /// A field the device left blank renders as a dash so columns stay legible.
     #[must_use]
     pub fn display_row(&self) -> Vec<String> {
-        Vec::new()
+        let or_dash = |value: &str| {
+            if value.is_empty() {
+                "-".to_owned()
+            } else {
+                value.to_owned()
+            }
+        };
+
+        vec![
+            self.ip.to_string(),
+            or_dash(&self.name),
+            or_dash(&self.vendor),
+            or_dash(&self.model),
+            self.platform.label().to_owned(),
+            or_dash(&self.software),
+        ]
     }
 }
 
