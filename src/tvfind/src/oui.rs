@@ -4,7 +4,7 @@
 //! is invisible to a port scan yet plainly present in the neighbour table.
 //! Resolving its MAC prefix against nmap's OUI database recovers it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 
 /// Octets of a MAC address that make up the vendor prefix.
@@ -26,6 +26,33 @@ pub struct Neighbour {
     pub ip: Ipv4Addr,
     /// Hardware address as printed by `arp`.
     pub mac: String,
+}
+
+/// A neighbour whose MAC belongs to the vendor being looked for, but which
+/// answered no probe — almost always a set that is powered off.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Candidate {
+    /// Address held in the neighbour table.
+    pub ip: Ipv4Addr,
+    /// Hardware address as printed by `arp`.
+    pub mac: String,
+    /// Vendor the MAC prefix is registered to.
+    pub vendor: String,
+}
+
+/// Neighbours matching `vendor_filter` by MAC that no probe identified.
+///
+/// `identified` holds the addresses already confirmed as televisions, so a TV
+/// that answered is never also reported as a silent candidate.
+#[must_use]
+pub fn unresponsive_candidates(
+    arp_output: &str,
+    db: &HashMap<String, String>,
+    identified: &HashSet<Ipv4Addr>,
+    vendor_filter: &str,
+) -> Vec<Candidate> {
+    let _ = (arp_output, db, identified, vendor_filter);
+    Vec::new()
 }
 
 /// Normalise a MAC address to its 6-hex-digit uppercase OUI prefix.
@@ -197,6 +224,85 @@ mod tests {
         let neighbours = parse_arp_table(ARP_TABLE);
 
         assert_eq!(neighbours.len(), 3);
+    }
+
+    /// The OUI database entries the candidate fixture depends on.
+    fn candidate_db() -> HashMap<String, String> {
+        parse_db(
+            "D065B3 TCL King Electrical Appliances(Huizhou)Co.
+2CD974 Hui Zhou Gaoshengda Technology
+70A741 Ubiquiti Inc
+5CAAFD Sonos
+",
+        )
+    }
+
+    const CANDIDATE_ARP: &str = "? (192.168.0.1) at 70:a7:41:66:7c:39 on en0 ifscope [ethernet]
+? (192.168.0.46) at 5c:aa:fd:59:b5:f6 on en0 ifscope [ethernet]
+? (192.168.0.248) at 2c:d9:74:11:bf:36 on en0 ifscope [ethernet]
+? (192.168.1.217) at d0:65:b3:a8:60:33 on en0 ifscope [ethernet]
+";
+
+    #[test]
+    fn reports_a_neighbour_whose_mac_belongs_to_the_wanted_vendor() {
+        let found = unresponsive_candidates(
+            CANDIDATE_ARP,
+            &candidate_db(),
+            &HashSet::new(),
+            "tcl",
+        );
+
+        assert!(found.iter().any(|c| c.ip == Ipv4Addr::new(192, 168, 1, 217)));
+    }
+
+    #[test]
+    fn reports_a_neighbour_registered_to_the_contract_manufacturer() {
+        let found = unresponsive_candidates(
+            CANDIDATE_ARP,
+            &candidate_db(),
+            &HashSet::new(),
+            "tcl",
+        );
+
+        assert!(found.iter().any(|c| c.ip == Ipv4Addr::new(192, 168, 0, 248)));
+    }
+
+    #[test]
+    fn omits_a_neighbour_already_identified_as_a_television() {
+        let identified = HashSet::from([Ipv4Addr::new(192, 168, 0, 248)]);
+
+        let found =
+            unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &identified, "tcl");
+
+        assert!(!found.iter().any(|c| c.ip == Ipv4Addr::new(192, 168, 0, 248)));
+    }
+
+    #[test]
+    fn omits_neighbours_belonging_to_other_vendors() {
+        let found = unresponsive_candidates(
+            CANDIDATE_ARP,
+            &candidate_db(),
+            &HashSet::new(),
+            "tcl",
+        );
+
+        assert_eq!(found.len(), 2, "only the two TCL-family MACs should remain");
+    }
+
+    #[test]
+    fn names_the_vendor_the_prefix_is_registered_to() {
+        let found = unresponsive_candidates(
+            CANDIDATE_ARP,
+            &candidate_db(),
+            &HashSet::new(),
+            "tcl",
+        );
+        let tcl_king = found
+            .iter()
+            .find(|c| c.ip == Ipv4Addr::new(192, 168, 1, 217))
+            .expect("the TCL King neighbour should be reported");
+
+        assert_eq!(tcl_king.vendor, "TCL King Electrical Appliances(Huizhou)Co.");
     }
 
     #[test]
