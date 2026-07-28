@@ -125,6 +125,39 @@ describe("buildCheckPlan", () => {
       expected: ["pnpm typecheck", "pnpm lint", "pnpm test --run"],
     },
     {
+      name: "a package.json with no check scripts yields no plan, install alone is not green",
+      files: {
+        "package.json": pkgJson("build"),
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      },
+      expected: null,
+    },
+    {
+      name: "a package.json with no scripts block at all yields no plan",
+      files: {
+        "package.json": JSON.stringify({ name: "fixture" }),
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      },
+      expected: null,
+    },
+    {
+      name: "a checkless package.json adds no install to an otherwise cargo-only plan",
+      files: {
+        "package.json": pkgJson("build"),
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "Cargo.toml": "[package]\nname = \"fixture\"\n",
+      },
+      expected: ["cargo check", "cargo test", "cargo clippy -- -D warnings"],
+    },
+    {
+      name: "a lone test script still gets its install",
+      files: {
+        "package.json": pkgJson("build", "test"),
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      },
+      expected: ["pnpm install --frozen-lockfile", "pnpm test --run"],
+    },
+    {
       name: "tauri-shaped repo runs js checks then both cargo manifests",
       files: {
         "package.json": pkgJson("typecheck", "lint", "test"),
@@ -152,6 +185,36 @@ describe("buildCheckPlan", () => {
       assert.deepEqual(buildCheckPlan(makeFixture(files)), expected);
     });
   }
+
+  // `pnpm install --frozen-lockfile` verifies nothing on its own — it exists only
+  // to make the js checks runnable in a fresh worktree. A plan that is just an
+  // install would report green having checked nothing, so the install rides along
+  // with the js checks or not at all.
+  test("no js check means no install, even when the plan is non-empty", () => {
+    const dir = makeFixture({
+      "package.json": pkgJson("build", "dev", "start"),
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "Cargo.toml": "[package]\nname = \"fixture\"\n",
+    });
+    const plan = buildCheckPlan(dir) ?? [];
+    assert.ok(
+      !plan.some((cmd) => cmd.includes("pnpm install")),
+      `plan must not install without a js check to run: ${JSON.stringify(plan)}`,
+    );
+  });
+
+  test("the install is first when js checks do exist", () => {
+    const dir = makeFixture({
+      "package.json": pkgJson("typecheck", "lint", "test"),
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+    });
+    assert.deepEqual(buildCheckPlan(dir), [
+      "pnpm install --frozen-lockfile",
+      "pnpm typecheck",
+      "pnpm lint",
+      "pnpm test --run",
+    ]);
+  });
 });
 
 describe("pkgScripts", () => {
