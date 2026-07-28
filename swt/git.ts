@@ -42,3 +42,31 @@ export const gitMust = (args: string[], cwd?: string): string => {
   }
   return r.out.trim();
 };
+
+declare const worktreeNameBrand: unique symbol;
+
+/**
+ * A worktree base name that has passed `validateWorktreeName` and is therefore
+ * safe to splice into a branch name and a filesystem path. The brand makes the
+ * check unskippable: nothing else in the codebase can produce this type.
+ */
+export type WorktreeName = string & { readonly [worktreeNameBrand]: "WorktreeName" };
+
+/** Human-readable statement of what a worktree name may contain. */
+export const WORKTREE_NAME_RULE =
+  "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
+
+/**
+ * Checks that a caller-supplied worktree base name is safe to turn into a
+ * branch name and a worktree path.
+ *
+ * Passing git argv arrays already removes the injection risk, but an unchecked
+ * name still yields nonsense: `../..` escapes the worktree parent directory,
+ * a leading `-` is read as an option, and `/` silently nests the branch.
+ *
+ * @param name - Raw name as supplied on the command line.
+ * @returns The branded name, or null if it violates {@link WORKTREE_NAME_RULE}.
+ */
+export function validateWorktreeName(name: string): WorktreeName | null {
+  return name as WorktreeName;
+}

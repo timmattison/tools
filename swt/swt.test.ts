@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
 
-import { git, gitMust } from "./git.ts";
+import { git, gitMust, validateWorktreeName } from "./git.ts";
 import { buildCheckPlan, pkgScripts } from "./green-check.ts";
 
 /** Process-unique root for this suite's fixtures; removed in the `after` hook. */
@@ -250,4 +250,35 @@ describe("git argv boundary", () => {
     assert.equal(out, "");
     assert.equal(gitMust(["config", "--local", "--get", "swt.testvalue"], dir), "trimmed");
   });
+});
+
+describe("validateWorktreeName", () => {
+  const rejected: { name: string; why: string }[] = [
+    { name: "fix parser", why: "a space splits the branch name from the path" },
+    { name: "a;rm -rf /", why: "a semicolon is a command separator" },
+    { name: "$(touch pwned)", why: "command substitution" },
+    { name: "feat/foo", why: "a slash silently nests the branch and the path" },
+    { name: "..", why: "escapes the worktree parent directory" },
+    { name: ".", why: "resolves to the parent directory itself" },
+    { name: "../escape", why: "path traversal" },
+    { name: "-b", why: "a leading dash is read as a git option" },
+    { name: "-force", why: "a leading dash is read as a git option" },
+    { name: "", why: "an empty name yields an empty path component" },
+    { name: "café", why: "non-ASCII is outside the allowed set" },
+    { name: "with\nnewline", why: "a newline breaks ref parsing" },
+  ];
+
+  for (const { name, why } of rejected) {
+    test(`rejects ${JSON.stringify(name)} — ${why}`, () => {
+      assert.equal(validateWorktreeName(name), null);
+    });
+  }
+
+  const accepted = ["fix-parser", "fix_parser", "issue42", "v1.2.3", "A-Z_a-z.0-9", "x"];
+
+  for (const name of accepted) {
+    test(`accepts ${JSON.stringify(name)}`, () => {
+      assert.equal(validateWorktreeName(name), name);
+    });
+  }
 });
