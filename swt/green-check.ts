@@ -13,9 +13,10 @@
 //   Otherwise, detected from `target` and run there, whichever apply, additively
 //   (Tauri repos have both):
 //   - package.json declaring at least one of typecheck/tsc/lint/test:
-//     `pnpm install --frozen-lockfile` (if pnpm-lock.yaml), then those checks.
-//     A package.json with none of those scripts contributes nothing — the install
-//     alone verifies nothing and must never stand in for a check.
+//     `pnpm install --frozen-lockfile` (only if pnpm-lock.yaml exists *and*
+//     node_modules does not — see below), then those checks. A package.json with
+//     none of those scripts contributes nothing — the install alone verifies
+//     nothing and must never stand in for a check.
 //   - Cargo.toml at repo root and/or src-tauri/Cargo.toml: cargo check + test + clippy per manifest
 //   If nothing applies: error (drop a .swt-check).
 
@@ -104,10 +105,17 @@ export function buildCheckPlan(target: string, configRoot: string = target): str
     // can run in a fresh worktree, which has no node_modules. A plan of just an
     // install would report green having checked nothing, so it rides along with
     // the js checks or not at all.
+    //
+    // And it only rides along into a tree that is actually fresh. `isGreen` also
+    // runs against the parent worktree the user is living in, where an install is
+    // not a read-only step: `--frozen-lockfile` prunes extraneous packages and
+    // undoes local `pnpm link`s. An existing node_modules is the tell that the
+    // dependencies are already there — nothing to set up, and something to lose —
+    // so verification inspects that tree without touching it.
     if (jsChecks.length > 0) {
-      if (existsSync(join(cwd, "pnpm-lock.yaml"))) {
-        cmds.push("pnpm install --frozen-lockfile");
-      }
+      const needsInstall =
+        existsSync(join(cwd, "pnpm-lock.yaml")) && !existsSync(join(cwd, "node_modules"));
+      if (needsInstall) cmds.push("pnpm install --frozen-lockfile");
       cmds.push(...jsChecks);
     }
   }
