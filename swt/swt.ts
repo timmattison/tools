@@ -23,8 +23,9 @@
 // Every git command runs through ./git.ts as an argv array, never a shell
 // string, so caller-supplied names cannot word-split or inject.
 
-import { closeSync, existsSync, openSync, rmSync } from "node:fs";
+import { closeSync, existsSync, openSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { git, gitMust, validateWorktreeName, worktreeDirt, WORKTREE_NAME_RULE } from "./git.ts";
 import { isGreen, type Result } from "./green-check.ts";
 
@@ -37,7 +38,7 @@ import { isGreen, type Result } from "./green-check.ts";
  * @param fn - Work to perform under the lock.
  * @returns Whatever `fn` returns.
  */
-function withParentLock<T>(repoRoot: string, fn: () => T): T {
+export function withParentLock<T>(repoRoot: string, fn: () => T): T {
   const lockPath = join(repoRoot, ".git", "swt.lock");
   const STALE_MS = 60 * 60 * 1000;
   const start = Date.now();
@@ -221,10 +222,32 @@ function merge(wtPath: string): void {
   });
 }
 
-const [cmd, ...args] = process.argv.slice(2);
-if (cmd === "create" && args[0]) create(args[0]);
-else if (cmd === "merge" && args[0]) merge(args[0]);
-else {
-  process.stderr.write("usage: swt {create <name>|merge <worktree-path>}\n");
-  process.exit(2);
+/**
+ * Reports whether this module is the program being run rather than a module
+ * someone imported. Symlinked installs (`~/.local/bin/swt` → `swt/swt.ts`) mean
+ * argv[1] and this module's own URL can name the same file by different paths,
+ * so both sides are resolved through the filesystem before comparing.
+ *
+ * @returns True when swt was invoked as a command line program.
+ */
+function isProgramEntry(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+// Guarded so importing this module — which the tests do, for `withParentLock` —
+// neither parses argv nor exits the importing process.
+if (isProgramEntry()) {
+  const [cmd, ...args] = process.argv.slice(2);
+  if (cmd === "create" && args[0]) create(args[0]);
+  else if (cmd === "merge" && args[0]) merge(args[0]);
+  else {
+    process.stderr.write("usage: swt {create <name>|merge <worktree-path>}\n");
+    process.exit(2);
+  }
 }

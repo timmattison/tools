@@ -1,4 +1,5 @@
-// Baseline tests for the swt green-check plan builder and the git argv boundary.
+// Baseline tests for the swt green-check plan builder, the git argv boundary,
+// and the parent merge lock.
 //
 // Every fixture lives under a process-unique temp root so two concurrent copies
 // of this suite (parallel agents, a manual run racing ./test.sh) never clobber
@@ -6,13 +7,23 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { git, gitMust, validateWorktreeName, worktreeDirt } from "./git.ts";
 import { buildCheckPlan, pkgScripts } from "./green-check.ts";
+import { withParentLock } from "./swt.ts";
 
 /** Process-unique root for this suite's fixtures; removed in the `after` hook. */
 const FIXTURE_ROOT = join(tmpdir(), `swt-test-${process.pid}-${process.hrtime.bigint()}`);
@@ -478,4 +489,141 @@ describe("validateWorktreeName", () => {
       assert.equal(validateWorktreeName(name), name);
     });
   }
+});
+
+/**
+ * Adds a linked worktree to a fixture repository. A linked worktree's `.git` is
+ * a regular *file* holding `gitdir: …`, which is the whole point of these
+ * fixtures: it is the shape `swt merge` actually runs in, since the workflow
+ * this tool serves never works in the main repo.
+ *
+ * @param repo - Repository to add the worktree to; must already have a commit.
+ * @returns Absolute path to the new linked worktree.
+ */
+function addLinkedWorktree(repo: string): string {
+  const id = fixtureCounter++;
+  const path = join(FIXTURE_ROOT, `linked-worktree-${id}`);
+  const add = git(["worktree", "add", "--quiet", "-b", `linked-${id}`, path, "HEAD"], repo);
+  assert.ok(add.ok, `git worktree add failed: ${add.out}`);
+  return path;
+}
+
+// The lock that serializes concurrent `swt merge` runs against one parent repo.
+// Two things are being pinned here: *where* the lock file lives (the git dir
+// shared by every worktree of the repo — not `<worktree>/.git`, which is a file
+// in a linked worktree), and that it is always released, including on the exit
+// paths that skip `finally` entirely.
+describe("withParentLock", () => {
+  /** Basename of the lock file, relative to the repo's shared git dir. */
+  const LOCK_NAME = "swt.lock";
+
+  /** This module's sibling: the entry point child-process fixtures import. */
+  const SWT_MODULE = fileURLToPath(new URL("./swt.ts", import.meta.url));
+
+  /** Child fixture exit status meaning "exited from inside the locked region". */
+  const EXIT_INSIDE_LOCK = 17;
+
+  /** Child fixture exit status meaning "the lock file was never created". */
+  const EXIT_NO_LOCK = 18;
+
+  test("creates the lock while fn runs, removes it after, and returns fn's value", () => {
+    const repo = makeCommittedGitRepo();
+    const lock = join(repo, ".git", LOCK_NAME);
+
+    const returned = withParentLock(repo, () => {
+      assert.ok(existsSync(lock), `expected a lock at ${lock} while fn runs`);
+      return "fn result";
+    });
+
+    assert.equal(returned, "fn result");
+    assert.ok(!existsSync(lock), `lock at ${lock} outlived the locked region`);
+  });
+
+  // Bug A: `.git` is only a directory in the main worktree. In a linked worktree
+  // it is a regular file, so `join(repoRoot, ".git", "swt.lock")` is an ENOTDIR.
+  test("locks from a linked worktree, whose .git is a file rather than a directory", () => {
+    const repo = makeCommittedGitRepo();
+    const wt = addLinkedWorktree(repo);
+    assert.ok(
+      statSync(join(wt, ".git")).isFile(),
+      "fixture precondition: a linked worktree's .git must be a file",
+    );
+    const lock = join(repo, ".git", LOCK_NAME);
+
+    let ran = false;
+    withParentLock(wt, () => {
+      ran = true;
+      assert.ok(existsSync(lock), `expected the lock in the shared git dir at ${lock}`);
+    });
+
+    assert.ok(ran, "fn never ran");
+    assert.ok(!existsSync(lock), `lock at ${lock} outlived the locked region`);
+  });
+
+  // Serialization scope: a merge launched from any worktree of a repo must
+  // contend for the *same* file, so a lock written by one is seen by the other.
+  // Aging it past the staleness horizon keeps the assertion instant instead of
+  // parking the test on the retry backoff.
+  test("sees a stale lock left in the shared git dir by another worktree, and reaps it", () => {
+    const repo = makeCommittedGitRepo();
+    const wt = addLinkedWorktree(repo);
+    const lock = join(repo, ".git", LOCK_NAME);
+    writeFileSync(lock, "");
+    const longAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(lock, longAgo, longAgo);
+
+    let ran = false;
+    withParentLock(wt, () => {
+      ran = true;
+    });
+
+    assert.ok(ran, `a stale lock at ${lock} was never reaped from the linked worktree`);
+    assert.ok(!existsSync(lock), `lock at ${lock} outlived the locked region`);
+  });
+
+  test("releases the lock when fn throws", () => {
+    const repo = makeCommittedGitRepo();
+    const lock = join(repo, ".git", LOCK_NAME);
+
+    assert.throws(
+      () =>
+        withParentLock(repo, () => {
+          throw new Error("boom");
+        }),
+      /boom/,
+    );
+
+    assert.ok(!existsSync(lock), `a throwing fn left ${lock} behind`);
+  });
+
+  // Bug B, and the only assertion that can actually observe it: `process.exit`
+  // skips `finally`, so this has to be watched from outside the process. The
+  // rebase-conflict path inside the locked region is exactly this shape, and a
+  // leaked lock blocks every later merge until the one-hour stale reap.
+  test("releases the lock when fn exits the process outright", () => {
+    const repo = makeCommittedGitRepo();
+    const lock = join(repo, ".git", LOCK_NAME);
+    const script = join(FIXTURE_ROOT, `exit-inside-lock-${fixtureCounter++}.ts`);
+    writeFileSync(
+      script,
+      [
+        `import { existsSync } from "node:fs";`,
+        `import { withParentLock } from ${JSON.stringify(pathToFileURL(SWT_MODULE).href)};`,
+        ``,
+        `withParentLock(${JSON.stringify(repo)}, () => {`,
+        `  if (!existsSync(${JSON.stringify(lock)})) process.exit(${EXIT_NO_LOCK});`,
+        `  process.exit(${EXIT_INSIDE_LOCK});`,
+        `});`,
+        ``,
+      ].join("\n"),
+    );
+
+    const r = spawnSync("npx", ["tsx", script], { cwd: dirname(SWT_MODULE), encoding: "utf8" });
+    assert.equal(
+      r.status,
+      EXIT_INSIDE_LOCK,
+      `child did not exit from inside the locked region: ${r.stdout}${r.stderr}`,
+    );
+    assert.ok(!existsSync(lock), `process.exit inside the locked region left ${lock} behind`);
+  });
 });
