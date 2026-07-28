@@ -16,39 +16,14 @@
 //
 // The green check itself lives in ./green-check.ts — see that module for what
 // counts as green and how pnpm/cargo/Tauri repos are detected.
+//
+// Every git command runs through ./git.ts as an argv array, never a shell
+// string, so caller-supplied names cannot word-split or inject.
 
-import { spawnSync } from "node:child_process";
 import { closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { git, gitMust } from "./git.ts";
 import { isGreen, type Result } from "./green-check.ts";
-
-/**
- * Runs a shell command and captures its combined output.
- *
- * @param cmd - Shell command to run.
- * @param cwd - Directory to run it in; defaults to the current working directory.
- * @returns The command's success flag and combined stdout/stderr.
- */
-const sh = (cmd: string, cwd?: string): Result => {
-  const r = spawnSync("sh", ["-c", cmd], { cwd, encoding: "utf8" });
-  return { ok: r.status === 0, out: (r.stdout ?? "") + (r.stderr ?? "") };
-};
-
-/**
- * Runs a shell command, aborting the process with its output on failure.
- *
- * @param cmd - Shell command to run.
- * @param cwd - Directory to run it in; defaults to the current working directory.
- * @returns The command's trimmed combined output.
- */
-const must = (cmd: string, cwd?: string): string => {
-  const r = sh(cmd, cwd);
-  if (!r.ok) {
-    process.stderr.write(r.out);
-    process.exit(1);
-  }
-  return r.out.trim();
-};
 
 /**
  * Runs `fn` while holding the parent repo's merge lock, so concurrent
@@ -89,7 +64,8 @@ function withParentLock<T>(repoRoot: string, fn: () => T): T {
         process.stderr.write("Timed out waiting for parent repo lock.\n");
         process.exit(1);
       }
-      spawnSync("sh", ["-c", "sleep 1"]);
+      // Synchronous 1s backoff without spawning a shell to sleep.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
     }
   }
 }
@@ -102,18 +78,18 @@ function withParentLock<T>(repoRoot: string, fn: () => T): T {
  * @param name - Base name for the worktree directory and branch.
  */
 function create(name: string): void {
-  const root = must("git rev-parse --show-toplevel");
+  const root = gitMust(["rev-parse", "--show-toplevel"]);
   const branch = `swt/${name}-${Date.now().toString(36)}`;
   const path = resolve(root, "..", `${name}.swt`);
 
   // Create the worktree first, then run the green check INSIDE it. A fresh
   // worktree is a clean checkout of HEAD with no parent dirty state — so
   // uncommitted changes in the parent can't trick the check.
-  must(`git worktree add -b ${branch} ${path} HEAD`, root);
+  gitMust(["worktree", "add", "-b", branch, path, "HEAD"], root);
 
   const cleanup = (): void => {
-    sh(`git worktree remove --force ${path}`, root);
-    sh(`git branch -D ${branch}`, root);
+    git(["worktree", "remove", "--force", path], root);
+    git(["branch", "-D", branch], root);
   };
 
   let green: Result;
@@ -144,7 +120,7 @@ function create(name: string): void {
  */
 function merge(wtPath: string): void {
   const wt = resolve(wtPath);
-  const root = must("git rev-parse --show-toplevel");
+  const root = gitMust(["rev-parse", "--show-toplevel"]);
   if (resolve(root) === wt) {
     process.stderr.write("Refusing: that's the parent worktree.\n");
     process.exit(1);
@@ -159,7 +135,7 @@ function merge(wtPath: string): void {
   // that would vanish when the worktree is removed. `git status --porcelain`
   // catches both modified-tracked and untracked files.
   const checkClean = (cwd: string, label: string): void => {
-    const r = sh("git status --porcelain", cwd);
+    const r = git(["status", "--porcelain"], cwd);
     if (!r.ok) {
       process.stderr.write(r.out);
       process.exit(1);
@@ -190,14 +166,14 @@ function merge(wtPath: string): void {
     process.exit(1);
   }
 
-  const branch = must("git rev-parse --abbrev-ref HEAD", wt);
-  const parentBranch = must("git rev-parse --abbrev-ref HEAD", root);
+  const branch = gitMust(["rev-parse", "--abbrev-ref", "HEAD"], wt);
+  const parentBranch = gitMust(["rev-parse", "--abbrev-ref", "HEAD"], root);
 
   withParentLock(root, () => {
-    const ff = sh(`git merge --ff-only ${branch}`, root);
+    const ff = git(["merge", "--ff-only", branch], root);
     if (!ff.ok) {
       process.stderr.write("Parent advanced; rebasing subagent onto parent…\n");
-      const rebase = sh(`git rebase ${parentBranch}`, wt);
+      const rebase = git(["rebase", parentBranch], wt);
       if (!rebase.ok) {
         process.stderr.write(rebase.out);
         process.stderr.write(`\nResolve conflicts in ${wt}, then re-run: swt merge ${wt}\n`);
@@ -208,10 +184,10 @@ function merge(wtPath: string): void {
         process.stderr.write(`Not green after rebase: ${reGreen.out}`);
         process.exit(1);
       }
-      must(`git merge --ff-only ${branch}`, root);
+      gitMust(["merge", "--ff-only", branch], root);
     }
-    must(`git worktree remove ${wt}`, root);
-    must(`git branch -d ${branch}`, root);
+    gitMust(["worktree", "remove", wt], root);
+    gitMust(["branch", "-d", branch], root);
     process.stdout.write(`merged ${branch}, removed ${wt}\n`);
   });
 }
