@@ -8,8 +8,10 @@
 // Green check (always runs inside the worktree being checked, never the parent):
 //   - ./.swt-check at repo root (escape hatch — used alone if present)
 //   Otherwise, runs whichever apply, additively (Tauri repos have both):
-//   - package.json present: `pnpm install --frozen-lockfile` (if pnpm-lock.yaml), then
-//     typecheck/lint/test (whichever scripts exist)
+//   - package.json declaring at least one of typecheck/tsc/lint/test:
+//     `pnpm install --frozen-lockfile` (if pnpm-lock.yaml), then those checks.
+//     A package.json with none of those scripts contributes nothing — the install
+//     alone verifies nothing and must never stand in for a check.
 //   - Cargo.toml at repo root and/or src-tauri/Cargo.toml: cargo check + test + clippy per manifest
 //   If nothing applies: error (drop a .swt-check).
 
@@ -64,15 +66,23 @@ export function buildCheckPlan(cwd: string): string[] | null {
   const cmds: string[] = [];
 
   if (existsSync(join(cwd, "package.json"))) {
-    // Fresh worktrees have no node_modules; install before checking.
-    if (existsSync(join(cwd, "pnpm-lock.yaml"))) {
-      cmds.push("pnpm install --frozen-lockfile");
-    }
     const scripts = pkgScripts(cwd);
-    if (scripts.has("typecheck")) cmds.push("pnpm typecheck");
-    else if (scripts.has("tsc")) cmds.push("pnpm exec tsc --noEmit");
-    if (scripts.has("lint")) cmds.push("pnpm lint");
-    if (scripts.has("test")) cmds.push("pnpm test --run");
+    const jsChecks: string[] = [];
+    if (scripts.has("typecheck")) jsChecks.push("pnpm typecheck");
+    else if (scripts.has("tsc")) jsChecks.push("pnpm exec tsc --noEmit");
+    if (scripts.has("lint")) jsChecks.push("pnpm lint");
+    if (scripts.has("test")) jsChecks.push("pnpm test --run");
+
+    // The install verifies nothing on its own — it exists only so the js checks
+    // can run in a fresh worktree, which has no node_modules. A plan of just an
+    // install would report green having checked nothing, so it rides along with
+    // the js checks or not at all.
+    if (jsChecks.length > 0) {
+      if (existsSync(join(cwd, "pnpm-lock.yaml"))) {
+        cmds.push("pnpm install --frozen-lockfile");
+      }
+      cmds.push(...jsChecks);
+    }
   }
 
   // Rust checks run alongside package.json checks — Tauri repos have both.
