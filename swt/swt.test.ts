@@ -22,7 +22,7 @@ import { delimiter, dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { git, gitMust, removeWorktree, validateWorktreeName, worktreeDirt } from "./git.ts";
+import { git, gitMust, removeWorktree, runGit, validateWorktreeName, worktreeDirt } from "./git.ts";
 import { buildCheckPlan, pkgScripts } from "./green-check.ts";
 import { withParentLock } from "./swt.ts";
 
@@ -559,6 +559,79 @@ describe("git argv boundary", () => {
     const out = gitMust(["config", "--local", "swt.testvalue", "trimmed"], dir);
     assert.equal(out, "");
     assert.equal(gitMust(["config", "--local", "--get", "swt.testvalue"], dir), "trimmed");
+  });
+});
+
+// The shield that keeps interrupt teardown alive is a single undocumented
+// option: `detached` on `spawnSync`. Node honors it, but documents it only for
+// the asynchronous `spawn`, so a release that dropped the pass-through would
+// turn it into a silent no-op — teardown's git would slide back into swt's
+// process group, and the second-Ctrl-C orphan bug would return without one
+// assertion anywhere going red. These two tests are that alarm, and they call
+// `runGit` itself: a hand-rolled `spawnSync` here would only prove that Node
+// still honors an option the production code might have stopped passing.
+describe("runGit process-group shielding", () => {
+  /**
+   * A git alias that reports the process group git itself is running in.
+   *
+   * A `!`-prefixed alias body is handed to a shell that git forks, so `$$` is
+   * that shell's pid and the group it reports is the one it inherited from git.
+   * Supplying the alias with `-c` leaves the fixture repository's own config
+   * untouched, and beats any `alias.pg` in the developer's global config.
+   */
+  const PGID_ALIAS = "!ps -o pgid= -p $$";
+
+  /**
+   * Reports the process group a git launched through the production `runGit`
+   * ran in.
+   *
+   * @param cwd - Repository to run git in.
+   * @param shielded - Passed straight through to `runGit`.
+   * @returns Git's process group id, as decimal digits.
+   */
+  function gitProcessGroup(cwd: string, shielded: boolean): string {
+    const r = runGit(["-c", `alias.pg=${PGID_ALIAS}`, "pg"], cwd, shielded);
+    assert.ok(r.ok, `the pgid alias failed to run: ${r.out}`);
+    const pgid = r.out.trim();
+    assert.match(pgid, /^\d+$/, `expected a process group id, got ${JSON.stringify(r.out)}`);
+    return pgid;
+  }
+
+  /**
+   * Reports this process's own process group — the one a terminal Ctrl-C aims
+   * at, and therefore the group teardown has to stay out of.
+   *
+   * @returns This process's process group id, as decimal digits.
+   */
+  function ownProcessGroup(): string {
+    const r = spawnSync("ps", ["-o", "pgid=", "-p", String(process.pid)], { encoding: "utf8" });
+    assert.equal(r.status, 0, `ps failed: ${r.stderr ?? ""}`);
+    return (r.stdout ?? "").trim();
+  }
+
+  /** Process groups are a POSIX notion; there is nothing to assert on Windows. */
+  const posixOnly = { skip: process.platform === "win32" ? "POSIX process groups only" : false };
+
+  test("a shielded git runs outside swt's process group", posixOnly, () => {
+    const dir = makeGitRepo();
+    const own = ownProcessGroup();
+    assert.notEqual(
+      gitProcessGroup(dir, true),
+      own,
+      "shielded git shared swt's process group, so a Ctrl-C aimed at swt would " +
+        "kill teardown mid-flight — `detached` is no longer being honored by spawnSync",
+    );
+  });
+
+  test("an unshielded git runs inside swt's process group", posixOnly, () => {
+    const dir = makeGitRepo();
+    const own = ownProcessGroup();
+    assert.equal(
+      gitProcessGroup(dir, false),
+      own,
+      "unshielded git escaped swt's process group; work the user is waiting on " +
+        "must stay interruptible by the Ctrl-C that abandons it",
+    );
   });
 });
 

@@ -11,10 +11,30 @@
 // shell strings by design and live in ./green-check.ts.)
 
 import { spawnSync } from "node:child_process";
+import type { SpawnOptions, SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import type { Result } from "./green-check.ts";
 
 /**
+ * `spawnSync`'s options with `detached` added back.
+ *
+ * Node honors `detached` for `spawnSync` — it reaches the same spawn path as the
+ * asynchronous `spawn` — but says so nowhere: the option is documented only for
+ * `spawn`, and `@types/node` likewise declares it on `SpawnOptions` while
+ * omitting it from `SpawnSyncOptions`. Borrowing the field from `SpawnOptions`
+ * rather than restating `detached?: boolean` keeps this pinned to Node's own
+ * declaration, and lets the extension collapse into a harmless no-op on the day
+ * `@types/node` declares the option where it is actually accepted.
+ */
+type ShieldableSpawnSyncOptions = SpawnSyncOptionsWithStringEncoding &
+  Pick<SpawnOptions, "detached">;
+
+/**
  * Runs git and captures its combined output.
+ *
+ * Exported only so the process-group guard in the test suite can exercise this
+ * exact call rather than a hand-rolled imitation of it; production callers want
+ * {@link git}, {@link gitMust} or {@link removeWorktree}, which fix `shielded`
+ * to the value their situation calls for.
  *
  * @param args - Arguments to git, one array element per argv entry.
  * @param cwd - Directory to run git in; defaults to the current working directory.
@@ -23,8 +43,18 @@ import type { Result } from "./green-check.ts";
  *   the right call for teardown and the wrong one for everything else.
  * @returns Git's success flag and its combined stdout/stderr.
  */
-const runGit = (args: string[], cwd: string | undefined, shielded: boolean): Result => {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", detached: shielded });
+export const runGit = (args: string[], cwd: string | undefined, shielded: boolean): Result => {
+  // `detached` is the whole shield, and it rests on undocumented behavior:
+  // verified to work on Node 26, but absent from `spawnSync`'s documented
+  // options, so a future release could drop the pass-through and turn this line
+  // into a silent no-op. Nothing would throw — teardown's git would simply move
+  // back into swt's process group, where a second Ctrl-C kills it mid-`worktree
+  // remove` and orphans both the worktree and the branch it still claims (see
+  // {@link removeWorktree}). The "a shielded git runs outside swt's process
+  // group" test in swt.test.ts is what makes that regression a test failure
+  // instead of a bug that quietly comes back.
+  const options: ShieldableSpawnSyncOptions = { cwd, encoding: "utf8", detached: shielded };
+  const r = spawnSync("git", args, options);
   return { ok: r.status === 0, out: (r.stdout ?? "") + (r.stderr ?? "") };
 };
 
