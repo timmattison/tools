@@ -216,6 +216,104 @@ describe("buildCheckPlan", () => {
   });
 });
 
+// The install is a *setup* step smuggled into a *verification* step, and it is
+// not inert: `pnpm install --frozen-lockfile` prunes extraneous packages and
+// undoes local `pnpm link`s. That is acceptable in a fresh worktree, which has
+// no dependencies and nothing to lose, and unacceptable in the parent worktree
+// the user is living in — which `isGreen` also checks. An already-populated
+// node_modules is the tell: the target is not fresh, so the check must inspect
+// it without touching it.
+describe("buildCheckPlan install gating on node_modules", () => {
+  /** Lockfile contents; only its existence matters to the plan. */
+  const LOCKFILE = "lockfileVersion: '9.0'\n";
+  /** Minimal manifest that makes a directory auto-detect as a cargo repo. */
+  const CARGO_TOML = '[package]\nname = "fixture"\n';
+  /** A file inside node_modules, so `makeFixture` materializes the directory. */
+  const NODE_MODULES_MARKER = "node_modules/.modules.yaml";
+  /** The js checks a full package.json produces, in order, without any install. */
+  const JS_CHECKS = ["pnpm typecheck", "pnpm lint", "pnpm test --run"];
+
+  /** Every command in a plan that is a pnpm install, for pinpointing failures. */
+  const installsIn = (plan: string[] | null): string[] =>
+    (plan ?? []).filter((cmd) => cmd.includes("pnpm install"));
+
+  test("an existing node_modules suppresses the install entirely", () => {
+    const dir = makeFixture({
+      "package.json": pkgJson("typecheck", "lint", "test"),
+      "pnpm-lock.yaml": LOCKFILE,
+      [NODE_MODULES_MARKER]: "hoistPattern:\n  - '*'\n",
+    });
+    const plan = buildCheckPlan(dir);
+    assert.deepEqual(
+      installsIn(plan),
+      [],
+      `verification must not install into a populated tree: ${JSON.stringify(plan)}`,
+    );
+    assert.deepEqual(plan, JS_CHECKS);
+  });
+
+  test("a fresh worktree with no node_modules still gets the install first", () => {
+    const dir = makeFixture({
+      "package.json": pkgJson("typecheck", "lint", "test"),
+      "pnpm-lock.yaml": LOCKFILE,
+    });
+    assert.deepEqual(buildCheckPlan(dir), ["pnpm install --frozen-lockfile", ...JS_CHECKS]);
+  });
+
+  test("a populated tauri-shaped repo runs js then both cargo manifests, no install", () => {
+    const dir = makeFixture({
+      "package.json": pkgJson("typecheck", "lint", "test"),
+      "pnpm-lock.yaml": LOCKFILE,
+      [NODE_MODULES_MARKER]: "hoistPattern:\n  - '*'\n",
+      "Cargo.toml": CARGO_TOML,
+      "src-tauri/Cargo.toml": '[package]\nname = "fixture-tauri"\n',
+    });
+    assert.deepEqual(buildCheckPlan(dir), [
+      ...JS_CHECKS,
+      "cargo check",
+      "cargo test",
+      "cargo clippy -- -D warnings",
+      "cargo check --manifest-path src-tauri/Cargo.toml",
+      "cargo test --manifest-path src-tauri/Cargo.toml",
+      "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
+    ]);
+  });
+
+  // Dropping the install is the *only* thing node_modules may change: the checks
+  // themselves, their order, and the cargo commands after them stay identical.
+  test("node_modules removes the install and nothing else", () => {
+    const files = {
+      "package.json": pkgJson("tsc", "lint", "test"),
+      "pnpm-lock.yaml": LOCKFILE,
+      "Cargo.toml": CARGO_TOML,
+    };
+    const fresh = buildCheckPlan(makeFixture(files)) ?? [];
+    const populated = buildCheckPlan(
+      makeFixture({ ...files, [NODE_MODULES_MARKER]: "hoistPattern:\n  - '*'\n" }),
+    );
+    assert.deepEqual(installsIn(fresh), ["pnpm install --frozen-lockfile"]);
+    assert.deepEqual(
+      populated,
+      fresh.filter((cmd) => !cmd.includes("pnpm install")),
+    );
+  });
+
+  // A tree with no js checks never had an install to drop, so node_modules is a
+  // no-op there — it must not add, remove, or reorder anything.
+  test("node_modules alone changes nothing when there are no js checks", () => {
+    const files = {
+      "package.json": pkgJson("build"),
+      "pnpm-lock.yaml": LOCKFILE,
+      "Cargo.toml": CARGO_TOML,
+    };
+    const populated = buildCheckPlan(
+      makeFixture({ ...files, [NODE_MODULES_MARKER]: "hoistPattern:\n  - '*'\n" }),
+    );
+    assert.deepEqual(populated, buildCheckPlan(makeFixture(files)));
+    assert.deepEqual(populated, ["cargo check", "cargo test", "cargo clippy -- -D warnings"]);
+  });
+});
+
 // The `.swt-check` escape hatch is documented as a file you *drop* at the repo
 // root — i.e. uncommitted, and therefore absent from the fresh checkout of HEAD
 // the green check now runs in. So the override has to be resolved against the
