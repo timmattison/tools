@@ -6,7 +6,7 @@
 // each other's directories.
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -756,6 +756,54 @@ function writeSwtCheck(repo: string, body: string): void {
 }
 
 /**
+ * How long the shimmed teardown command stalls before handing over to real git.
+ * Only a floor matters: it has to outlast the poll interval the test notices the
+ * shim's sentinel on, so the interrupt cannot arrive after teardown is over.
+ */
+const TEARDOWN_HOLD_SECONDS = 1;
+
+/**
+ * Materializes a PATH-shadowing `git` that announces swt's teardown and holds
+ * its first command open.
+ *
+ * The interrupt under test has to land *inside* teardown, and teardown is two
+ * back-to-back git commands that together take a few tens of milliseconds — so
+ * timing a signal into that window with a sleep is a coin flip, and a flaky test
+ * for a flaky bug proves nothing. Making the first teardown command its own
+ * synchronization point removes the guesswork: it touches a sentinel the test
+ * waits on, then stalls before handing over to the real git. Every other git
+ * invocation is passed straight through, so nothing else about the run changes.
+ *
+ * @param label - Distinguishes this shim's directory from every other fixture's.
+ * @returns The directory to prepend to PATH, and the sentinel it touches.
+ */
+function makeTeardownShim(label: string): { dir: string; sentinel: string } {
+  // Resolved here, before the shim can shadow it, so the shim can hand over.
+  const resolved = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" });
+  assert.equal(resolved.status, 0, `could not resolve the real git: ${resolved.stderr}`);
+  const realGit = resolved.stdout.trim();
+
+  const dir = join(FIXTURE_ROOT, `git-shim-${label}`);
+  mkdirSync(dir, { recursive: true });
+  const sentinel = join(dir, "teardown-started");
+  const shim = join(dir, "git");
+  writeFileSync(
+    shim,
+    [
+      "#!/bin/sh",
+      `if [ "$1" = "worktree" ] && [ "$2" = "remove" ]; then`,
+      `  : > ${JSON.stringify(sentinel)}`,
+      `  sleep ${TEARDOWN_HOLD_SECONDS}`,
+      "fi",
+      `exec ${JSON.stringify(realGit)} "$@"`,
+      "",
+    ].join("\n"),
+  );
+  chmodSync(shim, 0o755);
+  return { dir, sentinel };
+}
+
+/**
  * Lists the branches `swt create <name>` could have left behind in a repository.
  *
  * @param repo - Repository to inspect.
@@ -775,13 +823,44 @@ function swtBranches(repo: string, name: string): string[] {
 const CHILD_DEADLINE_MS = 60_000;
 
 /**
+ * Spawns swt as a child in its own process group, with no launcher in between.
+ *
+ * The launcher is not incidental to any test that signals swt. `npx tsx` is a
+ * parent *process*: on SIGINT it relays the signal to the node process actually
+ * running swt, waits 30ms for an IPC acknowledgement that swt — blocked in the
+ * synchronous `spawnSync` of a green check — can never send, re-sends, and
+ * SIGKILLs at ~60ms. A test launched that way measures tsx's kill deadline
+ * against swt's teardown rather than swt's own guarantee, and fails whenever a
+ * loaded machine pushes teardown past 60ms. Re-using this process's own node
+ * binary and `execArgv` runs swt under exactly the same TypeScript loader (tsx's
+ * `--import` when the suite itself is run under tsx) with the launcher removed,
+ * so the signal lands on swt and nothing else can kill it.
+ *
+ * `detached` puts swt in its own process group, so a signal sent to `-pid`
+ * reaches the children swt spawned too — which is what a terminal Ctrl-C does.
+ *
+ * @param args - Arguments following the program name, e.g. `["create", name]`.
+ * @param cwd - Directory to run swt in.
+ * @param env - Environment entries merged over this process's own.
+ * @returns The spawned child; stdout is discarded and stderr is piped.
+ */
+function spawnSwt(args: string[], cwd: string, env: NodeJS.ProcessEnv = {}): ChildProcess {
+  return spawn(process.execPath, [...process.execArgv, SWT_MODULE, ...args], {
+    cwd,
+    detached: true,
+    stdio: ["ignore", "ignore", "pipe"],
+    env: { ...process.env, ...env },
+  });
+}
+
+/**
  * Reports whether any process remains in a process group.
  *
- * `npx tsx` is a small tree, not a single process: the wrapper exits the instant
- * it is signalled while the node process actually running swt is still tearing
- * its worktree down. Waiting on the tracked child alone would therefore sample
- * the filesystem mid-cleanup; the group is empty only once every one of them has
- * gone. Signal 0 performs the existence check without delivering anything.
+ * A signalled swt is not necessarily the last process standing: the green check
+ * it spawned, and the git commands it runs while tearing down, are children too.
+ * Waiting on the tracked child alone would therefore sample the filesystem
+ * mid-cleanup; the group is empty only once every one of them has gone. Signal 0
+ * performs the existence check without delivering anything.
  *
  * @param pid - Pid of the group leader, as spawned with `detached: true`.
  * @returns True while at least one member of the group is alive.
@@ -937,13 +1016,7 @@ describe("swt create cleanup", () => {
     // lands mid-check rather than after it.
     writeSwtCheck(repo, `#!/bin/sh\n: > ${JSON.stringify(started)}\nsleep 30\n`);
 
-    // `detached` puts swt in its own process group, so the signal below reaches
-    // the check swt spawned too — which is what a terminal Ctrl-C does.
-    const child = spawn("npx", ["tsx", SWT_MODULE, "create", name], {
-      cwd: repo,
-      detached: true,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
+    const child = spawnSwt(["create", name], repo);
     let stderr = "";
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -970,5 +1043,63 @@ describe("swt create cleanup", () => {
 
     assert.ok(!existsSync(wt), `SIGINT left an orphaned worktree at ${wt}:\n${stderr}`);
     assert.deepEqual(swtBranches(repo, name), [], `SIGINT left an orphaned branch:\n${stderr}`);
+  });
+
+  // One Ctrl-C asks swt to stop; a second one, while it is still stopping, must
+  // not undo the stopping. Teardown is two git commands run as children of swt,
+  // in swt's process group — which is exactly where a terminal sends Ctrl-C — so
+  // an impatient second interrupt kills the teardown command mid-flight. The
+  // worktree removal never completes, the branch the surviving worktree still
+  // claims cannot be deleted, and both are orphaned by the very interrupt that
+  // asked for them to go away.
+  test("a second interrupt during teardown still leaves no worktree and no branch", async () => {
+    const repo = makeCommittedGitRepo();
+    const name = `reinterrupted${fixtureCounter++}`;
+    const wt = fixturePath(`${name}.swt`);
+    const started = fixturePath(`check-started-${fixtureCounter++}`);
+    writeSwtCheck(repo, `#!/bin/sh\n: > ${JSON.stringify(started)}\nsleep 30\n`);
+    const shim = makeTeardownShim(`${name}-${fixtureCounter++}`);
+
+    const child = spawnSwt(["create", name], repo, {
+      PATH: `${shim.dir}${delimiter}${process.env.PATH ?? ""}`,
+    });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
+    const pid = child.pid;
+    assert.ok(pid !== undefined, "child process never started");
+
+    try {
+      await waitUntil(() => existsSync(started), "the green check to start");
+      assert.ok(existsSync(wt), `precondition: create must have built ${wt} before checking it`);
+      process.kill(-pid, "SIGINT");
+      // Both sentinels are the synchronization: the first proved the check was
+      // running, this one proves teardown is. Only then is the second interrupt
+      // sent, so "it arrived mid-teardown" is a fact rather than a hope.
+      await waitUntil(() => existsSync(shim.sentinel), "teardown to start");
+      process.kill(-pid, "SIGINT");
+      await withDeadline(exited, "swt to exit after a second SIGINT");
+      await waitUntil(() => !groupAlive(pid), "the interrupted swt to finish exiting");
+    } finally {
+      // Never leave the 30-second sleep — or a stalled shim — running.
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        /* the process group is already gone */
+      }
+      await exited;
+    }
+
+    assert.ok(
+      !existsSync(wt),
+      `a second SIGINT truncated teardown, orphaning the worktree at ${wt}:\n${stderr}`,
+    );
+    assert.deepEqual(
+      swtBranches(repo, name),
+      [],
+      `a second SIGINT truncated teardown, orphaning the branch:\n${stderr}`,
+    );
   });
 });
