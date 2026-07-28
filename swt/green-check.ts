@@ -2,12 +2,16 @@
 //
 // This module owns the whole definition of the green check: detecting which
 // toolchains a worktree uses (pnpm / cargo / Tauri), assembling the command
-// plan, and running it. Callers see only `isGreen(cwd)` (and `buildCheckPlan`
-// for inspection/testing) — the pnpm/cargo/Tauri detection stays hidden here.
+// plan, and running it. Callers see only `isGreen(target, configRoot)` (and
+// `buildCheckPlan` for inspection/testing) — the pnpm/cargo/Tauri detection
+// stays hidden here.
 //
 // Green check (always runs inside the worktree being checked, never the parent):
-//   - ./.swt-check at repo root (escape hatch — used alone if present)
-//   Otherwise, runs whichever apply, additively (Tauri repos have both):
+//   - .swt-check at `configRoot` — the parent repo root, because the escape hatch
+//     is an uncommitted file and so is absent from a fresh checkout of HEAD. Used
+//     alone if present, as an absolute shell-quoted path, still run in `target`.
+//   Otherwise, detected from `target` and run there, whichever apply, additively
+//   (Tauri repos have both):
 //   - package.json declaring at least one of typecheck/tsc/lint/test:
 //     `pnpm install --frozen-lockfile` (if pnpm-lock.yaml), then those checks.
 //     A package.json with none of those scripts contributes nothing — the install
@@ -37,6 +41,20 @@ const streamCheck = (cmd: string, cwd: string): boolean => {
 };
 
 /**
+ * Wraps a string so `sh -c` sees exactly one literal argument.
+ *
+ * Check commands are shell strings by design, so the one piece swt splices into
+ * them — the absolute path of the `.swt-check` override — has to be quoted: a
+ * repo root containing a space, a quote or a `$` would otherwise word-split or
+ * expand. Single quotes suppress every expansion; the embedded-quote case is
+ * handled by closing, escaping, and reopening (`'` → `'\''`).
+ *
+ * @param s - Raw string to embed in a shell command.
+ * @returns The single-quoted form, safe to concatenate into a command line.
+ */
+const shellQuote = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+
+/**
  * Reads the script names declared in a directory's package.json.
  *
  * @param cwd - Directory that may contain a package.json.
@@ -63,9 +81,15 @@ export function pkgScripts(cwd: string): Set<string> {
  * @returns The commands to run in order, or null if no check applies.
  */
 export function buildCheckPlan(target: string, configRoot: string = target): string[] | null {
-  const cwd = target;
-  if (existsSync(join(cwd, ".swt-check"))) return ["./.swt-check"];
+  // Resolved against configRoot, run in target. The escape hatch is documented as
+  // a file you *drop* at the repo root — uncommitted, and so absent from the fresh
+  // checkout of HEAD that `create` checks. Looking it up in the parent keeps that
+  // per-developer override working; running it in the target keeps the check
+  // honest about what it is verifying.
+  const override = join(configRoot, ".swt-check");
+  if (existsSync(override)) return [shellQuote(override)];
 
+  const cwd = target;
   const cmds: string[] = [];
 
   if (existsSync(join(cwd, "package.json"))) {
@@ -110,17 +134,16 @@ export function buildCheckPlan(target: string, configRoot: string = target): str
  * @returns Ok result when every command passed, otherwise the first failure.
  */
 export function isGreen(target: string, configRoot: string = target): Result {
-  const cwd = target;
-  const plan = buildCheckPlan(cwd);
+  const plan = buildCheckPlan(target, configRoot);
   if (!plan) {
     return {
       ok: false,
-      out: `No green-check defined. Drop a './.swt-check' executable at the repo root.\n`,
+      out: `No green-check defined. Drop a '.swt-check' executable at ${configRoot}.\n`,
     };
   }
-  process.stderr.write(`Running green check in ${cwd}…`);
+  process.stderr.write(`Running green check in ${target}…`);
   for (const cmd of plan) {
-    if (!streamCheck(cmd, cwd)) return { ok: false, out: `failed: ${cmd}\n` };
+    if (!streamCheck(cmd, target)) return { ok: false, out: `failed: ${cmd}\n` };
   }
   return { ok: true, out: "" };
 }

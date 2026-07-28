@@ -8,9 +8,12 @@
 //   1. The green check runs INSIDE the new worktree (a clean checkout of HEAD), not the
 //      parent — so uncommitted changes in the parent can't trick the check. The worktree
 //      and branch are torn down on failure.
-//   2. At merge time, BOTH worktrees must be clean (no uncommitted/untracked changes)
-//      AND both must pass the green check — so no in-progress red is silently advanced
-//      past, and no uncommitted subagent work is lost when the worktree is removed.
+//   2. At merge time, BOTH worktrees must be clean AND both must pass the green check —
+//      so no in-progress red is silently advanced past, and no uncommitted subagent work
+//      is lost when the worktree is removed. "Clean" is scoped per side: tracked changes
+//      only in the parent (a ff-merge cannot discard untracked files, and the `.swt-check`
+//      escape hatch is untracked by design), untracked included in the subagent (whose
+//      whole directory is deleted).
 //   3. If parent advanced during the subagent's work, rebase + re-verify green before ff-merging.
 //   4. Concurrent `swt merge` runs against the same parent are serialized via .git/swt.lock.
 //
@@ -105,7 +108,9 @@ function create(rawName: string): void {
 
   let green: Result;
   try {
-    green = isGreen(path);
+    // Checked in the new worktree, but configured from the parent: the
+    // `.swt-check` override is uncommitted, so it only exists in `root`.
+    green = isGreen(path, root);
   } catch (e) {
     cleanup();
     throw e;
@@ -141,10 +146,20 @@ function merge(wtPath: string): void {
     process.exit(1);
   }
 
-  // Refuse if either worktree is dirty. Parent dirt = in-progress work that
-  // shouldn't be silently fast-forwarded over. Subagent dirt = uncommitted work
-  // that would vanish when the worktree is removed. `git status --porcelain`
-  // catches both modified-tracked and untracked files.
+  // Refuse if either worktree is dirty — but the two guards need different scopes.
+  //
+  // Parent: tracked changes only. What matters there is in-progress work a
+  // fast-forward would silently advance past, and a ff-merge can only ever touch
+  // tracked files — git itself refuses to overwrite modified tracked ones, and it
+  // never discards untracked ones. Including untracked files here would instead
+  // hard-block every merge for anyone using the documented `./.swt-check` escape
+  // hatch, which is by definition an uncommitted file at the parent repo root.
+  //
+  // Subagent: untracked included. Uncommitted *or* untracked work there is
+  // genuinely destroyed, because `git worktree remove` deletes the whole
+  // directory. This is the early, clearer guard; the `git worktree remove` below
+  // is invoked without `--force`, so git's own dirty-worktree refusal is the
+  // backstop — but it fires after the merge and reports far less usefully.
   const checkClean = (cwd: string, label: string, includeUntracked: boolean): void => {
     let dirt: string;
     try {
@@ -154,12 +169,13 @@ function merge(wtPath: string): void {
       process.exit(1);
     }
     if (dirt.length > 0) {
-      process.stderr.write(`${label} has uncommitted/untracked changes:\n${dirt}\n`);
+      const kind = includeUntracked ? "uncommitted/untracked" : "uncommitted";
+      process.stderr.write(`${label} has ${kind} changes:\n${dirt}\n`);
       process.stderr.write("Commit or stash before merging.\n");
       process.exit(1);
     }
   };
-  checkClean(root, "Parent worktree", true);
+  checkClean(root, "Parent worktree", false);
   checkClean(wt, "Subagent worktree", true);
 
   // Parent HEAD must be green: refusing to silently advance past an in-progress
@@ -173,7 +189,7 @@ function merge(wtPath: string): void {
     process.exit(1);
   }
 
-  const green = isGreen(wt);
+  const green = isGreen(wt, root);
   if (!green.ok) {
     process.stderr.write(`Subagent worktree not green: ${green.out}`);
     process.exit(1);
@@ -192,7 +208,7 @@ function merge(wtPath: string): void {
         process.stderr.write(`\nResolve conflicts in ${wt}, then re-run: swt merge ${wt}\n`);
         process.exit(1);
       }
-      const reGreen = isGreen(wt);
+      const reGreen = isGreen(wt, root);
       if (!reGreen.ok) {
         process.stderr.write(`Not green after rebase: ${reGreen.out}`);
         process.exit(1);

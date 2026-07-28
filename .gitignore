@@ -12,3 +12,5 @@ target
 .env.local
 .claude/
 .op-cache.json
+# swt's green-check escape hatch: per-developer, never committed.
+.swt-check

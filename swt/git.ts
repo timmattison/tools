@@ -52,7 +52,9 @@ export const gitMust = (args: string[], cwd?: string): string => {
  * @throws If git itself fails, carrying git's combined output as the message.
  */
 export function worktreeDirt(cwd: string, opts: { includeUntracked: boolean }): string {
-  const r = git(["status", "--porcelain"], cwd);
+  const args = ["status", "--porcelain"];
+  if (!opts.includeUntracked) args.push("--untracked-files=no");
+  const r = git(args, cwd);
   if (!r.ok) throw new Error(r.out);
   return r.out.trim();
 }
