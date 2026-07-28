@@ -14,18 +14,33 @@ import { spawnSync } from "node:child_process";
 import type { Result } from "./green-check.ts";
 
 /**
+ * Runs git and captures its combined output.
+ *
+ * @param args - Arguments to git, one array element per argv entry.
+ * @param cwd - Directory to run git in; defaults to the current working directory.
+ * @param shielded - Whether to put git in a process group of its own, out of
+ *   reach of a signal aimed at swt's. See {@link removeWorktree} for why that is
+ *   the right call for teardown and the wrong one for everything else.
+ * @returns Git's success flag and its combined stdout/stderr.
+ */
+const runGit = (args: string[], cwd: string | undefined, shielded: boolean): Result => {
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", detached: shielded });
+  return { ok: r.status === 0, out: (r.stdout ?? "") + (r.stderr ?? "") };
+};
+
+/**
  * Runs a git command, capturing its combined output. Arguments are passed to
  * git directly rather than through a shell, so spaces, `;`, `$(…)` and every
  * other metacharacter in `args` are always literal argument text.
+ *
+ * Interruptible: a Ctrl-C reaches this git the same way it reaches swt, which is
+ * what you want for work the user is waiting on and can abandon.
  *
  * @param args - Arguments to git, one array element per argv entry.
  * @param cwd - Directory to run git in; defaults to the current working directory.
  * @returns Git's success flag and its combined stdout/stderr.
  */
-export const git = (args: string[], cwd?: string): Result => {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8" });
-  return { ok: r.status === 0, out: (r.stdout ?? "") + (r.stderr ?? "") };
-};
+export const git = (args: string[], cwd?: string): Result => runGit(args, cwd, false);
 
 /**
  * Runs a git command, aborting the process with git's output on failure.
@@ -54,14 +69,23 @@ export const gitMust = (args: string[], cwd?: string): string => {
  * still lying around too, which is the difference between a usable recovery
  * instruction and a wrong one.
  *
+ * Best-effort is not the same as abandonable, though, so unlike every other git
+ * call in swt these two run in a process group of their own. Teardown is most
+ * often what a Ctrl-C *asked for*, and a terminal sends Ctrl-C to the whole
+ * foreground process group — so an impatient second one would kill the very
+ * command that is carrying out the first. Cut between these two calls, that
+ * leaves the worst possible state: a worktree that survived and a branch that
+ * cannot be deleted while it does. Out of the group, teardown finishes on its
+ * own terms, and finishes even if swt itself is killed once it has started.
+ *
  * @param root - Repository worktree to run git from; never the one being removed.
  * @param path - Worktree directory to delete.
  * @param branch - Branch checked out in that worktree.
  * @returns Ok only when both commands succeeded; `out` is their combined output.
  */
 export function removeWorktree(root: string, path: string, branch: string): Result {
-  const removed = git(["worktree", "remove", "--force", path], root);
-  const deleted = git(["branch", "-D", branch], root);
+  const removed = runGit(["worktree", "remove", "--force", path], root, true);
+  const deleted = runGit(["branch", "-D", branch], root, true);
   return { ok: removed.ok && deleted.ok, out: removed.out + deleted.out };
 }
 

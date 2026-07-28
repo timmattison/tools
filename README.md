@@ -356,7 +356,9 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
   - Subagent worktree helper for parallel TDD. `swt create <name>` (names limited to
     `[A-Za-z0-9._-]`) builds an isolated worktree on a new branch and runs the green check inside
     that fresh checkout, so uncommitted parent changes can't fake a pass; worktree and branch are
-    torn back down if the check fails or the run is interrupted. `swt merge <path>` refuses unless
+    torn back down if the check fails, or if the run is interrupted by a signal it can handle —
+    teardown ignores further Ctrl-Cs so a second one can't strand what the first asked to remove,
+    though nothing survives `kill -9`. `swt merge <path>` refuses unless
     both worktrees are clean — tracked changes in the parent, untracked included in the subagent,
     whose directory gets deleted — and both pass the green check; it then rebases if the parent
     advanced, fast-forward-merges, and cleans up. Concurrent merges serialize on a `swt.lock` in the

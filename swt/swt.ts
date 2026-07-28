@@ -8,8 +8,12 @@
 //   1. Worktrees are only ever created from a green commit. The check runs INSIDE the
 //      new worktree — a clean checkout of HEAD, so uncommitted changes in the parent
 //      cannot trick it — and both the worktree and its branch are torn down again if the
-//      check fails or the run is interrupted. A failed check reports what that teardown
-//      actually did, plus the command to finish it by hand, rather than assuming it worked.
+//      check fails, or if the run is interrupted by any signal swt is allowed to handle:
+//      teardown ignores further signals and runs its git commands outside swt's process
+//      group, so the second Ctrl-C cannot undo what the first one asked for. SIGKILL is
+//      the exception no program can cover, and swt does not pretend otherwise. A failed
+//      check reports what that teardown actually did, plus the command to finish it by
+//      hand, rather than assuming it worked.
 //   2. A name from the command line can only ever name the thing it spells. It becomes
 //      both a branch and a filesystem path, so it is validated against a restricted
 //      character set (see WORKTREE_NAME_RULE) before anything at all is created.
@@ -58,6 +62,9 @@ const SIGNAL_EXIT_STATUS: Record<(typeof TERMINATION_SIGNALS)[number], number> =
   SIGTERM: 143,
 };
 
+/** Whether a teardown step is running right now; see {@link uninterrupted}. */
+let tearingDown = false;
+
 /**
  * Turns a terminating signal into a normal exit. Without a listener the signal's
  * default disposition kills the process outright — no `exit` hook runs — which
@@ -66,10 +73,49 @@ const SIGNAL_EXIT_STATUS: Record<(typeof TERMINATION_SIGNALS)[number], number> =
  * teardown decision lives in an `exit` hook, so two responsibilities armed at
  * the same time cannot fight over ordering.
  *
+ * Once teardown has started it does nothing at all — see {@link uninterrupted}.
+ *
  * @param signal - Signal that arrived.
  */
 function exitOnSignal(signal: (typeof TERMINATION_SIGNALS)[number]): void {
+  if (tearingDown) return;
   process.exit(SIGNAL_EXIT_STATUS[signal]);
+}
+
+/**
+ * Runs one teardown step, with interruption neutralized for its duration.
+ *
+ * The hazard is that teardown is usually what a signal *asked for*, and the
+ * signals keep coming: a terminal repeats Ctrl-C for as long as the user holds
+ * it, and the `npx tsx` launcher swt is installed behind relays SIGINT again
+ * 30ms after the first. Arriving mid-teardown, a second one must not be allowed
+ * to undo the first. So for the duration of a step the listener stays installed
+ * but stops acting: {@link exitOnSignal} would otherwise call `process.exit`,
+ * and `process.exit` from inside an `exit` hook does not re-emit `exit` — it
+ * goes straight to the real exit, dropping whatever teardown had not finished.
+ * Staying installed is the other half: removing the listener instead would
+ * restore the signal's default disposition, which kills swt outright and is
+ * strictly worse. Latching each step (below) then keeps the work itself to one
+ * run, however many callers reach it.
+ *
+ * What this cannot do is survive SIGKILL, which no process is allowed to handle.
+ * Teardown runs to completion against every signal swt is permitted to see; the
+ * only defence against the one it is not is that teardown's git commands run
+ * outside swt's process group (see `removeWorktree`), so whatever has already
+ * started still finishes.
+ *
+ * @param step - The teardown work. Must be synchronous: this runs inside `exit`
+ *   hooks, where the event loop is over and a promise would never be resumed.
+ * @returns Whatever `step` returns.
+ */
+function uninterrupted<T>(step: () => T): T {
+  const wasTearingDown = tearingDown;
+  tearingDown = true;
+  try {
+    return step();
+  } finally {
+    tearingDown = wasTearingDown;
+  }
 }
 
 /** How many teardown responsibilities currently need signals to reach `exit`. */
@@ -103,14 +149,20 @@ const heldLocks = new Set<string>();
  * touching a lock file this process did not create.
  */
 function releaseHeldLocks(): void {
-  for (const path of heldLocks) {
-    try {
-      rmSync(path, { force: true });
-    } catch {
-      /* best effort: nothing useful to do while the process is going down */
+  uninterrupted(() => {
+    // Latched by taking the paths out of the set up front, so a second call —
+    // the hook firing after an explicit release, or a signal on the way out —
+    // finds nothing left to do rather than repeating the work.
+    const paths = [...heldLocks];
+    heldLocks.clear();
+    for (const path of paths) {
+      try {
+        rmSync(path, { force: true });
+      } catch {
+        /* best effort: nothing useful to do while the process is going down */
+      }
     }
-  }
-  heldLocks.clear();
+  });
 }
 
 let lockExitHookInstalled = false;
@@ -189,17 +241,20 @@ function keepUnverifiedWorktree(): void {
 function removeUnverifiedWorktree(): Result | null {
   const worktree = unverifiedWorktree;
   if (worktree === null) return null;
-  // Clearing the hold first makes a second call a no-op; disarming waits until
-  // the git commands are done. An interrupted run is often *still* being
-  // signalled while it cleans up — the `npx tsx` launcher relays SIGINT again
-  // 30ms later — and dropping the listener mid-teardown would restore the
-  // default disposition and kill swt between the two commands.
+  // Latch: clearing the hold first makes a second call — `create`'s explicit one
+  // and the `exit` hook both reach here — a no-op rather than a repeat. Whoever
+  // gets here first runs the teardown to completion; disarming waits until the
+  // git commands are done, because dropping the listener mid-teardown would
+  // restore the default disposition and let the next signal kill swt between
+  // them.
   unverifiedWorktree = null;
-  try {
-    return removeWorktree(worktree.root, worktree.path, worktree.branch);
-  } finally {
-    disarmSignalExit();
-  }
+  return uninterrupted(() => {
+    try {
+      return removeWorktree(worktree.root, worktree.path, worktree.branch);
+    } finally {
+      disarmSignalExit();
+    }
+  });
 }
 
 /**
@@ -274,8 +329,9 @@ export function withParentLock<T>(repoRoot: string, fn: () => T): T {
 /**
  * Creates a subagent worktree on a fresh branch, verifying HEAD is green inside
  * it first. Prints the worktree path on stdout. Tears the worktree and branch
- * down and exits non-zero if the check fails — or if the run is interrupted
- * before it passes — reporting honestly when that teardown does not work.
+ * down and exits non-zero if the check fails — or if the run is interrupted by a
+ * catchable signal before it passes — reporting honestly when that teardown does
+ * not work.
  *
  * @param rawName - Base name for the worktree directory and branch; rejected up
  *   front unless it satisfies {@link WORKTREE_NAME_RULE}.
