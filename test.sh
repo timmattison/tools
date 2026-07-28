@@ -1,10 +1,11 @@
 #!/bin/bash
-# Run all tests for Go and Rust programs in this repository
+# Run all tests for Go, Rust, and TypeScript programs in this repository
 #
 # Usage:
 #   ./test.sh           # Run all tests
 #   ./test.sh --go      # Run only Go tests
 #   ./test.sh --rust    # Run only Rust tests
+#   ./test.sh --ts      # Run only TypeScript tests
 
 set -e
 
@@ -12,24 +13,33 @@ cd "$(dirname "$0")"
 
 run_go=true
 run_rust=true
+run_ts=true
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --go)
             run_rust=false
+            run_ts=false
             shift
             ;;
         --rust)
             run_go=false
+            run_ts=false
+            shift
+            ;;
+        --ts)
+            run_go=false
+            run_rust=false
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--go] [--rust]"
+            echo "Usage: $0 [--go] [--rust] [--ts]"
             echo ""
             echo "Options:"
             echo "  --go    Run only Go tests"
             echo "  --rust  Run only Rust tests"
+            echo "  --ts    Run only TypeScript tests"
             echo ""
             echo "If no options are specified, all tests are run."
             exit 0
@@ -69,6 +79,21 @@ if [ "$run_rust" = true ]; then
     else
         echo ""
         echo "[FAIL] Rust tests failed"
+        exit_code=1
+    fi
+    echo ""
+fi
+
+if [ "$run_ts" = true ]; then
+    echo "========================================="
+    echo "Running TypeScript tests..."
+    echo "========================================="
+    if npx tsx --test 'swt/*.test.ts'; then
+        echo ""
+        echo "[PASS] TypeScript tests passed"
+    else
+        echo ""
+        echo "[FAIL] TypeScript tests failed"
         exit_code=1
     fi
     echo ""

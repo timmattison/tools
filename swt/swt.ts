@@ -14,25 +14,33 @@
 //   3. If parent advanced during the subagent's work, rebase + re-verify green before ff-merging.
 //   4. Concurrent `swt merge` runs against the same parent are serialized via .git/swt.lock.
 //
-// Green check (always runs inside the worktree being checked, never the parent):
-//   - ./.swt-check at repo root (escape hatch — used alone if present)
-//   Otherwise, runs whichever apply, additively (Tauri repos have both):
-//   - package.json present: `pnpm install --frozen-lockfile` (if pnpm-lock.yaml), then
-//     typecheck/lint/test (whichever scripts exist)
-//   - Cargo.toml at repo root and/or src-tauri/Cargo.toml: cargo check + test + clippy per manifest
-//   If nothing applies: error (drop a .swt-check).
+// The green check itself lives in ./green-check.ts — see that module for what
+// counts as green and how pnpm/cargo/Tauri repos are detected.
 
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, rmSync } from "node:fs";
+import { closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { isGreen, type Result } from "./green-check.ts";
 
-type Result = { ok: boolean; out: string };
-
+/**
+ * Runs a shell command and captures its combined output.
+ *
+ * @param cmd - Shell command to run.
+ * @param cwd - Directory to run it in; defaults to the current working directory.
+ * @returns The command's success flag and combined stdout/stderr.
+ */
 const sh = (cmd: string, cwd?: string): Result => {
   const r = spawnSync("sh", ["-c", cmd], { cwd, encoding: "utf8" });
   return { ok: r.status === 0, out: (r.stdout ?? "") + (r.stderr ?? "") };
 };
 
+/**
+ * Runs a shell command, aborting the process with its output on failure.
+ *
+ * @param cmd - Shell command to run.
+ * @param cwd - Directory to run it in; defaults to the current working directory.
+ * @returns The command's trimmed combined output.
+ */
 const must = (cmd: string, cwd?: string): string => {
   const r = sh(cmd, cwd);
   if (!r.ok) {
@@ -42,70 +50,15 @@ const must = (cmd: string, cwd?: string): string => {
   return r.out.trim();
 };
 
-// Stream stdout/stderr live so the user sees progress on long checks.
-const streamCheck = (cmd: string, cwd: string): boolean => {
-  process.stderr.write(`\n  $ ${cmd}\n`);
-  const r = spawnSync("sh", ["-c", cmd], { cwd, stdio: "inherit" });
-  return r.status === 0;
-};
-
-function pkgScripts(cwd: string): Set<string> {
-  const p = join(cwd, "package.json");
-  if (!existsSync(p)) return new Set();
-  try {
-    const json = JSON.parse(readFileSync(p, "utf8"));
-    return new Set(Object.keys(json.scripts ?? {}));
-  } catch {
-    return new Set();
-  }
-}
-
-function buildCheckPlan(cwd: string): string[] | null {
-  if (existsSync(join(cwd, ".swt-check"))) return ["./.swt-check"];
-
-  const cmds: string[] = [];
-
-  if (existsSync(join(cwd, "package.json"))) {
-    // Fresh worktrees have no node_modules; install before checking.
-    if (existsSync(join(cwd, "pnpm-lock.yaml"))) {
-      cmds.push("pnpm install --frozen-lockfile");
-    }
-    const scripts = pkgScripts(cwd);
-    if (scripts.has("typecheck")) cmds.push("pnpm typecheck");
-    else if (scripts.has("tsc")) cmds.push("pnpm exec tsc --noEmit");
-    if (scripts.has("lint")) cmds.push("pnpm lint");
-    if (scripts.has("test")) cmds.push("pnpm test --run");
-  }
-
-  // Rust checks run alongside package.json checks — Tauri repos have both.
-  // "" = root Cargo.toml (no --manifest-path needed); otherwise point at the manifest.
-  const cargoManifests: string[] = [];
-  if (existsSync(join(cwd, "Cargo.toml"))) cargoManifests.push("");
-  if (existsSync(join(cwd, "src-tauri", "Cargo.toml"))) cargoManifests.push("src-tauri/Cargo.toml");
-  for (const manifest of cargoManifests) {
-    const flag = manifest ? ` --manifest-path ${manifest}` : "";
-    cmds.push(`cargo check${flag}`, `cargo test${flag}`, `cargo clippy${flag} -- -D warnings`);
-  }
-
-  return cmds.length > 0 ? cmds : null;
-}
-
-function isGreen(cwd: string): Result {
-  const plan = buildCheckPlan(cwd);
-  if (!plan) {
-    return {
-      ok: false,
-      out: `No green-check defined. Drop a './.swt-check' executable at the repo root.\n`,
-    };
-  }
-  process.stderr.write(`Running green check in ${cwd}…`);
-  for (const cmd of plan) {
-    if (!streamCheck(cmd, cwd)) return { ok: false, out: `failed: ${cmd}\n` };
-  }
-  return { ok: true, out: "" };
-}
-
-// O_EXCL-based lock with bounded retry. Stale locks > 1h are reaped.
+/**
+ * Runs `fn` while holding the parent repo's merge lock, so concurrent
+ * `swt merge` runs are serialized. O_EXCL-based lock with bounded retry;
+ * stale locks older than 1h are reaped.
+ *
+ * @param repoRoot - Parent repository root containing the .git directory.
+ * @param fn - Work to perform under the lock.
+ * @returns Whatever `fn` returns.
+ */
 function withParentLock<T>(repoRoot: string, fn: () => T): T {
   const lockPath = join(repoRoot, ".git", "swt.lock");
   const STALE_MS = 60 * 60 * 1000;
@@ -141,6 +94,13 @@ function withParentLock<T>(repoRoot: string, fn: () => T): T {
   }
 }
 
+/**
+ * Creates a subagent worktree on a fresh branch, verifying HEAD is green inside
+ * it first. Prints the worktree path on stdout. Tears the worktree and branch
+ * down and exits non-zero if the check fails.
+ *
+ * @param name - Base name for the worktree directory and branch.
+ */
 function create(name: string): void {
   const root = must("git rev-parse --show-toplevel");
   const branch = `swt/${name}-${Date.now().toString(36)}`;
@@ -175,6 +135,13 @@ function create(name: string): void {
   process.stdout.write(path + "\n");
 }
 
+/**
+ * Merges a subagent worktree back into the parent: both worktrees must be clean
+ * and green, the subagent is rebased if the parent advanced, then fast-forwarded
+ * in and torn down. Exits non-zero on any violated invariant.
+ *
+ * @param wtPath - Path to the subagent worktree to merge.
+ */
 function merge(wtPath: string): void {
   const wt = resolve(wtPath);
   const root = must("git rev-parse --show-toplevel");
