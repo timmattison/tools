@@ -46,15 +46,23 @@ export const gitMust = (args: string[], cwd?: string): string => {
 /**
  * Tears down a worktree and the branch checked out in it, forcing both.
  *
+ * Teardown is best-effort by nature — git refuses to remove a working tree whose
+ * `.git` link has gone missing, and refuses to delete a branch a registered
+ * worktree still claims — so the outcome is *reported* rather than assumed. Both
+ * commands are attempted even when the first fails, and both outputs come back:
+ * a caller shown only the first complaint would not know whether the branch is
+ * still lying around too, which is the difference between a usable recovery
+ * instruction and a wrong one.
+ *
  * @param root - Repository worktree to run git from; never the one being removed.
  * @param path - Worktree directory to delete.
  * @param branch - Branch checked out in that worktree.
- * @returns The teardown outcome.
+ * @returns Ok only when both commands succeeded; `out` is their combined output.
  */
 export function removeWorktree(root: string, path: string, branch: string): Result {
-  git(["worktree", "remove", "--force", path], root);
-  git(["branch", "-D", branch], root);
-  return { ok: true, out: "" };
+  const removed = git(["worktree", "remove", "--force", path], root);
+  const deleted = git(["branch", "-D", branch], root);
+  return { ok: removed.ok && deleted.ok, out: removed.out + deleted.out };
 }
 
 /**

@@ -36,22 +36,58 @@ import {
   worktreeDirt,
   WORKTREE_NAME_RULE,
 } from "./git.ts";
-import { isGreen, type Result } from "./green-check.ts";
+import { isGreen, shellQuote, type Result } from "./green-check.ts";
 
 /** Basename of the lock file, inside the repository's shared git directory. */
 const LOCK_FILE = "swt.lock";
 
-/** Locks this process created and is still responsible for removing. */
-const heldLocks = new Set<string>();
-
-/** Signals turned into an ordinary exit so held locks are still released. */
-const LOCK_RELEASE_SIGNALS = ["SIGINT", "SIGTERM"] as const;
+/** Signals swt turns into an ordinary exit so its `exit` hooks still run. */
+const TERMINATION_SIGNALS = ["SIGINT", "SIGTERM"] as const;
 
 /** Conventional shell exit status for a death by signal: 128 + signal number. */
-const SIGNAL_EXIT_STATUS: Record<(typeof LOCK_RELEASE_SIGNALS)[number], number> = {
+const SIGNAL_EXIT_STATUS: Record<(typeof TERMINATION_SIGNALS)[number], number> = {
   SIGINT: 130,
   SIGTERM: 143,
 };
+
+/**
+ * Turns a terminating signal into a normal exit. Without a listener the signal's
+ * default disposition kills the process outright — no `exit` hook runs — which
+ * is precisely how a lock, or a worktree that never passed its check, outlives
+ * its owner. This listener deliberately does no cleanup of its own: every
+ * teardown decision lives in an `exit` hook, so two responsibilities armed at
+ * the same time cannot fight over ordering.
+ *
+ * @param signal - Signal that arrived.
+ */
+function exitOnSignal(signal: (typeof TERMINATION_SIGNALS)[number]): void {
+  process.exit(SIGNAL_EXIT_STATUS[signal]);
+}
+
+/** How many teardown responsibilities currently need signals to reach `exit`. */
+let signalGuards = 0;
+
+/**
+ * Arms signal-to-exit conversion on behalf of one teardown responsibility, so
+ * swt only alters the process's signal behaviour while it actually owns
+ * something that would otherwise be orphaned.
+ */
+function armSignalExit(): void {
+  if (signalGuards++ === 0) {
+    for (const signal of TERMINATION_SIGNALS) process.on(signal, exitOnSignal);
+  }
+}
+
+/** Drops one responsibility's claim, restoring default signal handling at zero. */
+function disarmSignalExit(): void {
+  if (signalGuards === 0) return;
+  if (--signalGuards === 0) {
+    for (const signal of TERMINATION_SIGNALS) process.removeListener(signal, exitOnSignal);
+  }
+}
+
+/** Locks this process created and is still responsible for removing. */
+const heldLocks = new Set<string>();
 
 /**
  * Removes every lock this process is holding. Registered as the `exit` hook, so
@@ -69,51 +105,92 @@ function releaseHeldLocks(): void {
   heldLocks.clear();
 }
 
-/**
- * Releases held locks and exits on a terminating signal. Without a listener the
- * signal's default disposition kills the process outright and no `exit` hook
- * ever runs, which is precisely how a lock would survive its owner.
- *
- * @param signal - Signal that arrived.
- */
-function releaseLocksAndExit(signal: (typeof LOCK_RELEASE_SIGNALS)[number]): void {
-  releaseHeldLocks();
-  process.exit(SIGNAL_EXIT_STATUS[signal]);
-}
-
-let exitHookInstalled = false;
+let lockExitHookInstalled = false;
 
 /**
  * Records a freshly created lock as this process's responsibility and arms the
- * teardown hooks. The signal listeners exist only while a lock is actually held,
- * so swt never changes the process's signal behaviour outside that window.
+ * teardown hooks.
  *
  * @param path - Lock file this process just created with O_EXCL.
  */
 function holdLock(path: string): void {
   if (heldLocks.size === 0) {
-    if (!exitHookInstalled) {
+    if (!lockExitHookInstalled) {
       process.on("exit", releaseHeldLocks);
-      exitHookInstalled = true;
+      lockExitHookInstalled = true;
     }
-    for (const signal of LOCK_RELEASE_SIGNALS) process.on(signal, releaseLocksAndExit);
+    armSignalExit();
   }
   heldLocks.add(path);
 }
 
 /**
- * Removes a lock this process holds and disarms the signal listeners once the
- * last one is gone.
+ * Removes a lock this process holds and disarms its signal claim once the last
+ * one is gone.
  *
  * @param path - Lock file previously passed to {@link holdLock}.
  */
 function releaseLock(path: string): void {
   heldLocks.delete(path);
   rmSync(path, { force: true });
-  if (heldLocks.size === 0) {
-    for (const signal of LOCK_RELEASE_SIGNALS) {
-      process.removeListener(signal, releaseLocksAndExit);
-    }
+  if (heldLocks.size === 0) disarmSignalExit();
+}
+
+/** A worktree that exists but has not passed its green check yet. */
+type UnverifiedWorktree = { root: string; path: string; branch: string };
+
+/** The unverified worktree this process is on the hook for, if any. */
+let unverifiedWorktree: UnverifiedWorktree | null = null;
+
+let worktreeExitHookInstalled = false;
+
+/**
+ * Takes responsibility for a worktree that exists but is not verified yet, so a
+ * Ctrl-C during a long green check does not leave the user with a half-built
+ * worktree and branch they never asked to keep. Mirrors {@link holdLock}: the
+ * hooks are armed only for the window where something would actually be
+ * orphaned, and dropped by {@link keepUnverifiedWorktree} or
+ * {@link removeUnverifiedWorktree}.
+ *
+ * @param worktree - Worktree just created by `git worktree add`.
+ */
+function holdUnverifiedWorktree(worktree: UnverifiedWorktree): void {
+  if (!worktreeExitHookInstalled) {
+    process.on("exit", () => {
+      removeUnverifiedWorktree();
+    });
+    worktreeExitHookInstalled = true;
+  }
+  unverifiedWorktree = worktree;
+  armSignalExit();
+}
+
+/** Releases the hold without removing anything: the check passed, so it stays. */
+function keepUnverifiedWorktree(): void {
+  if (unverifiedWorktree === null) return;
+  unverifiedWorktree = null;
+  disarmSignalExit();
+}
+
+/**
+ * Tears down the held worktree, if one is still held. Idempotent, because it is
+ * both the `exit` hook and what `create` calls explicitly when the check fails.
+ *
+ * @returns The teardown outcome, or null when there was nothing left to remove.
+ */
+function removeUnverifiedWorktree(): Result | null {
+  const worktree = unverifiedWorktree;
+  if (worktree === null) return null;
+  // Clearing the hold first makes a second call a no-op; disarming waits until
+  // the git commands are done. An interrupted run is often *still* being
+  // signalled while it cleans up — the `npx tsx` launcher relays SIGINT again
+  // 30ms later — and dropping the listener mid-teardown would restore the
+  // default disposition and kill swt between the two commands.
+  unverifiedWorktree = null;
+  try {
+    return removeWorktree(worktree.root, worktree.path, worktree.branch);
+  } finally {
+    disarmSignalExit();
   }
 }
 
@@ -189,7 +266,8 @@ export function withParentLock<T>(repoRoot: string, fn: () => T): T {
 /**
  * Creates a subagent worktree on a fresh branch, verifying HEAD is green inside
  * it first. Prints the worktree path on stdout. Tears the worktree and branch
- * down and exits non-zero if the check fails.
+ * down and exits non-zero if the check fails — or if the run is interrupted
+ * before it passes — reporting honestly when that teardown does not work.
  *
  * @param rawName - Base name for the worktree directory and branch; rejected up
  *   front unless it satisfies {@link WORKTREE_NAME_RULE}.
@@ -213,9 +291,26 @@ function create(rawName: string): void {
   // worktree is a clean checkout of HEAD with no parent dirty state — so
   // uncommitted changes in the parent can't trick the check.
   gitMust(["worktree", "add", "-b", branch, path, "HEAD"], root);
+  // Nothing has verified this worktree yet, and the check about to run can take
+  // minutes. Until it passes, swt owns removing it — including when the user
+  // gives up and hits Ctrl-C.
+  holdUnverifiedWorktree({ root, path, branch });
 
+  /** Tears the unverified worktree down and says what actually happened to it. */
   const cleanup = (): void => {
-    removeWorktree(root, path, branch);
+    const torn = removeUnverifiedWorktree();
+    if (torn === null || torn.ok) {
+      process.stderr.write(`Cleaned up worktree ${path} and branch ${branch}.\n`);
+      return;
+    }
+    // Teardown is best-effort, so claiming it worked would strand the user with
+    // an orphaned worktree *and* branch they were told did not exist. Report
+    // git's own account, then the command that finishes the job by hand.
+    process.stderr.write(torn.out);
+    process.stderr.write(
+      `Could not clean up ${path}. Remove it by hand:\n` +
+        `  git worktree remove --force ${shellQuote(path)} && git branch -D ${branch}\n`,
+    );
   };
 
   let green: Result;
@@ -229,11 +324,13 @@ function create(rawName: string): void {
   }
 
   if (!green.ok) {
-    cleanup();
     process.stderr.write(`HEAD not green: ${green.out}`);
-    process.stderr.write(`Cleaned up worktree ${path} and branch ${branch}.\n`);
+    cleanup();
     process.exit(1);
   }
+
+  // Verified: it is the caller's worktree now, not swt's to tear down.
+  keepUnverifiedWorktree();
 
   // Print only the path on stdout — callers can capture cleanly.
   process.stdout.write(path + "\n");

@@ -775,6 +775,27 @@ function swtBranches(repo: string, name: string): string[] {
 const CHILD_DEADLINE_MS = 60_000;
 
 /**
+ * Reports whether any process remains in a process group.
+ *
+ * `npx tsx` is a small tree, not a single process: the wrapper exits the instant
+ * it is signalled while the node process actually running swt is still tearing
+ * its worktree down. Waiting on the tracked child alone would therefore sample
+ * the filesystem mid-cleanup; the group is empty only once every one of them has
+ * gone. Signal 0 performs the existence check without delivering anything.
+ *
+ * @param pid - Pid of the group leader, as spawned with `detached: true`.
+ * @returns True while at least one member of the group is alive.
+ */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Polls until a condition holds, failing the test rather than hanging forever.
  *
  * @param ready - Condition to poll; must be cheap and side-effect free.
@@ -936,6 +957,7 @@ describe("swt create cleanup", () => {
       assert.ok(existsSync(wt), `precondition: create must have built ${wt} before checking it`);
       process.kill(-pid, "SIGINT");
       await withDeadline(exited, "swt to exit after SIGINT");
+      await waitUntil(() => !groupAlive(pid), "the interrupted swt to finish exiting");
     } finally {
       // Never leave a 30-second sleep running, whatever went wrong above.
       try {

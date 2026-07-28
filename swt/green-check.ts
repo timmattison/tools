@@ -50,10 +50,13 @@ const streamCheck = (cmd: string, cwd: string): boolean => {
  * expand. Single quotes suppress every expansion; the embedded-quote case is
  * handled by closing, escaping, and reopening (`'` → `'\''`).
  *
+ * The same applies to a command line swt *prints* for a human to paste back into
+ * their shell, which is why this is exported.
+ *
  * @param s - Raw string to embed in a shell command.
  * @returns The single-quoted form, safe to concatenate into a command line.
  */
-const shellQuote = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
+export const shellQuote = (s: string): string => `'${s.replaceAll("'", `'\\''`)}'`;
 
 /**
  * Reads the script names declared in a directory's package.json.
