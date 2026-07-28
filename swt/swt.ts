@@ -15,7 +15,9 @@
 //      escape hatch is untracked by design), untracked included in the subagent (whose
 //      whole directory is deleted).
 //   3. If parent advanced during the subagent's work, rebase + re-verify green before ff-merging.
-//   4. Concurrent `swt merge` runs against the same parent are serialized via .git/swt.lock.
+//   4. Concurrent `swt merge` runs against the same parent are serialized via a
+//      swt.lock in the repo's *shared* git dir, so runs launched from two
+//      different worktrees of one repo still block each other.
 //
 // The green check itself lives in ./green-check.ts — see that module for what
 // counts as green and how pnpm/cargo/Tauri repos are detected.
@@ -23,40 +25,143 @@
 // Every git command runs through ./git.ts as an argv array, never a shell
 // string, so caller-supplied names cannot word-split or inject.
 
-import { closeSync, existsSync, openSync, realpathSync, rmSync } from "node:fs";
+import { closeSync, existsSync, openSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { git, gitMust, validateWorktreeName, worktreeDirt, WORKTREE_NAME_RULE } from "./git.ts";
 import { isGreen, type Result } from "./green-check.ts";
+
+/** Basename of the lock file, inside the repository's shared git directory. */
+const LOCK_FILE = "swt.lock";
+
+/** Locks this process created and is still responsible for removing. */
+const heldLocks = new Set<string>();
+
+/** Signals turned into an ordinary exit so held locks are still released. */
+const LOCK_RELEASE_SIGNALS = ["SIGINT", "SIGTERM"] as const;
+
+/** Conventional shell exit status for a death by signal: 128 + signal number. */
+const SIGNAL_EXIT_STATUS: Record<(typeof LOCK_RELEASE_SIGNALS)[number], number> = {
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+
+/**
+ * Removes every lock this process is holding. Registered as the `exit` hook, so
+ * it also covers `process.exit` calls that unwind no `finally` at all — never
+ * touching a lock file this process did not create.
+ */
+function releaseHeldLocks(): void {
+  for (const path of heldLocks) {
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      /* best effort: nothing useful to do while the process is going down */
+    }
+  }
+  heldLocks.clear();
+}
+
+/**
+ * Releases held locks and exits on a terminating signal. Without a listener the
+ * signal's default disposition kills the process outright and no `exit` hook
+ * ever runs, which is precisely how a lock would survive its owner.
+ *
+ * @param signal - Signal that arrived.
+ */
+function releaseLocksAndExit(signal: (typeof LOCK_RELEASE_SIGNALS)[number]): void {
+  releaseHeldLocks();
+  process.exit(SIGNAL_EXIT_STATUS[signal]);
+}
+
+let exitHookInstalled = false;
+
+/**
+ * Records a freshly created lock as this process's responsibility and arms the
+ * teardown hooks. The signal listeners exist only while a lock is actually held,
+ * so swt never changes the process's signal behaviour outside that window.
+ *
+ * @param path - Lock file this process just created with O_EXCL.
+ */
+function holdLock(path: string): void {
+  if (heldLocks.size === 0) {
+    if (!exitHookInstalled) {
+      process.on("exit", releaseHeldLocks);
+      exitHookInstalled = true;
+    }
+    for (const signal of LOCK_RELEASE_SIGNALS) process.on(signal, releaseLocksAndExit);
+  }
+  heldLocks.add(path);
+}
+
+/**
+ * Removes a lock this process holds and disarms the signal listeners once the
+ * last one is gone.
+ *
+ * @param path - Lock file previously passed to {@link holdLock}.
+ */
+function releaseLock(path: string): void {
+  heldLocks.delete(path);
+  rmSync(path, { force: true });
+  if (heldLocks.size === 0) {
+    for (const signal of LOCK_RELEASE_SIGNALS) {
+      process.removeListener(signal, releaseLocksAndExit);
+    }
+  }
+}
+
+/**
+ * Resolves the lock file that serializes merges for a repository.
+ *
+ * `.git` is a directory only in the main worktree; in a linked worktree it is a
+ * regular *file* holding `gitdir: …`, so joining `.git/swt.lock` onto a worktree
+ * root is an ENOTDIR — and the workflow swt serves never merges from the main
+ * repo. `--git-common-dir` names the git directory shared by every worktree of
+ * the repository, which is also exactly the serialization scope wanted: two
+ * `swt merge` runs launched from two different worktrees of one repo must
+ * contend for the same lock.
+ *
+ * @param repoRoot - Any worktree root of the repository.
+ * @returns Absolute path of that repository's merge lock file.
+ */
+function parentLockPath(repoRoot: string): string {
+  // Run in the main worktree, git answers with a path relative to its cwd ('.git').
+  const commonDir = gitMust(["rev-parse", "--git-common-dir"], repoRoot);
+  return join(resolve(repoRoot, commonDir), LOCK_FILE);
+}
 
 /**
  * Runs `fn` while holding the parent repo's merge lock, so concurrent
  * `swt merge` runs are serialized. O_EXCL-based lock with bounded retry;
  * stale locks older than 1h are reaped.
  *
- * @param repoRoot - Parent repository root containing the .git directory.
+ * The lock is released when `fn` returns, when it throws, and when it — or
+ * anything it calls — exits the process outright.
+ *
+ * @param repoRoot - Root of any worktree of the parent repository.
  * @param fn - Work to perform under the lock.
  * @returns Whatever `fn` returns.
  */
 export function withParentLock<T>(repoRoot: string, fn: () => T): T {
-  const lockPath = join(repoRoot, ".git", "swt.lock");
+  const lockPath = parentLockPath(repoRoot);
   const STALE_MS = 60 * 60 * 1000;
   const start = Date.now();
   while (true) {
     try {
       const fd = openSync(lockPath, "wx");
+      holdLock(lockPath);
       try {
         return fn();
       } finally {
         closeSync(fd);
-        rmSync(lockPath, { force: true });
+        releaseLock(lockPath);
       }
     } catch (e) {
       const err = e as NodeJS.ErrnoException;
       if (err.code !== "EEXIST") throw err;
       // Reap stale locks.
       try {
-        const stat = require("node:fs").statSync(lockPath);
+        const stat = statSync(lockPath);
         if (Date.now() - stat.mtimeMs > STALE_MS) {
           rmSync(lockPath, { force: true });
           continue;
@@ -199,27 +304,40 @@ function merge(wtPath: string): void {
   const branch = gitMust(["rev-parse", "--abbrev-ref", "HEAD"], wt);
   const parentBranch = gitMust(["rev-parse", "--abbrev-ref", "HEAD"], root);
 
-  withParentLock(root, () => {
+  // Nothing inside the locked region may exit the process: `process.exit` skips
+  // the `finally` that releases the lock, and a rebase conflict — the very case
+  // this path exists to handle — would then block every later merge until the
+  // stale reap. So the region *returns* its outcome and the exit happens out
+  // here, after the lock is released. `gitMust` is banned in there for the same
+  // reason: it exits on failure.
+  const outcome = withParentLock(root, (): Result => {
     const ff = git(["merge", "--ff-only", branch], root);
     if (!ff.ok) {
       process.stderr.write("Parent advanced; rebasing subagent onto parent…\n");
       const rebase = git(["rebase", parentBranch], wt);
       if (!rebase.ok) {
-        process.stderr.write(rebase.out);
-        process.stderr.write(`\nResolve conflicts in ${wt}, then re-run: swt merge ${wt}\n`);
-        process.exit(1);
+        return {
+          ok: false,
+          out: `${rebase.out}\nResolve conflicts in ${wt}, then re-run: swt merge ${wt}\n`,
+        };
       }
       const reGreen = isGreen(wt, root);
-      if (!reGreen.ok) {
-        process.stderr.write(`Not green after rebase: ${reGreen.out}`);
-        process.exit(1);
-      }
-      gitMust(["merge", "--ff-only", branch], root);
+      if (!reGreen.ok) return { ok: false, out: `Not green after rebase: ${reGreen.out}` };
+      const ffAfterRebase = git(["merge", "--ff-only", branch], root);
+      if (!ffAfterRebase.ok) return { ok: false, out: ffAfterRebase.out };
     }
-    gitMust(["worktree", "remove", wt], root);
-    gitMust(["branch", "-d", branch], root);
-    process.stdout.write(`merged ${branch}, removed ${wt}\n`);
+    const removed = git(["worktree", "remove", wt], root);
+    if (!removed.ok) return { ok: false, out: removed.out };
+    const deleted = git(["branch", "-d", branch], root);
+    if (!deleted.ok) return { ok: false, out: deleted.out };
+    return { ok: true, out: `merged ${branch}, removed ${wt}\n` };
   });
+
+  if (!outcome.ok) {
+    process.stderr.write(outcome.out);
+    process.exit(1);
+  }
+  process.stdout.write(outcome.out);
 }
 
 /**
