@@ -4,23 +4,31 @@
 //   swt create <name>          → verify HEAD green, create worktree on a new branch, print path
 //   swt merge <worktree-path>  → verify subagent green, ff-merge (rebase if parent advanced), cleanup
 //
-// Invariants enforced:
-//   1. The green check runs INSIDE the new worktree (a clean checkout of HEAD), not the
-//      parent — so uncommitted changes in the parent can't trick the check. The worktree
-//      and branch are torn down on failure.
-//   2. At merge time, BOTH worktrees must be clean AND both must pass the green check —
-//      so no in-progress red is silently advanced past, and no uncommitted subagent work
-//      is lost when the worktree is removed. "Clean" is scoped per side: tracked changes
-//      only in the parent (a ff-merge cannot discard untracked files, and the `.swt-check`
-//      escape hatch is untracked by design), untracked included in the subagent (whose
-//      whole directory is deleted).
-//   3. If parent advanced during the subagent's work, rebase + re-verify green before ff-merging.
-//   4. Concurrent `swt merge` runs against the same parent are serialized via a
-//      swt.lock in the repo's *shared* git dir, so runs launched from two
-//      different worktrees of one repo still block each other.
+// Invariants enforced — each states the guarantee first, then the mechanism:
+//   1. Worktrees are only ever created from a green commit. The check runs INSIDE the
+//      new worktree — a clean checkout of HEAD, so uncommitted changes in the parent
+//      cannot trick it — and both the worktree and its branch are torn down again if the
+//      check fails or the run is interrupted. A failed check reports what that teardown
+//      actually did, plus the command to finish it by hand, rather than assuming it worked.
+//   2. A name from the command line can only ever name the thing it spells. It becomes
+//      both a branch and a filesystem path, so it is validated against a restricted
+//      character set (see WORKTREE_NAME_RULE) before anything at all is created.
+//   3. A merge neither loses work nor advances the parent past an in-progress red. BOTH
+//      worktrees must be clean AND both must pass the green check before anything moves.
+//      "Clean" is scoped per side: tracked changes only in the parent (a ff-merge cannot
+//      discard untracked files, and the `.swt-check` escape hatch is untracked by design),
+//      untracked included in the subagent (whose whole directory is deleted).
+//   4. What lands in the parent is green as merged, not merely green in isolation. If the
+//      parent advanced during the subagent's work, the subagent is rebased onto it and
+//      re-verified green before the fast-forward.
+//   5. Merges into one repository never interleave. They serialize on a swt.lock in the
+//      repo's *shared* git dir, so runs launched from two different worktrees of one repo
+//      still block each other, and that lock is released when the merge returns, when it
+//      throws, and when the process exits from inside the locked region.
 //
 // The green check itself lives in ./green-check.ts — see that module for what
-// counts as green and how pnpm/cargo/Tauri repos are detected.
+// counts as green, how pnpm/cargo/Tauri repos are detected, and where the
+// `.swt-check` override is looked up versus where it runs.
 //
 // Every git command runs through ./git.ts as an argv array, never a shell
 // string, so caller-supplied names cannot word-split or inject.

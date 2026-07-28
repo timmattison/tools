@@ -353,10 +353,16 @@ A shared Rust library for monitoring and transforming clipboard content. Provide
     each Claude model. Useful for reconciling spend or estimating burn across date ranges.
   - To install: `cargo install --git https://github.com/timmattison/tools claude-usage`
 - swt (subagent worktree)
-  - Subagent worktree helper for parallel TDD. `swt create <name>` verifies HEAD is green and spins
-    up an isolated worktree on a new branch; `swt merge <path>` verifies the subagent is green,
-    rebases if the parent advanced, fast-forward-merges, and cleans up. Concurrent merges are
-    serialized via `.git/swt.lock`. Drop a `./.swt-check` script to override the default green check.
+  - Subagent worktree helper for parallel TDD. `swt create <name>` (names limited to
+    `[A-Za-z0-9._-]`) builds an isolated worktree on a new branch and runs the green check inside
+    that fresh checkout, so uncommitted parent changes can't fake a pass; worktree and branch are
+    torn back down if the check fails or the run is interrupted. `swt merge <path>` refuses unless
+    both worktrees are clean — tracked changes in the parent, untracked included in the subagent,
+    whose directory gets deleted — and both pass the green check; it then rebases if the parent
+    advanced, fast-forward-merges, and cleans up. Concurrent merges serialize on a `swt.lock` in the
+    repo's shared git dir, so runs started from sibling worktrees block each other. To replace the
+    default check, drop a `.swt-check` executable at the parent repo root (gitignored, so it stays
+    per-developer); it runs with the worktree being checked as its working directory.
   - To install: symlink `swt/swt.ts` from a clone of this repo into your `PATH`
     (e.g. `ln -s "$PWD/swt/swt.ts" ~/.local/bin/swt`). Requires `npx`/`tsx`.
 

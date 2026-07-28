@@ -2,13 +2,14 @@
 //
 // This module owns the whole definition of the green check: detecting which
 // toolchains a worktree uses (pnpm / cargo / Tauri), assembling the command
-// plan, and running it. Callers see only `isGreen(target, configRoot)` (and
-// `buildCheckPlan` for inspection/testing) — the pnpm/cargo/Tauri detection
-// stays hidden here.
+// plan, and running it. Callers see only `isGreen(target, configRoot)`; the
+// detection stays hidden here. (`buildCheckPlan` and `pkgScripts` are exported
+// for inspection and tests, `shellQuote` because swt prints shell commands too.)
 //
 // Green check (always runs inside the worktree being checked, never the parent):
-//   - .swt-check at `configRoot` — the parent repo root, because the escape hatch
-//     is an uncommitted file and so is absent from a fresh checkout of HEAD. Used
+//   - .swt-check at `configRoot`, which defaults to `target` but is the *parent*
+//     repo root when swt checks a worktree: the escape hatch is a gitignored,
+//     per-developer file, so it is absent from a fresh checkout of HEAD. Used
 //     alone if present, as an absolute shell-quoted path, still run in `target`.
 //   Otherwise, detected from `target` and run there, whichever apply, additively
 //   (Tauri repos have both):
