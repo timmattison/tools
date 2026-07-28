@@ -28,7 +28,14 @@
 import { closeSync, existsSync, openSync, realpathSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { git, gitMust, validateWorktreeName, worktreeDirt, WORKTREE_NAME_RULE } from "./git.ts";
+import {
+  git,
+  gitMust,
+  removeWorktree,
+  validateWorktreeName,
+  worktreeDirt,
+  WORKTREE_NAME_RULE,
+} from "./git.ts";
 import { isGreen, type Result } from "./green-check.ts";
 
 /** Basename of the lock file, inside the repository's shared git directory. */
@@ -208,8 +215,7 @@ function create(rawName: string): void {
   gitMust(["worktree", "add", "-b", branch, path, "HEAD"], root);
 
   const cleanup = (): void => {
-    git(["worktree", "remove", "--force", path], root);
-    git(["branch", "-D", branch], root);
+    removeWorktree(root, path, branch);
   };
 
   let green: Result;

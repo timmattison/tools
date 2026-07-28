@@ -6,11 +6,12 @@
 // each other's directories.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
+  realpathSync,
   rmSync,
   statSync,
   utimesSync,
@@ -21,12 +22,15 @@ import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { git, gitMust, validateWorktreeName, worktreeDirt } from "./git.ts";
+import { git, gitMust, removeWorktree, validateWorktreeName, worktreeDirt } from "./git.ts";
 import { buildCheckPlan, pkgScripts } from "./green-check.ts";
 import { withParentLock } from "./swt.ts";
 
 /** Process-unique root for this suite's fixtures; removed in the `after` hook. */
 const FIXTURE_ROOT = join(tmpdir(), `swt-test-${process.pid}-${process.hrtime.bigint()}`);
+
+/** This module's sibling: the entry point child-process fixtures run and import. */
+const SWT_MODULE = fileURLToPath(new URL("./swt.ts", import.meta.url));
 
 let fixtureCounter = 0;
 
@@ -615,9 +619,6 @@ describe("withParentLock", () => {
   /** Basename of the lock file, relative to the repo's shared git dir. */
   const LOCK_NAME = "swt.lock";
 
-  /** This module's sibling: the entry point child-process fixtures import. */
-  const SWT_MODULE = fileURLToPath(new URL("./swt.ts", import.meta.url));
-
   /** Child fixture exit status meaning "exited from inside the locked region". */
   const EXIT_INSIDE_LOCK = 17;
 
@@ -723,5 +724,229 @@ describe("withParentLock", () => {
       `child did not exit from inside the locked region: ${r.stdout}${r.stderr}`,
     );
     assert.ok(!existsSync(lock), `process.exit inside the locked region left ${lock} behind`);
+  });
+});
+
+/**
+ * Names a path directly under the fixture root, spelled the way git spells it back.
+ *
+ * `getcwd(2)` always answers with the physical path and on macOS `$TMPDIR` is a
+ * symlink, so every path git and swt print is already symlink-resolved — string
+ * comparisons against a `FIXTURE_ROOT`-derived path would otherwise miss.
+ *
+ * @param name - Basename to place under the fixture root; nothing is created.
+ * @returns The absolute, symlink-resolved path.
+ */
+function fixturePath(name: string): string {
+  mkdirSync(FIXTURE_ROOT, { recursive: true });
+  return join(realpathSync(FIXTURE_ROOT), name);
+}
+
+/**
+ * Drops an executable `.swt-check` override at a repository root.
+ *
+ * @param repo - Repository root the override belongs to. It is deliberately left
+ *   untracked, which is exactly how the escape hatch is documented.
+ * @param body - Shell script contents, shebang included.
+ */
+function writeSwtCheck(repo: string, body: string): void {
+  const path = join(repo, ".swt-check");
+  writeFileSync(path, body);
+  chmodSync(path, 0o755);
+}
+
+/**
+ * Lists the branches `swt create <name>` could have left behind in a repository.
+ *
+ * @param repo - Repository to inspect.
+ * @param name - Worktree base name that was passed to `swt create`.
+ * @returns Matching branch names; empty when the branch was cleaned up.
+ */
+function swtBranches(repo: string, name: string): string[] {
+  const r = git(["branch", "--list", "--format=%(refname:short)", `swt/${name}-*`], repo);
+  assert.ok(r.ok, `git branch --list failed: ${r.out}`);
+  return r.out
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+/** Ceiling on every wait for a child `swt`, so a hang fails instead of parking the suite. */
+const CHILD_DEADLINE_MS = 60_000;
+
+/**
+ * Polls until a condition holds, failing the test rather than hanging forever.
+ *
+ * @param ready - Condition to poll; must be cheap and side-effect free.
+ * @param what - Phrase describing what is awaited, used in the failure message.
+ */
+async function waitUntil(ready: () => boolean, what: string): Promise<void> {
+  const deadline = Date.now() + CHILD_DEADLINE_MS;
+  while (!ready()) {
+    if (Date.now() > deadline) {
+      assert.fail(`timed out after ${CHILD_DEADLINE_MS}ms waiting for ${what}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+/**
+ * Awaits a promise under the same deadline, so a wedged child cannot park the suite.
+ *
+ * @param promise - Promise to await.
+ * @param what - Phrase describing what is awaited, used in the failure message.
+ * @returns Whatever `promise` resolves to.
+ */
+async function withDeadline<T>(promise: Promise<T>, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`timed out after ${CHILD_DEADLINE_MS}ms waiting for ${what}`)),
+          CHILD_DEADLINE_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+// Finding #4: tearing an unverified worktree down takes two git commands, and
+// both used to have their results dropped on the floor. Teardown is genuinely
+// best-effort — a worktree whose `.git` link is gone cannot be removed, and a
+// branch cannot be deleted while a registered worktree still claims it — so the
+// outcome has to travel back to the caller instead of being assumed.
+describe("removeWorktree", () => {
+  test("removes the worktree and its branch, and reports success", () => {
+    const repo = makeCommittedGitRepo();
+    const branch = `swt/teardown-${fixtureCounter++}`;
+    const path = fixturePath(`teardown-${fixtureCounter++}.swt`);
+    const add = git(["worktree", "add", "--quiet", "-b", branch, path, "HEAD"], repo);
+    assert.ok(add.ok, `git worktree add failed: ${add.out}`);
+    assert.ok(existsSync(path), "fixture precondition: the worktree must exist first");
+
+    const torn = removeWorktree(repo, path, branch);
+
+    assert.equal(torn.ok, true, `teardown reported failure: ${torn.out}`);
+    assert.ok(!existsSync(path), `${path} survived a teardown that reported success`);
+    assert.ok(
+      !gitMust(["worktree", "list"], repo).includes(path),
+      `${path} is still a registered worktree`,
+    );
+    assert.equal(gitMust(["branch", "--list", "--format=%(refname:short)", branch], repo), "");
+  });
+
+  test("reports failure, and git's own output, when neither command can succeed", () => {
+    const repo = makeCommittedGitRepo();
+    const stranger = fixturePath(`not-a-worktree-${fixtureCounter++}`);
+    mkdirSync(stranger, { recursive: true });
+    const branch = "swt/never-existed";
+
+    const torn = removeWorktree(repo, stranger, branch);
+
+    assert.equal(
+      torn.ok,
+      false,
+      `teardown claimed success for ${stranger}: ${JSON.stringify(torn)}`,
+    );
+    // Both commands are attempted and both are reported. A caller shown only the
+    // first failure would still not know whether the branch is lying around.
+    assert.ok(torn.out.includes(stranger), `git's worktree complaint is missing:\n${torn.out}`);
+    assert.ok(torn.out.includes(branch), `git's branch complaint is missing:\n${torn.out}`);
+  });
+});
+
+// The user-facing half of finding #4, plus nit N1. Both are only observable from
+// outside the process: what `swt create` prints when its teardown fails, and what
+// it leaves behind when the user gives up on a long green check.
+describe("swt create cleanup", () => {
+  /**
+   * A `.swt-check` that deletes the worktree's own `.git` link and then fails.
+   * Teardown afterwards fails for two independent reasons: git refuses to remove
+   * a working tree whose `.git` has vanished, and refuses to delete a branch a
+   * registered worktree still claims. No permission games, so it behaves the
+   * same for an unprivileged user and for root.
+   */
+  const SABOTAGE_CHECK = '#!/bin/sh\nrm -f "$PWD/.git"\nexit 1\n';
+
+  test("never reports a cleanup that did not happen", () => {
+    const repo = makeCommittedGitRepo();
+    const name = `sabotaged${fixtureCounter++}`;
+    const wt = fixturePath(`${name}.swt`);
+    writeSwtCheck(repo, SABOTAGE_CHECK);
+
+    const r = spawnSync("npx", ["tsx", SWT_MODULE, "create", name], { cwd: repo, encoding: "utf8" });
+    const stderr = r.stderr ?? "";
+
+    assert.equal(r.status, 1, `expected a failed create: ${stderr}`);
+    // The claim is only a lie if the orphans really are orphans.
+    assert.ok(existsSync(wt), `fixture precondition: ${wt} should have survived teardown`);
+    const branches = swtBranches(repo, name);
+    assert.equal(
+      branches.length,
+      1,
+      `expected one leftover branch, got ${JSON.stringify(branches)}`,
+    );
+    const branch = branches[0] ?? "";
+
+    assert.ok(
+      !stderr.includes("Cleaned up"),
+      `claimed cleanup while ${wt} and ${branch} both survived:\n${stderr}`,
+    );
+    assert.match(stderr, /fatal:/, `git's own teardown output was swallowed:\n${stderr}`);
+    assert.ok(
+      stderr.includes(`git worktree remove --force '${wt}' && git branch -D ${branch}`),
+      `no copy-pasteable recovery command naming ${wt} and ${branch}:\n${stderr}`,
+    );
+  });
+
+  // Nit N1: the green check now runs *after* the worktree exists, so a user who
+  // Ctrl-Cs a long check is the one paying for the new ordering unless swt tears
+  // its own half-built state down on the way out.
+  test("interrupting the green check leaves no worktree and no branch behind", async () => {
+    const repo = makeCommittedGitRepo();
+    const name = `interrupted${fixtureCounter++}`;
+    const wt = fixturePath(`${name}.swt`);
+    const started = fixturePath(`check-started-${fixtureCounter++}`);
+    // The sentinel is the synchronization point — it proves the check is running,
+    // and therefore that the worktree exists. The sleep only guarantees the signal
+    // lands mid-check rather than after it.
+    writeSwtCheck(repo, `#!/bin/sh\n: > ${JSON.stringify(started)}\nsleep 30\n`);
+
+    // `detached` puts swt in its own process group, so the signal below reaches
+    // the check swt spawned too — which is what a terminal Ctrl-C does.
+    const child = spawn("npx", ["tsx", SWT_MODULE, "create", name], {
+      cwd: repo,
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
+    const pid = child.pid;
+    assert.ok(pid !== undefined, "child process never started");
+
+    try {
+      await waitUntil(() => existsSync(started), "the green check to start");
+      assert.ok(existsSync(wt), `precondition: create must have built ${wt} before checking it`);
+      process.kill(-pid, "SIGINT");
+      await withDeadline(exited, "swt to exit after SIGINT");
+    } finally {
+      // Never leave a 30-second sleep running, whatever went wrong above.
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        /* the process group is already gone */
+      }
+      await exited;
+    }
+
+    assert.ok(!existsSync(wt), `SIGINT left an orphaned worktree at ${wt}:\n${stderr}`);
+    assert.deepEqual(swtBranches(repo, name), [], `SIGINT left an orphaned branch:\n${stderr}`);
   });
 });

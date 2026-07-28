@@ -44,6 +44,20 @@ export const gitMust = (args: string[], cwd?: string): string => {
 };
 
 /**
+ * Tears down a worktree and the branch checked out in it, forcing both.
+ *
+ * @param root - Repository worktree to run git from; never the one being removed.
+ * @param path - Worktree directory to delete.
+ * @param branch - Branch checked out in that worktree.
+ * @returns The teardown outcome.
+ */
+export function removeWorktree(root: string, path: string, branch: string): Result {
+  git(["worktree", "remove", "--force", path], root);
+  git(["branch", "-D", branch], root);
+  return { ok: true, out: "" };
+}
+
+/**
  * Reports a worktree's uncommitted state as git's own porcelain listing.
  *
  * @param cwd - Worktree root to inspect.
