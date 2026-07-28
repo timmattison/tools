@@ -5,16 +5,20 @@
 //   swt merge <worktree-path>  → verify subagent green, ff-merge (rebase if parent advanced), cleanup
 //
 // Invariants enforced:
-//   1. Worktrees are only created from a green commit (parent HEAD green at create time).
-//   2. Merges are only accepted from a green subagent commit AND a green parent HEAD —
-//      so a `swt merge` mid-TDD-cycle in the parent is refused, not silently fast-forwarded past.
+//   1. The green check runs INSIDE the new worktree (a clean checkout of HEAD), not the
+//      parent — so uncommitted changes in the parent can't trick the check. The worktree
+//      and branch are torn down on failure.
+//   2. At merge time, BOTH worktrees must be clean (no uncommitted/untracked changes)
+//      AND both must pass the green check — so no in-progress red is silently advanced
+//      past, and no uncommitted subagent work is lost when the worktree is removed.
 //   3. If parent advanced during the subagent's work, rebase + re-verify green before ff-merging.
 //   4. Concurrent `swt merge` runs against the same parent are serialized via .git/swt.lock.
 //
-// Green check:
+// Green check (always runs inside the worktree being checked, never the parent):
 //   - ./.swt-check at repo root (escape hatch — used alone if present)
 //   Otherwise, runs whichever apply, additively (Tauri repos have both):
-//   - package.json scripts: typecheck/lint/test (only the ones that exist)
+//   - package.json present: `pnpm install --frozen-lockfile` (if pnpm-lock.yaml), then
+//     typecheck/lint/test (whichever scripts exist)
 //   - Cargo.toml at repo root and/or src-tauri/Cargo.toml: cargo check + test + clippy per manifest
 //   If nothing applies: error (drop a .swt-check).
 
@@ -61,11 +65,17 @@ function buildCheckPlan(cwd: string): string[] | null {
 
   const cmds: string[] = [];
 
-  const scripts = pkgScripts(cwd);
-  if (scripts.has("typecheck")) cmds.push("pnpm typecheck");
-  else if (scripts.has("tsc")) cmds.push("pnpm exec tsc --noEmit");
-  if (scripts.has("lint")) cmds.push("pnpm lint");
-  if (scripts.has("test")) cmds.push("pnpm test --run");
+  if (existsSync(join(cwd, "package.json"))) {
+    // Fresh worktrees have no node_modules; install before checking.
+    if (existsSync(join(cwd, "pnpm-lock.yaml"))) {
+      cmds.push("pnpm install --frozen-lockfile");
+    }
+    const scripts = pkgScripts(cwd);
+    if (scripts.has("typecheck")) cmds.push("pnpm typecheck");
+    else if (scripts.has("tsc")) cmds.push("pnpm exec tsc --noEmit");
+    if (scripts.has("lint")) cmds.push("pnpm lint");
+    if (scripts.has("test")) cmds.push("pnpm test --run");
+  }
 
   // Rust checks run alongside package.json checks — Tauri repos have both.
   // "" = root Cargo.toml (no --manifest-path needed); otherwise point at the manifest.
@@ -133,14 +143,34 @@ function withParentLock<T>(repoRoot: string, fn: () => T): T {
 
 function create(name: string): void {
   const root = must("git rev-parse --show-toplevel");
-  const green = isGreen(root);
-  if (!green.ok) {
-    process.stderr.write(`HEAD not green: ${green.out}`);
-    process.exit(1);
-  }
   const branch = `swt/${name}-${Date.now().toString(36)}`;
   const path = resolve(root, "..", `${name}.swt`);
+
+  // Create the worktree first, then run the green check INSIDE it. A fresh
+  // worktree is a clean checkout of HEAD with no parent dirty state — so
+  // uncommitted changes in the parent can't trick the check.
   must(`git worktree add -b ${branch} ${path} HEAD`, root);
+
+  const cleanup = (): void => {
+    sh(`git worktree remove --force ${path}`, root);
+    sh(`git branch -D ${branch}`, root);
+  };
+
+  let green: Result;
+  try {
+    green = isGreen(path);
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
+
+  if (!green.ok) {
+    cleanup();
+    process.stderr.write(`HEAD not green: ${green.out}`);
+    process.stderr.write(`Cleaned up worktree ${path} and branch ${branch}.\n`);
+    process.exit(1);
+  }
+
   // Print only the path on stdout — callers can capture cleanly.
   process.stdout.write(path + "\n");
 }
@@ -156,6 +186,25 @@ function merge(wtPath: string): void {
     process.stderr.write(`No such worktree: ${wt}\n`);
     process.exit(1);
   }
+
+  // Refuse if either worktree is dirty. Parent dirt = in-progress work that
+  // shouldn't be silently fast-forwarded over. Subagent dirt = uncommitted work
+  // that would vanish when the worktree is removed. `git status --porcelain`
+  // catches both modified-tracked and untracked files.
+  const checkClean = (cwd: string, label: string): void => {
+    const r = sh("git status --porcelain", cwd);
+    if (!r.ok) {
+      process.stderr.write(r.out);
+      process.exit(1);
+    }
+    if (r.out.trim().length > 0) {
+      process.stderr.write(`${label} has uncommitted/untracked changes:\n${r.out}`);
+      process.stderr.write("Commit or stash before merging.\n");
+      process.exit(1);
+    }
+  };
+  checkClean(root, "Parent worktree");
+  checkClean(wt, "Subagent worktree");
 
   // Parent HEAD must be green: refusing to silently advance past an in-progress
   // red commit in the parent worktree (mirrors the create-time invariant).
