@@ -43,6 +43,20 @@ export const gitMust = (args: string[], cwd?: string): string => {
   return r.out.trim();
 };
 
+/**
+ * Reports a worktree's uncommitted state as git's own porcelain listing.
+ *
+ * @param cwd - Worktree root to inspect.
+ * @param opts - `includeUntracked` decides whether untracked files count as dirt.
+ * @returns The trimmed porcelain output; empty string means clean.
+ * @throws If git itself fails, carrying git's combined output as the message.
+ */
+export function worktreeDirt(cwd: string, opts: { includeUntracked: boolean }): string {
+  const r = git(["status", "--porcelain"], cwd);
+  if (!r.ok) throw new Error(r.out);
+  return r.out.trim();
+}
+
 declare const worktreeNameBrand: unique symbol;
 
 /**

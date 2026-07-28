@@ -57,10 +57,13 @@ export function pkgScripts(cwd: string): Set<string> {
  * Determines the ordered list of shell commands that constitute the green check
  * for a worktree, based on the files present at its root.
  *
- * @param cwd - Worktree root to inspect.
+ * @param target - Worktree root to inspect and to run the check in.
+ * @param configRoot - Directory the `.swt-check` override is looked up in;
+ *   defaults to `target`.
  * @returns The commands to run in order, or null if no check applies.
  */
-export function buildCheckPlan(cwd: string): string[] | null {
+export function buildCheckPlan(target: string, configRoot: string = target): string[] | null {
+  const cwd = target;
   if (existsSync(join(cwd, ".swt-check"))) return ["./.swt-check"];
 
   const cmds: string[] = [];
@@ -101,10 +104,13 @@ export function buildCheckPlan(cwd: string): string[] | null {
 /**
  * Runs the green check for a worktree, stopping at the first failing command.
  *
- * @param cwd - Worktree root to check; every command runs in this directory.
+ * @param target - Worktree root to check; every command runs in this directory.
+ * @param configRoot - Directory the `.swt-check` override is looked up in;
+ *   defaults to `target`.
  * @returns Ok result when every command passed, otherwise the first failure.
  */
-export function isGreen(cwd: string): Result {
+export function isGreen(target: string, configRoot: string = target): Result {
+  const cwd = target;
   const plan = buildCheckPlan(cwd);
   if (!plan) {
     return {

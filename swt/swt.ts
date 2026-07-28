@@ -22,7 +22,7 @@
 
 import { closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { git, gitMust, validateWorktreeName, WORKTREE_NAME_RULE } from "./git.ts";
+import { git, gitMust, validateWorktreeName, worktreeDirt, WORKTREE_NAME_RULE } from "./git.ts";
 import { isGreen, type Result } from "./green-check.ts";
 
 /**
@@ -145,20 +145,22 @@ function merge(wtPath: string): void {
   // shouldn't be silently fast-forwarded over. Subagent dirt = uncommitted work
   // that would vanish when the worktree is removed. `git status --porcelain`
   // catches both modified-tracked and untracked files.
-  const checkClean = (cwd: string, label: string): void => {
-    const r = git(["status", "--porcelain"], cwd);
-    if (!r.ok) {
-      process.stderr.write(r.out);
+  const checkClean = (cwd: string, label: string, includeUntracked: boolean): void => {
+    let dirt: string;
+    try {
+      dirt = worktreeDirt(cwd, { includeUntracked });
+    } catch (e) {
+      process.stderr.write((e as Error).message);
       process.exit(1);
     }
-    if (r.out.trim().length > 0) {
-      process.stderr.write(`${label} has uncommitted/untracked changes:\n${r.out}`);
+    if (dirt.length > 0) {
+      process.stderr.write(`${label} has uncommitted/untracked changes:\n${dirt}\n`);
       process.stderr.write("Commit or stash before merging.\n");
       process.exit(1);
     }
   };
-  checkClean(root, "Parent worktree");
-  checkClean(wt, "Subagent worktree");
+  checkClean(root, "Parent worktree", true);
+  checkClean(wt, "Subagent worktree", true);
 
   // Parent HEAD must be green: refusing to silently advance past an in-progress
   // red commit in the parent worktree (mirrors the create-time invariant).

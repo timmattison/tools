@@ -5,12 +5,13 @@
 // each other's directories.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, test } from "node:test";
 
-import { git, gitMust, validateWorktreeName } from "./git.ts";
+import { git, gitMust, validateWorktreeName, worktreeDirt } from "./git.ts";
 import { buildCheckPlan, pkgScripts } from "./green-check.ts";
 
 /** Process-unique root for this suite's fixtures; removed in the `after` hook. */
@@ -22,10 +23,12 @@ let fixtureCounter = 0;
  * Materializes a fixture directory containing the given files.
  *
  * @param files - Map of repo-relative path to file contents; parent directories are created.
+ * @param label - Prefix for the directory name; a counter is always appended so two
+ *   fixtures with the same label never share a path.
  * @returns Absolute path to the fixture directory.
  */
-function makeFixture(files: Record<string, string>): string {
-  const dir = join(FIXTURE_ROOT, `case-${fixtureCounter++}`);
+function makeFixture(files: Record<string, string>, label = "case"): string {
+  const dir = join(FIXTURE_ROOT, `${label}-${fixtureCounter++}`);
   mkdirSync(dir, { recursive: true });
   for (const [relPath, contents] of Object.entries(files)) {
     const full = join(dir, relPath);
@@ -52,21 +55,6 @@ describe("buildCheckPlan", () => {
       name: "empty directory has no plan",
       files: {},
       expected: null,
-    },
-    {
-      name: ".swt-check escape hatch is the whole plan",
-      files: { ".swt-check": "#!/bin/sh\nexit 0\n" },
-      expected: ["./.swt-check"],
-    },
-    {
-      name: ".swt-check wins alone over package.json and Cargo.toml",
-      files: {
-        ".swt-check": "#!/bin/sh\nexit 0\n",
-        "package.json": pkgJson("typecheck", "lint", "test"),
-        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
-        "Cargo.toml": "[package]\nname = \"fixture\"\n",
-      },
-      expected: ["./.swt-check"],
     },
     {
       name: "root Cargo.toml only uses no --manifest-path",
@@ -217,6 +205,76 @@ describe("buildCheckPlan", () => {
   });
 });
 
+// The `.swt-check` escape hatch is documented as a file you *drop* at the repo
+// root — i.e. uncommitted, and therefore absent from the fresh checkout of HEAD
+// the green check now runs in. So the override has to be resolved against the
+// parent repo root while the commands still run in the worktree being checked.
+describe("buildCheckPlan config root", () => {
+  /** Trivial always-green override script. */
+  const SWT_CHECK = "#!/bin/sh\nexit 0\n";
+  /** Minimal manifest that makes a directory auto-detect as a cargo repo. */
+  const CARGO_TOML = '[package]\nname = "fixture"\n';
+  /** The plan `CARGO_TOML` alone produces — what must NOT win over an override. */
+  const CARGO_PLAN = ["cargo check", "cargo test", "cargo clippy -- -D warnings"];
+
+  test(".swt-check in the target is the whole plan, as an absolute quoted path", () => {
+    const dir = makeFixture({ ".swt-check": SWT_CHECK });
+    assert.deepEqual(buildCheckPlan(dir), [`'${join(dir, ".swt-check")}'`]);
+  });
+
+  test(".swt-check wins alone over package.json and Cargo.toml", () => {
+    const dir = makeFixture({
+      ".swt-check": SWT_CHECK,
+      "package.json": pkgJson("typecheck", "lint", "test"),
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "Cargo.toml": CARGO_TOML,
+    });
+    assert.deepEqual(buildCheckPlan(dir), [`'${join(dir, ".swt-check")}'`]);
+  });
+
+  test(".swt-check at the config root is used when the target has none", () => {
+    const configRoot = makeFixture({ ".swt-check": SWT_CHECK });
+    const target = makeFixture({ "Cargo.toml": CARGO_TOML });
+    assert.deepEqual(buildCheckPlan(target, configRoot), [`'${join(configRoot, ".swt-check")}'`]);
+  });
+
+  test(".swt-check at the config root beats auto-detection in the target", () => {
+    const configRoot = makeFixture({ ".swt-check": SWT_CHECK });
+    const target = makeFixture({
+      "package.json": pkgJson("typecheck", "lint", "test"),
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+      "Cargo.toml": CARGO_TOML,
+    });
+    assert.deepEqual(buildCheckPlan(target, configRoot), [`'${join(configRoot, ".swt-check")}'`]);
+  });
+
+  test("no .swt-check at the config root leaves the target's auto-detected plan alone", () => {
+    const configRoot = makeFixture({});
+    const target = makeFixture({ "Cargo.toml": CARGO_TOML });
+    assert.deepEqual(buildCheckPlan(target, configRoot), CARGO_PLAN);
+  });
+
+  test("no .swt-check anywhere still yields no plan", () => {
+    assert.equal(buildCheckPlan(makeFixture({}), makeFixture({})), null);
+  });
+
+  // The emitted command is handed to `sh -c`, so a repo root containing a space,
+  // a quote or a `$` has to survive that round trip intact.
+  test("a config root path with a space and a quote is shell-quoted for sh -c", () => {
+    const configRoot = makeFixture({ ".swt-check": "#!/bin/sh\nexit 7\n" }, "wei'rd $config root");
+    chmodSync(join(configRoot, ".swt-check"), 0o755);
+    const target = makeFixture({ "Cargo.toml": CARGO_TOML });
+
+    const plan = buildCheckPlan(target, configRoot);
+    const quoted = `'${join(configRoot, ".swt-check").replaceAll("'", "'\\''")}'`;
+    assert.deepEqual(plan, [quoted]);
+
+    // Not tautological: this actually runs the emitted string the way swt does.
+    const r = spawnSync("sh", ["-c", plan![0]], { cwd: target, encoding: "utf8" });
+    assert.equal(r.status, 7, `sh could not run the quoted override: ${r.stderr}`);
+  });
+});
+
 describe("pkgScripts", () => {
   test("returns an empty set when there is no package.json", () => {
     assert.deepEqual(pkgScripts(makeFixture({})), new Set());
@@ -249,6 +307,82 @@ function makeGitRepo(): string {
   assert.ok(init.ok, `git init failed: ${init.out}`);
   return dir;
 }
+
+/** Path of the one tracked file `makeCommittedGitRepo` leaves behind. */
+const TRACKED_FILE = "tracked.txt";
+
+/**
+ * Creates a git repository with a single committed file under the process-unique
+ * fixture root. Identity and excludes are pinned locally so the fixture behaves
+ * the same regardless of the developer's global git config.
+ *
+ * @returns Absolute path to the initialized repository.
+ */
+function makeCommittedGitRepo(): string {
+  const dir = makeFixture({ [TRACKED_FILE]: "original\n" });
+  const init = git(["init", "-b", "main", "--quiet"], dir);
+  assert.ok(init.ok, `git init failed: ${init.out}`);
+  for (const [key, value] of [
+    ["user.email", "swt-test@example.com"],
+    ["user.name", "swt test"],
+    ["commit.gpgsign", "false"],
+    ["core.excludesFile", "/dev/null"],
+  ]) {
+    const set = git(["config", "--local", key, value], dir);
+    assert.ok(set.ok, `git config ${key} failed: ${set.out}`);
+  }
+  const add = git(["add", "--", TRACKED_FILE], dir);
+  assert.ok(add.ok, `git add failed: ${add.out}`);
+  const commit = git(["commit", "--quiet", "-m", "fixture"], dir);
+  assert.ok(commit.ok, `git commit failed: ${commit.out}`);
+  return dir;
+}
+
+// The parent guard and the subagent guard need different scopes, so dirt
+// detection is a parameter rather than a fixed `git status --porcelain`.
+describe("worktreeDirt", () => {
+  test("a freshly committed repo is clean under either scope", () => {
+    const dir = makeCommittedGitRepo();
+    assert.equal(worktreeDirt(dir, { includeUntracked: false }), "");
+    assert.equal(worktreeDirt(dir, { includeUntracked: true }), "");
+  });
+
+  test("an untracked file is dirt only when untracked files are included", () => {
+    const dir = makeCommittedGitRepo();
+    writeFileSync(join(dir, "scratch.txt"), "scratch\n");
+    assert.equal(worktreeDirt(dir, { includeUntracked: false }), "");
+    assert.match(worktreeDirt(dir, { includeUntracked: true }), /scratch\.txt/);
+  });
+
+  // Finding A in one test: the documented escape hatch is an uncommitted file at
+  // the repo root, so an untracked-sensitive parent guard hard-blocks every merge
+  // for anyone following the documented workflow.
+  test("an uncommitted .swt-check escape hatch is not parent dirt", () => {
+    const dir = makeCommittedGitRepo();
+    writeFileSync(join(dir, ".swt-check"), "#!/bin/sh\nexit 0\n");
+    assert.equal(worktreeDirt(dir, { includeUntracked: false }), "");
+  });
+
+  test("a modified tracked file is dirt even when untracked files are excluded", () => {
+    const dir = makeCommittedGitRepo();
+    writeFileSync(join(dir, TRACKED_FILE), "changed\n");
+    assert.match(worktreeDirt(dir, { includeUntracked: false }), /tracked\.txt/);
+  });
+
+  test("a staged addition is dirt even when untracked files are excluded", () => {
+    const dir = makeCommittedGitRepo();
+    writeFileSync(join(dir, "added.txt"), "added\n");
+    const add = git(["add", "--", "added.txt"], dir);
+    assert.ok(add.ok, `git add failed: ${add.out}`);
+    assert.match(worktreeDirt(dir, { includeUntracked: false }), /added\.txt/);
+  });
+
+  test("a deleted tracked file is dirt even when untracked files are excluded", () => {
+    const dir = makeCommittedGitRepo();
+    rmSync(join(dir, TRACKED_FILE));
+    assert.match(worktreeDirt(dir, { includeUntracked: false }), /tracked\.txt/);
+  });
+});
 
 // These tests exist to prove there is no shell between swt and git. Each one
 // feeds git an argument that a shell would mangle — a space (word splitting),
