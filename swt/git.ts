@@ -52,6 +52,12 @@ declare const worktreeNameBrand: unique symbol;
  */
 export type WorktreeName = string & { readonly [worktreeNameBrand]: "WorktreeName" };
 
+/** Characters a worktree name may be built from. */
+const WORKTREE_NAME_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+/** Names that match the pattern but are still meaningless as a path component. */
+const RESERVED_WORKTREE_NAMES = new Set([".", ".."]);
+
 /** Human-readable statement of what a worktree name may contain. */
 export const WORKTREE_NAME_RULE =
   "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
@@ -68,5 +74,8 @@ export const WORKTREE_NAME_RULE =
  * @returns The branded name, or null if it violates {@link WORKTREE_NAME_RULE}.
  */
 export function validateWorktreeName(name: string): WorktreeName | null {
+  if (!WORKTREE_NAME_PATTERN.test(name)) return null;
+  if (name.startsWith("-")) return null;
+  if (RESERVED_WORKTREE_NAMES.has(name)) return null;
   return name as WorktreeName;
 }

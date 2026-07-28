@@ -22,7 +22,7 @@
 
 import { closeSync, existsSync, openSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { git, gitMust } from "./git.ts";
+import { git, gitMust, validateWorktreeName, WORKTREE_NAME_RULE } from "./git.ts";
 import { isGreen, type Result } from "./green-check.ts";
 
 /**
@@ -75,9 +75,20 @@ function withParentLock<T>(repoRoot: string, fn: () => T): T {
  * it first. Prints the worktree path on stdout. Tears the worktree and branch
  * down and exits non-zero if the check fails.
  *
- * @param name - Base name for the worktree directory and branch.
+ * @param rawName - Base name for the worktree directory and branch; rejected up
+ *   front unless it satisfies {@link WORKTREE_NAME_RULE}.
  */
-function create(name: string): void {
+function create(rawName: string): void {
+  // Validate before touching git: the name becomes both a branch and a path, so
+  // `..` or a leading `-` would otherwise create the wrong thing somewhere else.
+  const name = validateWorktreeName(rawName);
+  if (name === null) {
+    process.stderr.write(
+      `Invalid worktree name ${JSON.stringify(rawName)} — ${WORKTREE_NAME_RULE}.\n`,
+    );
+    process.exit(1);
+  }
+
   const root = gitMust(["rev-parse", "--show-toplevel"]);
   const branch = `swt/${name}-${Date.now().toString(36)}`;
   const path = resolve(root, "..", `${name}.swt`);
