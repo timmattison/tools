@@ -126,7 +126,12 @@ impl Fixture {
 fn branch_exists(repo: &Path, branch: &str) -> bool {
     git_allow_fail(
         repo,
-        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")],
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
     )
     .status
     .success()
