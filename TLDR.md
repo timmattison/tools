@@ -19,6 +19,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |
 | `freeport` | Finds a free TCP port on localhost, cross-platform. |
 | `gitdiggin` | Recursively searches git repos for commits containing a string (messages and diffs). |
+| `gitnuke` | Removes a git worktree and deletes its branch; `--force` is required for worktrees with submodules checked out (which `git worktree remove` refuses outright) or uncommitted changes. |
 | `gitrdun` | Shows your recent git commits across multiple repositories. |
 | `glo` | Finds and displays large objects in git repositories. |
 | `goup` | Updates Go dependencies across all `go.mod` files in a repo. |
