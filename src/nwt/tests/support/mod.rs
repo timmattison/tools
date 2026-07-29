@@ -116,6 +116,11 @@ pub fn init_repo() -> (TempDir, PathBuf) {
 /// scrubs the terminal-multiplexer environment from the child so a suite
 /// launched from inside zellij/tmux can never hijack the user's real tab.
 ///
+/// It likewise scrubs the git location environment, so the spawned `nwt` — which
+/// shells out to `git worktree add` — operates on `repo` and not on whatever
+/// repo an inherited `GIT_DIR` names. Both scrubs guard the same class of bug:
+/// a fixture reaching out and acting on the developer's real session.
+///
 /// Tests that deliberately *exercise* the multiplexer behaviour (see
 /// [`FakeMultiplexer`]) re-add `ZELLIJ`/`TMUX` on the returned command; because
 /// those `.env(...)` calls run after the scrub here, they win for that child.
@@ -136,7 +141,13 @@ pub fn nwt_command(repo: &Path) -> Command {
         // real tab. Tests that deliberately exercise the multiplexer behavior
         // re-add ZELLIJ/TMUX after calling this (a later `.env(..)` wins).
         .env_remove("ZELLIJ")
-        .env_remove("TMUX");
+        .env_remove("TMUX")
+        // Same idea for git: a hook exports these, `cargo test` inherits them,
+        // and GIT_DIR beats `current_dir`. Left in place, the spawned nwt would
+        // add its worktree to the real repo. See `run_git` above.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
     cmd
 }
 
