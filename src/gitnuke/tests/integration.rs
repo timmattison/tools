@@ -104,6 +104,45 @@ impl Fixture {
         self.root.join("main")
     }
 
+    /// Create a `sub` repo and register it as a submodule at `sub/` in `main`.
+    ///
+    /// Must be called *before* `add_worktree` so the worktree's HEAD contains
+    /// the gitlink. `protocol.file.allow` is needed because git refuses
+    /// file-transport submodule clones by default (CVE-2022-39253).
+    fn add_submodule(&self) {
+        self.init_repo("sub");
+        let main = self.main_repo();
+        git(
+            &main,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../sub",
+                "sub",
+            ],
+        );
+        git(&main, &["commit", "-qm", "add submodule"]);
+    }
+
+    /// Check out the submodule contents inside a linked worktree, which is what
+    /// makes git refuse to remove that worktree.
+    fn populate_submodule(&self, worktree: &Path) {
+        git(
+            worktree,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "update",
+                "--init",
+                "-q",
+            ],
+        );
+    }
+
     /// Add a linked worktree at `<root>/<dir>` checked out on a new `branch`.
     fn add_worktree(&self, dir: &str, branch: &str) -> PathBuf {
         let path = self.root.join(dir);
@@ -143,6 +182,130 @@ fn worktree_registered(repo: &Path, path: &Path) -> bool {
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .any(|line| line.strip_prefix("worktree ") == Some(path.to_str().expect("utf-8 path")))
+}
+
+/// A worktree containing a populated submodule is the case plain
+/// `git worktree remove` refuses outright ("working trees containing submodules
+/// cannot be moved or removed"). gitnuke must refuse too — but say what is in
+/// the way and how to override it, and leave the branch alone.
+#[test]
+fn refuses_a_submodule_worktree_without_force() {
+    let fixture = Fixture::new();
+    fixture.add_submodule();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    fixture.populate_submodule(&worktree);
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["feature"]);
+    let message = combined(&output);
+
+    assert!(
+        !output.status.success(),
+        "gitnuke should refuse a submodule worktree without --force: {message}"
+    );
+    assert!(
+        worktree.exists(),
+        "the worktree must survive a refusal: {message}"
+    );
+    assert!(
+        worktree_registered(&main, &worktree),
+        "git must still track the worktree after a refusal: {message}"
+    );
+    assert!(
+        branch_exists(&main, "feature"),
+        "the branch must survive a refused removal: {message}"
+    );
+    assert!(
+        message.contains("submodule"),
+        "the message should say submodules are the problem: {message}"
+    );
+    assert!(
+        message.contains("sub"),
+        "the message should name the submodule in the way: {message}"
+    );
+    assert!(
+        message.contains("--force"),
+        "the message should point at --force: {message}"
+    );
+}
+
+#[test]
+fn nukes_a_submodule_worktree_with_force() {
+    let fixture = Fixture::new();
+    fixture.add_submodule();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    fixture.populate_submodule(&worktree);
+    assert!(
+        worktree.join("sub/README.md").exists(),
+        "fixture should have a populated submodule checkout"
+    );
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["--force", "feature"]);
+
+    assert!(
+        output.status.success(),
+        "gitnuke --force should nuke a submodule worktree: {}",
+        combined(&output)
+    );
+    assert!(
+        !worktree.exists(),
+        "worktree directory should be gone, submodule and all"
+    );
+    assert!(
+        !worktree_registered(&main, &worktree),
+        "git should no longer track the worktree"
+    );
+    assert!(
+        !branch_exists(&main, "feature"),
+        "branch 'feature' should be deleted"
+    );
+}
+
+/// Uncommitted work is git's other reason to refuse a removal. gitnuke must not
+/// delete the branch when that happens — the whole point of the worktree being
+/// left standing is that the work inside it is still recoverable.
+#[test]
+fn keeps_the_branch_when_a_dirty_worktree_is_refused() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("README.md"), "uncommitted work\n").expect("dirty the worktree");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["feature"]);
+    let message = combined(&output);
+
+    assert!(
+        !output.status.success(),
+        "gitnuke should refuse a dirty worktree without --force: {message}"
+    );
+    assert!(worktree.exists(), "the dirty worktree must survive");
+    assert!(
+        branch_exists(&main, "feature"),
+        "the branch must survive a refused removal: {message}"
+    );
+}
+
+#[test]
+fn force_nukes_a_dirty_worktree() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("README.md"), "uncommitted work\n").expect("dirty the worktree");
+    std::fs::write(worktree.join("scratch.txt"), "untracked\n").expect("add untracked file");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["--force", "feature"]);
+
+    assert!(
+        output.status.success(),
+        "gitnuke --force should nuke a dirty worktree: {}",
+        combined(&output)
+    );
+    assert!(!worktree.exists(), "worktree directory should be gone");
+    assert!(
+        !branch_exists(&main, "feature"),
+        "branch 'feature' should be deleted"
+    );
 }
 
 #[test]
