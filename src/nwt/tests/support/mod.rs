@@ -28,6 +28,21 @@ use tempfile::TempDir;
 /// Runs a git command in `dir` with stdin/stdout/stderr nulled, returning
 /// whether it succeeded. Output is nulled so concurrent test runs (a background
 /// `bacon` loop alongside the pre-commit hook's own run) don't interleave noise.
+///
+/// Scrubs the inherited `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` so that `dir`
+/// is the repo git operates on. Without this, `current_dir(dir)` is not enough:
+/// when the suite runs from inside a git hook, git exports those vars into the
+/// hook's environment, `cargo test` inherits them, and `GIT_DIR` overrides
+/// cwd-based discovery — so a fixture's `git config`/`commit` lands in the
+/// *real* repo. That is how `Test <t@example.com>` got written into this repo's
+/// own `.git/config` and then authored every later commit until it was noticed.
+/// Pinned by `tests/git-env-isolation.rs`.
+///
+/// Only the three location vars are scrubbed. `GIT_CONFIG_GLOBAL`/
+/// `GIT_CONFIG_SYSTEM` are deliberately left alone: they are not part of this
+/// leak (a bare `git config` writes to the *local* file named by `GIT_DIR`), and
+/// pinning them to `/dev/null` would also drop the host's `init.defaultBranch`,
+/// silently changing the branch fixtures are created on.
 pub fn run_git(dir: &Path, args: &[&str]) -> bool {
     let mut command = Command::new("git");
     shed_inherited_git_environment(&mut command);
@@ -38,6 +53,9 @@ pub fn run_git(dir: &Path, args: &[&str]) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
