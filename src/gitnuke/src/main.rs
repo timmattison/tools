@@ -16,7 +16,12 @@ mod exit_codes {
     pub const WORKTREE_NOT_FOUND: i32 = 3;
     /// The target matched more than one worktree.
     pub const MULTIPLE_MATCHES: i32 = 4;
+    /// The worktree contains submodules and `--force` was not given.
+    pub const SUBMODULES_PRESENT: i32 = 5;
 }
+
+/// The index mode git records for a submodule (gitlink) entry.
+const GITLINK_MODE_PREFIX: &str = "160000 ";
 
 /// Remove a git worktree and force-delete its branch.
 ///
@@ -40,6 +45,7 @@ mod exit_codes {
 /// - 2: A git command failed
 /// - 3: No worktree matched the target
 /// - 4: The target matched more than one worktree
+/// - 5: The worktree contains submodules and `--force` was not given
 #[derive(Parser)]
 #[command(name = "gitnuke")]
 #[command(about = "Remove a git worktree and force-delete its branch")]
@@ -48,6 +54,15 @@ struct Cli {
     /// Worktree to nuke: its path, its directory name, or its branch name.
     #[arg(required = true)]
     targets: Vec<String>,
+
+    /// Nuke the worktree even if git would refuse to remove it.
+    ///
+    /// Required for a worktree containing submodules, which git otherwise
+    /// refuses outright, and for one holding uncommitted changes. Both cases
+    /// discard work that exists nowhere else — including anything uncommitted
+    /// or unpushed inside the submodule checkouts.
+    #[arg(short = 'f', long, verbatim_doc_comment)]
+    force: bool,
 }
 
 /// Represents a single git worktree.
@@ -216,6 +231,102 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// What is standing between a worktree and its removal, submodule-wise.
+///
+/// This mirrors git's own `validate_no_submodules` check, which is what produces
+/// "working trees containing submodules cannot be moved or removed": a worktree
+/// blocks removal if its index holds a gitlink whose directory exists on disk,
+/// or if its private git dir has a `modules/` directory. Reproducing the check
+/// rather than parsing git's refusal keeps the diagnosis locale-independent and
+/// lets gitnuke name the submodules that are in the way.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SubmoduleReport {
+    /// Submodule paths, relative to the worktree, that are checked out.
+    paths: Vec<String>,
+    /// Whether the worktree's private git dir contains submodule metadata.
+    has_module_metadata: bool,
+}
+
+impl SubmoduleReport {
+    /// Whether git will refuse a plain `git worktree remove` because of this.
+    fn blocks_removal(&self) -> bool {
+        !self.paths.is_empty() || self.has_module_metadata
+    }
+
+    /// Human-readable description of what is in the way.
+    fn describe(&self) -> String {
+        if self.paths.is_empty() {
+            "submodule metadata".to_string()
+        } else {
+            format!("submodules ({})", self.paths.join(", "))
+        }
+    }
+}
+
+/// Extracts the submodule (gitlink) paths from `git ls-files --stage -z` output.
+///
+/// Each NUL-separated entry looks like `<mode> <object> <stage>\t<path>`. `-z`
+/// is what makes this safe for non-ASCII and whitespace-bearing paths: without
+/// it git would quote and escape them according to `core.quotePath`.
+fn parse_gitlink_paths(stdout: &str) -> Vec<String> {
+    stdout
+        .split('\0')
+        .filter_map(|entry| {
+            let (metadata, path) = entry.split_once('\t')?;
+            metadata
+                .starts_with(GITLINK_MODE_PREFIX)
+                .then(|| path.to_string())
+        })
+        .collect()
+}
+
+/// Inspects `worktree` for submodules that would block its removal.
+///
+/// A worktree git can no longer inspect (already deleted, corrupt) yields an
+/// empty report: there is nothing to protect, and `git worktree remove` will
+/// give the authoritative answer either way.
+fn find_submodules(worktree: &Path) -> SubmoduleReport {
+    let mut paths = Vec::new();
+    if let Ok(output) = Command::new("git")
+        .args(["ls-files", "--stage", "-z"])
+        .current_dir(worktree)
+        .output()
+    {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // git only refuses when the submodule is actually checked out; a
+            // gitlink with no directory on disk is inert.
+            paths = parse_gitlink_paths(&stdout)
+                .into_iter()
+                .filter(|path| worktree.join(path).exists())
+                .collect();
+        }
+    }
+
+    SubmoduleReport {
+        has_module_metadata: worktree_git_dir(worktree)
+            .is_some_and(|git_dir| git_dir.join("modules").is_dir()),
+        paths,
+    }
+}
+
+/// The worktree's private git dir (`.../.git/worktrees/<name>` for a linked one).
+fn worktree_git_dir(worktree: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+
+    output.status.success().then(|| {
+        PathBuf::from(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
+    })
+}
+
 /// A failure to nuke one target: the message to print and the exit code to use.
 struct NukeError {
     code: i32,
@@ -235,9 +346,31 @@ impl NukeError {
 ///
 /// The branch is only deleted once the removal has actually succeeded, so a
 /// refused removal never leaves the branch destroyed and the worktree standing.
-fn nuke(repo_root: &Path, worktree: &Worktree) -> Result<(), NukeError> {
+fn nuke(repo_root: &Path, worktree: &Worktree, force: bool) -> Result<(), NukeError> {
+    let submodules = find_submodules(&worktree.path);
+    if submodules.blocks_removal() && !force {
+        return Err(NukeError::new(
+            exit_codes::SUBMODULES_PRESENT,
+            format!(
+                "{} contains {} — git refuses to remove a worktree with submodules \
+                 checked out.\n  Nuking it deletes those checkouts along with any \
+                 uncommitted or unpushed work inside them.\n  Re-run with --force to \
+                 nuke it anyway.",
+                worktree.path.display(),
+                submodules.describe(),
+            ),
+        ));
+    }
+
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        // One --force is enough for both of git's refusals: submodules present
+        // and uncommitted changes. (Verified against git 2.55.)
+        args.push("--force");
+    }
+
     let output = Command::new("git")
-        .args(["worktree", "remove"])
+        .args(args)
         .arg(&worktree.path)
         .current_dir(repo_root)
         .output()
@@ -319,12 +452,17 @@ fn not_found_message(worktrees: &[Worktree], target: &str) -> String {
 }
 
 /// Nukes one target, resolving it against a freshly listed set of worktrees.
-fn nuke_target(repo_root: &Path, target: &str, cwd: Option<&Path>) -> Result<(), NukeError> {
+fn nuke_target(
+    repo_root: &Path,
+    target: &str,
+    cwd: Option<&Path>,
+    force: bool,
+) -> Result<(), NukeError> {
     let worktrees =
         get_worktrees(repo_root).map_err(|e| NukeError::new(exit_codes::GIT_COMMAND_ERROR, e))?;
 
     match resolve_target(&worktrees, target, cwd) {
-        Resolution::Single(idx) => nuke(repo_root, &worktrees[idx]),
+        Resolution::Single(idx) => nuke(repo_root, &worktrees[idx], force),
         Resolution::Multiple(indices) => {
             let mut message =
                 format!("'{target}' matches more than one worktree; use a path instead:");
@@ -353,7 +491,7 @@ fn main() {
     // The worktree list is re-read per target because nuking one invalidates it.
     let mut first_error: Option<i32> = None;
     for target in &cli.targets {
-        if let Err(error) = nuke_target(&repo_root, target, cwd.as_deref()) {
+        if let Err(error) = nuke_target(&repo_root, target, cwd.as_deref(), cli.force) {
             eprintln!("{} {}", "gitnuke:".red().bold(), error.message);
             first_error.get_or_insert(error.code);
         }
@@ -474,6 +612,65 @@ detached
             resolve_target(&worktrees, "🎉-party", None),
             Resolution::Single(2)
         );
+    }
+
+    #[test]
+    fn extracts_only_gitlink_entries_from_ls_files_output() {
+        // `<mode> <object> <stage>\t<path>`, NUL-separated.
+        let stdout = "100644 aaa 0\tREADME.md\0160000 bbb 0\tsub\0\
+                      100755 ccc 0\tscript.sh\0160000 ddd 0\tvendor/lib\0";
+
+        assert_eq!(
+            parse_gitlink_paths(stdout),
+            vec!["sub".to_string(), "vendor/lib".to_string()]
+        );
+    }
+
+    #[test]
+    fn extracts_gitlink_paths_with_multibyte_and_space_characters() {
+        // `-z` output is unquoted, so these arrive verbatim.
+        let stdout = "160000 aaa 0\t日本語/サブ\0160000 bbb 0\tmy submodule\0";
+
+        assert_eq!(
+            parse_gitlink_paths(stdout),
+            vec!["日本語/サブ".to_string(), "my submodule".to_string()]
+        );
+    }
+
+    #[test]
+    fn ignores_entries_that_only_look_like_gitlinks() {
+        // A path *named* like a mode, and a regular file whose mode merely
+        // starts with the same digits, must not be mistaken for submodules.
+        let stdout = "100644 aaa 0\t160000 notes.txt\01600000 bbb 0\tweird\0";
+
+        assert!(parse_gitlink_paths(stdout).is_empty());
+    }
+
+    #[test]
+    fn empty_gitlink_output_yields_nothing() {
+        assert!(parse_gitlink_paths("").is_empty());
+    }
+
+    #[test]
+    fn report_blocks_removal_for_checked_out_submodules_or_metadata() {
+        let clean = SubmoduleReport::default();
+        assert!(!clean.blocks_removal());
+
+        let with_paths = SubmoduleReport {
+            paths: vec!["sub".to_string(), "vendor/lib".to_string()],
+            has_module_metadata: false,
+        };
+        assert!(with_paths.blocks_removal());
+        assert_eq!(with_paths.describe(), "submodules (sub, vendor/lib)");
+
+        // git refuses on leftover metadata even with nothing checked out, so
+        // gitnuke has to gate on it too or it would gate then fail anyway.
+        let metadata_only = SubmoduleReport {
+            paths: Vec::new(),
+            has_module_metadata: true,
+        };
+        assert!(metadata_only.blocks_removal());
+        assert_eq!(metadata_only.describe(), "submodule metadata");
     }
 
     #[test]
