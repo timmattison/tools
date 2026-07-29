@@ -274,7 +274,10 @@ fn dry_run_reports_a_submodule_refusal() {
         !output.status.success(),
         "a dry run that would be refused should exit non-zero: {message}"
     );
-    assert!(message.contains("--force"), "should point at --force: {message}");
+    assert!(
+        message.contains("--force"),
+        "should point at --force: {message}"
+    );
     assert!(worktree.exists(), "dry run must not remove the worktree");
 }
 
@@ -648,7 +651,10 @@ fn nukes_every_target_it_can_and_reports_the_ones_it_cannot() {
         "a failed target should fail the run: {message}"
     );
     assert!(!first.exists(), "'first' should have been nuked: {message}");
-    assert!(!second.exists(), "'second' should have been nuked: {message}");
+    assert!(
+        !second.exists(),
+        "'second' should have been nuked: {message}"
+    );
     assert!(
         !branch_exists(&main, "first") && !branch_exists(&main, "second"),
         "both resolvable branches should be deleted: {message}"

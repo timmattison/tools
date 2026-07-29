@@ -18,6 +18,10 @@ mod exit_codes {
     pub const MULTIPLE_MATCHES: i32 = 4;
     /// The worktree contains submodules and `--force` was not given.
     pub const SUBMODULES_PRESENT: i32 = 5;
+    /// The shell is standing inside the worktree it was asked to nuke.
+    pub const INSIDE_TARGET: i32 = 6;
+    /// The worktree was removed but its branch could not be deleted.
+    pub const BRANCH_NOT_DELETED: i32 = 7;
 }
 
 /// The index mode git records for a submodule (gitlink) entry.
@@ -46,6 +50,8 @@ const GITLINK_MODE_PREFIX: &str = "160000 ";
 /// - 3: No worktree matched the target
 /// - 4: The target matched more than one worktree
 /// - 5: The worktree contains submodules and `--force` was not given
+/// - 6: The shell is standing inside the target worktree
+/// - 7: The worktree was removed but its branch could not be deleted
 #[derive(Parser)]
 #[command(name = "gitnuke")]
 #[command(about = "Remove a git worktree and force-delete its branch")]
@@ -63,6 +69,42 @@ struct Cli {
     /// or unpushed inside the submodule checkouts.
     #[arg(short = 'f', long, verbatim_doc_comment)]
     force: bool,
+
+    /// Keep the branch unless it is fully merged (`git branch -d`).
+    ///
+    /// Only affects the branch: the worktree is still removed. Without this,
+    /// gitnuke force-deletes the branch (`git branch -D`) whether or not its
+    /// commits landed anywhere.
+    #[arg(short = 's', long, verbatim_doc_comment)]
+    safe: bool,
+
+    /// Report what would happen without removing or deleting anything.
+    ///
+    /// Runs the same checks as a real run, so a target that would be refused is
+    /// still reported as a failure.
+    #[arg(short = 'n', long, verbatim_doc_comment)]
+    dry_run: bool,
+}
+
+/// How a nuke should behave, independent of which worktree it is aimed at.
+#[derive(Debug, Clone, Copy)]
+struct NukeOptions {
+    /// Override git's refusal to remove worktrees with submodules or changes.
+    force: bool,
+    /// Delete the branch only if it is fully merged.
+    safe: bool,
+    /// Check everything, change nothing.
+    dry_run: bool,
+}
+
+impl From<&Cli> for NukeOptions {
+    fn from(cli: &Cli) -> Self {
+        NukeOptions {
+            force: cli.force,
+            safe: cli.safe,
+            dry_run: cli.dry_run,
+        }
+    }
 }
 
 /// Represents a single git worktree.
@@ -346,9 +388,9 @@ impl NukeError {
 ///
 /// The branch is only deleted once the removal has actually succeeded, so a
 /// refused removal never leaves the branch destroyed and the worktree standing.
-fn nuke(repo_root: &Path, worktree: &Worktree, force: bool) -> Result<(), NukeError> {
+fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(), NukeError> {
     let submodules = find_submodules(&worktree.path);
-    if submodules.blocks_removal() && !force {
+    if submodules.blocks_removal() && !options.force {
         return Err(NukeError::new(
             exit_codes::SUBMODULES_PRESENT,
             format!(
@@ -362,8 +404,12 @@ fn nuke(repo_root: &Path, worktree: &Worktree, force: bool) -> Result<(), NukeEr
         ));
     }
 
+    if options.dry_run {
+        return report_plan(worktree, &submodules, options);
+    }
+
     let mut args = vec!["worktree", "remove"];
-    if force {
+    if options.force {
         // One --force is enough for both of git's refusals: submodules present
         // and uncommitted changes. (Verified against git 2.55.)
         args.push("--force");
@@ -407,13 +453,52 @@ fn nuke(repo_root: &Path, worktree: &Worktree, force: bool) -> Result<(), NukeEr
         return Ok(());
     };
 
-    delete_branch(repo_root, branch)
+    delete_branch(repo_root, branch, options.safe)
 }
 
-/// Force-deletes a branch (`git branch -D`), echoing git's own report.
-fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), NukeError> {
+/// Prints what a real run would do, and returns Ok since nothing was touched.
+///
+/// Reached only after every gate has passed, so a refused target reports its
+/// refusal instead: a dry run is a preflight, not a description.
+fn report_plan(
+    worktree: &Worktree,
+    submodules: &SubmoduleReport,
+    options: NukeOptions,
+) -> Result<(), NukeError> {
+    let extra = if submodules.blocks_removal() {
+        format!(" (discarding its {})", submodules.describe())
+    } else {
+        String::new()
+    };
+    println!(
+        "{} would remove worktree {}{extra}",
+        "gitnuke:".yellow().bold(),
+        worktree.path.display()
+    );
+
+    match &worktree.branch {
+        Some(branch) => println!(
+            "{} would delete branch {branch} (git branch {})",
+            "gitnuke:".yellow().bold(),
+            if options.safe { "-d" } else { "-D" }
+        ),
+        None => println!(
+            "{} {} has a detached HEAD, so no branch would be deleted",
+            "gitnuke:".yellow().bold(),
+            worktree.path.display()
+        ),
+    }
+
+    Ok(())
+}
+
+/// Deletes a branch, echoing git's own report.
+///
+/// `safe` picks `git branch -d` (refuses an unmerged branch) over `-D`.
+fn delete_branch(repo_root: &Path, branch: &str, safe: bool) -> Result<(), NukeError> {
+    let delete_flag = if safe { "-d" } else { "-D" };
     let output = Command::new("git")
-        .args(["branch", "-D", branch])
+        .args(["branch", delete_flag, branch])
         .current_dir(repo_root)
         .output()
         .map_err(|e| {
@@ -425,9 +510,10 @@ fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), NukeError> {
 
     if !output.status.success() {
         return Err(NukeError::new(
-            exit_codes::GIT_COMMAND_ERROR,
+            exit_codes::BRANCH_NOT_DELETED,
             format!(
-                "worktree removed, but branch '{branch}' could not be deleted: {}",
+                "worktree removed, but branch '{branch}' was kept: {}\n  \
+                 Delete it anyway with: git branch -D {branch}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         ));
@@ -451,18 +537,58 @@ fn not_found_message(worktrees: &[Worktree], target: &str) -> String {
     message
 }
 
+/// Whether `cwd` is the worktree at `worktree`, or somewhere beneath it.
+///
+/// Both sides are canonicalized so `..` segments, trailing slashes, and
+/// symlinked parents (macOS `/var` → `/private/var`) cannot hide the overlap.
+fn cwd_is_inside(cwd: Option<&Path>, worktree: &Path) -> bool {
+    let Some(Ok(cwd)) = cwd.map(Path::canonicalize) else {
+        return false;
+    };
+    let Ok(worktree) = worktree.canonicalize() else {
+        return false;
+    };
+
+    paths_equal(&cwd, &worktree) || cwd.starts_with(&worktree)
+}
+
 /// Nukes one target, resolving it against a freshly listed set of worktrees.
 fn nuke_target(
     repo_root: &Path,
     target: &str,
     cwd: Option<&Path>,
-    force: bool,
+    options: NukeOptions,
 ) -> Result<(), NukeError> {
     let worktrees =
         get_worktrees(repo_root).map_err(|e| NukeError::new(exit_codes::GIT_COMMAND_ERROR, e))?;
 
     match resolve_target(&worktrees, target, cwd) {
-        Resolution::Single(idx) => nuke(repo_root, &worktrees[idx], force),
+        Resolution::Single(idx) => {
+            let worktree = &worktrees[idx];
+
+            // Removing the directory the shell is sitting in leaves that shell
+            // in a deleted cwd, where every later git command fails
+            // confusingly. gitnuke is a binary, not a shell function, so it
+            // cannot cd the caller out — refusing is the only safe answer, and
+            // --force does not change that: it overrides git's refusals, not
+            // the caller's shell.
+            if cwd_is_inside(cwd, &worktree.path) {
+                // worktrees[0] is always the main worktree in git's listing.
+                let elsewhere = worktrees.first().map_or_else(String::new, |main| {
+                    format!(" (for example {})", main.path.display())
+                });
+                return Err(NukeError::new(
+                    exit_codes::INSIDE_TARGET,
+                    format!(
+                        "you are inside {} — cd somewhere else first{elsewhere}, \
+                         otherwise your shell is left in a deleted directory",
+                        worktree.path.display()
+                    ),
+                ));
+            }
+
+            nuke(repo_root, worktree, options)
+        }
         Resolution::Multiple(indices) => {
             let mut message =
                 format!("'{target}' matches more than one worktree; use a path instead:");
@@ -487,11 +613,12 @@ fn main() {
     };
 
     let cwd = std::env::current_dir().ok();
+    let options = NukeOptions::from(&cli);
 
     // The worktree list is re-read per target because nuking one invalidates it.
     let mut first_error: Option<i32> = None;
     for target in &cli.targets {
-        if let Err(error) = nuke_target(&repo_root, target, cwd.as_deref(), cli.force) {
+        if let Err(error) = nuke_target(&repo_root, target, cwd.as_deref(), options) {
             eprintln!("{} {}", "gitnuke:".red().bold(), error.message);
             first_error.get_or_insert(error.code);
         }
@@ -617,8 +744,8 @@ detached
     #[test]
     fn extracts_only_gitlink_entries_from_ls_files_output() {
         // `<mode> <object> <stage>\t<path>`, NUL-separated.
-        let stdout = "100644 aaa 0\tREADME.md\0160000 bbb 0\tsub\0\
-                      100755 ccc 0\tscript.sh\0160000 ddd 0\tvendor/lib\0";
+        let stdout = "100644 aaa 0\tREADME.md\x00160000 bbb 0\tsub\x00\
+                      100755 ccc 0\tscript.sh\x00160000 ddd 0\tvendor/lib\x00";
 
         assert_eq!(
             parse_gitlink_paths(stdout),
@@ -629,7 +756,7 @@ detached
     #[test]
     fn extracts_gitlink_paths_with_multibyte_and_space_characters() {
         // `-z` output is unquoted, so these arrive verbatim.
-        let stdout = "160000 aaa 0\t日本語/サブ\0160000 bbb 0\tmy submodule\0";
+        let stdout = "160000 aaa 0\t日本語/サブ\x00160000 bbb 0\tmy submodule\x00";
 
         assert_eq!(
             parse_gitlink_paths(stdout),
@@ -641,7 +768,7 @@ detached
     fn ignores_entries_that_only_look_like_gitlinks() {
         // A path *named* like a mode, and a regular file whose mode merely
         // starts with the same digits, must not be mistaken for submodules.
-        let stdout = "100644 aaa 0\t160000 notes.txt\01600000 bbb 0\tweird\0";
+        let stdout = "100644 aaa 0\t160000 notes.txt\x001600000 bbb 0\tweird\x00";
 
         assert!(parse_gitlink_paths(stdout).is_empty());
     }
