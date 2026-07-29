@@ -1,0 +1,20 @@
+[package]
+name = "gitnuke"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "gitnuke"
+path = "src/main.rs"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+colored.workspace = true
+repowalker.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
