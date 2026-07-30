@@ -29,7 +29,11 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
         .expect("simulation runs");
 
     for (name, sha) in before {
-        assert_eq!(repo.rev_parse(&name), sha, "simulation moved branch '{name}'");
+        assert_eq!(
+            repo.rev_parse(&name),
+            sha,
+            "simulation moved branch '{name}'"
+        );
     }
 }
 

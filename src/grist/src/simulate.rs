@@ -40,11 +40,14 @@ const MAX_RESOLUTION_ROUNDS: usize = 1_000;
 /// point where waiting for an answer beats just picking one and rebasing.
 pub const MAX_BRANCHES: usize = 6;
 
+/// Notified as each branch is replayed, so a long run is not silent.
+type ProgressListener = Box<dyn Fn(&str)>;
+
 /// Measures what a candidate ordering would cost to carry out for real.
 pub struct Simulator {
     repo: PathBuf,
     base: String,
-    progress: Option<Box<dyn Fn(&str)>>,
+    progress: Option<ProgressListener>,
 }
 
 impl Simulator {
@@ -150,7 +153,7 @@ impl Simulator {
                     let (onto, mut cumulative) = memo
                         .get(&prefix)
                         .cloned()
-                        .expect("the shorter prefix is always simulated first");
+                        .context("internal error: a shorter prefix was not simulated first")?;
 
                     let (next_main, step) = self.land(&scratch, &onto, branch)?;
                     cumulative.absorb(step);
@@ -162,7 +165,7 @@ impl Simulator {
 
             let (_, total) = memo
                 .get(&prefix)
-                .expect("the full ordering was just simulated");
+                .context("internal error: the full ordering was not simulated")?;
             scores.push(total.clone().into_score(ordering));
         }
 
@@ -229,9 +232,7 @@ impl Simulator {
             outcome = git.try_run(&["rebase", "--continue"])?;
         }
 
-        anyhow::bail!(
-            "gave up rebasing '{branch}' after {MAX_RESOLUTION_ROUNDS} resolution rounds"
-        )
+        anyhow::bail!("gave up rebasing '{branch}' after {MAX_RESOLUTION_ROUNDS} resolution rounds")
     }
 }
 
@@ -371,7 +372,9 @@ impl Drop for Scratch {
         // Best effort: the TempDir goes away regardless, but git also keeps
         // administrative state in the real repo that must be cleaned up.
         if let Ok(path) = self.worktree_arg() {
-            let _ = self.repo_git().try_run(&["worktree", "remove", "--force", path]);
+            let _ = self
+                .repo_git()
+                .try_run(&["worktree", "remove", "--force", path]);
         }
         let _ = self.repo_git().try_run(&["worktree", "prune"]);
         let _ = &self.dir;

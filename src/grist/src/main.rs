@@ -65,7 +65,10 @@ fn main() -> Result<()> {
     println!();
     println!("Land them in this order: {winner}");
 
-    if ranked.iter().all(|score| score.hunks() == ranked[0].hunks()) {
+    if ranked
+        .iter()
+        .all(|score| score.hunks() == ranked[0].hunks())
+    {
         println!("Every order costs the same, so pick whichever you prefer.");
     }
 

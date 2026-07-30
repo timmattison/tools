@@ -187,4 +187,3 @@ pub fn conflicting_repo() -> TestRepo {
     repo.checkout("main");
     repo
 }
-

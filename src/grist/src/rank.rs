@@ -35,7 +35,10 @@ mod tests {
         let many_hunks_one_stop = score(&["a", "b"], 1, 1, 9);
         let few_hunks_three_stops = score(&["b", "a"], 3, 4, 2);
 
-        let ranked = rank(vec![many_hunks_one_stop.clone(), few_hunks_three_stops.clone()]);
+        let ranked = rank(vec![
+            many_hunks_one_stop.clone(),
+            few_hunks_three_stops.clone(),
+        ]);
 
         assert_eq!(ranked, vec![few_hunks_three_stops, many_hunks_one_stop]);
     }

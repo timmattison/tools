@@ -6,7 +6,7 @@
 //! non-destructive — most importantly `rebase.updateRefs=false`, which would
 //! otherwise move the very branch refs being simulated.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -31,21 +31,6 @@ impl Git {
         Self {
             cwd: cwd.into(),
             hooks_path: hooks_path.into(),
-        }
-    }
-
-    /// The directory this runner operates in.
-    #[must_use]
-    pub fn cwd(&self) -> &Path {
-        &self.cwd
-    }
-
-    /// Same repository, different working directory.
-    #[must_use]
-    pub fn at(&self, cwd: impl Into<PathBuf>) -> Self {
-        Self {
-            cwd: cwd.into(),
-            hooks_path: self.hooks_path.clone(),
         }
     }
 
@@ -143,7 +128,10 @@ impl Git {
         ]
         .iter()
         .flat_map(|setting| ["-c".to_string(), (*setting).to_string()])
-        .chain(["-c".to_string(), format!("core.hooksPath={}", self.hooks_path)])
+        .chain([
+            "-c".to_string(),
+            format!("core.hooksPath={}", self.hooks_path),
+        ])
         .collect()
     }
 }

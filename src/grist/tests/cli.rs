@@ -42,8 +42,14 @@ fn default_output_ranks_both_orderings_with_their_costs() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("iterated \u{2192} single"), "got:\n{stdout}");
-    assert!(stdout.contains("single \u{2192} iterated"), "got:\n{stdout}");
+    assert!(
+        stdout.contains("iterated \u{2192} single"),
+        "got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("single \u{2192} iterated"),
+        "got:\n{stdout}"
+    );
     assert!(
         stdout.contains("Land them in this order: iterated single"),
         "got:\n{stdout}"
