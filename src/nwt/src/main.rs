@@ -1029,13 +1029,17 @@ struct EnvCopySummary {
 /// 1. Gets all tracked files from git in a single call (for performance)
 /// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
 /// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`
-/// 4. Copies untracked .env files to the same relative path in the new worktree
-/// 5. Creates parent directories as needed
-/// 6. Reports copied files unless quiet mode is enabled
+/// 4. Skips any destination that already exists, leaving it completely untouched —
+///    a `post-checkout` hook runs during `git worktree add` (before this copy), so a
+///    worktree-specific .env it generated must win over the main worktree's version
+/// 5. Copies the remaining untracked .env files to the same relative path in the new worktree
+/// 6. Creates parent directories as needed
+/// 7. Reports copied and kept files unless quiet mode is enabled
 ///
 /// Errors copying individual files are reported but don't stop the process.
 ///
-/// Returns an [`EnvCopySummary`] with the number of files copied and kept.
+/// Returns an [`EnvCopySummary`] recording how many files were copied and how many
+/// existing destinations were kept.
 fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> EnvCopySummary {
     // Get all tracked files in a single git call for performance
     let tracked_files = get_tracked_files(main_repo);
@@ -1078,6 +1082,28 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
         };
         let dest_path = worktree.join(relative_path);
 
+        // Never clobber something the new worktree already has. Repo
+        // `post-checkout` hooks live in the shared git dir, so they run DURING
+        // `git worktree add` — before this copy — and a hook that generates a
+        // worktree-specific .env (unique port, unique DB name, freshly-minted
+        // secret) would otherwise have its work silently replaced.
+        //
+        // symlink_metadata(), not exists(): exists() follows symlinks and
+        // reports false for a broken one, and fs::copy would then write THROUGH
+        // the dangling symlink to its target — exactly the silent clobber this
+        // guard exists to prevent. symlink_metadata() answers "is there
+        // anything at this path", which is the question we actually mean.
+        if dest_path.symlink_metadata().is_ok() {
+            summary.kept += 1;
+            if !quiet {
+                eprintln!(
+                    "Kept existing: {} (generated in worktree; not overwritten from main worktree)",
+                    relative_path.display()
+                );
+            }
+            continue;
+        }
+
         // Create parent directories if needed (create_dir_all is idempotent)
         if let Some(parent) = dest_path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
@@ -1117,6 +1143,14 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
             "Copied {} untracked .env file{} to new worktree",
             summary.copied,
             if summary.copied == 1 { "" } else { "s" }
+        );
+    }
+
+    if summary.kept > 0 && !quiet {
+        eprintln!(
+            "Kept {} existing .env file{} already in the new worktree",
+            summary.kept,
+            if summary.kept == 1 { "" } else { "s" }
         );
     }
 
