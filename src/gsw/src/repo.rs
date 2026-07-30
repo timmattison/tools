@@ -10,17 +10,92 @@ use std::collections::HashMap;
 use crate::git::{FileEntry, FileStatus, NumStat};
 use crate::render::{Operation, UpstreamStatus};
 
-/// Open the repository containing `cwd`, or `None` when there isn't one with a
-/// working tree (outside any repo, or a bare repo — gsw has nothing per-file to
-/// render in either case).
-pub fn open() -> Option<gix::Repository> {
-    let repo = gix::discover(".").ok()?;
-    // Bare repos have no work tree; gsw renders a per-file working-tree view,
-    // so there's nothing to show. Treat them like "not a repo".
-    if repo.workdir().is_some() {
-        Some(repo)
-    } else {
-        None
+/// A repository handle that can be re-opened between reads.
+///
+/// A [`gix::Repository`] snapshots `.git/config` when it is opened and never
+/// reloads it. That is fine for the one-shot path — a fresh process opens a
+/// fresh handle — but watch mode holds one handle for the lifetime of the
+/// process, so every config key it caches goes stale the moment the user
+/// changes it in another pane. The headline symptom is `git push -u origin
+/// <branch>`: it writes `branch.<name>.remote` and `branch.<name>.merge`, which
+/// is exactly where [`upstream_status`] resolves the tracking ref from, so the
+/// `↑0 ↓0 origin/<branch>` header segment never appears until gsw restarts. The
+/// mirror (`git branch --unset-upstream` leaving stale arrows on screen), a
+/// renamed remote, and a changed `core.excludesFile` are all the same bug.
+///
+/// Rather than special-case `branch.*`, this handle owns the re-open: callers
+/// that want the config as it is *right now* ask for [`reopened`] and get a
+/// handle built from a freshly-read config, which fixes the whole class at once.
+///
+/// [`reopened`]: RepoHandle::reopened
+pub struct RepoHandle {
+    /// The repository as of the last successful open.
+    repo: gix::Repository,
+    /// The work-tree root, captured when the repository was first discovered so
+    /// a re-open never has to search for it again. See
+    /// [`reopened`](RepoHandle::reopened) for why the re-open deliberately does
+    /// not re-discover.
+    workdir: std::path::PathBuf,
+}
+
+impl RepoHandle {
+    /// Open the repository containing the current directory, or `None` when
+    /// there isn't one with a working tree (outside any repo, or a bare repo —
+    /// gsw has nothing per-file to render in either case).
+    pub fn open() -> Option<Self> {
+        Self::discover(std::path::Path::new("."))
+    }
+
+    /// Open the repository containing `path`, walking up from it the way `git`
+    /// itself does. Same `None` cases as [`open`](Self::open); this is the
+    /// cwd-free form, which is also what the tests use since a parallel test
+    /// runner shares one process-wide current directory.
+    pub fn discover(path: &std::path::Path) -> Option<Self> {
+        Self::from_repo(gix::discover(path).ok()?)
+    }
+
+    /// Wrap an opened repository, rejecting one gsw can't render.
+    ///
+    /// Bare repos have no work tree; gsw renders a per-file working-tree view,
+    /// so there's nothing to show. Treat them like "not a repo". Shared by the
+    /// initial discovery and by [`reopened`](Self::reopened) so both apply the
+    /// same admission rule.
+    fn from_repo(repo: gix::Repository) -> Option<Self> {
+        let workdir = repo.workdir()?.to_path_buf();
+        Some(Self { repo, workdir })
+    }
+
+    /// The repository as it was last opened. Does not re-read `.git/config`, so
+    /// two calls with no intervening [`reopened`](Self::reopened) always see the
+    /// same configuration.
+    pub fn repo(&self) -> &gix::Repository {
+        &self.repo
+    }
+
+    /// Re-open the repository so configuration written since the last call
+    /// takes effect, and return the resulting handle.
+    ///
+    /// Callers that refresh on a timer (watch mode) use this instead of
+    /// [`repo`](Self::repo) so an upstream configured — or unset — in another
+    /// pane shows up on the next tick rather than on the next process start.
+    ///
+    /// The re-open goes through `gix::open` against the captured work-tree
+    /// root, deliberately **not** `gix::discover`: `open` resolves `path/.git`
+    /// (including the `.git` *file* a linked worktree uses) but never walks up
+    /// the directory tree, so if the git dir momentarily vanishes — mid-`git
+    /// gc`, mid-checkout, a worktree being pruned — it simply errors instead of
+    /// silently latching onto a *parent* repository and rendering someone
+    /// else's status.
+    ///
+    /// A failed re-open, or one that comes back without a work tree, keeps the
+    /// handle already in hand: a monitor that blanks out for one tick because
+    /// it caught git mid-write is worse than a monitor that repaints one
+    /// tick-old configuration and recovers on the next call.
+    pub fn reopened(&mut self) -> &gix::Repository {
+        if let Some(fresh) = gix::open(&self.workdir).ok().and_then(Self::from_repo) {
+            self.repo = fresh.repo;
+        }
+        &self.repo
     }
 }
 
@@ -501,56 +576,21 @@ fn worktree_bytes(repo: &gix::Repository, rela_path: &gix::bstr::BString) -> Vec
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::process::Command;
 
+    use super::RepoHandle;
     use crate::git::FileStatus;
     use crate::render::Operation;
-
-    /// Run a git command in `dir`, isolated from the host's global/system
-    /// config, asserting success. Test-only fixture construction.
-    ///
-    /// Scrubs inherited `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` so the
-    /// fixture repo under `dir` is the one git operates on. Without this, when
-    /// the suite runs from inside this repo's own pre-commit hook (git exports
-    /// those vars for the hook), the fixture's commits would land in the *real*
-    /// repo despite `current_dir(dir)`.
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("invoke git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    /// A fresh repo on branch `main` with one commit. Parallel-safe: unique tempdir.
-    fn init_repo() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        git(p, &["config", "user.email", "t@example.com"]);
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "commit.gpgsign", "false"]);
-        std::fs::write(p.join("a.txt"), "initial\n").unwrap();
-        git(p, &["add", "a.txt"]);
-        git(p, &["commit", "-q", "-m", "initial"]);
-        dir
-    }
+    use crate::testrepo::{git, git_allowing_failure, init_repo, init_repo_with_upstream};
 
     /// Open a repo at an explicit path (tests can't rely on cwd under a
-    /// parallel test runner). Mirrors `open()`'s logic but takes a path.
+    /// parallel test runner).
+    ///
+    /// Delegates to [`RepoHandle::discover`] — the same discovery and
+    /// bare-repo rejection production uses — and unwraps to the bare
+    /// repository, which is what the assertions below want. Tests that need to
+    /// re-open mid-test hold a [`RepoHandle`] instead.
     fn open_at(path: &Path) -> Option<gix::Repository> {
-        let repo = gix::discover(path).ok()?;
-        if repo.workdir().is_some() {
-            Some(repo)
-        } else {
-            None
-        }
+        RepoHandle::discover(path).map(|handle| handle.repo)
     }
 
     #[test]
@@ -597,6 +637,43 @@ mod tests {
         git(dir.path(), &["branch", "-m", "main", "master"]);
         let repo = open_at(dir.path()).unwrap();
         assert_eq!(super::resolve_base(&repo), "master");
+    }
+
+    #[test]
+    fn resolve_base_follows_a_base_branch_created_after_the_handle_was_opened() {
+        // `resolve_base` picks the base ref by *resolving* candidates rather
+        // than by reading a config key, so — unlike `upstream_status`, whose
+        // `branch.<name>.remote` lookup is exactly what the per-refresh re-open
+        // exists to un-stale — it was expected to already be immune to a
+        // long-lived handle. Expected is not verified: if gix ever snapshotted
+        // the ref store the way it snapshots `.git/config`, a `main` branch
+        // created mid-watch would leave the header comparing against `master`
+        // forever, silently reporting the wrong ahead/behind counts against a
+        // base the user abandoned. Assert the property on a handle that is
+        // deliberately never re-opened, so the test fails if that immunity
+        // is ever lost rather than being propped up by the re-open.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["branch", "-m", "main", "master"]);
+
+        // Opened while `master` is the only candidate, and held across the
+        // creation of `main` — no `reopened()` anywhere in this test.
+        let held = RepoHandle::discover(p).expect("fixture is a worktree repo");
+        assert_eq!(
+            super::resolve_base(held.repo()),
+            "master",
+            "with no `main`, the base falls back to `master`",
+        );
+
+        // What `git branch main` (or a fetch that lands one) does mid-watch.
+        git(p, &["branch", "main"]);
+
+        assert_eq!(
+            super::resolve_base(held.repo()),
+            "main",
+            "`main` outranks `master`, and a ref-driven resolve must see one \
+             created after the handle was opened — without re-opening it",
+        );
     }
 
     #[test]
@@ -688,31 +765,6 @@ mod tests {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
         assert!(super::recent_log(&repo, 0).is_empty());
-    }
-
-    /// Clone `init_repo()`'s repo so the clone has a real `origin/main` upstream.
-    fn init_repo_with_upstream() -> (tempfile::TempDir, tempfile::TempDir) {
-        let origin = init_repo();
-        let clone = tempfile::tempdir().expect("tempdir");
-        let status = std::process::Command::new("git")
-            .args([
-                "clone",
-                "-q",
-                origin.path().to_str().unwrap(),
-                clone.path().to_str().unwrap(),
-            ])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("git clone");
-        assert!(status.success(), "git clone failed");
-        git(clone.path(), &["config", "user.email", "t@example.com"]);
-        git(clone.path(), &["config", "user.name", "Test"]);
-        git(clone.path(), &["config", "commit.gpgsign", "false"]);
-        (origin, clone)
     }
 
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
@@ -948,6 +1000,71 @@ mod tests {
     }
 
     #[test]
+    fn reopened_handle_sees_upstream_configured_after_open() {
+        // Watch mode's failure shape: gsw opens the repository once, and only
+        // later does the user run `git push -u origin <branch>` in another
+        // pane. That writes `branch.feature.remote`/`.merge` into
+        // `.git/config`, which the already-open gix handle has cached and will
+        // never re-read — so the header's upstream segment stays missing until
+        // the process restarts. A handle that re-opens must see it.
+        let (_origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("feature.txt"), "x\n").unwrap();
+        git(p, &["add", "feature.txt"]);
+        git(p, &["commit", "-q", "-m", "feature work"]);
+
+        // Opened BEFORE the push, and held across it, exactly like watch mode.
+        let mut held = RepoHandle::discover(p).expect("clone is a worktree repo");
+        assert!(
+            super::upstream_status(held.repo()).is_none(),
+            "a local-only branch has no upstream yet",
+        );
+
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+
+        let up = super::upstream_status(held.reopened())
+            .expect("a re-opened handle must see the upstream configured after it was opened");
+        assert_eq!(up.name, "origin/feature");
+        assert_eq!(
+            (up.ahead, up.behind),
+            (0, 0),
+            "the push left the branch level with its brand-new upstream",
+        );
+    }
+
+    #[test]
+    fn reopened_keeps_the_previous_handle_when_the_repo_is_momentarily_gone() {
+        // Watch mode calls `reopened()` on a timer, so it will eventually land
+        // in the middle of a `git gc`, a checkout, or a worktree prune and find
+        // the git dir missing. Falling back to the handle already in hand keeps
+        // the monitor rendering; going blank (or panicking) for a tick would be
+        // worse than repainting one tick-old configuration.
+        //
+        // This guard cannot be written red-first: before `reopened()` re-opened
+        // anything it returned the cached handle unconditionally and passed
+        // trivially. It ships with the branch it protects.
+        let dir = init_repo();
+        let p = dir.path();
+        let mut held = RepoHandle::discover(p).expect("worktree repo");
+        let git_dir = held.repo().git_dir().to_path_buf();
+
+        std::fs::rename(p.join(".git"), p.join(".git-moved")).unwrap();
+        assert_eq!(
+            held.reopened().git_dir(),
+            git_dir,
+            "a failed re-open must keep the previous handle, not drop the repo",
+        );
+
+        std::fs::rename(p.join(".git-moved"), p.join(".git")).unwrap();
+        assert_eq!(
+            super::branch_name(held.reopened()),
+            "main",
+            "and the next re-open must recover once the git dir is back",
+        );
+    }
+
+    #[test]
     fn status_staged_typechange_file_to_symlink() {
         // Replace a tracked regular file with a symlink and stage it; git/gix
         // report this as a type change, not a plain modification.
@@ -978,16 +1095,7 @@ mod tests {
         git(p, &["commit", "-q", "-am", "main edit"]);
         // Merge 'other' into main → conflict on a.txt. The merge command exits
         // non-zero on conflict, so don't assert success here.
-        let _ = std::process::Command::new("git")
-            .args(["merge", "other"])
-            .current_dir(p)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("invoke git merge");
+        git_allowing_failure(p, &["merge", "other"]);
         let repo = open_at(p).unwrap();
         let s = statuses(&repo);
         assert!(
@@ -1010,16 +1118,7 @@ mod tests {
         std::fs::write(p.join("a.txt"), "from main\n").unwrap();
         git(p, &["commit", "-q", "-am", "main edit"]);
         // The merge exits non-zero on conflict; don't assert success.
-        let _ = std::process::Command::new("git")
-            .args(["merge", "other"])
-            .current_dir(p)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("invoke git merge");
+        git_allowing_failure(p, &["merge", "other"]);
         let repo = open_at(p).unwrap();
         assert_eq!(
             super::operation_state(&repo, 1),

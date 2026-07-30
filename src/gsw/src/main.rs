@@ -20,6 +20,10 @@ mod git;
 mod render;
 mod repo;
 mod snapshot;
+/// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
+/// build throwaway repositories, which the shipped binary never does.
+#[cfg(test)]
+mod testrepo;
 mod watch;
 
 #[derive(Parser)]
@@ -226,7 +230,7 @@ fn main() -> Result<()> {
         colored::control::set_override(true);
     }
 
-    let Some(repo) = repo::open() else {
+    let Some(handle) = repo::RepoHandle::open() else {
         println!("{}", "gsw • not a git repository".dimmed());
         return Ok(());
     };
@@ -260,10 +264,15 @@ fn main() -> Result<()> {
                     width_offset: cfg.width_offset,
                 },
             );
-            println!("{}", build_output(&repo, &cfg, dims)?.output);
+            // A fresh process opened this handle a moment ago, so its cached
+            // config is current by construction — one render, then exit. Only
+            // watch mode, which outlives config edits, needs to re-open.
+            println!("{}", build_output(handle.repo(), &cfg, dims)?.output);
             Ok(())
         }
-        watch::Mode::Watch => watch::run(&repo, &cfg),
+        // Hand the handle over: watch mode owns the repository from here and
+        // re-opens it on every refresh.
+        watch::Mode::Watch => watch::run(handle, &cfg),
     }
 }
 
