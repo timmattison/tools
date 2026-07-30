@@ -262,4 +262,31 @@ mod tests {
             "the counts should start in the same terminal column:\n{rendered}"
         );
     }
+
+    /// A clean tree has nothing to warn about, and warning anyway would train
+    /// people to ignore the line that matters.
+    #[test]
+    fn a_clean_tree_gets_no_dirty_note() {
+        assert_eq!(
+            Report::new("grind", "replaying HEAD onto main").dirty_note(0),
+            None
+        );
+    }
+
+    /// The note exists so a `clean` verdict is never misread as covering work
+    /// that was never committed, which means it has to read like a sentence
+    /// rather than like a counter - "1 uncommitted file is", not "1 files are".
+    #[test]
+    fn the_dirty_note_agrees_with_itself_about_how_many_files_there_are() {
+        let report = Report::new("grind", "replaying HEAD onto main");
+
+        assert_eq!(
+            report.dirty_note(1).as_deref(),
+            Some("grind: note: 1 uncommitted file is not included; simulating from HEAD")
+        );
+        assert_eq!(
+            report.dirty_note(3).as_deref(),
+            Some("grind: note: 3 uncommitted files are not included; simulating from HEAD")
+        );
+    }
 }
