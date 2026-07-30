@@ -87,11 +87,20 @@ impl Repo {
 
     /// How many files are uncommitted — staged, unstaged, or untracked.
     ///
+    /// A replay only ever sees committed work, so this is how a caller can warn
+    /// that the answer describes the tree as committed rather than as it sits
+    /// on disk. `--untracked-files=all` is what makes the number honest: git
+    /// otherwise collapses an untracked directory into a single entry, so a
+    /// hundred new files would be reported as one.
+    ///
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or reported a failure.
     pub fn uncommitted_files(&self) -> Result<usize> {
-        anyhow::bail!("not implemented")
+        Ok(self
+            .git()
+            .lines(&["status", "--porcelain", "--untracked-files=all"])?
+            .len())
     }
 
     /// A runner rooted in the real repository, carrying the crate's safety
