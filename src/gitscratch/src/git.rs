@@ -141,3 +141,27 @@ impl Git {
         .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Git;
+
+    /// `git var GIT_AUTHOR_IDENT` reports exactly the identity git would stamp
+    /// on a commit, so it proves what [`Git::safety_config`] actually pins
+    /// without having to build a repository and commit into it. It resolves
+    /// outside a repository too, which is why `temp_dir` is only ever a cwd
+    /// here — nothing is created in it, so concurrent test runs cannot collide.
+    #[test]
+    fn commits_under_the_crate_s_own_identity_not_a_consuming_tool_s() {
+        let git = Git::new(std::env::temp_dir(), "");
+
+        let ident = git
+            .run(&["var", "GIT_AUTHOR_IDENT"])
+            .expect("git var GIT_AUTHOR_IDENT");
+
+        assert!(
+            ident.starts_with("gitscratch <gitscratch@localhost>"),
+            "scratch commits should be authored by the crate, not a consumer: {ident}"
+        );
+    }
+}
