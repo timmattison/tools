@@ -101,9 +101,11 @@ are supporting evidence.
 ## Development
 
 ```console
-cargo test -p grist          # unit, simulation, safety and CLI suites
+cargo test -p grist          # unit, simulation and CLI suites
+cargo test -p gitscratch     # the safety suite for the shared harness
 cargo build --release -p grist
 ```
 
-The safety guarantees above are pinned by `tests/safety.rs`, and each one was
-verified by mutation: remove the guard, watch the test fail, put it back.
+The safety guarantees above belong to the shared harness, so they are pinned by
+`gitscratch`'s `tests/safety.rs`, and each one was verified by mutation: remove
+the guard, watch the test fail, put it back.
