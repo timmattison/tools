@@ -143,6 +143,30 @@ fn file_is_all_zeroes_with_buffer(path: &Path, buffer: &mut [u8]) -> io::Result<
     reader_is_all_zeroes(&mut file, buffer)
 }
 
+/// Returns `true` when `file` holds at least one byte and every one of them
+/// lives in a hole - a range the filesystem never allocated, which reads back
+/// as zeroes without any of it existing on disk.
+///
+/// Such a file is all zeroes by definition, and answering that way costs one
+/// `lseek` against metadata already in memory instead of a read per block. A
+/// filesystem that cannot answer the question - one with no sparse support at
+/// all, or a network mount - reports `false`, which is not a wrong answer but a
+/// deferral: the caller reads the file the ordinary way and decides for itself.
+///
+/// The read position is left where it was found, so a caller may treat this as
+/// a pure question about the file.
+#[cfg(unix)]
+fn whole_file_is_a_hole(_file: &File) -> bool {
+    false
+}
+
+/// Sparse-file interrogation needs `lseek(SEEK_DATA)`, which is a POSIX
+/// extension. Elsewhere every file is read the ordinary way.
+#[cfg(not(unix))]
+fn whole_file_is_a_hole(_file: &File) -> bool {
+    false
+}
+
 /// How many files are read concurrently. Always at least one.
 ///
 /// Scanning is dominated by waiting on the storage device, so the useful range
@@ -624,6 +648,108 @@ mod tests {
             Jobs::default().get(),
             expected,
             "the default should use every core the machine reports"
+        );
+    }
+
+    /// Creates a file of `len` bytes that was never written to, so the
+    /// filesystem backs it with a hole rather than with blocks of zeroes.
+    #[cfg(unix)]
+    fn sparse_file(len: u64) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().expect("creating a temp dir should succeed");
+        let path = dir.path().join("sparse.bin");
+        File::create(&path)
+            .expect("creating the fixture should succeed")
+            .set_len(len)
+            .expect("extending the fixture should succeed");
+        (dir, path)
+    }
+
+    /// Opens a fixture for the hole tests.
+    #[cfg(unix)]
+    fn open(path: &Path) -> File {
+        File::open(path).expect("opening the fixture should succeed")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wholly_unwritten_file_is_recognized_as_a_hole() {
+        let (_dir, path) = sparse_file(1 << 20);
+        assert!(
+            whole_file_is_a_hole(&open(&path)),
+            "a 1 MiB file that was never written has no data anywhere in it"
+        );
+    }
+
+    /// An empty file reports "no data at or after offset zero" exactly as a
+    /// wholly-sparse one does, and zth does not count it as all zeroes - so the
+    /// fast path has to tell the two apart rather than trusting the `lseek`.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_file_is_not_a_hole() {
+        let (_dir, path) = file_with(&[]);
+        assert!(
+            !whole_file_is_a_hole(&open(&path)),
+            "an empty file has no zero bytes, so it must not take the fast path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_of_written_zeroes_is_not_a_hole() {
+        let (_dir, path) = file_with(&vec![0_u8; 1 << 20]);
+        assert!(
+            !whole_file_is_a_hole(&open(&path)),
+            "zeroes that were actually written occupy blocks, not a hole"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_with_content_is_not_a_hole() {
+        let (_dir, path) = file_with(&[7_u8; 4096]);
+        assert!(
+            !whole_file_is_a_hole(&open(&path)),
+            "a file with content must be read, not waved through"
+        );
+    }
+
+    /// The fast path runs before the read, so anything it does to the file
+    /// position is something the read inherits.
+    #[cfg(unix)]
+    #[test]
+    fn asking_about_a_hole_leaves_the_read_position_at_the_start() {
+        let (_dir, path) = file_with(&[1_u8, 2, 3, 4]);
+        let mut file = open(&path);
+
+        let _ = whole_file_is_a_hole(&file);
+
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)
+            .expect("reading the fixture should succeed");
+        assert_eq!(
+            contents,
+            vec![1_u8, 2, 3, 4],
+            "the question must not consume any of the file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wholly_unwritten_file_is_reported_as_all_zeroes() {
+        let (_dir, path) = sparse_file(1 << 20);
+        assert!(
+            scan(&path),
+            "a hole reads back as zeroes, so a file that is nothing but hole is all zeroes"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritten_file_of_zero_length_is_not_reported() {
+        let (_dir, path) = sparse_file(0);
+        assert!(
+            !scan(&path),
+            "a zero-length file is empty however it was created"
         );
     }
 

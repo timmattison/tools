@@ -246,6 +246,37 @@ fn progress_totals_arrive_in_order() {
     );
 }
 
+/// A sparse file is all zeroes without a single zero byte existing on disk, and
+/// it is exactly the shape a scan should be able to settle without reading -
+/// the ones worth finding are routinely enormous.
+#[cfg(unix)]
+#[test]
+fn sparse_files_are_found_alongside_written_ones() {
+    let (_dir, root) = fixture();
+    let written = write(&root, "written.bin", &[0_u8; 512]);
+
+    let sparse = root.join("sparse.bin");
+    fs::File::create(&sparse)
+        .expect("creating the fixture should succeed")
+        .set_len(64 << 20)
+        .expect("extending the fixture should succeed");
+
+    let empty_sparse = root.join("empty-sparse.bin");
+    fs::File::create(&empty_sparse)
+        .expect("creating the fixture should succeed")
+        .set_len(0)
+        .expect("truncating the fixture should succeed");
+
+    let mut expected = vec![written, sparse];
+    expected.sort();
+
+    assert_eq!(
+        scan(&root),
+        expected,
+        "a hole is zeroes, but a zero-length hole is still an empty file"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinks_are_not_followed() {
