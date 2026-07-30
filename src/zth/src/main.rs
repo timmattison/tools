@@ -187,3 +187,139 @@ fn main() -> ExitCode {
         Err(_) => ExitCode::FAILURE,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A [`BarProgress`] over a bar that never draws.
+    ///
+    /// The bar still tracks every value handed to it, so the assertions below
+    /// read exactly the state a visible bar would render from - without a
+    /// terminal, and without the integration tests' problem that piping stderr
+    /// makes indicatif hide the line and its behavior with it.
+    ///
+    /// Nothing here touches the filesystem, the network, or a shared name, so
+    /// the module is safe to run alongside another copy of itself.
+    fn hidden_progress() -> BarProgress {
+        BarProgress::new(ProgressBar::hidden())
+    }
+
+    /// A slow first `readdir` can leave the bar on screen for seconds before a
+    /// single file turns up, and the line has to say something during that time.
+    #[test]
+    fn a_fresh_bar_already_reads_as_zeroes() {
+        let progress = hidden_progress();
+
+        assert_eq!(
+            progress.bar.message(),
+            "discovered 0 · remaining 0",
+            "the counts are painted at construction, so the line before the first \
+             file looks the same as the line during the scan rather than blank"
+        );
+    }
+
+    #[test]
+    fn discovery_sets_the_denominator_and_the_outstanding_count() {
+        let progress = hidden_progress();
+
+        progress.files_discovered(3);
+
+        assert_eq!(
+            progress.bar.length(),
+            Some(3),
+            "the discovered total is the bar's denominator, so the filled fraction \
+             is measured against what the walk has actually turned up"
+        );
+        assert_eq!(
+            progress.bar.message(),
+            "discovered 3 · remaining 3",
+            "no worker has reached any of these files yet, so all three are outstanding"
+        );
+    }
+
+    #[test]
+    fn scanning_advances_the_bar_and_drains_the_remainder() {
+        let progress = hidden_progress();
+
+        progress.files_discovered(10);
+        progress.files_scanned(4);
+
+        assert_eq!(
+            progress.bar.position(),
+            4,
+            "the scanned total is the bar's position, which is what fills the bar \
+             and what indicatif derives the ETA from"
+        );
+        assert_eq!(
+            progress.bar.message(),
+            "discovered 10 · remaining 6",
+            "remaining is the work discovery has found and the workers have not reached"
+        );
+    }
+
+    /// Discovery and scanning run at the same time and each callback is told only
+    /// its own total, so whichever one fires has to remember the other - which is
+    /// the entire reason both counters live on this struct.
+    #[test]
+    fn either_callback_leaves_the_other_total_standing() {
+        let progress = hidden_progress();
+
+        progress.files_discovered(5);
+        progress.files_scanned(2);
+        progress.files_discovered(9);
+
+        assert_eq!(
+            progress.bar.message(),
+            "discovered 9 · remaining 7",
+            "a discovery arriving mid-scan must widen the remainder, \
+             not forget the files already read"
+        );
+        assert_eq!(
+            progress.bar.length(),
+            Some(9),
+            "the newest discovered total is the denominator"
+        );
+        assert_eq!(
+            progress.bar.position(),
+            2,
+            "a discovery must not disturb how far along the bar is"
+        );
+    }
+
+    /// The two counters are loaded one after the other, so a worker reporting in
+    /// between can make `scanned` read as larger than the `discovered` value this
+    /// call saw. That is a torn read of a scan that is briefly a file ahead of
+    /// itself - a wrapping subtraction would put `remaining
+    /// 18,446,744,073,709,551,615` on the line over it.
+    #[test]
+    fn a_scanned_total_ahead_of_discovery_renders_as_nothing_remaining() {
+        let progress = hidden_progress();
+
+        progress.files_discovered(1);
+        progress.files_scanned(2);
+
+        assert_eq!(
+            progress.bar.message(),
+            "discovered 1 · remaining 0",
+            "a momentarily inverted pair of totals must round down to no work left, \
+             never underflow into a twenty-digit count"
+        );
+    }
+
+    /// The scans worth running are hundreds of thousands of files deep, and at
+    /// that size an unseparated run of digits cannot be read at a glance.
+    #[test]
+    fn large_totals_carry_thousands_separators() {
+        let progress = hidden_progress();
+
+        progress.files_discovered(1_234_567);
+        progress.files_scanned(1_000);
+
+        assert_eq!(
+            progress.bar.message(),
+            "discovered 1,234,567 · remaining 1,233,567",
+            "both counts go through HumanCount, so seven-digit totals stay legible"
+        );
+    }
+}
