@@ -68,10 +68,12 @@ fn main() -> Result<()> {
     println!();
     println!("Land them in this order: {winner}");
 
-    if ranked
-        .iter()
-        .all(|score| score.hunks() == ranked[0].hunks())
-    {
+    // Only say the order does not matter when it genuinely does not. The whole
+    // ranking key has to match: orderings can share a hunk count and still be
+    // ranked apart on stops or files, and shrugging at a difference grist just
+    // printed a winner for contradicts the line above.
+    let cheapest = ranked[0].cost_key();
+    if ranked.iter().all(|score| score.cost_key() == cheapest) {
         println!("Every order costs the same, so pick whichever you prefer.");
     }
 

@@ -4,13 +4,12 @@ use crate::metrics::OrderingScore;
 
 /// Rank simulated orderings cheapest-first.
 ///
-/// Cost is compared lexicographically: hunks, then stops, then files. Hunks
-/// lead because they count the lines a human actually has to hand-merge; the
-/// other two break ties in favour of fewer interruptions and a smaller blast
-/// radius. Sorting is stable, so equally-priced orderings keep input order.
+/// Cost is whatever [`OrderingScore::cost_key`] says it is - hunks, then stops,
+/// then files, compared lexicographically. Sorting is stable, so orderings with
+/// an equal key keep input order.
 #[must_use]
 pub fn rank(mut scores: Vec<OrderingScore>) -> Vec<OrderingScore> {
-    scores.sort_by_key(|score| (score.hunks(), score.stops(), score.files()));
+    scores.sort_by_key(OrderingScore::cost_key);
     scores
 }
 

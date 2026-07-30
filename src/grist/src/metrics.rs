@@ -126,4 +126,20 @@ impl OrderingScore {
     pub fn hunks(&self) -> Hunks {
         self.hunks
     }
+
+    /// *The* ranking key: what this ordering costs, ordered for comparison.
+    ///
+    /// Hunks lead because they count the lines a human actually hand-merges;
+    /// stops and files break ties in favour of fewer interruptions and a
+    /// smaller blast radius. Comparing the tuple compares all three
+    /// lexicographically.
+    ///
+    /// Anything deciding whether two orderings cost the same - ranking them,
+    /// declaring a tie, deduplicating them - must compare this and nothing
+    /// narrower. Two scores can share a hunk count and still be ranked apart,
+    /// so a check written against `hunks()` alone will contradict the ranking.
+    #[must_use]
+    pub fn cost_key(&self) -> (Hunks, Stops, Files) {
+        (self.hunks, self.stops, self.files)
+    }
 }
