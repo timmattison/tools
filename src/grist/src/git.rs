@@ -126,6 +126,11 @@ impl Git {
             // merges later.
             "rerere.enabled=false",
             "rerere.autoupdate=false",
+            // Without this, rebasing a detached HEAD still rewrites every branch
+            // ref pointing into the replayed range - including the branch being
+            // simulated. Proven by tests/safety.rs: with the setting enabled and
+            // this override removed, a dry run destroys the developer's branch.
+            "rebase.updateRefs=false",
             "rebase.autoStash=false",
             "rebase.autosquash=false",
             "commit.gpgsign=false",
