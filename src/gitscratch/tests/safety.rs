@@ -243,3 +243,138 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
         describe_tree(&rr_cache)
     );
 }
+
+/// The hooks a replay would trip if `core.hooksPath` were not redirected.
+/// `pre-merge-commit` cannot fire from a rebase-only replay today; it is planted
+/// anyway, because the guard is not "rebase does not fire hooks" - it is "no
+/// replay fires anything" - and the merge replay a sibling tool will add must
+/// inherit a test that is already watching for it.
+#[cfg(unix)]
+const PLANTED_HOOKS: [&str; 4] = [
+    "post-checkout",
+    "pre-rebase",
+    "post-rewrite",
+    "pre-merge-commit",
+];
+
+/// Hooks are the developer's own code, and a replay runs git in the developer's
+/// own repository, so by default git would happily execute them. They are
+/// written for a real workflow, not for a simulation: they sign commits, push
+/// to remotes, notify chat, rewrite commit messages, regenerate lockfiles, kick
+/// off builds. `post-rewrite` in particular exists precisely to react to a
+/// rebase having happened - which is exactly what a replay looks like from the
+/// outside, and exactly the wrong conclusion for it to draw.
+///
+/// So a dry run that fires hooks stops being a question and becomes an action.
+/// "Tell me whether this would conflict" must not be able to post to a channel,
+/// touch a remote, or start a build on the developer's machine, and it must not
+/// be able to do so *invisibly* - hooks are the one part of a git operation
+/// whose side effects live entirely outside git's own state, so none of the
+/// other guarantees in this file would notice them.
+///
+/// The guarantee is therefore about the developer's *existing* hooks, installed
+/// long before this crate showed up: they stay installed, they stay armed for
+/// real work, and a replay simply never reaches them.
+///
+/// Unix-only because git ignores a hook without the executable bit, and setting
+/// that bit needs Unix permissions. On a platform where the hooks cannot be
+/// armed there is no way for this test to be anything but vacuous, so it does
+/// not pretend to run.
+#[cfg(unix)]
+#[test]
+fn never_fires_a_hook_from_the_developer_s_repository() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = conflicting_repo();
+
+    // Hooks and their evidence both hang off the common dir: hooks because that
+    // is where git looks by default in every worktree of the repo, and the
+    // sentinels because the common dir is inside the fixture's `TempDir` (so
+    // concurrent runs cannot collide) while being outside any working tree (so
+    // a sentinel can never be mistaken for a dirty file the replay left behind).
+    let common_dir = repo
+        .path()
+        .join(repo.git(&["rev-parse", "--git-common-dir"]));
+    let hooks_dir = common_dir.join("hooks");
+    let sentinels = common_dir.join("hook-sentinels");
+    std::fs::create_dir_all(&hooks_dir).expect("create the repo's default hooks directory");
+    std::fs::create_dir_all(&sentinels).expect("create the hook sentinel directory");
+
+    for hook in PLANTED_HOOKS {
+        let script = hooks_dir.join(hook);
+        // Deliberately `exit 0`. A `pre-*` hook that failed would abort the
+        // operation, and an aborted replay proves nothing about hooks - the
+        // sentinel has to be the only trace, so the replay is free to run to
+        // completion and still be caught.
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ntouch \"{}/{hook}\"\nexit 0\n",
+                sentinels.display()
+            ),
+        )
+        .unwrap_or_else(|e| panic!("plant the {hook} hook: {e}"));
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| panic!("make the {hook} hook executable: {e}"));
+    }
+
+    // Control: prove the hooks are actually armed before proving the replay
+    // leaves them alone. A typo in the sentinel path or a missing executable
+    // bit would make git skip them silently, and every assertion below would
+    // then pass for the wrong reason. This checkout runs through the fixture's
+    // own git rather than through `gitscratch`, so nothing under test is
+    // involved - it is the real repository behaving normally.
+    repo.checkout("left");
+    repo.checkout("main");
+    let control = sentinels.join("post-checkout");
+    assert!(
+        control.is_file(),
+        "the planted hooks are not armed, so this test could only pass vacuously; \
+         a plain checkout in {} left nothing at {}",
+        repo.path().display(),
+        control.display()
+    );
+    std::fs::remove_file(&control).expect("clear the control sentinel");
+    assert_eq!(
+        describe_tree(&sentinels),
+        "",
+        "the control run must leave no evidence behind, or the real assertion \
+         cannot tell the two apart"
+    );
+
+    // Scoped on purpose: teardown removes the scratch worktree from the real
+    // repository, which is another git operation with hooks of its own to fire,
+    // so the drop must have run before the sentinels are inspected. Do not
+    // flatten this block away.
+    let conflicts = {
+        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        replay(&scratch, "left", "main");
+        // `right` onto `left` genuinely conflicts, so the rebase halts, resolves
+        // and continues - several times more hook-triggering machinery than a
+        // clean replay walks through.
+        replay(&scratch, "right", "left")
+    };
+
+    // Asserting on the conflict that was resolved, so this cannot pass by
+    // having quietly replayed nothing for a hook to react to.
+    assert_eq!(
+        conflicts.files(),
+        Files::new(1),
+        "the contested file should have conflicted"
+    );
+    assert!(
+        conflicts.file_names().contains("shared.txt"),
+        "the contested file should be named in the conflicts: {:?}",
+        conflicts.file_names()
+    );
+    assert!(
+        conflicts.hunks() > Hunks::new(0),
+        "replaying a contested branch should have hunks to hand-merge"
+    );
+
+    assert_eq!(
+        describe_tree(&sentinels),
+        "",
+        "replay executed the developer's hooks; each path below is a hook that fired"
+    );
+}
