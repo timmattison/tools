@@ -35,15 +35,13 @@ const GITLINK_MODE_PREFIX: &str = "160000 ";
 /// whatever that worktree had checked out. A detached-HEAD worktree is removed
 /// with no branch deletion.
 ///
-/// # Usage
+/// Examples:
 ///
-/// ```sh
-/// gitnuke ../feature-wt        # by path
-/// gitnuke feature-wt           # by directory name
-/// gitnuke issue-42             # by branch name
-/// ```
+///     gitnuke ../feature-wt        # by path
+///     gitnuke feature-wt           # by directory name
+///     gitnuke issue-42             # by branch name
 ///
-/// # Exit Codes
+/// Exit codes:
 ///
 /// - 0: Success
 /// - 1: Not in a git repository
@@ -54,6 +52,7 @@ const GITLINK_MODE_PREFIX: &str = "160000 ";
 /// - 6: The shell is standing inside the target worktree
 /// - 7: The worktree was removed but its branch could not be deleted
 #[derive(Parser)]
+#[command(verbatim_doc_comment)]
 #[command(name = "gitnuke")]
 #[command(about = "Remove a git worktree and force-delete its branch")]
 #[command(version = version_string!())]
