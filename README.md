@@ -1387,7 +1387,14 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - **Never your own directory.** gitnuke refuses to remove the worktree your shell is
   standing in (or any parent of it) and names somewhere else to `cd` to first. It is a
   binary, not a shell function, so it cannot move your shell out of a directory it deletes.
-- **Never the main worktree**, and never a branch whose removal git refused.
+- **Never the main worktree.** It is the worktree the repository itself lives in, and git
+  declines to remove it with or without `--force`. gitnuke refuses it up front and says what
+  to do instead, rather than letting git's `fatal: '…' is a main working tree` be the answer —
+  a `--dry-run` never runs that command, so leaving the rule to git meant the dry run cleared
+  the one worktree nothing can ever remove. Both runs report exit `2`, the code git's own
+  refusal produces.
+- **Never a branch whose removal git refused.** The branch is deleted only once the worktree
+  is actually gone.
 - **A lock is honoured, not overridden.** A worktree locked with `git worktree lock` is
   refused even with `--force`, quoting the lock reason if git recorded one and handing back
   the `git worktree unlock` command to run.

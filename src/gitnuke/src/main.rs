@@ -31,6 +31,14 @@ mod exit_codes {
 /// The index mode git records for a submodule (gitlink) entry.
 const GITLINK_MODE_PREFIX: &str = "160000 ";
 
+/// Where the main worktree sits in `git worktree list`: always first.
+///
+/// That position is the *only* thing distinguishing the main worktree from the
+/// linked ones in the porcelain output — there is no `main` attribute line — so
+/// both rules that need to know about it read it from here rather than
+/// re-deriving it: the "cd somewhere else" hint, and the refusal to nuke it.
+const MAIN_WORKTREE_INDEX: usize = 0;
+
 /// Remove a git worktree and force-delete its branch.
 ///
 /// The target names a worktree, not a branch to delete in isolation: gitnuke
@@ -245,7 +253,7 @@ struct Worktree {
 /// unless the worktree is locked, and carries a reason only when one was
 /// recorded. Attribute lines may appear in any order within a block. The main
 /// worktree is always the first block, and the order here is preserved so
-/// callers can rely on it.
+/// callers can rely on it — see [`MAIN_WORKTREE_INDEX`].
 fn parse_worktree_list(output: &str) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
     let mut current_path: Option<WorktreePath> = None;
@@ -723,8 +731,8 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 /// keeps their own wording and their own edge cases. A dry run invokes neither,
 /// so without a stand-in it reports "would remove" for targets git is going to
 /// turn away — a false all-clear on a tool whose whole job is destruction. The
-/// lock and submodule gates are the caller's, since they refuse both paths
-/// before either reaches this point.
+/// main-worktree, lock, and submodule gates are the caller's, since they refuse
+/// both paths before either reaches this point.
 ///
 /// The exit codes match the real refusals deliberately: `gitnuke -n x` failing
 /// has to mean `gitnuke x` fails the same way, or the preflight is decoration.
@@ -880,15 +888,41 @@ fn nuke_target(
             // --force does not change that: it overrides git's refusals, not
             // the caller's shell.
             if cwd_is_inside(cwd, &worktree.path) {
-                // worktrees[0] is always the main worktree in git's listing.
                 let elsewhere = worktrees
-                    .first()
+                    .get(MAIN_WORKTREE_INDEX)
                     .map_or_else(String::new, |main| format!(" (for example {})", main.path));
                 return Err(NukeError::new(
                     exit_codes::INSIDE_TARGET,
                     format!(
                         "you are inside {} — cd somewhere else first{elsewhere}, \
                          otherwise your shell is left in a deleted directory",
+                        worktree.path
+                    ),
+                ));
+            }
+
+            // git will not remove the worktree the repository itself lives in —
+            // `fatal: '<path>' is a main working tree`, with or without --force
+            // — so this refusal only decides *who says so*, never the outcome.
+            // Saying it here rather than leaving it to `git worktree remove` is
+            // what makes --dry-run tell the truth: a dry run never issues that
+            // command, so with the rule living in git it cleared the one
+            // worktree nothing can ever remove. Deferring also cost the caller
+            // the answer to "then what?", which git's fatal does not give.
+            //
+            // Below the cwd guard on purpose: standing inside the main worktree
+            // trips both, and a shell about to be stranded in a deleted
+            // directory is the more urgent thing to be told about.
+            if idx == MAIN_WORKTREE_INDEX {
+                return Err(NukeError::new(
+                    // git's own code for this refusal, so `gitnuke -n main` and
+                    // `gitnuke main` still agree the way the preflight promises.
+                    exit_codes::GIT_COMMAND_ERROR,
+                    format!(
+                        "{} is the main worktree — git refuses to remove the worktree \
+                         the repository itself lives in, with or without --force.\n  \
+                         Nuke one of its linked worktrees instead, or delete the \
+                         repository directory by hand.",
                         worktree.path
                     ),
                 ));
