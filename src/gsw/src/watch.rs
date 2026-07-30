@@ -389,7 +389,7 @@ enum Event {
 /// Propagates a [`collect_snapshot`] failure (the status walk). A failed
 /// *re-open* is not an error: it degrades to the handle already in hand.
 pub(crate) fn walk(handle: &mut RepoHandle, cfg: &RenderConfig) -> Result<Snapshot> {
-    collect_snapshot(handle.repo(), cfg)
+    collect_snapshot(handle.reopened(), cfg)
 }
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot

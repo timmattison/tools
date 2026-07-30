@@ -91,16 +91,6 @@ impl RepoHandle {
     /// handle already in hand: a monitor that blanks out for one tick because
     /// it caught git mid-write is worse than a monitor that repaints one
     /// tick-old configuration and recovers on the next call.
-    // Only the tests call this so far: `watch::run` still borrows one handle for
-    // the whole process. `expect` rather than `allow` so wiring this into the
-    // refresh loop makes the attribute itself a warning, forcing its removal.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called from watch::run's refresh loop in the next slice of issue #334"
-        )
-    )]
     pub fn reopened(&mut self) -> &gix::Repository {
         if let Some(fresh) = gix::open(&self.workdir).ok().and_then(Self::from_repo) {
             self.repo = fresh.repo;
