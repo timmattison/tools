@@ -1,5 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   asInode,
@@ -79,6 +84,28 @@ describe("parseZellijServers", () => {
 
   it("returns nothing for empty input", () => {
     assert.deepEqual(parseZellijServers("   \n\n"), []);
+  });
+});
+
+describe("entrypoint detection", () => {
+  // Installed the way every other tool here is, the script is reached through a
+  // symlink named `zellij-install` — no `.ts`. If the entrypoint check only
+  // recognises the literal filename, the CLI silently does nothing.
+  it("runs the CLI when invoked through a differently-named symlink", () => {
+    const modulePath = fileURLToPath(new URL("./zellij-install.ts", import.meta.url));
+    // Unique per process AND per call: two concurrent runs of this same test
+    // must not collide on the directory or the symlink inside it.
+    const dir = mkdtempSync(
+      join(tmpdir(), `zellij-install-${process.pid}-${process.hrtime.bigint()}-`),
+    );
+    try {
+      const link = join(dir, "zellij-install");
+      symlinkSync(modulePath, link);
+      const result = spawnSync("npx", ["tsx", link, "--help"], { encoding: "utf8" });
+      assert.match(result.stdout, /--dry-run/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
