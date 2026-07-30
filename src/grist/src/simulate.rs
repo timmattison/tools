@@ -34,6 +34,10 @@ use crate::metrics::{BranchName, Files, Hunks, OrderingScore, Stops};
 /// to anticipate stalls the run instead of spinning forever.
 const MAX_RESOLUTION_ROUNDS: usize = 1_000;
 
+/// Orderings grow factorially. Seven branches is 5,040 replays - far past the
+/// point where waiting for an answer beats just picking one and rebasing.
+pub const MAX_BRANCHES: usize = 6;
+
 /// Measures what a candidate ordering would cost to carry out for real.
 pub struct Simulator {
     repo: PathBuf,
@@ -97,6 +101,16 @@ impl Simulator {
             Files::new(files.len()),
             Hunks::new(hunks),
         ))
+    }
+
+    /// Score every order `branches` could land in, cheapest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the branch list is empty, repeats a branch, is
+    /// longer than [`MAX_BRANCHES`], or if any simulation fails.
+    pub fn evaluate(&self, _branches: &[BranchName]) -> Result<Vec<OrderingScore>> {
+        todo!("evaluate and rank every ordering")
     }
 
     /// Rebase the checked-out branch onto `onto`, resolving as it goes.

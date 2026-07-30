@@ -133,3 +133,24 @@ fn landing_a_stacked_branch_first_strands_the_branch_beneath_it() {
     assert_eq!(stacked_first.stops(), Stops::new(1));
     assert_eq!(stacked_first.files(), Files::new(1));
 }
+
+/// End to end: given the branches in the *expensive* order, grist still ranks
+/// the cheap order first. Passing the losing order in guarantees a pass cannot
+/// be an artefact of input ordering.
+#[test]
+fn ranks_the_cheaper_ordering_first_regardless_of_input_order() {
+    let repo = contested_region_repo();
+    let simulator = Simulator::new(repo.path(), "main");
+
+    let ranked = simulator
+        .evaluate(&order(&["single", "iterated"]))
+        .expect("evaluation runs");
+
+    assert_eq!(ranked.len(), 2, "both orderings should be evaluated");
+    assert_eq!(
+        ranked[0].order(),
+        order(&["iterated", "single"]).as_slice(),
+        "the heavily iterated branch should be recommended to land first"
+    );
+    assert!(ranked[0].hunks() < ranked[1].hunks());
+}
