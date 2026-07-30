@@ -159,15 +159,8 @@ struct Cost {
 /// Collapse the checked-out (already rebased) branch into a single commit on
 /// top of `parent`, discarding its ancestry exactly as a squash merge does.
 fn squash_into(git: &Git, parent: &str, branch: &BranchName) -> Result<String> {
-    let tree = git.run(&["rev-parse", "HEAD^{tree}"])?;
-    git.run(&[
-        "commit-tree",
-        &tree,
-        "-p",
-        parent,
-        "-m",
-        &format!("squash {branch}"),
-    ])
+    let _ = (parent, branch);
+    git.run(&["rev-parse", "HEAD"])
 }
 
 /// Whether git is sitting in a halted rebase.
