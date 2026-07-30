@@ -126,10 +126,6 @@ impl Git {
             // merges later.
             "rerere.enabled=false",
             "rerere.autoupdate=false",
-            // Without this, rebasing a detached HEAD still rewrites every branch
-            // ref pointing into the replayed range - including the branch being
-            // simulated. This is the single most dangerous default here.
-            "rebase.updateRefs=false",
             "rebase.autoStash=false",
             "rebase.autosquash=false",
             "commit.gpgsign=false",
