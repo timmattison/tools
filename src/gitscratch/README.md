@@ -50,8 +50,10 @@ index measured under identical rules, not as an exact prediction.
 | `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git still resolves lookups against it — so the path is a real, empty, temporary directory, validated once at creation. |
 | `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` | A halted rebase would otherwise open an editor and hang forever. |
 | `commit.gpgsign=false` | A signing config in the developer's global gitconfig would otherwise prompt or fail mid-replay. |
+| `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
+| `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -74,16 +76,17 @@ remove the guard, watch that specific test fail, put it back:
   the opposite direction — *add* a prune and watch the test fail — because the
   guarantee is that it is not there.
 
-A unit test in `src/git.rs` pins the identity scratch commits are authored
-under, so they are attributable to this crate rather than to whichever tool is
-driving it.
+A fourth guarantee — **the `user.name`/`user.email` identity**, the last row
+above — is pinned by a unit test in `src/git.rs` instead, which reads back
+`git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
 
 The remaining rows of the table above — the `rerere` pair, `core.hooksPath`, the
-editor and prompt environment, `commit.gpgsign`, `gc.auto`, and the
-`rebase.autoStash`/`autosquash` pair — are established by construction in
+editor and prompt environment, `commit.gpgsign`, `gpg.format`, `gc.auto`, and
+the `rebase.autoStash`/`autosquash` pair — are established by construction in
 `safety_config` and are **not yet covered by a test**. Issue #329 tracks growing
-the suite to eight guarantees and mutation-verifying every guard; when it lands,
-this paragraph goes with it.
+the suite to eight guarantees and mutation-verifying every guard; the `rerere`
+pair, `core.hooksPath` and `commit.gpgsign` are the rows it reaches, so this
+paragraph shrinks rather than disappears when it lands.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
