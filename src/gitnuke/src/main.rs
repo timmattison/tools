@@ -451,35 +451,19 @@ fn canonicalize_target(target: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     absolute.canonicalize().ok()
 }
 
-/// Compares two paths, handling case-insensitivity on macOS.
+/// Compares two canonical paths for exact equality.
+///
+/// Exact is the only comparison that is correct on both kinds of volume, and
+/// every caller canonicalizes both sides first, which is what makes it
+/// sufficient. On a case-insensitive volume (the macOS default) `realpath(3)`
+/// — which `Path::canonicalize` uses — rewrites each component to its true
+/// on-disk spelling, so `FEATURE-WT/nested` arrives as `feature-wt/nested` and
+/// the two sides already agree on case. On a case-sensitive volume `/x/Foo` and
+/// `/x/foo` are two genuinely different directories, each canonicalizing to
+/// itself; case-folding would call them one and hand this destructive tool the
+/// wrong worktree.
 fn paths_equal(a: &Path, b: &Path) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        // Folding case assumes a difference of case cannot be a difference of
-        // directory. That holds on a case-insensitive volume, which is the macOS
-        // default, but APFS can be formatted case-sensitive, and there `/x/Foo`
-        // and `/x/foo` are two genuinely different directories this would call
-        // one — an alarming thing in a tool that destroys what it resolves.
-        //
-        // What makes it safe is *when* it is called: every caller canonicalizes
-        // both sides first, and macOS `realpath(3)` — which `Path::canonicalize`
-        // uses — rewrites each component to its true on-disk spelling. On either
-        // kind of volume the two sides therefore arrive already agreeing on case
-        // and the fold has nothing left to do; it is belt and braces. A runtime
-        // case-sensitivity probe was considered and rejected: more I/O and more
-        // moving parts for a misresolution no caller can currently reach.
-        //
-        // The residual limitation is that precondition. Hand this function two
-        // paths that have *not* been through `canonicalize` and on a
-        // case-sensitive volume it will report two different directories equal,
-        // so canonicalize first — every caller here does.
-        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        a == b
-    }
+    a == b
 }
 
 /// What is standing between a worktree and its removal, submodule-wise.
