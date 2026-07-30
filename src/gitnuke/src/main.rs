@@ -709,7 +709,8 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 
     if options.dry_run {
         preflight(repo_root, worktree, options)?;
-        return report_plan(worktree, &submodules, options);
+        report_plan(worktree, &submodules, options);
+        return Ok(());
     }
 
     let mut args = vec!["worktree", "remove"];
@@ -799,15 +800,11 @@ fn preflight(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Res
     Ok(())
 }
 
-/// Prints what a real run would do, and returns Ok since nothing was touched.
+/// Prints what a real run would do, touching nothing, so it cannot fail.
 ///
 /// Reached only after every gate has passed, so a refused target reports its
 /// refusal instead: a dry run is a preflight, not a description.
-fn report_plan(
-    worktree: &Worktree,
-    submodules: &SubmoduleReport,
-    options: NukeOptions,
-) -> Result<(), NukeError> {
+fn report_plan(worktree: &Worktree, submodules: &SubmoduleReport, options: NukeOptions) {
     let extra = if submodules.blocks_removal() {
         format!(" (discarding its {})", submodules.describe())
     } else {
@@ -831,8 +828,6 @@ fn report_plan(
             worktree.path
         ),
     }
-
-    Ok(())
 }
 
 /// Deletes a branch, echoing git's own report.
