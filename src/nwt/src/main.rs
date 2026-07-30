@@ -1092,7 +1092,7 @@ fn report_kept_existing(relative_path: &Path, quiet: bool) {
 }
 
 /// Copies a single `.env` file from `source` to `dest`, creating the destination
-/// exclusively and (on Unix) at mode [`ENV_FILE_MODE`] — owner read/write only.
+/// exclusively and (on Unix) at mode 0600 — owner read/write only.
 ///
 /// This deliberately does *not* use [`fs::copy`], which would both overwrite an existing
 /// destination and stamp the source's permission bits onto it.
