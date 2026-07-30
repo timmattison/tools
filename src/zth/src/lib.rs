@@ -24,7 +24,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::thread;
 
 use walkdir::WalkDir;
@@ -153,8 +153,15 @@ impl Default for Jobs {
 
 /// Receives running totals while [`find_all_zero_files`] works.
 ///
-/// Both methods are called from the scan's own threads, from any of them, and
-/// often - once per file. Implementations must be cheap and must not block.
+/// Both methods are called from the scan's own threads and often - once per
+/// file - so implementations must be cheap and must not block.
+///
+/// Each total is delivered in order and never repeats a value or goes
+/// backwards, even though several worker threads produce them. Progress bars
+/// depend on that: indicatif reads a backwards position as a seek and throws
+/// away the estimate it has been building. Calls to the two methods still
+/// interleave freely with each other, since discovery and scanning run at the
+/// same time.
 pub trait ScanProgress: Sync {
     /// Called once per file the directory walk turns up, with the running total
     /// of files discovered so far.
@@ -208,17 +215,22 @@ pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress)
     // ahead of the reads.
     let (sender, receiver) = crossbeam::channel::unbounded::<PathBuf>();
 
-    let discovered = AtomicU64::new(0);
-    let scanned = AtomicU64::new(0);
+    // Guarded rather than atomic so the count and the callback that announces it
+    // happen together: workers report from several threads, and an observer that
+    // sees totals out of order sees the scan going backwards.
+    let scanned = Mutex::new(0_u64);
 
     let mut found = thread::scope(|scope| {
         let walk_root = &root;
-        let discovered = &discovered;
 
         scope.spawn(move || {
             // Dropping this sender at the end of the walk is what tells the
             // workers there is nothing left to come, so it is moved in here.
             let sender = sender;
+
+            // The walk is this one thread, so its running total needs nothing
+            // more than a local counter to stay in order.
+            let mut discovered = 0_u64;
 
             for entry in WalkDir::new(walk_root)
                 .follow_links(false)
@@ -231,8 +243,8 @@ pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress)
                     continue;
                 }
 
-                let total = discovered.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-                progress.files_discovered(total);
+                discovered = discovered.saturating_add(1);
+                progress.files_discovered(discovered);
 
                 if sender.send(entry.into_path()).is_err() {
                     // Every worker is gone; nothing will read what we send.
@@ -258,8 +270,13 @@ pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress)
                             matches.push(path);
                         }
 
-                        let total = scanned.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-                        progress.files_scanned(total);
+                        // Counting and announcing under one lock is what keeps
+                        // the totals in order. An observer that panics poisons
+                        // the mutex; recovering the count is better than taking
+                        // every other worker down with it.
+                        let mut total = scanned.lock().unwrap_or_else(PoisonError::into_inner);
+                        *total = total.saturating_add(1);
+                        progress.files_scanned(*total);
                     }
 
                     matches
