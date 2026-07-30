@@ -92,6 +92,19 @@ mod tests {
     use super::Report;
     use crate::scratch::Conflicts;
 
+    /// The two-file, four-hunk, three-stop result the design spec's sample
+    /// output describes, so every rendering test is measured against the shape
+    /// `grind` and `grime` promised to print.
+    fn sample() -> Conflicts {
+        Conflicts::from_files(
+            [
+                ("src/lib.rs".to_string(), 3),
+                ("src/main.rs".to_string(), 1),
+            ],
+            3,
+        )
+    }
+
     #[test]
     fn a_clean_replay_gets_one_line_naming_the_tool_and_what_it_tried() {
         let report = Report::new("grind", "replaying HEAD onto origin/main");
@@ -99,6 +112,24 @@ mod tests {
         assert_eq!(
             report.render(&Conflicts::default()),
             "grind: clean - replaying HEAD onto origin/main hit no conflicts"
+        );
+    }
+
+    /// The whole verdict in one assertion: the header, the summary indented to
+    /// sit under it, and the breakdown that says where the work lands. Asserted
+    /// as one block because the shape - including the blank line and the
+    /// aligned counts - is the contract, not the individual lines.
+    #[test]
+    fn a_conflicted_replay_gets_a_header_a_summary_and_a_per_file_breakdown() {
+        let report = Report::new("grind", "replaying HEAD onto main");
+
+        assert_eq!(
+            report.render(&sample()),
+            r"grind: conflicts - replaying HEAD onto main
+       4 hunks across 2 files, 3 stops
+
+  src/lib.rs     3 hunks
+  src/main.rs    1 hunk"
         );
     }
 }
