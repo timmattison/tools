@@ -60,8 +60,16 @@ impl Simulator {
 
     /// Report each replay step to `listener` as it happens.
     #[must_use]
-    pub fn with_progress(self, _listener: impl Fn(&str) + 'static) -> Self {
+    pub fn with_progress(mut self, listener: impl Fn(&str) + 'static) -> Self {
+        self.progress = Some(Box::new(listener));
         self
+    }
+
+    /// Tell the listener, if there is one, what is happening.
+    fn report(&self, message: &str) {
+        if let Some(listener) = &self.progress {
+            listener(message);
+        }
     }
 
     /// The repository being simulated against.
@@ -165,6 +173,8 @@ impl Simulator {
     /// simulated main and what the step cost.
     fn land(&self, scratch: &Scratch, onto: &str, branch: &BranchName) -> Result<(String, Cost)> {
         let git = scratch.git();
+
+        self.report(&format!("replaying {branch}"));
 
         // Detached, so the real branch ref is never moved.
         git.run(&["checkout", "-q", "--detach", branch.as_str()])
