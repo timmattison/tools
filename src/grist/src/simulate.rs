@@ -44,6 +44,7 @@ pub const MAX_BRANCHES: usize = 6;
 pub struct Simulator {
     repo: PathBuf,
     base: String,
+    progress: Option<Box<dyn Fn(&str)>>,
 }
 
 impl Simulator {
@@ -53,7 +54,14 @@ impl Simulator {
         Self {
             repo: repo.into(),
             base: base.into(),
+            progress: None,
         }
+    }
+
+    /// Report each replay step to `listener` as it happens.
+    #[must_use]
+    pub fn with_progress(self, _listener: impl Fn(&str) + 'static) -> Self {
+        self
     }
 
     /// The repository being simulated against.

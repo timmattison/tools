@@ -174,3 +174,32 @@ fn memoised_evaluation_agrees_with_scoring_each_ordering_independently() {
         );
     }
 }
+
+/// Replaying dozens of commits takes real time, so the caller needs to be told
+/// what is happening rather than staring at a silent terminal.
+#[test]
+fn reports_progress_for_each_branch_it_lands() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let repo = contested_region_repo();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+
+    let recorder = Rc::clone(&seen);
+    let simulator = Simulator::new(repo.path(), "main")
+        .with_progress(move |message| recorder.borrow_mut().push(message.to_owned()));
+
+    simulator
+        .score(&order(&["iterated", "single"]))
+        .expect("simulation runs");
+
+    let messages = seen.borrow();
+    assert!(
+        messages.iter().any(|message| message.contains("iterated")),
+        "expected progress mentioning 'iterated', got {messages:?}"
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("single")),
+        "expected progress mentioning 'single', got {messages:?}"
+    );
+}
