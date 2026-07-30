@@ -226,10 +226,11 @@ fn main() -> Result<()> {
         colored::control::set_override(true);
     }
 
-    let Some(repo) = repo::open() else {
+    let Some(handle) = repo::RepoHandle::open() else {
         println!("{}", "gsw • not a git repository".dimmed());
         return Ok(());
     };
+    let repo = handle.repo();
 
     // Everything the renderer needs that doesn't depend on the live terminal
     // size. In watch mode this is computed once and reused for every repaint.

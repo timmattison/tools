@@ -10,17 +10,68 @@ use std::collections::HashMap;
 use crate::git::{FileEntry, FileStatus, NumStat};
 use crate::render::{Operation, UpstreamStatus};
 
-/// Open the repository containing `cwd`, or `None` when there isn't one with a
-/// working tree (outside any repo, or a bare repo — gsw has nothing per-file to
-/// render in either case).
-pub fn open() -> Option<gix::Repository> {
-    let repo = gix::discover(".").ok()?;
-    // Bare repos have no work tree; gsw renders a per-file working-tree view,
-    // so there's nothing to show. Treat them like "not a repo".
-    if repo.workdir().is_some() {
-        Some(repo)
-    } else {
-        None
+/// A repository handle that can be re-opened between reads.
+///
+/// A [`gix::Repository`] snapshots `.git/config` when it is opened and never
+/// reloads it. That is fine for the one-shot path — a fresh process opens a
+/// fresh handle — but watch mode holds one handle for the lifetime of the
+/// process, so every config key it caches goes stale the moment the user
+/// changes it in another pane. The headline symptom is `git push -u origin
+/// <branch>`: it writes `branch.<name>.remote` and `branch.<name>.merge`, which
+/// is exactly where [`upstream_status`] resolves the tracking ref from, so the
+/// `↑0 ↓0 origin/<branch>` header segment never appears until gsw restarts. The
+/// mirror (`git branch --unset-upstream` leaving stale arrows on screen), a
+/// renamed remote, and a changed `core.excludesFile` are all the same bug.
+///
+/// Rather than special-case `branch.*`, this handle owns the re-open: callers
+/// that want the config as it is *right now* ask for [`reopened`] and get a
+/// handle built from a freshly-read config, which fixes the whole class at once.
+///
+/// [`reopened`]: RepoHandle::reopened
+pub struct RepoHandle {
+    /// The repository as of the last successful open.
+    repo: gix::Repository,
+}
+
+impl RepoHandle {
+    /// Open the repository containing the current directory, or `None` when
+    /// there isn't one with a working tree (outside any repo, or a bare repo —
+    /// gsw has nothing per-file to render in either case).
+    pub fn open() -> Option<Self> {
+        Self::discover(std::path::Path::new("."))
+    }
+
+    /// Open the repository containing `path`, walking up from it the way `git`
+    /// itself does. Same `None` cases as [`open`](Self::open); this is the
+    /// cwd-free form, which is also what the tests use since a parallel test
+    /// runner shares one process-wide current directory.
+    pub fn discover(path: &std::path::Path) -> Option<Self> {
+        let repo = gix::discover(path).ok()?;
+        // Bare repos have no work tree; gsw renders a per-file working-tree
+        // view, so there's nothing to show. Treat them like "not a repo".
+        repo.workdir()?;
+        Some(Self { repo })
+    }
+
+    /// The repository as it was last opened. Does not re-read `.git/config`, so
+    /// two calls with no intervening [`reopened`](Self::reopened) always see the
+    /// same configuration.
+    pub fn repo(&self) -> &gix::Repository {
+        &self.repo
+    }
+
+    /// Re-open the repository so configuration written since the last call
+    /// takes effect, and return the resulting handle.
+    ///
+    /// Callers that refresh on a timer (watch mode) use this instead of
+    /// [`repo`](Self::repo) so an upstream configured — or unset — in another
+    /// pane shows up on the next tick rather than on the next process start.
+    // Only the tests call this so far: `watch::run` still borrows one handle for
+    // the whole process. Wiring it into the refresh loop is the next slice of
+    // issue #334, which removes this allow along with the last stale-config read.
+    #[allow(dead_code)]
+    pub fn reopened(&mut self) -> &gix::Repository {
+        &self.repo
     }
 }
 
@@ -503,6 +554,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    use super::RepoHandle;
     use crate::git::FileStatus;
     use crate::render::Operation;
 
@@ -543,14 +595,14 @@ mod tests {
     }
 
     /// Open a repo at an explicit path (tests can't rely on cwd under a
-    /// parallel test runner). Mirrors `open()`'s logic but takes a path.
+    /// parallel test runner).
+    ///
+    /// Delegates to [`RepoHandle::discover`] — the same discovery and
+    /// bare-repo rejection production uses — and unwraps to the bare
+    /// repository, which is what the assertions below want. Tests that need to
+    /// re-open mid-test hold a [`RepoHandle`] instead.
     fn open_at(path: &Path) -> Option<gix::Repository> {
-        let repo = gix::discover(path).ok()?;
-        if repo.workdir().is_some() {
-            Some(repo)
-        } else {
-            None
-        }
+        RepoHandle::discover(path).map(|handle| handle.repo)
     }
 
     #[test]
@@ -945,6 +997,40 @@ mod tests {
         assert_eq!(up.name, "origin/main");
         assert_eq!(up.ahead, 0, "clone has no local commits past origin");
         assert_eq!(up.behind, 1, "origin advanced one commit past the clone");
+    }
+
+    #[test]
+    fn reopened_handle_sees_upstream_configured_after_open() {
+        // Watch mode's failure shape: gsw opens the repository once, and only
+        // later does the user run `git push -u origin <branch>` in another
+        // pane. That writes `branch.feature.remote`/`.merge` into
+        // `.git/config`, which the already-open gix handle has cached and will
+        // never re-read — so the header's upstream segment stays missing until
+        // the process restarts. A handle that re-opens must see it.
+        let (_origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("feature.txt"), "x\n").unwrap();
+        git(p, &["add", "feature.txt"]);
+        git(p, &["commit", "-q", "-m", "feature work"]);
+
+        // Opened BEFORE the push, and held across it, exactly like watch mode.
+        let mut held = RepoHandle::discover(p).expect("clone is a worktree repo");
+        assert!(
+            super::upstream_status(held.repo()).is_none(),
+            "a local-only branch has no upstream yet",
+        );
+
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+
+        let up = super::upstream_status(held.reopened())
+            .expect("a re-opened handle must see the upstream configured after it was opened");
+        assert_eq!(up.name, "origin/feature");
+        assert_eq!(
+            (up.ahead, up.behind),
+            (0, 0),
+            "the push left the branch level with its brand-new upstream",
+        );
     }
 
     #[test]
