@@ -9,7 +9,7 @@
 
 use tempfile::TempDir;
 
-use gitscratch::testing::conflicting_repo;
+use gitscratch::testing::{conflicting_repo, TestRepo};
 use gitscratch::Repo;
 
 /// The whole point of opening a repository up front is that "you pointed me at
@@ -80,5 +80,70 @@ fn resolve_returns_the_commit_a_branch_points_at() {
         resolved,
         fixture.rev_parse("left"),
         "resolve should agree with git about where 'left' points"
+    );
+}
+
+/// A clean tree has to read as clean, or every caller that warns about
+/// uncommitted work would cry wolf on every run.
+#[test]
+fn uncommitted_files_is_zero_on_a_clean_tree() {
+    let fixture = conflicting_repo();
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    assert_eq!(
+        repo.uncommitted_files().expect("count uncommitted files"),
+        0,
+        "a freshly committed fixture should have nothing uncommitted"
+    );
+}
+
+/// "Uncommitted" means everything a replay would not carry with it, so all
+/// three flavours count: what is staged, what is only in the working tree, and
+/// what git is not tracking at all.
+#[test]
+fn uncommitted_files_counts_staged_unstaged_and_untracked_work() {
+    let fixture = TestRepo::init();
+    fixture.commit_files(
+        &[
+            ("staged.txt", "committed\n"),
+            ("unstaged.txt", "committed\n"),
+        ],
+        "base",
+    );
+
+    std::fs::write(fixture.path().join("staged.txt"), "staged edit\n").expect("edit a file");
+    fixture.git(&["add", "staged.txt"]);
+    std::fs::write(fixture.path().join("unstaged.txt"), "unstaged edit\n").expect("edit a file");
+    std::fs::write(fixture.path().join("untracked.txt"), "brand new\n").expect("write a new file");
+
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    assert_eq!(
+        repo.uncommitted_files().expect("count uncommitted files"),
+        3,
+        "staged, unstaged and untracked work should each count"
+    );
+}
+
+/// By default git collapses an untracked directory into a single line, so a
+/// hundred new files would report as one. The count is meant to convey how much
+/// work is sitting outside the commit graph, which makes that a lie worth
+/// spending `--untracked-files=all` to avoid.
+#[test]
+fn uncommitted_files_counts_every_file_inside_an_untracked_directory() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("tracked.txt", "committed\n", "base");
+
+    let untracked = fixture.path().join("untracked-dir");
+    std::fs::create_dir(&untracked).expect("create an untracked directory");
+    std::fs::write(untracked.join("one.txt"), "one\n").expect("write a new file");
+    std::fs::write(untracked.join("two.txt"), "two\n").expect("write a new file");
+
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    assert_eq!(
+        repo.uncommitted_files().expect("count uncommitted files"),
+        2,
+        "an untracked directory should count its files, not itself"
     );
 }
