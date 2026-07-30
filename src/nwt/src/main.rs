@@ -1066,6 +1066,19 @@ struct EnvCopySummary {
     kept: usize,
 }
 
+/// Builds the user-facing line announcing a destination `.env` that was left alone.
+///
+/// SCAFFOLDING (red step): the wording still claims the destination was "generated in
+/// worktree", which presumes a post-checkout hook. The skip fires for *any* pre-existing
+/// destination — including a file `git worktree add` itself checked out — so the claim is
+/// not implemented as the tests demand yet.
+fn kept_existing_message(relative_path: &Path) -> String {
+    format!(
+        "Kept existing: {} (generated in worktree; not overwritten from main worktree)",
+        relative_path.display()
+    )
+}
+
 /// Reports a destination `.env` that already existed and was deliberately left alone.
 ///
 /// Both the pre-flight existence check and the lost-the-race `AlreadyExists` path funnel
@@ -1073,10 +1086,7 @@ struct EnvCopySummary {
 /// are the same outcome, and the wording lives in exactly one place.
 fn report_kept_existing(relative_path: &Path, quiet: bool) {
     if !quiet {
-        eprintln!(
-            "Kept existing: {} (generated in worktree; not overwritten from main worktree)",
-            relative_path.display()
-        );
+        eprintln!("{}", kept_existing_message(relative_path));
     }
 }
 
@@ -3656,6 +3666,21 @@ mod tests {
                 summary,
                 EnvCopySummary { copied: 0, kept: 1 },
                 "A skipped destination must count as kept, never as copied"
+            );
+        }
+
+        /// The skip fires for *any* pre-existing destination, not just one a
+        /// post-checkout hook generated. A `.env.local` that is untracked in the main
+        /// worktree but committed on the branch being checked out is placed there by
+        /// `git worktree add` itself, and the line must not tell the user that file was
+        /// "generated in worktree". The per-file line states the observed fact — the file
+        /// was already there — and leaves the hook rationale to the README and --help.
+        #[test]
+        fn test_kept_existing_message_does_not_claim_the_file_was_generated_in_the_worktree() {
+            assert_eq!(
+                kept_existing_message(Path::new(".env.local")),
+                "Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)",
+                "The kept-existing line must report only that the destination already existed, not why"
             );
         }
 
