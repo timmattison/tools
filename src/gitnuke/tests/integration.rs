@@ -71,6 +71,7 @@ fn combined(output: &Output) -> String {
 /// contract callers script against, so the test has to state the numbers
 /// independently. A copy that followed `mod exit_codes` around would pin nothing.
 mod exit_codes {
+    pub const SUCCESS: i32 = 0;
     pub const NOT_IN_REPO: i32 = 1;
     pub const GIT_COMMAND_ERROR: i32 = 2;
     pub const WORKTREE_NOT_FOUND: i32 = 3;
@@ -1116,6 +1117,39 @@ fn nukes_every_target_it_can_and_reports_the_ones_it_cannot() {
     assert!(
         message.contains("no-such-thing"),
         "the unresolvable target should be reported: {message}"
+    );
+}
+
+/// Naming the same target twice is one instruction, not two. The first pass
+/// nukes the worktree and the second finds nothing left to match, so a run that
+/// took the list verbatim would report "no worktree matches 'dup'" and exit 3 —
+/// an error about its own success, on a tool people script around exit codes.
+#[test]
+fn nukes_a_repeated_target_once_and_still_succeeds() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("dup-wt", "dup");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["dup", "dup"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::SUCCESS,
+        "a repeated target is one nuke, not a nuke followed by a failure",
+    );
+    assert!(!worktree.exists(), "worktree directory should be gone");
+    assert!(
+        !worktree_registered(&main, &worktree),
+        "git should no longer track the worktree: {message}"
+    );
+    assert!(
+        !branch_exists(&main, "dup"),
+        "branch 'dup' should be deleted: {message}"
+    );
+    assert!(
+        !message.contains("no worktree matches"),
+        "the second mention must not be reported as a miss: {message}"
     );
 }
 
