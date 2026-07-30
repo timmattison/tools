@@ -3782,6 +3782,61 @@ mod tests {
             );
         }
 
+        /// Pins the dangling-symlink case: a broken symlink at the destination must
+        /// never be written THROUGH, which would create the symlink's target and fill
+        /// it with the main worktree's secrets at whatever arbitrary path it names.
+        ///
+        /// Two independent layers prevent this, and this test pins their conjunction —
+        /// at least one must always survive:
+        ///
+        /// 1. The pre-flight `symlink_metadata()` guard in [`copy_untracked_env_files`].
+        ///    `exists()` follows symlinks and reports *false* for a broken one, so a
+        ///    guard written that way falls through; `symlink_metadata()` answers "is
+        ///    there anything at this path", which is what the guard actually means.
+        /// 2. `create_new(true)` in [`copy_env_file`]. `O_CREAT | O_EXCL` refuses to
+        ///    follow a symlink at all, dangling or not, and fails with `EEXIST`.
+        ///
+        /// Verified by mutation, all four combinations: degrading *either* layer alone
+        /// still passes (the other catches it), and degrading *both* — `exists()` plus
+        /// `create(true)` — fails on the first assertion below. So this test cannot be
+        /// satisfied vacuously, but it also will not fail on a single-layer regression;
+        /// the redundancy is deliberate defense in depth, not an accident.
+        #[cfg(unix)]
+        #[test]
+        fn test_dangling_symlink_dest_is_never_written_through() {
+            use std::os::unix::fs::symlink;
+
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+            // The symlink's target lives in its own TempDir, so a concurrent copy of
+            // this test can never race us over the same "must not exist" path.
+            let target_dir = TempDir::new().expect("Failed to create temp dir");
+            let target_path = target_dir.path().join("write-through-victim.env");
+
+            create_file(source.path(), ".env", "SECRET=from-main");
+            let dest_path = dest.path().join(".env");
+            symlink(&target_path, &dest_path).expect("Failed to create dangling symlink");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                !target_path.exists(),
+                "Nothing may be created at a dangling symlink's target — writing through it would leak the main worktree's secrets to an arbitrary path"
+            );
+            assert!(
+                fs::symlink_metadata(&dest_path)
+                    .expect("The destination symlink must still be there")
+                    .file_type()
+                    .is_symlink(),
+                "The destination must still be the untouched symlink, not a regular file that replaced it"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary { copied: 0, kept: 1 },
+                "A dangling symlink at the destination must count as kept, never as copied"
+            );
+        }
+
         /// Pins the atomicity claim: the destination is created exclusively, so a
         /// file that appears between the skip check and the open is never clobbered.
         #[test]
