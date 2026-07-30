@@ -1,24 +1,29 @@
 //! Zero the Hero - locate files whose contents are nothing but zero bytes.
 //!
-//! The headline entry point is [`file_is_all_zeroes`], which answers the
-//! question for a single file while reading as few bytes as it can get away
-//! with: it stops at the first non-zero byte instead of hashing or reading the
-//! whole file.
+//! [`find_all_zero_files`] is the whole tool in one call: point it at a path and
+//! it walks the tree, reads every file it finds, and hands back the absolute,
+//! sorted paths of the ones that are non-empty and entirely zeroes. Discovery
+//! and reading overlap, every I/O error is silently skipped, and a
+//! [`ScanProgress`] observer sees the running totals as they change.
+//!
+//! [`file_is_all_zeroes`] answers the same question for a single file. It stops
+//! at the first non-zero byte rather than reading or hashing the whole file.
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! use zth::file_is_all_zeroes;
 //! use std::path::Path;
+//! use zth::{find_all_zero_files, Jobs, NoProgress};
 //!
-//! if file_is_all_zeroes(Path::new("sparse.img"))? {
-//!     println!("nothing but zeroes");
+//! for path in find_all_zero_files(Path::new("/data"), Jobs::default(), &NoProgress) {
+//!     println!("{}", path.display());
 //! }
 //! ```
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
+use std::num::NonZeroUsize;
+use std::path::{Path, PathBuf};
 
 /// Size of the buffer each read fills before the block is tested for zeroes.
 ///
@@ -104,11 +109,99 @@ fn file_is_all_zeroes_with_buffer(path: &Path, buffer: &mut [u8]) -> io::Result<
     reader_is_all_zeroes(&mut file, buffer)
 }
 
+/// How many files are read concurrently. Always at least one.
+///
+/// Scanning is dominated by waiting on the storage device, so the useful range
+/// runs well past the core count on network or spinning-rust volumes and sits
+/// near it on NVMe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Jobs(NonZeroUsize);
+
+impl Jobs {
+    /// Builds a worker count, clamping `count` up to one.
+    ///
+    /// Zero workers would mean nothing ever reads the discovered files, so it is
+    /// treated as a request for the minimum rather than as an error.
+    #[must_use]
+    pub fn new(count: usize) -> Self {
+        let _ = count;
+        Self(NonZeroUsize::MIN)
+    }
+
+    /// The machine's available parallelism, or one when it cannot be determined.
+    #[must_use]
+    pub fn available_parallelism() -> Self {
+        Self(NonZeroUsize::MIN)
+    }
+
+    /// The number of workers, guaranteed non-zero.
+    #[must_use]
+    pub fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl Default for Jobs {
+    /// Defaults to [`Jobs::available_parallelism`].
+    fn default() -> Self {
+        Self::available_parallelism()
+    }
+}
+
+/// Receives running totals while [`find_all_zero_files`] works.
+///
+/// Both methods are called from the scan's own threads, from any of them, and
+/// often - once per file. Implementations must be cheap and must not block.
+pub trait ScanProgress: Sync {
+    /// Called once per file the directory walk turns up, with the running total
+    /// of files discovered so far.
+    ///
+    /// This total is the scan's denominator, and it keeps growing while the walk
+    /// is still running.
+    fn files_discovered(&self, total: u64);
+
+    /// Called once per file a worker finishes with - whether it matched, did not
+    /// match, or could not be read - with the running total of files scanned.
+    ///
+    /// This total is the scan's numerator, and it always ends up equal to the
+    /// final discovered total.
+    fn files_scanned(&self, total: u64);
+}
+
+/// A [`ScanProgress`] that discards every update, for callers with nothing to
+/// display.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoProgress;
+
+impl ScanProgress for NoProgress {
+    fn files_discovered(&self, _total: u64) {}
+    fn files_scanned(&self, _total: u64) {}
+}
+
+/// Recursively finds every file under `root` that is non-empty and contains
+/// nothing but zero bytes, returning their absolute paths in sorted order.
+///
+/// One thread walks the tree while `jobs` workers read the files it turns up, so
+/// discovery keeps running - and `progress` keeps hearing about it - while the
+/// reads are still in flight. `root` may name a file rather than a directory,
+/// in which case only that file is scanned.
+///
+/// Symlinks are never followed: the tree could otherwise escape `root` entirely,
+/// or lead a worker into an endless read of something like `/dev/zero`.
+///
+/// Every I/O error - an unreadable directory, a vanished file, a permission
+/// denial, a missing `root` - is silently skipped. Nothing is printed, and the
+/// scan carries on.
+#[must_use]
+pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress) -> Vec<PathBuf> {
+    let _ = (root, jobs, progress);
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::path::PathBuf;
     use tempfile::TempDir;
 
     /// Writes `contents` to a uniquely-named file inside a fresh temp dir.
@@ -203,6 +296,31 @@ mod tests {
     fn multi_byte_file_name_is_handled() {
         let (_dir, path) = file_named("日本語-🎉-café.bin", &[0_u8; 64]);
         assert!(scan(&path), "non-ASCII file names are ordinary paths");
+    }
+
+    #[test]
+    fn jobs_preserves_the_requested_worker_count() {
+        assert_eq!(Jobs::new(7).get(), 7, "a requested worker count is honored");
+    }
+
+    #[test]
+    fn jobs_clamps_zero_workers_up_to_one() {
+        assert_eq!(
+            Jobs::new(0).get(),
+            1,
+            "zero workers would leave discovered files unread"
+        );
+    }
+
+    #[test]
+    fn jobs_defaults_to_available_parallelism() {
+        let expected = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZeroUsize::get);
+        assert_eq!(
+            Jobs::default().get(),
+            expected,
+            "the default should use every core the machine reports"
+        );
     }
 
     #[test]
