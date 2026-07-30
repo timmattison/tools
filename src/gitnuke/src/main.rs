@@ -582,13 +582,20 @@ fn worktree_git_dir(worktree: &WorktreePath) -> Option<PathBuf> {
         .output()
         .ok()?;
 
-    output.status.success().then(|| {
-        PathBuf::from(
-            String::from_utf8_lossy(&output.stdout)
-                .trim_end_matches('\n')
-                .to_string(),
-        )
-    })
+    output
+        .status
+        .success()
+        .then(|| parse_absolute_git_dir(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Reads the path out of `git rev-parse --absolute-git-dir` stdout.
+///
+/// Split out from the command that produces it so the trimming is testable
+/// without a repository on disk: everything downstream compares this path
+/// against the filesystem (`git_dir.join("modules").is_dir()`), where one stray
+/// terminator character silently turns a hit into a miss.
+fn parse_absolute_git_dir(stdout: &str) -> PathBuf {
+    PathBuf::from(stdout.trim_end_matches('\n'))
 }
 
 /// A failure to nuke one target: the message to print and the exit code to use.
@@ -1176,6 +1183,39 @@ branch refs/heads/loud
     #[test]
     fn empty_gitlink_output_yields_nothing() {
         assert!(parse_gitlink_paths("").is_empty());
+    }
+
+    #[test]
+    fn reads_the_git_dir_path_whatever_terminates_the_line() {
+        // git's own output ends in LF, but a CRLF one has to yield the same
+        // path: the result is joined with "modules" and asked whether that is a
+        // directory, and a path ending in a stray \r answers no to everything.
+        assert_eq!(
+            parse_absolute_git_dir("/repo/.git/worktrees/feature\n"),
+            PathBuf::from("/repo/.git/worktrees/feature")
+        );
+        assert_eq!(
+            parse_absolute_git_dir("/repo/.git/worktrees/feature\r\n"),
+            PathBuf::from("/repo/.git/worktrees/feature")
+        );
+        assert_eq!(
+            parse_absolute_git_dir("/repo/.git/worktrees/feature"),
+            PathBuf::from("/repo/.git/worktrees/feature")
+        );
+    }
+
+    #[test]
+    fn keeps_every_character_a_git_dir_path_is_entitled_to() {
+        // Spaces and multi-byte characters are legal in a path, including at the
+        // very end, so only the line terminator may be trimmed.
+        assert_eq!(
+            parse_absolute_git_dir("/repo dir/.git/worktrees/日本語 テスト\n"),
+            PathBuf::from("/repo dir/.git/worktrees/日本語 テスト")
+        );
+        assert_eq!(
+            parse_absolute_git_dir("/repo/.git/worktrees/trailing space \n"),
+            PathBuf::from("/repo/.git/worktrees/trailing space ")
+        );
     }
 
     #[test]
