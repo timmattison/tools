@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
@@ -910,6 +911,25 @@ fn nuke_target(
     }
 }
 
+/// The targets of a run, in the order first given, with repeats collapsed.
+///
+/// Naming a target twice is one instruction: without this, `gitnuke dup dup`
+/// nukes the worktree on the first pass and then reports `no worktree matches
+/// 'dup'` on the second, failing the whole run over its own success.
+///
+/// The comparison is on the literal strings the caller typed. Two *different*
+/// spellings of the same worktree — a path and the branch it has checked out —
+/// are still two targets here, and the second one still reports a miss once the
+/// first has removed it.
+fn distinct_targets(targets: &[String]) -> Vec<&str> {
+    let mut seen = HashSet::new();
+    targets
+        .iter()
+        .map(String::as_str)
+        .filter(|target| seen.insert(*target))
+        .collect()
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -923,7 +943,7 @@ fn main() {
 
     // The worktree list is re-read per target because nuking one invalidates it.
     let mut first_error: Option<i32> = None;
-    for target in &cli.targets {
+    for target in distinct_targets(&cli.targets) {
         if let Err(error) = nuke_target(&repo_root, target, cwd.as_deref(), options) {
             eprintln!("{} {}", "gitnuke:".red().bold(), error.message);
             first_error.get_or_insert(error.code);
@@ -1243,6 +1263,19 @@ branch refs/heads/loud
         };
         assert!(metadata_only.blocks_removal());
         assert_eq!(metadata_only.describe(), "submodule metadata");
+    }
+
+    #[test]
+    fn collapses_repeats_and_keeps_the_order_they_were_first_given() {
+        let targets: Vec<String> = ["second", "first", "second", "third", "first"]
+            .iter()
+            .map(|target| (*target).to_string())
+            .collect();
+
+        // Order is the contract, not just the set: the run reports each target
+        // as it goes and exits with the *first* failure's code.
+        assert_eq!(distinct_targets(&targets), vec!["second", "first", "third"]);
+        assert_eq!(distinct_targets(&[]), Vec::<&str>::new());
     }
 
     #[test]
