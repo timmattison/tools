@@ -339,7 +339,11 @@ struct Scratch {
     #[expect(dead_code, reason = "held only so the TempDir is removed on drop")]
     dir: TempDir,
     worktree: PathBuf,
-    hooks: PathBuf,
+    /// Validated once in [`Scratch::create`] so every `Git` built from it can
+    /// have the path infallibly. An empty `core.hooksPath` is not "hooks off" -
+    /// git still resolves hook lookups against it - so a path that cannot be
+    /// spelled for git has to fail the run, not degrade into one.
+    hooks: String,
 }
 
 impl Scratch {
@@ -347,8 +351,12 @@ impl Scratch {
     fn create(repo: &Path, base: &str) -> Result<Self> {
         let dir = TempDir::new().context("could not create a scratch directory")?;
         let worktree = dir.path().join("worktree");
-        let hooks = dir.path().join("hooks");
-        std::fs::create_dir(&hooks).context("could not create the empty hooks directory")?;
+        let hooks_dir = dir.path().join("hooks");
+        std::fs::create_dir(&hooks_dir).context("could not create the empty hooks directory")?;
+        let hooks = hooks_dir
+            .to_str()
+            .context("scratch hooks path is not valid UTF-8")?
+            .to_owned();
 
         let scratch = Self {
             repo: repo.to_path_buf(),
@@ -379,18 +387,14 @@ impl Scratch {
             .context("scratch worktree path is not valid UTF-8")
     }
 
-    fn hooks_arg(&self) -> &str {
-        self.hooks.to_str().unwrap_or("")
-    }
-
     /// A runner rooted in the real repository.
     fn repo_git(&self) -> Git {
-        Git::new(&self.repo, self.hooks_arg())
+        Git::new(&self.repo, self.hooks.as_str())
     }
 
     /// A runner rooted in the scratch worktree.
     fn git(&self) -> Git {
-        Git::new(&self.worktree, self.hooks_arg())
+        Git::new(&self.worktree, self.hooks.as_str())
     }
 }
 
