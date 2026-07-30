@@ -57,9 +57,17 @@ impl RepoHandle {
     /// Wrap an opened repository, rejecting one gsw can't render.
     ///
     /// Bare repos have no work tree; gsw renders a per-file working-tree view,
-    /// so there's nothing to show. Treat them like "not a repo". Shared by the
-    /// initial discovery and by [`reopened`](Self::reopened) so both apply the
-    /// same admission rule.
+    /// so there's nothing to show. Treat them like "not a repo".
+    ///
+    /// This is the discovery path only. [`reopened`](Self::reopened) admits a
+    /// repository by the same rule — the repository must have a work tree — but
+    /// states it inline instead of calling here, because a re-open keeps the
+    /// work-tree root captured at discovery and has no use for the `PathBuf`
+    /// this builds. That is a weaker guarantee than one shared code path: the
+    /// two could drift. What keeps them honest is that the rule is a single
+    /// `workdir()` call on each side, small enough to compare at a glance, and
+    /// that changing it here without changing it there would leave a handle
+    /// whose `workdir` field no longer describes what a re-open will accept.
     fn from_repo(repo: gix::Repository) -> Option<Self> {
         let workdir = repo.workdir()?.to_path_buf();
         Some(Self { repo, workdir })
@@ -90,7 +98,11 @@ impl RepoHandle {
     /// A failed re-open, or one that comes back without a work tree, keeps the
     /// handle already in hand: a monitor that blanks out for one tick because
     /// it caught git mid-write is worse than a monitor that repaints one
-    /// tick-old configuration and recovers on the next call.
+    /// tick-old configuration and recovers on the next call. The work-tree
+    /// check is written out here rather than borrowed from
+    /// [`from_repo`](Self::from_repo): only the repository is being replaced,
+    /// and building a second work-tree root just to drop it would suggest the
+    /// captured one gets refreshed, which is exactly what this must not do.
     ///
     /// That "never a blank screen" property is **not** delivered here alone —
     /// this fallback only guarantees a usable *handle*. Reading a repository
@@ -103,8 +115,11 @@ impl RepoHandle {
     /// ends watch mode outright, which is precisely the bug this pairing was
     /// written to close.
     pub fn reopened(&mut self) -> &gix::Repository {
-        if let Some(fresh) = gix::open(&self.workdir).ok().and_then(Self::from_repo) {
-            self.repo = fresh.repo;
+        if let Some(fresh) = gix::open(&self.workdir)
+            .ok()
+            .filter(|repo| repo.workdir().is_some())
+        {
+            self.repo = fresh;
         }
         &self.repo
     }
