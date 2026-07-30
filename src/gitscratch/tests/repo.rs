@@ -46,3 +46,39 @@ fn open_succeeds_inside_a_repository_and_reports_where_it_was_opened() {
         "a Repo should report the directory it was opened at"
     );
 }
+
+/// The defect this whole type exists to kill: a mistyped branch name used to
+/// come back as "you have conflicts" because a failed rebase and a bad argument
+/// were indistinguishable. Resolving up front turns that into an error, and the
+/// error is only actionable if it repeats the name that did not resolve.
+#[test]
+fn resolve_rejects_an_unresolvable_revision_and_names_it() {
+    let fixture = conflicting_repo();
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let error = repo
+        .resolve("mian")
+        .expect_err("'mian' is not a branch in the fixture");
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("mian"),
+        "the error should name the revision that did not resolve: {message}"
+    );
+}
+
+/// Resolving is what lets a caller compare candidates and detect a no-op before
+/// building anything, so it has to agree with git about where a branch points.
+#[test]
+fn resolve_returns_the_commit_a_branch_points_at() {
+    let fixture = conflicting_repo();
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    let resolved = repo.resolve("left").expect("resolve an existing branch");
+
+    assert_eq!(
+        resolved,
+        fixture.rev_parse("left"),
+        "resolve should agree with git about where 'left' points"
+    );
+}
