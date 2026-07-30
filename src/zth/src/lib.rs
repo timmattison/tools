@@ -16,6 +16,7 @@
 //! }
 //! ```
 
+use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -25,6 +26,58 @@ use std::path::Path;
 /// the memory comparison, and small enough that a worker's buffer stays inside
 /// a typical L2 cache.
 const READ_BUFFER_LEN: usize = 256 * 1024;
+
+/// A block of zero bytes that freshly-read data is compared against.
+///
+/// Comparing two byte slices lowers to `memcmp`, which is both vectorized and
+/// early-exiting on every platform we care about - far faster than a per-byte
+/// loop, and without the `unsafe` a hand-rolled word-at-a-time scan would need.
+/// Lives in `.bss`, so it costs address space rather than binary size.
+static ZERO_BLOCK: [u8; READ_BUFFER_LEN] = [0; READ_BUFFER_LEN];
+
+/// Returns `true` when every byte of `bytes` is zero.
+///
+/// An empty slice is vacuously all zeroes; callers that care about emptiness
+/// (as [`file_is_all_zeroes`] does) must track it themselves.
+fn slice_is_all_zeroes(bytes: &[u8]) -> bool {
+    // chunks() never yields more than ZERO_BLOCK.len() bytes, so the get() below
+    // always succeeds; it is written fallibly to keep the function panic-free
+    // regardless of what a future caller passes in.
+    bytes.chunks(ZERO_BLOCK.len()).all(|chunk| {
+        ZERO_BLOCK
+            .get(..chunk.len())
+            .is_some_and(|zeroes| chunk == zeroes)
+    })
+}
+
+/// Reads `reader` to exhaustion, reporting whether it yielded at least one byte
+/// and every byte it yielded was zero.
+///
+/// Returns as soon as a non-zero byte is seen. `buffer` is caller-owned so a
+/// worker scanning thousands of files can reuse one allocation.
+fn reader_is_all_zeroes(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<bool> {
+    let mut saw_bytes = false;
+
+    loop {
+        let filled = match reader.read(buffer) {
+            Ok(0) => break,
+            Ok(filled) => filled,
+            // A signal arriving mid-read is not a failure of the file.
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+
+        saw_bytes = true;
+
+        // Only the bytes this read actually filled are meaningful; the tail of
+        // the buffer still holds the previous read's data.
+        if !slice_is_all_zeroes(&buffer[..filled]) {
+            return Ok(false);
+        }
+    }
+
+    Ok(saw_bytes)
+}
 
 /// Returns `true` when `path` names a file that is both non-empty and made up
 /// entirely of zero bytes.
@@ -38,8 +91,17 @@ const READ_BUFFER_LEN: usize = 256 * 1024;
 /// Returns any [`io::Error`] raised while opening or reading the file - it does
 /// not exist, it is a directory, permissions deny the read, and so on.
 pub fn file_is_all_zeroes(path: &Path) -> io::Result<bool> {
-    let _ = path;
-    Ok(false)
+    let mut buffer = vec![0_u8; READ_BUFFER_LEN];
+    file_is_all_zeroes_with_buffer(path, &mut buffer)
+}
+
+/// [`file_is_all_zeroes`] against a caller-supplied scratch buffer.
+///
+/// The scanning workers hold one buffer for their entire lifetime, so the read
+/// path never allocates per file.
+fn file_is_all_zeroes_with_buffer(path: &Path, buffer: &mut [u8]) -> io::Result<bool> {
+    let mut file = File::open(path)?;
+    reader_is_all_zeroes(&mut file, buffer)
 }
 
 #[cfg(test)]
