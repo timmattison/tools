@@ -29,7 +29,7 @@ use tempfile::TempDir;
 
 use crate::git::Git;
 use crate::metrics::{BranchName, Files, Hunks, OrderingScore, Stops};
-use crate::plan::permutations;
+use crate::plan::{ordering_count, permutations};
 use crate::rank::rank;
 
 /// Upper bound on rebase resolution rounds per branch, so a git state we failed
@@ -42,6 +42,42 @@ pub const MAX_BRANCHES: usize = 6;
 
 /// Notified as each branch is replayed, so a long run is not silent.
 type ProgressListener = Box<dyn Fn(&str)>;
+
+/// Check that `branches` is a list grist will simulate, and report how many
+/// orderings doing so means replaying.
+///
+/// [`Simulator::evaluate`] applies this itself, so nothing has to validate on
+/// its way in. It is public because announcing the size of a run is the other
+/// thing a caller wants that count for, and deriving it independently is how the
+/// count and the limit drift apart - or overflow. The limit is tested before any
+/// count is derived, so a branch list too long to have a countable number of
+/// orderings is refused by its length alone.
+///
+/// # Errors
+///
+/// Returns an error if `branches` is empty, repeats a branch, or is longer than
+/// [`MAX_BRANCHES`].
+pub fn orderings_to_simulate(branches: &[BranchName]) -> Result<usize> {
+    anyhow::ensure!(!branches.is_empty(), "no branches to order");
+    anyhow::ensure!(
+        branches.len() <= MAX_BRANCHES,
+        "{} branches is more than grist's limit of {MAX_BRANCHES}",
+        branches.len(),
+    );
+
+    let distinct: BTreeSet<_> = branches.iter().collect();
+    anyhow::ensure!(
+        distinct.len() == branches.len(),
+        "each branch may only be listed once"
+    );
+
+    ordering_count(branches.len()).with_context(|| {
+        format!(
+            "{} branches has more orderings than grist can count",
+            branches.len()
+        )
+    })
+}
 
 /// Measures what a candidate ordering would cost to carry out for real.
 pub struct Simulator {
@@ -120,19 +156,7 @@ impl Simulator {
     /// Returns an error if the branch list is empty, repeats a branch, is
     /// longer than [`MAX_BRANCHES`], or if any simulation fails.
     pub fn evaluate(&self, branches: &[BranchName]) -> Result<Vec<OrderingScore>> {
-        anyhow::ensure!(!branches.is_empty(), "no branches to order");
-        anyhow::ensure!(
-            branches.len() <= MAX_BRANCHES,
-            "{} branches means {} orderings to simulate; grist stops at {MAX_BRANCHES}",
-            branches.len(),
-            (1..=branches.len()).product::<usize>(),
-        );
-
-        let distinct: BTreeSet<_> = branches.iter().collect();
-        anyhow::ensure!(
-            distinct.len() == branches.len(),
-            "each branch may only be listed once"
-        );
+        orderings_to_simulate(branches)?;
 
         let scratch = Scratch::create(&self.repo, &self.base)?;
         let base_commit = scratch.git().rev_parse(&self.base)?;

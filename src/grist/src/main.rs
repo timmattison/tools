@@ -7,7 +7,7 @@ use buildinfo::version_string;
 use clap::Parser;
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, ContentArrangement, Table};
-use grist::{BranchName, OrderingScore, Simulator};
+use grist::{orderings_to_simulate, BranchName, OrderingScore, Simulator};
 
 /// Rank the orders you could squash-merge branches in, cheapest conflicts first
 #[derive(Parser, Debug)]
@@ -34,7 +34,10 @@ fn main() -> Result<()> {
 
     let mut simulator = Simulator::new(&repo, &args.onto);
     if !args.quiet {
-        let orderings: usize = (1..=branches.len()).product();
+        // Ask the library what the run costs before announcing one: it is the
+        // same check `evaluate` makes, so a list grist will not simulate is
+        // turned away here rather than advertised and then refused.
+        let orderings = orderings_to_simulate(&branches)?;
         eprintln!(
             "Simulating {orderings} ordering{} of {} branches onto {}...",
             if orderings == 1 { "" } else { "s" },

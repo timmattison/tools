@@ -14,5 +14,6 @@ pub mod rank;
 pub mod simulate;
 
 pub use metrics::{BranchName, Files, Hunks, OrderingScore, Stops};
+pub use plan::ordering_count;
 pub use rank::rank;
-pub use simulate::Simulator;
+pub use simulate::{orderings_to_simulate, Simulator, MAX_BRANCHES};
