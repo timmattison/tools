@@ -2651,6 +2651,157 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_absorbs_a_failed_walk_and_keeps_the_last_good_frame() {
+        // A walk can fail for reasons that have nothing to do with the user:
+        // `git gc` swapping the ref store out from under us, a worktree being
+        // pruned, `.git` momentarily renamed by a tool. `RepoHandle::reopened`
+        // already degrades to the handle in hand rather than blanking the
+        // screen — but that fallback only matters if the loop survives the
+        // *status walk* failing too. So a failed collect must not end watch
+        // mode; it must re-render the LAST GOOD snapshot, and it must render it
+        // at its TRUE age: `collected_at` may not advance for a collection that
+        // never happened, or the monitor would show a stale repo with every
+        // file age reset to "just now" — lying about freshness precisely when
+        // it is least fresh. With the cache collected at `base` and the clock
+        // 50 s later, the render hook must see the cached snapshot and a 50 s
+        // offset, and the loop must return `Ok`.
+        let base = Instant::now();
+        let clock_at = base + Duration::from_secs(50);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue fs change");
+        drop(tx);
+
+        let mut cache = seeded_cache(base);
+        cache.snapshot.branch = "last-good".to_string();
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut rendered: Vec<(String, Duration)> = Vec::new();
+        let result = event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            cache,
+            None, // decay timer off: isolate the failed walk from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    // The exact shape `collect_snapshot` produces when the ref
+                    // store has gone missing mid-walk.
+                    Err(anyhow::anyhow!(
+                        "status iter: The reference 'HEAD' did not exist"
+                    ))
+                },
+                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                    rendered.push((snap.branch.clone(), offset));
+                    frame("last good frame")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || clock_at,
+                next_tick: timer_off,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "a failed walk must be absorbed, not propagated out of watch mode: {result:?}",
+        );
+        assert_eq!(collects, 1, "the failed walk still ran exactly once");
+        assert_eq!(
+            rendered.len(),
+            1,
+            "a failed walk must still produce a frame — the screen never blanks",
+        );
+        assert_eq!(
+            rendered[0].0, "last-good",
+            "the frame after a failed walk must come from the CACHED snapshot",
+        );
+        assert_eq!(
+            rendered[0].1,
+            Duration::from_secs(50),
+            "a failed walk must not advance collected_at: the cached snapshot has \
+             to keep aging truthfully (now - collected_at = 50s), not reset to 0",
+        );
+        assert_eq!(displayed, "last good frame");
+    }
+
+    #[test]
+    fn event_loop_keeps_throttling_when_every_walk_fails() {
+        // Absorbing a failed walk must not turn the loop into a hot spin. A
+        // repository that is unreadable for a while (mid-`gc`, mid-checkout)
+        // will fail *every* walk, and each failure still costs a real status
+        // traversal — so the failure path has to feed the throttle exactly like
+        // the success path does, or a deleted repo would burn a core retrying.
+        //
+        // Same shape as `event_loop_throttles_walks_after_an_idle_change`, but
+        // every collect fails: three FS changes across the cooldown boundary
+        // must still collapse to exactly TWO walks. The first walk costs
+        // D = 10 ms, arming a 100·D = 1 s cooldown; the change at base + 100 ms
+        // lands mid-cooldown and is deferred; the change at base + 2 s is past
+        // expiry and walks. The injected clock is a short clamped sequence, so
+        // the test never sleeps and stays deterministic.
+        let base = Instant::now();
+        let times = [
+            base,                              // first (failing) walk start
+            base + Duration::from_millis(10),  // first walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_millis(100), // second change: mid-cooldown → deferred
+            base + Duration::from_secs(2), // third change: past expiry → walks; trailing reads clamp here
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue first change");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut changes_sent = 1_usize;
+        let result = event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            None, // decay timer off: isolate the throttle from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Err(anyhow::anyhow!("status platform: repository is gone"))
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    // Deliver the next change in its own iteration so the three
+                    // never coalesce; quit once all three have been processed.
+                    if changes_sent < 3 {
+                        changes_sent += 1;
+                        let _ = tx.send(Event::FsChanged);
+                    } else {
+                        let _ = tx.send(Event::Quit);
+                    }
+                    frame(&format!("frame {changes_sent}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: timer_off,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "failing walks must keep the loop alive: {result:?}",
+        );
+        assert_eq!(
+            collects, 2,
+            "a failing walk must arm the cooldown exactly like a successful one: \
+             three FS changes across the boundary walk twice, not three times",
+        );
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
