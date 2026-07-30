@@ -35,8 +35,10 @@ const GITLINK_MODE_PREFIX: &str = "160000 ";
 ///
 /// That position is the *only* thing distinguishing the main worktree from the
 /// linked ones in the porcelain output — there is no `main` attribute line — so
-/// both rules that need to know about it read it from here rather than
-/// re-deriving it: the "cd somewhere else" hint, and the refusal to nuke it.
+/// the refusal to nuke it reads the position from here rather than re-deriving
+/// it. The "cd somewhere else" hint leans on the same ordering without naming
+/// it: [`somewhere_else`] takes the first worktree that is *not* the target,
+/// which is this one in every case except the one where this one is the target.
 const MAIN_WORKTREE_INDEX: usize = 0;
 
 /// Remove a git worktree and force-delete its branch.
@@ -852,6 +854,25 @@ fn not_found_message(worktrees: &[Worktree], target: &str) -> String {
     message
 }
 
+/// A worktree to send a stranded caller to, given the one they are standing in.
+///
+/// The main worktree is the natural answer — it outlives every removal gitnuke
+/// can perform — and simply taking the first worktree git lists picks it. But
+/// the main worktree is also a legal target, and standing inside it while naming
+/// it is precisely when this hint fires, so "first entry" on its own answers
+/// "cd somewhere else, for example: here". Skipping the target is what keeps the
+/// advice advice; the main worktree still wins every other time, because it is
+/// still first.
+///
+/// A repo with nothing but its main worktree has nowhere to offer, and says so
+/// by offering nothing rather than by offering the target back.
+fn somewhere_else(worktrees: &[Worktree], target: usize) -> Option<&WorktreePath> {
+    worktrees
+        .iter()
+        .enumerate()
+        .find_map(|(index, worktree)| (index != target).then_some(&worktree.path))
+}
+
 /// Whether `cwd` is the worktree at `worktree`, or somewhere beneath it.
 ///
 /// Both sides are canonicalized so `..` segments, trailing slashes, and
@@ -888,9 +909,8 @@ fn nuke_target(
             // --force does not change that: it overrides git's refusals, not
             // the caller's shell.
             if cwd_is_inside(cwd, &worktree.path) {
-                let elsewhere = worktrees
-                    .get(MAIN_WORKTREE_INDEX)
-                    .map_or_else(String::new, |main| format!(" (for example {})", main.path));
+                let elsewhere = somewhere_else(&worktrees, idx)
+                    .map_or_else(String::new, |path| format!(" (for example {path})"));
                 return Err(NukeError::new(
                     exit_codes::INSIDE_TARGET,
                     format!(
