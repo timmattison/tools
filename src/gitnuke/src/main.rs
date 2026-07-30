@@ -33,6 +33,8 @@ enum ExitCode {
     BranchNotDeleted = 7,
     /// The worktree is locked, which `--force` deliberately does not override.
     LockedWorktree = 8,
+    /// The worktree holds modified or untracked files and `--force` was absent.
+    DirtyWorktree = 9,
 }
 
 impl ExitCode {
@@ -79,6 +81,7 @@ const MAIN_WORKTREE_INDEX: usize = 0;
 /// - 6: The shell is standing inside the target worktree
 /// - 7: The worktree was removed but its branch could not be deleted
 /// - 8: The worktree is locked, which `--force` does not override
+/// - 9: The worktree contains modified or untracked files and `--force` was not given
 #[derive(Parser)]
 #[command(verbatim_doc_comment)]
 #[command(name = "gitnuke")]
@@ -685,6 +688,25 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
         ));
     }
 
+    // Below the submodule gate on purpose: a worktree that trips both is told
+    // about the submodules, because a submodule checkout can hold commits and
+    // untracked files that exist nowhere else and `--force` would take them all.
+    // Above the dry-run branch, like every gate before it, because the two paths
+    // owe the same verdict — and stated here rather than left to `git worktree
+    // remove` for the same reason the submodule gate is: gitnuke already knows
+    // the answer, so relaying git's locale-dependent `fatal:` under the generic
+    // "a git command failed" code would only make its two runs disagree.
+    if !options.force && has_uncommitted_changes(&worktree.path) {
+        return Err(NukeError::new(
+            ExitCode::DirtyWorktree,
+            format!(
+                "{} contains modified or untracked files — nuking it discards work \
+                 that exists nowhere else.\n  Re-run with --force to nuke it anyway.",
+                worktree.path
+            ),
+        ));
+    }
+
     if options.dry_run {
         preflight(repo_root, worktree, options)?;
         return report_plan(worktree, &submodules, options);
@@ -747,24 +769,16 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 /// the authority on whether they will refuse, and letting them answer is what
 /// keeps their own wording and their own edge cases. A dry run invokes neither,
 /// so without a stand-in it reports "would remove" for targets git is going to
-/// turn away — a false all-clear on a tool whose whole job is destruction. The
-/// main-worktree, lock, and submodule gates are the caller's, since they refuse
-/// both paths before either reaches this point.
+/// turn away — a false all-clear on a tool whose whole job is destruction.
+///
+/// Only the branch is left to stand in for. The main-worktree, lock, submodule
+/// and dirty-worktree gates are the caller's, since gitnuke raises those itself
+/// on both paths before either reaches this point — which is what leaves one
+/// message and one exit code per refusal instead of a dry-run copy to drift.
 ///
 /// The exit codes match the real refusals deliberately: `gitnuke -n x` failing
 /// has to mean `gitnuke x` fails the same way, or the preflight is decoration.
 fn preflight(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(), NukeError> {
-    if !options.force && has_uncommitted_changes(&worktree.path) {
-        return Err(NukeError::new(
-            ExitCode::GitCommandError,
-            format!(
-                "could not remove worktree {}: it contains modified or untracked \
-                 files.\n  Re-run with --force to discard them.",
-                worktree.path
-            ),
-        ));
-    }
-
     // A detached worktree has no branch, so there is nothing to be unmerged.
     if options.safe {
         if let Some(branch) = &worktree.branch {

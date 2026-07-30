@@ -1363,6 +1363,23 @@ and untracked files that exist nowhere else, and removing the worktree deletes t
 One `--force` covers both of the refusals gitnuke overrides — submodules checked out and
 uncommitted changes in the worktree itself.
 
+### Worktrees with uncommitted changes
+
+git's other refusal, and gitnuke raises it the same way it raises the submodule one — on its
+own terms, before `git worktree remove` is ever reached:
+
+```text
+gitnuke: /code/repo-worktrees/issue-42 contains modified or untracked files — nuking it
+discards work that exists nowhere else.
+  Re-run with --force to nuke it anyway.
+```
+
+Untracked files count, ignored files do not — the same question `git worktree remove` asks.
+This is exit code `9`, and `--dry-run` reports it with the identical message: one gate serves
+both runs, so they cannot drift. A worktree that has *both* submodules and uncommitted
+changes reports the submodule refusal (`5`), because a submodule checkout is the more
+consequential thing `--force` would take with it.
+
 ### Locked worktrees
 
 git has a third refusal, and `--force` is not the answer to it. A worktree you locked with
@@ -1395,6 +1412,10 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
   refusal produces.
 - **Never a branch whose removal git refused.** The branch is deleted only once the worktree
   is actually gone.
+- **Uncommitted work is gitnuke's own refusal.** Submodules and uncommitted changes are both
+  diagnosed by gitnuke before `git worktree remove` is invoked, so each gets a message that
+  names what is in the way and an exit code of its own (`5` and `9`) rather than git's
+  locale-dependent `fatal:` under the generic `2`.
 - **A lock is honoured, not overridden.** A worktree locked with `git worktree lock` is
   refused even with `--force`, quoting the lock reason if git recorded one and handing back
   the `git worktree unlock` command to run.
@@ -1423,6 +1444,7 @@ out when the lock has none. This is exit code `8`, and `--dry-run` reports it to
 - `6`: The shell is standing inside the target worktree
 - `7`: The worktree was removed but its branch could not be deleted
 - `8`: The worktree is locked, which `--force` does not override
+- `9`: The worktree contains modified or untracked files and `--force` was not given
 
 ### Replacing the shell functions
 
