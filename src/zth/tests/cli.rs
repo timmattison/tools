@@ -8,9 +8,19 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
+
+/// Matches in the closed-pipe fixture. Chosen with [`PIPE_NAME_PADDING`] so the
+/// printed list runs to a few hundred kilobytes - several times a pipe's 64 KiB
+/// buffer - which is what makes the closed read end break a write rather than
+/// letting the whole list slip into the kernel and the test pass by accident.
+const PIPE_FIXTURE_MATCHES: u32 = 1_200;
+
+/// Padding characters in each closed-pipe fixture name. Long names buy output
+/// bytes far more cheaply than more files do.
+const PIPE_NAME_PADDING: usize = 100;
 
 /// Writes `contents` to `dir/name`, creating any parent directories.
 fn write(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
@@ -184,6 +194,63 @@ fn unreadable_files_produce_no_error_output() {
         as_lines(&[&readable]),
         "the readable match should still be reported around the failures"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_stdout_write_is_reported_through_the_exit_status() {
+    let (_dir, root) = fixture();
+    write(&root, "zero.bin", &[0_u8; 64]);
+
+    // A descriptor opened read-only, handed to the child as stdout: every write
+    // fails with `EBADF`, an I/O error that is emphatically not a broken pipe.
+    let read_only = fs::File::open("/dev/null").expect("opening /dev/null should succeed");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_zth"))
+        .arg(root.as_os_str())
+        .stdout(Stdio::from(read_only))
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawning zth should succeed");
+
+    assert!(
+        !output.status.success(),
+        "a list that could not be written must not exit like a complete run, got {:?}",
+        output.status
+    );
+    assert_silent(&output);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reader_that_stops_early_still_exits_zero() {
+    let (_dir, root) = fixture();
+    let padding = "x".repeat(PIPE_NAME_PADDING);
+    for index in 0..PIPE_FIXTURE_MATCHES {
+        write(&root, &format!("zero-{index:04}-{padding}.bin"), &[0_u8; 1]);
+    }
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_zth"))
+        .arg(root.as_os_str())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawning zth should succeed");
+
+    // Closing the read end is the `zth /data | head` case: the writes fail with
+    // `EPIPE`, which says the caller had seen enough, not that anything broke.
+    drop(child.stdout.take());
+
+    let output = child
+        .wait_with_output()
+        .expect("waiting for zth should succeed");
+
+    assert!(
+        output.status.success(),
+        "a caller that stops reading must not turn the run into a failure, got {:?}",
+        output.status
+    );
+    assert_silent(&output);
 }
 
 #[test]
