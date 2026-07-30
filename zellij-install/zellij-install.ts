@@ -83,6 +83,10 @@ export function shellsOutToPs(binaryStrings: string): boolean {
   return binaryStrings.includes(PS_DISCOVERY_MARKER);
 }
 
+export function remoteForRef(_ref: string): string | null {
+  return null;
+}
+
 /**
  * Extracts the running zellij *servers* from `ps -Ao pid=,user=,args=` output.
  *

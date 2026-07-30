@@ -6,6 +6,7 @@ import {
   asPid,
   classifyServers,
   parseZellijServers,
+  remoteForRef,
   shellsOutToPs,
 } from "./zellij-install.ts";
 
@@ -78,6 +79,22 @@ describe("parseZellijServers", () => {
 
   it("returns nothing for empty input", () => {
     assert.deepEqual(parseZellijServers("   \n\n"), []);
+  });
+});
+
+describe("remoteForRef", () => {
+  it("derives the remote from a remote-tracking ref", () => {
+    assert.equal(remoteForRef("upstream/main"), "upstream");
+    assert.equal(remoteForRef("origin/main"), "origin");
+  });
+
+  it("keeps only the first segment when the branch name has slashes", () => {
+    assert.equal(remoteForRef("upstream/feature/nested"), "upstream");
+  });
+
+  it("returns null for a purely local ref, which has no remote to fetch", () => {
+    assert.equal(remoteForRef("main"), null);
+    assert.equal(remoteForRef("v0.44.3"), null);
   });
 });
 
