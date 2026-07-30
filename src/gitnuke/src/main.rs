@@ -23,6 +23,8 @@ mod exit_codes {
     pub const INSIDE_TARGET: i32 = 6;
     /// The worktree was removed but its branch could not be deleted.
     pub const BRANCH_NOT_DELETED: i32 = 7;
+    /// The worktree is locked, which `--force` deliberately does not override.
+    pub const LOCKED_WORKTREE: i32 = 8;
 }
 
 /// The index mode git records for a submodule (gitlink) entry.
@@ -51,6 +53,7 @@ const GITLINK_MODE_PREFIX: &str = "160000 ";
 /// - 5: The worktree contains submodules and `--force` was not given
 /// - 6: The shell is standing inside the target worktree
 /// - 7: The worktree was removed but its branch could not be deleted
+/// - 8: The worktree is locked, which `--force` does not override
 #[derive(Parser)]
 #[command(verbatim_doc_comment)]
 #[command(name = "gitnuke")]
@@ -61,12 +64,16 @@ struct Cli {
     #[arg(required = true)]
     targets: Vec<String>,
 
-    /// Nuke the worktree even if git would refuse to remove it.
+    /// Nuke the worktree despite submodules or uncommitted changes.
     ///
-    /// Required for a worktree containing submodules, which git otherwise
-    /// refuses outright, and for one holding uncommitted changes. Both cases
+    /// Those are the two refusals it covers: a worktree containing submodules,
+    /// which git refuses outright, and one holding uncommitted changes. Both
     /// discard work that exists nowhere else — including anything uncommitted
     /// or unpushed inside the submodule checkouts.
+    ///
+    /// It does not cover a *locked* worktree. A lock is a deliberate "leave
+    /// this alone" marker, so gitnuke refuses one on its own terms and tells
+    /// you how to unlock it.
     #[arg(short = 'f', long, verbatim_doc_comment)]
     force: bool,
 
@@ -174,6 +181,40 @@ impl fmt::Display for WorktreePath {
     }
 }
 
+/// Whether git has a worktree locked, and why.
+///
+/// A lock is git's third refusal, alongside submodules and uncommitted changes,
+/// and the only one a single `--force` does not buy through: `git worktree
+/// remove --force` on a locked worktree still fails and asks for `remove -f -f`.
+/// gitnuke does not escalate — a lock is set by hand and means "leave this
+/// alone" — so this type exists to let it say so before it touches anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum LockState {
+    /// Nothing lock-related stands between this worktree and its removal.
+    #[default]
+    Unlocked,
+    /// git will refuse to remove this worktree, for `reason` if it recorded one.
+    Locked {
+        /// The text passed to `git worktree lock --reason`, if any.
+        reason: Option<String>,
+    },
+}
+
+impl LockState {
+    /// The lock's recorded reason, or None when locked without one.
+    fn reason(&self) -> Option<&str> {
+        match self {
+            LockState::Unlocked => None,
+            LockState::Locked { reason } => reason.as_deref(),
+        }
+    }
+
+    /// Whether git would refuse to remove the worktree over this lock.
+    fn blocks_removal(&self) -> bool {
+        matches!(self, LockState::Locked { .. })
+    }
+}
+
 /// Represents a single git worktree.
 #[derive(Debug, Clone)]
 struct Worktree {
@@ -181,6 +222,8 @@ struct Worktree {
     path: WorktreePath,
     /// The branch checked out here, or None for detached HEAD.
     branch: Option<BranchName>,
+    /// Whether git has this worktree locked.
+    lock: LockState,
 }
 
 /// Parses the output of `git worktree list --porcelain`.
@@ -194,14 +237,19 @@ struct Worktree {
 /// worktree /path/to/worktree
 /// HEAD def456...
 /// detached
+/// locked waiting on review
 /// ```
 ///
-/// For a detached HEAD the `branch` line is absent. The main worktree is always
-/// the first block, and the order here is preserved so callers can rely on it.
+/// For a detached HEAD the `branch` line is absent. The `locked` line is absent
+/// unless the worktree is locked, and carries a reason only when one was
+/// recorded. Attribute lines may appear in any order within a block. The main
+/// worktree is always the first block, and the order here is preserved so
+/// callers can rely on it.
 fn parse_worktree_list(output: &str) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
     let mut current_path: Option<WorktreePath> = None;
     let mut current_branch: Option<BranchName> = None;
+    let mut current_lock = LockState::Unlocked;
 
     for line in output.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
@@ -210,24 +258,97 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
                 worktrees.push(Worktree {
                     path,
                     branch: current_branch.take(),
+                    lock: std::mem::take(&mut current_lock),
                 });
             }
             current_path = Some(WorktreePath::new(path));
         } else if let Some(branch) = line.strip_prefix("branch ") {
             // BranchName::from_ref owns the `refs/heads/` stripping.
             current_branch = Some(BranchName::from_ref(branch));
+        } else if let Some(lock) = parse_locked_line(line) {
+            current_lock = lock;
         }
-        // Ignore HEAD/bare/detached/locked/prunable lines.
+        // Ignore HEAD/bare/detached/prunable lines.
     }
 
     if let Some(path) = current_path {
         worktrees.push(Worktree {
             path,
             branch: current_branch,
+            lock: current_lock,
         });
     }
 
     worktrees
+}
+
+/// Reads a porcelain `locked` line, or None if this line is not one.
+///
+/// The grammar has two forms: a bare `locked`, meaning locked with no reason
+/// recorded, and `locked <reason>`. Requiring the separating space keeps any
+/// future attribute that merely starts with those letters from being read as a
+/// lock, and an all-whitespace reason is treated as none at all — which is what
+/// `git worktree lock --reason ""` records.
+fn parse_locked_line(line: &str) -> Option<LockState> {
+    let rest = line.strip_prefix("locked")?;
+    if !rest.is_empty() && !rest.starts_with(' ') {
+        return None;
+    }
+
+    let reason = rest.trim();
+    Some(LockState::Locked {
+        reason: (!reason.is_empty())
+            .then(|| unquote_c_style(reason).unwrap_or_else(|| reason.to_string())),
+    })
+}
+
+/// Decodes the C-style quoted form git uses for values it cannot print raw.
+///
+/// A lock reason is printed verbatim while it is plain ASCII, and wrapped in
+/// double quotes with backslash escapes — octal for every non-ASCII byte — as
+/// soon as it is not. Leaving that encoded would report
+/// `"\343\203\254\343\203\223..."` back to the person who typed
+/// `レビュー待ち`. Anything that is not a well-formed quoted string yields None,
+/// so the caller can fall back to the text as git printed it.
+///
+/// Bytes are collected and decoded as UTF-8 only at the end: one multi-byte
+/// character arrives as several separate octal escapes, so decoding per escape
+/// would mangle it.
+fn unquote_c_style(value: &str) -> Option<String> {
+    let inner = value.strip_prefix('"')?.strip_suffix('"')?;
+    let mut bytes: Vec<u8> = Vec::with_capacity(inner.len());
+    let mut chars = inner.chars();
+
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            let mut buffer = [0_u8; 4];
+            bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+            continue;
+        }
+
+        match chars.next()? {
+            'a' => bytes.push(0x07),
+            'b' => bytes.push(0x08),
+            'f' => bytes.push(0x0c),
+            'n' => bytes.push(b'\n'),
+            'r' => bytes.push(b'\r'),
+            't' => bytes.push(b'\t'),
+            'v' => bytes.push(0x0b),
+            '"' => bytes.push(b'"'),
+            '\\' => bytes.push(b'\\'),
+            // Octal escapes are always exactly three digits.
+            first @ '0'..='7' => {
+                let mut value = first.to_digit(8)?;
+                for _ in 0..2 {
+                    value = value * 8 + chars.next()?.to_digit(8)?;
+                }
+                bytes.push(u8::try_from(value).ok()?);
+            }
+            _ => return None,
+        }
+    }
+
+    Some(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// Lists the worktrees of the repository containing `repo_root`.
@@ -490,6 +611,27 @@ impl NukeError {
 /// The branch is only deleted once the removal has actually succeeded, so a
 /// refused removal never leaves the branch destroyed and the worktree standing.
 fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(), NukeError> {
+    // Before the submodule gate, because a lock is the refusal --force cannot
+    // clear: reporting the overridable problem first would send the caller off
+    // to re-run with a flag that then hits this anyway. Ahead of the dry-run
+    // branch for the same reason the submodule gate is — both paths owe the
+    // same verdict.
+    if worktree.lock.blocks_removal() {
+        let reason = worktree
+            .lock
+            .reason()
+            .map_or_else(String::new, |reason| format!(" ({reason})"));
+        return Err(NukeError::new(
+            exit_codes::LOCKED_WORKTREE,
+            format!(
+                "{path} is locked{reason} — git refuses to remove a locked \
+                 worktree even with --force.\n  Unlock it first: git worktree \
+                 unlock {path}",
+                path = worktree.path,
+            ),
+        ));
+    }
+
     let submodules = find_submodules(&worktree.path);
     if submodules.blocks_removal() && !options.force {
         return Err(NukeError::new(
@@ -512,8 +654,10 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 
     let mut args = vec!["worktree", "remove"];
     if options.force {
-        // One --force is enough for both of git's refusals: submodules present
-        // and uncommitted changes. (Verified against git 2.55.)
+        // One --force is enough for the two of git's refusals gitnuke overrides:
+        // submodules present and uncommitted changes. (Verified against git
+        // 2.55.) The third — a locked worktree, which would need `-f -f` — was
+        // refused above rather than escalated to.
         args.push("--force");
     }
 
@@ -566,7 +710,8 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 /// keeps their own wording and their own edge cases. A dry run invokes neither,
 /// so without a stand-in it reports "would remove" for targets git is going to
 /// turn away — a false all-clear on a tool whose whole job is destruction. The
-/// submodule gate is the caller's, since it applies to both paths.
+/// lock and submodule gates are the caller's, since they refuse both paths
+/// before either reaches this point.
 ///
 /// The exit codes match the real refusals deliberately: `gitnuke -n x` failing
 /// has to mean `gitnuke x` fails the same way, or the preflight is decoration.
@@ -786,6 +931,7 @@ mod tests {
         Worktree {
             path: WorktreePath::new(path),
             branch: branch.map(BranchName::from_ref),
+            lock: LockState::Unlocked,
         }
     }
 
@@ -824,6 +970,106 @@ detached
 
         assert_eq!(worktrees.len(), 1);
         assert_eq!(branch_of(&worktrees[0]), Some("main"));
+    }
+
+    #[test]
+    fn records_the_lock_state_of_each_block() {
+        // A bare `locked` line, a `locked <reason>` line, and no line at all —
+        // the three states a block can be in. The lock is deliberately not the
+        // last line of its block: it may appear in any position.
+        let output = "\
+worktree /repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /wt/no-reason
+locked
+HEAD def456
+branch refs/heads/quiet
+
+worktree /wt/with-reason
+HEAD 789abc
+locked waiting on review
+branch refs/heads/loud
+";
+        let worktrees = parse_worktree_list(output);
+
+        assert_eq!(worktrees.len(), 3);
+        assert_eq!(worktrees[0].lock, LockState::Unlocked);
+        assert!(!worktrees[0].lock.blocks_removal());
+        assert_eq!(worktrees[1].lock, LockState::Locked { reason: None });
+        assert!(worktrees[1].lock.blocks_removal());
+        assert_eq!(worktrees[1].lock.reason(), None);
+        assert_eq!(worktrees[2].lock.reason(), Some("waiting on review"));
+        // The lock must not swallow the rest of its block.
+        assert_eq!(branch_of(&worktrees[1]), Some("quiet"));
+        assert_eq!(branch_of(&worktrees[2]), Some("loud"));
+    }
+
+    #[test]
+    fn records_a_lock_in_the_final_block_without_a_trailing_blank_line() {
+        let worktrees = parse_worktree_list("worktree /wt/x\nHEAD abc\nlocked");
+
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].lock, LockState::Locked { reason: None });
+    }
+
+    #[test]
+    fn reads_the_two_forms_of_the_porcelain_locked_line() {
+        assert_eq!(
+            parse_locked_line("locked"),
+            Some(LockState::Locked { reason: None })
+        );
+        assert_eq!(
+            parse_locked_line("locked mid-bisect, do not touch"),
+            Some(LockState::Locked {
+                reason: Some("mid-bisect, do not touch".to_string()),
+            })
+        );
+        // `git worktree lock --reason ""` records an empty reason, which is no
+        // reason at all rather than a reason that renders as "()".
+        assert_eq!(
+            parse_locked_line("locked   "),
+            Some(LockState::Locked { reason: None })
+        );
+
+        // Lines that merely start with the same letters are not locks.
+        assert_eq!(parse_locked_line("lockedby someone"), None);
+        assert_eq!(parse_locked_line("detached"), None);
+        assert_eq!(parse_locked_line(""), None);
+    }
+
+    #[test]
+    fn decodes_the_c_quoted_form_git_uses_for_awkward_lock_reasons() {
+        // Non-ASCII arrives as one octal escape per *byte*, so the decode has to
+        // reassemble the character rather than decode escape by escape.
+        assert_eq!(
+            parse_locked_line(
+                r#"locked "\343\203\254\343\203\223\343\203\245\343\203\274\345\276\205\343\201\241 \360\237\216\211""#
+            ),
+            Some(LockState::Locked {
+                reason: Some("レビュー待ち 🎉".to_string()),
+            })
+        );
+        assert_eq!(
+            unquote_c_style(r#""line one\nline two""#),
+            Some("line one\nline two".to_string())
+        );
+        assert_eq!(
+            unquote_c_style(r#""a \"quoted\" \\ backslash""#),
+            Some("a \"quoted\" \\ backslash".to_string())
+        );
+
+        // Not a quoted string, or a malformed one: the caller keeps git's text.
+        assert_eq!(unquote_c_style("plain reason"), None);
+        assert_eq!(unquote_c_style(r#""unterminated escape \"#), None);
+        assert_eq!(unquote_c_style(r#""short octal \34""#), None);
+        assert_eq!(
+            parse_locked_line(r#"locked "unterminated"#),
+            Some(LockState::Locked {
+                reason: Some(r#""unterminated"#.to_string()),
+            })
+        );
     }
 
     #[test]

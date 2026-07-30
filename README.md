@@ -1360,8 +1360,24 @@ worktree with submodules checked out.
 
 `--force` is required because that warning is literal: a submodule checkout can hold commits
 and untracked files that exist nowhere else, and removing the worktree deletes them silently.
-One `--force` covers both of git's refusals — submodules checked out and uncommitted changes
-in the worktree itself.
+One `--force` covers both of the refusals gitnuke overrides — submodules checked out and
+uncommitted changes in the worktree itself.
+
+### Locked worktrees
+
+git has a third refusal, and `--force` is not the answer to it. A worktree you locked with
+`git worktree lock` is declined even by `git worktree remove --force`, which asks for
+`remove -f -f` instead. A lock is a deliberate "leave this alone" marker you set by hand, so
+gitnuke honours it rather than escalating, and says so before it touches anything:
+
+```text
+gitnuke: /code/repo-worktrees/issue-42 is locked (mid-bisect, do not touch) — git refuses to
+remove a locked worktree even with --force.
+  Unlock it first: git worktree unlock /code/repo-worktrees/issue-42
+```
+
+The reason in parentheses is whatever you passed to `git worktree lock --reason`; it is left
+out when the lock has none. This is exit code `8`, and `--dry-run` reports it too.
 
 ### Safety rails
 
@@ -1372,14 +1388,18 @@ in the worktree itself.
   standing in (or any parent of it) and names somewhere else to `cd` to first. It is a
   binary, not a shell function, so it cannot move your shell out of a directory it deletes.
 - **Never the main worktree**, and never a branch whose removal git refused.
+- **A lock is honoured, not overridden.** A worktree locked with `git worktree lock` is
+  refused even with `--force`, quoting the lock reason if git recorded one and handing back
+  the `git worktree unlock` command to run.
 - **`--dry-run` is a real preflight.** It runs every check a real run runs — submodules,
   uncommitted changes, and under `--safe` whether the branch is merged — and exits with the
   same status that run would, so `gitnuke -n x` failing means `gitnuke x` would fail too.
 
 ### Options
 
-- `-f, --force`: Nuke the worktree even if git would refuse — submodules checked out, or
-  uncommitted changes
+- `-f, --force`: Nuke the worktree despite the two refusals it overrides — submodules checked
+  out, or uncommitted changes. It does not override a locked worktree; that is refused
+  separately, with instructions to unlock it
 - `-s, --safe`: Keep the branch unless it is fully merged (`git branch -d` semantics instead
   of the default force-delete). Only affects the branch; the worktree is still removed
 - `-n, --dry-run`: Report what would happen without removing or deleting anything
@@ -1395,6 +1415,7 @@ in the worktree itself.
 - `5`: The worktree contains submodules and `--force` was not given
 - `6`: The shell is standing inside the target worktree
 - `7`: The worktree was removed but its branch could not be deleted
+- `8`: The worktree is locked, which `--force` does not override
 
 ### Replacing the shell functions
 
