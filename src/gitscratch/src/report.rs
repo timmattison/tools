@@ -17,6 +17,8 @@
 //! [`Report::without_stops`] - a merge halts exactly once, so printing the
 //! number would be noise.
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::metrics::Hunks;
 use crate::scratch::Conflicts;
 
@@ -83,10 +85,14 @@ impl<'a> Report<'a> {
             return format!("{}: clean - {} hit no conflicts", self.tool, self.action);
         }
 
-        let indent = " ".repeat(self.tool.chars().count() + LABEL_SEPARATOR_WIDTH);
+        // Everything below is padded in display width, never in bytes or
+        // characters. A path can be any of the three lengths at once - a CJK
+        // name is one character and three bytes per glyph but two terminal
+        // columns - and only the third is what a reader sees line up.
+        let indent = " ".repeat(self.tool.width() + LABEL_SEPARATOR_WIDTH);
         let widest = conflicts
             .file_hunks()
-            .map(|(name, _)| name.chars().count())
+            .map(|(name, _)| name.width())
             .max()
             .unwrap_or_default();
 
@@ -108,7 +114,7 @@ impl<'a> Report<'a> {
         ];
 
         for (name, hunks) in conflicts.file_hunks() {
-            let gap = " ".repeat(widest.saturating_sub(name.chars().count()) + COUNT_GAP);
+            let gap = " ".repeat(widest.saturating_sub(name.width()) + COUNT_GAP);
             lines.push(format!(
                 "{FILE_INDENT}{name}{gap}{}",
                 Hunks::new(hunks).phrase()
