@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, ExitStatus, Stdio};
 use std::thread;
@@ -1023,6 +1023,20 @@ struct EnvCopySummary {
     kept: usize,
 }
 
+/// Copies a single `.env` file from `source` to `dest`.
+///
+/// SCAFFOLDING (red step): this still delegates to [`fs::copy`], which overwrites an
+/// existing destination and stamps the source's permission bits onto it. The behavior
+/// the tests demand — creating the destination exclusively, at mode 0600 — is not
+/// implemented yet.
+///
+/// # Errors
+///
+/// Returns any I/O error encountered while copying.
+fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
+    fs::copy(source, dest).map(|_| ())
+}
+
 /// Copies untracked .env files from the main worktree to the new worktree.
 ///
 /// This function:
@@ -1119,7 +1133,7 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
         }
 
         // Copy the file
-        match fs::copy(file_path, &dest_path) {
+        match copy_env_file(file_path, &dest_path) {
             Ok(_) => {
                 summary.copied += 1;
                 if !quiet {
@@ -3238,6 +3252,25 @@ mod tests {
             fs::write(&path, content).expect("Failed to write file");
         }
 
+        /// Helper to read a file's permission bits (Unix only).
+        #[cfg(unix)]
+        fn mode_of(path: &Path) -> u32 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(path)
+                .expect("file should exist")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        /// Helper to chmod a file during test setup (Unix only).
+        #[cfg(unix)]
+        fn set_mode(path: &Path, mode: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .expect("Failed to set permissions");
+        }
+
         /// Helper to check if a file exists and has expected content.
         fn file_has_content(dir: &Path, name: &str, expected: &str) -> bool {
             let path = dir.join(name);
@@ -3576,6 +3609,105 @@ mod tests {
                 summary,
                 EnvCopySummary { copied: 1, kept: 1 },
                 "Copy and keep must be accounted separately in a single pass"
+            );
+        }
+
+        /// A `.env` holds secrets, so the copy in the new worktree must be owner-only
+        /// regardless of how loose the main worktree's permissions are.
+        #[cfg(unix)]
+        #[test]
+        fn test_copied_env_file_lands_at_0600() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "SECRET=value");
+            // A world-readable source is the whole point: fs::copy would propagate
+            // these bits into every worktree.
+            set_mode(&source.path().join(".env"), 0o644);
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert_eq!(
+                mode_of(&dest.path().join(".env")),
+                0o600,
+                "Copied .env must land at 0600 even when the source is 0644"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "SECRET=value"),
+                "Hardening the mode must not break the copy itself"
+            );
+        }
+
+        /// The parent-directory-creating path must harden the mode too.
+        #[cfg(unix)]
+        #[test]
+        fn test_copied_nested_env_file_lands_at_0600() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "packages/api/.env", "NESTED=secret");
+            set_mode(&source.path().join("packages/api/.env"), 0o644);
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert_eq!(
+                mode_of(&dest.path().join("packages/api/.env")),
+                0o600,
+                "Nested .env must also land at 0600"
+            );
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "NESTED=secret"),
+                "Nested .env content must still be copied"
+            );
+        }
+
+        /// Regression guard: the skip-existing path must never re-introduce the
+        /// permission downgrade by touching a destination it decided to keep.
+        #[cfg(unix)]
+        #[test]
+        fn test_existing_dest_env_keeps_its_own_mode() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "MAIN=from-main");
+            set_mode(&source.path().join(".env"), 0o644);
+            create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
+            set_mode(&dest.path().join(".env"), 0o600);
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert_eq!(
+                mode_of(&dest.path().join(".env")),
+                0o600,
+                "A kept .env must keep its own 0600 mode, not inherit the source's 0644"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "WORKTREE=generated-by-hook"),
+                "A kept .env must keep its own content"
+            );
+        }
+
+        /// Pins the atomicity claim: the destination is created exclusively, so a
+        /// file that appears between the skip check and the open is never clobbered.
+        #[test]
+        fn test_copy_env_file_refuses_to_overwrite_existing_dest() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "MAIN=from-main");
+            create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
+
+            let result = copy_env_file(&source.path().join(".env"), &dest.path().join(".env"));
+
+            let error = result.expect_err("copy_env_file must refuse an existing destination");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists,
+                "Refusal must be reported as AlreadyExists so callers can treat it as a keep"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "WORKTREE=generated-by-hook"),
+                "The refused destination must be left byte-for-byte intact"
             );
         }
 
