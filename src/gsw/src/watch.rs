@@ -143,7 +143,7 @@ impl LiveIgnore {
     /// Build the matcher from the repository's ignore sources as they are on
     /// disk right now. See [`build_ignore_matcher`] for which sources those are.
     pub(crate) fn new(repo: &gix::Repository) -> Self {
-        Self::from(build_ignore_matcher(repo))
+        Self(Arc::new(RwLock::new(build_ignore_matcher(repo))))
     }
 
     /// Re-read the repository's ignore sources so a rule added or removed since
@@ -200,11 +200,26 @@ impl LiveIgnore {
     }
 }
 
+#[cfg(test)]
 impl From<Gitignore> for LiveIgnore {
-    /// Share an already-built matcher. Production always goes through
-    /// [`LiveIgnore::new`]; this is the seam the [`should_react`] unit tests use
-    /// to hand in a matcher assembled from raw gitignore lines instead of from a
-    /// repository on disk.
+    /// Share an already-built matcher — **in test builds only**, and the
+    /// `#[cfg(test)]` above is load-bearing rather than tidiness.
+    ///
+    /// A [`LiveIgnore`] built from a bare [`Gitignore`] is one nobody refreshes.
+    /// It is assembled from a glob set the caller already had in hand, with no
+    /// repository behind it to re-read, so it is frozen at whatever those globs
+    /// said the moment it was handed over — the exact staleness this type was
+    /// introduced to prevent, wearing the type that promises the opposite. Left
+    /// ungated, that construction is reachable from anywhere in the crate, and
+    /// the liveness invariant degrades from something the compiler holds into
+    /// something a future caller is trusted to remember.
+    ///
+    /// Gating it leaves [`LiveIgnore::new`] as the only entrance that survives
+    /// into a production build, and `new` reads from a repository — so every
+    /// `LiveIgnore` that ships is one [`refresh`](LiveIgnore::refresh) can keep
+    /// current. Under `cfg(test)` the impl remains what it always was: the seam
+    /// the pure [`should_react`] tests use to hand in a matcher assembled from
+    /// raw gitignore lines instead of from a repository on disk.
     fn from(matcher: Gitignore) -> Self {
         Self(Arc::new(RwLock::new(matcher)))
     }
