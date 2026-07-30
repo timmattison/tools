@@ -26,6 +26,7 @@
 use std::fs::File;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
+use std::panic::resume_unwind;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
@@ -346,6 +347,11 @@ impl Default for Jobs {
 /// away the estimate it has been building. Calls to the two methods still
 /// interleave freely with each other, since discovery and scanning run at the
 /// same time.
+///
+/// An implementation that panics aborts the scan: whichever of the scan's
+/// threads the panic fires in, [`find_all_zero_files`] re-raises it to its
+/// caller rather than returning the matches the surviving threads happened to
+/// collect. A result that is quietly missing files is worse than no result.
 pub trait ScanProgress: Sync {
     /// Called once per file the directory walk turns up, with the running total
     /// of files discovered so far.
@@ -386,6 +392,15 @@ impl ScanProgress for NoProgress {
 /// Every I/O error - an unreadable directory, a vanished file, a permission
 /// denial, a missing `root` - is silently skipped. Nothing is printed, and the
 /// scan carries on.
+///
+/// # Panics
+///
+/// Panics if `progress` panics. The scan's own threads are the ones calling it,
+/// so a panicking observer is re-raised here - with its original message and
+/// location - once the remaining threads have wound down. The alternative is
+/// returning whatever the surviving threads collected, and since the return
+/// type is a bare `Vec` the caller could not tell that apart from a complete
+/// answer. Which thread the observer panicked in makes no difference to this.
 #[must_use]
 pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress) -> Vec<PathBuf> {
     // Resolving the root once is what makes every result absolute: walkdir hands
@@ -407,7 +422,7 @@ pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress)
     let mut found = thread::scope(|scope| {
         let walk_root = &root;
 
-        scope.spawn(move || {
+        let walker = scope.spawn(move || {
             // Dropping this sender at the end of the walk is what tells the
             // workers there is nothing left to come, so it is moved in here.
             let sender = sender;
@@ -472,11 +487,27 @@ pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress)
         // otherwise keep the channel alive for no reason.
         drop(receiver);
 
-        workers
-            .into_iter()
-            .filter_map(|worker| worker.join().ok())
-            .flatten()
-            .collect::<Vec<_>>()
+        // A panicking observer is carried out of the scan rather than absorbed.
+        // Swallowing a worker's panic would also swallow every match that
+        // worker had accumulated, and this function returns a bare Vec: a
+        // truncated answer is indistinguishable from a complete one, so the
+        // only honest reply to a broken observer is the panic itself. Which
+        // thread it fired in must not change that, so the walker is joined the
+        // same way. Re-raising the original payload keeps the observer's own
+        // message and location intact.
+        //
+        // Doing this from inside the scope is safe: thread::scope catches the
+        // closure's unwind, waits for every thread still running, and only then
+        // re-raises. Nothing here can deadlock waiting on them - the channel is
+        // unbounded, so the walker never blocks on the workers, and no lock is
+        // held across the joins.
+        let mut matches = Vec::new();
+        for worker in workers {
+            matches.extend(worker.join().unwrap_or_else(|panic| resume_unwind(panic)));
+        }
+        walker.join().unwrap_or_else(|panic| resume_unwind(panic));
+
+        matches
     });
 
     found.sort_unstable();
