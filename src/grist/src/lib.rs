@@ -9,6 +9,8 @@
 
 pub mod metrics;
 pub mod rank;
+pub mod simulate;
 
 pub use metrics::{BranchName, Files, Hunks, OrderingScore, Stops};
 pub use rank::rank;
+pub use simulate::Simulator;
