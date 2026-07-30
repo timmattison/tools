@@ -640,6 +640,43 @@ mod tests {
     }
 
     #[test]
+    fn resolve_base_follows_a_base_branch_created_after_the_handle_was_opened() {
+        // `resolve_base` picks the base ref by *resolving* candidates rather
+        // than by reading a config key, so — unlike `upstream_status`, whose
+        // `branch.<name>.remote` lookup is exactly what the per-refresh re-open
+        // exists to un-stale — it was expected to already be immune to a
+        // long-lived handle. Expected is not verified: if gix ever snapshotted
+        // the ref store the way it snapshots `.git/config`, a `main` branch
+        // created mid-watch would leave the header comparing against `master`
+        // forever, silently reporting the wrong ahead/behind counts against a
+        // base the user abandoned. Assert the property on a handle that is
+        // deliberately never re-opened, so the test fails if that immunity
+        // is ever lost rather than being propped up by the re-open.
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["branch", "-m", "main", "master"]);
+
+        // Opened while `master` is the only candidate, and held across the
+        // creation of `main` — no `reopened()` anywhere in this test.
+        let held = RepoHandle::discover(p).expect("fixture is a worktree repo");
+        assert_eq!(
+            super::resolve_base(held.repo()),
+            "master",
+            "with no `main`, the base falls back to `master`",
+        );
+
+        // What `git branch main` (or a fetch that lands one) does mid-watch.
+        git(p, &["branch", "main"]);
+
+        assert_eq!(
+            super::resolve_base(held.repo()),
+            "main",
+            "`main` outranks `master`, and a ref-driven resolve must see one \
+             created after the handle was opened — without re-opening it",
+        );
+    }
+
+    #[test]
     fn base_status_reports_behind_when_base_advances_past_fork_point() {
         // Fork `feature` off main, advance both: feature gets one commit, then
         // main gets one commit. From feature's view the base (main) has moved
