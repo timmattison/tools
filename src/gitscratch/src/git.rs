@@ -129,8 +129,11 @@ impl Git {
             "gc.auto=0",
             "commit.gpgsign=false",
             "gpg.format=openpgp",
-            "user.name=grist",
-            "user.email=grist@localhost",
+            // The identity belongs to this crate, not to whichever tool is
+            // driving it, so every consumer's scratch commits are attributable
+            // to the harness that actually made them.
+            "user.name=gitscratch",
+            "user.email=gitscratch@localhost",
         ]
         .iter()
         .flat_map(|setting| ["-c".to_string(), (*setting).to_string()])
