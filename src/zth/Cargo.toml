@@ -5,6 +5,14 @@ edition.workspace = true
 description = "Zero the Hero - find files that contain nothing but zero bytes"
 license.workspace = true
 
+[lib]
+name = "zth"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zth"
+path = "src/main.rs"
+
 [dependencies]
 crossbeam.workspace = true
 walkdir.workspace = true
