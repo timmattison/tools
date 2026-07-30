@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 /// A git repository, opened for the read-only questions that precede a replay.
+#[derive(Debug)]
 pub struct Repo {
     path: PathBuf,
 }
