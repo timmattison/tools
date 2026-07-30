@@ -76,7 +76,11 @@ fn prints_matching_absolute_paths_to_stdout() {
 
     let output = run(&[&root.to_string_lossy()]);
 
-    assert!(output.status.success(), "zth should exit 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "zth should exit 0, got {:?}",
+        output.status
+    );
     assert_eq!(
         stdout_lines(&output),
         as_lines(&[&top, &nested]),
@@ -111,7 +115,11 @@ fn a_tree_with_no_matches_prints_nothing() {
 
     let output = run(&[&root.to_string_lossy()]);
 
-    assert!(output.status.success(), "zth should exit 0, got {:?}", output.status);
+    assert!(
+        output.status.success(),
+        "zth should exit 0, got {:?}",
+        output.status
+    );
     assert!(
         output.stdout.is_empty(),
         "no file qualifies, so stdout should be empty"
