@@ -194,4 +194,21 @@ mod tests {
   src/main.rs    1 hunk"
         );
     }
+
+    /// The smallest possible conflict is also the most common one, and "1 hunks
+    /// across 1 files, 1 stops" is the tell that nobody looked at the output
+    /// before shipping it.
+    #[test]
+    fn a_single_hunk_in_a_single_file_reads_in_the_singular_throughout() {
+        let report = Report::new("grind", "replaying HEAD onto main");
+        let one = Conflicts::from_files([("src/lib.rs".to_string(), 1)], 1);
+
+        assert_eq!(
+            report.render(&one),
+            r"grind: conflicts - replaying HEAD onto main
+       1 hunk across 1 file, 1 stop
+
+  src/lib.rs    1 hunk"
+        );
+    }
 }
