@@ -1,0 +1,258 @@
+//! A throwaway worktree, and the git operations replayed inside it.
+//!
+//! A [`Scratch`] is a detached worktree of the developer's real repository,
+//! living in a private temporary directory and removing itself on drop. Every
+//! git call made through it goes via [`Git`](crate::Git), so the whole safety
+//! configuration applies to the replay whether the caller remembered it or not.
+//!
+//! # Why markers, and what that means for the numbers
+//!
+//! Conflicts hit during a replay are counted and then resolved by staging the
+//! conflict markers verbatim. Staging markers is the conservative
+//! auto-resolution: unlike `--ours` or `--theirs` it never silently discards a
+//! side. It does mean a later commit touching the same region conflicts again -
+//! but that is faithful to reality, since a human resolution also leaves later
+//! commits conflicting against the resolved state. Treat the totals as a cost
+//! index for comparing candidates measured under identical rules, not as an
+//! exact prediction.
+
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use tempfile::TempDir;
+
+use crate::git::Git;
+use crate::metrics::{Files, Hunks, Stops};
+
+/// Upper bound on rebase resolution rounds per branch, so a git state we failed
+/// to anticipate stalls the run instead of spinning forever.
+const MAX_RESOLUTION_ROUNDS: usize = 1_000;
+
+/// A detached scratch worktree that removes itself.
+pub struct Scratch {
+    repo: PathBuf,
+    /// Never read: held solely so the temporary directory - and everything the
+    /// simulation wrote into it - is removed when the `Scratch` is dropped.
+    #[expect(dead_code, reason = "held only so the TempDir is removed on drop")]
+    dir: TempDir,
+    worktree: PathBuf,
+    /// Validated once in [`Scratch::create`] so every `Git` built from it can
+    /// have the path infallibly. An empty `core.hooksPath` is not "hooks off" -
+    /// git still resolves hook lookups against it - so a path that cannot be
+    /// spelled for git has to fail the run, not degrade into one.
+    hooks: String,
+}
+
+impl Scratch {
+    /// Add a detached worktree at `at` in a private temporary directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the temporary directory cannot be created, if its
+    /// path cannot be spelled for git as UTF-8, or if git refuses to add the
+    /// worktree - most commonly because `repo` is not a repository or `at` does
+    /// not name a commit.
+    pub fn create(repo: &Path, at: &str) -> Result<Self> {
+        let dir = TempDir::new().context("could not create a scratch directory")?;
+        let worktree = dir.path().join("worktree");
+        let hooks_dir = dir.path().join("hooks");
+        std::fs::create_dir(&hooks_dir).context("could not create the empty hooks directory")?;
+        let hooks = hooks_dir
+            .to_str()
+            .context("scratch hooks path is not valid UTF-8")?
+            .to_owned();
+
+        let scratch = Self {
+            repo: repo.to_path_buf(),
+            dir,
+            worktree,
+            hooks,
+        };
+
+        scratch.repo_git().run(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            scratch.worktree_arg()?,
+            at,
+        ])?;
+
+        Ok(scratch)
+    }
+
+    /// Where the scratch worktree is checked out.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.worktree
+    }
+
+    /// A runner rooted in the scratch worktree.
+    #[must_use]
+    pub fn git(&self) -> Git {
+        Git::new(&self.worktree, self.hooks.as_str())
+    }
+
+    /// Rebase the checked-out HEAD onto `onto`, walking the whole rebase and
+    /// auto-resolving conflicts by staging markers verbatim.
+    ///
+    /// Every stop is measured before it is resolved, so the returned
+    /// [`Conflicts`] describes what a human would have had to hand-merge to get
+    /// the same result.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, if the rebase fails
+    /// without leaving a rebase to resolve - an unresolvable ref, unrelated
+    /// histories, a repository in a state the replay cannot enter - or if the
+    /// resolution loop still has not finished after `MAX_RESOLUTION_ROUNDS`
+    /// rounds.
+    pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
+        let git = self.git();
+        let worktree = self.path();
+
+        let mut cost = Conflicts::default();
+        let mut outcome = git.try_run(&["rebase", onto])?;
+
+        for _ in 0..MAX_RESOLUTION_ROUNDS {
+            if !rebase_in_progress(&git, worktree)? {
+                anyhow::ensure!(
+                    outcome.success,
+                    "the rebase failed without leaving a rebase to resolve:\n{}\n{}",
+                    outcome.stdout,
+                    outcome.stderr
+                );
+                return Ok(cost);
+            }
+
+            let conflicted = git.lines(&["diff", "--name-only", "--diff-filter=U"])?;
+
+            if conflicted.is_empty() {
+                // The rebase halted without unmerged paths - typically a commit
+                // that became empty once its changes were already present.
+                // Nothing for a human to resolve, so it costs nothing.
+                outcome = git.try_run(&["rebase", "--skip"])?;
+                continue;
+            }
+
+            cost.stops += 1;
+            for file in conflicted {
+                cost.hunks += count_conflict_hunks(&worktree.join(&file))?;
+                cost.files.insert(file);
+            }
+
+            git.run(&["add", "-A"])?;
+            outcome = git.try_run(&["rebase", "--continue"])?;
+        }
+
+        anyhow::bail!("gave up on the rebase after {MAX_RESOLUTION_ROUNDS} resolution rounds")
+    }
+
+    fn worktree_arg(&self) -> Result<&str> {
+        self.worktree
+            .to_str()
+            .context("scratch worktree path is not valid UTF-8")
+    }
+
+    /// A runner rooted in the real repository.
+    fn repo_git(&self) -> Git {
+        Git::new(&self.repo, self.hooks.as_str())
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // Best effort: the TempDir goes away regardless, but git also keeps
+        // administrative state in the real repo that must be cleaned up.
+        // Removing by path takes both, and it runs while the TempDir is still
+        // alive, so git still sees the worktree it is being asked about.
+        //
+        // Deliberately no `worktree prune` afterwards. Pruning is repo-wide and
+        // immediate: it deletes the administrative state - including any halted
+        // rebase - of every worktree whose directory is merely *missing right
+        // now*, which is the normal condition for a worktree on an unmounted
+        // drive or a sleeping network mount. A dry run must not cost the
+        // developer a worktree. If the removal above ever fails, the leftover
+        // entry is inert, and git's own gc clears it once it ages out.
+        if let Ok(path) = self.worktree_arg() {
+            let _ = self
+                .repo_git()
+                .try_run(&["worktree", "remove", "--force", path]);
+        }
+    }
+}
+
+/// What replaying one operation - or a whole sequence of them - cost.
+#[derive(Debug, Default, Clone)]
+pub struct Conflicts {
+    stops: usize,
+    hunks: usize,
+    files: BTreeSet<String>,
+}
+
+impl Conflicts {
+    /// Fold another step's cost into this running total.
+    pub fn absorb(&mut self, other: Self) {
+        self.stops += other.stops;
+        self.hunks += other.hunks;
+        self.files.extend(other.files);
+    }
+
+    /// How many times the replay halted for manual resolution.
+    #[must_use]
+    pub fn stops(&self) -> Stops {
+        Stops::new(self.stops)
+    }
+
+    /// How many conflict hunks would need hand-merging.
+    #[must_use]
+    pub fn hunks(&self) -> Hunks {
+        Hunks::new(self.hunks)
+    }
+
+    /// How many distinct files conflicted at least once.
+    #[must_use]
+    pub fn files(&self) -> Files {
+        Files::new(self.files.len())
+    }
+
+    /// Which files conflicted, in sorted order.
+    ///
+    /// A caller rendering the result needs the names, not just how many there
+    /// were; [`Conflicts::files`] is the count of exactly this set.
+    #[must_use]
+    pub fn file_names(&self) -> &BTreeSet<String> {
+        &self.files
+    }
+}
+
+/// Whether git is sitting in a halted rebase.
+fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
+    for state_dir in ["rebase-merge", "rebase-apply"] {
+        let path = git.run(&["rev-parse", "--git-path", state_dir])?;
+        if worktree.join(path).exists() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Count the conflict regions a human would have to hand-merge in one file.
+///
+/// Conflicts with no markers at all - binary files, add/add on a blob git will
+/// not diff, delete/modify - still cost one decision each.
+fn count_conflict_hunks(path: &Path) -> Result<usize> {
+    let Ok(contents) = std::fs::read(path) else {
+        // A delete/modify conflict can leave no file on disk; it is still one
+        // decision for the person resolving it.
+        return Ok(1);
+    };
+
+    let markers = contents
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.starts_with(b"<<<<<<<"))
+        .count();
+
+    Ok(markers.max(1))
+}

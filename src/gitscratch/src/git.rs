@@ -1,4 +1,4 @@
-//! The one way `grist` is allowed to invoke git.
+//! The one way a tool in this repository is allowed to invoke git.
 //!
 //! Every simulation runs against the developer's *real* repository, so a stray
 //! git invocation could rewrite branches they care about. All calls funnel

@@ -1,66 +1,11 @@
-//! Newtyped conflict metrics.
+//! What one candidate ordering costs, in newtyped conflict metrics.
 //!
-//! All three cost measures are counts, so a bare `usize` triple invites
-//! transposition bugs that no compiler would catch. Each gets its own opaque
-//! type with a private field.
+//! The counts themselves - [`Stops`], [`Files`], [`Hunks`] - are opaque
+//! newtypes owned by [`gitscratch`], because every tool measuring a replay
+//! reports the same three numbers. What is specific to `grist` is attributing
+//! them to a *branch ordering*, which is [`OrderingScore`].
 
-/// A git branch name.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BranchName(String);
-
-impl BranchName {
-    /// Wrap a branch name.
-    #[must_use]
-    pub fn new(name: impl Into<String>) -> Self {
-        Self(name.into())
-    }
-
-    /// The underlying branch name, for handing to git.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for BranchName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// Count of commits whose replay stopped the rebase for manual resolution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
-pub struct Stops(usize);
-
-/// Count of distinct files that conflicted at least once across an ordering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
-pub struct Files(usize);
-
-/// Count of individual conflict hunks a human would have to hand-merge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
-pub struct Hunks(usize);
-
-macro_rules! counter {
-    ($name:ident) => {
-        impl $name {
-            /// Wrap a raw count.
-            #[must_use]
-            pub fn new(count: usize) -> Self {
-                Self(count)
-            }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
-    };
-}
-
-counter!(Stops);
-counter!(Files);
-counter!(Hunks);
+use gitscratch::{BranchName, Files, Hunks, Stops};
 
 /// What one candidate ordering would cost to actually carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
