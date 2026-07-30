@@ -26,8 +26,14 @@ pub struct Git {
 
 impl Git {
     /// Run git in `cwd`, with hooks redirected to the empty `hooks_path`.
+    ///
+    /// Crate-private on purpose. A caller outside this crate could otherwise
+    /// build a runner rooted in the developer's real repository, with a
+    /// `hooks_path` that redirects nothing — an empty one still resolves hook
+    /// lookups, relative to `cwd`. Both guards are established by
+    /// [`Scratch::create`](crate::Scratch::create), so it stays the only way in.
     #[must_use]
-    pub fn new(cwd: impl Into<PathBuf>, hooks_path: impl Into<String>) -> Self {
+    pub(crate) fn new(cwd: impl Into<PathBuf>, hooks_path: impl Into<String>) -> Self {
         Self {
             cwd: cwd.into(),
             hooks_path: hooks_path.into(),
