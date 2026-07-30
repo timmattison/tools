@@ -5,7 +5,9 @@ mod support;
 
 use std::process::Command;
 
-use support::contested_region_repo;
+use support::{contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo};
+
+const TIE_ADVICE: &str = "Every order costs the same";
 
 fn grist(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_grist"))
@@ -54,6 +56,62 @@ fn default_output_ranks_both_orderings_with_their_costs() {
         stdout.contains("Land them in this order: iterated single"),
         "got:\n{stdout}"
     );
+}
+
+/// Cost is ranked lexicographically on hunks, then stops, then files, so
+/// matching hunk counts alone are not a tie. Here `two \u{2192} one` stops once and
+/// `one \u{2192} two` stops twice on identical hunk and file counts: grist names a
+/// winner, and must not then tell the user that winner does not matter.
+#[test]
+fn does_not_call_it_a_tie_when_only_the_hunk_counts_match() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let output = grist(repo.path(), &["--onto", "main", "one", "two"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "grist failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let winner = stdout
+        .find("two \u{2192} one")
+        .unwrap_or_else(|| panic!("no row for the cheaper ordering, got:\n{stdout}"));
+    let runner_up = stdout
+        .find("one \u{2192} two")
+        .unwrap_or_else(|| panic!("no row for the costlier ordering, got:\n{stdout}"));
+    assert!(
+        winner < runner_up,
+        "fewer stops must rank first, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Land them in this order: two one"),
+        "got:\n{stdout}"
+    );
+
+    assert!(
+        !stdout.contains(TIE_ADVICE),
+        "the orderings differ in stops, so the order does matter, got:\n{stdout}"
+    );
+}
+
+/// The advice itself is not the bug, so it has to survive: branches that touch
+/// nothing in common cost zero of everything in either order, and there grist
+/// should say so.
+#[test]
+fn still_calls_it_a_tie_when_the_whole_cost_key_matches() {
+    let repo = independent_branches_repo();
+
+    let output = grist(repo.path(), &["--onto", "main", "alpha", "beta"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "grist failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains(TIE_ADVICE), "got:\n{stdout}");
 }
 
 /// A branch list grist will not simulate has to be turned away cleanly. The

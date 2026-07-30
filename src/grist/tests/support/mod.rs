@@ -60,8 +60,16 @@ impl TestRepo {
 
     /// Write `contents` to `name` and commit it.
     pub fn commit_file(&self, name: &str, contents: &str, message: &str) {
-        std::fs::write(self.dir.path().join(name), contents).expect("write fixture file");
-        self.git(&["add", name]);
+        self.commit_files(&[(name, contents)], message);
+    }
+
+    /// Write every `(name, contents)` pair and land them in one commit, so a
+    /// fixture can control whether an edit set arrives as one commit or several.
+    pub fn commit_files(&self, files: &[(&str, &str)], message: &str) {
+        for (name, contents) in files {
+            std::fs::write(self.dir.path().join(name), contents).expect("write fixture file");
+            self.git(&["add", name]);
+        }
         self.git(&["commit", "-q", "-m", message]);
     }
 
@@ -155,6 +163,63 @@ pub fn stacked_branches_repo() -> TestRepo {
     repo.branch("built-on-top");
     let stacked = replace_line(&groundwork, CONTESTED_LINE, "built-on-top-edit");
     repo.commit_file("shared.txt", &stacked, "built on top");
+
+    repo.checkout("main");
+    repo
+}
+
+/// Two branches that make the same two edits, packaged differently: `one` lands
+/// both in a single commit, `two` splits them across two commits. Every
+/// ordering hand-merges the same two hunks in the same two files, but replaying
+/// `two`'s two commits halts the rebase twice where `one`'s single commit halts
+/// it once - so the orderings tie on hunks and files while differing on stops.
+///
+/// That is the shape that catches anything treating equal hunks as equal cost.
+pub fn equal_hunks_unequal_stops_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_files(&[("x.txt", &base), ("y.txt", &base)], "base");
+
+    repo.branch("one");
+    repo.commit_files(
+        &[
+            ("x.txt", &replace_line(&base, CONTESTED_LINE, "one-x")),
+            ("y.txt", &replace_line(&base, CONTESTED_LINE, "one-y")),
+        ],
+        "one edits both files at once",
+    );
+
+    repo.checkout("main");
+    repo.branch("two");
+    repo.commit_file(
+        "x.txt",
+        &replace_line(&base, CONTESTED_LINE, "two-x"),
+        "two edits x",
+    );
+    repo.commit_file(
+        "y.txt",
+        &replace_line(&base, CONTESTED_LINE, "two-y"),
+        "two edits y",
+    );
+
+    repo.checkout("main");
+    repo
+}
+
+/// Two branches that each add a file of their own and touch nothing else, so no
+/// ordering conflicts and every ordering genuinely costs zero of everything.
+pub fn independent_branches_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("shared.txt", &numbered_lines(30), "base");
+
+    repo.branch("alpha");
+    repo.commit_file("alpha.txt", "alpha work\n", "alpha work");
+
+    repo.checkout("main");
+    repo.branch("beta");
+    repo.commit_file("beta.txt", "beta work\n", "beta work");
 
     repo.checkout("main");
     repo
