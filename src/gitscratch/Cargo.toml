@@ -7,6 +7,7 @@ description = "The hardened scratch-worktree harness for dry-running git operati
 [dependencies]
 anyhow.workspace = true
 tempfile.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
 # Depending on itself turns the `testing` feature on for this crate's own test

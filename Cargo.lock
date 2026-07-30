@@ -2632,6 +2632,7 @@ dependencies = [
  "anyhow",
  "gitscratch",
  "tempfile",
+ "unicode-width",
 ]
 
 [[package]]
