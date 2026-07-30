@@ -952,19 +952,98 @@ fn nukes_a_worktree_given_its_directory_name() {
     );
 }
 
+/// git refuses to remove the main worktree at all — `fatal: '…' is a main
+/// working tree`, with or without `--force` — so gitnuke must fail too.
+///
+/// The run is deliberately made from a *second* worktree. From inside the main
+/// worktree the cwd guard answers first (see
+/// `cwd_guard_answers_before_the_main_worktree_refusal`), so a test standing
+/// there passes without this rule ever being reached.
 #[test]
 fn refuses_the_main_worktree() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let elsewhere = fixture.add_worktree("elsewhere-wt", "elsewhere");
+
+    let output = gitnuke(&elsewhere, &["--force", "main"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::GIT_COMMAND_ERROR,
+        "gitnuke must never nuke the main worktree",
+    );
+    assert!(main.exists(), "the main worktree must survive: {message}");
+    assert!(
+        worktree_registered(&main, &main),
+        "git must still track the main worktree: {message}"
+    );
+    assert!(
+        branch_exists(&main, "main"),
+        "branch 'main' must survive: {message}"
+    );
+    assert!(
+        message.contains(main.to_str().expect("utf-8 path")),
+        "the refusal should name the worktree it is about: {message}"
+    );
+}
+
+/// The dry run's whole promise is that its verdict is the real run's verdict.
+/// The main worktree is the one target no check gitnuke performs can catch —
+/// it is neither locked, nor dirty, nor holding submodules — so a preflight
+/// that never consults the worktree's *position* in git's listing reports
+/// "would remove" for the one worktree that can never be removed.
+#[test]
+fn dry_run_refuses_the_main_worktree() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let elsewhere = fixture.add_worktree("elsewhere-wt", "elsewhere");
+
+    let output = gitnuke(&elsewhere, &["--dry-run", "main"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::GIT_COMMAND_ERROR,
+        "a dry run must report the refusal a real run would hit",
+    );
+    assert!(
+        !message.contains("would remove"),
+        "a dry run must not advertise a removal git will never perform: {message}"
+    );
+    assert!(main.exists(), "dry run must not remove the main worktree");
+    assert!(
+        worktree_registered(&main, &main),
+        "dry run must leave git still tracking the main worktree: {message}"
+    );
+    assert!(
+        branch_exists(&main, "main"),
+        "dry run must not delete branch 'main': {message}"
+    );
+}
+
+/// Standing in the main worktree and naming it trips two rules at once, and the
+/// cwd guard owns the case. Whichever way the removal would have ended, a shell
+/// left in a deleted directory is the caller's more immediate problem, and exit
+/// 6 — not the main-worktree refusal's exit 2 — is what says so.
+#[test]
+fn cwd_guard_answers_before_the_main_worktree_refusal() {
     let fixture = Fixture::new();
     let main = fixture.main_repo();
 
     let output = gitnuke(&main, &["--force", "main"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "gitnuke must never nuke the main worktree: {message}"
+    assert_exit_code(
+        &output,
+        exit_codes::INSIDE_TARGET,
+        "the cwd guard, not the main-worktree rule, answers this case",
     );
-    assert!(main.exists(), "the main worktree must survive");
+    assert!(main.exists(), "the main worktree must survive: {message}");
+    assert!(
+        worktree_registered(&main, &main),
+        "git must still track the main worktree: {message}"
+    );
     assert!(
         branch_exists(&main, "main"),
         "branch 'main' must survive: {message}"
