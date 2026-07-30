@@ -537,3 +537,187 @@ fn never_touches_the_real_working_tree_or_index() {
         );
     }
 }
+
+/// Adding a scratch worktree is not a purely local act. `git worktree add`
+/// writes administrative state into the *developer's* repository - a directory
+/// under `.git/worktrees/` holding that worktree's HEAD, its index, and any
+/// operation it is in the middle of - and registers an entry that
+/// `git worktree list` reports from then on. Deleting the worktree's directory
+/// undoes none of that. And the directory here is a `TempDir` that deletes
+/// itself unconditionally, so a harness that forgot to deregister produces
+/// exactly the failure nobody goes looking for: no leftover files, no error
+/// message, and a repository quietly accumulating one dead worktree per dry run.
+///
+/// The consequences all land on the developer rather than on the harness. A
+/// stale entry keeps its recorded HEAD reachable, so the commits a replay
+/// created stay pinned against collection forever. It makes the developer's own
+/// `git worktree add` refuse a path that git believes is still taken, over a
+/// directory that has not existed since the run that made it. And it puts
+/// worktrees the developer never created into `git worktree list`, where they
+/// have to be understood before they can be dismissed.
+///
+/// Then comes the part that makes this the sharpest guarantee in the file. The
+/// remedy git offers for a stale entry - the one every answer on the subject
+/// reaches for - is `git worktree prune`. Pruning is precisely the repo-wide,
+/// no-grace-period operation this crate refuses to run, because it also deletes
+/// the administrative state of every *healthy* worktree whose directory is
+/// merely unreachable right now: an unmounted drive, a sleeping network mount,
+/// a directory moved aside for a minute, together with any halted rebase inside
+/// it. That is the guarantee the test above this one pins. So a leak here would
+/// not merely leave litter behind - it would hand the developer a mess whose
+/// obvious fix is the destructive command the harness goes out of its way to
+/// protect them from. The two guarantees are the same guarantee seen from
+/// opposite ends, and this crate has to hold both or neither.
+///
+/// The three scopes below are the three ways a `Scratch` reaches its `Drop`,
+/// hardest last: a clean replay, a replay that had to resolve a genuine
+/// conflict, and a scratch dropped while a rebase is still halted mid-flight.
+/// The last one is the one most likely to leak, because a worktree git
+/// considers busy is exactly the worktree a cautious removal would decline to
+/// take - and it is also the state a consumer reaches for real the moment a
+/// replay errors out partway through and unwinds.
+#[test]
+fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
+    let repo = conflicting_repo();
+
+    // `worktrees/` under the common dir is where `git worktree add` files the
+    // administrative state that outlives the worktree's directory. Everything
+    // here hangs off the fixture's own `TempDir`, so a concurrent run of this
+    // same test never shares a path with this one.
+    let common_dir = repo
+        .path()
+        .join(repo.git(&["rev-parse", "--git-common-dir"]));
+    let worktrees_dir = common_dir.join("worktrees");
+
+    // Anchored to what the fixture actually starts with rather than to a
+    // hardcoded listing: the claim being pinned is "the replay added nothing",
+    // which only means something if "nothing" is measured against the real
+    // starting state.
+    let before = repo.git(&["worktree", "list"]);
+    assert_eq!(
+        before.lines().count(),
+        1,
+        "the fixture must start with only the real repository registered, \
+         or a leak has somewhere to hide:\n{before}"
+    );
+    assert_eq!(
+        describe_tree(&worktrees_dir),
+        "",
+        "the fixture must start with no worktree administrative state, \
+         or the assertions below cannot tell new state from old"
+    );
+
+    let assert_nothing_registered = |stage: &str| {
+        let listed = repo.git(&["worktree", "list"]);
+        assert_eq!(
+            listed, before,
+            "after {stage}, the real repository's worktree list changed\n  \
+             before: {before}\n   after: {listed}"
+        );
+        // Called out separately from the equality above because `prunable` is
+        // the specific shape a leak takes: the entry survives, the directory
+        // does not, and git starts advertising that a prune would tidy it up.
+        assert!(
+            !listed.contains("prunable"),
+            "after {stage}, the real repository has a worktree entry git wants \
+             pruned:\n{listed}"
+        );
+        assert_eq!(
+            describe_tree(&worktrees_dir),
+            "",
+            "after {stage}, worktree administrative state is still filed in the \
+             developer's repository under {}",
+            worktrees_dir.display()
+        );
+    };
+
+    // Scoped on purpose: `Drop` is the entire subject of this test, so it must
+    // have run before anything is asserted. Do not flatten these blocks away.
+    {
+        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+
+        // Control: prove the harness really does register a worktree in the
+        // real repository while the `Scratch` is alive. Without it, a `Scratch`
+        // that quietly registered nothing at all would satisfy every assertion
+        // below by never having had anything to clean up.
+        let while_alive = repo.git(&["worktree", "list"]);
+        assert_eq!(
+            while_alive.lines().count(),
+            2,
+            "a live scratch should be registered in the real repository, \
+             or this test can only pass vacuously:\n{while_alive}"
+        );
+        assert_ne!(
+            describe_tree(&worktrees_dir),
+            "",
+            "a live scratch should have administrative state under {}, \
+             or this test can only pass vacuously",
+            worktrees_dir.display()
+        );
+
+        replay(&scratch, "left", "main");
+    }
+    assert_nothing_registered("a clean replay");
+
+    {
+        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        replay(&scratch, "left", "main");
+        // `right` onto `left` genuinely conflicts, so this scratch halts,
+        // resolves and continues a rebase before being dropped - it reaches
+        // teardown having done real work, with a rewritten index and a rewritten
+        // working tree behind it.
+        let conflicts = replay(&scratch, "right", "left");
+
+        // Asserting on the conflict that was resolved, so this block cannot
+        // pass by having quietly replayed nothing.
+        assert_eq!(
+            conflicts.files(),
+            Files::new(1),
+            "the contested file should have conflicted"
+        );
+        assert!(
+            conflicts.file_names().contains("shared.txt"),
+            "the contested file should be named in the conflicts: {:?}",
+            conflicts.file_names()
+        );
+        assert!(
+            conflicts.hunks() > Hunks::new(0),
+            "replaying a contested branch should have hunks to hand-merge"
+        );
+    }
+    assert_nothing_registered("a replay that had to resolve a conflict");
+
+    {
+        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let git = scratch.git();
+        git.run(&["checkout", "-q", "--detach", "right"])
+            .expect("check out the branch detached in the scratch worktree");
+
+        // Deliberately not resolved. `try_run` hands back the failure instead of
+        // raising it, which is the only way to leave the scratch sitting in a
+        // halted rebase and then drop it - the shape a consumer hits whenever a
+        // replay gives up partway through and unwinds.
+        let halted = git
+            .try_run(&["rebase", "left"])
+            .expect("run the rebase that conflicts");
+        assert!(
+            !halted.success,
+            "the rebase was supposed to conflict and halt, so this block cannot \
+             pin teardown-from-mid-rebase unless it did:\n{}\n{}",
+            halted.stdout, halted.stderr
+        );
+
+        // And prove the halt is real rather than merely a non-zero exit: git is
+        // sitting on rebase state, in the worktree that is about to be dropped.
+        let state = git
+            .run(&["rev-parse", "--git-path", "rebase-merge"])
+            .expect("locate the scratch worktree's rebase state");
+        let state = scratch.path().join(state);
+        assert!(
+            state.exists(),
+            "the scratch should be mid-rebase at {} when it is dropped",
+            state.display()
+        );
+    }
+    assert_nothing_registered("a scratch dropped while a rebase was still halted");
+}
