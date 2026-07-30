@@ -60,3 +60,21 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
         assert_eq!(repo.rev_parse(&name), sha, "simulation moved branch '{name}'");
     }
 }
+
+/// The branches worth comparing are usually the ones already checked out in
+/// other worktrees - which is exactly the situation where a plain `git checkout`
+/// refuses to run. Simulation must detach instead.
+#[test]
+fn works_when_the_branches_are_checked_out_in_other_worktrees() {
+    let repo = conflicting_repo();
+    let _left = repo.add_worktree("left");
+    let _right = repo.add_worktree("right");
+
+    let simulator = Simulator::new(repo.path(), "main");
+
+    let ranked = simulator
+        .evaluate(&order(&["left", "right"]))
+        .expect("evaluation runs even though both branches are checked out elsewhere");
+
+    assert_eq!(ranked.len(), 2);
+}
