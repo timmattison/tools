@@ -9,6 +9,7 @@
 
 pub mod git;
 pub mod metrics;
+pub mod plan;
 pub mod rank;
 pub mod simulate;
 
