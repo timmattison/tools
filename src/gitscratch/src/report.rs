@@ -35,10 +35,6 @@ const FILE_INDENT: &str = "  ";
 const COUNT_GAP: usize = 4;
 
 /// A conflict verdict, and how to word it for one particular tool.
-#[expect(
-    dead_code,
-    reason = "scaffold: the renderer that reads these lands with its first behaviour"
-)]
 pub struct Report<'a> {
     tool: &'a str,
     action: &'a str,
@@ -94,14 +90,18 @@ impl<'a> Report<'a> {
             .max()
             .unwrap_or_default();
 
+        let mut summary = format!(
+            "{indent}{} hunks across {} files",
+            conflicts.hunks(),
+            conflicts.files()
+        );
+        if self.show_stops {
+            summary.push_str(&format!(", {} stops", conflicts.stops()));
+        }
+
         let mut lines = vec![
             format!("{}: conflicts - {}", self.tool, self.action),
-            format!(
-                "{indent}{} hunks across {} files, {} stops",
-                conflicts.hunks(),
-                conflicts.files(),
-                conflicts.stops()
-            ),
+            summary,
             // The breakdown is a separate thought from the summary, and a blank
             // line is how a terminal says so.
             String::new(),
