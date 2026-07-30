@@ -30,8 +30,8 @@ impl TestRepo {
         let repo = Self { dir };
 
         repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.email", "grist@example.com"]);
-        repo.git(&["config", "user.name", "grist test"]);
+        repo.git(&["config", "user.email", "gitscratch@example.com"]);
+        repo.git(&["config", "user.name", "gitscratch test"]);
         // A commit-signing config in the developer's global gitconfig would
         // otherwise make every fixture commit prompt or fail.
         repo.git(&["config", "commit.gpgsign", "false"]);
