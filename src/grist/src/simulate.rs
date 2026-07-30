@@ -334,6 +334,9 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
 /// A detached scratch worktree that removes itself.
 struct Scratch {
     repo: PathBuf,
+    /// Never read: held solely so the temporary directory - and everything the
+    /// simulation wrote into it - is removed when the `Scratch` is dropped.
+    #[expect(dead_code, reason = "held only so the TempDir is removed on drop")]
     dir: TempDir,
     worktree: PathBuf,
     hooks: PathBuf,
@@ -410,6 +413,5 @@ impl Drop for Scratch {
                 .repo_git()
                 .try_run(&["worktree", "remove", "--force", path]);
         }
-        let _ = &self.dir;
     }
 }
