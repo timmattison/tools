@@ -1,8 +1,14 @@
-# Pin the toolchain so the formatting contract (and clippy gate) is
-# machine-independent: every contributor and CI run resolves the exact same
-# rustfmt/clippy behavior instead of whatever stable happens to be installed.
-# See issue #273. Bump deliberately; after bumping, re-run `cargo fmt --all`
-# in a dedicated style-only commit if the check no longer passes.
+# Pin the toolchain so the clippy gate is machine-independent: every
+# contributor resolves the exact same lint set instead of whatever stable
+# happens to be installed. Formatting is already insulated independently by
+# `style_edition` in rustfmt.toml, which holds rustfmt's output stable across
+# compiler versions (verified byte-identical from 1.88 through 1.97.1), so the
+# pin is carrying the clippy contract, not the formatting one. See issue #273.
+#
+# Bump deliberately, and only once `cargo clippy --all-targets --workspace --
+# -D warnings` passes on the new toolchain: `-D warnings` turns any new or
+# renamed lint into a repo-wide commit blocker. Editing this file re-triggers
+# the full Rust gate in .husky/pre-commit, which re-proves that on commit.
 [toolchain]
-channel = "1.96.0"
+channel = "1.97.1"
 components = ["rustfmt", "clippy"]
