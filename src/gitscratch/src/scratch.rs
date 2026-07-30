@@ -220,9 +220,19 @@ impl Conflicts {
     }
 
     /// Whether the replay finished without a single conflict.
+    ///
+    /// Defined on the file set rather than on the counts, because the file set
+    /// is the primary fact: a conflict is something that happened *to a file*,
+    /// and the numbers are summaries of it. The three measures cannot disagree
+    /// anyway - [`count_conflict_hunks`] floors every conflicted file at one
+    /// hunk, and a file only enters the set from inside a stop - so hunks and
+    /// stops are both non-zero exactly when the set is non-empty. Anchoring on
+    /// the set keeps that true by construction instead of by coincidence: a
+    /// future measure that can legitimately be zero cannot make a conflicted
+    /// replay report itself clean.
     #[must_use]
     pub fn is_clean(&self) -> bool {
-        false
+        self.files.is_empty()
     }
 
     /// How many times the replay halted for manual resolution.
