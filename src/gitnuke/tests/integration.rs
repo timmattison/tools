@@ -78,6 +78,7 @@ mod exit_codes {
     pub const SUBMODULES_PRESENT: i32 = 5;
     pub const INSIDE_TARGET: i32 = 6;
     pub const BRANCH_NOT_DELETED: i32 = 7;
+    pub const LOCKED_WORKTREE: i32 = 8;
 }
 
 /// Assert the process exited with exactly `code`, showing gitnuke's output on
@@ -177,6 +178,23 @@ impl Fixture {
                 "-q",
             ],
         );
+    }
+
+    /// Lock `worktree` the way `git worktree lock` does, with or without a
+    /// reason.
+    ///
+    /// A lock is a deliberate "leave this alone" marker, and git treats it as a
+    /// refusal of its own: `git worktree remove --force` still declines and asks
+    /// for `remove -f -f`.
+    fn lock_worktree(&self, worktree: &Path, reason: Option<&str>) {
+        let path = worktree.to_str().expect("utf-8 path");
+        match reason {
+            Some(reason) => git(
+                &self.main_repo(),
+                &["worktree", "lock", "--reason", reason, path],
+            ),
+            None => git(&self.main_repo(), &["worktree", "lock", path]),
+        };
     }
 
     /// Add a linked worktree at `<root>/<dir>` checked out on a new `branch`.
@@ -663,6 +681,163 @@ fn nukes_a_submodule_worktree_with_force() {
     );
 }
 
+/// A lock is git's *third* refusal, and the one `--force` deliberately does not
+/// buy through: `git worktree remove --force` on a locked worktree still fails,
+/// asking for `remove -f -f`. A lock is a deliberate "leave this alone" marker
+/// set by hand, so gitnuke honours it rather than escalating — and diagnoses it
+/// itself instead of letting git's raw `fatal:` leak out.
+#[test]
+fn refuses_a_locked_worktree_even_with_force() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    let main = fixture.main_repo();
+    fixture.lock_worktree(&worktree, None);
+
+    let output = gitnuke(&main, &["--force", "feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::LOCKED_WORKTREE,
+        "a locked worktree must get its own refusal, not git's raw failure",
+    );
+    assert!(
+        worktree.exists(),
+        "the locked worktree must survive: {message}"
+    );
+    assert!(
+        worktree_registered(&main, &worktree),
+        "git must still track the locked worktree: {message}"
+    );
+    assert!(
+        branch_exists(&main, "feature"),
+        "the branch must survive a refused removal: {message}"
+    );
+    assert!(
+        message.contains("locked"),
+        "the message should say the lock is what is in the way: {message}"
+    );
+    assert!(
+        message.contains(&format!(
+            "git worktree unlock {}",
+            worktree.to_str().expect("utf-8 path")
+        )),
+        "the message should hand back the exact unlock command: {message}"
+    );
+}
+
+/// `git worktree lock --reason` records *why* the worktree was locked. That
+/// reason is the whole reason the lock is respectable, so the refusal has to
+/// quote it back rather than making the caller go look it up.
+#[test]
+fn locked_worktree_refusal_quotes_the_lock_reason() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    let main = fixture.main_repo();
+    fixture.lock_worktree(&worktree, Some("mid-bisect, do not touch"));
+
+    let output = gitnuke(&main, &["--force", "feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::LOCKED_WORKTREE,
+        "a reason does not change the refusal, only what it says",
+    );
+    assert!(
+        message.contains("mid-bisect, do not touch"),
+        "the message should quote git's recorded lock reason: {message}"
+    );
+    assert!(worktree.exists(), "the locked worktree must survive");
+    assert!(branch_exists(&main, "feature"), "the branch must survive");
+}
+
+/// git prints a non-ASCII lock reason C-quoted and octal-escaped in its
+/// porcelain output (`locked "\343\203\254..."`). Echoing that back at the
+/// person who typed the reason is not surfacing it.
+#[test]
+fn locked_worktree_refusal_quotes_a_multibyte_lock_reason() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    let main = fixture.main_repo();
+    fixture.lock_worktree(&worktree, Some("レビュー待ち 🎉"));
+
+    let output = gitnuke(&main, &["--force", "feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::LOCKED_WORKTREE,
+        "a multi-byte reason is still just a locked worktree",
+    );
+    assert!(
+        message.contains("レビュー待ち 🎉"),
+        "the reason should be readable, not octal-escaped: {message}"
+    );
+}
+
+/// A dry run is a preflight: `gitnuke -n x` failing has to mean `gitnuke x`
+/// fails the same way, so the lock must be reported with the same code there.
+#[test]
+fn dry_run_reports_a_locked_worktree_refusal() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    let main = fixture.main_repo();
+    fixture.lock_worktree(&worktree, Some("held for CI"));
+
+    let output = gitnuke(&main, &["--force", "--dry-run", "feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::LOCKED_WORKTREE,
+        "a dry run must report the refusal a real run would hit",
+    );
+    assert!(worktree.exists(), "dry run must not remove the worktree");
+    assert!(
+        worktree_registered(&main, &worktree),
+        "dry run must leave git still tracking the worktree: {message}"
+    );
+    assert!(
+        branch_exists(&main, "feature"),
+        "dry run must not delete the branch: {message}"
+    );
+    assert!(
+        message.contains("held for CI"),
+        "the dry run should quote the lock reason too: {message}"
+    );
+}
+
+/// The other half of the contract: the check must key on the lock being *there*,
+/// not on the worktree having once been locked. Unlocking puts it straight back
+/// in reach of `--force`.
+#[test]
+fn force_still_nukes_a_worktree_that_was_unlocked_again() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    let main = fixture.main_repo();
+    let path = worktree.to_str().expect("utf-8 path");
+    fixture.lock_worktree(&worktree, Some("briefly"));
+    git(&main, &["worktree", "unlock", path]);
+
+    let output = gitnuke(&main, &["--force", "feature"]);
+
+    assert!(
+        output.status.success(),
+        "an unlocked worktree must still nuke: {}",
+        combined(&output)
+    );
+    assert!(!worktree.exists(), "worktree directory should be gone");
+    assert!(
+        !worktree_registered(&main, &worktree),
+        "git should no longer track the worktree"
+    );
+    assert!(
+        !branch_exists(&main, "feature"),
+        "branch 'feature' should be deleted"
+    );
+}
+
 /// Uncommitted work is git's other reason to refuse a removal. gitnuke must not
 /// delete the branch when that happens — the whole point of the worktree being
 /// left standing is that the work inside it is still recoverable.
@@ -1005,7 +1180,7 @@ fn refuses_to_run_outside_a_git_repository() {
 /// Stated here rather than derived from the binary for the same reason as
 /// `mod exit_codes` above: this is the contract users read, so the test has to
 /// spell it out independently.
-const HELP_EXIT_CODE_LINES: [&str; 8] = [
+const HELP_EXIT_CODE_LINES: [&str; 9] = [
     "- 0: Success",
     "- 1: Not in a git repository",
     "- 2: A git command failed",
@@ -1014,6 +1189,7 @@ const HELP_EXIT_CODE_LINES: [&str; 8] = [
     "- 5: The worktree contains submodules and `--force` was not given",
     "- 6: The shell is standing inside the target worktree",
     "- 7: The worktree was removed but its branch could not be deleted",
+    "- 8: The worktree is locked, which `--force` does not override",
 ];
 
 /// The usage examples `gitnuke --help` publishes, as (command, trailing note).
