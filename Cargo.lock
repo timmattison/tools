@@ -8850,6 +8850,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
+name = "zth"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "clap",
+ "crossbeam",
+ "indicatif",
+ "libc",
+ "tempfile",
+ "termbar",
+ "walkdir",
+]
+
+[[package]]
 name = "zune-core"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

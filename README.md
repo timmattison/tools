@@ -467,6 +467,18 @@ containers/CI).
     ranks them. Up to six branches; `--onto <REF>` sets what they land on, and `-q` prints just the
     winning order for piping.
   - To install: `cargo install --git https://github.com/timmattison/tools grist`
+- zth (zero the hero)
+  - Recursively finds files that are larger than zero bytes and contain nothing but zero bytes, then
+    prints their absolute paths - the wreckage a failed copy, a truncated restore, or a dying disk
+    leaves behind. Each file is read only until its first non-zero byte, so a directory of ordinary
+    files costs one read apiece no matter how large they are. The directory walk runs alongside the
+    reads, so the progress bar's "discovered" count keeps climbing while files are already being
+    scanned, and the estimate follows it. Errors are skipped in silence: unreadable files and
+    directories, a path that does not exist, a file that vanishes mid-scan. Nothing but results ever
+    reaches stdout, and nothing at all reaches stderr, so `zth /data > suspects.txt` just works.
+  - Usage: `zth <PATH>`, `zth -j 32 /mnt/backups` (more readers for a network or spinning-rust
+    volume; defaults to the machine's core count).
+  - To install: `cargo install --git https://github.com/timmattison/tools zth`
 
 ## dirhash
 
@@ -1837,4 +1849,76 @@ bm --suffix .pdf --destination ~/Documents/pdfs ~/Downloads ~/Desktop /tmp
 On completion, bm prints a summary:
 ```
 Move complete: 42 moved (40 renamed, 2 copied across volumes), 0 skipped in 1.23s (34 files/sec)
+```
+
+## zth (zero the hero)
+
+Recursively hunt down files that are larger than zero bytes and contain nothing but zero bytes, and print their absolute paths. Named for the relaxing Cannibal Corpse cover of Black Sabbath's "Zero the Hero".
+
+Files full of nothing are the residue of something going wrong: an interrupted `dd`, a restore that allocated the file but never filled it, a network copy that dropped, a drive quietly returning zeroes on the way out. They look fine in `ls` — right name, right size — and only give themselves up when you read them.
+
+### Basic Usage
+
+```bash
+zth /Volumes/Backup
+zth /Volumes/Backup > suspects.txt
+zth -j 32 /mnt/nas
+```
+
+### Options
+
+- `-j`, `--jobs <N>`: How many files to read at once. Defaults to the machine's core count. Scanning waits on the storage device far more than on the CPU, so a network share or a spinning disk often does better well above the core count.
+- `<PATH>`: The directory to scan recursively. A single file works too, in which case only that file is checked.
+
+### How it reads
+
+Each file is read only until its first non-zero byte, so an ordinary file costs a single read no matter how large it is — a 4 GB video is dismissed by its first few bytes. Only files that really are all zeroes get read to the end. Blocks are compared against a zero block with `memcmp`, which the CPU vectorizes, so the all-zero case runs at memory speed rather than byte-at-a-time.
+
+That first read asks for 16 KiB, not a full buffer. Almost every file is disqualified by its very first byte, so the first read exists to reject rather than to consume, and pulling 256 KiB off the platter to look at one of them is waste in two directions — the transfer itself, and the page cache it evicts. Three hundred thousand files at a quarter-megabyte apiece flush the directory metadata the walk is still working through, which buys extra seeks in exchange for bytes nothing ever reads. Once a file survives the probe it is likely to be all zeroes, so every read after the first one goes full width and runs sequentially.
+
+For the same reason, `zth` asks the kernel not to cache what it reads at all (`F_NOCACHE` on macOS, `posix_fadvise` on Linux). It reads every byte exactly once and never comes back, so a scan that filled the cache would only be competing with itself.
+
+Sparse files are settled without being read. A file made entirely of a hole — a range the filesystem never allocated, which reads back as zeroes without any of it existing on disk — is exactly what an interrupted restore leaves behind, and it is routinely enormous. One `lseek` against metadata already in memory answers it, so a 64 GB sparse file costs the same as a 64-byte one. Filesystems that cannot answer the question are simply read the ordinary way.
+
+Empty files are never reported, however they were made. A file with no bytes has no zero bytes either, and a directory full of `touch`ed placeholders is not what you are looking for.
+
+### Spinning disks
+
+Reading many small files at once helps on a hard drive, which surprises people who have been told that disks hate concurrency. That advice is about independent sequential streams thrashing the head against each other; this is the opposite workload. Command queuing lets the drive hold up to 32 outstanding reads and service them in whatever order costs the least head travel, so a single 7200 RPM spindle that manages roughly 75 random reads per second one-at-a-time will manage two to three times that with a full queue.
+
+`-j 24` or so is the sweet spot for one spinning disk. Past about twice the drive's queue depth the extra workers just wait in line. Two things to know: a USB enclosure speaking the older mass-storage protocol instead of UASP has no queue at all and gains nothing from any of this, and a repeat run measures the page cache rather than the disk unless you clear it first.
+
+### The progress bar
+
+The directory walk and the reading run at the same time, which is what makes the estimate honest: discovery keeps turning up files while workers are already reading, so the bar shows the count discovered so far, the count still waiting, and a time estimate that re-derives itself as the denominator grows.
+
+```
+⠲ [███████████▍                    ] discovered 105,564 · remaining 71,628 · ETA 23s
+```
+
+It draws on stderr, so it stays out of the way of the results on stdout and disappears entirely when stderr is not a terminal. That is the split you want: `zth /Volumes/Backup > suspects.txt` still shows you the bar while the list fills up, and a run whose stderr goes to a pipe or a log file — a script, a cron job, CI — draws nothing at all.
+
+### Errors
+
+Every I/O error during the scan is skipped without a word: unreadable files, unreadable directories, a path that does not exist, a file that vanishes mid-scan. `zth` never writes a diagnostic to stderr — the progress bar has it to itself — and none of those failures touch the exit status, so a scan of a large tree you do not fully own produces a clean list rather than a screenful of permission complaints. The one thing that does fail the run is a failure to write the results themselves — a full disk swallowing half of `> suspects.txt`, say — because a truncated list must never be able to pass for a complete one. A reader that simply stops early is not that: `zth /data | head` still exits 0.
+
+Symlinks are reported by neither name nor target — they are not followed, so a scan cannot escape the tree it was pointed at or report the same file twice through two paths.
+
+### Examples
+
+Find the damage on a backup drive and count it:
+```bash
+zth /Volumes/Backup | wc -l
+```
+
+Check a single suspicious file:
+```bash
+zth ~/Downloads/ubuntu.iso
+```
+
+Delete what turns up, after reading the list first:
+```bash
+zth /Volumes/Backup > suspects.txt
+less suspects.txt
+tr '\n' '\0' < suspects.txt | xargs -0 rm --
 ```
