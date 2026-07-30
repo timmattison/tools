@@ -36,6 +36,23 @@ use walkdir::WalkDir;
 /// a typical L2 cache.
 const READ_BUFFER_LEN: usize = 256 * 1024;
 
+/// Size of the first read, before the file has shown any sign of being zeroes.
+///
+/// Almost every file is disqualified by its very first byte, so the first read
+/// exists to reject rather than to consume, and reading a full
+/// [`READ_BUFFER_LEN`] to look at one byte is waste in two directions: the
+/// transfer time itself, and - much worse on a large scan - the page cache it
+/// evicts. Three hundred thousand files at 256 KiB apiece flush the directory
+/// metadata the walk is about to need, buying extra seeks in exchange for bytes
+/// nothing ever looks at.
+///
+/// 16 KiB is several filesystem blocks, which keeps files that legitimately open
+/// with a run of zeroes - padded headers, preallocated records - resolving in a
+/// single read, while still asking the disk for a sixteenth of what a full
+/// buffer would.
+#[allow(dead_code)]
+const PROBE_READ_LEN: usize = 16 * 1024;
+
 /// A block of zero bytes that freshly-read data is compared against.
 ///
 /// Comparing two byte slices lowers to `memcmp`, which is both vectorized and
@@ -317,6 +334,131 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// A reader that yields zero bytes and records the size of every request it
+    /// is handed.
+    ///
+    /// Reading is the expensive half of a scan on a spinning disk, so how many
+    /// bytes the scanner asks for - not just what it concludes - is behavior
+    /// worth pinning down.
+    struct RecordingReader {
+        remaining: usize,
+        first_byte: u8,
+        position: usize,
+        requests: Vec<usize>,
+    }
+
+    impl RecordingReader {
+        /// A reader with `remaining` zero bytes to give out.
+        fn zeroes(remaining: usize) -> Self {
+            Self {
+                remaining,
+                first_byte: 0,
+                position: 0,
+                requests: Vec::new(),
+            }
+        }
+
+        /// A reader whose very first byte is non-zero and whose rest is zeroes.
+        fn rejected_at_the_first_byte(remaining: usize) -> Self {
+            Self {
+                remaining,
+                first_byte: 0xFF,
+                position: 0,
+                requests: Vec::new(),
+            }
+        }
+
+        /// Total bytes the scanner asked this reader for.
+        fn bytes_requested(&self) -> usize {
+            self.requests.iter().sum()
+        }
+    }
+
+    impl Read for RecordingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.requests.push(buffer.len());
+
+            let filled = buffer.len().min(self.remaining);
+            buffer[..filled].fill(0);
+            if self.position == 0 && filled > 0 {
+                buffer[0] = self.first_byte;
+            }
+
+            self.remaining -= filled;
+            self.position += filled;
+            Ok(filled)
+        }
+    }
+
+    /// The whole point of the probe: a file that is disqualified by its first
+    /// byte - the overwhelming majority of them - must not drag a full buffer
+    /// off the platter to prove it.
+    #[test]
+    fn a_rejected_file_costs_no_more_than_the_probe() {
+        let mut reader = RecordingReader::rejected_at_the_first_byte(READ_BUFFER_LEN * 4);
+        let mut buffer = vec![0_u8; READ_BUFFER_LEN];
+
+        let all_zeroes = reader_is_all_zeroes(&mut reader, &mut buffer)
+            .expect("an in-memory reader should not fail");
+
+        assert!(!all_zeroes, "a leading 0xFF byte disqualifies the reader");
+        assert_eq!(
+            reader.bytes_requested(),
+            PROBE_READ_LEN,
+            "rejecting a file must read the probe and nothing more"
+        );
+    }
+
+    #[test]
+    fn the_first_read_only_asks_for_the_probe() {
+        let mut reader = RecordingReader::zeroes(READ_BUFFER_LEN * 4);
+        let mut buffer = vec![0_u8; READ_BUFFER_LEN];
+
+        let _ = reader_is_all_zeroes(&mut reader, &mut buffer)
+            .expect("an in-memory reader should not fail");
+
+        assert_eq!(
+            reader.requests.first().copied(),
+            Some(PROBE_READ_LEN),
+            "the first read is a probe, not a full buffer"
+        );
+    }
+
+    /// Once the probe comes back clean the file is very likely all zeroes, so
+    /// there is nothing left to be cautious about - go as wide as the buffer
+    /// allows and let the reads run sequentially.
+    #[test]
+    fn surviving_the_probe_escalates_to_the_full_buffer() {
+        let mut reader = RecordingReader::zeroes(READ_BUFFER_LEN * 4);
+        let mut buffer = vec![0_u8; READ_BUFFER_LEN];
+
+        let all_zeroes = reader_is_all_zeroes(&mut reader, &mut buffer)
+            .expect("an in-memory reader should not fail");
+
+        assert!(all_zeroes, "the reader yields nothing but zeroes");
+        assert_eq!(
+            reader.requests.get(1).copied(),
+            Some(READ_BUFFER_LEN),
+            "reads after the probe should use the whole buffer"
+        );
+    }
+
+    #[test]
+    fn a_buffer_smaller_than_the_probe_is_not_overrun() {
+        let mut reader = RecordingReader::zeroes(64);
+        let mut buffer = vec![0_u8; 8];
+
+        let all_zeroes = reader_is_all_zeroes(&mut reader, &mut buffer)
+            .expect("an in-memory reader should not fail");
+
+        assert!(all_zeroes, "a short buffer still sees nothing but zeroes");
+        assert!(
+            reader.requests.iter().all(|&request| request <= 8),
+            "no read may ask for more than the caller's buffer holds, got {:?}",
+            reader.requests
+        );
+    }
+
     /// Writes `contents` to a uniquely-named file inside a fresh temp dir.
     ///
     /// The returned [`TempDir`] owns the directory: hold onto it for as long as
@@ -386,6 +528,37 @@ mod tests {
         assert!(
             !scan(&path),
             "the last byte of a full buffer must be tested"
+        );
+    }
+
+    #[test]
+    fn non_zero_byte_at_the_end_of_the_probe_is_rejected() {
+        let mut contents = vec![0_u8; PROBE_READ_LEN * 2];
+        contents[PROBE_READ_LEN - 1] = 1;
+        let (_dir, path) = file_with(&contents);
+        assert!(
+            !scan(&path),
+            "the last byte the probe covers must still be tested"
+        );
+    }
+
+    #[test]
+    fn non_zero_byte_just_past_the_probe_is_rejected() {
+        let mut contents = vec![0_u8; PROBE_READ_LEN * 2];
+        contents[PROBE_READ_LEN] = 1;
+        let (_dir, path) = file_with(&contents);
+        assert!(
+            !scan(&path),
+            "escalating past the probe must not skip the byte it stopped on"
+        );
+    }
+
+    #[test]
+    fn an_all_zero_file_exactly_the_size_of_the_probe_is_reported() {
+        let (_dir, path) = file_with(&vec![0_u8; PROBE_READ_LEN]);
+        assert!(
+            scan(&path),
+            "a file that ends exactly where the probe does is still all zeroes"
         );
     }
 
