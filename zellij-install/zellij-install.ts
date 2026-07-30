@@ -83,8 +83,16 @@ export function shellsOutToPs(binaryStrings: string): boolean {
   return binaryStrings.includes(PS_DISCOVERY_MARKER);
 }
 
-export function remoteForRef(_ref: string): string | null {
-  return null;
+/**
+ * Derives the remote to fetch before resolving a ref.
+ *
+ * @param ref A ref such as `upstream/main`, `origin/main`, or a local `main`.
+ * @returns The remote name, or `null` when the ref is purely local and there is
+ *   nothing to fetch.
+ */
+export function remoteForRef(ref: string): string | null {
+  const slash = ref.indexOf("/");
+  return slash === -1 ? null : ref.slice(0, slash);
 }
 
 /**
@@ -324,11 +332,14 @@ function main(): void {
   process.stderr.write(`\n  repo   ${opts.repo}\n  dest   ${opts.dest}\n  ref    ${opts.ref}\n`);
 
   if (opts.fetch) {
-    const remote = opts.ref.includes("/") ? opts.ref.split("/")[0] : "origin";
+    const remote = remoteForRef(opts.ref);
     if (opts.dryRun) {
-      process.stderr.write(`\n  ${DOT} would fetch ${remote} and reset --hard to ${opts.ref}\n`);
+      const fetchPlan = remote === null ? "would not fetch (local ref)" : `would fetch ${remote}`;
+      process.stderr.write(`\n  ${DOT} ${fetchPlan} and reset --hard to ${opts.ref}\n`);
     } else {
-      if (!stream(`git fetch ${remote}`, opts.repo)) die(`git fetch ${remote} failed`);
+      if (remote !== null && !stream(`git fetch ${remote}`, opts.repo)) {
+        die(`git fetch ${remote} failed`);
+      }
 
       // Commits on the checked-out branch that the target ref does not contain
       // would be destroyed by the reset. That is almost always a mistake.
