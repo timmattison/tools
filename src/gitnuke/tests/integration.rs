@@ -80,7 +80,16 @@ mod exit_codes {
     pub const INSIDE_TARGET: i32 = 6;
     pub const BRANCH_NOT_DELETED: i32 = 7;
     pub const LOCKED_WORKTREE: i32 = 8;
+    pub const DIRTY_WORKTREE: i32 = 9;
 }
+
+/// The text git prints when *it* is the one refusing something.
+///
+/// A refusal gitnuke gates itself must never contain this: reaching git at all
+/// for a condition gitnuke already knows about means the gate did not fire, and
+/// the caller gets git's locale-dependent wording under a generic exit code
+/// instead of gitnuke's own.
+const GIT_FATAL_PREFIX: &str = "fatal:";
 
 /// Assert the process exited with exactly `code`, showing gitnuke's output on
 /// failure.
@@ -410,7 +419,7 @@ fn dry_run_reports_a_dirty_worktree_refusal() {
     // The same code the real run reports for this refusal, so the two agree.
     assert_exit_code(
         &output,
-        exit_codes::GIT_COMMAND_ERROR,
+        exit_codes::DIRTY_WORKTREE,
         "a dry run must report the refusal a real run would hit",
     );
     assert!(worktree.exists(), "dry run must not remove the worktree");
@@ -428,6 +437,129 @@ fn dry_run_reports_a_dirty_worktree_refusal() {
     );
 }
 
+/// A dirty worktree is gitnuke's refusal to make, not git's to report.
+///
+/// gitnuke already knows the answer — the dry run has been asking `git status`
+/// for it all along — so handing the case to `git worktree remove` and relaying
+/// whatever it says buys nothing and costs everything the submodule gate was
+/// built to keep: a diagnosis that does not depend on git's locale, and an exit
+/// code that names *this* refusal rather than "some git command failed".
+#[test]
+fn refuses_a_dirty_worktree_on_gitnukes_own_terms() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("README.md"), "uncommitted work\n").expect("dirty the worktree");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::DIRTY_WORKTREE,
+        "a dirty worktree has its own exit code, not the generic git-failed one",
+    );
+    assert!(
+        !message.contains(GIT_FATAL_PREFIX),
+        "gitnuke must gate this itself rather than relaying git's refusal: {message}"
+    );
+    assert!(
+        message.contains("--force"),
+        "the refusal should point at the flag that overrides it: {message}"
+    );
+    assert!(
+        worktree.exists() && worktree_registered(&main, &worktree),
+        "the dirty worktree must survive: {message}"
+    );
+    assert!(
+        branch_exists(&main, "feature"),
+        "the branch must survive a refused removal: {message}"
+    );
+}
+
+/// The preflight's contract, stated at its strictest: for the same dirty
+/// worktree the two runs must be indistinguishable — same words, same code.
+/// Two gates written separately drift, which is how `gitnuke -n x` ends up
+/// promising a refusal `gitnuke x` words differently or numbers differently.
+#[test]
+fn a_dirty_worktree_reads_the_same_dry_or_not() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("scratch.txt"), "untracked\n").expect("add untracked file");
+    let main = fixture.main_repo();
+
+    let dry_run = gitnuke(&main, &["--dry-run", "feature"]);
+    // Order matters: the dry run must not have changed anything, so the real
+    // run that follows meets exactly the worktree the dry run reported on.
+    let real_run = gitnuke(&main, &["feature"]);
+
+    assert_eq!(
+        real_run.status.code(),
+        dry_run.status.code(),
+        "the two runs must agree on the code:\n--- dry ---\n{}\n--- real ---\n{}",
+        combined(&dry_run),
+        combined(&real_run),
+    );
+    assert_eq!(
+        combined(&real_run),
+        combined(&dry_run),
+        "the two runs must agree word for word, which one shared message is what \
+         guarantees"
+    );
+    assert_exit_code(
+        &real_run,
+        exit_codes::DIRTY_WORKTREE,
+        "both runs refuse a dirty worktree with its own code",
+    );
+    assert!(
+        worktree.exists() && branch_exists(&main, "feature"),
+        "neither run may destroy anything: {}",
+        combined(&real_run)
+    );
+}
+
+/// Two refusals at once, and the submodule one still answers.
+///
+/// A submodule checkout can hold commits and untracked files that exist nowhere
+/// else, so it is the more consequential thing to be told about — and the dirty
+/// gate arriving first would quietly demote it to a footnote of exit 9. The
+/// ordering is the contract; this pins it against the new gate.
+#[test]
+fn the_submodule_refusal_still_answers_before_the_dirty_one() {
+    let fixture = Fixture::new();
+    fixture.add_submodule();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    fixture.populate_submodule(&worktree);
+    std::fs::write(worktree.join("scratch.txt"), "untracked\n").expect("dirty the worktree");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::SUBMODULES_PRESENT,
+        "submodules outrank uncommitted changes when a worktree has both",
+    );
+    assert!(
+        message.contains("submodule"),
+        "the message should name the more consequential problem: {message}"
+    );
+    assert!(
+        worktree.exists() && branch_exists(&main, "feature"),
+        "nothing may be destroyed: {message}"
+    );
+
+    // And the dry run reaches the same verdict, as it does for every other gate.
+    let dry_run = gitnuke(&main, &["--dry-run", "feature"]);
+
+    assert_exit_code(
+        &dry_run,
+        exit_codes::SUBMODULES_PRESENT,
+        "the dry run must order the two gates the same way the real run does",
+    );
+}
+
 /// git refuses on untracked files too, not just modified ones — a preflight that
 /// only asked about tracked changes would clear half the targets git rejects.
 #[test]
@@ -442,7 +574,7 @@ fn dry_run_reports_an_untracked_only_worktree_refusal() {
 
     assert_exit_code(
         &output,
-        exit_codes::GIT_COMMAND_ERROR,
+        exit_codes::DIRTY_WORKTREE,
         "untracked files alone are enough for git to refuse",
     );
     assert!(worktree.exists(), "dry run must not remove the worktree");
@@ -933,11 +1065,11 @@ fn keeps_the_branch_when_a_dirty_worktree_is_refused() {
     let output = gitnuke(&main, &["feature"]);
     let message = combined(&output);
 
-    // git's own refusal, surfaced verbatim: gitnuke did not gate this itself, so
-    // it reports the failed git command rather than a gitnuke-specific code.
+    // gitnuke's own refusal, with its own code — the same shape the submodule
+    // gate has, so a caller scripting around exit codes can tell the two apart.
     assert_exit_code(
         &output,
-        exit_codes::GIT_COMMAND_ERROR,
+        exit_codes::DIRTY_WORKTREE,
         "gitnuke should refuse a dirty worktree without --force",
     );
     assert!(worktree.exists(), "the dirty worktree must survive");
@@ -1374,7 +1506,7 @@ fn refuses_to_run_outside_a_git_repository() {
 /// Stated here rather than derived from the binary for the same reason as
 /// `mod exit_codes` above: this is the contract users read, so the test has to
 /// spell it out independently.
-const HELP_EXIT_CODE_LINES: [&str; 9] = [
+const HELP_EXIT_CODE_LINES: [&str; 10] = [
     "- 0: Success",
     "- 1: Not in a git repository",
     "- 2: A git command failed",
@@ -1384,6 +1516,7 @@ const HELP_EXIT_CODE_LINES: [&str; 9] = [
     "- 6: The shell is standing inside the target worktree",
     "- 7: The worktree was removed but its branch could not be deleted",
     "- 8: The worktree is locked, which `--force` does not override",
+    "- 9: The worktree contains modified or untracked files and `--force` was not given",
 ];
 
 /// The usage examples `gitnuke --help` publishes, as (command, trailing note).
@@ -1401,7 +1534,7 @@ const HELP_USAGE_EXAMPLES: [(&str, &str); 3] = [
 /// clap only keeps the line breaks of a doc comment when the *command* itself
 /// carries `verbatim_doc_comment`; the per-flag attributes do not cover the
 /// struct's own doc comment. Without it every usage example is jammed onto one
-/// line and all eight exit codes run together as a single paragraph.
+/// line and every exit code runs together as a single paragraph.
 #[test]
 fn long_help_renders_one_line_per_entry() {
     let tmp = tempfile::tempdir().expect("tempdir");
