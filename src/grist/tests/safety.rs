@@ -1,12 +1,10 @@
 //! `grist` runs against the developer's real repository. These tests pin the
 //! properties that make that acceptable.
 
-mod support;
-
 use std::process::Command;
 
+use gitscratch::testing::conflicting_repo;
 use grist::{BranchName, Simulator};
-use support::conflicting_repo;
 
 fn order(names: &[&str]) -> Vec<BranchName> {
     names.iter().map(|n| BranchName::new(*n)).collect()

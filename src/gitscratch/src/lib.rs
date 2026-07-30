@@ -22,10 +22,16 @@
 //! The result of a replay is a [`Conflicts`]: how many times the operation
 //! halted, how many hunks a human would hand-merge, and which files were
 //! involved.
+//!
+//! Fixtures for building throwaway repositories with known conflict shapes live
+//! in `testing`, behind the `testing` feature, so every consumer's test suite
+//! shares one copy instead of each compiling its own.
 
 pub mod git;
 pub mod metrics;
 pub mod scratch;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use git::{Git, GitOutput};
 pub use metrics::{BranchName, Files, Hunks, Stops};

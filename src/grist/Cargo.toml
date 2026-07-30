@@ -12,7 +12,7 @@ comfy-table.workspace = true
 gitscratch.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

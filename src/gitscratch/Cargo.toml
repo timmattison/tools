@@ -8,5 +8,9 @@ description = "The hardened scratch-worktree harness for dry-running git operati
 anyhow.workspace = true
 tempfile.workspace = true
 
+[features]
+# Shared git fixture builders for the test suites of crates built on gitscratch.
+testing = []
+
 [lints]
 workspace = true
