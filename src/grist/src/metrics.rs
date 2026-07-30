@@ -48,26 +48,6 @@ macro_rules! counter {
             pub fn new(count: usize) -> Self {
                 Self(count)
             }
-
-            /// The raw count, for display and arithmetic at the edges.
-            #[must_use]
-            pub fn get(self) -> usize {
-                self.0
-            }
-        }
-
-        impl std::ops::Add for $name {
-            type Output = Self;
-
-            fn add(self, other: Self) -> Self {
-                Self(self.0 + other.0)
-            }
-        }
-
-        impl std::iter::Sum for $name {
-            fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-                iter.fold(Self(0), std::ops::Add::add)
-            }
         }
 
         impl std::fmt::Display for $name {
