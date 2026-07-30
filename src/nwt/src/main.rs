@@ -44,6 +44,15 @@ const SKIP_DIRECTORIES: &[&str] = &[
     "venv",
 ];
 
+/// Permission bits for `.env` files created in the new worktree (owner read/write only).
+///
+/// `.env` files hold secrets — API keys, database passwords, tokens. They must never
+/// land group- or world-readable, no matter how loose the main worktree's copy is.
+/// `fs::copy` would stamp the source's bits onto the destination, so the mode is set
+/// explicitly at creation time instead.
+#[cfg(unix)]
+const ENV_FILE_MODE: u32 = 0o600;
+
 /// Shell code to be installed by --shell-setup.
 ///
 /// This function wraps the nwt binary and automatically changes to the new worktree
@@ -1023,18 +1032,62 @@ struct EnvCopySummary {
     kept: usize,
 }
 
-/// Copies a single `.env` file from `source` to `dest`.
+/// Reports a destination `.env` that already existed and was deliberately left alone.
 ///
-/// SCAFFOLDING (red step): this still delegates to [`fs::copy`], which overwrites an
-/// existing destination and stamps the source's permission bits onto it. The behavior
-/// the tests demand — creating the destination exclusively, at mode 0600 — is not
-/// implemented yet.
+/// Both the pre-flight existence check and the lost-the-race `AlreadyExists` path funnel
+/// through here so the two are worded identically — from the user's point of view they
+/// are the same outcome, and the wording lives in exactly one place.
+fn report_kept_existing(relative_path: &Path, quiet: bool) {
+    if !quiet {
+        eprintln!(
+            "Kept existing: {} (generated in worktree; not overwritten from main worktree)",
+            relative_path.display()
+        );
+    }
+}
+
+/// Copies a single `.env` file from `source` to `dest`, creating the destination
+/// exclusively and (on Unix) at mode [`ENV_FILE_MODE`] — owner read/write only.
+///
+/// This deliberately does *not* use [`fs::copy`], which would both overwrite an existing
+/// destination and stamp the source's permission bits onto it.
 ///
 /// # Errors
 ///
-/// Returns any I/O error encountered while copying.
+/// Returns [`io::ErrorKind::AlreadyExists`] if anything already exists at `dest` — the
+/// destination is never truncated or overwritten. Any other I/O error from opening
+/// `source`, creating `dest`, or streaming the bytes is returned as-is.
 fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
-    fs::copy(source, dest).map(|_| ())
+    let mut options = fs::OpenOptions::new();
+
+    // create_new(true) is load-bearing twice over, and looks like removable ceremony:
+    //
+    // 1. Mode-at-creation. Combined with .mode() below, the file exists with 0600 from
+    //    the very first instant. The obvious alternative — copy, then
+    //    fs::set_permissions — leaves a window in which the secret is already on disk
+    //    wearing the source's bits (typically 0644). For a secrets file that window is
+    //    the entire point; anything scanning or racing the worktree during it wins.
+    //
+    // 2. TOCTOU. The caller checks symlink_metadata() before calling us, but a
+    //    post-checkout hook or a concurrent process can still create the destination
+    //    between that check and this open. create_new makes the open itself the atomic
+    //    test-and-create, so the loser of that race gets AlreadyExists instead of
+    //    silently clobbering a freshly generated worktree-specific .env. Note it also
+    //    refuses to follow a dangling symlink at dest, which would otherwise write
+    //    through to the symlink's target.
+    options.write(true).create_new(true);
+
+    // The mode is the only platform-varying part; everything else behaves identically
+    // on Windows, where the concept does not exist.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(ENV_FILE_MODE);
+    }
+
+    let mut reader = fs::File::open(source)?;
+    let mut writer = options.open(dest)?;
+    io::copy(&mut reader, &mut writer).map(|_| ())
 }
 
 /// Copies untracked .env files from the main worktree to the new worktree.
@@ -1048,7 +1101,10 @@ fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
 ///    worktree-specific .env it generated must win over the main worktree's version
 /// 5. Copies the remaining untracked .env files to the same relative path in the new worktree
 /// 6. Creates parent directories as needed
-/// 7. Reports copied and kept files unless quiet mode is enabled
+/// 7. Creates each copy exclusively and, on Unix, at mode 0600 (see [`copy_env_file`]), so a
+///    world-readable .env in the main worktree never propagates its permissions — and a
+///    destination that appears mid-pass is counted as kept rather than clobbered
+/// 8. Reports copied and kept files unless quiet mode is enabled
 ///
 /// Errors copying individual files are reported but don't stop the process.
 ///
@@ -1109,12 +1165,7 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
         // anything at this path", which is the question we actually mean.
         if dest_path.symlink_metadata().is_ok() {
             summary.kept += 1;
-            if !quiet {
-                eprintln!(
-                    "Kept existing: {} (generated in worktree; not overwritten from main worktree)",
-                    relative_path.display()
-                );
-            }
+            report_kept_existing(relative_path, quiet);
             continue;
         }
 
@@ -1139,6 +1190,16 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> E
                 if !quiet {
                     eprintln!("Copied: {}", relative_path.display());
                 }
+            }
+            // The race-loser twin of the symlink_metadata() check above: the
+            // destination did not exist when we looked, but existed by the time
+            // copy_env_file opened it (a post-checkout hook or a concurrent process
+            // got there first). Not dead code — it is the only thing standing
+            // between that race and a clobbered worktree .env. The outcome is
+            // identical to the pre-flight skip, so account for it identically.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                summary.kept += 1;
+                report_kept_existing(relative_path, quiet);
             }
             Err(e) => {
                 if !quiet {
