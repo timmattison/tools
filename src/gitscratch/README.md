@@ -62,10 +62,33 @@ cost the developer a worktree.
 
 ## Testing
 
-`tests/safety.rs` pins the guarantees above, and each one is verified by
-mutation: remove the guard, watch the specific test fail, put it back. The
-`worktree prune` absence is mutated in the opposite direction — *add* a prune and
-watch the test fail — because the guarantee is that it is not there.
+`tests/safety.rs` pins three properties today, each verified by mutation —
+remove the guard, watch that specific test fail, put it back:
+
+- **`rebase.updateRefs=false`**, the first row above, asserted with the setting
+  deliberately turned *on* in the repository being replayed.
+- **The detached checkout**, which is what lets a branch already checked out in
+  another worktree be replayed at all. It is spelled out in the test rather than
+  hidden behind a library call precisely because it is a guard.
+- **The absence of `git worktree prune` in teardown.** This one is mutated in
+  the opposite direction — *add* a prune and watch the test fail — because the
+  guarantee is that it is not there.
+
+A unit test in `src/git.rs` pins the identity scratch commits are authored
+under, so they are attributable to this crate rather than to whichever tool is
+driving it.
+
+The remaining rows of the table above — the `rerere` pair, `core.hooksPath`, the
+editor and prompt environment, `commit.gpgsign`, `gc.auto`, and the
+`rebase.autoStash`/`autosquash` pair — are established by construction in
+`safety_config` and are **not yet covered by a test**. Issue #329 tracks growing
+the suite to eight guarantees and mutation-verifying every guard; when it lands,
+this paragraph goes with it.
+
+Consumers pin what they compose on top of the harness. `grist`'s own
+`tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
+`replay_rebase` → `squash_into` sequence, which this crate's tests cannot see —
+leaves every real branch ref where it found it.
 
 The `testing` feature exposes `gitscratch::testing`: throwaway git repositories
 with known conflict shapes, shared by every crate built on the harness so the
