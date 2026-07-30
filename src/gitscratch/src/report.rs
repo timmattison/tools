@@ -132,8 +132,20 @@ impl<'a> Report<'a> {
 
 #[cfg(test)]
 mod tests {
+    use unicode_width::UnicodeWidthStr;
+
     use super::Report;
     use crate::scratch::Conflicts;
+
+    /// Which terminal column the hunk count starts in, measured in display
+    /// width rather than bytes or characters - which is the only measure a
+    /// reader looking at aligned columns can see.
+    fn count_column(line: &str, count: &str) -> usize {
+        line.split(count)
+            .next()
+            .expect("splitting always yields at least one piece")
+            .width()
+    }
 
     /// The two-file, four-hunk, three-stop result the design spec's sample
     /// output describes, so every rendering test is measured against the shape
@@ -209,6 +221,39 @@ mod tests {
        1 hunk across 1 file, 1 stop
 
   src/lib.rs    1 hunk"
+        );
+    }
+
+    /// A CJK file name occupies two terminal columns per character while being
+    /// one character - and three bytes - wide, so padding by either of the two
+    /// numbers Rust hands you for free produces a ragged column. Only display
+    /// width lines these up for the person actually reading them.
+    #[test]
+    fn the_hunk_counts_line_up_by_display_width_not_by_character_count() {
+        let report = Report::new("grind", "replaying HEAD onto main");
+        // `日本語.txt` is 7 characters and 13 bytes, but 10 columns wide - one
+        // wider than `readme.md`, which is 9 of all three.
+        let wide = Conflicts::from_files(
+            [("readme.md".to_string(), 2), ("日本語.txt".to_string(), 1)],
+            2,
+        );
+
+        let rendered = report.render(&wide);
+
+        assert_eq!(
+            rendered,
+            r"grind: conflicts - replaying HEAD onto main
+       3 hunks across 2 files, 2 stops
+
+  readme.md     2 hunks
+  日本語.txt    1 hunk"
+        );
+
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(
+            count_column(lines[3], "2 hunks"),
+            count_column(lines[4], "1 hunk"),
+            "the counts should start in the same terminal column:\n{rendered}"
         );
     }
 }
