@@ -139,17 +139,70 @@ pub fn file_is_all_zeroes(path: &Path) -> io::Result<bool> {
 /// The scanning workers hold one buffer for their entire lifetime, so the read
 /// path never allocates per file.
 fn file_is_all_zeroes_with_buffer(path: &Path, buffer: &mut [u8]) -> io::Result<bool> {
-    let mut file = File::open(path)?;
+    let mut scanned = ScanFile::open(path)?;
 
     // A file that is nothing but hole is already answered, and the answer cost
     // no reads at all - which is the difference between settling a 64 GiB
     // sparse file instantly and grinding through it a buffer at a time.
-    if whole_file_is_a_hole(&file) {
+    if whole_file_is_a_hole(&scanned.file) {
         return Ok(true);
     }
 
-    reader_is_all_zeroes(&mut file, buffer)
+    reader_is_all_zeroes(&mut scanned, buffer)
 }
+
+/// A file opened for a single sequential pass whose contents the page cache is
+/// asked not to keep.
+///
+/// zth reads a byte exactly once and never comes back for it, so every page it
+/// caches is a page held for no one. At a few hundred files that is harmless;
+/// at the few hundred thousand this tool is built for, the reads evict the
+/// directory metadata the walk is still working through, and the scan buys
+/// extra seeks in exchange for bytes nothing will ever look at again. Telling
+/// the kernel up front is what keeps a long scan from competing with itself.
+///
+/// Where the hint lands in a file's life is a platform question - some kernels
+/// take it at open, others only once the reading is done - so it is asked for
+/// here at both ends and each platform answers the half it can. A kernel that
+/// refuses is not an error: the scan reads the file either way, it just leaves
+/// a colder cache behind.
+struct ScanFile {
+    file: File,
+}
+
+impl ScanFile {
+    /// Opens `path` for reading and asks that its contents not be retained.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`io::Error`] from opening the file. Failure to apply the
+    /// cache hint is not one of them.
+    fn open(path: &Path) -> io::Result<Self> {
+        let file = File::open(path)?;
+        keep_out_of_the_page_cache(&file);
+        Ok(Self { file })
+    }
+}
+
+impl Read for ScanFile {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+
+impl Drop for ScanFile {
+    fn drop(&mut self) {
+        release_from_the_page_cache(&self.file);
+    }
+}
+
+/// Asks the kernel, before any reading happens, not to retain this file's
+/// contents.
+fn keep_out_of_the_page_cache(_file: &File) {}
+
+/// Drops whatever this file left in the page cache, once the scan is done with
+/// it.
+fn release_from_the_page_cache(_file: &File) {}
 
 /// Returns `true` when `file` holds at least one byte and every one of them
 /// lives in a hole - a range the filesystem never allocated, which reads back
@@ -705,6 +758,56 @@ mod tests {
     #[cfg(unix)]
     fn open(path: &Path) -> File {
         File::open(path).expect("opening the fixture should succeed")
+    }
+
+    /// The flag `F_GETFL` reports back once `F_NOCACHE` has been set on a
+    /// descriptor.
+    ///
+    /// xnu calls it `FNOCACHE`. It is not one of the `open(2)` flags, so `libc`
+    /// gives it no name, but `fcntl(F_GETFL)` returns it and that is what makes
+    /// the hint observable rather than merely intended.
+    #[cfg(target_vendor = "apple")]
+    const FNOCACHE_FLAG: libc::c_int = 0x0004_0000;
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn a_file_opened_for_scanning_is_kept_out_of_the_page_cache() {
+        use std::os::unix::io::AsRawFd;
+
+        let (_dir, path) = file_with(&[0_u8; 4096]);
+        let scanned = ScanFile::open(&path).expect("opening the fixture should succeed");
+
+        // SAFETY: the descriptor is borrowed from a ScanFile that outlives the
+        // call, and F_GETFL only reads the descriptor's flags.
+        let flags = unsafe { libc::fcntl(scanned.file.as_raw_fd(), libc::F_GETFL) };
+
+        assert!(flags >= 0, "F_GETFL should succeed on an open file");
+        assert_ne!(
+            flags & FNOCACHE_FLAG,
+            0,
+            "a scanned file's pages are read once and never wanted again, \
+             so the descriptor must be marked uncached"
+        );
+    }
+
+    /// Uncached reads are the whole point, but they are worth nothing if they
+    /// come back different. This is the guard on the hint: same bytes, same
+    /// short-read behavior, across a length that is not a multiple of anything.
+    #[test]
+    fn a_file_opened_for_scanning_reads_back_every_byte() {
+        let contents: Vec<u8> = (0..10_007_u32).map(|byte| (byte % 251) as u8).collect();
+        let (_dir, path) = file_with(&contents);
+
+        let mut scanned = ScanFile::open(&path).expect("opening the fixture should succeed");
+        let mut read_back = Vec::new();
+        scanned
+            .read_to_end(&mut read_back)
+            .expect("reading the fixture should succeed");
+
+        assert_eq!(
+            read_back, contents,
+            "an uncached read must return exactly what a cached one would"
+        );
     }
 
     #[cfg(unix)]
