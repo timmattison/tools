@@ -3,6 +3,10 @@
 //! Every repo lives in its own `TempDir`, so concurrent `cargo test` runs (the
 //! pre-commit hook's and yours) never share a path.
 
+// Each integration test binary compiles its own copy of this module and uses a
+// different subset of the helpers.
+#![allow(dead_code, reason = "shared fixture helpers, used per test binary")]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

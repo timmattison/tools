@@ -159,7 +159,7 @@ impl Simulator {
         let git = scratch.git();
 
         // Detached, so the real branch ref is never moved.
-        git.run(&["checkout", "-q", branch.as_str()])
+        git.run(&["checkout", "-q", "--detach", branch.as_str()])
             .with_context(|| format!("could not check out '{branch}'"))?;
 
         let cost = self.replay_onto(&git, scratch.path(), onto, branch)?;

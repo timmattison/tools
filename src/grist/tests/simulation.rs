@@ -154,3 +154,23 @@ fn ranks_the_cheaper_ordering_first_regardless_of_input_order() {
     );
     assert!(ranked[0].hunks() < ranked[1].hunks());
 }
+
+/// Memoising shared prefixes must be a pure optimisation: every ranked score
+/// has to match what an independent, uncached run of that ordering produces.
+#[test]
+fn memoised_evaluation_agrees_with_scoring_each_ordering_independently() {
+    let repo = contested_region_repo();
+    let simulator = Simulator::new(repo.path(), "main");
+
+    let ranked = simulator
+        .evaluate(&order(&["iterated", "single"]))
+        .expect("evaluation runs");
+
+    for memoised in &ranked {
+        let independent = simulator.score(memoised.order()).expect("simulation runs");
+        assert_eq!(
+            &independent, memoised,
+            "memoised score disagrees with an independent replay of the same ordering"
+        );
+    }
+}
