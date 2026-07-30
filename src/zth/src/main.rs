@@ -77,13 +77,16 @@ struct BarProgress {
 }
 
 impl BarProgress {
-    /// Wraps a progress bar, starting from empty.
+    /// Wraps a progress bar and paints the zeroed counts onto it, so the line
+    /// reads the same before the first file turns up as it does after.
     fn new(bar: ProgressBar) -> Self {
-        Self {
+        let progress = Self {
             bar,
             discovered: AtomicU64::new(0),
             scanned: AtomicU64::new(0),
-        }
+        };
+        progress.refresh_counts();
+        progress
     }
 
     /// Rewrites the counts from whichever total just changed.
@@ -130,7 +133,6 @@ fn build_progress_bar() -> ProgressBar {
     if let Ok(style) = ProgressStyle::with_template(&template) {
         bar.set_style(style.progress_chars(PROGRESS_CHARS));
     }
-    bar.set_message("discovered 0 · remaining 0");
     bar.enable_steady_tick(TICK_INTERVAL);
     bar
 }
