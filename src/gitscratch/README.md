@@ -21,13 +21,20 @@ let scratch = Scratch::create(repo_path, "main")?;
 scratch.git().run(&["checkout", "-q", "--detach", "feature"])?;
 let conflicts = scratch.replay_rebase("main")?;
 
-println!(
-    "{} hunks across {} files, {} stops",
-    conflicts.hunks(),
-    conflicts.files(),
-    conflicts.stops()
-);
+if conflicts.is_clean() {
+    // Nothing conflicted.
+} else {
+    for (file, hunks) in conflicts.file_hunks() {
+        println!("{file}: {hunks}");
+    }
+}
 ```
+
+A `Conflicts` records how many times the replay halted and, for every file that
+conflicted, how many hunks it contributed. The headline totals — `hunks()`,
+`files()`, `stops()` — are summaries of that breakdown rather than numbers
+tracked beside it, so the total and the list underneath it cannot tell a reader
+two different stories.
 
 `Scratch` is the only way to get a worktree. It hands out a `Git` that already
 carries the whole safety configuration, so there is no way to get a worktree
@@ -54,6 +61,42 @@ everything else: `Git::new` is crate-private, so a repository-rooted runner can
 only be built from inside this crate. The queries are all reads, which fire no
 hooks, so unlike `Scratch` the pre-flight creates nothing at all — no temporary
 directory, no worktree, nothing to clean up if it rejects.
+
+## The report
+
+`Report` turns a `Conflicts` into the words a developer reads. It lives here,
+not in the binaries, because `grind` (rebase) and `grime` (merge) ask different
+questions and have to print the same shape — and two renderers would drift apart
+on exactly the details that make the two answers comparable at a glance:
+
+```rust
+use gitscratch::Report;
+
+let report = Report::new("grind", "replaying HEAD onto main");
+
+if let Some(note) = report.dirty_note(repo.uncommitted_files()?) {
+    eprintln!("{note}");
+}
+println!("{}", report.render(&conflicts));
+```
+
+```console
+grind: conflicts - replaying HEAD onto main
+       4 hunks across 2 files, 3 stops
+
+  src/lib.rs     3 hunks
+  src/main.rs    1 hunk
+```
+
+The only variation the two tools get is `Report::without_stops()`, which drops
+the stop count for `grime`: a merge halts exactly once, so the number would be a
+constant dressed up as a measurement. Everything else is fixed — the indent is
+measured from the tool's own name, the counts are padded in *display* width so a
+CJK filename still lines its column up, and every noun is pluralised by the
+metric newtype that owns it rather than by whoever is printing it.
+
+This is a deliberate, spec-sanctioned acceptance of a little presentation logic
+in a library crate. The alternative is two copies of it.
 
 A replay walks the *whole* operation rather than bailing at the first collision,
 resolving as it goes by staging the conflict markers verbatim. That is the
@@ -156,6 +199,12 @@ mutation rather than trusting a green suite.
 `tests/repo.rs` covers the pre-flight separately, since what it must get right
 is the *cheap rejection*: a directory that is not a repository and a revision
 that does not resolve both have to fail there, by name.
+
+`tests/conflicts.rs` covers the answer rather than the safety of getting it:
+whether a replay conflicted at all, and that the per-file breakdown accumulates
+across stops and adds up to the total it explains. `Report`'s own tests sit
+beside it in `src/report.rs`, because rendering a `Conflicts` is pure string
+work that needs no repository at all.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
