@@ -50,7 +50,6 @@ const READ_BUFFER_LEN: usize = 256 * 1024;
 /// with a run of zeroes - padded headers, preallocated records - resolving in a
 /// single read, while still asking the disk for a sixteenth of what a full
 /// buffer would.
-#[allow(dead_code)]
 const PROBE_READ_LEN: usize = 16 * 1024;
 
 /// A block of zero bytes that freshly-read data is compared against.
@@ -81,19 +80,33 @@ fn slice_is_all_zeroes(bytes: &[u8]) -> bool {
 ///
 /// Returns as soon as a non-zero byte is seen. `buffer` is caller-owned so a
 /// worker scanning thousands of files can reuse one allocation.
+///
+/// The first read asks for only [`PROBE_READ_LEN`] bytes and the rest ask for
+/// the whole buffer: until the probe comes back clean the likeliest outcome by
+/// far is rejection, and once it does the likeliest outcome is reading to the
+/// end. A buffer shorter than the probe simply caps both.
 fn reader_is_all_zeroes(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<bool> {
     let mut saw_bytes = false;
+    let mut window = PROBE_READ_LEN.min(buffer.len());
 
     loop {
-        let filled = match reader.read(buffer) {
+        // Indexing is bounded by the min() above and by the assignment below,
+        // both of which clamp to the buffer's length.
+        let Some(target) = buffer.get_mut(..window) else {
+            break;
+        };
+
+        let filled = match reader.read(target) {
             Ok(0) => break,
             Ok(filled) => filled,
-            // A signal arriving mid-read is not a failure of the file.
+            // A signal arriving mid-read is not a failure of the file, and it
+            // is not evidence about the probe either - retry at the same width.
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         };
 
         saw_bytes = true;
+        window = buffer.len();
 
         // Only the bytes this read actually filled are meaningful; the tail of
         // the buffer still holds the previous read's data.
