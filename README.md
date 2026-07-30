@@ -1853,7 +1853,7 @@ Move complete: 42 moved (40 renamed, 2 copied across volumes), 0 skipped in 1.23
 
 ## zth (zero the hero)
 
-Recursively hunt down files that are larger than zero bytes and contain nothing but zero bytes, and print their absolute paths. Named for the relaxing Cannibal Corpse ditty.
+Recursively hunt down files that are larger than zero bytes and contain nothing but zero bytes, and print their absolute paths. Named for the relaxing Cannibal Corpse cover of Black Sabbath's "Zero the Hero".
 
 Files full of nothing are the residue of something going wrong: an interrupted `dd`, a restore that allocated the file but never filled it, a network copy that dropped, a drive quietly returning zeroes on the way out. They look fine in `ls` — right name, right size — and only give themselves up when you read them.
 
@@ -1896,7 +1896,7 @@ The directory walk and the reading run at the same time, which is what makes the
 ⠲ [███████████▍                    ] discovered 105,564 · remaining 71,628 · ETA 23s
 ```
 
-It draws on stderr, so it stays out of the way of the results on stdout and disappears entirely when output is piped or redirected.
+It draws on stderr, so it stays out of the way of the results on stdout and disappears entirely when stderr is not a terminal. That is the split you want: `zth /Volumes/Backup > suspects.txt` still shows you the bar while the list fills up, and a run whose stderr goes to a pipe or a log file — a script, a cron job, CI — draws nothing at all.
 
 ### Errors
 
@@ -1920,5 +1920,5 @@ Delete what turns up, after reading the list first:
 ```bash
 zth /Volumes/Backup > suspects.txt
 less suspects.txt
-xargs -d '\n' rm -- < suspects.txt
+tr '\n' '\0' < suspects.txt | xargs -0 rm --
 ```
