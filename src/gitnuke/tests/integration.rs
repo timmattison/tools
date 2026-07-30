@@ -65,6 +65,42 @@ fn combined(output: &Output) -> String {
     )
 }
 
+/// The exit codes `gitnuke --help` and the README publish.
+///
+/// Spelled out here rather than imported from the binary on purpose: these are a
+/// contract callers script against, so the test has to state the numbers
+/// independently. A copy that followed `mod exit_codes` around would pin nothing.
+mod exit_codes {
+    pub const NOT_IN_REPO: i32 = 1;
+    pub const GIT_COMMAND_ERROR: i32 = 2;
+    pub const WORKTREE_NOT_FOUND: i32 = 3;
+    pub const MULTIPLE_MATCHES: i32 = 4;
+    pub const SUBMODULES_PRESENT: i32 = 5;
+    pub const INSIDE_TARGET: i32 = 6;
+    pub const BRANCH_NOT_DELETED: i32 = 7;
+}
+
+/// Assert the process exited with exactly `code`, showing gitnuke's output on
+/// failure.
+///
+/// `context` says what the run was supposed to be refusing (or doing), so a
+/// failure names the behaviour rather than just the number. A run killed by a
+/// signal has no exit code at all; that is reported as such instead of being
+/// silently compared against `None`.
+fn assert_exit_code(output: &Output, code: i32, context: &str) {
+    let actual = output.status.code();
+    assert_eq!(
+        actual,
+        Some(code),
+        "{context}: expected exit code {code}, got {}\n--- gitnuke output ---\n{}",
+        match actual {
+            Some(actual) => actual.to_string(),
+            None => format!("no exit code ({})", output.status),
+        },
+        combined(output),
+    );
+}
+
 /// A throwaway directory holding a `main` repo plus any worktrees a test adds.
 ///
 /// Every path lives under a fresh `TempDir`, so concurrent runs of the same
@@ -197,9 +233,10 @@ fn refuses_to_nuke_the_worktree_you_are_standing_in() {
     let output = gitnuke(&worktree, &["--force", "feature"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "gitnuke should refuse to nuke its own cwd: {message}"
+    assert_exit_code(
+        &output,
+        exit_codes::INSIDE_TARGET,
+        "gitnuke should refuse to nuke its own cwd",
     );
     assert!(worktree.exists(), "the worktree must survive: {message}");
     assert!(
@@ -223,10 +260,10 @@ fn refuses_when_cwd_is_below_the_target_worktree() {
 
     let output = gitnuke(&nested, &["--force", "feature"]);
 
-    assert!(
-        !output.status.success(),
-        "gitnuke should refuse from a subdirectory of the target: {}",
-        combined(&output)
+    assert_exit_code(
+        &output,
+        exit_codes::INSIDE_TARGET,
+        "gitnuke should refuse from a subdirectory of the target",
     );
     assert!(worktree.exists(), "the worktree must survive");
     assert!(branch_exists(&main, "feature"), "the branch must survive");
@@ -270,9 +307,10 @@ fn dry_run_reports_a_submodule_refusal() {
     let output = gitnuke(&main, &["--dry-run", "feature"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "a dry run that would be refused should exit non-zero: {message}"
+    assert_exit_code(
+        &output,
+        exit_codes::SUBMODULES_PRESENT,
+        "a dry run that would be refused should report the refusal's own code",
     );
     assert!(
         message.contains("--force"),
@@ -295,9 +333,10 @@ fn safe_mode_removes_the_worktree_but_keeps_an_unmerged_branch() {
     let output = gitnuke(&main, &["--safe", "feature"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "keeping an unmerged branch is a failure to report, not a silent skip: {message}"
+    assert_exit_code(
+        &output,
+        exit_codes::BRANCH_NOT_DELETED,
+        "keeping an unmerged branch is a failure to report, not a silent skip",
     );
     assert!(!worktree.exists(), "the worktree should still be removed");
     assert!(
@@ -368,9 +407,10 @@ fn refuses_a_submodule_worktree_without_force() {
     let output = gitnuke(&main, &["feature"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "gitnuke should refuse a submodule worktree without --force: {message}"
+    assert_exit_code(
+        &output,
+        exit_codes::SUBMODULES_PRESENT,
+        "gitnuke should refuse a submodule worktree without --force",
     );
     assert!(
         worktree.exists(),
@@ -444,9 +484,12 @@ fn keeps_the_branch_when_a_dirty_worktree_is_refused() {
     let output = gitnuke(&main, &["feature"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "gitnuke should refuse a dirty worktree without --force: {message}"
+    // git's own refusal, surfaced verbatim: gitnuke did not gate this itself, so
+    // it reports the failed git command rather than a gitnuke-specific code.
+    assert_exit_code(
+        &output,
+        exit_codes::GIT_COMMAND_ERROR,
+        "gitnuke should refuse a dirty worktree without --force",
     );
     assert!(worktree.exists(), "the dirty worktree must survive");
     assert!(
@@ -600,9 +643,10 @@ fn reports_an_unknown_target_and_lists_the_known_worktrees() {
     let output = gitnuke(&main, &["no-such-thing"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "an unknown target should fail: {message}"
+    assert_exit_code(
+        &output,
+        exit_codes::WORKTREE_NOT_FOUND,
+        "an unknown target should fail",
     );
     assert!(
         message.contains("no-such-thing"),
@@ -624,15 +668,55 @@ fn never_nukes_a_worktree_whose_branch_merely_contains_the_target() {
 
     let output = gitnuke(&main, &["issue-42"]);
 
-    assert!(
-        !output.status.success(),
-        "a substring must not resolve: {}",
-        combined(&output)
+    assert_exit_code(
+        &output,
+        exit_codes::WORKTREE_NOT_FOUND,
+        "a substring must not resolve",
     );
     assert!(worktree.exists(), "issue-421's worktree must survive");
     assert!(
         branch_exists(&main, "issue-421"),
         "issue-421 must survive a request to nuke issue-42"
+    );
+}
+
+/// A name that is one worktree's *directory* and another worktree's *branch* is
+/// genuinely ambiguous. gitnuke destroys whatever it resolves, so an ambiguous
+/// target has to destroy nothing at all and hand back both candidates.
+#[test]
+fn refuses_an_ambiguous_target_and_destroys_nothing() {
+    let fixture = Fixture::new();
+    // "shared" is the directory name of one worktree and the branch of another.
+    let by_directory = fixture.add_worktree("shared", "branch-a");
+    let by_branch = fixture.add_worktree("other", "shared");
+    let main = fixture.main_repo();
+
+    // Run from the main repo so "shared" cannot resolve as a relative path:
+    // `<main>/shared` does not exist, only `<root>/shared` does.
+    let output = gitnuke(&main, &["shared"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::MULTIPLE_MATCHES,
+        "an ambiguous target must be refused",
+    );
+    assert!(
+        by_directory.exists() && worktree_registered(&main, &by_directory),
+        "the directory-name match must survive: {message}"
+    );
+    assert!(
+        by_branch.exists() && worktree_registered(&main, &by_branch),
+        "the branch-name match must survive: {message}"
+    );
+    assert!(
+        branch_exists(&main, "branch-a") && branch_exists(&main, "shared"),
+        "neither branch may be deleted for an ambiguous target: {message}"
+    );
+    assert!(
+        message.contains(by_directory.to_str().expect("utf-8 path"))
+            && message.contains(by_branch.to_str().expect("utf-8 path")),
+        "both candidates should be listed so the caller can disambiguate: {message}"
     );
 }
 
@@ -646,9 +730,12 @@ fn nukes_every_target_it_can_and_reports_the_ones_it_cannot() {
     let output = gitnuke(&main, &["first", "no-such-thing", "second"]);
     let message = combined(&output);
 
-    assert!(
-        !output.status.success(),
-        "a failed target should fail the run: {message}"
+    // The run exits with the *first* failure's code; the only failing target here
+    // is the unresolvable one.
+    assert_exit_code(
+        &output,
+        exit_codes::WORKTREE_NOT_FOUND,
+        "a failed target should fail the run",
     );
     assert!(!first.exists(), "'first' should have been nuked: {message}");
     assert!(
@@ -709,10 +796,10 @@ fn refuses_to_run_outside_a_git_repository() {
 
     let output = gitnuke(tmp.path(), &["anything"]);
 
-    assert!(
-        !output.status.success(),
-        "gitnuke should fail outside a repo: {}",
-        combined(&output)
+    assert_exit_code(
+        &output,
+        exit_codes::NOT_IN_REPO,
+        "gitnuke should fail outside a repo",
     );
     assert!(
         combined(&output).contains("git repository"),
