@@ -81,8 +81,10 @@ struct Cli {
 
     /// Report what would happen without removing or deleting anything.
     ///
-    /// Runs the same checks as a real run, so a target that would be refused is
-    /// still reported as a failure.
+    /// A preflight, not a description: it runs every check a real run runs —
+    /// submodules, uncommitted changes, and under --safe whether the branch is
+    /// merged — and exits with the status that run would. A target that would
+    /// be refused is reported as a failure, with the same exit code.
     #[arg(short = 'n', long, verbatim_doc_comment)]
     dry_run: bool,
 }
@@ -411,6 +413,47 @@ fn find_submodules(worktree: &WorktreePath) -> SubmoduleReport {
     }
 }
 
+/// Whether `worktree` holds the modified or untracked files git refuses over.
+///
+/// This is the same question `git worktree remove` asks before it will delete
+/// anything, down to `--ignore-submodules=none`: ignored files do not count,
+/// untracked ones do. A worktree git can no longer inspect reports clean, the
+/// same way [`find_submodules`] reports nothing — the real removal is the
+/// authority, and it will say so in its own words.
+fn has_uncommitted_changes(worktree: &WorktreePath) -> bool {
+    Command::new("git")
+        .args(["status", "--porcelain", "--ignore-submodules=none"])
+        .current_dir(worktree.as_path())
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
+/// Whether `branch` is merged into whatever `git branch -d` would compare it to.
+///
+/// git measures merged-ness against the branch's upstream when it has one and
+/// against HEAD otherwise, so gitnuke asks about the same ref. Assuming HEAD
+/// unconditionally would cry "not fully merged" over every branch whose commits
+/// are already safe on its remote but not yet back on the local mainline.
+fn branch_is_merged(repo_root: &Path, branch: &BranchName) -> bool {
+    let upstream = format!("{branch}@{{upstream}}");
+    let has_upstream = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", &upstream])
+        .current_dir(repo_root)
+        .output()
+        .is_ok_and(|output| output.status.success());
+
+    let reference = if has_upstream {
+        upstream.as_str()
+    } else {
+        "HEAD"
+    };
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", branch.as_str(), reference])
+        .current_dir(repo_root)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
 /// The worktree's private git dir (`.../.git/worktrees/<name>` for a linked one).
 fn worktree_git_dir(worktree: &WorktreePath) -> Option<PathBuf> {
     let output = Command::new("git")
@@ -464,6 +507,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
     }
 
     if options.dry_run {
+        preflight(repo_root, worktree, options)?;
         return report_plan(worktree, &submodules, options);
     }
 
@@ -513,6 +557,50 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
     };
 
     delete_branch(repo_root, branch, options.safe)
+}
+
+/// Raises, ahead of time, the refusals a real run would only discover by asking
+/// git.
+///
+/// A real run never needs this: `git worktree remove` and `git branch -d` are
+/// the authority on whether they will refuse, and letting them answer is what
+/// keeps their own wording and their own edge cases. A dry run invokes neither,
+/// so without a stand-in it reports "would remove" for targets git is going to
+/// turn away — a false all-clear on a tool whose whole job is destruction. The
+/// submodule gate is the caller's, since it applies to both paths.
+///
+/// The exit codes match the real refusals deliberately: `gitnuke -n x` failing
+/// has to mean `gitnuke x` fails the same way, or the preflight is decoration.
+fn preflight(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(), NukeError> {
+    if !options.force && has_uncommitted_changes(&worktree.path) {
+        return Err(NukeError::new(
+            exit_codes::GIT_COMMAND_ERROR,
+            format!(
+                "could not remove worktree {}: it contains modified or untracked \
+                 files.\n  Re-run with --force to discard them.",
+                worktree.path
+            ),
+        ));
+    }
+
+    // A detached worktree has no branch, so there is nothing to be unmerged.
+    if options.safe {
+        if let Some(branch) = &worktree.branch {
+            if !branch_is_merged(repo_root, branch) {
+                return Err(NukeError::new(
+                    exit_codes::BRANCH_NOT_DELETED,
+                    format!(
+                        "worktree {} would be removed, but branch '{branch}' is not \
+                         fully merged, so --safe would keep it.\n  Delete it anyway \
+                         with: git branch -D {branch}",
+                        worktree.path
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Prints what a real run would do, and returns Ok since nothing was touched.

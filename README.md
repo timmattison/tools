@@ -1372,8 +1372,9 @@ in the worktree itself.
   standing in (or any parent of it) and names somewhere else to `cd` to first. It is a
   binary, not a shell function, so it cannot move your shell out of a directory it deletes.
 - **Never the main worktree**, and never a branch whose removal git refused.
-- **`--dry-run` is a real preflight.** It runs every check and exits with the same status a
-  real run would, so `gitnuke -n x` failing means `gitnuke x` would fail too.
+- **`--dry-run` is a real preflight.** It runs every check a real run runs — submodules,
+  uncommitted changes, and under `--safe` whether the branch is merged — and exits with the
+  same status that run would, so `gitnuke -n x` failing means `gitnuke x` would fail too.
 
 ### Options
 

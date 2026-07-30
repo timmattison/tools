@@ -387,6 +387,72 @@ fn dry_run_reports_an_unmerged_branch_refusal_under_safe() {
     );
 }
 
+/// The other half of the preflight's contract: it must not refuse what a real
+/// run would happily do. Without this, a merge check that always answered "not
+/// merged" would still satisfy the refusal tests above.
+#[test]
+fn dry_run_clears_a_merged_branch_under_safe() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["--safe", "--dry-run", "feature"]);
+    let message = combined(&output);
+
+    assert!(
+        output.status.success(),
+        "a merged branch would be deleted for real, so the dry run must clear \
+         it: {message}"
+    );
+    assert!(worktree.exists(), "dry run must not remove the worktree");
+    assert!(
+        branch_exists(&main, "feature"),
+        "dry run must not delete the branch: {message}"
+    );
+}
+
+/// `git branch -d` measures merged-ness against a branch's *upstream* when it
+/// has one, so a branch whose commits are only on its remote is still
+/// deletable. The dry run has to answer the same question against the same ref
+/// — and the real run immediately after it proves that is what git does.
+#[test]
+fn dry_run_clears_a_branch_merged_only_into_its_upstream_under_safe() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let remote = fixture.root.join("remote.git");
+    let remote_path = remote.to_str().expect("utf-8 path");
+    git(&main, &["init", "-q", "--bare", remote_path]);
+    git(&main, &["remote", "add", "origin", remote_path]);
+
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("work.txt"), "work only on the remote\n").expect("write file");
+    git(&worktree, &["add", "work.txt"]);
+    git(&worktree, &["commit", "-qm", "unmerged locally"]);
+    // Now 'feature' is ahead of HEAD but identical to its upstream.
+    git(&worktree, &["push", "-q", "-u", "origin", "feature"]);
+
+    let dry_run = gitnuke(&main, &["--safe", "--dry-run", "feature"]);
+
+    assert!(
+        dry_run.status.success(),
+        "a branch merged into its upstream is deletable, so the dry run must \
+         not refuse it: {}",
+        combined(&dry_run)
+    );
+
+    let real_run = gitnuke(&main, &["--safe", "feature"]);
+
+    assert!(
+        real_run.status.success(),
+        "the real run must reach the same verdict the dry run gave: {}",
+        combined(&real_run)
+    );
+    assert!(
+        !branch_exists(&main, "feature"),
+        "the branch should have been deleted for real"
+    );
+}
+
 /// A detached worktree has no branch, so `--safe` has nothing to ask about
 /// merged-ness. The preflight must clear it rather than invent a refusal.
 #[test]
