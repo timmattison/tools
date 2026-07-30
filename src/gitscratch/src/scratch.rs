@@ -192,11 +192,37 @@ pub struct Conflicts {
 }
 
 impl Conflicts {
+    /// Build a result straight from a per-file hunk breakdown.
+    ///
+    /// The total is summed from `files` rather than accepted alongside it, so a
+    /// hand-built `Conflicts` cannot claim a total its own breakdown
+    /// contradicts. That matters because this is the constructor a renderer's
+    /// tests reach for: a test fixture that can lie about the totals is a test
+    /// fixture that can make a broken renderer look correct.
+    #[must_use]
+    pub fn from_files(files: impl IntoIterator<Item = (String, usize)>, stops: usize) -> Self {
+        let mut conflicts = Self {
+            stops,
+            ..Self::default()
+        };
+        for (name, hunks) in files {
+            conflicts.hunks += hunks;
+            conflicts.files.insert(name);
+        }
+        conflicts
+    }
+
     /// Fold another step's cost into this running total.
     pub fn absorb(&mut self, other: Self) {
         self.stops += other.stops;
         self.hunks += other.hunks;
         self.files.extend(other.files);
+    }
+
+    /// Whether the replay finished without a single conflict.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        false
     }
 
     /// How many times the replay halted for manual resolution.
@@ -220,10 +246,19 @@ impl Conflicts {
     /// Which files conflicted, in sorted order.
     ///
     /// A caller rendering the result needs the names, not just how many there
-    /// were; [`Conflicts::files`] is the count of exactly this set.
-    #[must_use]
-    pub fn file_names(&self) -> &BTreeSet<String> {
-        &self.files
+    /// were; [`Conflicts::files`] is the count of exactly this sequence.
+    pub fn file_names(&self) -> impl Iterator<Item = &str> {
+        self.files.iter().map(String::as_str)
+    }
+
+    /// Every conflicted file paired with how many hunks it contributed, in
+    /// sorted order.
+    ///
+    /// A verdict that says only "4 hunks across 2 files" tells a developer how
+    /// much work is coming but not where it lands, so the breakdown is part of
+    /// the answer rather than a nicety layered on top.
+    pub fn file_hunks(&self) -> impl Iterator<Item = (&str, usize)> {
+        std::iter::empty()
     }
 }
 
