@@ -261,10 +261,10 @@ fn main() -> Result<()> {
                     width_offset: cfg.width_offset,
                 },
             );
-            println!("{}", build_output(&repo, &cfg, dims)?.output);
+            println!("{}", build_output(repo, &cfg, dims)?.output);
             Ok(())
         }
-        watch::Mode::Watch => watch::run(&repo, &cfg),
+        watch::Mode::Watch => watch::run(repo, &cfg),
     }
 }
 

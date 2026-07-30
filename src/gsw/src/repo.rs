@@ -31,6 +31,11 @@ use crate::render::{Operation, UpstreamStatus};
 pub struct RepoHandle {
     /// The repository as of the last successful open.
     repo: gix::Repository,
+    /// The work-tree root, captured when the repository was first discovered so
+    /// a re-open never has to search for it again. See
+    /// [`reopened`](RepoHandle::reopened) for why the re-open deliberately does
+    /// not re-discover.
+    workdir: std::path::PathBuf,
 }
 
 impl RepoHandle {
@@ -46,11 +51,18 @@ impl RepoHandle {
     /// cwd-free form, which is also what the tests use since a parallel test
     /// runner shares one process-wide current directory.
     pub fn discover(path: &std::path::Path) -> Option<Self> {
-        let repo = gix::discover(path).ok()?;
-        // Bare repos have no work tree; gsw renders a per-file working-tree
-        // view, so there's nothing to show. Treat them like "not a repo".
-        repo.workdir()?;
-        Some(Self { repo })
+        Self::from_repo(gix::discover(path).ok()?)
+    }
+
+    /// Wrap an opened repository, rejecting one gsw can't render.
+    ///
+    /// Bare repos have no work tree; gsw renders a per-file working-tree view,
+    /// so there's nothing to show. Treat them like "not a repo". Shared by the
+    /// initial discovery and by [`reopened`](Self::reopened) so both apply the
+    /// same admission rule.
+    fn from_repo(repo: gix::Repository) -> Option<Self> {
+        let workdir = repo.workdir()?.to_path_buf();
+        Some(Self { repo, workdir })
     }
 
     /// The repository as it was last opened. Does not re-read `.git/config`, so
@@ -66,11 +78,33 @@ impl RepoHandle {
     /// Callers that refresh on a timer (watch mode) use this instead of
     /// [`repo`](Self::repo) so an upstream configured — or unset — in another
     /// pane shows up on the next tick rather than on the next process start.
+    ///
+    /// The re-open goes through `gix::open` against the captured work-tree
+    /// root, deliberately **not** `gix::discover`: `open` resolves `path/.git`
+    /// (including the `.git` *file* a linked worktree uses) but never walks up
+    /// the directory tree, so if the git dir momentarily vanishes — mid-`git
+    /// gc`, mid-checkout, a worktree being pruned — it simply errors instead of
+    /// silently latching onto a *parent* repository and rendering someone
+    /// else's status.
+    ///
+    /// A failed re-open, or one that comes back without a work tree, keeps the
+    /// handle already in hand: a monitor that blanks out for one tick because
+    /// it caught git mid-write is worse than a monitor that repaints one
+    /// tick-old configuration and recovers on the next call.
     // Only the tests call this so far: `watch::run` still borrows one handle for
-    // the whole process. Wiring it into the refresh loop is the next slice of
-    // issue #334, which removes this allow along with the last stale-config read.
-    #[allow(dead_code)]
+    // the whole process. `expect` rather than `allow` so wiring this into the
+    // refresh loop makes the attribute itself a warning, forcing its removal.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "called from watch::run's refresh loop in the next slice of issue #334"
+        )
+    )]
     pub fn reopened(&mut self) -> &gix::Repository {
+        if let Some(fresh) = gix::open(&self.workdir).ok().and_then(Self::from_repo) {
+            self.repo = fresh.repo;
+        }
         &self.repo
     }
 }
@@ -1030,6 +1064,37 @@ mod tests {
             (up.ahead, up.behind),
             (0, 0),
             "the push left the branch level with its brand-new upstream",
+        );
+    }
+
+    #[test]
+    fn reopened_keeps_the_previous_handle_when_the_repo_is_momentarily_gone() {
+        // Watch mode calls `reopened()` on a timer, so it will eventually land
+        // in the middle of a `git gc`, a checkout, or a worktree prune and find
+        // the git dir missing. Falling back to the handle already in hand keeps
+        // the monitor rendering; going blank (or panicking) for a tick would be
+        // worse than repainting one tick-old configuration.
+        //
+        // This guard cannot be written red-first: before `reopened()` re-opened
+        // anything it returned the cached handle unconditionally and passed
+        // trivially. It ships with the branch it protects.
+        let dir = init_repo();
+        let p = dir.path();
+        let mut held = RepoHandle::discover(p).expect("worktree repo");
+        let git_dir = held.repo().git_dir().to_path_buf();
+
+        std::fs::rename(p.join(".git"), p.join(".git-moved")).unwrap();
+        assert_eq!(
+            held.reopened().git_dir(),
+            git_dir,
+            "a failed re-open must keep the previous handle, not drop the repo",
+        );
+
+        std::fs::rename(p.join(".git-moved"), p.join(".git")).unwrap();
+        assert_eq!(
+            super::branch_name(held.reopened()),
+            "main",
+            "and the next re-open must recover once the git dir is back",
         );
     }
 
