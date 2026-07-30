@@ -154,6 +154,28 @@ fn refuses_more_branches_than_the_limit_instead_of_overflowing_the_ordering_coun
     );
 }
 
+/// An empty branch list is the one input for which "the cheapest ordering" has
+/// no answer, so it has to be refused by name. Ranking nothing succeeds just as
+/// readily as ranking something - it yields the single empty ordering - and a
+/// caller handed that empty-but-successful result reads it as "your branches are
+/// already in the best order" rather than "you named no branches".
+#[test]
+fn refuses_an_empty_branch_list_rather_than_ranking_nothing() {
+    // No repository needed: the branch list is validated before any git work,
+    // the same reason an over-limit list costs nothing to reject.
+    let simulator = Simulator::new("/grist-does-not-exist", "main");
+
+    let error = simulator
+        .evaluate(&[])
+        .expect_err("there is nothing to put in an order");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("no branches to order"),
+        "expected the error to say there was nothing to order, got: {message}"
+    );
+}
+
 /// Replaying dozens of commits takes real time, so the caller needs to be told
 /// what is happening rather than staring at a silent terminal.
 #[test]
