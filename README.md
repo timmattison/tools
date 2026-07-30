@@ -1900,7 +1900,7 @@ It draws on stderr, so it stays out of the way of the results on stdout and disa
 
 ### Errors
 
-Every I/O error is skipped without a word: unreadable files, unreadable directories, a path that does not exist, a file that vanishes mid-scan. `zth` never writes to stderr and always exits 0, so a scan of a large tree you do not fully own produces a clean list rather than a screenful of permission complaints.
+Every I/O error during the scan is skipped without a word: unreadable files, unreadable directories, a path that does not exist, a file that vanishes mid-scan. `zth` never writes to stderr, and none of those failures touch the exit status, so a scan of a large tree you do not fully own produces a clean list rather than a screenful of permission complaints. The one thing that does fail the run is a failure to write the results themselves — a full disk swallowing half of `> suspects.txt`, say — because a truncated list must never be able to pass for a complete one. A reader that simply stops early is not that: `zth /data | head` still exits 0.
 
 Symlinks are reported by neither name nor target — they are not followed, so a scan cannot escape the tree it was pointed at or report the same file twice through two paths.
 

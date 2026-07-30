@@ -6,6 +6,7 @@
 
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -145,8 +146,9 @@ fn build_progress_bar() -> ProgressBar {
 ///
 /// # Errors
 ///
-/// Returns any [`io::Error`] from writing to stdout - most plausibly a broken
-/// pipe when the caller stops reading early.
+/// Returns any [`io::Error`] from writing to stdout. A broken pipe means the
+/// caller stopped reading early; every other kind means the list stdout received
+/// is shorter than what was found, which [`main`] turns into a failing status.
 fn print_paths(paths: &[PathBuf]) -> io::Result<()> {
     let stdout = io::stdout();
     let mut stdout = stdout.lock();
@@ -159,7 +161,13 @@ fn print_paths(paths: &[PathBuf]) -> io::Result<()> {
     stdout.flush()
 }
 
-fn main() {
+/// Scans, prints, and fails only when the result list could not be delivered.
+///
+/// The scan itself has nothing to report: unreadable files and directories are
+/// skipped silently and never reach the exit status. Writing the results is the
+/// one step that can fail meaningfully, and since `zth` never writes to stderr,
+/// the status is the only channel there is to say the list came out short.
+fn main() -> ExitCode {
     let cli = Cli::parse();
     let jobs = cli.jobs.map_or_else(Jobs::default, Jobs::new);
 
@@ -170,7 +178,12 @@ fn main() {
 
     bar.finish_and_clear();
 
-    // A closed pipe (`zth /data | head`) is the caller's business, not an error
-    // to report - and zth never writes to stderr regardless.
-    let _ = print_paths(&found);
+    match print_paths(&found) {
+        Ok(()) => ExitCode::SUCCESS,
+        // A closed pipe (`zth /data | head`) is the caller's business, not an error.
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        // Any other write failure truncated the list; the exit status is the only
+        // way to say so, because zth never writes to stderr.
+        Err(_) => ExitCode::FAILURE,
+    }
 }
