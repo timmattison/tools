@@ -62,8 +62,16 @@ impl<'a> Report<'a> {
     }
 
     /// The verdict, ready to print to stdout, with no trailing newline.
+    ///
+    /// Returned rather than printed so the caller decides where it goes - and
+    /// so `-q` can decide it goes nowhere - without this having to know about
+    /// streams.
     #[must_use]
-    pub fn render(&self, _conflicts: &Conflicts) -> String {
+    pub fn render(&self, conflicts: &Conflicts) -> String {
+        if conflicts.is_clean() {
+            return format!("{}: clean - {} hit no conflicts", self.tool, self.action);
+        }
+
         String::new()
     }
 
