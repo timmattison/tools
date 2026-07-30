@@ -184,7 +184,7 @@ impl Drop for Scratch {
 }
 
 /// What replaying one operation - or a whole sequence of them - cost.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Conflicts {
     stops: usize,
     hunks: usize,
