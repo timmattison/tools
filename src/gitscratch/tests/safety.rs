@@ -378,3 +378,162 @@ fn never_fires_a_hook_from_the_developer_s_repository() {
         "replay executed the developer's hooks; each path below is a hook that fired"
     );
 }
+
+/// Half-finished work in a tracked file, deliberately full of multi-byte
+/// characters. "Unchanged" has to mean byte-identical, not merely
+/// line-for-line: a replay that round-tripped this file through a lossy read,
+/// a re-encode, or a line-ending normalisation would look untouched to a
+/// textual comparison while having quietly mangled the developer's text.
+const UNCOMMITTED_EDIT: &str =
+    "作業中 — do not lose this 🚧\nthe café patch, half written\nline3\n";
+
+/// A change that exists only in the index: the shape of a developer who has
+/// staged part of their work and is still deciding about the rest.
+const STAGED_ONLY: &str = "staged, never committed — 保存されていない 🧪\n";
+
+/// A file git has never heard of, which is also the file with no recovery story
+/// whatsoever if something deletes it.
+const UNTRACKED_ONLY: &str = "untracked scratch notes ✍️ notes-café\n";
+
+/// The whole premise of a dry run is that a developer can ask "would this
+/// conflict?" *from the middle of their own half-finished work* and get an
+/// answer back without paying for it. That premise dies the instant a replay
+/// reaches into their working tree or their index, because uncommitted work is
+/// the least recoverable thing a repository holds. A clobbered commit is one
+/// `reflog` away. A clobbered branch is one `reset --hard` away. A working tree
+/// git has overwritten, or an index git has reset, is simply gone - there is no
+/// reflog for a working tree, and no amount of expertise gets it back.
+///
+/// The dirty tree is not the awkward edge case here, it is *the* case. Nobody
+/// runs "would this rebase hurt?" from a pristine checkout; they run it because
+/// they are elbow-deep in a branch and trying to decide what to do next. So the
+/// three kinds of uncommitted state this test builds - a tracked file edited but
+/// not committed, a change staged but not committed, and a file git has never
+/// seen - are the normal condition of the repository a replay will be pointed
+/// at, and all three have to survive it untouched.
+///
+/// The contested file is the one that gets dirtied on purpose: `shared.txt` is
+/// exactly the file both replayed branches rewrite, so it is the file a replay
+/// that escaped its scratch worktree would check out over, merge into, and stage
+/// conflict markers into. If any of that leaked into the real repository, this
+/// is where it would land first.
+#[test]
+fn never_touches_the_real_working_tree_or_index() {
+    let repo = conflicting_repo();
+
+    // Everything below is relative to the fixture's own `TempDir`, so a
+    // concurrent run of this same test cannot share a path with this one.
+    let dirty_tracked = repo.path().join("shared.txt");
+    std::fs::write(&dirty_tracked, UNCOMMITTED_EDIT).expect("leave uncommitted work in the tree");
+    std::fs::write(repo.path().join("staged.txt"), STAGED_ONLY).expect("write the staged file");
+    repo.git(&["add", "staged.txt"]);
+    std::fs::write(repo.path().join("untracked.txt"), UNTRACKED_ONLY)
+        .expect("write the untracked file");
+
+    // Bytes, not a `String`: this snapshot is the evidence, so it must not be
+    // taken through any decoding step that could hide a difference.
+    let before_bytes = std::fs::read(&dirty_tracked).expect("snapshot the uncommitted work");
+    let before_status = repo.git(&["status", "--porcelain"]);
+    let before_index = repo.git(&["diff", "--cached"]);
+    let before_head = repo.rev_parse("HEAD");
+    let before_branch = repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]);
+    let before_refs: Vec<(String, String)> = ["main", "left", "right"]
+        .iter()
+        .map(|name| ((*name).to_string(), repo.rev_parse(name)))
+        .collect();
+
+    // Control: if the fixture were somehow clean, every assertion below would
+    // pass by having nothing to lose.
+    assert!(
+        !before_status.is_empty(),
+        "the repository must start dirty, or this test proves nothing"
+    );
+    assert!(
+        !before_index.is_empty(),
+        "the index must start carrying a staged change, or nothing below covers it"
+    );
+    assert_eq!(
+        before_branch, "main",
+        "the fixture must start on a branch, so a stray detach is visible"
+    );
+
+    // Scoped on purpose: teardown removes the scratch worktree from the real
+    // repository, and a removal that resolved to the wrong path is exactly the
+    // failure that would eat the developer's work. The drop must have run
+    // before anything below is read. Do not flatten this block away.
+    let conflicts = {
+        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        replay(&scratch, "left", "main");
+        // `right` onto `left` genuinely conflicts, so the replay checks out,
+        // merges, writes conflict markers and stages them - the full set of
+        // operations that rewrite a working tree and an index.
+        replay(&scratch, "right", "left")
+    };
+
+    // Asserting on the conflict that was resolved, so this cannot pass by
+    // having quietly replayed nothing at all into anywhere at all.
+    assert_eq!(
+        conflicts.files(),
+        Files::new(1),
+        "the contested file should have conflicted"
+    );
+    assert!(
+        conflicts.file_names().contains("shared.txt"),
+        "the contested file should be named in the conflicts: {:?}",
+        conflicts.file_names()
+    );
+    assert!(
+        conflicts.hunks() > Hunks::new(0),
+        "replaying a contested branch should have hunks to hand-merge"
+    );
+
+    let after_bytes = std::fs::read(&dirty_tracked).expect("re-read the uncommitted work");
+    assert_eq!(
+        after_bytes,
+        before_bytes,
+        "replay rewrote the developer's uncommitted work in {}\n  before: {}\n   after: {}",
+        dirty_tracked.display(),
+        String::from_utf8_lossy(&before_bytes),
+        String::from_utf8_lossy(&after_bytes),
+    );
+    assert_eq!(
+        repo.git(&["status", "--porcelain"]),
+        before_status,
+        "replay changed what the developer's working tree and index contain"
+    );
+    assert_eq!(
+        repo.git(&["diff", "--cached"]),
+        before_index,
+        "replay changed what the developer had staged"
+    );
+    assert_eq!(
+        repo.rev_parse("HEAD"),
+        before_head,
+        "replay moved the developer's HEAD"
+    );
+    assert_eq!(
+        repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]),
+        before_branch,
+        "replay left the developer's HEAD somewhere other than the branch they were on"
+    );
+    for (name, sha) in before_refs {
+        assert_eq!(repo.rev_parse(&name), sha, "replay moved branch '{name}'");
+    }
+
+    // A halted rebase left behind in the real repository is its own kind of
+    // damage: every later git command in that repo refuses or behaves oddly
+    // until someone runs `rebase --abort`, and the developer has no reason to
+    // suspect a dry run put it there.
+    let common_dir = repo
+        .path()
+        .join(repo.git(&["rev-parse", "--git-common-dir"]));
+    for state_dir in ["rebase-merge", "rebase-apply"] {
+        let path = common_dir.join(state_dir);
+        assert!(
+            !path.exists(),
+            "replay left the developer's repository mid-rebase at {}:\n{}",
+            path.display(),
+            describe_tree(&path)
+        );
+    }
+}
