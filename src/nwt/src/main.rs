@@ -550,6 +550,35 @@ ENV FILE COPYING:
         .environment   - doesn't match the pattern
         Tracked files  - files already in git are never copied
 
+    A destination that already exists is never overwritten. If anything is already at the
+    destination path, nwt leaves it exactly as it found it and prints a line naming it:
+
+        Kept existing: .env.local (generated in worktree; not overwritten from main worktree)
+
+    A repo's 'post-checkout' hook lives in the shared git directory, so it runs during
+    'git worktree add' — before this copy. A hook that generates a worktree-specific .env
+    (a unique port, a unique database name, a freshly minted secret) would otherwise have
+    its work replaced by the main worktree's version. The worktree's own hook knows more
+    about that worktree than the main repo does, so nwt skips and says so.
+
+    The trade-off: nwt does not parse or merge .env files, so when the hook writes a
+    .env.local, the main worktree's .env.local does not reach the new worktree at all.
+    Keys that exist only in the main worktree's copy (DISABLE_AUTH, a shared API key)
+    will be missing, and you have to copy them over by hand. The per-file 'Kept existing:'
+    line is there so that divergence is discoverable. A trailing summary reports both
+    counts:
+
+        Copied 2 untracked .env files to new worktree
+        Kept 1 existing .env file already in the new worktree
+
+    Both the per-file lines and the summary are suppressed by --quiet.
+
+    On Unix, copied .env files are created at mode 0600 — owner read/write only — no
+    matter what the source file's mode is. A 0644 .env in the main worktree therefore no
+    longer propagates a world-readable secrets file into every worktree. The mode is
+    applied when the file is created, so the copy is never briefly readable by anyone
+    else. Windows has no equivalent mode; everything else behaves the same there.
+
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
 
@@ -695,6 +724,11 @@ struct Cli {
     /// .env.development) from the main worktree to the new worktree, preserving
     /// their relative paths. This is useful for development settings that shouldn't
     /// be committed to git.
+    ///
+    /// When copying is enabled, a destination that already exists (typically written
+    /// by a `post-checkout` hook during `git worktree add`) is kept as-is rather than
+    /// overwritten, and each copy is created at mode 0600 on Unix no matter what the
+    /// source file's mode is.
     ///
     /// Use this flag to disable this behavior for a single invocation, or set
     /// `copy_env = false` in ~/.nwt.toml to disable it by default.

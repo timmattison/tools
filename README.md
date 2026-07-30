@@ -1221,6 +1221,24 @@ copy_env = true
 bootstrap_hooks = true
 ```
 
+### Env File Copying
+
+After creating the worktree, nwt copies untracked `.env` files from the main worktree into the new one, preserving their relative paths, so development settings that aren't committed to git are there immediately. Two patterns are copied: `.env` exactly, and anything starting with `.env.` (`.env.local`, `.env.development`, and so on). Nothing else is — `.envrc` (direnv) and `.environment` don't match the pattern, and any file tracked by git is skipped, since git already puts it in the new worktree.
+
+A destination that already exists is never overwritten. nwt leaves it exactly as it found it and prints a line naming it:
+
+```text
+Kept existing: .env.local (generated in worktree; not overwritten from main worktree)
+```
+
+This exists because a repo's `post-checkout` hook lives in the shared git directory, so it runs during `git worktree add` — before nwt's copy. A hook that generates a worktree-specific `.env` (a unique port, a unique database name, a freshly minted secret) would otherwise have its work replaced by the main worktree's version. The worktree's own hook knows more about that worktree than the main repo does, so nwt skips and says so.
+
+The trade-off: nwt does not parse or merge `.env` files, so when the hook writes a `.env.local`, the main worktree's `.env.local` does not reach the new worktree at all. Keys that live only in the main worktree's copy — `DISABLE_AUTH`, a shared API key, whatever else you keep there — will be missing, and you have to copy them over by hand. The per-file `Kept existing:` line is there so that divergence is discoverable. A trailing summary reports both counts (`Copied N untracked .env files to new worktree` and `Kept N existing .env files already in the new worktree`); `-q`/`--quiet` suppresses the per-file lines and the summary alike.
+
+On Unix, copied `.env` files are created at mode `0600` — owner read/write only — no matter what the source file's mode is. A `0644` `.env` in the main worktree therefore no longer propagates a world-readable secrets file into every worktree. The mode is applied when the file is created, so the copy is never briefly readable by anyone else. Windows has no equivalent mode; everything else behaves the same there.
+
+Disable copying for a single invocation with `--no-copy-env`, or set `copy_env = false` in `~/.nwt.toml` to disable it by default.
+
 ### Hook Bootstrap
 
 After creating the worktree, if `package.json` at the worktree root declares a `prepare` script (the husky convention), nwt runs the project's package manager install so git-hook managers regenerate their hooks directory. This matters because `core.hooksPath` often points at a gitignored, generated directory (e.g. `.husky/_`) that a freshly created worktree doesn't have — without the install, git finds no hooks directory and silently runs nothing, so every commit bypasses lint/typecheck/test gates. The package manager is chosen by the `packageManager` field, then a lockfile, then pnpm. Repos without a `prepare` script are unaffected — no install is run.
