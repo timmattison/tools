@@ -594,8 +594,13 @@ fn worktree_git_dir(worktree: &WorktreePath) -> Option<PathBuf> {
 /// without a repository on disk: everything downstream compares this path
 /// against the filesystem (`git_dir.join("modules").is_dir()`), where one stray
 /// terminator character silently turns a hit into a miss.
+///
+/// Only the line terminator is trimmed, not trailing whitespace at large: a
+/// path component may legitimately end in a space, and `trim_end` would quietly
+/// hand back a *different* path than git named — trading a rare bug for a rarer
+/// and worse one. `\r` and `\n` are the only characters git can add here.
 fn parse_absolute_git_dir(stdout: &str) -> PathBuf {
-    PathBuf::from(stdout.trim_end_matches('\n'))
+    PathBuf::from(stdout.trim_end_matches(['\r', '\n']))
 }
 
 /// A failure to nuke one target: the message to print and the exit code to use.
