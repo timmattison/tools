@@ -319,7 +319,7 @@ impl Jobs {
     /// The machine's available parallelism, or one when it cannot be determined.
     #[must_use]
     pub fn available_parallelism() -> Self {
-        Self(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
+        Self(thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
     }
 
     /// The number of workers, guaranteed non-zero.
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn jobs_defaults_to_available_parallelism() {
-        let expected = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let expected = thread::available_parallelism().map_or(1, NonZeroUsize::get);
         assert_eq!(
             Jobs::default().get(),
             expected,
