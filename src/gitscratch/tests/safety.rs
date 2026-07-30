@@ -1,6 +1,7 @@
 //! `gitscratch` runs against the developer's real repository. These tests pin
 //! the properties that make that acceptable.
 
+use std::path::Path;
 use std::process::Command;
 
 use gitscratch::testing::conflicting_repo;
@@ -19,6 +20,32 @@ fn replay(scratch: &Scratch, branch: &str, onto: &str) -> Conflicts {
     scratch
         .replay_rebase(onto)
         .expect("replay the branch onto the simulated base")
+}
+
+/// Every path under `dir`, sorted, one per line - so an assertion that says
+/// "something was written here" can also say exactly what was written.
+///
+/// Returns an empty string for a directory that does not exist, which is the
+/// case every caller here is hoping for.
+fn describe_tree(dir: &Path) -> String {
+    let mut found = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+
+    while let Some(path) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let child = entry.path();
+            if child.is_dir() {
+                pending.push(child.clone());
+            }
+            found.push(child.display().to_string());
+        }
+    }
+
+    found.sort();
+    found.join("\n")
 }
 
 /// `rebase.updateRefs` rewrites any branch pointing into the range being
@@ -140,5 +167,79 @@ fn never_disturbs_other_worktrees_whose_directories_are_temporarily_missing() {
         status.status.success(),
         "the restored worktree is no longer a working worktree:\n{}",
         String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+/// `rerere` - "reuse recorded resolution" - is the one git feature that makes a
+/// dry run *teach* the repository something. With it enabled, every conflict
+/// git hits is filed away as a preimage in `rr-cache`, and the resolution that
+/// follows is filed away beside it. That cache lives in the git common
+/// directory: it is shared by every worktree, keyed only by the shape of the
+/// conflict, and consulted by every later merge and rebase in the repository.
+///
+/// A replay resolves conflicts by staging the markers verbatim - a deliberate
+/// non-answer chosen because it never discards a side. Letting rerere watch
+/// that happen would record "the resolution to this conflict is a file full of
+/// `<<<<<<<`" and then replay it silently the next time the developer hits the
+/// same conflict for real - with `rerere.autoupdate` on, staged for them
+/// without so much as a prompt. That is a simulation reaching forward in time
+/// to corrupt real work, which is strictly worse than not simulating at all.
+///
+/// So the guarantee is not "we do not turn rerere on"; it is that a developer
+/// who has already turned it on themselves - a perfectly reasonable thing to
+/// have done - still gets an `rr-cache` that the replay never touched.
+#[test]
+fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
+    let repo = conflicting_repo();
+    repo.git(&["config", "rerere.enabled", "true"]);
+    // The half that stages a recalled resolution without asking, and therefore
+    // the half that would do the damage invisibly.
+    repo.git(&["config", "rerere.autoupdate", "true"]);
+
+    // `rr-cache` is shared repo-wide, so it is reachable from the common dir
+    // rather than from any one worktree's git dir - including the scratch's.
+    let common_dir = repo
+        .path()
+        .join(repo.git(&["rev-parse", "--git-common-dir"]));
+    let rr_cache = common_dir.join("rr-cache");
+    assert!(
+        !rr_cache.exists(),
+        "fixture must start with nothing recorded, or this proves nothing:\n{}",
+        describe_tree(&rr_cache)
+    );
+
+    // Scoped on purpose: teardown is another chance for git to flush state into
+    // the real repository, so the drop must have run before the cache is
+    // inspected. Do not flatten this block away.
+    let conflicts = {
+        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        replay(&scratch, "left", "main");
+        // `right` onto `left` is the replay that genuinely conflicts, and a
+        // conflict is the only thing rerere ever has to record.
+        replay(&scratch, "right", "left")
+    };
+
+    // Asserting on the conflict that was resolved, so this cannot pass by
+    // having quietly replayed nothing for rerere to learn from.
+    assert_eq!(
+        conflicts.files(),
+        Files::new(1),
+        "the contested file should have conflicted"
+    );
+    assert!(
+        conflicts.file_names().contains("shared.txt"),
+        "the contested file should be named in the conflicts: {:?}",
+        conflicts.file_names()
+    );
+    assert!(
+        conflicts.hunks() > Hunks::new(0),
+        "replaying a contested branch should have hunks to hand-merge"
+    );
+
+    assert!(
+        !rr_cache.exists(),
+        "replay recorded rerere state in the developer's repository at {}:\n{}",
+        rr_cache.display(),
+        describe_tree(&rr_cache)
     );
 }
