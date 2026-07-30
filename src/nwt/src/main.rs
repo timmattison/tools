@@ -553,7 +553,7 @@ ENV FILE COPYING:
     A destination that already exists is never overwritten. If anything is already at the
     destination path, nwt leaves it exactly as it found it and prints a line naming it:
 
-        Kept existing: .env.local (generated in worktree; not overwritten from main worktree)
+        Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)
 
     A repo's 'post-checkout' hook lives in the shared git directory, so it runs during
     'git worktree add' — before this copy. A hook that generates a worktree-specific .env
@@ -1068,13 +1068,14 @@ struct EnvCopySummary {
 
 /// Builds the user-facing line announcing a destination `.env` that was left alone.
 ///
-/// SCAFFOLDING (red step): the wording still claims the destination was "generated in
-/// worktree", which presumes a post-checkout hook. The skip fires for *any* pre-existing
-/// destination — including a file `git worktree add` itself checked out — so the claim is
-/// not implemented as the tests demand yet.
+/// The line states only the observed fact — the destination was already there — because
+/// the skip fires for *any* pre-existing file, not just one a post-checkout hook
+/// generated. A `.env.local` that is untracked in the main worktree but committed on the
+/// branch being checked out is placed there by `git worktree add` itself. The hook
+/// rationale is explained in the `--help` text and the README instead.
 fn kept_existing_message(relative_path: &Path) -> String {
     format!(
-        "Kept existing: {} (generated in worktree; not overwritten from main worktree)",
+        "Kept existing: {} (already in the new worktree; not overwritten from main worktree)",
         relative_path.display()
     )
 }

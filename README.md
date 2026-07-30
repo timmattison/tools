@@ -1228,7 +1228,7 @@ After creating the worktree, nwt copies untracked `.env` files from the main wor
 A destination that already exists is never overwritten. nwt leaves it exactly as it found it and prints a line naming it:
 
 ```text
-Kept existing: .env.local (generated in worktree; not overwritten from main worktree)
+Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)
 ```
 
 This exists because a repo's `post-checkout` hook lives in the shared git directory, so it runs during `git worktree add` — before nwt's copy. A hook that generates a worktree-specific `.env` (a unique port, a unique database name, a freshly minted secret) would otherwise have its work replaced by the main worktree's version. The worktree's own hook knows more about that worktree than the main repo does, so nwt skips and says so.
