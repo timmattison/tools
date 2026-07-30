@@ -130,9 +130,29 @@ impl<'a> Report<'a> {
     /// A replay only ever sees committed work, so a `clean` verdict on a dirty
     /// tree is true and still misleading. The note exists so it cannot be
     /// misread.
+    ///
+    /// `None` rather than an empty string, so a caller cannot print a blank
+    /// line for a tree that had nothing worth warning about: there either is a
+    /// note or there is not.
     #[must_use]
-    pub fn dirty_note(&self, _uncommitted: usize) -> Option<String> {
-        None
+    pub fn dirty_note(&self, uncommitted: usize) -> Option<String> {
+        if uncommitted == 0 {
+            return None;
+        }
+
+        // Noun and verb move together - "1 uncommitted file is", "3
+        // uncommitted files are" - so they are chosen together and cannot end
+        // up disagreeing.
+        let (noun, verb) = if uncommitted == 1 {
+            ("file", "is")
+        } else {
+            ("files", "are")
+        };
+
+        Some(format!(
+            "{}: note: {uncommitted} uncommitted {noun} {verb} not included; simulating from HEAD",
+            self.tool
+        ))
     }
 }
 
