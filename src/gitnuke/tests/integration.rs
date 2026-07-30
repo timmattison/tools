@@ -239,6 +239,19 @@ fn worktree_registered(repo: &Path, path: &Path) -> bool {
         .any(|line| line.strip_prefix("worktree ") == Some(path.to_str().expect("utf-8 path")))
 }
 
+/// The path the cwd-guard hint offers as somewhere to cd to, if it offered one.
+///
+/// Asserting on the whole message cannot tell a useful hint from a useless one:
+/// the target's path legitimately appears earlier in it ("you are inside
+/// <target>"), so a plain `contains` is satisfied by a hint that names the very
+/// directory being nuked. This pulls out just the parenthesised suggestion, and
+/// yields None when the message makes none at all.
+fn suggested_destination(message: &str) -> Option<&str> {
+    let (_, after_marker) = message.split_once("(for example ")?;
+    let (path, _) = after_marker.split_once(')')?;
+    Some(path)
+}
+
 /// Nuking the worktree your shell is sitting in leaves that shell in a deleted
 /// directory, where every later git command fails confusingly. gitnuke is not a
 /// shell function and cannot cd you out, so it must refuse — even with --force,
@@ -266,6 +279,74 @@ fn refuses_to_nuke_the_worktree_you_are_standing_in() {
         message.contains(main.to_str().expect("utf-8 path")),
         "the message should point at the main worktree to cd to: {message}"
     );
+    assert_eq!(
+        suggested_destination(&message),
+        Some(main.to_str().expect("utf-8 path")),
+        "the ordinary case should send the caller to the main worktree: {message}"
+    );
+}
+
+/// The hint has to name somewhere *else*. It is built from git's worktree list,
+/// where the main worktree comes first — which is the right answer for every
+/// target except the main worktree itself. Standing in it and naming it, taking
+/// the first entry regardless produces "cd somewhere else, for example: here",
+/// advice that is useless in exactly the case it fires.
+#[test]
+fn never_suggests_cd_ing_to_the_worktree_being_nuked() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let elsewhere = fixture.add_worktree("elsewhere-wt", "elsewhere");
+
+    let output = gitnuke(&main, &["--force", "main"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::INSIDE_TARGET,
+        "the cwd guard owns the case of standing in the main worktree",
+    );
+    let Some(suggestion) = suggested_destination(&message) else {
+        panic!("a worktree the caller could go to exists, so the hint should name it: {message}");
+    };
+    assert_ne!(
+        suggestion,
+        main.to_str().expect("utf-8 path"),
+        "the hint must not send the caller to the directory it is refusing over: {message}"
+    );
+    assert_eq!(
+        suggestion,
+        elsewhere.to_str().expect("utf-8 path"),
+        "the hint should name the worktree that is not the target: {message}"
+    );
+    assert!(main.exists(), "the main worktree must survive: {message}");
+}
+
+/// A repo with nothing but its main worktree has nowhere to send the caller.
+/// The refusal still stands — the shell would still be stranded — so the hint
+/// offers nothing rather than offering the target back.
+#[test]
+fn omits_the_suggestion_when_there_is_no_other_worktree_to_offer() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["--force", "main"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::INSIDE_TARGET,
+        "the cwd guard still refuses when it has no advice to give",
+    );
+    assert_eq!(
+        suggested_destination(&message),
+        None,
+        "with nowhere else to go the hint must stay silent, not name the target: {message}"
+    );
+    assert!(
+        message.contains("cd somewhere else"),
+        "the refusal should still say why it refused: {message}"
+    );
+    assert!(main.exists(), "the main worktree must survive: {message}");
 }
 
 /// A subdirectory of the target is just as fatal to the shell as its root.
