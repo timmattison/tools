@@ -101,9 +101,18 @@ are supporting evidence.
 ## Development
 
 ```console
-cargo test -p grist          # unit, simulation, safety and CLI suites
+cargo test -p grist          # unit, simulation, CLI and safety suites
+cargo test -p gitscratch     # the shared harness and its own safety suite
 cargo build --release -p grist
 ```
 
-The safety guarantees above are pinned by `tests/safety.rs`, and each one was
-verified by mutation: remove the guard, watch the test fail, put it back.
+Most of the safety guarantees above belong to the shared harness, so that is
+where they are pinned: `gitscratch`'s `tests/safety.rs` covers the pinned
+`rebase.updateRefs=false` and the detached checkout, each verified by mutation —
+remove the guard, watch the test fail, put it back. `grist` keeps a
+`tests/safety.rs` of its own for the part `gitscratch` cannot see: that a full
+simulation, composed the way `grist` composes it, leaves every real branch ref
+where it found it.
+
+Disabling `rerere`, hooks and `gc.auto` is done by construction in the harness
+and is not yet covered by a test. Issue #329 tracks closing that gap.

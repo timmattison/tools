@@ -1,7 +1,5 @@
-mod support;
-
+use gitscratch::testing::{contested_region_repo, numbered_lines, stacked_branches_repo, TestRepo};
 use grist::{BranchName, Files, Hunks, Simulator, Stops};
-use support::{contested_region_repo, numbered_lines, stacked_branches_repo, TestRepo};
 
 fn order(names: &[&str]) -> Vec<BranchName> {
     names.iter().map(|n| BranchName::new(*n)).collect()

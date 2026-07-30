@@ -9,7 +9,10 @@ anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
-tempfile.workspace = true
+gitscratch.workspace = true
+
+[dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

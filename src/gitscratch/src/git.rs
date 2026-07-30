@@ -1,4 +1,4 @@
-//! The one way `grist` is allowed to invoke git.
+//! The one way a tool in this repository is allowed to invoke git.
 //!
 //! Every simulation runs against the developer's *real* repository, so a stray
 //! git invocation could rewrite branches they care about. All calls funnel
@@ -26,8 +26,14 @@ pub struct Git {
 
 impl Git {
     /// Run git in `cwd`, with hooks redirected to the empty `hooks_path`.
+    ///
+    /// Crate-private on purpose. A caller outside this crate could otherwise
+    /// build a runner rooted in the developer's real repository, with a
+    /// `hooks_path` that redirects nothing — an empty one still resolves hook
+    /// lookups, relative to `cwd`. Both guards are established by
+    /// [`Scratch::create`](crate::Scratch::create), so it stays the only way in.
     #[must_use]
-    pub fn new(cwd: impl Into<PathBuf>, hooks_path: impl Into<String>) -> Self {
+    pub(crate) fn new(cwd: impl Into<PathBuf>, hooks_path: impl Into<String>) -> Self {
         Self {
             cwd: cwd.into(),
             hooks_path: hooks_path.into(),
@@ -123,8 +129,11 @@ impl Git {
             "gc.auto=0",
             "commit.gpgsign=false",
             "gpg.format=openpgp",
-            "user.name=grist",
-            "user.email=grist@localhost",
+            // The identity belongs to this crate, not to whichever tool is
+            // driving it, so every consumer's scratch commits are attributable
+            // to the harness that actually made them.
+            "user.name=gitscratch",
+            "user.email=gitscratch@localhost",
         ]
         .iter()
         .flat_map(|setting| ["-c".to_string(), (*setting).to_string()])
@@ -133,5 +142,29 @@ impl Git {
             format!("core.hooksPath={}", self.hooks_path),
         ])
         .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Git;
+
+    /// `git var GIT_AUTHOR_IDENT` reports exactly the identity git would stamp
+    /// on a commit, so it proves what [`Git::safety_config`] actually pins
+    /// without having to build a repository and commit into it. It resolves
+    /// outside a repository too, which is why `temp_dir` is only ever a cwd
+    /// here — nothing is created in it, so concurrent test runs cannot collide.
+    #[test]
+    fn commits_under_the_crate_s_own_identity_not_a_consuming_tool_s() {
+        let git = Git::new(std::env::temp_dir(), "");
+
+        let ident = git
+            .run(&["var", "GIT_AUTHOR_IDENT"])
+            .expect("git var GIT_AUTHOR_IDENT");
+
+        assert!(
+            ident.starts_with("gitscratch <gitscratch@localhost>"),
+            "scratch commits should be authored by the crate, not a consumer: {ident}"
+        );
     }
 }

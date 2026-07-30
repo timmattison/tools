@@ -16,7 +16,8 @@ pub fn rank(mut scores: Vec<OrderingScore>) -> Vec<OrderingScore> {
 #[cfg(test)]
 mod tests {
     use super::rank;
-    use crate::metrics::{BranchName, Files, Hunks, OrderingScore, Stops};
+    use crate::metrics::OrderingScore;
+    use gitscratch::{BranchName, Files, Hunks, Stops};
 
     fn score(order: &[&str], stops: usize, files: usize, hunks: usize) -> OrderingScore {
         OrderingScore::new(

@@ -1,11 +1,11 @@
 //! End-to-end coverage of the binary itself, so the wiring between argument
 //! parsing, simulation and output is exercised the way a user runs it.
 
-mod support;
-
 use std::process::Command;
 
-use support::{contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo};
+use gitscratch::testing::{
+    contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
+};
 
 const TIE_ADVICE: &str = "Every order costs the same";
 

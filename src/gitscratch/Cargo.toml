@@ -1,0 +1,23 @@
+[package]
+name = "gitscratch"
+version = "0.1.0"
+edition.workspace = true
+description = "The hardened scratch-worktree harness for dry-running git operations without touching a real repository"
+
+[dependencies]
+anyhow.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+# Depending on itself turns the `testing` feature on for this crate's own test
+# targets, so `cargo test -p gitscratch` compiles the safety suite without
+# anyone having to remember `--features testing`. Cargo permits this one cycle
+# precisely so a crate can enable its own optional test scaffolding.
+gitscratch = { path = ".", features = ["testing"] }
+
+[features]
+# Shared git fixture builders for the test suites of crates built on gitscratch.
+testing = []
+
+[lints]
+workspace = true

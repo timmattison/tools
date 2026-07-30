@@ -1,6 +1,6 @@
 //! Enumerating and evaluating every order the branches could land in.
 
-use crate::metrics::BranchName;
+use gitscratch::BranchName;
 
 /// How many orders `branches` branches could land in - `branches!` - or `None`
 /// when that many orderings cannot be counted at all.
@@ -48,7 +48,7 @@ pub fn permutations(branches: &[BranchName]) -> Vec<Vec<BranchName>> {
 #[cfg(test)]
 mod tests {
     use super::{ordering_count, permutations};
-    use crate::metrics::BranchName;
+    use gitscratch::BranchName;
     use std::collections::HashSet;
 
     fn branches(names: &[&str]) -> Vec<BranchName> {

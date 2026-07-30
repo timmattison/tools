@@ -2493,6 +2493,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitscratch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gitscratch",
+ "tempfile",
+]
+
+[[package]]
 name = "gix"
 version = "0.83.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3474,7 +3483,7 @@ dependencies = [
  "buildinfo",
  "clap",
  "comfy-table",
- "tempfile",
+ "gitscratch",
 ]
 
 [[package]]
