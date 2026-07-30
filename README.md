@@ -467,6 +467,18 @@ containers/CI).
     ranks them. Up to six branches; `--onto <REF>` sets what they land on, and `-q` prints just the
     winning order for piping.
   - To install: `cargo install --git https://github.com/timmattison/tools grist`
+- zth (zero the hero)
+  - Recursively finds files that are larger than zero bytes and contain nothing but zero bytes, then
+    prints their absolute paths - the wreckage a failed copy, a truncated restore, or a dying disk
+    leaves behind. Each file is read only until its first non-zero byte, so a directory of ordinary
+    files costs one read apiece no matter how large they are. The directory walk runs alongside the
+    reads, so the progress bar's "discovered" count keeps climbing while files are already being
+    scanned, and the estimate follows it. Errors are skipped in silence: unreadable files and
+    directories, a path that does not exist, a file that vanishes mid-scan. Nothing but results ever
+    reaches stdout, and nothing at all reaches stderr, so `zth /data > suspects.txt` just works.
+  - Usage: `zth <PATH>`, `zth -j 32 /mnt/backups` (more readers for a network or spinning-rust
+    volume; defaults to the machine's core count).
+  - To install: `cargo install --git https://github.com/timmattison/tools zth`
 
 ## dirhash
 
@@ -1837,4 +1849,64 @@ bm --suffix .pdf --destination ~/Documents/pdfs ~/Downloads ~/Desktop /tmp
 On completion, bm prints a summary:
 ```
 Move complete: 42 moved (40 renamed, 2 copied across volumes), 0 skipped in 1.23s (34 files/sec)
+```
+
+## zth (zero the hero)
+
+Recursively hunt down files that are larger than zero bytes and contain nothing but zero bytes, and print their absolute paths. Named for the relaxing Cannibal Corpse ditty.
+
+Files full of nothing are the residue of something going wrong: an interrupted `dd`, a restore that allocated the file but never filled it, a network copy that dropped, a drive quietly returning zeroes on the way out. They look fine in `ls` — right name, right size — and only give themselves up when you read them.
+
+### Basic Usage
+
+```bash
+zth /Volumes/Backup
+zth /Volumes/Backup > suspects.txt
+zth -j 32 /mnt/nas
+```
+
+### Options
+
+- `-j`, `--jobs <N>`: How many files to read at once. Defaults to the machine's core count. Scanning waits on the storage device far more than on the CPU, so a network share or a spinning disk often does better well above the core count.
+- `<PATH>`: The directory to scan recursively. A single file works too, in which case only that file is checked.
+
+### How it reads
+
+Each file is read only until its first non-zero byte, so an ordinary file costs a single read no matter how large it is — a 4 GB video is dismissed by its first few bytes. Only files that really are all zeroes get read to the end. Blocks are compared against a zero block with `memcmp`, which the CPU vectorizes, so the all-zero case runs at memory speed rather than byte-at-a-time.
+
+Empty files are never reported. A file with no bytes has no zero bytes either, and a directory full of `touch`ed placeholders is not what you are looking for.
+
+### The progress bar
+
+The directory walk and the reading run at the same time, which is what makes the estimate honest: discovery keeps turning up files while workers are already reading, so the bar shows the count discovered so far, the count still waiting, and a time estimate that re-derives itself as the denominator grows.
+
+```
+⠲ [███████████▍                    ] discovered 105,564 · remaining 71,628 · ETA 23s
+```
+
+It draws on stderr, so it stays out of the way of the results on stdout and disappears entirely when output is piped or redirected.
+
+### Errors
+
+Every I/O error is skipped without a word: unreadable files, unreadable directories, a path that does not exist, a file that vanishes mid-scan. `zth` never writes to stderr and always exits 0, so a scan of a large tree you do not fully own produces a clean list rather than a screenful of permission complaints.
+
+Symlinks are reported by neither name nor target — they are not followed, so a scan cannot escape the tree it was pointed at or report the same file twice through two paths.
+
+### Examples
+
+Find the damage on a backup drive and count it:
+```bash
+zth /Volumes/Backup | wc -l
+```
+
+Check a single suspicious file:
+```bash
+zth ~/Downloads/ubuntu.iso
+```
+
+Delete what turns up, after reading the list first:
+```bash
+zth /Volumes/Backup > suspects.txt
+less suspects.txt
+xargs -d '\n' rm -- < suspects.txt
 ```

@@ -72,3 +72,4 @@ A one-line description of every program documented in the [README](./README.md),
 | `wl` | Shows which process is listening on a given port. |
 | `wolly` | Wake-on-LAN tool that sends magic packets with auto subnet broadcast detection. |
 | `wu` | Cross-platform "who's using" a file/directory/device (process name, PID, user, mode). |
+| `zth` | Zero the Hero — recursively finds non-empty files that contain nothing but zero bytes. |
