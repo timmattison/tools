@@ -471,8 +471,11 @@ pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress)
 
                         // Counting and announcing under one lock is what keeps
                         // the totals in order. An observer that panics poisons
-                        // the mutex; recovering the count is better than taking
-                        // every other worker down with it.
+                        // the mutex on its way out; recovering the count lets
+                        // the other workers wind down normally instead of each
+                        // dying on the lock, so what reaches the caller is the
+                        // observer's own panic rather than a pile of
+                        // PoisonErrors standing in front of it.
                         let mut total = scanned.lock().unwrap_or_else(PoisonError::into_inner);
                         *total = total.saturating_add(1);
                         progress.files_scanned(*total);
