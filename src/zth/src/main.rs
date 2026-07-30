@@ -165,8 +165,9 @@ fn print_paths(paths: &[PathBuf]) -> io::Result<()> {
 ///
 /// The scan itself has nothing to report: unreadable files and directories are
 /// skipped silently and never reach the exit status. Writing the results is the
-/// one step that can fail meaningfully, and since `zth` never writes to stderr,
-/// the status is the only channel there is to say the list came out short.
+/// one step that can fail meaningfully, and since `zth` never writes a
+/// diagnostic to stderr, the status is the only channel there is to say the
+/// list came out short.
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let jobs = cli.jobs.map_or_else(Jobs::default, Jobs::new);
@@ -183,7 +184,7 @@ fn main() -> ExitCode {
         // A closed pipe (`zth /data | head`) is the caller's business, not an error.
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         // Any other write failure truncated the list; the exit status is the only
-        // way to say so, because zth never writes to stderr.
+        // way to say so, because zth never writes a diagnostic to stderr.
         Err(_) => ExitCode::FAILURE,
     }
 }
