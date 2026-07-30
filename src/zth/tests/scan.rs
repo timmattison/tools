@@ -4,7 +4,9 @@
 //! concurrently with another copy of itself.
 
 use std::fs;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use tempfile::TempDir;
@@ -243,6 +245,112 @@ fn progress_totals_arrive_in_order() {
         "scanned totals must never go backwards, got {} reversals, e.g. {:?}",
         backwards.len(),
         &backwards[..backwards.len().min(5)]
+    );
+}
+
+/// How many all-zero files the observer-panic fixtures hold.
+///
+/// Large enough that the work is spread across every worker, so exactly one of
+/// them is lost when a single callback panics - and the shortfall is visible.
+const PANIC_FIXTURE_FILES: usize = 50;
+
+/// A [`ScanProgress`] that panics the first time the chosen callback fires.
+///
+/// Observers fail for entirely ordinary reasons - arithmetic that overflows, a
+/// channel whose receiver has already hung up, an `unwrap` on a lock another
+/// panic poisoned - and which of the scan's threads happens to make the call is
+/// not something the caller chose or can see.
+struct PanicsOnce {
+    on_discovered: bool,
+    on_scanned: bool,
+    fired: AtomicBool,
+}
+
+impl PanicsOnce {
+    /// Panics inside the walker thread, on the first file discovered.
+    fn on_discovered() -> Self {
+        Self {
+            on_discovered: true,
+            on_scanned: false,
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    /// Panics inside a worker thread, on the first file scanned.
+    fn on_scanned() -> Self {
+        Self {
+            on_discovered: false,
+            on_scanned: true,
+            fired: AtomicBool::new(false),
+        }
+    }
+
+    /// Panics on the first call and returns quietly on every one after it.
+    ///
+    /// Panicking once rather than every time is what makes the failure a
+    /// *truncation*: the rest of the scan carries on and produces a result that
+    /// looks entirely plausible.
+    fn fire(&self) {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            panic!("the observer is broken - this panic is the point of the test");
+        }
+    }
+}
+
+impl ScanProgress for PanicsOnce {
+    fn files_discovered(&self, _total: u64) {
+        if self.on_discovered {
+            self.fire();
+        }
+    }
+
+    fn files_scanned(&self, _total: u64) {
+        if self.on_scanned {
+            self.fire();
+        }
+    }
+}
+
+/// Builds a tree of [`PANIC_FIXTURE_FILES`] all-zero files and scans it with
+/// `progress`, reporting how many matches came back if the scan wrongly ran to
+/// completion, and `None` if the observer's panic reached the caller.
+fn matches_survived(progress: &dyn ScanProgress) -> Option<usize> {
+    let (_dir, root) = fixture();
+    for index in 0..PANIC_FIXTURE_FILES {
+        write(&root, &format!("zero-{index}.bin"), &[0_u8; 64]);
+    }
+
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        find_all_zero_files(&root, Jobs::new(4), progress)
+    }))
+    .ok()
+    .map(|found| found.len())
+}
+
+/// The silent half of the bug: a worker thread's panic used to be swallowed by
+/// the `join()` that collected its matches, so the scan handed back everything
+/// the *other* workers found and said nothing about the list it dropped on the
+/// floor. `find_all_zero_files` returns a bare `Vec`, so a caller has no way to
+/// tell that result apart from a complete one.
+#[test]
+fn a_panicking_scanned_observer_aborts_the_scan() {
+    assert_eq!(
+        matches_survived(&PanicsOnce::on_scanned()),
+        None,
+        "a panicking files_scanned observer must abort the scan, \
+         not return a silently truncated result"
+    );
+}
+
+/// The other half: whichever thread the observer happens to panic in, the
+/// outcome a caller sees has to be the same one.
+#[test]
+fn a_panicking_discovered_observer_aborts_the_scan() {
+    assert_eq!(
+        matches_survived(&PanicsOnce::on_discovered()),
+        None,
+        "a panicking files_discovered observer must abort the scan, \
+         not return a silently truncated result"
     );
 }
 
