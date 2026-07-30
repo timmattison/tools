@@ -7,6 +7,7 @@
 //! `grist` measures that cost by replaying each candidate ordering against
 //! throwaway git state and counting what a human would have to resolve.
 
+pub mod git;
 pub mod metrics;
 pub mod rank;
 pub mod simulate;
