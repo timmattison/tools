@@ -1205,6 +1205,21 @@ branch refs/heads/loud
     }
 
     #[test]
+    fn never_equates_two_paths_that_differ_only_in_case() {
+        // A difference of case can be a difference of directory: APFS can be
+        // formatted case-sensitive, and on such a volume `/x/Foo` and `/x/foo`
+        // are two unrelated directories. gitnuke destroys what it resolves, so
+        // calling them equal means removing a worktree nobody named and
+        // deleting its branch. Only exact comparison is safe here.
+        assert!(!paths_equal(Path::new("/x/Foo"), Path::new("/x/foo")));
+        assert!(!paths_equal(
+            Path::new("/wt/FEATURE-WT/nested"),
+            Path::new("/wt/feature-wt/nested")
+        ));
+        assert!(paths_equal(Path::new("/x/foo"), Path::new("/x/foo")));
+    }
+
+    #[test]
     fn reports_ambiguity_between_a_directory_name_and_a_branch_name() {
         let worktrees = vec![
             wt("/repo", Some("main")),
