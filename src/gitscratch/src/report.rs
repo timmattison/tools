@@ -175,4 +175,23 @@ mod tests {
   src/main.rs    1 hunk"
         );
     }
+
+    /// `grime` prints the identical shape minus the stop count, because a merge
+    /// halts exactly once and the number would be a constant dressed up as a
+    /// measurement. Everything else - the header, the counts, the breakdown -
+    /// has to survive the omission untouched, or the two tools stop being
+    /// comparable at a glance.
+    #[test]
+    fn dropping_the_stop_count_removes_that_clause_and_nothing_else() {
+        let report = Report::new("grime", "merging feature into HEAD").without_stops();
+
+        assert_eq!(
+            report.render(&sample()),
+            r"grime: conflicts - merging feature into HEAD
+       4 hunks across 2 files
+
+  src/lib.rs     3 hunks
+  src/main.rs    1 hunk"
+        );
+    }
 }
