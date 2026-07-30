@@ -721,3 +721,195 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
     }
     assert_nothing_registered("a scratch dropped while a rebase was still halted");
 }
+
+/// Commit signing is the one git setting people turn on once, globally, and
+/// then forget about - which means it applies to every repository the developer
+/// owns, including the one a dry run is about to be pointed at. A replay commits
+/// for real inside its scratch worktree: every resolved conflict ends in
+/// `rebase --continue`, and `rebase --continue` writes a commit object. If the
+/// replay inherits the developer's signing configuration, that commit gets sent
+/// to their signing program.
+///
+/// Both ways that can go are unacceptable, and they are unacceptable for
+/// different reasons. The good case is that signing simply fails - a key that is
+/// not on this machine, a smartcard that is not plugged in, an agent that is not
+/// running - and the developer gets no answer at all to a question that was
+/// supposed to be free. The bad case is that signing *works*, and the developer
+/// is handed a passphrase prompt, or a pinentry dialog, or a smartcard touch
+/// request that they never asked for and cannot connect to anything they did.
+/// A dry run is a question, not an action, and it must not sit there waiting on
+/// a human. A hang is strictly worse than a failure: a failure tells you what
+/// happened and hands the terminal back, while a hang wedges the calling tool
+/// with no diagnosis and no obvious culprit.
+///
+/// So this test has to be able to tell those two apart, which is why the replay
+/// runs on its own thread behind a timeout instead of being called directly. A
+/// plain call would catch only the failure; the hang - the outcome that actually
+/// matters more - would take the whole test binary down with it and report
+/// nothing about why.
+#[test]
+fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::time::Duration;
+
+    /// Long enough that a loaded machine running several `cargo test`
+    /// invocations at once never trips it by being slow, short enough that a
+    /// genuinely stuck replay is reported in about a minute instead of hanging
+    /// the suite until someone notices. The replay it bounds takes well under a
+    /// second, so the gap between "slow" and "stuck" is not a close call.
+    const REPLAY_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// A key id no keyring can resolve. This is what makes the guarantee
+    /// testable on *any* machine rather than only on one without a working gpg:
+    /// with a real key, whether an attempted signature succeeds would depend on
+    /// whether the developer running the tests happens to have an unlocked agent
+    /// sitting there, so "the replay tried to sign" would be observable on some
+    /// machines and invisible on others. With a key that cannot resolve,
+    /// attempting to sign is deterministically fatal everywhere.
+    const UNRESOLVABLE_SIGNING_KEY: &str = "0xDEADBEEFDEADBEEF";
+
+    /// Drive both replays and hand back what the contested one cost, reporting
+    /// failure instead of raising it.
+    ///
+    /// The shared `replay` helper at the top of this file `expect`s, which is
+    /// right for every other test here and wrong for this one: a panic on this
+    /// thread would reach the main thread only as a dropped channel, stripped of
+    /// the git output that says *why* - and "why" is the entire subject of this
+    /// test. So this is a local, non-panicking twin. Do not merge the two; the
+    /// other tests want the panic.
+    fn replay_under_signing(repo: &Path) -> anyhow::Result<Conflicts> {
+        let scratch = Scratch::create(repo, "main")?;
+
+        let git = scratch.git();
+        git.run(&["checkout", "-q", "--detach", "left"])?;
+        scratch.replay_rebase("main")?;
+
+        // The replay that matters. `right` onto `left` genuinely conflicts, so
+        // the rebase halts, the markers get staged, and the replay finishes the
+        // commit with `rebase --continue` - which is the exact moment a signing
+        // configuration would be consulted.
+        git.run(&["checkout", "-q", "--detach", "right"])?;
+        let conflicts = scratch.replay_rebase("left")?;
+
+        // A signing failure does not have to arrive as an error, and that is the
+        // subtlest way this guarantee could rot. When `rebase --continue` cannot
+        // write the commit, git leaves the rebase halted with nothing unmerged
+        // left in the index - which the resolution loop reads as "a commit that
+        // became empty" and answers with `rebase --skip`. The rebase then
+        // finishes successfully, having thrown away the very commit it was
+        // asked to replay, and the caller gets a plausible-looking cost for work
+        // that was never actually done. So "no error" is not enough: the
+        // replayed commit has to still be there.
+        let replayed = git.run(&["log", "--format=%s", "left..HEAD"])?;
+        anyhow::ensure!(
+            replayed.contains("right work"),
+            "the replay finished without the commit it was replaying - \
+             `git log --format=%s left..HEAD` in the scratch worktree reported \
+             {replayed:?}. Signing broke the commit and the resolution loop \
+             skipped it, so the failure came back disguised as an answer."
+        );
+
+        Ok(conflicts)
+    }
+
+    let repo = conflicting_repo();
+
+    // Signing has to be switched on *after* the fixture is built: `TestRepo`
+    // pins `commit.gpgsign=false` while creating the commits, precisely so a
+    // developer whose global config signs everything can still build fixtures.
+    repo.git(&["config", "commit.gpgsign", "true"]);
+    repo.git(&["config", "user.signingkey", UNRESOLVABLE_SIGNING_KEY]);
+    // Pinned here as well as in the harness, so the fixture stays deterministic
+    // on its own terms: `gpg.format` selects *which* program config git reads
+    // (`gpg.program`, `gpg.ssh.program`, `gpg.x509.program`), so leaving it to
+    // whatever the developer running these tests has set globally would leave
+    // the signing program below unused on their machine.
+    repo.git(&["config", "gpg.format", "openpgp"]);
+    // A signing program that does not exist, at a path inside this fixture's own
+    // `TempDir` so concurrent runs cannot share it. Naming a real gpg would drag
+    // the developer's actual `~/.gnupg` into a test run - creating it, locking
+    // it, starting an agent - and would put a pinentry prompt one misconfigured
+    // machine away from wedging the suite for real. A path that cannot be
+    // executed makes "the replay tried to sign" fail instantly, identically,
+    // everywhere, and with nothing outside the fixture involved.
+    let signing_program = repo.path().join("no-such-signing-program");
+    repo.git(&[
+        "config",
+        "gpg.program",
+        signing_program.to_str().expect("utf-8 fixture path"),
+    ]);
+
+    // Control: prove the signing configuration above is actually armed before
+    // proving the replay is unaffected by it. A typo in a config key, or a git
+    // that ignored the setting, would leave every assertion below passing
+    // because nothing was ever asked to sign. This commit runs through plain
+    // git rather than through `gitscratch`, so nothing under test is involved -
+    // it is the developer's repository behaving the way it normally would. It
+    // is `--allow-empty` so that failing, which is what it is here to do, leaves
+    // the fixture exactly as it found it.
+    let control = Command::new("git")
+        .args(["commit", "--allow-empty", "-q", "-m", "control"])
+        .current_dir(repo.path())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .expect("run the control commit in the fixture");
+    let control_stderr = String::from_utf8_lossy(&control.stderr);
+    assert!(
+        !control.status.success(),
+        "commit signing is not armed in {}, so this test could only pass \
+         vacuously: a plain commit succeeded",
+        repo.path().display()
+    );
+    assert!(
+        control_stderr.contains("gpg failed to sign"),
+        "the control commit failed for some reason other than signing, so the \
+         fixture is not testing what it claims to:\n{control_stderr}"
+    );
+
+    // The replay goes on its own thread so the main thread keeps a clock on it.
+    // Only the path is moved across; `repo` stays here, alive, because its
+    // `TempDir` is the repository the thread is working in.
+    let repo_path = repo.path().to_path_buf();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        // The receiver is gone if the main thread already gave up waiting, and
+        // that is a normal end to this thread rather than an error.
+        let _ = sender.send(replay_under_signing(&repo_path));
+    });
+
+    // Three outcomes, three different bugs, three different messages. Collapsing
+    // them would report the wrong one.
+    let conflicts = match receiver.recv_timeout(REPLAY_TIMEOUT) {
+        Ok(Ok(conflicts)) => conflicts,
+        Ok(Err(error)) => panic!(
+            "commit signing broke the replay: a developer with signing enabled \
+             cannot get a trustworthy answer out of a dry run\n{error:?}"
+        ),
+        Err(RecvTimeoutError::Timeout) => panic!(
+            "the replay never came back after {REPLAY_TIMEOUT:?} - a dry run \
+             that inherited commit signing is sitting on a passphrase prompt \
+             nobody asked for"
+        ),
+        Err(RecvTimeoutError::Disconnected) => panic!(
+            "the replay panicked instead of returning; see the thread's own \
+             panic message above for what commit signing did to it"
+        ),
+    };
+
+    // Asserting on the conflict that was resolved, so this cannot pass by having
+    // quietly replayed nothing for signing to have been consulted about.
+    assert_eq!(
+        conflicts.files(),
+        Files::new(1),
+        "the contested file should have conflicted"
+    );
+    assert!(
+        conflicts.file_names().contains("shared.txt"),
+        "the contested file should be named in the conflicts: {:?}",
+        conflicts.file_names()
+    );
+    assert!(
+        conflicts.hunks() > Hunks::new(0),
+        "replaying a contested branch should have hunks to hand-merge"
+    );
+}
