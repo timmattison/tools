@@ -371,12 +371,21 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         // Best effort: the TempDir goes away regardless, but git also keeps
         // administrative state in the real repo that must be cleaned up.
+        // Removing by path takes both, and it runs while the TempDir is still
+        // alive, so git still sees the worktree it is being asked about.
+        //
+        // Deliberately no `worktree prune` afterwards. Pruning is repo-wide and
+        // immediate: it deletes the administrative state - including any halted
+        // rebase - of every worktree whose directory is merely *missing right
+        // now*, which is the normal condition for a worktree on an unmounted
+        // drive or a sleeping network mount. A dry run must not cost the
+        // developer a worktree. If the removal above ever fails, the leftover
+        // entry is inert, and git's own gc clears it once it ages out.
         if let Ok(path) = self.worktree_arg() {
             let _ = self
                 .repo_git()
                 .try_run(&["worktree", "remove", "--force", path]);
         }
-        let _ = self.repo_git().try_run(&["worktree", "prune"]);
         let _ = &self.dir;
     }
 }
