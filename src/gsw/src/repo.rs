@@ -591,7 +591,9 @@ mod tests {
     use super::RepoHandle;
     use crate::git::FileStatus;
     use crate::render::Operation;
-    use crate::testrepo::{git, git_allowing_failure, init_repo, init_repo_with_upstream};
+    use crate::testrepo::{
+        git, git_allowing_failure, init_repo, init_repo_with_upstream, init_repo_with_worktree,
+    };
 
     /// Open a repo at an explicit path (tests can't rely on cwd under a
     /// parallel test runner).
@@ -1041,6 +1043,74 @@ mod tests {
             (up.ahead, up.behind),
             (0, 0),
             "the push left the branch level with its brand-new upstream",
+        );
+    }
+
+    /// Read the `gsw.probe` key out of the repository's config as it stands
+    /// *right now*, owned so the snapshot's borrow ends with the call.
+    ///
+    /// The key is one git itself never consults, so a non-`None` answer can only
+    /// have come from a fresh read of the config file the handle resolves to —
+    /// exactly the observation the re-open is supposed to make possible.
+    fn probe(repo: &gix::Repository) -> Option<String> {
+        repo.config_snapshot()
+            .string("gsw.probe")
+            .map(|value| value.to_string())
+    }
+
+    #[test]
+    fn reopened_handle_in_a_linked_worktree_sees_config_written_after_open() {
+        // Nearly all work on this repository happens in a linked worktree
+        // (`nwt`), so that is where gsw's watch mode actually runs, and it is
+        // the one layout whose work-tree root holds a `.git` *file* pointing at
+        // `<repo>/.git/worktrees/<name>` rather than a `.git` directory.
+        // `reopened()` re-opens with `gix::open` — chosen over `gix::discover`
+        // precisely because it resolves that pointer without walking up — so if
+        // resolution ever regressed, `open` would simply fail, the handle would
+        // fall back to the stale repository it already holds, and every config
+        // change made mid-watch (`git push -u origin <branch>` above all) would
+        // go unseen until restart, with nothing on screen to say so. The rest
+        // of the re-open tests run against a plain repo or a clone, where a
+        // broken pointer costs nothing.
+        //
+        // This guard is not red-first: the property already holds. It exists so
+        // a gix upgrade or a later refactor cannot turn the #334 fix into a
+        // no-op in the environment it is used in most while the suite stays
+        // green.
+        let (_repo, linked) = init_repo_with_worktree();
+
+        // The fixture only proves anything if it really is a linked worktree —
+        // a plain clone would exercise the `.git`-directory path and satisfy
+        // every assertion below while covering none of the pointer resolution.
+        assert!(
+            linked.join(".git").is_file(),
+            "a linked worktree's `.git` is a gitdir pointer file, not a directory",
+        );
+
+        // Opened BEFORE the config write and held across it, like watch mode.
+        let mut held = RepoHandle::discover(&linked).expect("linked worktree is a worktree repo");
+        assert_ne!(
+            held.repo().git_dir(),
+            held.repo().common_dir(),
+            "a linked worktree's per-worktree git dir lives under the main repo's common dir",
+        );
+        assert_eq!(probe(held.repo()), None, "nothing has written the key yet");
+
+        // What any `git config` run in another pane does mid-watch. From a
+        // linked worktree this lands in the *common* `.git/config`, which is
+        // reachable only by following the gitdir pointer.
+        git(&linked, &["config", "gsw.probe", "written-after-open"]);
+
+        assert_eq!(
+            probe(held.repo()),
+            None,
+            "the handle opened before the write still has the old config cached",
+        );
+        assert_eq!(
+            probe(held.reopened()).as_deref(),
+            Some("written-after-open"),
+            "re-opening from a work-tree root whose `.git` is a pointer file must \
+             still re-read the configuration it points at",
         );
     }
 

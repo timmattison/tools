@@ -10,7 +10,7 @@
 //! Every fixture lives in its own [`tempfile::TempDir`], so the suite stays
 //! parallel-safe: two concurrent runs of the same test never share a path.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
@@ -101,6 +101,40 @@ pub(crate) fn init_repo_with_upstream() -> (TempDir, TempDir) {
     );
     identity(clone.path());
     (origin, clone)
+}
+
+/// An [`init_repo`] repo plus a linked worktree checked out on its own branch,
+/// returning `(repo, linked_worktree_path)`.
+///
+/// A linked worktree is the only layout where the work-tree root holds a `.git`
+/// *file* — a `gitdir:` pointer at `<repo>/.git/worktrees/<name>` — instead of a
+/// `.git` directory, and following that pointer to the shared config is a
+/// distinct code path from reading `<root>/.git/config` directly. It is also the
+/// layout this repository mandates all development happen in, so fixtures built
+/// only from [`init_repo`] and [`init_repo_with_upstream`] leave the path gsw
+/// runs against most as the one path nothing covers.
+///
+/// The worktree is deliberately nested *inside* the repo's tempdir so a single
+/// [`TempDir`] owns both halves: dropping it removes the checkout and the
+/// `.git/worktrees` administrative directory that describes it together, with no
+/// second directory to leak. That [`TempDir`] must therefore be held for as long
+/// as the caller reads *either* repository — the returned path points inside it,
+/// so dropping the [`TempDir`] invalidates the path as well.
+pub(crate) fn init_repo_with_worktree() -> (TempDir, PathBuf) {
+    let repo = init_repo();
+    let linked = repo.path().join("linked");
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().expect("utf-8 tempdir path"),
+        ],
+    );
+    (repo, linked)
 }
 
 /// Give the repo at `dir` a committer identity and disable signing, so commits
