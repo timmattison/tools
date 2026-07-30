@@ -11,7 +11,7 @@
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -110,6 +110,106 @@ pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions 
     }
 }
 
+/// The watcher's ignore matcher, shared between the render loop — which
+/// rebuilds it from the repository's ignore sources on every git walk — and the
+/// watcher callback thread, which reads it on every filesystem event.
+///
+/// The sharing exists because the matcher must be *live*. Built once at watcher
+/// spawn and never rebuilt, it renders whatever the ignore files said at
+/// startup, and both directions of a later edit are wrong:
+///
+/// - **A rule added** (`echo 'build/' >> .gitignore`) never takes effect, so the
+///   watcher keeps waking on churn that can no longer change anything — wasteful.
+/// - **A rule removed** never takes effect either, and that one is a correctness
+///   bug: the callback goes on silently *dropping* events for paths that are now
+///   rendered, so the view freezes until gsw is restarted.
+///
+/// `core.excludesFile` is the same failure one level up — it lives in
+/// `.git/config`, which a long-lived [`gix::Repository`] also caches — which is
+/// why [`refresh`](Self::refresh) takes a repository rather than closing over
+/// the one held at spawn. Handed the freshly re-opened handle from [`walk`], a
+/// changed excludes path flows straight through, so the two halves of the
+/// staleness fix compose instead of each needing its own special case.
+///
+/// The [`RwLock`] is what lets the two threads share one matcher: the render
+/// loop takes the write side once per walk, while the callback takes the read
+/// side once per filesystem event. Events outnumber walks by orders of
+/// magnitude, so the read side must not serialize them — hence a reader-writer
+/// lock rather than a `Mutex`.
+#[derive(Clone)]
+pub(crate) struct LiveIgnore(Arc<RwLock<Gitignore>>);
+
+impl LiveIgnore {
+    /// Build the matcher from the repository's ignore sources as they are on
+    /// disk right now. See [`build_ignore_matcher`] for which sources those are.
+    pub(crate) fn new(repo: &gix::Repository) -> Self {
+        Self::from(build_ignore_matcher(repo))
+    }
+
+    /// Re-read the repository's ignore sources so a rule added or removed since
+    /// the last call takes effect on the very next filesystem event, with no
+    /// restart.
+    ///
+    /// Called once per git walk, unconditionally. That is deliberate: rebuilding
+    /// reads at most three small files and recompiles a handful of globs, which
+    /// is negligible against the status traversal it rides along with — and
+    /// watch-mode walks are already gated to a ~1% duty cycle by [`Throttle`], so
+    /// the rebuild rate is bounded by the same budget. Do **not** "optimize" this
+    /// into a build-once cache or an mtime check: building it exactly once is the
+    /// staleness this method exists to fix.
+    pub(crate) fn refresh(&self, repo: &gix::Repository) {
+        *self.write() = build_ignore_matcher(repo);
+    }
+
+    /// Whether the ignore set claims `path` — directly, or via a rule on any of
+    /// its parents, so a write deep inside an ignored directory
+    /// (`target/debug/app`) is matched by the `target/` rule above it.
+    ///
+    /// `is_dir` tells the matcher whether `path` itself is a directory, which
+    /// decides whether directory-only rules (`build/`) can match it directly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` is not under the work-tree root the matcher was built
+    /// against — the underlying [`Gitignore::matched_path_or_any_parents`]
+    /// contract. [`should_react`] is the only caller and it classifies out-of-
+    /// worktree paths before reaching here.
+    fn is_ignored(&self, path: &Path, is_dir: bool) -> bool {
+        self.read()
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore()
+    }
+
+    /// The read side of the shared matcher, recovering from lock poisoning.
+    ///
+    /// A [`Gitignore`] is an immutable compiled glob set with no cross-field
+    /// invariant a panic could leave half-written: whatever is behind the lock is
+    /// always a complete matcher. Propagating poisoning instead would let an
+    /// unrelated thread's panic wedge the monitor permanently — every subsequent
+    /// event unwrapping on a poisoned lock — which is strictly worse than reading
+    /// a perfectly valid matcher, so recover the inner value.
+    fn read(&self) -> RwLockReadGuard<'_, Gitignore> {
+        self.0.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The write side of the shared matcher, recovering from lock poisoning for
+    /// the same reason as [`read`](Self::read) — and with even less at stake
+    /// here, since the write replaces the matcher wholesale.
+    fn write(&self) -> RwLockWriteGuard<'_, Gitignore> {
+        self.0.write().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl From<Gitignore> for LiveIgnore {
+    /// Share an already-built matcher. Production always goes through
+    /// [`LiveIgnore::new`]; this is the seam the [`should_react`] unit tests use
+    /// to hand in a matcher assembled from raw gitignore lines instead of from a
+    /// repository on disk.
+    fn from(matcher: Gitignore) -> Self {
+        Self(Arc::new(RwLock::new(matcher)))
+    }
+}
+
 /// Whether a filesystem event at `path` should wake the render loop.
 ///
 /// `gsw` watches the worktree root *and* the git directory recursively — a
@@ -133,13 +233,19 @@ pub(crate) fn resolve_dimensions(mode: Mode, inputs: &SizeInputs) -> Dimensions 
 /// - A path under neither the worktree nor a git dir is accepted defensively;
 ///   suppression makes a spurious wake-up free.
 ///
-/// `workdir` roots the ignore matcher. [`Gitignore::matched_path_or_any_parents`]
-/// panics on a path outside its root, so the matcher is only consulted for
-/// paths confirmed to be under `workdir` (git-dir paths, which may live outside
-/// the worktree, are classified before it is ever called).
+/// `workdir` roots the ignore matcher. [`LiveIgnore::is_ignored`] panics on a
+/// path outside that root, so the matcher is only consulted for paths confirmed
+/// to be under `workdir` (git-dir paths, which may live outside the worktree,
+/// are classified before it is ever called).
+///
+/// The matcher arrives as a [`LiveIgnore`] rather than a bare [`Gitignore`]
+/// because the render loop rebuilds it from disk on every walk while this
+/// classifier is running on the watcher thread: an ignore rule added or removed
+/// mid-session must change the answer here without a restart. This function
+/// stays pure — it reads the matcher, never rebuilds it.
 pub(crate) fn should_react(
     path: &Path,
-    ignore: &Gitignore,
+    ignore: &LiveIgnore,
     workdir: &Path,
     git_dirs: &[PathBuf],
 ) -> bool {
@@ -151,13 +257,11 @@ pub(crate) fn should_react(
     }
 
     if path.starts_with(workdir) {
-        // `matched_path_or_any_parents` walks up to the root, so a write deep
-        // inside an ignored directory (`target/debug/app`) is matched by the
-        // `target/` rule on the parent. Drop the event only when the ignore
-        // set actually claims the path.
-        return !ignore
-            .matched_path_or_any_parents(path, path.is_dir())
-            .is_ignore();
+        // `is_ignored` walks up to the root, so a write deep inside an ignored
+        // directory (`target/debug/app`) is matched by the `target/` rule on the
+        // parent. Drop the event only when the ignore set actually claims the
+        // path — as of the last rebuild, which is the last git walk.
+        return !ignore.is_ignored(path, path.is_dir());
     }
 
     // Outside both the worktree and every git dir: unexpected, but cheap to
@@ -388,7 +492,11 @@ enum Event {
 ///
 /// Propagates a [`collect_snapshot`] failure (the status walk). A failed
 /// *re-open* is not an error: it degrades to the handle already in hand.
-pub(crate) fn walk(handle: &mut RepoHandle, cfg: &RenderConfig) -> Result<Snapshot> {
+pub(crate) fn walk(
+    handle: &mut RepoHandle,
+    _ignore: &LiveIgnore,
+    cfg: &RenderConfig,
+) -> Result<Snapshot> {
     collect_snapshot(handle.reopened(), cfg)
 }
 
@@ -416,8 +524,11 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     //
     // Deliberately NOT `walk`: the handle was opened microseconds ago in
     // `main`, so nothing can have changed the config since, and a re-open here
-    // would only pay for a config parse to read back what we already hold.
-    // Every *subsequent* refresh goes through `walk` and does re-open.
+    // would only pay for a config parse to read back what we already hold. The
+    // ignore matcher is equally fresh — `LiveIgnore::new` below builds it from
+    // that same just-opened handle — so skipping `walk`'s rebuild costs nothing
+    // either. Every *subsequent* refresh goes through `walk`, which re-opens the
+    // handle and rebuilds the matcher.
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
     let snapshot = collect_snapshot(handle.repo(), cfg)?;
@@ -435,10 +546,15 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx.clone());
 
+    // The one ignore matcher both threads share: the watcher callback reads it
+    // per event, and every `walk` below rebuilds it from disk so a `.gitignore`
+    // edited in another pane takes effect without a restart.
+    let ignore = LiveIgnore::new(handle.repo());
+
     // The filesystem watcher must outlive the loop — dropping it stops watching.
     // Started before the collect closure below takes its mutable borrow of the
     // handle; the watcher clones everything it needs, so this borrow ends here.
-    let _watcher = spawn_fs_watcher(handle.repo(), tx)?;
+    let _watcher = spawn_fs_watcher(handle.repo(), ignore.clone(), tx)?;
 
     event_loop(
         &rx,
@@ -447,7 +563,7 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
         cache,
         initial_freshest,
         LoopHooks {
-            collect: || walk(&mut handle, cfg),
+            collect: || walk(&mut handle, &ignore, cfg),
             render: |snap: &Snapshot, dims: Dimensions, offset: Duration| {
                 render_frame(snap, cfg, dims, offset)
             },
@@ -468,8 +584,14 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
 /// so commits (which write only under those) still register. Every event path
 /// is run through [`should_react`] *before* a wake-up is sent, so ignored
 /// build churn (`target/`, `node_modules/`) never even reaches the channel.
+///
+/// `ignore` is the caller's [`LiveIgnore`], not one built here: the callback
+/// thread only ever *reads* the matcher, while the render loop rebuilds it on
+/// every walk. Owning it here would pin the ignore set to whatever was on disk
+/// at spawn — precisely the staleness [`LiveIgnore`] exists to prevent.
 fn spawn_fs_watcher(
     repo: &gix::Repository,
+    ignore: LiveIgnore,
     tx: Sender<Event>,
 ) -> Result<Option<RecommendedWatcher>> {
     let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {
@@ -483,8 +605,6 @@ fn spawn_fs_watcher(
     if !git_dirs.contains(&common) {
         git_dirs.push(common);
     }
-
-    let ignore = build_ignore_matcher(repo, &workdir);
 
     let filter_workdir = workdir.clone();
     let filter_git_dirs = git_dirs.clone();
@@ -528,7 +648,21 @@ fn spawn_fs_watcher(
 /// *suppressed* status walk, so the byte-identical-output backstop keeps the
 /// rendered view correct, while the high-volume top-level churn this is meant
 /// to filter (`target/`, `node_modules/`) is matched up front.
-fn build_ignore_matcher(repo: &gix::Repository, workdir: &Path) -> Gitignore {
+///
+/// Every source is re-read on each call — this is what [`LiveIgnore::refresh`]
+/// runs per walk — so the work-tree root is taken from the repository rather
+/// than passed in, keeping the ignore set and the handle it was derived from
+/// impossible to get out of step.
+///
+/// A repository with no work tree yields an empty matcher instead of a panic.
+/// [`RepoHandle`] already rejects bare repos on the way in, so this should be
+/// unreachable, but `workdir()` is still an `Option` and "nothing is ignored"
+/// (every event wakes the loop — merely wasteful) is the right way for a monitor
+/// to be wrong.
+fn build_ignore_matcher(repo: &gix::Repository) -> Gitignore {
+    let Some(workdir) = repo.workdir() else {
+        return Gitignore::empty();
+    };
     let mut builder = GitignoreBuilder::new(workdir);
     // `add` returns `Some(err)` when a file is missing or unreadable; a repo
     // without a `.gitignore` is normal, so these are intentionally ignored.
@@ -956,9 +1090,10 @@ mod tests {
 
         // Opened BEFORE the push and held across it, exactly like watch mode.
         let mut handle = RepoHandle::discover(p).expect("clone is a worktree repo");
+        let ignore = LiveIgnore::new(handle.repo());
         let cfg = walk_config();
 
-        let before = walk(&mut handle, &cfg).expect("first walk");
+        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
         assert!(
             before.upstream.is_none(),
             "a local-only branch has no upstream yet",
@@ -967,7 +1102,7 @@ mod tests {
         // What `git push -u origin feature` in another pane does while gsw runs.
         testrepo::git(p, &["push", "-q", "-u", "origin", "feature"]);
 
-        let after = walk(&mut handle, &cfg).expect("second walk");
+        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
         let up = after
             .upstream
             .as_ref()
@@ -982,12 +1117,72 @@ mod tests {
 
     /// Build an ignore matcher rooted at `root` from raw gitignore lines, the
     /// way the production matcher is assembled from the repo's ignore files.
-    fn matcher(root: &str, patterns: &[&str]) -> Gitignore {
+    /// Handed back as a [`LiveIgnore`] so the pure [`should_react`] tests use
+    /// the same type production does, without needing a repository on disk.
+    fn matcher(root: &str, patterns: &[&str]) -> LiveIgnore {
         let mut builder = GitignoreBuilder::new(root);
         for pattern in patterns {
             builder.add_line(None, pattern).expect("valid glob");
         }
-        builder.build().expect("build matcher")
+        builder.build().expect("build matcher").into()
+    }
+
+    /// Open `path` the way watch mode does, and hand back everything the
+    /// live-ignore tests need: the handle each walk re-opens, the matcher built
+    /// from the repo's ignore sources as they stood at "startup", and the
+    /// work-tree root plus git dirs [`should_react`] classifies against.
+    ///
+    /// The work-tree root comes from the *repository*, never from the tempdir
+    /// path the caller created. On macOS `tempfile::tempdir()` hands back
+    /// `/var/folders/…`, a symlink to the real `/private/var/folders/…`, and the
+    /// matcher is rooted at whichever form gix reports. Since
+    /// `matched_path_or_any_parents` panics on a path outside its root, every
+    /// path fed to `should_react` must be built from this same root.
+    fn watching(path: &Path) -> (RepoHandle, LiveIgnore, PathBuf, Vec<PathBuf>) {
+        let handle = RepoHandle::discover(path).expect("fixture is a worktree repo");
+        let workdir = handle
+            .repo()
+            .workdir()
+            .expect("a discovered worktree repo has a work tree")
+            .to_path_buf();
+        let git_dirs = vec![handle.repo().git_dir().to_path_buf()];
+        let ignore = LiveIgnore::new(handle.repo());
+        (handle, ignore, workdir, git_dirs)
+    }
+
+    #[test]
+    fn walk_picks_up_a_gitignore_rule_added_after_watch_started() {
+        // The second half of #334: the watcher's ignore matcher was built once
+        // at spawn and moved into the notify callback, so an ignore rule the
+        // user adds while gsw is running never takes effect. `echo 'build/' >>
+        // .gitignore` in another pane leaves the watcher waking the render loop
+        // on every object file the next build writes, forever — a status walk
+        // burned per event, for churn that can no longer change the view. A
+        // refresh must rebuild the matcher so the rule takes hold immediately.
+        let dir = testrepo::init_repo();
+        let p = dir.path();
+        std::fs::create_dir(p.join("build")).expect("create build/");
+        std::fs::write(p.join("build").join("out.o"), "obj\n").expect("write build/out.o");
+
+        // Opened BEFORE the .gitignore edit and held across it, like watch mode.
+        let (mut handle, ignore, workdir, git_dirs) = watching(p);
+        let churn = workdir.join("build").join("out.o");
+        let cfg = walk_config();
+
+        assert!(
+            should_react(&churn, &ignore, &workdir, &git_dirs),
+            "nothing is ignored yet, so build churn still has to wake the loop",
+        );
+
+        // What `echo 'build/' >> .gitignore` in another pane does while gsw runs.
+        std::fs::write(p.join(".gitignore"), "build/\n").expect("write .gitignore");
+        walk(&mut handle, &ignore, &cfg).expect("walk");
+
+        assert!(
+            !should_react(&churn, &ignore, &workdir, &git_dirs),
+            "a .gitignore rule written after watch started must take effect \
+             without restarting gsw",
+        );
     }
 
     #[test]
