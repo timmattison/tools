@@ -8,24 +8,38 @@ use clap::Parser;
 use colored::Colorize;
 use repowalker::find_git_repo;
 
-/// Exit codes for different error conditions.
-mod exit_codes {
+/// The exit status gitnuke leaves behind, one variant per documented code.
+///
+/// A closed set rather than loose `i32` constants: these numbers are a published
+/// contract — they appear in `README.md` and in [`Cli`]'s own help — and the
+/// enum is what keeps an arbitrary integer from ever reaching [`NukeError`].
+/// The discriminants are the contract itself, so they must never be renumbered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
+enum ExitCode {
     /// Not in a git repository.
-    pub const NOT_IN_REPO: i32 = 1;
+    NotInRepo = 1,
     /// A git command failed to execute or returned an error.
-    pub const GIT_COMMAND_ERROR: i32 = 2;
+    GitCommandError = 2,
     /// No worktree matched the target.
-    pub const WORKTREE_NOT_FOUND: i32 = 3;
+    WorktreeNotFound = 3,
     /// The target matched more than one worktree.
-    pub const MULTIPLE_MATCHES: i32 = 4;
+    MultipleMatches = 4,
     /// The worktree contains submodules and `--force` was not given.
-    pub const SUBMODULES_PRESENT: i32 = 5;
+    SubmodulesPresent = 5,
     /// The shell is standing inside the worktree it was asked to nuke.
-    pub const INSIDE_TARGET: i32 = 6;
+    InsideTarget = 6,
     /// The worktree was removed but its branch could not be deleted.
-    pub const BRANCH_NOT_DELETED: i32 = 7;
+    BranchNotDeleted = 7,
     /// The worktree is locked, which `--force` deliberately does not override.
-    pub const LOCKED_WORKTREE: i32 = 8;
+    LockedWorktree = 8,
+}
+
+impl ExitCode {
+    /// The number to hand [`exit`], which takes a plain `i32`.
+    fn as_i32(self) -> i32 {
+        self as i32
+    }
 }
 
 /// The index mode git records for a submodule (gitlink) entry.
@@ -617,12 +631,12 @@ fn parse_absolute_git_dir(stdout: &str) -> PathBuf {
 
 /// A failure to nuke one target: the message to print and the exit code to use.
 struct NukeError {
-    code: i32,
+    code: ExitCode,
     message: String,
 }
 
 impl NukeError {
-    fn new(code: i32, message: impl Into<String>) -> Self {
+    fn new(code: ExitCode, message: impl Into<String>) -> Self {
         NukeError {
             code,
             message: message.into(),
@@ -646,7 +660,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
             .reason()
             .map_or_else(String::new, |reason| format!(" ({reason})"));
         return Err(NukeError::new(
-            exit_codes::LOCKED_WORKTREE,
+            ExitCode::LockedWorktree,
             format!(
                 "{path} is locked{reason} — git refuses to remove a locked \
                  worktree even with --force.\n  Unlock it first: git worktree \
@@ -659,7 +673,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
     let submodules = find_submodules(&worktree.path);
     if submodules.blocks_removal() && !options.force {
         return Err(NukeError::new(
-            exit_codes::SUBMODULES_PRESENT,
+            ExitCode::SubmodulesPresent,
             format!(
                 "{} contains {} — git refuses to remove a worktree with submodules \
                  checked out.\n  Nuking it deletes those checkouts along with any \
@@ -692,14 +706,14 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
         .output()
         .map_err(|e| {
             NukeError::new(
-                exit_codes::GIT_COMMAND_ERROR,
+                ExitCode::GitCommandError,
                 format!("failed to execute git: {e}"),
             )
         })?;
 
     if !output.status.success() {
         return Err(NukeError::new(
-            exit_codes::GIT_COMMAND_ERROR,
+            ExitCode::GitCommandError,
             format!(
                 "could not remove worktree {}: {}",
                 worktree.path,
@@ -742,7 +756,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 fn preflight(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(), NukeError> {
     if !options.force && has_uncommitted_changes(&worktree.path) {
         return Err(NukeError::new(
-            exit_codes::GIT_COMMAND_ERROR,
+            ExitCode::GitCommandError,
             format!(
                 "could not remove worktree {}: it contains modified or untracked \
                  files.\n  Re-run with --force to discard them.",
@@ -756,7 +770,7 @@ fn preflight(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Res
         if let Some(branch) = &worktree.branch {
             if !branch_is_merged(repo_root, branch) {
                 return Err(NukeError::new(
-                    exit_codes::BRANCH_NOT_DELETED,
+                    ExitCode::BranchNotDeleted,
                     format!(
                         "worktree {} would be removed, but branch '{branch}' is not \
                          fully merged, so --safe would keep it.\n  Delete it anyway \
@@ -818,14 +832,14 @@ fn delete_branch(repo_root: &Path, branch: &BranchName, safe: bool) -> Result<()
         .output()
         .map_err(|e| {
             NukeError::new(
-                exit_codes::GIT_COMMAND_ERROR,
+                ExitCode::GitCommandError,
                 format!("failed to execute git: {e}"),
             )
         })?;
 
     if !output.status.success() {
         return Err(NukeError::new(
-            exit_codes::BRANCH_NOT_DELETED,
+            ExitCode::BranchNotDeleted,
             format!(
                 "worktree removed, but branch '{branch}' was kept: {}\n  \
                  Delete it anyway with: git branch -D {branch}",
@@ -897,7 +911,7 @@ fn nuke_target(
     options: NukeOptions,
 ) -> Result<(), NukeError> {
     let worktrees =
-        get_worktrees(repo_root).map_err(|e| NukeError::new(exit_codes::GIT_COMMAND_ERROR, e))?;
+        get_worktrees(repo_root).map_err(|e| NukeError::new(ExitCode::GitCommandError, e))?;
 
     match resolve_target(&worktrees, target, cwd) {
         Resolution::Single(idx) => {
@@ -913,7 +927,7 @@ fn nuke_target(
                 let elsewhere = somewhere_else(&worktrees, idx)
                     .map_or_else(String::new, |path| format!(" (for example {path})"));
                 return Err(NukeError::new(
-                    exit_codes::INSIDE_TARGET,
+                    ExitCode::InsideTarget,
                     format!(
                         "you are inside {} — cd somewhere else first{elsewhere}, \
                          otherwise your shell is left in a deleted directory",
@@ -938,7 +952,7 @@ fn nuke_target(
                 return Err(NukeError::new(
                     // git's own code for this refusal, so `gitnuke -n main` and
                     // `gitnuke main` still agree the way the preflight promises.
-                    exit_codes::GIT_COMMAND_ERROR,
+                    ExitCode::GitCommandError,
                     format!(
                         "{} is the main worktree — git refuses to remove the worktree \
                          the repository itself lives in, with or without --force.\n  \
@@ -957,10 +971,10 @@ fn nuke_target(
             for idx in indices {
                 message.push_str(&format!("\n  {}", worktrees[idx].path));
             }
-            Err(NukeError::new(exit_codes::MULTIPLE_MATCHES, message))
+            Err(NukeError::new(ExitCode::MultipleMatches, message))
         }
         Resolution::NotFound => Err(NukeError::new(
-            exit_codes::WORKTREE_NOT_FOUND,
+            ExitCode::WorktreeNotFound,
             not_found_message(&worktrees, target),
         )),
     }
@@ -990,14 +1004,14 @@ fn main() {
 
     let Some(repo_root) = find_git_repo() else {
         eprintln!("{} not in a git repository", "gitnuke:".red().bold());
-        exit(exit_codes::NOT_IN_REPO);
+        exit(ExitCode::NotInRepo.as_i32());
     };
 
     let cwd = std::env::current_dir().ok();
     let options = NukeOptions::from(&cli);
 
     // The worktree list is re-read per target because nuking one invalidates it.
-    let mut first_error: Option<i32> = None;
+    let mut first_error: Option<ExitCode> = None;
     for target in distinct_targets(&cli.targets) {
         if let Err(error) = nuke_target(&repo_root, target, cwd.as_deref(), options) {
             eprintln!("{} {}", "gitnuke:".red().bold(), error.message);
@@ -1006,7 +1020,7 @@ fn main() {
     }
 
     if let Some(code) = first_error {
-        exit(code);
+        exit(code.as_i32());
     }
 }
 
