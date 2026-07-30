@@ -20,6 +20,10 @@ mod git;
 mod render;
 mod repo;
 mod snapshot;
+/// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
+/// build throwaway repositories, which the shipped binary never does.
+#[cfg(test)]
+mod testrepo;
 mod watch;
 
 #[derive(Parser)]

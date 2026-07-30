@@ -586,47 +586,11 @@ fn worktree_bytes(repo: &gix::Repository, rela_path: &gix::bstr::BString) -> Vec
 #[cfg(test)]
 mod tests {
     use std::path::Path;
-    use std::process::Command;
 
     use super::RepoHandle;
     use crate::git::FileStatus;
     use crate::render::Operation;
-
-    /// Run a git command in `dir`, isolated from the host's global/system
-    /// config, asserting success. Test-only fixture construction.
-    ///
-    /// Scrubs inherited `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` so the
-    /// fixture repo under `dir` is the one git operates on. Without this, when
-    /// the suite runs from inside this repo's own pre-commit hook (git exports
-    /// those vars for the hook), the fixture's commits would land in the *real*
-    /// repo despite `current_dir(dir)`.
-    fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("invoke git");
-        assert!(status.success(), "git {args:?} failed");
-    }
-
-    /// A fresh repo on branch `main` with one commit. Parallel-safe: unique tempdir.
-    fn init_repo() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let p = dir.path();
-        git(p, &["init", "-q", "-b", "main"]);
-        git(p, &["config", "user.email", "t@example.com"]);
-        git(p, &["config", "user.name", "Test"]);
-        git(p, &["config", "commit.gpgsign", "false"]);
-        std::fs::write(p.join("a.txt"), "initial\n").unwrap();
-        git(p, &["add", "a.txt"]);
-        git(p, &["commit", "-q", "-m", "initial"]);
-        dir
-    }
+    use crate::testrepo::{git, git_allowing_failure, init_repo, init_repo_with_upstream};
 
     /// Open a repo at an explicit path (tests can't rely on cwd under a
     /// parallel test runner).
@@ -774,31 +738,6 @@ mod tests {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
         assert!(super::recent_log(&repo, 0).is_empty());
-    }
-
-    /// Clone `init_repo()`'s repo so the clone has a real `origin/main` upstream.
-    fn init_repo_with_upstream() -> (tempfile::TempDir, tempfile::TempDir) {
-        let origin = init_repo();
-        let clone = tempfile::tempdir().expect("tempdir");
-        let status = std::process::Command::new("git")
-            .args([
-                "clone",
-                "-q",
-                origin.path().to_str().unwrap(),
-                clone.path().to_str().unwrap(),
-            ])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("git clone");
-        assert!(status.success(), "git clone failed");
-        git(clone.path(), &["config", "user.email", "t@example.com"]);
-        git(clone.path(), &["config", "user.name", "Test"]);
-        git(clone.path(), &["config", "commit.gpgsign", "false"]);
-        (origin, clone)
     }
 
     fn statuses(repo: &gix::Repository) -> Vec<(String, FileStatus, bool)> {
@@ -1129,16 +1068,7 @@ mod tests {
         git(p, &["commit", "-q", "-am", "main edit"]);
         // Merge 'other' into main → conflict on a.txt. The merge command exits
         // non-zero on conflict, so don't assert success here.
-        let _ = std::process::Command::new("git")
-            .args(["merge", "other"])
-            .current_dir(p)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("invoke git merge");
+        git_allowing_failure(p, &["merge", "other"]);
         let repo = open_at(p).unwrap();
         let s = statuses(&repo);
         assert!(
@@ -1161,16 +1091,7 @@ mod tests {
         std::fs::write(p.join("a.txt"), "from main\n").unwrap();
         git(p, &["commit", "-q", "-am", "main edit"]);
         // The merge exits non-zero on conflict; don't assert success.
-        let _ = std::process::Command::new("git")
-            .args(["merge", "other"])
-            .current_dir(p)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE")
-            .status()
-            .expect("invoke git merge");
+        git_allowing_failure(p, &["merge", "other"]);
         let repo = open_at(p).unwrap();
         assert_eq!(
             super::operation_state(&repo, 1),
