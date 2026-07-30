@@ -91,6 +91,17 @@ impl RepoHandle {
     /// handle already in hand: a monitor that blanks out for one tick because
     /// it caught git mid-write is worse than a monitor that repaints one
     /// tick-old configuration and recovers on the next call.
+    ///
+    /// That "never a blank screen" property is **not** delivered here alone —
+    /// this fallback only guarantees a usable *handle*. Reading a repository
+    /// that is mid-`gc`, mid-checkout, or renamed away can still fail on the
+    /// status walk performed against the handle it hands back, and watch mode's
+    /// `event_loop` is what absorbs *that* failure by re-rendering the last good
+    /// snapshot at its true age. Removing either half re-breaks the guarantee:
+    /// drop this fallback and a momentary re-open failure loses the
+    /// configuration; drop the loop's absorption and the same momentary failure
+    /// ends watch mode outright, which is precisely the bug this pairing was
+    /// written to close.
     pub fn reopened(&mut self) -> &gix::Repository {
         if let Some(fresh) = gix::open(&self.workdir).ok().and_then(Self::from_repo) {
             self.repo = fresh.repo;

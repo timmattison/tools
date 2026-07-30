@@ -496,14 +496,24 @@ enum Event {
 /// walk, which only happens when the throttle admits a walk in the first place —
 /// and it rides along with a full status traversal that dwarfs both.
 /// [`RepoHandle::reopened`] keeps the previous handle if the re-open fails, so
-/// catching git mid-write costs a tick of stale configuration, never a blank
-/// screen.
+/// catching git mid-write costs a tick of stale configuration rather than a
+/// failed walk. That fallback is only half of "never a blank screen": it keeps
+/// the *handle*, while [`event_loop`] keeps the *frame* when the status walk on
+/// that handle fails anyway. Both halves are required — see the `# Errors`
+/// section.
 ///
 /// # Errors
 ///
 /// Propagates a [`collect_snapshot`] failure (the status walk). Neither a failed
 /// *re-open* nor an unreadable ignore file is an error: the first degrades to the
 /// handle already in hand, the second to a matcher without that source.
+///
+/// The one production caller, [`event_loop`], deliberately does **not** let that
+/// error out of watch mode: it keeps the last good snapshot, re-renders it at its
+/// true (still-advancing) age, arms the throttle from the failed walk's cost, and
+/// retries on the next event. So this signature says "this walk did not produce a
+/// snapshot", not "the monitor should stop" — a distinction worth preserving if a
+/// second caller ever appears.
 pub(crate) fn walk(
     handle: &mut RepoHandle,
     ignore: &LiveIgnore,
@@ -762,7 +772,24 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 ///   collect;
 /// - a recompute whose output is byte-identical to what's displayed paints
 ///   nothing (suppression);
+/// - a walk that *fails* does not end the loop: the last good snapshot is
+///   re-rendered at its true age and the next event retries (see below);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
+///
+/// A failed collect is absorbed rather than propagated because the failures are
+/// overwhelmingly transient and none of the user's doing — `git gc` swapping the
+/// ref store out from under the walk, a worktree being pruned, `.git` renamed
+/// mid-operation. This is the other half of [`RepoHandle::reopened`]'s "never a
+/// blank screen" guarantee: that fallback keeps a *handle* when the re-open
+/// fails, and this keeps a *frame* when the status walk on it fails. Either half
+/// alone leaves the monitor dying on a repository that is momentarily
+/// unreadable. The failed walk still arms the throttle from its measured cost —
+/// so a repo that fails every walk backs off on the same duty cycle instead of
+/// hot-looping — and deliberately does *not* advance `collected_at`, so the
+/// stale frame goes on aging honestly rather than resetting every displayed age
+/// to zero. The accepted cost: a repository deleted for good leaves a frozen
+/// (but visibly aging) frame until the user quits. That is the right failure for
+/// a monitor — a wrong-but-labeled-old screen beats no screen.
 fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
     rx: &Receiver<Event>,
     debounce: Duration,
@@ -888,15 +915,40 @@ where
 
         let render = if walk_now {
             cache.dims = (hooks.dimensions)();
-            // Re-seed the collection time to the walk's start so a later decay
-            // tick or resize advances ages from *this* walk, not the previous
-            // one. Measure the walk's wall-clock cost around collect and feed it
-            // to the throttle, which arms the next cooldown (= 100·cost) from it.
-            cache.collected_at = now;
-            cache.snapshot = (hooks.collect)()?;
+            let collected = (hooks.collect)();
+            // Measure the walk's wall-clock cost around collect and feed it to
+            // the throttle, which arms the next cooldown (= 100·cost) from it.
+            // Deliberately outside the match: a *failed* walk still paid for a
+            // status traversal, and a repo that is unreadable for a while fails
+            // every walk, so gating the retries on the same duty-cycle budget is
+            // what keeps a permanently-deleted repo from pinning a core.
             let cost = (hooks.clock)().saturating_duration_since(now);
             throttle.record(now, cost);
-            (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+            match collected {
+                Ok(snapshot) => {
+                    // Re-seed the collection time to the walk's start so a later
+                    // decay tick or resize advances ages from *this* walk, not
+                    // the previous one.
+                    cache.collected_at = now;
+                    cache.snapshot = snapshot;
+                    (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+                }
+                // A walk can fail for reasons that are none of the user's
+                // business and usually transient: `git gc` swapping the ref
+                // store, a worktree being pruned, `.git` renamed mid-operation.
+                // Ending watch mode over that would make the whole
+                // stale-configuration fallback in [`RepoHandle::reopened`]
+                // pointless, so absorb it: keep the last good snapshot and let
+                // the next event retry. `collected_at` is pointedly NOT advanced
+                // — a collection that never happened must not reset every
+                // displayed age to "just now", or the monitor would claim
+                // freshness exactly when it has none. The frame therefore keeps
+                // aging truthfully while the repository is unreadable.
+                Err(_) => {
+                    let age_offset = now.saturating_duration_since(cache.collected_at);
+                    (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+                }
+            }
         } else if saw_resize {
             cache.dims = (hooks.dimensions)();
             let age_offset = now.saturating_duration_since(cache.collected_at);
