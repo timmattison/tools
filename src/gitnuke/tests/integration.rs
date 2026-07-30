@@ -294,6 +294,132 @@ fn dry_run_reports_the_plan_without_touching_anything() {
     );
 }
 
+/// Uncommitted changes are one of the two refusals git itself raises, and a dry
+/// run never invokes git to find out. The preflight promise is worthless if
+/// `gitnuke -n x` clears a target that `gitnuke x` turns away.
+#[test]
+fn dry_run_reports_a_dirty_worktree_refusal() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("README.md"), "uncommitted work\n").expect("dirty the worktree");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["--dry-run", "feature"]);
+    let message = combined(&output);
+
+    // The same code the real run reports for this refusal, so the two agree.
+    assert_exit_code(
+        &output,
+        exit_codes::GIT_COMMAND_ERROR,
+        "a dry run must report the refusal a real run would hit",
+    );
+    assert!(worktree.exists(), "dry run must not remove the worktree");
+    assert!(
+        worktree_registered(&main, &worktree),
+        "dry run must leave git still tracking the worktree: {message}"
+    );
+    assert!(
+        branch_exists(&main, "feature"),
+        "dry run must not delete the branch: {message}"
+    );
+    assert!(
+        message.contains("--force"),
+        "should point at --force, like the real refusal does: {message}"
+    );
+}
+
+/// git refuses on untracked files too, not just modified ones — a preflight that
+/// only asked about tracked changes would clear half the targets git rejects.
+#[test]
+fn dry_run_reports_an_untracked_only_worktree_refusal() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("scratch.txt"), "untracked\n").expect("add untracked file");
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["--dry-run", "feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::GIT_COMMAND_ERROR,
+        "untracked files alone are enough for git to refuse",
+    );
+    assert!(worktree.exists(), "dry run must not remove the worktree");
+    assert!(
+        branch_exists(&main, "feature"),
+        "dry run must not delete the branch: {message}"
+    );
+}
+
+/// The other refusal a real run hits: `--safe` keeps an unmerged branch and
+/// exits 7. A dry run that reported "would delete branch feature" for it would
+/// be advertising a deletion git is going to refuse.
+#[test]
+fn dry_run_reports_an_unmerged_branch_refusal_under_safe() {
+    let fixture = Fixture::new();
+    let worktree = fixture.add_worktree("feature-wt", "feature");
+    std::fs::write(worktree.join("work.txt"), "unmerged work\n").expect("write work file");
+    git(&worktree, &["add", "work.txt"]);
+    git(&worktree, &["commit", "-qm", "unmerged commit"]);
+    let main = fixture.main_repo();
+
+    let output = gitnuke(&main, &["--safe", "--dry-run", "feature"]);
+    let message = combined(&output);
+
+    assert_exit_code(
+        &output,
+        exit_codes::BRANCH_NOT_DELETED,
+        "a dry run must report the branch --safe would refuse to delete",
+    );
+    assert!(worktree.exists(), "dry run must not remove the worktree");
+    assert!(
+        worktree_registered(&main, &worktree),
+        "dry run must leave git still tracking the worktree: {message}"
+    );
+    assert!(
+        branch_exists(&main, "feature"),
+        "dry run must not delete the branch: {message}"
+    );
+    assert!(
+        message.contains("feature"),
+        "the message should name the branch that would be kept: {message}"
+    );
+}
+
+/// A detached worktree has no branch, so `--safe` has nothing to ask about
+/// merged-ness. The preflight must clear it rather than invent a refusal.
+#[test]
+fn dry_run_of_a_detached_worktree_under_safe_still_succeeds() {
+    let fixture = Fixture::new();
+    let main = fixture.main_repo();
+    let worktree = fixture.root.join("detached-wt");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().expect("utf-8 path"),
+        ],
+    );
+
+    let output = gitnuke(&main, &["--safe", "--dry-run", "detached-wt"]);
+    let message = combined(&output);
+
+    assert!(
+        output.status.success(),
+        "a clean detached worktree would be removed for real, so the dry run \
+         must succeed: {message}"
+    );
+    assert!(worktree.exists(), "dry run must not remove the worktree");
+    assert!(
+        message.contains("detached"),
+        "should explain why no branch would be deleted: {message}"
+    );
+}
+
 /// A dry run is a preflight: it runs the same gates, so a submodule worktree
 /// reports the same refusal it would hit for real.
 #[test]
