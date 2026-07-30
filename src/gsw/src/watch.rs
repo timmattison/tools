@@ -1258,6 +1258,77 @@ mod tests {
         );
     }
 
+    /// Render `snapshot` exactly the way a watch-mode repaint does — the same
+    /// [`render_frame`] call [`run`] makes, at a zero age offset — and hand back
+    /// the header, which is the frame's first line, with ANSI stripped.
+    ///
+    /// The dimensions are deliberately generous: [`crate::render`] degrades the
+    /// header through a ladder (full upstream → counts only → shaved names →
+    /// omitted) as the terminal narrows, so a cramped width would hide the
+    /// upstream name for reasons that have nothing to do with what is being
+    /// asserted.
+    ///
+    /// Stripping is not optional. `colored` decides whether to emit escapes from
+    /// a *process-global* override that other tests in this parallel suite
+    /// toggle, so a byte-level `contains` would pass or fail depending on which
+    /// test ran last. Comparing visible glyphs is stable either way.
+    fn header_line(snapshot: &Snapshot, cfg: &RenderConfig) -> String {
+        let dims = Dimensions {
+            width: 200,
+            height: 40,
+        };
+        let frame = render_frame(snapshot, cfg, dims, Duration::ZERO);
+        crate::render::strip_ansi(frame.output.lines().next().unwrap_or_default())
+    }
+
+    #[test]
+    fn the_rendered_header_gains_the_upstream_segment_after_a_push() {
+        // #334 stated as what the user actually sees. Every other guard on this
+        // branch asserts on a `Snapshot` field; this one runs the snapshot
+        // through the same `render_frame` a repaint uses and reads the header
+        // line, so a refresh that collected the upstream correctly but failed to
+        // surface it in the header would still be caught.
+        //
+        // The scenario is the bug report verbatim: gsw is watching a local-only
+        // `feature` branch, the user runs `git push -u origin feature` in
+        // another pane, and the `↑0 ↓0 origin/feature` segment has to appear in
+        // the header on the next refresh instead of after a restart.
+        let (_origin, clone) = testrepo::init_repo_with_upstream();
+        let p = clone.path();
+        testrepo::git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("feature.txt"), "x\n").expect("write feature.txt");
+        testrepo::git(p, &["add", "feature.txt"]);
+        testrepo::git(p, &["commit", "-q", "-m", "feature work"]);
+
+        // Opened BEFORE the push and held across it, exactly like watch mode.
+        let mut handle = RepoHandle::discover(p).expect("clone is a worktree repo");
+        let ignore = LiveIgnore::new(handle.repo());
+        let cfg = walk_config();
+
+        let before = header_line(&walk(&mut handle, &ignore, &cfg).expect("first walk"), &cfg);
+        assert!(
+            !before.contains("origin/"),
+            "a local-only branch must not advertise any upstream: {before:?}",
+        );
+
+        // What `git push -u origin feature` in another pane does while gsw runs.
+        testrepo::git(p, &["push", "-q", "-u", "origin", "feature"]);
+
+        let after = header_line(
+            &walk(&mut handle, &ignore, &cfg).expect("second walk"),
+            &cfg,
+        );
+        assert!(
+            after.contains("origin/feature"),
+            "the header must name the brand-new upstream without restarting \
+             gsw: {after:?}",
+        );
+        assert!(
+            after.contains('↑') && after.contains('↓'),
+            "and it must carry the ahead/behind arrows alongside it: {after:?}",
+        );
+    }
+
     /// Build an ignore matcher rooted at `root` from raw gitignore lines, the
     /// way the production matcher is assembled from the repo's ignore files.
     /// Handed back as a [`LiveIgnore`] so the pure [`should_react`] tests use
