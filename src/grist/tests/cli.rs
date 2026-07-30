@@ -56,6 +56,35 @@ fn default_output_ranks_both_orderings_with_their_costs() {
     );
 }
 
+/// A branch list grist will not simulate has to be turned away cleanly. The
+/// ordering count for 25 branches does not fit in a `usize`, so announcing the
+/// run before the list is validated either panics or prints a wrapped, nonsense
+/// count - and either way the user sees a run start that never could.
+#[test]
+fn rejects_an_over_limit_branch_count_without_panicking_or_announcing_a_run() {
+    let repo = contested_region_repo();
+    let names: Vec<String> = (1..=25).map(|n| format!("br{n}")).collect();
+
+    let mut args = vec!["--onto", "main"];
+    args.extend(names.iter().map(String::as_str));
+
+    let output = grist(repo.path(), &args);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "grist should refuse 25 branches, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("overflow"),
+        "refusing an over-limit branch count must not panic, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Simulating"),
+        "grist must not announce a run it is about to refuse, got:\n{stderr}"
+    );
+}
+
 /// Listing the same branch twice is a mistake, not a plan.
 #[test]
 fn rejects_a_repeated_branch() {

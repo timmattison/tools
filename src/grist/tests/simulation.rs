@@ -126,6 +126,34 @@ fn memoised_evaluation_agrees_with_scoring_each_ordering_independently() {
     }
 }
 
+/// Orderings grow factorially, so grist refuses a branch list it would never
+/// finish. The refusal has to survive counts whose factorial does not fit in a
+/// `usize`: deriving the ordering count before checking the limit makes the very
+/// guard that exists to produce a friendly error the thing that blows up.
+#[test]
+fn refuses_more_branches_than_the_limit_instead_of_overflowing_the_ordering_count() {
+    let names: Vec<String> = (1..=25).map(|n| format!("br{n}")).collect();
+    let branches: Vec<BranchName> = names.iter().map(BranchName::new).collect();
+
+    // No repository needed: the branch list is validated before any git work,
+    // which is also why an over-limit run costs nothing to reject.
+    let simulator = Simulator::new("/grist-does-not-exist", "main");
+
+    let error = simulator
+        .evaluate(&branches)
+        .expect_err("25 branches is far past the limit");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("25"),
+        "expected the error to name the branch count it rejected, got: {message}"
+    );
+    assert!(
+        message.contains(&grist::simulate::MAX_BRANCHES.to_string()),
+        "expected the error to name the limit, got: {message}"
+    );
+}
+
 /// Replaying dozens of commits takes real time, so the caller needs to be told
 /// what is happening rather than staring at a silent terminal.
 #[test]
