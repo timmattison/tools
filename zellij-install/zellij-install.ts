@@ -15,9 +15,17 @@
 //   zellij-install --status        → skip the build; just report running servers
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, copyFileSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ─── constants ──────────────────────────────────────────────────────────────
 
@@ -387,5 +395,18 @@ function main(): void {
 }
 
 // Only run the CLI when executed directly, so the tests can import the pure
-// functions without the script trying to build anything.
-if (process.argv[1]?.endsWith("zellij-install.ts")) main();
+// functions without the script trying to build anything. Compared through
+// realpath, because the installed entrypoint is a symlink named `zellij-install`
+// with no extension — matching on the filename alone makes the installed
+// command a silent no-op.
+function invokedDirectly(): boolean {
+  const entry = process.argv[1];
+  if (entry === undefined) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) main();
