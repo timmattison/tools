@@ -198,10 +198,50 @@ impl Drop for ScanFile {
 
 /// Asks the kernel, before any reading happens, not to retain this file's
 /// contents.
+///
+/// Darwin answers this one outright: `F_NOCACHE` keeps the file's pages out of
+/// the unified buffer cache for the life of the descriptor, which leaves
+/// [`release_from_the_page_cache`] nothing to do afterwards.
+#[cfg(target_vendor = "apple")]
+fn keep_out_of_the_page_cache(file: &File) {
+    use std::os::unix::io::AsRawFd;
+
+    // SAFETY: the descriptor is borrowed from a File that outlives the call,
+    // and fcntl touches nothing but that descriptor's own flags. The result is
+    // deliberately ignored - a kernel that will not take the hint changes how
+    // much cache the scan leaves behind, never what it finds.
+    unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
+}
+
+/// Linux cannot refuse the cache up front for buffered reads, so this declares
+/// the access pattern instead - which is the truth, and lets readahead work in
+/// the scan's favor. The pages themselves are dropped by
+/// [`release_from_the_page_cache`] once they have been read.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn keep_out_of_the_page_cache(file: &File) {
+    use std::os::unix::io::AsRawFd;
+
+    // SAFETY: as above. A zero length means "through the end of the file".
+    unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_SEQUENTIAL) };
+}
+
+/// Platforms with no cache hint to offer read the file the ordinary way.
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "android")))]
 fn keep_out_of_the_page_cache(_file: &File) {}
 
 /// Drops whatever this file left in the page cache, once the scan is done with
 /// it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn release_from_the_page_cache(file: &File) {
+    use std::os::unix::io::AsRawFd;
+
+    // SAFETY: the descriptor is borrowed from a File that outlives the call.
+    unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+}
+
+/// Darwin refused the cache at open and has nothing left to drop; platforms
+/// with no hint at all never had anything to drop either.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn release_from_the_page_cache(_file: &File) {}
 
 /// Returns `true` when `file` holds at least one byte and every one of them
