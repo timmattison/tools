@@ -1,0 +1,80 @@
+//! The one place a conflict verdict is turned into text.
+//!
+//! `grind` asks whether rebasing HEAD onto a branch would conflict; `grime`
+//! asks whether merging a branch into HEAD would. Different questions, but a
+//! developer reading the answers has to be able to compare them at a glance,
+//! which means both must print the same shape - the same words, the same
+//! columns, the same singular and plural forms.
+//!
+//! Two binaries each carrying their own renderer would drift apart on exactly
+//! those details, and that drift is the bug class this crate exists to
+//! eliminate. So the renderer lives here, beside the [`Conflicts`] it renders,
+//! and the binaries own only the question they ask. That is a deliberate,
+//! spec-sanctioned acceptance of a little presentation logic in a library: the
+//! alternative is two copies of it.
+//!
+//! The only difference the two tools are allowed is captured by
+//! [`Report::without_stops`] - a merge halts exactly once, so printing the
+//! number would be noise.
+
+use crate::scratch::Conflicts;
+
+/// A conflict verdict, and how to word it for one particular tool.
+#[expect(
+    dead_code,
+    reason = "scaffold: the renderer that reads these lands with its first behaviour"
+)]
+pub struct Report<'a> {
+    tool: &'a str,
+    action: &'a str,
+    show_stops: bool,
+}
+
+impl<'a> Report<'a> {
+    /// Word the verdict for `tool`, describing the replay as `action`.
+    ///
+    /// `tool` is the binary's own name - `"grind"` - because every line the
+    /// tool prints is prefixed with it, the way a well-behaved unix tool
+    /// identifies itself in a pipeline. `action` is a present participle phrase
+    /// describing what was replayed, such as `"replaying HEAD onto main"`, so
+    /// it reads correctly in both the clean sentence and the conflict header.
+    #[must_use]
+    pub fn new(tool: &'a str, action: &'a str) -> Self {
+        Self {
+            tool,
+            action,
+            show_stops: true,
+        }
+    }
+
+    /// Drop the stop count from the summary.
+    ///
+    /// A merge halts exactly once, so the number carries no information for
+    /// `grime` and printing it would invite a reader to compare a constant
+    /// against `grind`'s real measurement. [`Conflicts`] still records it; this
+    /// only decides whether it is worth saying out loud.
+    #[must_use]
+    pub fn without_stops(self) -> Self {
+        Self {
+            show_stops: false,
+            ..self
+        }
+    }
+
+    /// The verdict, ready to print to stdout, with no trailing newline.
+    #[must_use]
+    pub fn render(&self, _conflicts: &Conflicts) -> String {
+        String::new()
+    }
+
+    /// The stderr note warning that uncommitted work is not covered, or `None`
+    /// when there is none to warn about.
+    ///
+    /// A replay only ever sees committed work, so a `clean` verdict on a dirty
+    /// tree is true and still misleading. The note exists so it cannot be
+    /// misread.
+    #[must_use]
+    pub fn dirty_note(&self, _uncommitted: usize) -> Option<String> {
+        None
+    }
+}

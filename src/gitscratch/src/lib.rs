@@ -21,7 +21,10 @@
 //!
 //! The result of a replay is a [`Conflicts`]: how many times the operation
 //! halted, how many hunks a human would hand-merge, and which files were
-//! involved.
+//! involved. Turning that into the words a developer reads is [`Report`]'s job,
+//! and it lives here for the same reason the hardening does — `grime` and
+//! `grind` answer different questions and must print the same shape, which two
+//! renderers could not stay agreed on.
 //!
 //! Not every question needs a worktree, though. [`Repo`] answers the cheap ones
 //! a caller should ask first — does this directory contain a repository, does
@@ -37,6 +40,7 @@
 pub mod git;
 pub mod metrics;
 pub mod repo;
+pub mod report;
 pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -44,4 +48,5 @@ pub mod testing;
 pub use git::{Git, GitOutput};
 pub use metrics::{BranchName, Files, Hunks, Stops};
 pub use repo::Repo;
+pub use report::Report;
 pub use scratch::{Conflicts, Scratch};
