@@ -1129,6 +1129,135 @@ mod tests {
         );
     }
 
+    #[test]
+    fn walk_sees_an_upstream_unset_after_watch_started() {
+        // The mirror of #334, and the direction a narrow fix would miss: a fix
+        // that only ever *adds* the upstream segment leaves the opposite case
+        // broken. The user is watching a branch that tracks `origin/main` and
+        // runs `git branch --unset-upstream` in another pane — deleting
+        // `branch.main.remote`/`.merge` from `.git/config`. With a handle that
+        // never re-reads that config, the header keeps painting `↑0 ↓0
+        // origin/main` for a branch that no longer tracks anything: arrows that
+        // are not merely stale but describe a relationship that has ceased to
+        // exist. The segment must disappear on the very next walk.
+        let (_origin, clone) = testrepo::init_repo_with_upstream();
+        let p = clone.path();
+
+        // Opened while the branch still tracks, and held across the unset.
+        let mut handle = RepoHandle::discover(p).expect("clone is a worktree repo");
+        let ignore = LiveIgnore::new(handle.repo());
+        let cfg = walk_config();
+
+        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
+        let up = before
+            .upstream
+            .as_ref()
+            .expect("a fresh clone's branch tracks origin/main");
+        assert_eq!(up.name, "origin/main");
+
+        // What `git branch --unset-upstream` in another pane does while gsw runs.
+        testrepo::git(p, &["branch", "--unset-upstream"]);
+
+        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
+        assert!(
+            after.upstream.is_none(),
+            "the upstream segment must vanish without restarting gsw; instead \
+             the header still claims {:?}",
+            after.upstream.as_ref().map(|u| &u.name),
+        );
+    }
+
+    #[test]
+    fn walk_tracks_the_counts_when_the_remote_moves_under_it() {
+        // End-to-end cover for the *counts* half of the upstream segment: a
+        // teammate pushes and the user runs `git fetch` in another pane, which
+        // moves `refs/remotes/origin/main` forward. The header's `↓` must follow
+        // on the next walk — a monitor that keeps reporting `↓0` while the
+        // branch is a commit behind is telling the user their branch is current
+        // when it is not.
+        //
+        // This covers the ref-driven half of the refresh rather than the
+        // config-cached half: tracking refs are read from disk on every
+        // `upstream_status` call, so this direction was already live before the
+        // re-open landed. It stays as a cheap guard that the whole path — walk,
+        // snapshot, counts — still moves with the remote.
+        let (origin, clone) = testrepo::init_repo_with_upstream();
+        let p = clone.path();
+        std::fs::write(p.join("local.txt"), "x\n").expect("write local.txt");
+        testrepo::git(p, &["add", "local.txt"]);
+        testrepo::git(p, &["commit", "-q", "-m", "local only"]);
+
+        let mut handle = RepoHandle::discover(p).expect("clone is a worktree repo");
+        let ignore = LiveIgnore::new(handle.repo());
+        let cfg = walk_config();
+
+        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
+        let up = before
+            .upstream
+            .as_ref()
+            .expect("the clone tracks origin/main");
+        assert_eq!(
+            (up.ahead, up.behind),
+            (1, 0),
+            "one local commit, and the remote has not moved yet",
+        );
+
+        // What a teammate's push plus `git fetch` in another pane amounts to.
+        let op = origin.path();
+        std::fs::write(op.join("remote.txt"), "y\n").expect("write remote.txt");
+        testrepo::git(op, &["add", "remote.txt"]);
+        testrepo::git(op, &["commit", "-q", "-m", "remote moved on"]);
+        testrepo::git(p, &["fetch", "-q"]);
+
+        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
+        let up = after
+            .upstream
+            .as_ref()
+            .expect("fetching does not remove the upstream");
+        assert_eq!(
+            (up.ahead, up.behind),
+            (1, 1),
+            "the remote advanced one commit past the branch, so the header must \
+             show it as behind without restarting gsw",
+        );
+    }
+
+    #[test]
+    fn walk_follows_a_remote_renamed_after_watch_started() {
+        // `git remote rename origin upstream` is the same staleness as #334
+        // wearing a different hat: it rewrites `branch.main.remote` *and* moves
+        // every `refs/remotes/origin/*` ref to `refs/remotes/upstream/*`. A
+        // handle holding the old config resolves the tracking ref to
+        // `refs/remotes/origin/main`, which no longer exists — so the segment
+        // doesn't just show the wrong name, it drops out of the header entirely
+        // until gsw restarts. The re-open makes the rename land on the next walk.
+        let (_origin, clone) = testrepo::init_repo_with_upstream();
+        let p = clone.path();
+
+        // Opened while the remote is still called `origin`, held across the rename.
+        let mut handle = RepoHandle::discover(p).expect("clone is a worktree repo");
+        let ignore = LiveIgnore::new(handle.repo());
+        let cfg = walk_config();
+
+        let before = walk(&mut handle, &ignore, &cfg).expect("first walk");
+        assert_eq!(
+            before.upstream.as_ref().map(|u| u.name.as_str()),
+            Some("origin/main"),
+            "the clone starts out tracking origin/main",
+        );
+
+        // What `git remote rename origin upstream` in another pane does.
+        testrepo::git(p, &["remote", "rename", "origin", "upstream"]);
+
+        let after = walk(&mut handle, &ignore, &cfg).expect("second walk");
+        assert_eq!(
+            after.upstream.as_ref().map(|u| u.name.as_str()),
+            Some("upstream/main"),
+            "a remote renamed after watch started must be reflected without a \
+             restart, not blank the upstream segment",
+        );
+    }
+
     /// Build an ignore matcher rooted at `root` from raw gitignore lines, the
     /// way the production matcher is assembled from the repo's ignore files.
     /// Handed back as a [`LiveIgnore`] so the pure [`should_react`] tests use
