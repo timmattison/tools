@@ -2,10 +2,11 @@
 
 Work out which order to squash-merge branches in, before you commit to one.
 
-`grime` tells you whether a merge conflicts. `grind` tells you whether a rebase
-conflicts. `grist` answers the question they can't: when you have several
-branches to land and each one makes the next one harder, **which order costs the
-least?**
+`grime` (does a merge conflict?) and `grind` (does a rebase conflict?) are
+planned siblings — neither exists yet, so don't go looking for them. `grist` is
+the one that's here, and it answers the question they can't: when you have
+several branches to land and each one makes the next one harder, **which order
+costs the least?**
 
 ```console
 $ grist issue-130 issue-120
