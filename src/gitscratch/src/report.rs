@@ -78,3 +78,19 @@ impl<'a> Report<'a> {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Report;
+    use crate::scratch::Conflicts;
+
+    #[test]
+    fn a_clean_replay_gets_one_line_naming_the_tool_and_what_it_tried() {
+        let report = Report::new("grind", "replaying HEAD onto origin/main");
+
+        assert_eq!(
+            report.render(&Conflicts::default()),
+            "grind: clean - replaying HEAD onto origin/main hit no conflicts"
+        );
+    }
+}
