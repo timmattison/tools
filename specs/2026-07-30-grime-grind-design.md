@@ -30,7 +30,7 @@ get.
 | `GIT_EDITOR=true` | pinned | absent |
 | `commit.gpgsign=false` | pinned | absent |
 | `gc.auto=0` | pinned | absent |
-| leaked-worktree cleanup | `Drop` also runs `worktree prune` | trap misses `SIGHUP`; never prunes |
+| leaked-worktree cleanup | `Drop` removes the scratch worktree by path, and deliberately *never* prunes | trap misses `SIGHUP`, so the worktree entry leaks |
 
 The first row is the serious one. `grind` runs a bare `git -C "$d" rebase
 "$branch"`. The range it replays is the current branch's commits, so with
@@ -235,18 +235,22 @@ crates now need it. It moves to `gitscratch` as `pub mod testing` behind a
 
 ### Safety suite — `src/gitscratch/tests/safety.rs`
 
-Two guarantees migrate from `grist`; five are new. All now cover the shared
+Three guarantees migrate from `grist`; five are new. All now cover the shared
 harness rather than `Simulator` alone.
 
 1. `rebase.updateRefs=true` moves no real branch ref *(migrated)*
 2. branches checked out in other worktrees still work *(migrated)*
-3. `rerere.enabled=true` leaves `rr-cache` unwritten
-4. hooks do not fire — plant `post-checkout`, `pre-rebase`, `post-rewrite`, and
+3. an unrelated worktree whose directory is *temporarily* missing keeps its
+   administrative state *(migrated)* — this is what pins teardown to removing
+   the scratch worktree by path and never running the repo-wide, no-grace-period
+   `worktree prune`
+4. `rerere.enabled=true` leaves `rr-cache` unwritten
+5. hooks do not fire — plant `post-checkout`, `pre-rebase`, `post-rewrite`, and
    `pre-merge-commit` hooks that each touch a sentinel; assert none appear
-5. the real working tree and index are untouched — a dirty file survives
+6. the real working tree and index are untouched — a dirty file survives
    byte-identical
-6. no worktree is left registered, including after a *conflicting* run
-7. `commit.gpgsign=true` neither hangs nor fails a replay
+7. no worktree is left registered, including after a *conflicting* run
+8. `commit.gpgsign=true` neither hangs nor fails a replay
 
 ### Behavior suites
 
@@ -278,13 +282,18 @@ fixed paths under `/tmp`, the repo, or the home directory.
 
 ### Mutation verification
 
-For each of the seven safety tests, identify the guard it pins — the pinned
-config setting for 1, 3, 4 and 7, `--detach` for 2, the `Drop` teardown and
-`worktree prune` for 5 and 6 — then remove that guard, confirm the specific test
-goes red, and restore it. This is how `grist`'s existing guards were validated
-and is
-required by `CLAUDE.md`'s enforced-helper rule — it is the only thing that stops
-a quietly-broken guard from passing green forever.
+For each of the eight safety tests, identify the guard it pins — the pinned
+config setting for 1, 4, 5 and 8; `--detach` for 2; running in a scratch
+worktree at all for 6; the `Drop` teardown's `worktree remove --force` for 7 —
+then remove that guard, confirm the specific test goes red, and restore it.
+
+Test 3 mutates in the opposite direction, because the guard it pins is an
+*absence*: **add** a `worktree prune` to the teardown and confirm the test goes
+red.
+
+This is how `grist`'s existing guards were validated and is required by
+`CLAUDE.md`'s enforced-helper rule — it is the only thing that stops a
+quietly-broken guard from passing green forever.
 
 ## Documentation and migration
 
