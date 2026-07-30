@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
@@ -107,20 +108,78 @@ impl From<&Cli> for NukeOptions {
     }
 }
 
+/// The name of a git branch, always with any `refs/heads/` prefix stripped.
+///
+/// gitnuke's most destructive call — `git branch -D` — takes one of these, and
+/// it sits right next to a worktree path in that signature. Keeping the two as
+/// distinct types makes swapping them a compile error rather than a deleted
+/// branch. Construction goes through [`BranchName::from_ref`], so no caller can
+/// forget to strip the prefix and end up asking git to delete `refs/heads/x`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BranchName(String);
+
+impl BranchName {
+    /// Builds a branch name from a git ref, stripping a leading `refs/heads/`.
+    ///
+    /// A ref that carries no such prefix (already a short name) is taken as-is.
+    fn from_ref(reference: &str) -> Self {
+        BranchName(
+            reference
+                .strip_prefix("refs/heads/")
+                .unwrap_or(reference)
+                .to_string(),
+        )
+    }
+
+    /// The short branch name, as git's own `branch` subcommand wants it.
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for BranchName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The filesystem path of a git worktree.
+///
+/// Distinct from a plain `PathBuf` so it cannot be confused with the repository
+/// root (which every git invocation here also takes) or with a [`BranchName`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorktreePath(PathBuf);
+
+impl WorktreePath {
+    /// Wraps a path reported by git as a worktree location.
+    fn new(path: impl Into<PathBuf>) -> Self {
+        WorktreePath(path.into())
+    }
+
+    /// The path itself, for handing to `git` or the filesystem.
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    /// The final path component (e.g. `absurd-rock` from a full path).
+    fn dir_name(&self) -> Option<&str> {
+        self.0.file_name()?.to_str()
+    }
+}
+
+impl fmt::Display for WorktreePath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.display().fmt(f)
+    }
+}
+
 /// Represents a single git worktree.
 #[derive(Debug, Clone)]
 struct Worktree {
     /// The filesystem path to this worktree.
-    path: PathBuf,
-    /// The branch name (without `refs/heads/` prefix), or None for detached HEAD.
-    branch: Option<String>,
-}
-
-impl Worktree {
-    /// The final path component (e.g. `absurd-rock` from a full path).
-    fn dir_name(&self) -> Option<&str> {
-        self.path.file_name()?.to_str()
-    }
+    path: WorktreePath,
+    /// The branch checked out here, or None for detached HEAD.
+    branch: Option<BranchName>,
 }
 
 /// Parses the output of `git worktree list --porcelain`.
@@ -140,8 +199,8 @@ impl Worktree {
 /// the first block, and the order here is preserved so callers can rely on it.
 fn parse_worktree_list(output: &str) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
-    let mut current_path: Option<PathBuf> = None;
-    let mut current_branch: Option<String> = None;
+    let mut current_path: Option<WorktreePath> = None;
+    let mut current_branch: Option<BranchName> = None;
 
     for line in output.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
@@ -152,14 +211,10 @@ fn parse_worktree_list(output: &str) -> Vec<Worktree> {
                     branch: current_branch.take(),
                 });
             }
-            current_path = Some(PathBuf::from(path));
+            current_path = Some(WorktreePath::new(path));
         } else if let Some(branch) = line.strip_prefix("branch ") {
-            current_branch = Some(
-                branch
-                    .strip_prefix("refs/heads/")
-                    .unwrap_or(branch)
-                    .to_string(),
-            );
+            // BranchName::from_ref owns the `refs/heads/` stripping.
+            current_branch = Some(BranchName::from_ref(branch));
         }
         // Ignore HEAD/bare/detached/locked/prunable lines.
     }
@@ -224,6 +279,7 @@ fn resolve_target(worktrees: &[Worktree], target: &str, cwd: Option<&Path>) -> R
     if let Some(canonical) = canonicalize_target(target, cwd) {
         if let Some(idx) = worktrees.iter().position(|wt| {
             wt.path
+                .as_path()
                 .canonicalize()
                 .is_ok_and(|p| paths_equal(&p, &canonical))
         }) {
@@ -237,7 +293,10 @@ fn resolve_target(worktrees: &[Worktree], target: &str, cwd: Option<&Path>) -> R
     let hits: Vec<usize> = worktrees
         .iter()
         .enumerate()
-        .filter(|(_, wt)| wt.dir_name() == Some(target) || wt.branch.as_deref() == Some(target))
+        .filter(|(_, wt)| {
+            wt.path.dir_name() == Some(target)
+                || wt.branch.as_ref().map(BranchName::as_str) == Some(target)
+        })
         .map(|(idx, _)| idx)
         .collect();
 
@@ -327,11 +386,11 @@ fn parse_gitlink_paths(stdout: &str) -> Vec<String> {
 /// A worktree git can no longer inspect (already deleted, corrupt) yields an
 /// empty report: there is nothing to protect, and `git worktree remove` will
 /// give the authoritative answer either way.
-fn find_submodules(worktree: &Path) -> SubmoduleReport {
+fn find_submodules(worktree: &WorktreePath) -> SubmoduleReport {
     let mut paths = Vec::new();
     if let Ok(output) = Command::new("git")
         .args(["ls-files", "--stage", "-z"])
-        .current_dir(worktree)
+        .current_dir(worktree.as_path())
         .output()
     {
         if output.status.success() {
@@ -340,7 +399,7 @@ fn find_submodules(worktree: &Path) -> SubmoduleReport {
             // gitlink with no directory on disk is inert.
             paths = parse_gitlink_paths(&stdout)
                 .into_iter()
-                .filter(|path| worktree.join(path).exists())
+                .filter(|path| worktree.as_path().join(path).exists())
                 .collect();
         }
     }
@@ -353,10 +412,10 @@ fn find_submodules(worktree: &Path) -> SubmoduleReport {
 }
 
 /// The worktree's private git dir (`.../.git/worktrees/<name>` for a linked one).
-fn worktree_git_dir(worktree: &Path) -> Option<PathBuf> {
+fn worktree_git_dir(worktree: &WorktreePath) -> Option<PathBuf> {
     let output = Command::new("git")
         .args(["rev-parse", "--absolute-git-dir"])
-        .current_dir(worktree)
+        .current_dir(worktree.as_path())
         .output()
         .ok()?;
 
@@ -398,7 +457,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
                  checked out.\n  Nuking it deletes those checkouts along with any \
                  uncommitted or unpushed work inside them.\n  Re-run with --force to \
                  nuke it anyway.",
-                worktree.path.display(),
+                worktree.path,
                 submodules.describe(),
             ),
         ));
@@ -417,7 +476,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
 
     let output = Command::new("git")
         .args(args)
-        .arg(&worktree.path)
+        .arg(worktree.path.as_path())
         .current_dir(repo_root)
         .output()
         .map_err(|e| {
@@ -432,7 +491,7 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
             exit_codes::GIT_COMMAND_ERROR,
             format!(
                 "could not remove worktree {}: {}",
-                worktree.path.display(),
+                worktree.path,
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         ));
@@ -441,14 +500,14 @@ fn nuke(repo_root: &Path, worktree: &Worktree, options: NukeOptions) -> Result<(
     println!(
         "{} removed worktree {}",
         "gitnuke:".green().bold(),
-        worktree.path.display()
+        worktree.path
     );
 
     let Some(branch) = &worktree.branch else {
         println!(
             "{} {} had a detached HEAD, so there is no branch to delete",
             "gitnuke:".green().bold(),
-            worktree.path.display()
+            worktree.path
         );
         return Ok(());
     };
@@ -473,7 +532,7 @@ fn report_plan(
     println!(
         "{} would remove worktree {}{extra}",
         "gitnuke:".yellow().bold(),
-        worktree.path.display()
+        worktree.path
     );
 
     match &worktree.branch {
@@ -485,7 +544,7 @@ fn report_plan(
         None => println!(
             "{} {} has a detached HEAD, so no branch would be deleted",
             "gitnuke:".yellow().bold(),
-            worktree.path.display()
+            worktree.path
         ),
     }
 
@@ -495,10 +554,10 @@ fn report_plan(
 /// Deletes a branch, echoing git's own report.
 ///
 /// `safe` picks `git branch -d` (refuses an unmerged branch) over `-D`.
-fn delete_branch(repo_root: &Path, branch: &str, safe: bool) -> Result<(), NukeError> {
+fn delete_branch(repo_root: &Path, branch: &BranchName, safe: bool) -> Result<(), NukeError> {
     let delete_flag = if safe { "-d" } else { "-D" };
     let output = Command::new("git")
-        .args(["branch", delete_flag, branch])
+        .args(["branch", delete_flag, branch.as_str()])
         .current_dir(repo_root)
         .output()
         .map_err(|e| {
@@ -531,8 +590,11 @@ fn delete_branch(repo_root: &Path, branch: &str, safe: bool) -> Result<(), NukeE
 fn not_found_message(worktrees: &[Worktree], target: &str) -> String {
     let mut message = format!("no worktree matches '{target}'. Known worktrees:");
     for wt in worktrees {
-        let branch = wt.branch.as_deref().unwrap_or("detached HEAD");
-        message.push_str(&format!("\n  {} [{branch}]", wt.path.display()));
+        let branch = wt
+            .branch
+            .as_ref()
+            .map_or("detached HEAD", BranchName::as_str);
+        message.push_str(&format!("\n  {} [{branch}]", wt.path));
     }
     message
 }
@@ -541,11 +603,11 @@ fn not_found_message(worktrees: &[Worktree], target: &str) -> String {
 ///
 /// Both sides are canonicalized so `..` segments, trailing slashes, and
 /// symlinked parents (macOS `/var` → `/private/var`) cannot hide the overlap.
-fn cwd_is_inside(cwd: Option<&Path>, worktree: &Path) -> bool {
+fn cwd_is_inside(cwd: Option<&Path>, worktree: &WorktreePath) -> bool {
     let Some(Ok(cwd)) = cwd.map(Path::canonicalize) else {
         return false;
     };
-    let Ok(worktree) = worktree.canonicalize() else {
+    let Ok(worktree) = worktree.as_path().canonicalize() else {
         return false;
     };
 
@@ -574,15 +636,15 @@ fn nuke_target(
             // the caller's shell.
             if cwd_is_inside(cwd, &worktree.path) {
                 // worktrees[0] is always the main worktree in git's listing.
-                let elsewhere = worktrees.first().map_or_else(String::new, |main| {
-                    format!(" (for example {})", main.path.display())
-                });
+                let elsewhere = worktrees
+                    .first()
+                    .map_or_else(String::new, |main| format!(" (for example {})", main.path));
                 return Err(NukeError::new(
                     exit_codes::INSIDE_TARGET,
                     format!(
                         "you are inside {} — cd somewhere else first{elsewhere}, \
                          otherwise your shell is left in a deleted directory",
-                        worktree.path.display()
+                        worktree.path
                     ),
                 ));
             }
@@ -593,7 +655,7 @@ fn nuke_target(
             let mut message =
                 format!("'{target}' matches more than one worktree; use a path instead:");
             for idx in indices {
-                message.push_str(&format!("\n  {}", worktrees[idx].path.display()));
+                message.push_str(&format!("\n  {}", worktrees[idx].path));
             }
             Err(NukeError::new(exit_codes::MULTIPLE_MATCHES, message))
         }
@@ -635,9 +697,14 @@ mod tests {
 
     fn wt(path: &str, branch: Option<&str>) -> Worktree {
         Worktree {
-            path: PathBuf::from(path),
-            branch: branch.map(str::to_string),
+            path: WorktreePath::new(path),
+            branch: branch.map(BranchName::from_ref),
         }
+    }
+
+    /// The short branch name a worktree carries, as a plain `&str`.
+    fn branch_of(worktree: &Worktree) -> Option<&str> {
+        worktree.branch.as_ref().map(BranchName::as_str)
     }
 
     #[test]
@@ -658,10 +725,10 @@ detached
         let worktrees = parse_worktree_list(output);
 
         assert_eq!(worktrees.len(), 3);
-        assert_eq!(worktrees[0].path, PathBuf::from("/repo"));
-        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
-        assert_eq!(worktrees[1].branch.as_deref(), Some("feature/login"));
-        assert_eq!(worktrees[2].branch, None);
+        assert_eq!(worktrees[0].path.as_path(), Path::new("/repo"));
+        assert_eq!(branch_of(&worktrees[0]), Some("main"));
+        assert_eq!(branch_of(&worktrees[1]), Some("feature/login"));
+        assert_eq!(branch_of(&worktrees[2]), None);
     }
 
     #[test]
@@ -669,7 +736,7 @@ detached
         let worktrees = parse_worktree_list("worktree /repo\nHEAD abc\nbranch refs/heads/main");
 
         assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert_eq!(branch_of(&worktrees[0]), Some("main"));
     }
 
     #[test]
