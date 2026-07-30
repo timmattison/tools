@@ -81,8 +81,8 @@ impl Repo {
     ///
     /// Returns an error if the revision does not name a commit; the message
     /// names the revision that could not be resolved.
-    pub fn resolve(&self, _revision: &str) -> Result<String> {
-        anyhow::bail!("not implemented")
+    pub fn resolve(&self, revision: &str) -> Result<String> {
+        self.git().rev_parse(revision)
     }
 
     /// How many files are uncommitted — staged, unstaged, or untracked.
