@@ -5,6 +5,10 @@ edition.workspace = true
 description = "Zero the Hero - find files that contain nothing but zero bytes"
 license.workspace = true
 
+[dependencies]
+crossbeam.workspace = true
+walkdir.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

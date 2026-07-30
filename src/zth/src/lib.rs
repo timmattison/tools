@@ -24,6 +24,10 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+
+use walkdir::WalkDir;
 
 /// Size of the buffer each read fills before the block is tested for zeroes.
 ///
@@ -124,14 +128,13 @@ impl Jobs {
     /// treated as a request for the minimum rather than as an error.
     #[must_use]
     pub fn new(count: usize) -> Self {
-        let _ = count;
-        Self(NonZeroUsize::MIN)
+        Self(NonZeroUsize::new(count).unwrap_or(NonZeroUsize::MIN))
     }
 
     /// The machine's available parallelism, or one when it cannot be determined.
     #[must_use]
     pub fn available_parallelism() -> Self {
-        Self(NonZeroUsize::MIN)
+        Self(std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN))
     }
 
     /// The number of workers, guaranteed non-zero.
@@ -194,8 +197,101 @@ impl ScanProgress for NoProgress {
 /// scan carries on.
 #[must_use]
 pub fn find_all_zero_files(root: &Path, jobs: Jobs, progress: &dyn ScanProgress) -> Vec<PathBuf> {
-    let _ = (root, jobs, progress);
-    Vec::new()
+    // Resolving the root once is what makes every result absolute: walkdir hands
+    // back paths built by joining onto the root it was given.
+    let root = absolute_root(root);
+
+    // Unbounded on purpose. A bounded queue would stall the walk whenever the
+    // workers fell behind, which is exactly when an honest "files discovered"
+    // total - and therefore an honest time estimate - matters most. The queue
+    // holds paths, so its high-water mark is bounded by how far the walk can run
+    // ahead of the reads.
+    let (sender, receiver) = crossbeam::channel::unbounded::<PathBuf>();
+
+    let discovered = AtomicU64::new(0);
+    let scanned = AtomicU64::new(0);
+
+    let mut found = thread::scope(|scope| {
+        let walk_root = &root;
+        let discovered = &discovered;
+
+        scope.spawn(move || {
+            // Dropping this sender at the end of the walk is what tells the
+            // workers there is nothing left to come, so it is moved in here.
+            let sender = sender;
+
+            for entry in WalkDir::new(walk_root)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                // Directories have no contents to read, and a symlink is left
+                // alone rather than followed.
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+
+                let total = discovered.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                progress.files_discovered(total);
+
+                if sender.send(entry.into_path()).is_err() {
+                    // Every worker is gone; nothing will read what we send.
+                    break;
+                }
+            }
+        });
+
+        let workers: Vec<_> = (0..jobs.get())
+            .map(|_| {
+                let receiver = receiver.clone();
+                let scanned = &scanned;
+
+                scope.spawn(move || {
+                    // One buffer per worker, reused for every file it reads.
+                    let mut buffer = vec![0_u8; READ_BUFFER_LEN];
+                    let mut matches = Vec::new();
+
+                    for path in receiver {
+                        // An unreadable file is not a match, and not a reason to
+                        // say anything about it.
+                        if file_is_all_zeroes_with_buffer(&path, &mut buffer).unwrap_or(false) {
+                            matches.push(path);
+                        }
+
+                        let total = scanned.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+                        progress.files_scanned(total);
+                    }
+
+                    matches
+                })
+            })
+            .collect();
+
+        // The clone each worker took is the one that matters; this one would
+        // otherwise keep the channel alive for no reason.
+        drop(receiver);
+
+        workers
+            .into_iter()
+            .filter_map(|worker| worker.join().ok())
+            .flatten()
+            .collect::<Vec<_>>()
+    });
+
+    found.sort_unstable();
+    found
+}
+
+/// Resolves `root` to an absolute path so every path built from it is absolute.
+///
+/// Canonicalizing also collapses `..` and resolves symlinked parents, which is
+/// what a user pasting a result back into another command wants. A root that
+/// cannot be canonicalized - most often because it does not exist - still gets
+/// made absolute so the walk can fail on it normally and report nothing.
+fn absolute_root(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root)
+        .or_else(|_| std::path::absolute(root))
+        .unwrap_or_else(|_| root.to_path_buf())
 }
 
 #[cfg(test)]
@@ -270,7 +366,10 @@ mod tests {
         let mut contents = vec![0_u8; READ_BUFFER_LEN * 2];
         contents[READ_BUFFER_LEN - 1] = 1;
         let (_dir, path) = file_with(&contents);
-        assert!(!scan(&path), "the last byte of a full buffer must be tested");
+        assert!(
+            !scan(&path),
+            "the last byte of a full buffer must be tested"
+        );
     }
 
     #[test]
@@ -278,7 +377,10 @@ mod tests {
         let mut contents = vec![0_u8; READ_BUFFER_LEN * 2];
         contents[READ_BUFFER_LEN] = 1;
         let (_dir, path) = file_with(&contents);
-        assert!(!scan(&path), "the first byte of a later buffer must be tested");
+        assert!(
+            !scan(&path),
+            "the first byte of a later buffer must be tested"
+        );
     }
 
     #[test]
@@ -314,8 +416,7 @@ mod tests {
 
     #[test]
     fn jobs_defaults_to_available_parallelism() {
-        let expected = std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get);
+        let expected = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         assert_eq!(
             Jobs::default().get(),
             expected,

@@ -22,7 +22,10 @@ impl Recorder {
     /// Returns the recorded totals, sorted. Worker threads report concurrently,
     /// so only the multiset of values is deterministic, not their order.
     fn sorted(values: &Mutex<Vec<u64>>) -> Vec<u64> {
-        let mut values = values.lock().expect("recorder mutex should not be poisoned").clone();
+        let mut values = values
+            .lock()
+            .expect("recorder mutex should not be poisoned")
+            .clone();
         values.sort_unstable();
         values
     }
@@ -61,7 +64,8 @@ fn write(dir: &Path, name: &str, contents: &[u8]) -> PathBuf {
 /// `/private/var/...`.
 fn fixture() -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("creating a temp dir should succeed");
-    let canonical = fs::canonicalize(dir.path()).expect("canonicalizing the temp dir should succeed");
+    let canonical =
+        fs::canonicalize(dir.path()).expect("canonicalizing the temp dir should succeed");
     (dir, canonical)
 }
 
@@ -167,9 +171,9 @@ fn multi_byte_paths_are_found() {
 #[test]
 fn one_worker_finds_the_same_files_as_many() {
     let (_dir, root) = fixture();
-    for index in 0..32 {
+    for index in 0_u8..32 {
         write(&root, &format!("zero-{index}.bin"), &[0_u8; 64]);
-        write(&root, &format!("data-{index}.bin"), &[index as u8 + 1; 64]);
+        write(&root, &format!("data-{index}.bin"), &[index + 1; 64]);
     }
 
     assert_eq!(
@@ -192,7 +196,7 @@ fn progress_reports_every_file_exactly_once() {
     write(&root, "sub/empty.bin", &[]);
 
     let recorder = Recorder::default();
-    find_all_zero_files(&root, Jobs::new(4), &recorder);
+    let _found = find_all_zero_files(&root, Jobs::new(4), &recorder);
 
     assert_eq!(
         Recorder::sorted(&recorder.discovered),
