@@ -468,8 +468,8 @@ enum Event {
 }
 
 /// The git work one watch-mode refresh performs: re-open the repository so
-/// configuration written since the last refresh takes effect, then collect the
-/// snapshot from that fresh handle.
+/// configuration written since the last refresh takes effect, rebuild the
+/// watcher's ignore matcher from that fresh handle, then collect the snapshot.
 ///
 /// This is watch mode's whole re-derivation of on-disk state, named so it has
 /// one place to grow. The re-open is the load-bearing half. A
@@ -482,22 +482,36 @@ enum Event {
 /// equally invisible. Re-opening per refresh fixes the class rather than
 /// special-casing `branch.*`.
 ///
-/// The cost is one config parse per walk, which only happens when the throttle
-/// admits a walk in the first place — and it rides along with a full status
-/// traversal that dwarfs it. [`RepoHandle::reopened`] keeps the previous handle
-/// if the re-open fails, so catching git mid-write costs a tick of stale
-/// configuration, never a blank screen.
+/// The ignore rebuild is the same bug one layer out. The matcher the watcher
+/// thread classifies events against was built once at spawn, so a rule added to
+/// `.gitignore` mid-session never starts filtering (the watcher keeps chasing
+/// build churn) and — worse — a rule *removed* never stops filtering, leaving
+/// the callback silently dropping events for paths that are once again
+/// rendered. Refreshing it here, from the handle re-opened one line above, is
+/// what makes the two fixes compose: `core.excludesFile` is read out of
+/// `.git/config`, so the fresh config feeds straight into the fresh matcher and
+/// a user who repoints their global excludes sees it on the next walk.
+///
+/// The cost is one config parse plus at most three small ignore-file reads per
+/// walk, which only happens when the throttle admits a walk in the first place —
+/// and it rides along with a full status traversal that dwarfs both.
+/// [`RepoHandle::reopened`] keeps the previous handle if the re-open fails, so
+/// catching git mid-write costs a tick of stale configuration, never a blank
+/// screen.
 ///
 /// # Errors
 ///
-/// Propagates a [`collect_snapshot`] failure (the status walk). A failed
-/// *re-open* is not an error: it degrades to the handle already in hand.
+/// Propagates a [`collect_snapshot`] failure (the status walk). Neither a failed
+/// *re-open* nor an unreadable ignore file is an error: the first degrades to the
+/// handle already in hand, the second to a matcher without that source.
 pub(crate) fn walk(
     handle: &mut RepoHandle,
-    _ignore: &LiveIgnore,
+    ignore: &LiveIgnore,
     cfg: &RenderConfig,
 ) -> Result<Snapshot> {
-    collect_snapshot(handle.reopened(), cfg)
+    let repo = handle.reopened();
+    ignore.refresh(repo);
+    collect_snapshot(repo, cfg)
 }
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
@@ -1182,6 +1196,42 @@ mod tests {
             !should_react(&churn, &ignore, &workdir, &git_dirs),
             "a .gitignore rule written after watch started must take effect \
              without restarting gsw",
+        );
+    }
+
+    #[test]
+    fn walk_picks_up_a_gitignore_rule_removed_after_watch_started() {
+        // The mirror direction, and the one that is a correctness bug rather
+        // than wasted work: with a stale matcher the watcher keeps *dropping*
+        // events for a path that is no longer ignored. Delete `build/` from
+        // `.gitignore` and everything under it becomes untracked — rows gsw is
+        // supposed to render — yet the callback filters those events out, so the
+        // view sits frozen until gsw is restarted. A refresh must let them
+        // through again.
+        let dir = testrepo::init_repo();
+        let p = dir.path();
+        std::fs::write(p.join(".gitignore"), "build/\n").expect("write .gitignore");
+        std::fs::create_dir(p.join("build")).expect("create build/");
+        std::fs::write(p.join("build").join("out.o"), "obj\n").expect("write build/out.o");
+
+        // Opened while the rule is still in force, and held across its removal.
+        let (mut handle, ignore, workdir, git_dirs) = watching(p);
+        let churn = workdir.join("build").join("out.o");
+        let cfg = walk_config();
+
+        assert!(
+            !should_react(&churn, &ignore, &workdir, &git_dirs),
+            "the rule is in force at startup, so build churn is filtered out",
+        );
+
+        // What deleting the `build/` line in another pane does while gsw runs.
+        std::fs::write(p.join(".gitignore"), "").expect("truncate .gitignore");
+        walk(&mut handle, &ignore, &cfg).expect("walk");
+
+        assert!(
+            should_react(&churn, &ignore, &workdir, &git_dirs),
+            "a .gitignore rule removed after watch started must stop filtering \
+             without restarting gsw — those paths are rendered again",
         );
     }
 
