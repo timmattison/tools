@@ -7,7 +7,10 @@
 //! [`ScanProgress`] observer sees the running totals as they change.
 //!
 //! [`file_is_all_zeroes`] answers the same question for a single file. It stops
-//! at the first non-zero byte rather than reading or hashing the whole file.
+//! at the first non-zero byte rather than reading or hashing the whole file,
+//! settles wholly-sparse files without reading them at all, and asks the kernel
+//! not to cache what it does read - a scan touches every byte exactly once, so
+//! anything it leaves in the page cache is held for no one.
 //!
 //! # Example
 //!
@@ -89,13 +92,10 @@ fn reader_is_all_zeroes(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result
     let mut saw_bytes = false;
     let mut window = PROBE_READ_LEN.min(buffer.len());
 
-    loop {
-        // Indexing is bounded by the min() above and by the assignment below,
-        // both of which clamp to the buffer's length.
-        let Some(target) = buffer.get_mut(..window) else {
-            break;
-        };
-
+    // Slicing is bounded by the min() above and by the assignment below, both
+    // of which clamp to the buffer's length, so the loop ends on a read of zero
+    // bytes rather than on a failed slice.
+    while let Some(target) = buffer.get_mut(..window) {
         let filled = match reader.read(target) {
             Ok(0) => break,
             Ok(filled) => filled,

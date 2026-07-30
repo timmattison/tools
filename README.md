@@ -1874,7 +1874,19 @@ zth -j 32 /mnt/nas
 
 Each file is read only until its first non-zero byte, so an ordinary file costs a single read no matter how large it is — a 4 GB video is dismissed by its first few bytes. Only files that really are all zeroes get read to the end. Blocks are compared against a zero block with `memcmp`, which the CPU vectorizes, so the all-zero case runs at memory speed rather than byte-at-a-time.
 
-Empty files are never reported. A file with no bytes has no zero bytes either, and a directory full of `touch`ed placeholders is not what you are looking for.
+That first read asks for 16 KiB, not a full buffer. Almost every file is disqualified by its very first byte, so the first read exists to reject rather than to consume, and pulling 256 KiB off the platter to look at one of them is waste in two directions — the transfer itself, and the page cache it evicts. Three hundred thousand files at a quarter-megabyte apiece flush the directory metadata the walk is still working through, which buys extra seeks in exchange for bytes nothing ever reads. Once a file survives the probe it is likely to be all zeroes, so every read after the first one goes full width and runs sequentially.
+
+For the same reason, `zth` asks the kernel not to cache what it reads at all (`F_NOCACHE` on macOS, `posix_fadvise` on Linux). It reads every byte exactly once and never comes back, so a scan that filled the cache would only be competing with itself.
+
+Sparse files are settled without being read. A file made entirely of a hole — a range the filesystem never allocated, which reads back as zeroes without any of it existing on disk — is exactly what an interrupted restore leaves behind, and it is routinely enormous. One `lseek` against metadata already in memory answers it, so a 64 GB sparse file costs the same as a 64-byte one. Filesystems that cannot answer the question are simply read the ordinary way.
+
+Empty files are never reported, however they were made. A file with no bytes has no zero bytes either, and a directory full of `touch`ed placeholders is not what you are looking for.
+
+### Spinning disks
+
+Reading many small files at once helps on a hard drive, which surprises people who have been told that disks hate concurrency. That advice is about independent sequential streams thrashing the head against each other; this is the opposite workload. Command queuing lets the drive hold up to 32 outstanding reads and service them in whatever order costs the least head travel, so a single 7200 RPM spindle that manages roughly 75 random reads per second one-at-a-time will manage two to three times that with a full queue.
+
+`-j 24` or so is the sweet spot for one spinning disk. Past about twice the drive's queue depth the extra workers just wait in line. Two things to know: a USB enclosure speaking the older mass-storage protocol instead of UASP has no queue at all and gains nothing from any of this, and a repeat run measures the page cache rather than the disk unless you clear it first.
 
 ### The progress bar
 
