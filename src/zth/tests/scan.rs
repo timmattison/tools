@@ -210,6 +210,42 @@ fn progress_reports_every_file_exactly_once() {
     );
 }
 
+/// Totals that arrive out of order are not a cosmetic problem: indicatif treats
+/// any backwards `set_position` as a seek and throws its whole ETA estimate
+/// away, so a scan with several workers would spend its life resetting the
+/// estimate it is supposed to be refining.
+#[test]
+fn progress_totals_arrive_in_order() {
+    let (_dir, root) = fixture();
+    for index in 0..2_000 {
+        write(&root, &format!("f-{index}.bin"), &[0_u8; 4]);
+    }
+
+    let recorder = Recorder::default();
+    let _found = find_all_zero_files(&root, Jobs::new(16), &recorder);
+
+    let scanned = recorder
+        .scanned
+        .lock()
+        .expect("recorder mutex should not be poisoned")
+        .clone();
+
+    assert_eq!(scanned.len(), 2_000, "every file should be reported once");
+
+    let backwards: Vec<_> = scanned
+        .windows(2)
+        .filter(|pair| pair[0] > pair[1])
+        .map(|pair| (pair[0], pair[1]))
+        .collect();
+
+    assert!(
+        backwards.is_empty(),
+        "scanned totals must never go backwards, got {} reversals, e.g. {:?}",
+        backwards.len(),
+        &backwards[..backwards.len().min(5)]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn symlinks_are_not_followed() {
