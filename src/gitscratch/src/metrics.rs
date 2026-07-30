@@ -41,12 +41,28 @@ pub struct Files(usize);
 pub struct Hunks(usize);
 
 macro_rules! counter {
-    ($name:ident) => {
+    ($name:ident, $noun:literal) => {
         impl $name {
             /// Wrap a raw count.
             #[must_use]
             pub fn new(count: usize) -> Self {
                 Self(count)
+            }
+
+            /// The count with its noun, pluralised - `"1 hunk"`, `"4 hunks"`.
+            ///
+            /// The noun belongs to the type rather than to whoever is printing
+            /// it. A renderer that has to remember both the word and when to
+            /// add the `s` is a renderer that can get one of them wrong, and
+            /// the tools built on this crate must not be able to disagree about
+            /// what to call the same number.
+            #[must_use]
+            pub fn phrase(&self) -> String {
+                if self.0 == 1 {
+                    format!("{} {}", self.0, $noun)
+                } else {
+                    format!("{} {}s", self.0, $noun)
+                }
             }
         }
 
@@ -58,6 +74,6 @@ macro_rules! counter {
     };
 }
 
-counter!(Stops);
-counter!(Files);
-counter!(Hunks);
+counter!(Stops, "stop");
+counter!(Files, "file");
+counter!(Hunks, "hunk");

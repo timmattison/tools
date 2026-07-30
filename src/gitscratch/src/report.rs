@@ -17,7 +17,22 @@
 //! [`Report::without_stops`] - a merge halts exactly once, so printing the
 //! number would be noise.
 
+use crate::metrics::Hunks;
 use crate::scratch::Conflicts;
+
+/// Width of the `": "` between the tool name and the verdict on the first line.
+///
+/// The summary sits on a second line indented to line up with the text after
+/// it, so the indent has to be measured from the tool's own name rather than
+/// written out as a fixed run of spaces that only happens to fit today.
+const LABEL_SEPARATOR_WIDTH: usize = 2;
+
+/// Indent for every line of the per-file breakdown.
+const FILE_INDENT: &str = "  ";
+
+/// Columns between the widest file name and the hunk counts, so the counts form
+/// a column of their own instead of butting up against the longest name.
+const COUNT_GAP: usize = 4;
 
 /// A conflict verdict, and how to word it for one particular tool.
 #[expect(
@@ -72,7 +87,35 @@ impl<'a> Report<'a> {
             return format!("{}: clean - {} hit no conflicts", self.tool, self.action);
         }
 
-        String::new()
+        let indent = " ".repeat(self.tool.chars().count() + LABEL_SEPARATOR_WIDTH);
+        let widest = conflicts
+            .file_hunks()
+            .map(|(name, _)| name.chars().count())
+            .max()
+            .unwrap_or_default();
+
+        let mut lines = vec![
+            format!("{}: conflicts - {}", self.tool, self.action),
+            format!(
+                "{indent}{} hunks across {} files, {} stops",
+                conflicts.hunks(),
+                conflicts.files(),
+                conflicts.stops()
+            ),
+            // The breakdown is a separate thought from the summary, and a blank
+            // line is how a terminal says so.
+            String::new(),
+        ];
+
+        for (name, hunks) in conflicts.file_hunks() {
+            let gap = " ".repeat(widest.saturating_sub(name.chars().count()) + COUNT_GAP);
+            lines.push(format!(
+                "{FILE_INDENT}{name}{gap}{}",
+                Hunks::new(hunks).phrase()
+            ));
+        }
+
+        lines.join("\n")
     }
 
     /// The stderr note warning that uncommitted work is not covered, or `None`
