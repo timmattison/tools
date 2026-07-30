@@ -91,12 +91,12 @@ impl<'a> Report<'a> {
             .unwrap_or_default();
 
         let mut summary = format!(
-            "{indent}{} hunks across {} files",
-            conflicts.hunks(),
-            conflicts.files()
+            "{indent}{} across {}",
+            conflicts.hunks().phrase(),
+            conflicts.files().phrase()
         );
         if self.show_stops {
-            summary.push_str(&format!(", {} stops", conflicts.stops()));
+            summary.push_str(&format!(", {}", conflicts.stops().phrase()));
         }
 
         let mut lines = vec![
