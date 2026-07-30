@@ -40,6 +40,20 @@ agree on the same port for a given project and user without `portplz` needing to
 to a fixed integer to override the detected user (handy for reproducing a teammate's port or pinning one in
 containers/CI).
 
+### gitscratch
+A shared Rust library that owns the hardened "dry-run a git operation without touching anything real" harness.
+Answering "would this rebase conflict, and how badly?" means actually performing it against the developer's own
+repository, which is only safe because of a set of pinned settings — `rebase.updateRefs=false` so the replay
+doesn't rewrite the very branches being simulated, `rerere.enabled=false` so a simulated resolution never poisons
+the shared `rr-cache`, hooks redirected at an empty directory, `gc.auto=0`, `commit.gpgsign=false`, and an editor
+environment a halted rebase can't hang on. A scratch worktree can only be built through `Scratch`, and a `Scratch`
+only hands out a git runner that already carries that configuration, so no tool can drift onto a weaker version of
+it. Teardown removes the scratch worktree by path and deliberately never runs the repo-wide `git worktree prune`,
+which would delete the administrative state of any worktree whose directory is merely missing right now. Used by
+`grist`.
+
+See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
+
 ## The tools
 
 - dirhash
