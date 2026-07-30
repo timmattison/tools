@@ -21,7 +21,7 @@
 //! resolved state. Treat the totals as a cost index for comparing orderings
 //! measured under identical rules, not as an exact prediction.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -29,6 +29,8 @@ use tempfile::TempDir;
 
 use crate::git::Git;
 use crate::metrics::{BranchName, Files, Hunks, OrderingScore, Stops};
+use crate::plan::permutations;
+use crate::rank::rank;
 
 /// Upper bound on rebase resolution rounds per branch, so a git state we failed
 /// to anticipate stalls the run instead of spinning forever.
@@ -75,42 +77,95 @@ impl Simulator {
     /// state the resolution loop cannot drive forward.
     pub fn score(&self, order: &[BranchName]) -> Result<OrderingScore> {
         let scratch = Scratch::create(&self.repo, &self.base)?;
-        let git = scratch.git();
-
-        let mut simulated_main = git.rev_parse(&self.base)?;
-        let mut stops = 0_usize;
-        let mut hunks = 0_usize;
-        let mut files = BTreeSet::new();
+        let mut simulated_main = scratch.git().rev_parse(&self.base)?;
+        let mut total = Cost::default();
 
         for branch in order {
-            // Detached, so the real branch ref is never moved.
-            git.run(&["checkout", "-q", "--detach", branch.as_str()])
-                .with_context(|| format!("could not check out '{branch}'"))?;
-
-            let cost = self.replay_onto(&git, scratch.path(), &simulated_main, branch)?;
-            stops += cost.stops;
-            hunks += cost.hunks;
-            files.extend(cost.files);
-
-            simulated_main = squash_into(&git, &simulated_main, branch)?;
+            let (next_main, step) = self.land(&scratch, &simulated_main, branch)?;
+            simulated_main = next_main;
+            total.absorb(step);
         }
 
-        Ok(OrderingScore::new(
-            order.to_vec(),
-            Stops::new(stops),
-            Files::new(files.len()),
-            Hunks::new(hunks),
-        ))
+        Ok(total.into_score(order.to_vec()))
     }
 
     /// Score every order `branches` could land in, cheapest first.
+    ///
+    /// Orderings that share a leading run of branches share the work of
+    /// simulating it: results are memoised on the ordered prefix. The prefix has
+    /// to be ordered rather than a set, because the auto-resolved tree a prefix
+    /// leaves behind depends on the sequence that produced it.
     ///
     /// # Errors
     ///
     /// Returns an error if the branch list is empty, repeats a branch, is
     /// longer than [`MAX_BRANCHES`], or if any simulation fails.
-    pub fn evaluate(&self, _branches: &[BranchName]) -> Result<Vec<OrderingScore>> {
-        todo!("evaluate and rank every ordering")
+    pub fn evaluate(&self, branches: &[BranchName]) -> Result<Vec<OrderingScore>> {
+        anyhow::ensure!(!branches.is_empty(), "no branches to order");
+        anyhow::ensure!(
+            branches.len() <= MAX_BRANCHES,
+            "{} branches means {} orderings to simulate; grist stops at {MAX_BRANCHES}",
+            branches.len(),
+            (1..=branches.len()).product::<usize>(),
+        );
+
+        let distinct: BTreeSet<_> = branches.iter().collect();
+        anyhow::ensure!(
+            distinct.len() == branches.len(),
+            "each branch may only be listed once"
+        );
+
+        let scratch = Scratch::create(&self.repo, &self.base)?;
+        let base_commit = scratch.git().rev_parse(&self.base)?;
+
+        let mut memo: HashMap<Vec<BranchName>, (String, Cost)> = HashMap::new();
+        memo.insert(Vec::new(), (base_commit, Cost::default()));
+
+        let mut scores = Vec::new();
+
+        for ordering in permutations(branches) {
+            let mut prefix: Vec<BranchName> = Vec::new();
+
+            for branch in &ordering {
+                let mut extended = prefix.clone();
+                extended.push(branch.clone());
+
+                if !memo.contains_key(&extended) {
+                    let (onto, mut cumulative) = memo
+                        .get(&prefix)
+                        .cloned()
+                        .expect("the shorter prefix is always simulated first");
+
+                    let (next_main, step) = self.land(&scratch, &onto, branch)?;
+                    cumulative.absorb(step);
+                    memo.insert(extended.clone(), (next_main, cumulative));
+                }
+
+                prefix = extended;
+            }
+
+            let (_, total) = memo
+                .get(&prefix)
+                .expect("the full ordering was just simulated");
+            scores.push(total.clone().into_score(ordering));
+        }
+
+        Ok(rank(scores))
+    }
+
+    /// Rebase `branch` onto `onto` and squash it in, reporting the new
+    /// simulated main and what the step cost.
+    fn land(&self, scratch: &Scratch, onto: &str, branch: &BranchName) -> Result<(String, Cost)> {
+        let git = scratch.git();
+
+        // Detached, so the real branch ref is never moved.
+        git.run(&["checkout", "-q", "--detach", branch.as_str()])
+            .with_context(|| format!("could not check out '{branch}'"))?;
+
+        let cost = self.replay_onto(&git, scratch.path(), onto, branch)?;
+        let next_main = squash_into(&git, onto, branch)?;
+
+        Ok((next_main, cost))
     }
 
     /// Rebase the checked-out branch onto `onto`, resolving as it goes.
@@ -162,12 +217,31 @@ impl Simulator {
     }
 }
 
-/// What one branch cost to replay.
-#[derive(Default)]
+/// What replaying one branch - or a whole prefix of them - cost.
+#[derive(Default, Clone)]
 struct Cost {
     stops: usize,
     hunks: usize,
     files: BTreeSet<String>,
+}
+
+impl Cost {
+    /// Fold another step's cost into this running total.
+    fn absorb(&mut self, other: Self) {
+        self.stops += other.stops;
+        self.hunks += other.hunks;
+        self.files.extend(other.files);
+    }
+
+    /// Attribute this cost to the ordering that produced it.
+    fn into_score(self, order: Vec<BranchName>) -> OrderingScore {
+        OrderingScore::new(
+            order,
+            Stops::new(self.stops),
+            Files::new(self.files.len()),
+            Hunks::new(self.hunks),
+        )
+    }
 }
 
 /// Collapse the checked-out (already rebased) branch into a single commit on

@@ -133,6 +133,9 @@ impl Git {
             "rebase.updateRefs=false",
             "rebase.autoStash=false",
             "rebase.autosquash=false",
+            // Simulated mains are loose commits nothing references yet; an
+            // opportunistic gc mid-run could collect one out from under us.
+            "gc.auto=0",
             "commit.gpgsign=false",
             "gpg.format=openpgp",
             "user.name=grist",
