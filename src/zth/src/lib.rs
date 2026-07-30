@@ -140,6 +140,14 @@ pub fn file_is_all_zeroes(path: &Path) -> io::Result<bool> {
 /// path never allocates per file.
 fn file_is_all_zeroes_with_buffer(path: &Path, buffer: &mut [u8]) -> io::Result<bool> {
     let mut file = File::open(path)?;
+
+    // A file that is nothing but hole is already answered, and the answer cost
+    // no reads at all - which is the difference between settling a 64 GiB
+    // sparse file instantly and grinding through it a buffer at a time.
+    if whole_file_is_a_hole(&file) {
+        return Ok(true);
+    }
+
     reader_is_all_zeroes(&mut file, buffer)
 }
 
@@ -156,8 +164,37 @@ fn file_is_all_zeroes_with_buffer(path: &Path, buffer: &mut [u8]) -> io::Result<
 /// The read position is left where it was found, so a caller may treat this as
 /// a pure question about the file.
 #[cfg(unix)]
-fn whole_file_is_a_hole(_file: &File) -> bool {
-    false
+fn whole_file_is_a_hole(file: &File) -> bool {
+    use std::os::unix::io::AsRawFd;
+
+    // SAFETY: the descriptor is borrowed from a File that outlives this call,
+    // and lseek touches nothing but that descriptor's own offset.
+    let first_data = unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_DATA) };
+
+    if first_data >= 0 {
+        // There is data somewhere, so the file has to be read. The lseek left
+        // the offset sitting on it; a leading hole is zeroes the read would
+        // have to see anyway, so give the caller back the file it handed in.
+        if first_data > 0 {
+            // SAFETY: as above.
+            unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_SET) };
+        }
+        return false;
+    }
+
+    // ENXIO is the single error that answers the question: no data at or after
+    // offset zero. Everything else - EINVAL, ENOTSUP, a filesystem with no
+    // concept of holes - means the question went unanswered, and an unanswered
+    // question is not a yes.
+    if io::Error::last_os_error().raw_os_error() != Some(libc::ENXIO) {
+        return false;
+    }
+
+    // An empty file reports ENXIO for the same reason a sparse one does, and
+    // zth counts a file with no bytes as having no zero bytes either. This is
+    // the only branch that needs the size, so the fstat stays off the path
+    // every ordinary file takes.
+    file.metadata().is_ok_and(|metadata| metadata.len() > 0)
 }
 
 /// Sparse-file interrogation needs `lseek(SEEK_DATA)`, which is a POSIX
