@@ -199,16 +199,22 @@ fn unreadable_files_produce_no_error_output() {
 #[cfg(unix)]
 #[test]
 fn a_failed_stdout_write_is_reported_through_the_exit_status() {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixDatagram;
+
     let (_dir, root) = fixture();
     write(&root, "zero.bin", &[0_u8; 64]);
 
-    // A descriptor opened read-only, handed to the child as stdout: every write
-    // fails with `EBADF`, an I/O error that is emphatically not a broken pipe.
-    let read_only = fs::File::open("/dev/null").expect("opening /dev/null should succeed");
+    // An unconnected datagram socket standing in for stdout. Writes to it fail
+    // with `EDESTADDRREQ`: an ordinary I/O error, not a broken pipe. The errno
+    // that matters in practice is `ENOSPC` from a full disk, which no test can
+    // conjure cheaply; `EBADF` cannot stand in for it either, because `std`
+    // deliberately reports a write that fails that way as having succeeded.
+    let unwritable = UnixDatagram::unbound().expect("creating a datagram socket should succeed");
 
     let output = Command::new(env!("CARGO_BIN_EXE_zth"))
         .arg(root.as_os_str())
-        .stdout(Stdio::from(read_only))
+        .stdout(Stdio::from(OwnedFd::from(unwritable)))
         .stderr(Stdio::piped())
         .output()
         .expect("spawning zth should succeed");
