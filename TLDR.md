@@ -24,6 +24,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `glo` | Finds and displays large objects in git repositories. |
 | `goup` | Updates Go dependencies across all `go.mod` files in a repo. |
 | `gr8` | Displays GitHub API rate limit info, color-coded, via the GitHub CLI. |
+| `grist` | Ranks the orders you could squash-merge a set of branches in, cheapest conflicts first, by replaying each one in a throwaway worktree. |
 | `gsw` | Git Status Watch — compact one-shot status dashboard meant to be wrapped by `viddy`/`watch`. |
 | `hexfind` | Searches for a hex string in a binary file and shows a hex dump with offsets. |
 | `htmlboard` | Pretty-prints HTML on the clipboard and puts it back. |

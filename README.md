@@ -459,6 +459,14 @@ containers/CI).
   - To install: `cargo install --git https://github.com/timmattison/tools install-bin`. Because it's
     a single binary with no runtime dependency, it can also install itself:
     `cargo build --release -p install-bin && ./target/release/install-bin ./target/release/install-bin`.
+- grist
+  - Ranks the orders you could squash-merge a set of branches in, cheapest conflicts first. Squash
+    merging destroys commit identity, so whichever branch lands second replays work that already
+    landed and collides — and the bill is not symmetric. `grist` replays every ordering against a
+    throwaway detached worktree, counts the conflict hunks, stops, and files each one would cost, and
+    ranks them. Up to six branches; `--onto <REF>` sets what they land on, and `-q` prints just the
+    winning order for piping.
+  - To install: `cargo install --git https://github.com/timmattison/tools grist`
 
 ## dirhash
 
