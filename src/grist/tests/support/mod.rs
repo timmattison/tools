@@ -110,3 +110,81 @@ pub fn replace_line(contents: &str, line: usize, replacement: &str) -> String {
     out.push('\n');
     out
 }
+
+/// A branch that rewrites the same region three times, and one that touches it
+/// once. Landing the iterated branch second makes each of its three commits
+/// collide with the already-squashed change; landing it first means only the
+/// single-commit branch has to be replayed.
+pub fn contested_region_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_file("shared.txt", &base, "base");
+
+    repo.branch("iterated");
+    for revision in 1..=3 {
+        let contents = replace_line(&base, CONTESTED_LINE, &format!("iterated-v{revision}"));
+        repo.commit_file("shared.txt", &contents, &format!("iterate {revision}"));
+    }
+
+    repo.checkout("main");
+    repo.branch("single");
+    let contents = replace_line(&base, CONTESTED_LINE, "single-edit");
+    repo.commit_file("shared.txt", &contents, "single edit");
+
+    repo.checkout("main");
+    repo
+}
+
+/// `built-on-top` was branched from `groundwork`, not from main - the stacked
+/// shape that makes squash merging different from a real merge, because
+/// squashing `built-on-top` destroys the commit identity of the `groundwork`
+/// commits buried inside it.
+pub fn stacked_branches_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_file("shared.txt", &base, "base");
+
+    repo.branch("groundwork");
+    let groundwork = replace_line(&base, CONTESTED_LINE, "groundwork-edit");
+    repo.commit_file("shared.txt", &groundwork, "groundwork");
+
+    repo.branch("built-on-top");
+    let stacked = replace_line(&groundwork, CONTESTED_LINE, "built-on-top-edit");
+    repo.commit_file("shared.txt", &stacked, "built on top");
+
+    repo.checkout("main");
+    repo
+}
+
+/// Two branches that both rewrite the same line, so the simulation is
+/// guaranteed to actually conflict and resolve rather than no-op.
+pub fn conflicting_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_file("shared.txt", &base, "base");
+
+    repo.branch("left");
+    repo.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "left-edit"),
+        "left work",
+    );
+
+    repo.checkout("main");
+    repo.branch("right");
+    repo.commit_file(
+        "shared.txt",
+        &replace_line(&base, CONTESTED_LINE, "right-edit"),
+        "right work",
+    );
+
+    repo.checkout("main");
+    repo
+}
+

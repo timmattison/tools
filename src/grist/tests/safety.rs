@@ -4,38 +4,10 @@
 mod support;
 
 use grist::{BranchName, Simulator};
-use support::{numbered_lines, replace_line, TestRepo};
+use support::conflicting_repo;
 
 fn order(names: &[&str]) -> Vec<BranchName> {
     names.iter().map(|n| BranchName::new(*n)).collect()
-}
-
-/// Two branches that both rewrite the same line, so the simulation is
-/// guaranteed to actually conflict and resolve rather than no-op.
-fn conflicting_repo() -> TestRepo {
-    const CONTESTED_LINE: usize = 15;
-
-    let repo = TestRepo::init();
-    let base = numbered_lines(30);
-    repo.commit_file("shared.txt", &base, "base");
-
-    repo.branch("left");
-    repo.commit_file(
-        "shared.txt",
-        &replace_line(&base, CONTESTED_LINE, "left-edit"),
-        "left work",
-    );
-
-    repo.checkout("main");
-    repo.branch("right");
-    repo.commit_file(
-        "shared.txt",
-        &replace_line(&base, CONTESTED_LINE, "right-edit"),
-        "right work",
-    );
-
-    repo.checkout("main");
-    repo
 }
 
 /// `rebase.updateRefs` rewrites any branch pointing into the range being
