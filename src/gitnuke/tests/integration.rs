@@ -999,3 +999,66 @@ fn refuses_to_run_outside_a_git_repository() {
         combined(&output)
     );
 }
+
+/// The exit-code list `gitnuke --help` publishes, one entry per rendered line.
+///
+/// Stated here rather than derived from the binary for the same reason as
+/// `mod exit_codes` above: this is the contract users read, so the test has to
+/// spell it out independently.
+const HELP_EXIT_CODE_LINES: [&str; 8] = [
+    "- 0: Success",
+    "- 1: Not in a git repository",
+    "- 2: A git command failed",
+    "- 3: No worktree matched the target",
+    "- 4: The target matched more than one worktree",
+    "- 5: The worktree contains submodules and `--force` was not given",
+    "- 6: The shell is standing inside the target worktree",
+    "- 7: The worktree was removed but its branch could not be deleted",
+];
+
+/// The usage examples `gitnuke --help` publishes, as (command, trailing note).
+///
+/// Each pair has to land on a single rendered line of its own: the command at
+/// the start, its explanatory comment at the end.
+const HELP_USAGE_EXAMPLES: [(&str, &str); 3] = [
+    ("gitnuke ../feature-wt", "# by path"),
+    ("gitnuke feature-wt", "# by directory name"),
+    ("gitnuke issue-42", "# by branch name"),
+];
+
+/// `--help` has to render its long description with the newlines intact.
+///
+/// clap only keeps the line breaks of a doc comment when the *command* itself
+/// carries `verbatim_doc_comment`; the per-flag attributes do not cover the
+/// struct's own doc comment. Without it every usage example is jammed onto one
+/// line and all eight exit codes run together as a single paragraph.
+#[test]
+fn long_help_renders_one_line_per_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    let output = gitnuke(tmp.path(), &["--help"]);
+
+    assert!(
+        output.status.success(),
+        "--help should succeed: {}",
+        combined(&output)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = help.lines().map(str::trim).collect();
+
+    for entry in HELP_EXIT_CODE_LINES {
+        assert!(
+            lines.contains(&entry),
+            "exit code entry {entry:?} should be a line of its own, got:\n{help}"
+        );
+    }
+
+    for (command, note) in HELP_USAGE_EXAMPLES {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with(command) && line.ends_with(note)),
+            "usage example {command:?} should be a line of its own ending in {note:?}, got:\n{help}"
+        );
+    }
+}
