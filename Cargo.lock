@@ -2460,6 +2460,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gitnuke"
+version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "clap",
+ "colored",
+ "repowalker",
+ "tempfile",
+]
+
+[[package]]
 name = "gitrdun"
 version = "0.1.0"
 dependencies = [
