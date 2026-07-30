@@ -234,7 +234,6 @@ fn main() -> Result<()> {
         println!("{}", "gsw • not a git repository".dimmed());
         return Ok(());
     };
-    let repo = handle.repo();
 
     // Everything the renderer needs that doesn't depend on the live terminal
     // size. In watch mode this is computed once and reused for every repaint.
@@ -265,10 +264,15 @@ fn main() -> Result<()> {
                     width_offset: cfg.width_offset,
                 },
             );
-            println!("{}", build_output(repo, &cfg, dims)?.output);
+            // A fresh process opened this handle a moment ago, so its cached
+            // config is current by construction — one render, then exit. Only
+            // watch mode, which outlives config edits, needs to re-open.
+            println!("{}", build_output(handle.repo(), &cfg, dims)?.output);
             Ok(())
         }
-        watch::Mode::Watch => watch::run(repo, &cfg),
+        // Hand the handle over: watch mode owns the repository from here and
+        // re-opens it on every refresh.
+        watch::Mode::Watch => watch::run(handle, &cfg),
     }
 }
 

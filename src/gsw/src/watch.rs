@@ -26,6 +26,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::render::Snapshot;
+use crate::repo::RepoHandle;
 use crate::{
     collect_snapshot, effective_terminal_height, effective_terminal_width, render_frame, Render,
     RenderConfig, DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
@@ -362,23 +363,64 @@ enum Event {
     ForceRefresh,
 }
 
+/// The git work one watch-mode refresh performs: re-open the repository so
+/// configuration written since the last refresh takes effect, then collect the
+/// snapshot from that fresh handle.
+///
+/// This is watch mode's whole re-derivation of on-disk state, named so it has
+/// one place to grow. The re-open is the load-bearing half. A
+/// [`gix::Repository`] snapshots `.git/config` at open time and never reloads
+/// it, so a process-lifetime handle renders whatever the config said at
+/// startup: `git push -u origin <branch>` in another pane writes
+/// `branch.<name>.remote`/`.merge` and the header's `↑0 ↓0 origin/<branch>`
+/// segment still never appears, `git branch --unset-upstream` leaves stale
+/// arrows on screen, and a renamed remote or a changed `core.excludesFile` are
+/// equally invisible. Re-opening per refresh fixes the class rather than
+/// special-casing `branch.*`.
+///
+/// The cost is one config parse per walk, which only happens when the throttle
+/// admits a walk in the first place — and it rides along with a full status
+/// traversal that dwarfs it. [`RepoHandle::reopened`] keeps the previous handle
+/// if the re-open fails, so catching git mid-write costs a tick of stale
+/// configuration, never a blank screen.
+///
+/// # Errors
+///
+/// Propagates a [`collect_snapshot`] failure (the status walk). A failed
+/// *re-open* is not an error: it degrades to the handle already in hand.
+pub(crate) fn walk(handle: &mut RepoHandle, cfg: &RenderConfig) -> Result<Snapshot> {
+    collect_snapshot(handle.repo(), cfg)
+}
+
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
 /// cache with one git walk, paint the first frame, then re-render on filesystem
 /// changes, terminal resizes, and decay-timer ticks until the user quits with
 /// `q` or Ctrl-C.
 ///
-/// Filesystem changes walk git and re-seed the cache; decay ticks and resizes
-/// re-render the cached snapshot with no git work (Part A). The [`TerminalGuard`]
-/// restores the main screen and cursor on every exit path.
-pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
+/// Filesystem changes [`walk`] git — re-opening the repository so config
+/// changed in another pane takes effect — and re-seed the cache; decay ticks
+/// and resizes re-render the cached snapshot with no git work (Part A). The
+/// [`TerminalGuard`] restores the main screen and cursor on every exit path.
+///
+/// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
+/// the rest of the process, and each refresh mutates the handle in place by
+/// re-opening it. Borrowing instead would make the caller hold a mutable borrow
+/// across a call that never returns until the user quits, for no gain — nothing
+/// is left for it to do with the handle afterward.
+pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let _guard = TerminalGuard::enter()?;
 
     // Seed the cache with one git walk and paint the first frame at offset 0,
     // byte-identical to a one-shot render of the same state. That frame's
     // freshest age seeds the decay-timer cadence.
+    //
+    // Deliberately NOT `walk`: the handle was opened microseconds ago in
+    // `main`, so nothing can have changed the config since, and a re-open here
+    // would only pay for a config parse to read back what we already hold.
+    // Every *subsequent* refresh goes through `walk` and does re-open.
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
-    let snapshot = collect_snapshot(repo, cfg)?;
+    let snapshot = collect_snapshot(handle.repo(), cfg)?;
     let first = render_frame(&snapshot, cfg, dims, Duration::ZERO);
     paint_output(&first.output)?;
     let mut displayed = first.output;
@@ -394,7 +436,9 @@ pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
     spawn_event_reader(tx.clone());
 
     // The filesystem watcher must outlive the loop — dropping it stops watching.
-    let _watcher = spawn_fs_watcher(repo, tx)?;
+    // Started before the collect closure below takes its mutable borrow of the
+    // handle; the watcher clones everything it needs, so this borrow ends here.
+    let _watcher = spawn_fs_watcher(handle.repo(), tx)?;
 
     event_loop(
         &rx,
@@ -403,7 +447,7 @@ pub(crate) fn run(repo: &gix::Repository, cfg: &RenderConfig) -> Result<()> {
         cache,
         initial_freshest,
         LoopHooks {
-            collect: || collect_snapshot(repo, cfg),
+            collect: || walk(&mut handle, cfg),
             render: |snap: &Snapshot, dims: Dimensions, offset: Duration| {
                 render_frame(snap, cfg, dims, offset)
             },
@@ -876,8 +920,65 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testrepo;
     use crate::WRAPPER_CHROME_ROWS;
     use ignore::gitignore::GitignoreBuilder;
+
+    /// A [`RenderConfig`] for the fixture-backed walk tests: no explicit base,
+    /// no caps, no log rows, no color. Only the git work matters here — the
+    /// rendering knobs are exercised by the render tests.
+    fn walk_config() -> RenderConfig {
+        RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log_lines: 0,
+            truecolor: false,
+            width_offset: 0,
+        }
+    }
+
+    #[test]
+    fn walk_sees_an_upstream_configured_after_watch_started() {
+        // The reported bug (#334), at the snapshot level: gsw is already
+        // watching a local-only branch when the user runs `git push -u origin
+        // <branch>` in another pane. That writes `branch.feature.remote` and
+        // `branch.feature.merge` into `.git/config`, which the gix handle
+        // opened at startup has cached and never re-reads — so the header's
+        // `↑0 ↓0 origin/feature` segment stays missing until gsw is restarted.
+        // A refresh must pick it up on the very next walk.
+        let (_origin, clone) = testrepo::init_repo_with_upstream();
+        let p = clone.path();
+        testrepo::git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("feature.txt"), "x\n").expect("write feature.txt");
+        testrepo::git(p, &["add", "feature.txt"]);
+        testrepo::git(p, &["commit", "-q", "-m", "feature work"]);
+
+        // Opened BEFORE the push and held across it, exactly like watch mode.
+        let mut handle = RepoHandle::discover(p).expect("clone is a worktree repo");
+        let cfg = walk_config();
+
+        let before = walk(&mut handle, &cfg).expect("first walk");
+        assert!(
+            before.upstream.is_none(),
+            "a local-only branch has no upstream yet",
+        );
+
+        // What `git push -u origin feature` in another pane does while gsw runs.
+        testrepo::git(p, &["push", "-q", "-u", "origin", "feature"]);
+
+        let after = walk(&mut handle, &cfg).expect("second walk");
+        let up = after
+            .upstream
+            .as_ref()
+            .expect("the upstream segment must appear without restarting gsw");
+        assert_eq!(up.name, "origin/feature");
+        assert_eq!(
+            (up.ahead, up.behind),
+            (0, 0),
+            "the push left the branch level with its brand-new upstream",
+        );
+    }
 
     /// Build an ignore matcher rooted at `root` from raw gitignore lines, the
     /// way the production matcher is assembled from the repo's ignore files.
