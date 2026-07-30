@@ -29,9 +29,31 @@ println!(
 );
 ```
 
-`Scratch` is the only door in. It hands out a `Git` that already carries the
-whole safety configuration, so there is no way to get a worktree from here
-without also getting the hardening — which is the point.
+`Scratch` is the only way to get a worktree. It hands out a `Git` that already
+carries the whole safety configuration, so there is no way to get a worktree
+from here without also getting the hardening — which is the point.
+
+## The pre-flight
+
+Not every question is worth a worktree. `Repo` answers the cheap ones first, so
+a mistyped branch name fails in milliseconds with a message naming it, rather
+than arriving later disguised as a failed simulation:
+
+```rust
+use gitscratch::Repo;
+
+let repo = Repo::open(cwd)?;          // errors if `cwd` is not inside a repository
+let onto = repo.resolve("main")?;     // errors naming the revision that did not resolve
+let dirty = repo.uncommitted_files()?; // staged + unstaged + untracked, counted per file
+
+let scratch = Scratch::create(repo.path(), &onto)?;
+```
+
+These live here rather than in each consuming tool for the same reason as
+everything else: `Git::new` is crate-private, so a repository-rooted runner can
+only be built from inside this crate. The queries are all reads, which fire no
+hooks, so unlike `Scratch` the pre-flight creates nothing at all — no temporary
+directory, no worktree, nothing to clean up if it rejects.
 
 A replay walks the *whole* operation rather than bailing at the first collision,
 resolving as it goes by staging the conflict markers verbatim. That is the
@@ -47,7 +69,7 @@ index measured under identical rules, not as an exact prediction.
 | --- | --- |
 | `rebase.updateRefs=false` | Without it, rebasing a detached HEAD still rewrites every branch ref pointing into the replayed range — including the branch being simulated. Not paranoia: with the setting enabled and the guard removed, a dry run *destroys the branch it is replaying*. |
 | `rerere.enabled=false`, `rerere.autoupdate=false` | A simulated resolution would otherwise land in the shared `rr-cache` and silently pre-resolve the developer's real merges later. |
-| `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git still resolves lookups against it — so the path is a real, empty, temporary directory, validated once at creation. |
+| `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git still resolves lookups against it — so the path is a real, empty, temporary directory, validated once at creation. `Repo`'s read-only pre-flight points it at a relative path this crate never creates instead: reads fire no hooks, and rejecting a typo must not be able to fail for want of a writable temp directory. |
 | `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` | A halted rebase would otherwise open an editor and hang forever. |
 | `commit.gpgsign=false` | A signing config in the developer's global gitconfig would otherwise prompt or fail mid-replay. |
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
@@ -87,6 +109,10 @@ the `rebase.autoStash`/`autosquash` pair — are established by construction in
 the suite to eight guarantees and mutation-verifying every guard; the `rerere`
 pair, `core.hooksPath` and `commit.gpgsign` are the rows it reaches, so this
 paragraph shrinks rather than disappears when it lands.
+
+`tests/repo.rs` covers the pre-flight separately, since what it must get right
+is the *cheap rejection*: a directory that is not a repository and a revision
+that does not resolve both have to fail there, by name.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
