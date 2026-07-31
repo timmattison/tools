@@ -1,0 +1,17 @@
+[package]
+name = "grind"
+version = "0.1.0"
+edition.workspace = true
+description = "Reports whether rebasing HEAD onto a branch would conflict, and by how much"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+gitscratch.workspace = true
+
+[dev-dependencies]
+gitscratch = { workspace = true, features = ["testing"] }
+
+[lints]
+workspace = true
