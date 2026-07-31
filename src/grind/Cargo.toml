@@ -12,6 +12,11 @@ gitscratch.workspace = true
 
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
+# So a test asserting that a column lines up measures the same thing the
+# renderer does. Byte length and character count both disagree with what a
+# terminal shows for a CJK name, and a test using either would call a ragged
+# column aligned.
+unicode-width.workspace = true
 
 [lints]
 workspace = true

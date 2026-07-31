@@ -6,7 +6,7 @@
 
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
-    independent_branches_repo,
+    independent_branches_repo, multi_byte_names_repo,
 };
 use gitscratch::{Conflicts, Hunks, Scratch};
 
@@ -98,6 +98,34 @@ fn a_file_that_conflicts_repeatedly_accumulates_against_its_own_name() {
         Hunks::new(breakdown[0].1),
         conflicts.hunks(),
         "the breakdown has to add up to the total it explains"
+    );
+}
+
+/// A file name outside ASCII has to come back out of a replay as the developer
+/// typed it, carrying the hunks it really contributed.
+///
+/// Both halves break together, which is why both are asserted here. Git's
+/// default `core.quotePath` hands `git diff --name-only` a C-quoted,
+/// octal-escaped path, so the breakdown reports a name nobody typed *and* the
+/// count collapses: the escaped name resolves to no file on disk, and a
+/// conflicted file that cannot be read is floored at a single hunk. The second
+/// failure is the quiet one - it looks like a plausible answer.
+///
+/// `日本語.txt` is contested in two regions precisely so that undercount is
+/// visible. With one region the swallowed answer and the true answer would both
+/// be 1, and the defect would pass this test.
+#[test]
+fn a_conflicted_non_ascii_path_keeps_its_real_name_and_its_real_hunk_count() {
+    let repo = multi_byte_names_repo();
+    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+
+    let conflicts = replay(&scratch, "right-右", "left-左");
+
+    assert_eq!(
+        conflicts.file_hunks().collect::<Vec<_>>(),
+        vec![("readme.md", 1), ("日本語.txt", 2)],
+        "a non-ASCII path must survive the round trip through git by name and \
+         by count"
     );
 }
 
