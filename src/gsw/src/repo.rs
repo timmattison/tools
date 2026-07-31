@@ -595,9 +595,11 @@ fn worktree_bytes(repo: &gix::Repository, rela_path: &gix::bstr::BString) -> Vec
 mod tests {
     use std::path::Path;
 
+    use tempfile::TempDir;
+
     use super::RepoHandle;
     use crate::git::FileStatus;
-    use crate::render::Operation;
+    use crate::render::{Operation, StepProgress};
     use crate::testrepo::{
         git, git_allowing_failure, init_repo, init_repo_with_upstream, init_repo_with_worktree,
     };
@@ -1211,5 +1213,166 @@ mod tests {
         let dir = init_repo();
         let repo = open_at(dir.path()).unwrap();
         assert_eq!(super::operation_state(&repo, 0), None);
+    }
+
+    /// A repo whose `feature` branch holds two commits, the first of which
+    /// conflicts with `main`'s edit to the same line of `a.txt`. HEAD is left
+    /// on `feature`, so rebasing onto `main` stops on step 1 of 2 with `a.txt`
+    /// unmerged — the shape every in-progress-rebase assertion below needs.
+    fn diverged_repo() -> TempDir {
+        let dir = init_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("a.txt"), "from feature\n").expect("write a.txt");
+        git(p, &["commit", "-q", "-am", "feature edit"]);
+        std::fs::write(p.join("b.txt"), "second\n").expect("write b.txt");
+        git(p, &["add", "b.txt"]);
+        git(p, &["commit", "-q", "-m", "feature second"]);
+        git(p, &["checkout", "-q", "main"]);
+        std::fs::write(p.join("a.txt"), "from main\n").expect("write a.txt");
+        git(p, &["commit", "-q", "-am", "main edit"]);
+        git(p, &["checkout", "-q", "feature"]);
+        dir
+    }
+
+    /// [`diverged_repo`] with `feature`'s conflicting commit turned into a
+    /// mailbox patch and applied on `main`, where it fails — leaving a `git am`
+    /// in progress (a `rebase-apply/` directory carrying the `applying`
+    /// marker). HEAD is left on `main`.
+    fn failed_am_repo() -> TempDir {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["format-patch", "-1", "-o", "patches", "feature~1"]);
+        let patch = std::fs::read_dir(p.join("patches"))
+            .expect("read patches dir")
+            .next()
+            .expect("format-patch wrote a patch")
+            .expect("patch dir entry")
+            .path();
+        // `git am` exits non-zero when the patch does not apply — that failure
+        // *is* the fixture.
+        git_allowing_failure(p, &["am", patch.to_str().expect("utf-8 patch path")]);
+        dir
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_with_step_counts_and_conflict_count() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        // The rebase stops on the first of the two commits; it exits non-zero.
+        git_allowing_failure(p, &["rebase", "main"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_for_the_apply_backend() {
+        // `git rebase --apply` uses the apply backend, which records its state
+        // in `rebase-apply/` (with the `rebasing` marker) and counts steps in
+        // `next`/`last` rather than `msgnum`/`end`.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "--apply", "main"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_without_steps_when_counter_files_are_absent() {
+        // Graceful degradation: the rebase is still surfaced when its step
+        // counters cannot be read, just without the `current/total` clause.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        std::fs::remove_file(p.join(".git/rebase-merge/msgnum")).expect("remove msgnum");
+        std::fs::remove_file(p.join(".git/rebase-merge/end")).expect("remove end");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: None,
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_reports_rebase_without_steps_when_counters_are_unparseable() {
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "main"]);
+        std::fs::write(p.join(".git/rebase-merge/msgnum"), "not-a-number\n")
+            .expect("write msgnum");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: None,
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_treats_an_ambiguous_rebase_apply_dir_as_a_rebase() {
+        // A `rebase-apply/` directory carrying neither the `applying` nor the
+        // `rebasing` marker is gix's `ApplyMailboxRebase`: it cannot be told
+        // apart from an apply-backend rebase, so it is surfaced as one.
+        let dir = failed_am_repo();
+        let p = dir.path();
+        std::fs::remove_file(p.join(".git/rebase-apply/applying")).expect("remove applying marker");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 0),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 1,
+                }),
+                conflicts: 0,
+            }),
+        );
+    }
+
+    #[test]
+    fn operation_state_is_none_for_plain_git_am() {
+        // Applying a mailbox is not a rebase and is out of scope, so it gets no
+        // indicator — even though it shares the `rebase-apply/` directory that
+        // the apply-backend rebase uses.
+        let dir = failed_am_repo();
+        let repo = open_at(dir.path()).unwrap();
+        assert_eq!(super::operation_state(&repo, 0), None);
+    }
+
+    #[test]
+    fn operation_state_is_none_for_cherry_pick() {
+        // Out of scope: a cherry-pick conflict must not be reported as a merge
+        // or a rebase. A clean repo cannot catch that mis-mapping — it has no
+        // in-progress state at all — so this fixture is the real guard.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git_allowing_failure(p, &["cherry-pick", "feature~1"]);
+        let repo = open_at(p).unwrap();
+        assert_eq!(super::operation_state(&repo, 1), None);
     }
 }

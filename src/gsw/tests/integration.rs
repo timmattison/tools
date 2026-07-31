@@ -739,6 +739,39 @@ fn shows_merge_indicator_with_conflict_count_during_a_conflicted_merge() {
     );
 }
 
+#[test]
+fn shows_rebase_indicator_with_step_counts_during_a_conflicted_rebase() {
+    // Drive a real rebase conflict: `feature` carries two commits, the first of
+    // which edits the same line of a.txt as `main` did. Rebasing stops on step
+    // 1 of 2 with a.txt unmerged, so gsw must surface a dedicated indicator
+    // line between the header and the separator:
+    // `⚠ rebase 1/2 · 1 conflict to resolve`.
+    let dir = setup_repo(); // on `main`, a.txt = "initial\n"
+    let p = dir.path();
+    run_git(p, &["checkout", "-q", "-b", "feature"]);
+    fs::write(p.join("a.txt"), "from feature\n").unwrap();
+    run_git(p, &["commit", "-q", "-am", "feature edit"]);
+    fs::write(p.join("b.txt"), "second\n").unwrap();
+    run_git(p, &["add", "b.txt"]);
+    run_git(p, &["commit", "-q", "-m", "feature second"]);
+    run_git(p, &["checkout", "-q", "main"]);
+    fs::write(p.join("a.txt"), "from main\n").unwrap();
+    run_git(p, &["commit", "-q", "-am", "main edit"]);
+    run_git(p, &["checkout", "-q", "feature"]);
+    // `git rebase` exits non-zero when it stops on a conflict — expected.
+    run_git_allow_fail(p, &["rebase", "main"]);
+
+    let out = run_gsw(p);
+    assert!(
+        out.contains("⚠ rebase 1/2"),
+        "output should show the rebase indicator with git's step counts: {out}",
+    );
+    assert!(
+        out.contains("· 1 conflict to resolve"),
+        "indicator should report the singular conflict count: {out}",
+    );
+}
+
 /// Commit everything staged with both git dates pinned to `date`, so the
 /// commit's age is deterministic instead of "however old the fixture is".
 fn commit_dated(dir: &Path, message: &str, date: &str) {
