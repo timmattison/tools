@@ -94,6 +94,15 @@ philosophy):
 file — so it cannot be told apart from a rebase and is treated as one. A real
 apply-backend rebase writes `rebase-apply/rebasing` and classifies as `Rebase`.
 
+All three rebase spellings must be handled, because which one a given rebase
+produces is not the obvious mapping: git's merge backend writes
+`rebase-merge/interactive` for *every* rebase it drives, not just `rebase -i`,
+so a plain `git rebase` reports `RebaseInteractive` (verified on git 2.55).
+That leaves `Rebase` reachable in practice only via the apply backend's
+`rebase-apply/rebasing` marker. Since all three map to the same result the
+distinction never reaches the user, but a reader auditing the match arms should
+not conclude the interactive arm is dead code.
+
 **Step counts** are not exposed by gix, so read them directly from the git dir
 (`repo.path()`, the same base gix's `state()` uses), exactly as git's prompt
 does:
