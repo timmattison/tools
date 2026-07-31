@@ -1336,6 +1336,67 @@ mod tests {
     }
 
     #[test]
+    fn operation_state_reports_rebase_inside_a_linked_worktree() {
+        // A rebase started in a *linked* worktree writes its state to that
+        // worktree's own git dir — `<repo>/.git/worktrees/<name>/rebase-merge/`
+        // — not to the shared common dir every worktree of the repo points at.
+        // `rebase_step` therefore has to read `repo.path()` (the per-worktree
+        // git dir, the same base `gix::Repository::state` classifies from) and
+        // never the common dir. Resolving the common dir instead would still
+        // classify the rebase correctly while silently finding no counters, so
+        // every worktree user would lose the `current/total` clause with the
+        // suite staying green — and this repository mandates that all work
+        // happen in linked worktrees, so that is gsw's main path, not an edge
+        // case.
+        //
+        // This guard is not red-first: the property already holds. It exists so
+        // a later refactor of the git-dir resolution cannot quietly drop it.
+        let (dir, linked) = init_repo_with_worktree();
+        let p = dir.path();
+
+        // The fixture only proves anything if it really is a linked worktree —
+        // in a plain repo the per-worktree and common git dirs are the same
+        // path, so reading either would satisfy the assertion below.
+        assert!(
+            linked.join(".git").is_file(),
+            "a linked worktree's `.git` is a gitdir pointer file, not a directory",
+        );
+
+        // `diverged_repo`'s shape, built across the two worktrees: the linked
+        // worktree's branch gets two commits, the first of which conflicts with
+        // `main`'s edit to the same line of `a.txt`, so rebasing `linked` onto
+        // `main` stops on step 1 of 2 with `a.txt` unmerged.
+        std::fs::write(linked.join("a.txt"), "from linked\n").expect("write a.txt");
+        git(&linked, &["commit", "-q", "-am", "linked edit"]);
+        std::fs::write(linked.join("b.txt"), "second\n").expect("write b.txt");
+        git(&linked, &["add", "b.txt"]);
+        git(&linked, &["commit", "-q", "-m", "linked second"]);
+        std::fs::write(p.join("a.txt"), "from main\n").expect("write a.txt");
+        git(p, &["commit", "-q", "-am", "main edit"]);
+
+        // Run the rebase *inside* the linked worktree; it exits non-zero when
+        // it stops on the conflict.
+        git_allowing_failure(&linked, &["rebase", "main"]);
+
+        let repo = open_at(&linked).expect("linked worktree is a worktree repo");
+        assert_ne!(
+            repo.git_dir(),
+            repo.common_dir(),
+            "the rebase state must live in a git dir distinct from the common one",
+        );
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
     fn operation_state_reports_rebase_for_the_apply_backend() {
         // `git rebase --apply` uses the apply backend, which records its state
         // in `rebase-apply/` (with the `rebasing` marker) and counts steps in
