@@ -62,6 +62,71 @@ const LINT_SCRIPT: &str = "lint";
 /// Test script name.
 const TEST_SCRIPT: &str = "test";
 
+/// The outcome of a shell command or of a whole check: a success flag plus the
+/// output that came with it.
+///
+/// This is deliberately *not* a [`Result`](std::result::Result). A failed
+/// outcome here is an ordinary answer — "this worktree is not green", "that git
+/// command said no" — that the caller inspects, prints, and often folds together
+/// with another one; it is not an error propagating up to a handler. Keeping it
+/// a plain record is what lets `swt` treat every git call and every check
+/// uniformly, which is exactly how the original does it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcome {
+    /// Whether whatever produced this outcome succeeded.
+    pub ok: bool,
+    /// The combined stdout and stderr of whatever produced this outcome, or a
+    /// message explaining the verdict when no process produced it. Empty when
+    /// there is nothing to say.
+    pub out: String,
+}
+
+impl Outcome {
+    /// Success with nothing to report — the shape of a check that passed.
+    #[must_use]
+    pub fn ok() -> Self {
+        Self {
+            ok: true,
+            out: String::new(),
+        }
+    }
+
+    /// Success that has something to say, such as a summary to print or the
+    /// captured output of a command that was asked a question.
+    ///
+    /// `out` is the text that accompanies the success.
+    #[must_use]
+    pub fn succeeded(out: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            out: out.into(),
+        }
+    }
+
+    /// Failure, carrying the output that explains it.
+    ///
+    /// `out` is the combined output or the message describing what went wrong.
+    #[must_use]
+    pub fn failed(out: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            out: out.into(),
+        }
+    }
+
+    /// An outcome whose verdict is only known at runtime — typically a process
+    /// exit status paired with everything that process printed.
+    ///
+    /// `ok` is the success flag and `out` the combined stdout and stderr.
+    #[must_use]
+    pub fn new(ok: bool, out: impl Into<String>) -> Self {
+        Self {
+            ok,
+            out: out.into(),
+        }
+    }
+}
+
 /// Wraps a string so `sh -c` sees exactly one literal argument.
 ///
 /// Check commands are shell strings by design, so the one piece `swt` splices
@@ -192,9 +257,36 @@ pub fn build_check_plan(target: &Path, config_root: Option<&Path>) -> Option<Vec
     (!cmds.is_empty()).then_some(cmds)
 }
 
+/// Runs an already-built check plan, stopping at the first failing command.
+///
+/// `plan` is the ordered list of shell commands and `target` the directory every
+/// one of them runs in — the worktree being verified, never the parent and never
+/// the directory the override was found in. Returns [`Outcome::ok`] when every
+/// command exited 0, otherwise a failure naming the first command that did not.
+#[must_use]
+pub fn run_plan(plan: &[String], target: &Path) -> Outcome {
+    let _ = (plan, target);
+    Outcome::ok()
+}
+
+/// Runs the green check for a worktree, stopping at the first failing command.
+///
+/// `target` is the worktree root to check; every command runs in this directory.
+/// `config_root` is forwarded to [`build_check_plan`] as the directory the
+/// `.swt-check` override is looked up in, `None` meaning `target` itself.
+///
+/// Returns an ok outcome with no output when every command passed, otherwise the
+/// first failure — or, when nothing applies, a failure saying so rather than a
+/// vacuous green.
+#[must_use]
+pub fn is_green(target: &Path, config_root: Option<&Path>) -> Outcome {
+    let _ = (target, config_root);
+    Outcome::ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_check_plan, pkg_scripts, shell_quote, OVERRIDE_FILE};
+    use super::{build_check_plan, is_green, pkg_scripts, run_plan, shell_quote, OVERRIDE_FILE};
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
@@ -254,6 +346,18 @@ mod tests {
         "cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings",
     ];
 
+    /// A shell command that leaves a marker file in whatever directory it runs
+    /// in — the cheapest possible witness of "this command ran, and it ran
+    /// *here*". `:` plus a redirect is pure shell, so it needs no external
+    /// binary on the PATH.
+    const TOUCH_MARKER: &str = ": > ran-here";
+    /// The file [`TOUCH_MARKER`] creates.
+    const MARKER: &str = "ran-here";
+    /// A command that always succeeds, for padding a plan.
+    const PASSES: &str = "true";
+    /// A command that always fails, for pinning where a plan stops.
+    const FAILS: &str = "false";
+
     /// Materializes a fixture directory containing the given files.
     ///
     /// The directory is a `TempDir` with a randomized name, so two concurrent
@@ -285,6 +389,26 @@ mod tests {
     /// original TypeScript test's `'${p.replaceAll("'", "'\\''")}'`.
     fn quoted(path: &Path) -> String {
         format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+    }
+
+    /// Writes an executable `sh` script, the way a developer drops a
+    /// `.swt-check` at their repo root.
+    #[cfg(unix)]
+    fn executable_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, body).expect("check script");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make executable");
+    }
+
+    /// The body of a check script that succeeds after marking its own cwd.
+    #[cfg(unix)]
+    fn marking_script() -> String {
+        format!("#!/bin/sh\n{TOUCH_MARKER}\n")
+    }
+
+    /// Builds an owned plan from string literals.
+    fn plan_of(cmds: &[&str]) -> Vec<String> {
+        cmds.iter().map(|cmd| (*cmd).to_string()).collect()
     }
 
     /// Asserts a target directory's self-configured plan equals `expected`.
@@ -691,6 +815,159 @@ mod tests {
             dir.path(),
             None,
             "an unparseable manifest contributes no checks either",
+        );
+    }
+
+    // A tree nothing can be detected in is not green by default. Reporting a
+    // vacuous pass is the one failure mode that would make `swt` worthless: it
+    // would wave through every unverified worktree.
+    #[test]
+    fn no_plan_is_not_green_and_points_at_the_config_root() {
+        let config_root = fixture(&[]);
+        let target = fixture(&[]);
+        let outcome = is_green(target.path(), Some(config_root.path()));
+        assert!(!outcome.ok, "an undefined check must never report green");
+        assert_eq!(
+            outcome.out,
+            format!(
+                "No green-check defined. Drop a '{OVERRIDE_FILE}' executable at {}.\n",
+                config_root.path().display()
+            )
+        );
+        assert!(
+            !outcome.out.contains(&target.path().display().to_string()),
+            "the override belongs at the config root, so that is the path to name: {}",
+            outcome.out
+        );
+    }
+
+    #[test]
+    fn no_plan_and_no_config_root_points_at_the_target() {
+        let target = fixture(&[]);
+        let outcome = is_green(target.path(), None);
+        assert!(!outcome.ok);
+        assert_eq!(
+            outcome.out,
+            format!(
+                "No green-check defined. Drop a '{OVERRIDE_FILE}' executable at {}.\n",
+                target.path().display()
+            ),
+            "with no config root the target is the config root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_override_that_exits_zero_is_green_with_no_output() {
+        let dir = fixture(&[]);
+        executable_script(&dir.path().join(OVERRIDE_FILE), "#!/bin/sh\nexit 0\n");
+        let outcome = is_green(dir.path(), None);
+        assert!(outcome.ok, "a passing check is green: {outcome:?}");
+        assert_eq!(outcome.out, "", "a green verdict has nothing to report");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_override_reports_the_command_that_failed() {
+        let dir = fixture(&[]);
+        let script = dir.path().join(OVERRIDE_FILE);
+        executable_script(&script, "#!/bin/sh\nexit 3\n");
+        let outcome = is_green(dir.path(), None);
+        assert!(!outcome.ok, "a non-zero exit is not green");
+        assert_eq!(
+            outcome.out,
+            format!("failed: {}\n", quoted(&script)),
+            "the failure names the command as it was run, quoting included"
+        );
+    }
+
+    // The override is *looked up* in the config root and *run* in the target —
+    // running it in the config root would verify the parent worktree while
+    // claiming to have verified the fresh checkout.
+    #[cfg(unix)]
+    #[test]
+    fn the_check_runs_in_the_target_not_the_config_root() {
+        let config_root = fixture(&[]);
+        let target = fixture(&[]);
+        executable_script(&config_root.path().join(OVERRIDE_FILE), &marking_script());
+
+        let outcome = is_green(target.path(), Some(config_root.path()));
+        assert!(outcome.ok, "the override should have passed: {outcome:?}");
+        assert!(
+            target.path().join(MARKER).exists(),
+            "the check must run in the worktree being verified"
+        );
+        assert!(
+            !config_root.path().join(MARKER).exists(),
+            "the config root only supplies the script; it is never the cwd"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_plan_stops_at_the_first_failing_command() {
+        let dir = fixture(&[]);
+        let outcome = run_plan(&plan_of(&[PASSES, FAILS, TOUCH_MARKER]), dir.path());
+        assert!(!outcome.ok, "a failing command fails the plan");
+        assert_eq!(
+            outcome.out,
+            format!("failed: {FAILS}\n"),
+            "the first failure is the one reported"
+        );
+        assert!(
+            !dir.path().join(MARKER).exists(),
+            "no command after the first failure may run"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_plan_is_green_when_every_command_passes() {
+        let dir = fixture(&[]);
+        let outcome = run_plan(&plan_of(&[PASSES, TOUCH_MARKER]), dir.path());
+        assert!(outcome.ok, "every command passed: {outcome:?}");
+        assert_eq!(outcome.out, "", "a green plan has nothing to report");
+        assert!(
+            dir.path().join(MARKER).exists(),
+            "the plan's commands must actually be run"
+        );
+    }
+
+    // Both the override path spliced into a shell command and the directory the
+    // command runs in have to survive a repo root with a space and a quote in it.
+    #[cfg(unix)]
+    #[test]
+    fn a_target_with_a_space_and_a_quote_is_checked_in_place() {
+        let holder = fixture(&[]);
+        let target = holder.path().join("wei'rd $target dir");
+        fs::create_dir_all(&target).expect("weird target");
+        let config_root = holder.path().join("wei'rd $config root");
+        fs::create_dir_all(&config_root).expect("weird config root");
+        executable_script(&config_root.join(OVERRIDE_FILE), &marking_script());
+
+        let outcome = is_green(&target, Some(&config_root));
+        assert!(
+            outcome.ok,
+            "a quoted override path must survive sh -c: {outcome:?}"
+        );
+        assert!(
+            target.join(MARKER).exists(),
+            "the check ran somewhere other than the target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_plan_runs_commands_in_a_directory_whose_path_needs_quoting() {
+        let holder = fixture(&[]);
+        let target = holder.path().join("wei'rd $target dir");
+        fs::create_dir_all(&target).expect("weird target");
+
+        let outcome = run_plan(&plan_of(&[TOUCH_MARKER]), &target);
+        assert!(outcome.ok, "the command should have run: {outcome:?}");
+        assert!(
+            target.join(MARKER).exists(),
+            "the working directory is passed as a path, never spliced into the command"
         );
     }
 }
