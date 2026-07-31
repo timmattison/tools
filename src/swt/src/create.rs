@@ -25,9 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::git::{git_must, validate_worktree_name, WorktreeName, WORKTREE_NAME_RULE};
 use crate::green_check::{is_green, shell_quote};
-use crate::teardown::{
-    hold_unverified_worktree, keep_unverified_worktree, remove_unverified_worktree,
-};
+use crate::teardown::{hold_unverified_worktree, remove_unverified_worktree};
 
 /// The git query that names the root of the worktree `swt` was invoked in.
 const TOPLEVEL_ARGS: [&str; 2] = ["rev-parse", "--show-toplevel"];
@@ -147,8 +145,9 @@ pub fn create(raw_name: &str) -> ExitCode {
     );
     // Nothing has verified this worktree yet, and the check about to run can take
     // minutes. Until it passes, `swt` owns removing it — including when the user
-    // gives up and hits Ctrl-C.
-    hold_unverified_worktree(&root, &path, &branch);
+    // gives up and hits Ctrl-C, and including when the check panics: the hold is
+    // a guard, so an unwind past this point takes the worktree with it.
+    let hold = hold_unverified_worktree(&root, &path, &branch);
 
     // Checked in the new worktree, configured from the parent: the `.swt-check`
     // override is an uncommitted per-developer file, so it exists only in `root`,
@@ -161,12 +160,15 @@ pub fn create(raw_name: &str) -> ExitCode {
         // more than the fact that it did. The check's output already ends in a
         // newline of its own.
         eprint!("HEAD not green: {}", green.out);
+        // Asked for explicitly rather than left to `hold`'s destructor, because
+        // this is the one path with something to *say* about the teardown. The
+        // drop that follows finds nothing left to do — the removal is latched.
         report_teardown(&path, &branch);
         return ExitCode::FAILURE;
     }
 
     // Verified: it is the caller's worktree now, not `swt`'s to tear down.
-    keep_unverified_worktree();
+    hold.keep();
 
     // Only the path, and only on stdout — a caller captures this.
     println!("{}", path.display());

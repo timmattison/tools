@@ -21,8 +21,50 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+#[cfg(unix)]
+use {
+    signal_hook::consts::{SIGINT, SIGTERM},
+    std::os::raw::c_int,
+};
+
 use crate::git::remove_worktree;
 use crate::green_check::Outcome;
+
+/// The signals `swt` turns into a teardown followed by an ordinary exit.
+///
+/// SIGINT is the terminal's Ctrl-C and SIGTERM the polite kill. SIGKILL is the
+/// one no program is allowed to handle, and `swt` does not pretend otherwise.
+#[cfg(unix)]
+const TERMINATION_SIGNALS: [c_int; 2] = [SIGINT, SIGTERM];
+
+/// The conventional shell status for a death by signal: 128 plus the signal
+/// number, so SIGINT is 130 and SIGTERM is 143.
+#[cfg(unix)]
+const SIGNAL_EXIT_BASE: i32 = 128;
+
+/// What a termination signal means to `swt` at the moment it arrives.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disposition {
+    /// `swt` owns nothing the signal would orphan, so it must behave exactly as
+    /// it would have if `swt` had never installed a handler at all.
+    Default,
+    /// Something would be orphaned: tear it down, then exit with this status.
+    Terminate(i32),
+}
+
+/// Decides what a termination signal means, given whether anything `swt` owns
+/// would be orphaned by it.
+///
+/// `signal` is the signal that arrived and `at_risk` whether this process
+/// currently holds an unverified worktree or a lock file. Kept free of the
+/// registries it is asked about so the decision can be pinned on its own.
+#[cfg(unix)]
+fn signal_disposition(signal: c_int, at_risk: bool) -> Disposition {
+    let _ = at_risk;
+    let _ = signal;
+    Disposition::Default
+}
 
 /// A worktree that exists but has not passed its green check yet: the three
 /// facts teardown needs and nothing else.
@@ -55,32 +97,49 @@ fn unverified_worktree() -> MutexGuard<'static, Option<UnverifiedWorktree>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// One caller's claim on an unverified worktree, given up by exactly one of
+/// [`WorktreeHold::keep`] and being dropped.
+///
+/// The guard carries no data of its own — the worktree lives in the registry
+/// above, where the signal teardown can also find it — but its lifetime is what
+/// covers the path no registry can: an unwind. A panic anywhere inside the
+/// check would otherwise leave the worktree and its branch behind with nobody
+/// left to remove them.
+#[must_use = "dropping the hold immediately tears the worktree down again"]
+pub struct WorktreeHold {
+    /// Nothing to hold; the private field is what keeps a hold from being
+    /// forged outside this module, where it would authorize a teardown.
+    _private: (),
+}
+
+impl WorktreeHold {
+    /// Gives up the responsibility without removing anything: the check passed,
+    /// so the worktree stays.
+    ///
+    /// Consuming, because keeping is final — a verified worktree belongs to the
+    /// caller who asked for it, and no later signal may take it away.
+    pub fn keep(self) {}
+}
+
 /// Takes responsibility for a worktree that exists but is not verified yet.
 ///
 /// Call this the moment `git worktree add` returns, before the check starts: the
 /// window this covers is precisely the one where a worktree and a branch exist
-/// that nobody has agreed to keep. Exactly one of
-/// [`keep_unverified_worktree`] or [`remove_unverified_worktree`] must follow.
+/// that nobody has agreed to keep. The returned [`WorktreeHold`] ends that
+/// window whichever way the run goes — [`WorktreeHold::keep`] on a green check,
+/// its [`Drop`] on a panic, and [`remove_unverified_worktree`] when a caller
+/// wants to report what the teardown actually did.
 ///
 /// `root` is the repository worktree teardown would run git from, `path` the
 /// worktree directory that would be removed, and `branch` the branch checked out
 /// in it.
-pub fn hold_unverified_worktree(root: &Path, path: &Path, branch: &str) {
+pub fn hold_unverified_worktree(root: &Path, path: &Path, branch: &str) -> WorktreeHold {
     *unverified_worktree() = Some(UnverifiedWorktree {
         root: root.to_path_buf(),
         path: path.to_path_buf(),
         branch: branch.to_string(),
     });
-}
-
-/// Releases the hold without removing anything: the check passed, so the
-/// worktree stays.
-///
-/// After this, [`remove_unverified_worktree`] has nothing to do — which is the
-/// point. A verified worktree belongs to the caller who asked for it, and no
-/// later signal may take it away.
-pub fn keep_unverified_worktree() {
-    *unverified_worktree() = None;
+    WorktreeHold { _private: () }
 }
 
 /// Tears down the held worktree and its branch, if one is still held.
@@ -116,10 +175,9 @@ pub fn remove_unverified_worktree() -> Option<Outcome> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        hold_unverified_worktree, keep_unverified_worktree, remove_unverified_worktree,
-        UnverifiedWorktree,
-    };
+    use super::{hold_unverified_worktree, remove_unverified_worktree, UnverifiedWorktree};
+    #[cfg(unix)]
+    use super::{signal_disposition, Disposition, SIGINT, SIGTERM};
     use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, PoisonError};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -171,7 +229,9 @@ mod tests {
     fn a_held_worktree_is_torn_down_once_and_the_hold_is_latched() {
         let _serial = serial();
         let held = unreachable_worktree();
-        hold_unverified_worktree(&held.root, &held.path, &held.branch);
+        // Bound, not dropped on the spot: the hold *is* a guard, so a temporary
+        // would tear the worktree down before the assertions could ask.
+        let _hold = hold_unverified_worktree(&held.root, &held.path, &held.branch);
 
         assert!(
             remove_unverified_worktree().is_some(),
@@ -191,13 +251,47 @@ mod tests {
     fn keeping_a_worktree_releases_the_hold() {
         let _serial = serial();
         let held = unreachable_worktree();
-        hold_unverified_worktree(&held.root, &held.path, &held.branch);
+        let hold = hold_unverified_worktree(&held.root, &held.path, &held.branch);
 
-        keep_unverified_worktree();
+        hold.keep();
 
         assert!(
             remove_unverified_worktree().is_none(),
             "a kept worktree must no longer be swt's to tear down"
+        );
+    }
+
+    // A signal `swt` owns nothing for must behave exactly as it would have if
+    // `swt` had never touched the process's signal handling: anything else means
+    // a Ctrl-C in a window where there is nothing to clean up behaves
+    // differently for no reason, which is a worse tool, not a safer one.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_is_left_to_its_default_disposition_when_nothing_is_at_risk() {
+        for signal in [SIGINT, SIGTERM] {
+            assert_eq!(
+                signal_disposition(signal, false),
+                Disposition::Default,
+                "signal {signal} with nothing at risk"
+            );
+        }
+    }
+
+    // With something at risk the same signal has to become a teardown and the
+    // conventional 128 + signal status, so a caller can still tell a Ctrl-C from
+    // a red check.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_with_something_at_risk_becomes_a_teardown_and_128_plus_the_signal() {
+        assert_eq!(
+            signal_disposition(SIGINT, true),
+            Disposition::Terminate(130),
+            "SIGINT is 128 + 2"
+        );
+        assert_eq!(
+            signal_disposition(SIGTERM, true),
+            Disposition::Terminate(143),
+            "SIGTERM is 128 + 15"
         );
     }
 }

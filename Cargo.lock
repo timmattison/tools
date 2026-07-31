@@ -7084,8 +7084,10 @@ version = "0.1.0"
 dependencies = [
  "buildinfo",
  "clap",
+ "libc",
  "regex",
  "serde_json",
+ "signal-hook 0.3.18",
  "tempfile",
 ]
 
