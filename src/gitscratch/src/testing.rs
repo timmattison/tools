@@ -346,6 +346,73 @@ pub fn independent_branches_repo() -> TestRepo {
     repo
 }
 
+/// A conflict in a file named `日本語.txt` beside one named `readme.md`, on
+/// branches named `left-左` and `right-右`.
+///
+/// Three separate things go wrong with a non-ASCII name, and this one shape is
+/// built to expose all three at once rather than needing a fixture apiece.
+///
+/// **The name has to survive git.** Under git's default `core.quotePath`, a
+/// path outside ASCII comes back from `git diff --name-only` C-quoted and
+/// octal-escaped - `"\346\227\245\346\234\254\350\252\236.txt"` rather than
+/// `日本語.txt` - so a replay that takes git at its word goes looking for a file
+/// that does not exist and reports a name nobody typed.
+///
+/// **The hunk count has to survive it too**, which is why `日本語.txt` is
+/// contested in *two* regions while `readme.md` is contested in one. A
+/// conflicted file that cannot be read is floored at a single hunk, so a fixture
+/// whose real answer were also one would report the right number by accident and
+/// let an escaped name hide behind a correct total.
+///
+/// **The column has to line up.** `readme.md` is 9 bytes, 9 characters and 9
+/// terminal columns; `日本語.txt` is 13 bytes, 7 characters and 10 columns. The
+/// two names disagree about which is wider depending on which of the three
+/// measures you ask for, so a breakdown padded by anything except display width
+/// comes out visibly ragged - and, being a pair, they say so on one screen.
+///
+/// The branch names carry multi-byte characters for the same reason: a branch
+/// name is echoed back in the verdict, so it travels the same path a file name
+/// does, and mixing scripts within one name catches a truncation that a purely
+/// non-ASCII name would not.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn multi_byte_names_repo() -> TestRepo {
+    /// The one region `readme.md` is contested in.
+    const ASCII_LINE: usize = 15;
+    /// The two regions `日本語.txt` is contested in, far enough apart that
+    /// git's 3-line diff context cannot merge them into one conflict.
+    const WIDE_LINES: [usize; 2] = [5, 25];
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    repo.commit_files(&[("readme.md", &base), ("日本語.txt", &base)], "base");
+
+    // Both branches make the same three edits with different content, so every
+    // one of them collides and the two branches are otherwise symmetric.
+    for (branch, edit) in [("left-左", "左-edit"), ("right-右", "右-edit")] {
+        repo.checkout("main");
+        repo.branch(branch);
+
+        let mut wide = base.clone();
+        for line in WIDE_LINES {
+            wide = replace_line(&wide, line, edit);
+        }
+
+        repo.commit_files(
+            &[
+                ("readme.md", &replace_line(&base, ASCII_LINE, edit)),
+                ("日本語.txt", &wide),
+            ],
+            &format!("{branch} rewrites both files"),
+        );
+    }
+
+    repo.checkout("main");
+    repo
+}
+
 /// Two branches that both rewrite the same line, so the simulation is
 /// guaranteed to actually conflict and resolve rather than no-op.
 ///
