@@ -204,10 +204,12 @@ impl LockFailure {
 /// Exits the process with git's own message if git cannot answer — which is
 /// safe here precisely because it happens before anything is locked.
 fn parent_lock_path(repo_root: &Path) -> PathBuf {
-    // STUB: behaviorally wrong on purpose (red). `<root>/.git` is a regular file
-    // in a linked worktree, so this both names the wrong lock and cannot be
-    // written to.
-    repo_root.join(".git").join(LOCK_FILE)
+    // Asking git rather than assuming a layout is the whole point: `.git` is a
+    // directory only in the main worktree. `join` resolves the relative answer
+    // against the root and takes the absolute one whole, which is exactly the
+    // `resolve(repoRoot, commonDir)` the original performs.
+    let common_dir = git_must(GIT_COMMON_DIR_ARGS, Some(repo_root));
+    repo_root.join(common_dir).join(LOCK_FILE)
 }
 
 /// Runs `f` while holding a lock file, retrying until it can be created.
@@ -223,10 +225,57 @@ fn locked<T>(
     timings: LockTimings,
     f: impl FnOnce() -> T,
 ) -> Result<T, LockFailure> {
-    // STUB: behaviorally wrong on purpose (red). No lock is created, nothing is
-    // reaped, and no wait can ever time out.
-    let _ = (lock_path, timings);
-    Ok(f())
+    let start = Instant::now();
+    loop {
+        // `create_new` is `O_CREAT | O_EXCL`: the kernel decides who wins, so
+        // two processes reaching here at the same instant cannot both succeed.
+        // Anything short of that — probing for the file and then creating it —
+        // has a window between the two calls, and that window is the bug.
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(lock_path)
+        {
+            Ok(_file) => {
+                // The lock is the file's *existence*, not the open handle, so
+                // the handle is dropped immediately: keeping it would only add
+                // a second thing to get right on the release path, and a
+                // process that dies still leaves the file behind either way —
+                // which is what the staleness reap below is for.
+                let _guard = LockGuard::hold(lock_path.to_path_buf());
+                return Ok(f());
+            }
+            // Somebody else holds it. Fall through and wait.
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            // Not contention: a missing git directory, a read-only filesystem.
+            // Waiting would never help, so this is reported straight away
+            // rather than sat out as if it were somebody else's merge.
+            Err(err) => return Err(LockFailure::Unusable(err)),
+        }
+
+        // Reap a lock old enough to be a corpse rather than a merge in
+        // progress. A lock that vanishes under the stat is simply retried:
+        // whoever held it has just let go.
+        if let Ok(metadata) = fs::metadata(lock_path) {
+            let abandoned = metadata
+                .modified()
+                .ok()
+                // An mtime in the future yields no elapsed duration, and is
+                // treated as "not stale" — the conservative answer, since
+                // reaping a live lock hands two merges the same repository.
+                .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
+                .is_some_and(|age| age > timings.stale_after);
+            if abandoned {
+                let _ = fs::remove_file(lock_path);
+                continue;
+            }
+        }
+
+        if start.elapsed() > timings.wait_at_most {
+            return Err(LockFailure::TimedOut);
+        }
+        thread::sleep(timings.retry_every);
+    }
 }
 
 /// Runs `f` while holding the parent repository's merge lock, so concurrent
@@ -252,10 +301,16 @@ fn locked<T>(
 /// `repo_root` is the root of any worktree of the parent repository, and `f` the
 /// work to perform under the lock. Returns whatever `f` returns.
 pub fn with_parent_lock<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
-    // STUB: behaviorally wrong on purpose (red). The region runs unserialized,
-    // holding nothing at all.
-    let _ = repo_root;
-    f()
+    let lock_path = parent_lock_path(repo_root);
+    match locked(&lock_path, LockTimings::PRODUCTION, f) {
+        Ok(value) => value,
+        // Reported by `locked` rather than acted on there, so this exit happens
+        // out here — holding nothing, with no region left to cut short.
+        Err(failure) => {
+            eprint!("{}", failure.message(&lock_path));
+            process::exit(LOCK_FAILURE_EXIT_STATUS);
+        }
+    }
 }
 
 #[cfg(test)]
