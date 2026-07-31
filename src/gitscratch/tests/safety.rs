@@ -565,12 +565,29 @@ fn never_touches_the_real_working_tree_or_index() {
     std::fs::write(&dirty_tracked, UNCOMMITTED_EDIT).expect("leave uncommitted work in the tree");
     std::fs::write(repo.path().join("staged.txt"), STAGED_ONLY).expect("write the staged file");
     repo.git(&["add", "staged.txt"]);
-    std::fs::write(repo.path().join("untracked.txt"), UNTRACKED_ONLY)
-        .expect("write the untracked file");
+    let untracked = repo.path().join("untracked.txt");
+    std::fs::write(&untracked, UNTRACKED_ONLY).expect("write the untracked file");
 
-    // Bytes, not a `String`: this snapshot is the evidence, so it must not be
+    // Bytes, not `String`s: these snapshots are the evidence, so they must not be
     // taken through any decoding step that could hide a difference.
-    let before_bytes = std::fs::read(&dirty_tracked).expect("snapshot the uncommitted work");
+    //
+    // Two of the three files get a byte-compare, and it takes two because the
+    // porcelain status below cannot stand in for either. A tracked file a replay
+    // rewrote is still reported ` M` - it was already modified and it stays
+    // modified - and an untracked file is reported `?? untracked.txt` whatever is
+    // inside it, so its status line comes back byte-identical from a replay that
+    // rewrote every byte of the file. That makes the one file with no recovery
+    // story whatsoever the one file nothing else here can speak for, which is
+    // exactly backwards, so it is snapshotted too.
+    //
+    // `staged.txt` is deliberately not snapshotted, because it is the one of the
+    // three porcelain genuinely does cover: rewriting its working-tree copy flips
+    // its status from `A ` to `AM`, and what its index copy holds is covered by
+    // `diff --cached`. A third byte-compare here would assert nothing the two
+    // status assertions below do not already assert.
+    let tracked_before_bytes =
+        std::fs::read(&dirty_tracked).expect("snapshot the uncommitted work");
+    let untracked_before_bytes = std::fs::read(&untracked).expect("snapshot the untracked file");
     let before_status = repo.git(&["status", "--porcelain"]);
     let before_index = repo.git(&["diff", "--cached"]);
     let before_head = repo.rev_parse("HEAD");
@@ -625,14 +642,24 @@ fn never_touches_the_real_working_tree_or_index() {
         "replaying a contested branch should have hunks to hand-merge"
     );
 
-    let after_bytes = std::fs::read(&dirty_tracked).expect("re-read the uncommitted work");
+    let tracked_after_bytes = std::fs::read(&dirty_tracked).expect("re-read the uncommitted work");
     assert_eq!(
-        after_bytes,
-        before_bytes,
+        tracked_after_bytes,
+        tracked_before_bytes,
         "replay rewrote the developer's uncommitted work in {}\n  before: {}\n   after: {}",
         dirty_tracked.display(),
-        String::from_utf8_lossy(&before_bytes),
-        String::from_utf8_lossy(&after_bytes),
+        String::from_utf8_lossy(&tracked_before_bytes),
+        String::from_utf8_lossy(&tracked_after_bytes),
+    );
+    let untracked_after_bytes = std::fs::read(&untracked).expect("re-read the untracked file");
+    assert_eq!(
+        untracked_after_bytes,
+        untracked_before_bytes,
+        "replay rewrote a file git has never heard of, and no reflog, stash or \
+         branch gets it back: {}\n  before: {}\n   after: {}",
+        untracked.display(),
+        String::from_utf8_lossy(&untracked_before_bytes),
+        String::from_utf8_lossy(&untracked_after_bytes),
     );
     assert_eq!(
         repo.git(&["status", "--porcelain"]),
