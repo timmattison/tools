@@ -10,7 +10,8 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use gitscratch::testing::{
-    contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo, TestRepo,
+    contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
+    not_a_repository, TestRepo,
 };
 
 /// Exit code for a replay that hit no conflicts.
@@ -239,5 +240,32 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
         control_stderr.contains("could not create a scratch directory"),
         "a resolvable branch with the same poisoned TMPDIR must fail at the \
          scratch, or the assertion above proves nothing:\n{control_stderr}"
+    );
+}
+
+/// Somewhere outside every repository there is no question to answer, and
+/// saying so has to be distinguishable from answering it.
+///
+/// The exit code is the whole point. A tool that reported this as `1` would be
+/// telling a script "the rebase would conflict" about a directory it never
+/// found a rebase in.
+#[test]
+fn a_directory_that_is_not_a_repository_is_an_error_not_a_conflict() {
+    let elsewhere = not_a_repository();
+
+    let (code, stdout, stderr) = streams(&grind(elsewhere.path(), &["main"]));
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "running outside a repository must exit {ERROR}, never {CONFLICTS}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is not inside a git repository"),
+        "the message must say what was wrong with the directory, got:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "there was no rebase to conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }

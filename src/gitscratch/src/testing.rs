@@ -141,6 +141,54 @@ impl TestRepo {
     }
 }
 
+/// A directory that is not inside any git repository, so a tool can be run
+/// somewhere it has no question to answer.
+///
+/// Mirrors [`TestRepo`]'s shape - a `TempDir` behind a `path()` - so a consumer
+/// never has to name `tempfile`'s types or remember to keep the guard alive for
+/// the right reason.
+pub struct NotARepo {
+    dir: TempDir,
+}
+
+impl NotARepo {
+    /// The directory, guaranteed to sit outside every repository.
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// A throwaway directory that is emphatically not a repository.
+///
+/// The premise is checked rather than assumed: a developer whose `TMPDIR` sits
+/// inside a git repository would otherwise get a test that fails somewhere far
+/// away from the reason, so the fixture proves its own claim up front and
+/// panics with the offending path if it cannot.
+///
+/// # Panics
+///
+/// Panics if the temporary directory cannot be created, if `git` is not
+/// installed, or if the temporary directory turns out to be inside a
+/// repository after all.
+pub fn not_a_repository() -> NotARepo {
+    let dir = TempDir::new().expect("create temp dir");
+
+    let probe = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(dir.path())
+        .output()
+        .expect("failed to spawn git rev-parse --git-dir");
+
+    assert!(
+        !probe.status.success(),
+        "{} is inside a git repository, so it cannot stand in for somewhere that is not: {}",
+        dir.path().display(),
+        String::from_utf8_lossy(&probe.stdout).trim(),
+    );
+
+    NotARepo { dir }
+}
+
 /// A numbered file with `count` lines, so edits can be placed far enough apart
 /// that git's 3-line diff context does not make them overlap by accident.
 pub fn numbered_lines(count: usize) -> String {
