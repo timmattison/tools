@@ -1374,8 +1374,7 @@ mod tests {
         let dir = diverged_repo();
         let p = dir.path();
         git_allowing_failure(p, &["rebase", "main"]);
-        std::fs::write(p.join(".git/rebase-merge/msgnum"), "not-a-number\n")
-            .expect("write msgnum");
+        std::fs::write(p.join(".git/rebase-merge/msgnum"), "not-a-number\n").expect("write msgnum");
         let repo = open_at(p).unwrap();
         assert_eq!(
             super::operation_state(&repo, 1),
