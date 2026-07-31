@@ -208,6 +208,55 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
         describe_tree(&rr_cache)
     );
 
+    // Control: prove rerere is actually recording before proving the replay does
+    // not make it record. An empty `rr-cache` at the end is exactly what a git
+    // that had quietly stopped honouring `rerere.enabled`, or a config write that
+    // silently did nothing, would also produce - and every assertion below would
+    // then pass for the wrong reason, permanently. This merge runs through plain
+    // git in the fixture rather than through `gitscratch`, so nothing under test
+    // is involved: it is the developer's repository behaving the way it normally
+    // would. `merge` rather than `rebase` because it reaches the conflict in one
+    // command and unwinds in one more.
+    //
+    // Not `repo.git`, which panics on a non-zero exit - conflicting is the whole
+    // point of this merge, so its failure has to be inspected rather than raised.
+    repo.checkout("right");
+    let control = Command::new("git")
+        .args(["merge", "left"])
+        .current_dir(repo.path())
+        .output()
+        .expect("run the control merge in the fixture");
+    assert!(
+        !control.status.success(),
+        "the control merge was supposed to conflict, and rerere only ever records \
+         a conflict, so this test could only pass vacuously:\n{}\n{}",
+        String::from_utf8_lossy(&control.stdout),
+        String::from_utf8_lossy(&control.stderr)
+    );
+    assert!(
+        rr_cache.exists(),
+        "rerere is not recording in {}, so this test could only pass vacuously; \
+         a plain conflicting merge left nothing at {}",
+        repo.path().display(),
+        rr_cache.display()
+    );
+
+    // Put the fixture back exactly as it was found: no merge in flight, `main`
+    // checked out, and - because `merge --abort` pointedly leaves the recording
+    // alone - no `rr-cache` at all. The whole directory goes, not just its
+    // contents: the closing assertion is `!rr_cache.exists()`, so an emptied
+    // `rr-cache` left standing here would fail the test for the control's reasons
+    // rather than the replay's.
+    repo.git(&["merge", "--abort"]);
+    repo.checkout("main");
+    std::fs::remove_dir_all(&rr_cache).expect("clear the control's recording");
+    assert!(
+        !rr_cache.exists(),
+        "the control run must leave no recording behind, or the real assertion \
+         cannot tell the two apart:\n{}",
+        describe_tree(&rr_cache)
+    );
+
     // Scoped on purpose: teardown is another chance for git to flush state into
     // the real repository, so the drop must have run before the cache is
     // inspected. Do not flatten this block away.
