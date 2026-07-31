@@ -3676,10 +3676,32 @@ mod tests {
         /// `git worktree add` itself, and the line must not tell the user that file was
         /// "generated in worktree". The per-file line states the observed fact — the file
         /// was already there — and leaves the hook rationale to the README and --help.
+        ///
+        /// Two assertions, because they fail for different reasons and neither subsumes
+        /// the other. The equality pins the exact user-facing contract, but on its own it
+        /// only enforces this test's *name* by convention: any reword breaks it with a
+        /// plain left/right mismatch, and the reflex repair is to paste the new string
+        /// into the expected value. Should that new wording happen to reintroduce the
+        /// false causal claim — "created by the worktree hook", say — the test would go
+        /// green again having silently re-admitted the exact defect it was written to
+        /// forbid. The `contains` check makes the named invariant mechanical rather than
+        /// advisory, so the bypass fails CI (see CLAUDE.md's enforced-helper rule).
+        ///
+        /// It is stated first deliberately: a reword that smuggles the claim back in
+        /// should fail with the *reason* it is wrong, not with a string diff a reader has
+        /// to decode. A benign reword still trips the equality below, which is where a
+        /// deliberate wording change belongs.
         #[test]
         fn test_kept_existing_message_does_not_claim_the_file_was_generated_in_the_worktree() {
+            let message = kept_existing_message(Path::new(".env.local"));
+
+            assert!(
+                !message.contains("generated in worktree"),
+                "The kept-existing line must not attribute the file to a post-checkout hook"
+            );
+
             assert_eq!(
-                kept_existing_message(Path::new(".env.local")),
+                message,
                 "Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)",
                 "The kept-existing line must report only that the destination already existed, not why"
             );
