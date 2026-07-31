@@ -47,6 +47,50 @@ struct Args {
     quiet: bool,
 }
 
+/// Everything `grind` says, and the one switch that can silence it.
+///
+/// `-q` has to reach three writes on three different paths - the
+/// uncommitted-work note, the verdict, and the failure - and the last of those
+/// is printed from [`main`], nowhere near the other two. Three independent
+/// `if !quiet` checks would be one design decision smeared across three sites,
+/// which is precisely the shape that goes wrong the first time somebody adds a
+/// fourth line. Routing every write through one type makes the check
+/// impossible to forget rather than merely easy to remember.
+///
+/// The methods are named for what is being said rather than for which stream
+/// it lands on, because which stream is this type's decision to make: the
+/// verdict is the answer and belongs on stdout, while a caveat or a failure
+/// belongs on stderr where it cannot contaminate a pipeline.
+struct Console {
+    quiet: bool,
+}
+
+impl Console {
+    /// A caveat that qualifies the verdict without changing it.
+    fn note(&self, note: &str) {
+        if !self.quiet {
+            eprintln!("{note}");
+        }
+    }
+
+    /// The answer itself.
+    fn verdict(&self, verdict: &str) {
+        if !self.quiet {
+            println!("{verdict}");
+        }
+    }
+
+    /// Why there is no answer.
+    fn failure(&self, err: &anyhow::Error) {
+        if !self.quiet {
+            // Alternate formatting so the whole context chain arrives, not just
+            // the outermost sentence: git's own stderr is carried in the causes
+            // and is usually the only part that says what actually went wrong.
+            eprintln!("{TOOL}: error: {err:#}");
+        }
+    }
+}
+
 /// Returns an [`ExitCode`] rather than a `Result`, which looks like a stylistic
 /// choice and is not.
 ///
@@ -57,14 +101,12 @@ struct Args {
 /// hand is the only way to keep "conflicts" and "could not tell" apart.
 fn main() -> ExitCode {
     let args = Args::parse();
+    let console = Console { quiet: args.quiet };
 
-    match run(&args) {
+    match run(&args, &console) {
         Ok(code) => code,
         Err(err) => {
-            // Alternate formatting so the whole context chain arrives, not just
-            // the outermost sentence: git's own stderr is carried in the causes
-            // and is usually the only part that says what actually went wrong.
-            eprintln!("{TOOL}: error: {err:#}");
+            console.failure(&err);
             ExitCode::from(ERROR)
         }
     }
@@ -78,7 +120,7 @@ fn main() -> ExitCode {
 /// git repository, does not contain `branch`, if the working tree cannot be
 /// inspected, or if the replay itself failed without leaving a conflict to
 /// measure.
-fn run(args: &Args) -> Result<ExitCode> {
+fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
 
@@ -96,13 +138,13 @@ fn run(args: &Args) -> Result<ExitCode> {
     // the caveat before the sentence it qualifies, and a caller piping stdout
     // somewhere has to get the same bytes whether or not the tree was dirty.
     if let Some(note) = report.dirty_note(repo.uncommitted_files()?) {
-        eprintln!("{note}");
+        console.note(&note);
     }
 
     let scratch = Scratch::create(repo.path(), "HEAD")?;
     let conflicts = scratch.replay_rebase(&args.branch)?;
 
-    println!("{}", report.render(&conflicts));
+    console.verdict(&report.render(&conflicts));
 
     // Read off the same fact the report was rendered from, so the words and the
     // number a script acts on cannot tell two different stories.
