@@ -1,13 +1,13 @@
-//! green_check — what "green" means for a repo, and how that verdict is
-//! assembled into a command plan.
+//! green_check — what "green" means for a repo, and how to verify it.
 //!
 //! This module owns the whole definition of the green check: detecting which
-//! toolchains a worktree uses (pnpm / cargo / Tauri) and turning that into an
-//! ordered list of shell commands. Detection stays hidden behind
-//! [`build_check_plan`] — callers never ask "is this a cargo repo?" themselves,
-//! they ask what the check *is*. ([`pkg_scripts`] is exported for inspection and
-//! tests, [`shell_quote`] because `swt` prints shell command lines for humans to
-//! paste too.)
+//! toolchains a worktree uses (pnpm / cargo / Tauri), assembling the command
+//! plan, and running it. Callers see only [`is_green`]; the detection stays
+//! hidden behind it — they never ask "is this a cargo repo?" themselves, they
+//! ask whether the worktree is green. ([`build_check_plan`] and [`pkg_scripts`]
+//! are exported for inspection and tests, [`run_plan`] so an already-built plan
+//! can be run — and asserted about — on its own, and [`shell_quote`] because
+//! `swt` prints shell command lines for humans to paste too.)
 //!
 //! The plan always runs inside the worktree being checked, never the parent:
 //!
@@ -31,9 +31,18 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 /// The per-developer green-check override script, looked up at the config root.
 const OVERRIDE_FILE: &str = ".swt-check";
+
+/// The interpreter every check command is handed to. Plan entries are shell
+/// strings — pipelines, `&&`, redirections — so they are never split into an
+/// argv here.
+const SHELL: &str = "sh";
+
+/// The flag that makes [`SHELL`] read its command from the next argument.
+const SHELL_COMMAND_FLAG: &str = "-c";
 
 /// The manifest whose presence marks a directory as a JavaScript project.
 const PACKAGE_JSON: &str = "package.json";
@@ -257,6 +266,26 @@ pub fn build_check_plan(target: &Path, config_root: Option<&Path>) -> Option<Vec
     (!cmds.is_empty()).then_some(cmds)
 }
 
+/// Runs a single check command, streaming its output live so the user sees
+/// progress on long checks instead of a silent terminal.
+///
+/// `cmd` is the shell command — commands are shell strings by design, so they go
+/// to `sh -c` rather than being split here — and `cwd` the directory to run it
+/// in. Returns whether it exited 0; a command that could not be spawned at all
+/// counts as a failure, not as a reason to abandon the check.
+fn stream_check(cmd: &str, cwd: &Path) -> bool {
+    eprint!("\n  $ {cmd}\n");
+    Command::new(SHELL)
+        .arg(SHELL_COMMAND_FLAG)
+        .arg(cmd)
+        // Inherited stdio is the point: the check's own output is the progress
+        // report, so it goes straight to the terminal rather than being captured
+        // and replayed after the fact.
+        .current_dir(cwd)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Runs an already-built check plan, stopping at the first failing command.
 ///
 /// `plan` is the ordered list of shell commands and `target` the directory every
@@ -265,7 +294,11 @@ pub fn build_check_plan(target: &Path, config_root: Option<&Path>) -> Option<Vec
 /// command exited 0, otherwise a failure naming the first command that did not.
 #[must_use]
 pub fn run_plan(plan: &[String], target: &Path) -> Outcome {
-    let _ = (plan, target);
+    for cmd in plan {
+        if !stream_check(cmd, target) {
+            return Outcome::failed(format!("failed: {cmd}\n"));
+        }
+    }
     Outcome::ok()
 }
 
@@ -280,8 +313,16 @@ pub fn run_plan(plan: &[String], target: &Path) -> Outcome {
 /// vacuous green.
 #[must_use]
 pub fn is_green(target: &Path, config_root: Option<&Path>) -> Outcome {
-    let _ = (target, config_root);
-    Outcome::ok()
+    let Some(plan) = build_check_plan(target, config_root) else {
+        // Named after the config root, not the target: that is where the
+        // override is looked up, so that is where dropping one would help.
+        return Outcome::failed(format!(
+            "No green-check defined. Drop a '{OVERRIDE_FILE}' executable at {}.\n",
+            config_root.unwrap_or(target).display()
+        ));
+    };
+    eprint!("Running green check in {}…", target.display());
+    run_plan(&plan, target)
 }
 
 #[cfg(test)]
