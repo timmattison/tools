@@ -8,7 +8,6 @@ name = "swt"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 buildinfo.workspace = true
 clap.workspace = true
 
