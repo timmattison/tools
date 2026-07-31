@@ -16,8 +16,30 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::path::Path;
+use std::process::{self, Command};
 
 use crate::green_check::Outcome;
+
+/// The program every call in this module runs. Named once so it is impossible
+/// for a new call site to reach a different binary, and so the "could not run
+/// git" message names the same thing that was looked for.
+const GIT: &str = "git";
+
+/// Status [`git_must`] exits with when the command it was told cannot fail did.
+/// The conventional "the command failed" status, distinct from the `2` `swt`
+/// exits with for a command line usage error.
+const GIT_MUST_EXIT_STATUS: i32 = 1;
+
+/// The subcommand [`worktree_dirt`] asks for a worktree's uncommitted state.
+const STATUS_SUBCOMMAND: &str = "status";
+
+/// Machine-readable status output, stable across git versions by contract —
+/// which is what makes "empty means clean" a fact rather than a hope.
+const PORCELAIN_FLAG: &str = "--porcelain";
+
+/// Excludes untracked files from the listing. Only ever added, never negated:
+/// untracked files are in the porcelain listing unless this says otherwise.
+const NO_UNTRACKED_FLAG: &str = "--untracked-files=no";
 
 /// A git command that failed somewhere the caller cannot treat failure as an
 /// answer, carrying git's combined output as the explanation.
@@ -69,8 +91,51 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let _ = (args, cwd, shielded);
-    Outcome::failed(String::new())
+    let mut command = Command::new(GIT);
+    command.args(args);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+
+    // The shield. `process_group(0)` is `setpgid(0, 0)` performed in the child
+    // between fork and exec, so git becomes the leader of a new process group
+    // and a signal aimed at swt's group never reaches it. This one line is the
+    // whole of the guarantee described on `remove_worktree`, which is why the
+    // suite asserts on the process group git actually ran in rather than on the
+    // fact that this call is written here.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        if shielded {
+            command.process_group(0);
+        }
+    }
+    // Process groups are a POSIX notion. Everything else in swt already assumes
+    // a POSIX `sh`, so elsewhere the shield is an explicit no-op rather than a
+    // half-ported imitation of one that would claim a protection it cannot give.
+    #[cfg(not(unix))]
+    {
+        let _ = shielded;
+    }
+
+    match command.output() {
+        // stdout first, then stderr — the order a terminal would have shown them
+        // in for the overwhelmingly common case of a command that only writes to
+        // one of them. Lossy decoding keeps a non-UTF-8 byte in a filename from
+        // turning git's explanation into no explanation at all.
+        Ok(output) => Outcome::new(
+            output.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        ),
+        // A git that could not be spawned is reported the same way as a git that
+        // said no, because every caller already handles that. The reason goes in
+        // `out` so `git_must` prints something rather than exiting in silence.
+        Err(err) => Outcome::failed(format!("could not run {GIT}: {err}\n")),
+    }
 }
 
 /// Runs a git command, capturing its combined output.
@@ -105,8 +170,12 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let _ = (args, cwd);
-    String::new()
+    let outcome = git(args, cwd);
+    if !outcome.ok {
+        eprint!("{}", outcome.out);
+        process::exit(GIT_MUST_EXIT_STATUS);
+    }
+    outcome.out.trim().to_string()
 }
 
 /// Tears down a worktree and the branch checked out in it, forcing both.
@@ -133,8 +202,25 @@ where
 /// checked out in it. Returns ok only when both commands succeeded; `out` is
 /// their combined output.
 pub fn remove_worktree(root: &Path, path: &Path, branch: &str) -> Outcome {
-    let _ = (root, path, branch);
-    Outcome::failed(String::new())
+    // Both run before either verdict is consulted. Short-circuiting on the
+    // first failure is the bug this shape exists to prevent: the branch delete
+    // is what a failed removal makes *more* likely to be needed, not less.
+    let removed = run_git(
+        [
+            OsStr::new("worktree"),
+            OsStr::new("remove"),
+            OsStr::new("--force"),
+            path.as_os_str(),
+        ],
+        Some(root),
+        true,
+    );
+    let deleted = run_git(
+        [OsStr::new("branch"), OsStr::new("-D"), OsStr::new(branch)],
+        Some(root),
+        true,
+    );
+    Outcome::new(removed.ok && deleted.ok, removed.out + &deleted.out)
 }
 
 /// Reports a worktree's uncommitted state as git's own porcelain listing.
@@ -153,8 +239,18 @@ pub fn remove_worktree(root: &Path, path: &Path, branch: &str) -> Outcome {
 /// Returns a [`GitFailure`] carrying git's combined output when git itself
 /// fails. A git that never answered is emphatically not a clean worktree.
 pub fn worktree_dirt(cwd: &Path, include_untracked: bool) -> Result<String, GitFailure> {
-    let _ = (cwd, include_untracked);
-    Ok(String::new())
+    let mut args = vec![STATUS_SUBCOMMAND, PORCELAIN_FLAG];
+    // Untracked files are in the listing by default, so the flag is only needed
+    // to take them *out* — which is the case that has to be asked for.
+    if !include_untracked {
+        args.push(NO_UNTRACKED_FLAG);
+    }
+    let outcome = git(&args, Some(cwd));
+    if outcome.ok {
+        Ok(outcome.out.trim().to_string())
+    } else {
+        Err(GitFailure(outcome.out))
+    }
 }
 
 /// Human-readable statement of what a worktree name may contain.

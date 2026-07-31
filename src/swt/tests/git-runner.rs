@@ -62,14 +62,11 @@ fn a_successful_command_reports_ok_with_gits_output() {
 #[test]
 fn a_failing_command_reports_not_ok_carrying_gits_own_message() {
     let repo = TestRepo::new();
-    let outcome = git(
-        ["rev-parse", "--verify", "definitely-not-a-ref"],
-        Some(repo.path()),
-    );
+    let outcome = git(["rev-parse", "definitely-not-a-ref"], Some(repo.path()));
 
     assert!(!outcome.ok, "a non-zero git exit is not ok");
     assert!(
-        outcome.out.contains("definitely-not-a-ref"),
+        outcome.out.contains("definitely-not-a-ref") && outcome.out.contains("fatal:"),
         "git's own stderr must be captured, got: {:?}",
         outcome.out
     );
@@ -121,9 +118,13 @@ fn shell_metacharacters_are_stored_verbatim_never_interpreted() {
 #[test]
 fn a_hostile_ref_name_merely_fails_to_resolve() {
     let repo = TestRepo::new();
-    let outcome = git(["rev-parse", "--verify", HOSTILE], Some(repo.path()));
+    let outcome = git(["rev-parse", HOSTILE], Some(repo.path()));
 
     assert!(!outcome.ok, "a nonexistent ref must not resolve");
+    // git echoes the argument back verbatim in its complaint, which is the
+    // strongest available evidence that it received one argument spelled exactly
+    // this way — not a word-split sequence of them, and not the result of a
+    // substitution.
     assert!(
         outcome.out.contains(HOSTILE),
         "git should complain about the ref it was actually given, got: {:?}",
@@ -150,7 +151,9 @@ fn a_path_argument_full_of_metacharacters_round_trips_through_the_index() {
         .filter(|path| !path.is_empty())
         .collect();
     paths.sort_unstable();
-    assert_eq!(paths, vec![evil.as_str(), TRACKED_FILE]);
+    let mut expected = vec![evil.as_str(), TRACKED_FILE];
+    expected.sort_unstable();
+    assert_eq!(paths, expected);
     assert_nothing_was_executed(&repo);
 }
 
