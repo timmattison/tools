@@ -49,10 +49,41 @@ fn streams(output: &Output) -> (Option<i32>, String, String) {
     )
 }
 
+/// Stand on `head` and ask about `onto`, the way a developer would.
 fn run(repo: &TestRepo, head: &str, onto: &str) -> (Option<i32>, String, String) {
+    streams(&run_raw(repo, head, &[onto]))
+}
+
+/// The raw output, for the assertions that care about the difference between
+/// "printed nothing" and "printed only whitespace" - which [`streams`] trims
+/// away and `-q` is judged on.
+fn run_raw(repo: &TestRepo, head: &str, args: &[&str]) -> Output {
     repo.checkout(head);
 
-    streams(&grind(repo.path(), &[onto]))
+    grind(repo.path(), args)
+}
+
+/// Assert `-q` printed nothing whatsoever and still answered with `expected`.
+///
+/// Both streams, because the answer being silent is only useful if the *whole*
+/// run is: a caller redirecting stdout to `/dev/null` and getting a note or an
+/// error message on the terminal anyway has not been given a quiet tool.
+fn assert_silent(output: &Output, expected: i32, path: &str) {
+    let (code, stdout, stderr) = streams(output);
+
+    assert_eq!(
+        code,
+        Some(expected),
+        "-q must not change the answer on the {path} path\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "-q printed to stdout on the {path} path:\n{stdout}"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "-q printed to stderr on the {path} path:\n{stderr}"
+    );
 }
 
 /// Two branches that each add a file of their own rebase onto each other
@@ -357,4 +388,42 @@ fn uncommitted_work_gets_a_note_on_stderr_and_leaves_the_answer_alone() {
         "the note belongs on stderr; stdout must be byte-for-byte what the \
          clean run produced"
     );
+}
+
+/// Unlike a tool that prints a value, `grind` has no answer to pipe - the
+/// answer *is* the exit code. So a scripted caller asking for quiet wants
+/// silence, not a terser rendering, and gets it on the happy path first.
+#[test]
+fn quiet_prints_nothing_when_the_replay_is_clean() {
+    let repo = independent_branches_repo();
+
+    let output = run_raw(&repo, "alpha", &["-q", "beta"]);
+
+    assert_silent(&output, CLEAN, "clean");
+}
+
+/// Deliberately measured over a *dirty* tree, because the verdict is not the
+/// only thing `-q` has to swallow. A quiet mode that silences the report and
+/// leaves the uncommitted-work note on stderr would pass a clean-tree test and
+/// still spray output into a script's terminal.
+#[test]
+fn quiet_prints_nothing_when_the_replay_conflicts_over_a_dirty_tree() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let output = run_raw(&repo, "one", &["-q", "two"]);
+
+    assert_silent(&output, CONFLICTS, "conflicts");
+}
+
+/// The error message is the last thing that could leak, and the one most
+/// easily forgotten, because it is printed from `main` rather than from the
+/// code that does the work.
+#[test]
+fn quiet_prints_nothing_when_the_run_cannot_answer_at_all() {
+    let repo = independent_branches_repo();
+
+    let output = run_raw(&repo, "alpha", &["-q", "nonexistent-branch"]);
+
+    assert_silent(&output, ERROR, "error");
 }
