@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use crate::git::{FileEntry, FileStatus, NumStat};
-use crate::render::{Operation, UpstreamStatus};
+use crate::render::{Operation, StepProgress, UpstreamStatus};
 
 /// A repository handle that can be re-opened between reads.
 ///
@@ -288,14 +288,68 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
 /// gix-only philosophy. `conflicts` is the unmerged-path count the caller
 /// already has from the status walk, so this does no extra git work.
 ///
-/// Only merge is surfaced today; the `Operation` enum reserves a `Rebase`
-/// variant for a later slice. Cherry-pick, revert, bisect, and plain `git am`
-/// are intentionally out of scope and yield `None`.
+/// Every rebase flavor collapses to `Operation::Rebase`: `ApplyMailboxRebase`
+/// is gix's name for a bare `rebase-apply/` directory carrying neither the
+/// `applying` nor the `rebasing` marker, which cannot be told apart from an
+/// apply-backend rebase, so it is treated as one. Cherry-pick, revert, bisect,
+/// and plain `git am` are intentionally out of scope and yield `None`.
 pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operation> {
+    use gix::state::InProgress;
+
     match repo.state()? {
-        gix::state::InProgress::Merge => Some(Operation::Merge { conflicts }),
-        _ => None,
+        InProgress::Merge => Some(Operation::Merge { conflicts }),
+        InProgress::Rebase | InProgress::RebaseInteractive | InProgress::ApplyMailboxRebase => {
+            Some(Operation::Rebase {
+                step: rebase_step(repo.path()),
+                conflicts,
+            })
+        }
+        InProgress::ApplyMailbox
+        | InProgress::CherryPick
+        | InProgress::CherryPickSequence
+        | InProgress::Revert
+        | InProgress::RevertSequence
+        | InProgress::Bisect => None,
     }
+}
+
+/// How far through a rebase git is, or `None` when the counters cannot be read.
+///
+/// gix classifies the operation but does not expose its progress, so the two
+/// counter pairs git itself writes are read straight out of `git_dir` — the
+/// same base [`gix::Repository::state`] inspects, which keeps this worktree-
+/// aware — exactly as git's own prompt does:
+///
+/// - `rebase-merge/msgnum` + `rebase-merge/end` — the merge backend, used by
+///   both plain and interactive rebases.
+/// - `rebase-apply/next` + `rebase-apply/last` — the apply backend
+///   (`git rebase --apply`).
+///
+/// A missing, unreadable, or unparseable counter degrades to `None` rather than
+/// failing the whole indicator: the operation is still worth surfacing without
+/// its `current/total` clause.
+fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
+    /// Both counter pairs, in the order [`gix::Repository::state`] resolves the
+    /// directories they live in.
+    const COUNTERS: [(&str, &str); 2] = [
+        ("rebase-merge/msgnum", "rebase-merge/end"),
+        ("rebase-apply/next", "rebase-apply/last"),
+    ];
+
+    let read = |name: &str| -> Option<u32> {
+        std::fs::read_to_string(git_dir.join(name))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+
+    COUNTERS.iter().find_map(|&(current, total)| {
+        Some(StepProgress {
+            current: read(current)?,
+            total: read(total)?,
+        })
+    })
 }
 
 /// Everything one working-tree status walk produces: the `FileEntry` rows plus

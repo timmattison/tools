@@ -51,25 +51,13 @@ pub struct UpstreamStatus {
 /// present. Detection lives in `repo::operation_state`; rendering lives in
 /// `render_operation_line`.
 ///
-/// `Merge` is populated in production by `repo::operation_state`; the `Rebase`
-/// variant is plumbing constructed only by tests until the rebase slice wires
-/// rebase detection. In non-test builds nothing constructs `Rebase` yet, so
-/// `-D dead_code` would fire on that variant under `--all-targets`; the
-/// per-variant `allow` suppresses only that, and falls away once rebase
-/// detection lands.
+/// Both variants are populated in production by `repo::operation_state`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     /// A merge is in progress. `conflicts` is the number of unmerged paths.
     Merge { conflicts: u32 },
     /// A rebase is in progress. `step` is git's `current/total` progress when
     /// readable (may be `None`); `conflicts` is the number of unmerged paths.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "rebase plumbing: its detection/consumer lands in the rebase slice; only tests construct this variant today"
-        )
-    )]
     Rebase {
         step: Option<StepProgress>,
         conflicts: u32,
@@ -77,13 +65,6 @@ pub enum Operation {
 }
 
 /// Git's `current`/`total` rebase step counters (step 3 of 10 -> `3/10`).
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "constructed only by rebase render tests until the rebase slice wires rebase detection"
-    )
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StepProgress {
     pub current: u32,
