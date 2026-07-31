@@ -71,6 +71,19 @@ impl TestRepo {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
+    /// Write `contents` to `name` and leave it there uncommitted.
+    ///
+    /// Dirties the working tree the way a developer mid-edit does - a tracked
+    /// file modified, or a new file never added - which is the state a replay
+    /// cannot see, because it simulates from HEAD.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixture file cannot be written.
+    pub fn write_file(&self, name: &str, contents: &str) {
+        std::fs::write(self.dir.path().join(name), contents).expect("write fixture file");
+    }
+
     /// Write `contents` to `name` and commit it.
     ///
     /// # Panics
@@ -88,7 +101,7 @@ impl TestRepo {
     /// Panics if a fixture file cannot be written or if git fails.
     pub fn commit_files(&self, files: &[(&str, &str)], message: &str) {
         for (name, contents) in files {
-            std::fs::write(self.dir.path().join(name), contents).expect("write fixture file");
+            self.write_file(name, contents);
             self.git(&["add", name]);
         }
         self.git(&["commit", "-q", "-m", message]);
