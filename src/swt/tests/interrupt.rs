@@ -326,10 +326,13 @@ fn interrupted_create_leaves_nothing_behind(signal: c_int, expected_status: i32)
     let started = scratch.path().join("check-started");
     write_swt_check(repo.path(), &stalling_check(&started));
     let name = unique("interrupted");
-    let worktree = repo.siblings().join(format!("{name}.swt"));
 
     let mut run = RunningSwt::spawn(repo.path(), &["create", &name], None);
     run.wait_for(&started, "the green check to start");
+    // The worktree's name carries a token minted inside the child, so it is
+    // found rather than predicted — and by now it exists, because `create`
+    // builds before it checks and the check has announced itself.
+    let worktree = repo.sole_created_worktree(&name);
     assert!(
         worktree.is_dir(),
         "precondition: create must build the worktree before checking it"
@@ -388,10 +391,10 @@ fn a_second_interrupt_cannot_truncate_the_teardown_the_first_asked_for() {
     write_swt_check(repo.path(), &stalling_check(&started));
     let shim = TeardownShim::new(scratch.path());
     let name = unique("reinterrupted");
-    let worktree = repo.siblings().join(format!("{name}.swt"));
 
     let mut run = RunningSwt::spawn(repo.path(), &["create", &name], Some(&shim.dir));
     run.wait_for(&started, "the green check to start");
+    let worktree = repo.sole_created_worktree(&name);
     assert!(
         worktree.is_dir(),
         "precondition: create must build the worktree before checking it"

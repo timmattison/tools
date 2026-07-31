@@ -14,9 +14,13 @@
 mod support;
 
 use std::fs;
-use std::process::{Command, Output};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Output, Stdio};
 
-use support::{exiting_check, run_swt, unique, write_swt_check, TestRepo, SWT_CHECK, TRACKED_FILE};
+use support::{
+    exiting_check, git, run_swt, swt_command, unique, write_swt_check, TestRepo, SWT_CHECK,
+    TRACKED_FILE, WORKTREE_SUFFIX,
+};
 
 /// A check that records the directory it ran in. `pwd -P` asks the kernel rather
 /// than trusting an inherited `PWD`, so the answer is the cwd `swt` chose.
@@ -49,10 +53,65 @@ fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A file a subagent commits, so a merge has work to bring back.
+const SUBAGENT_FILE: &str = "subagent-only.txt";
+
+/// How many concurrent runs the collision case fans out. Two is enough to make a
+/// shared name a shared resource, which is the whole of the bug.
+const CONCURRENT_RUNS: usize = 2;
+
 /// The `git branch --list` pattern matching every branch a `swt create <name>`
 /// could have left behind.
 fn branch_pattern(name: &str) -> String {
     format!("swt/{name}-*")
+}
+
+/// The uniqueness token in the directory `swt create <name>` built.
+///
+/// Panics when the path is not `<name>-<token>.swt`, because a path with no
+/// token in it is issue #284 exactly and deserves to be named as such.
+fn token_of_worktree(path: &Path, name: &str) -> String {
+    let file_name = path
+        .file_name()
+        .expect("a worktree path names a directory")
+        .to_string_lossy()
+        .into_owned();
+    file_name
+        .strip_prefix(&format!("{name}-"))
+        .and_then(|rest| rest.strip_suffix(WORKTREE_SUFFIX))
+        .unwrap_or_else(|| {
+            panic!("the worktree path must embed a uniqueness token, got {file_name:?}")
+        })
+        .to_string()
+}
+
+/// Reads a uniqueness token out of `text`: whatever runs between the first
+/// occurrence of `label` and the `terminator` after it.
+///
+/// The token is minted inside the child process, so a test can only ever read it
+/// back out of what the run said — which is also the only way to check that two
+/// *different* messages named the same one.
+fn token_after(text: &str, label: &str, terminator: &str) -> String {
+    let (_, rest) = text
+        .split_once(label)
+        .unwrap_or_else(|| panic!("no {label:?} in: {text}"));
+    let (token, _) = rest
+        .split_once(terminator)
+        .unwrap_or_else(|| panic!("no {terminator:?} after {label:?} in: {text}"));
+    token.to_string()
+}
+
+/// Starts a `swt create <name>` without waiting for it, with both streams
+/// captured. Spawning is separated from waiting so the collision case can have
+/// two runs genuinely overlap — waited on in turn, the second would simply find
+/// the first's finished work and the race would never be run.
+fn spawn_create(repo: &TestRepo, name: &str) -> Child {
+    swt_command(repo.path())
+        .args(["create", name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn swt create")
 }
 
 /// Sorted names of everything sitting beside the repository, so an orphaned
@@ -80,7 +139,6 @@ fn a_green_check_yields_a_worktree_a_branch_and_only_the_path_on_stdout() {
     let repo = TestRepo::new();
     write_swt_check(repo.path(), &exiting_check(0));
     let name = unique("green");
-    let expected = repo.siblings().join(format!("{name}.swt"));
 
     let output = run_swt(repo.path(), &["create", &name]);
     let stderr = stderr_of(&output);
@@ -90,15 +148,16 @@ fn a_green_check_yields_a_worktree_a_branch_and_only_the_path_on_stdout() {
         Some(0),
         "a green check must produce a worktree: {stderr}"
     );
+    let created = repo.sole_created_worktree(&name);
     assert_eq!(
         stdout_of(&output),
-        format!("{}\n", expected.display()),
+        format!("{}\n", created.display()),
         "stdout carries the path and nothing else, so a caller can capture it"
     );
     assert!(
-        expected.is_dir(),
+        created.is_dir(),
         "the verified worktree must still be there at {}",
-        expected.display()
+        created.display()
     );
     let branches = repo.branches(&branch_pattern(&name));
     assert_eq!(
@@ -106,9 +165,134 @@ fn a_green_check_yields_a_worktree_a_branch_and_only_the_path_on_stdout() {
         1,
         "exactly one branch should have been created, got {branches:?}"
     );
+    // The token is what makes a second run of the same name possible at all, and
+    // it has to be the *same* token in both names — a directory and a branch
+    // keyed differently would be two worktrees wearing one name.
+    assert_eq!(
+        branches[0],
+        format!("swt/{name}-{}", token_of_worktree(&created, &name)),
+        "the worktree directory and its branch must be keyed on one token"
+    );
+}
+
+// The bug issue #284 names. `swt` exists to make *parallel* TDD safe, and the one
+// resource two concurrent `swt create <same-name>` calls shared was the worktree
+// directory — the only name that was not keyed for uniqueness. In parallel the
+// second `git worktree add` either fails outright or, worse, two agents believe
+// they own one directory. No merge lock applies to `create`, so this really is
+// two runs at once.
+#[test]
+fn concurrent_creates_of_one_name_each_get_their_own_worktree_and_branch() {
+    let repo = TestRepo::new();
+    write_swt_check(repo.path(), &exiting_check(0));
+    let name = unique("concurrent");
+
+    // Every run started before any of them is waited on: that overlap is the
+    // test.
+    let running: Vec<Child> = (0..CONCURRENT_RUNS)
+        .map(|_| spawn_create(&repo, &name))
+        .collect();
+    let finished: Vec<Output> = running
+        .into_iter()
+        .map(|run| run.wait_with_output().expect("swt create should finish"))
+        .collect();
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for (index, output) in finished.iter().enumerate() {
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "concurrent run {index} of {CONCURRENT_RUNS} failed: {}",
+            stderr_of(output)
+        );
+        paths.push(PathBuf::from(stdout_of(output).trim()));
+    }
+    paths.sort();
+    paths.dedup();
+    assert_eq!(
+        paths.len(),
+        CONCURRENT_RUNS,
+        "concurrent runs of one name collided on the worktree directory: {paths:?}"
+    );
+    for path in &paths {
+        assert!(
+            path.is_dir(),
+            "every concurrent run's worktree must survive, {} did not",
+            path.display()
+        );
+    }
+    assert_eq!(
+        repo.created_worktrees(&name),
+        paths,
+        "the directories beside the repository must be exactly the ones reported"
+    );
+
+    let mut branches = repo.branches(&branch_pattern(&name));
+    branches.sort();
+    branches.dedup();
+    assert_eq!(
+        branches.len(),
+        CONCURRENT_RUNS,
+        "concurrent runs of one name collided on the branch: {branches:?}"
+    );
+    // Each run's two names still belong to each other, which is what makes a
+    // stray directory attributable to a branch afterwards.
+    for path in &paths {
+        let branch = format!("swt/{name}-{}", token_of_worktree(path, &name));
+        assert!(
+            branches.contains(&branch),
+            "no branch {branch} for worktree {}: {branches:?}",
+            path.display()
+        );
+    }
+}
+
+// The path format is `create`'s business and nobody else's: `merge` is handed the
+// worktree path and reads the branch out of that worktree's own HEAD, so it never
+// parses either name. Pinned rather than assumed, because "merge is unaffected"
+// is the claim that lets the path format change at all.
+#[test]
+fn merge_takes_a_path_create_printed_and_removes_the_branch_it_names() {
+    let repo = TestRepo::new();
+    write_swt_check(repo.path(), &exiting_check(0));
+    let name = unique("mergeable");
+
+    let created = run_swt(repo.path(), &["create", &name]);
+    assert_eq!(
+        created.status.code(),
+        Some(0),
+        "fixture precondition: create must succeed: {}",
+        stderr_of(&created)
+    );
+    let worktree = PathBuf::from(stdout_of(&created).trim());
+
+    // Work to bring back, so the merge is a real fast-forward and not a no-op.
+    fs::write(worktree.join(SUBAGENT_FILE), "subagent\n").expect("subagent fixture file");
+    git(&worktree, &["add", "--", SUBAGENT_FILE]);
+    git(&worktree, &["commit", "--quiet", "-m", "subagent work"]);
+
+    let merged = run_swt(
+        repo.path(),
+        &["merge", worktree.to_str().expect("utf-8 fixture path")],
+    );
+    let stderr = stderr_of(&merged);
+
+    assert_eq!(
+        merged.status.code(),
+        Some(0),
+        "merge must accept the path create printed: {stderr}"
+    );
     assert!(
-        branches[0].starts_with(&format!("swt/{name}-")),
-        "the branch should be the name under the swt namespace: {branches:?}"
+        repo.path().join(SUBAGENT_FILE).exists(),
+        "the subagent's commit should have landed in the parent: {stderr}"
+    );
+    assert!(
+        !worktree.exists(),
+        "a merged worktree must be removed: {stderr}"
+    );
+    assert!(
+        repo.branches(&branch_pattern(&name)).is_empty(),
+        "a merged branch must be deleted: {stderr}"
     );
 }
 
@@ -121,7 +305,6 @@ fn the_check_runs_in_the_new_worktree_from_an_override_only_the_parent_has() {
     let repo = TestRepo::new();
     write_swt_check(repo.path(), RECORD_CWD_CHECK);
     let name = unique("inside");
-    let worktree = repo.siblings().join(format!("{name}.swt"));
 
     let output = run_swt(repo.path(), &["create", &name]);
     let stderr = stderr_of(&output);
@@ -131,6 +314,7 @@ fn the_check_runs_in_the_new_worktree_from_an_override_only_the_parent_has() {
         Some(0),
         "the parent's override should have been found and passed: {stderr}"
     );
+    let worktree = repo.sole_created_worktree(&name);
     let recorded = fs::read_to_string(worktree.join(CWD_MARKER))
         .expect("the check should have recorded its own cwd inside the new worktree");
     assert_eq!(
@@ -154,7 +338,6 @@ fn the_check_runs_in_the_new_worktree_from_an_override_only_the_parent_has() {
 fn a_repository_with_no_check_anywhere_fails_instead_of_reporting_a_vacuous_green() {
     let repo = TestRepo::new();
     let name = unique("nocheck");
-    let worktree = repo.siblings().join(format!("{name}.swt"));
 
     let output = run_swt(repo.path(), &["create", &name]);
     let stderr = stderr_of(&output);
@@ -172,10 +355,10 @@ fn a_repository_with_no_check_anywhere_fails_instead_of_reporting_a_vacuous_gree
         stderr.contains(&repo.path().display().to_string()),
         "the override belongs at the parent root, so that is the path to name: {stderr}"
     );
-    assert!(
-        !worktree.exists(),
-        "an unverified worktree must not survive at {}",
-        worktree.display()
+    assert_eq!(
+        repo.created_worktrees(&name),
+        Vec::<PathBuf>::new(),
+        "an unverified worktree must not survive"
     );
     assert!(
         repo.branches(&branch_pattern(&name)).is_empty(),
@@ -191,7 +374,6 @@ fn a_red_check_tears_the_worktree_and_the_branch_down_and_says_so() {
     let repo = TestRepo::new();
     write_swt_check(repo.path(), &exiting_check(1));
     let name = unique("red");
-    let worktree = repo.siblings().join(format!("{name}.swt"));
 
     let output = run_swt(repo.path(), &["create", &name]);
     let stderr = stderr_of(&output);
@@ -205,19 +387,33 @@ fn a_red_check_tears_the_worktree_and_the_branch_down_and_says_so() {
         stderr.contains("HEAD not green:"),
         "the red verdict should be reported: {stderr}"
     );
-    assert!(
-        !worktree.exists(),
-        "a red check left an orphaned worktree at {}: {stderr}",
-        worktree.display()
+    assert_eq!(
+        repo.created_worktrees(&name),
+        Vec::<PathBuf>::new(),
+        "a red check left an orphaned worktree: {stderr}"
     );
     assert!(
         repo.branches(&branch_pattern(&name)).is_empty(),
         "a red check left an orphaned branch: {stderr}"
     );
+    // The worktree is gone, so what it was called can only be read back out of
+    // the report — which is also the only place the two names appear together,
+    // and therefore the only place a run can be caught keying them differently.
+    let reported_path = format!(
+        "Cleaned up worktree {}/{name}-",
+        repo.siblings().display()
+    );
+    let path_token = token_after(&stderr, &reported_path, WORKTREE_SUFFIX);
+    let branch_token = token_after(&stderr, &format!(" and branch swt/{name}-"), ".");
+    assert_eq!(
+        path_token, branch_token,
+        "the cleaned-up directory and branch must have been keyed on one token: {stderr}"
+    );
     assert!(
         stderr.contains(&format!(
-            "Cleaned up worktree {} and branch swt/{name}-",
-            worktree.display()
+            "Cleaned up worktree {}/{name}-{path_token}{WORKTREE_SUFFIX} \
+             and branch swt/{name}-{branch_token}.",
+            repo.siblings().display()
         )),
         "a cleanup that happened should be reported: {stderr}"
     );
@@ -242,7 +438,6 @@ fn a_teardown_that_failed_is_never_reported_as_a_cleanup() {
     let repo = TestRepo::new();
     write_swt_check(repo.path(), SABOTAGE_CHECK);
     let name = unique("sabotaged");
-    let worktree = repo.siblings().join(format!("{name}.swt"));
 
     let output = run_swt(repo.path(), &["create", &name]);
     let stderr = stderr_of(&output);
@@ -253,6 +448,7 @@ fn a_teardown_that_failed_is_never_reported_as_a_cleanup() {
         "a red check must fail the command: {stderr}"
     );
     // The claim would only be a lie if the orphans really are orphans.
+    let worktree = repo.sole_created_worktree(&name);
     assert!(
         worktree.exists(),
         "fixture precondition: {} should have survived teardown",
@@ -296,7 +492,6 @@ fn uncommitted_parent_state_cannot_fake_a_green() {
     fs::write(repo.path().join(TRACKED_FILE), PARENT_EDIT).expect("uncommitted parent edit");
     let check = write_swt_check(repo.path(), NEEDS_PARENT_EDIT_CHECK);
     let name = unique("dirty");
-    let worktree = repo.siblings().join(format!("{name}.swt"));
 
     // Mutation guard: run the very same check against the parent, where it must
     // pass. Without this the test could be passing because the check is simply
@@ -322,8 +517,9 @@ fn uncommitted_parent_state_cannot_fake_a_green() {
         stderr.contains("HEAD not green:"),
         "the red verdict should be reported: {stderr}"
     );
-    assert!(
-        !worktree.exists(),
+    assert_eq!(
+        repo.created_worktrees(&name),
+        Vec::<PathBuf>::new(),
         "the unverified worktree must be gone: {stderr}"
     );
     assert!(

@@ -8,8 +8,9 @@
 //! drifted would reintroduce each failure mode silently:
 //!
 //! - **The repository is a subdirectory of its [`TempDir`], never the temp dir
-//!   itself.** `swt create` places a new worktree at `<repo>/../<name>.swt` — a
-//!   *sibling* of the repo root. With the repo at the temp dir root that sibling
+//!   itself.** `swt create` places a new worktree at
+//!   `<repo>/../<name>-<token>.swt` — a *sibling* of the repo root. With the
+//!   repo at the temp dir root that sibling
 //!   would land in the shared system temp directory, where it escapes cleanup
 //!   and where two concurrent runs of the same test collide on it.
 //!   [`TestRepo::siblings`] is that parent directory, and it is inside the
@@ -57,6 +58,9 @@ pub const TRACKED_FILE: &str = "tracked.txt";
 
 /// Basename of the per-developer green-check override script.
 pub const SWT_CHECK: &str = ".swt-check";
+
+/// Suffix every worktree directory `swt create` builds carries.
+pub const WORKTREE_SUFFIX: &str = ".swt";
 
 /// Local git config every fixture pins, so a fixture behaves the same whatever
 /// the developer's global config says. `core.excludesFile` matters as much as
@@ -253,6 +257,47 @@ impl TestRepo {
             "worktree", "add", "--quiet", "-b", &branch, path_arg, "HEAD",
         ]);
         LinkedWorktree { path, branch }
+    }
+
+    /// Every directory beside the repository that a `swt create <name>` could
+    /// have left behind, sorted.
+    ///
+    /// The worktree path carries a uniqueness token minted inside the child
+    /// process, so a test cannot predict it and has to go looking. The scan
+    /// deliberately matches the un-tokenized `<name>.swt` as well as
+    /// `<name>-<token>.swt`: a regression that dropped the token again would
+    /// otherwise walk straight past every "nothing survived" assertion by
+    /// leaving an orphan under a name the scan was not looking for.
+    pub fn created_worktrees(&self, name: &str) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = fs::read_dir(&self.siblings)
+            .expect("the fixture's sibling directory should be readable")
+            .filter_map(|entry| {
+                let entry = entry.expect("sibling directory entry");
+                let file_name = entry.file_name().to_string_lossy().into_owned();
+                let stem = file_name.strip_suffix(WORKTREE_SUFFIX)?;
+                let belongs = stem == name
+                    || stem
+                        .strip_prefix(name)
+                        .is_some_and(|token| token.starts_with('-'));
+                belongs.then(|| entry.path())
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The one worktree `swt create <name>` left beside the repository.
+    ///
+    /// Panics when there is not exactly one, naming what was found instead —
+    /// "none" and "two" are different bugs and deserve different messages.
+    pub fn sole_created_worktree(&self, name: &str) -> PathBuf {
+        let mut found = self.created_worktrees(name);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one worktree for {name:?} beside the repository, found {found:?}"
+        );
+        found.remove(0)
     }
 
     /// Lists the branches matching a `git branch --list` pattern.

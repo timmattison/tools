@@ -19,6 +19,7 @@
 //! with an orphaned worktree *and* branch they were told did not exist.
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,18 +38,18 @@ const WORKTREE_SUFFIX: &str = ".swt";
 /// Namespace every branch `swt` creates lives under.
 const BRANCH_PREFIX: &str = "swt";
 
-/// Radix the branch's timestamp suffix is spelled in — the Rust spelling of the
+/// Radix the uniqueness token is spelled in — the Rust spelling of the
 /// original's `Date.now().toString(36)`. Base 36 is the largest radix `char`
-/// digits cover, and keeps a millisecond timestamp to eight compact characters
-/// that are all legal in both a branch name and a path.
-const BRANCH_SUFFIX_RADIX: u32 = 36;
+/// digits cover, and keeps the token to a handful of compact characters that are
+/// all legal in both a branch name and a path component.
+const TOKEN_RADIX: u32 = 36;
 
 /// Spells a number in lowercase base 36.
 ///
 /// `value` is the number to spell. Returns its digits, most significant first;
 /// zero is `"0"` rather than the empty string.
 fn base36(mut value: u128) -> String {
-    let radix = u128::from(BRANCH_SUFFIX_RADIX);
+    let radix = u128::from(TOKEN_RADIX);
     let mut digits = String::new();
     // Division peels the digits off least-significant first, so they are pushed
     // in reverse and the string is flipped once at the end — cheaper and clearer
@@ -62,7 +63,7 @@ fn base36(mut value: u128) -> String {
         digits.push(
             u32::try_from(remainder)
                 .ok()
-                .and_then(|digit| char::from_digit(digit, BRANCH_SUFFIX_RADIX))
+                .and_then(|digit| char::from_digit(digit, TOKEN_RADIX))
                 .unwrap_or('0'),
         );
         if value == 0 {
@@ -72,39 +73,107 @@ fn base36(mut value: u128) -> String {
     digits.chars().rev().collect()
 }
 
-/// Milliseconds since the UNIX epoch, the quantity the branch suffix spells.
+/// Milliseconds since the UNIX epoch, half of what the uniqueness token spells.
 ///
 /// A clock somehow set before the epoch yields `0` rather than killing the
-/// command: the suffix exists to distinguish two runs, and even a useless one is
-/// a better outcome than refusing to create a worktree over a clock reading.
+/// command: the token exists to distinguish two runs, and even a useless reading
+/// is a better outcome than refusing to create a worktree over one.
 fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since_epoch| since_epoch.as_millis())
 }
 
-/// Names the directory a worktree called `name` belongs in: a sibling of the
-/// repository root, so worktrees sit beside the repo rather than inside it,
-/// where git would have to be told to ignore them.
-///
-/// `root` is the repository root and `name` the validated worktree name.
-fn worktree_path(root: &Path, name: &WorktreeName) -> PathBuf {
-    // The lexical parent, which is what resolving `<root>/../<name>.swt` comes
-    // to: git answers `--show-toplevel` with an absolute, already-normalized
-    // path, so there is no `..` component left for a lexical step to get wrong.
-    // A root with nothing above it stands in for itself, exactly as path
-    // resolution treats `/..`.
-    root.parent()
-        .unwrap_or(root)
-        .join(format!("{name}{WORKTREE_SUFFIX}"))
+/// A token that distinguishes one `swt create` invocation from every other,
+/// minted once per run and spelled in base 36.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UniqueToken(String);
+
+impl UniqueToken {
+    /// Mints the token for *this* invocation, from this process's id and the
+    /// current time.
+    fn mint() -> Self {
+        Self::from_parts(std::process::id(), now_millis())
+    }
+
+    /// Mints a token from an explicit process id and millisecond timestamp.
+    ///
+    /// The pure seam behind [`UniqueToken::mint`]: it takes both readings as
+    /// arguments so the property that actually matters — two processes minting
+    /// in the same millisecond still get different tokens — can be pinned
+    /// without racing two real clocks.
+    fn from_parts(pid: u32, millis: u128) -> Self {
+        // Deliberately still the pre-fix spelling: the timestamp alone. The
+        // failing tests that go with this commit are what make the missing pid
+        // a behavioral fact rather than a claim.
+        let _ = pid;
+        Self(base36(millis))
+    }
 }
 
-/// Names the branch a fresh worktree is created on.
+impl fmt::Display for UniqueToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The two names one `swt create` invocation brings into existence: the worktree
+/// directory and the branch checked out in it.
 ///
-/// The timestamp suffix is what keeps two worktrees of the same name from
-/// naming the same branch. `name` is the validated worktree name.
-fn branch_name(name: &WorktreeName) -> String {
-    format!("{BRANCH_PREFIX}/{name}-{}", base36(now_millis()))
+/// They are minted together, from one [`UniqueToken`], because that is the whole
+/// guarantee — a path and a branch keyed on *different* tokens would be two
+/// worktrees wearing one name, and two callers picking their own tokens is
+/// exactly how that happens. There is no way to build one of these with a token
+/// in only one of the two names.
+struct WorktreeNaming {
+    /// The worktree directory, beside the repository root.
+    path: PathBuf,
+    /// The branch checked out in it.
+    branch: String,
+}
+
+impl WorktreeNaming {
+    /// Names the worktree and branch for this invocation, minting the token they
+    /// share.
+    ///
+    /// `root` is the repository root and `name` the validated worktree name.
+    fn mint(root: &Path, name: &WorktreeName) -> Self {
+        Self::with_token(root, name, &UniqueToken::mint())
+    }
+
+    /// Names both from a token supplied by the caller — a pure function of
+    /// `(root, name, token)`, so the naming can be pinned without a clock, a
+    /// repository or a subprocess.
+    fn with_token(root: &Path, name: &WorktreeName, token: &UniqueToken) -> Self {
+        Self {
+            // The lexical parent, which is what resolving `<root>/../<name>…`
+            // comes to: git answers `--show-toplevel` with an absolute,
+            // already-normalized path, so there is no `..` component left for a
+            // lexical step to get wrong. A root with nothing above it stands in
+            // for itself, exactly as path resolution treats `/..`.
+            //
+            // Deliberately still the pre-fix spelling: the bare name, with no
+            // token in it. This is the collision issue #284 describes, and the
+            // failing tests that go with this commit are what pin it.
+            path: root
+                .parent()
+                .unwrap_or(root)
+                .join(format!("{name}{WORKTREE_SUFFIX}")),
+            branch: format!("{BRANCH_PREFIX}/{name}-{token}"),
+        }
+    }
+
+    /// The worktree directory: a sibling of the repository root, so worktrees
+    /// sit beside the repo rather than inside it, where git would have to be told
+    /// to ignore them.
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The branch the worktree is created on.
+    fn branch(&self) -> &str {
+        &self.branch
+    }
 }
 
 /// Creates a subagent worktree named `raw_name`, branched from a green HEAD.
@@ -126,8 +195,11 @@ pub fn create(raw_name: &str) -> ExitCode {
     };
 
     let root = PathBuf::from(git_must(TOPLEVEL_ARGS, None));
-    let branch = branch_name(&name);
-    let path = worktree_path(&root, &name);
+    // One token, both names: minted here and nowhere else, so the directory and
+    // the branch a run leaves behind visibly belong to each other.
+    let naming = WorktreeNaming::mint(&root, &name);
+    let branch = naming.branch();
+    let path = naming.path();
 
     // The worktree comes first and the check runs inside it. `git worktree add`
     // populates it from HEAD, so what gets verified is the commit a subagent
@@ -137,7 +209,7 @@ pub fn create(raw_name: &str) -> ExitCode {
             OsStr::new("worktree"),
             OsStr::new("add"),
             OsStr::new("-b"),
-            OsStr::new(&branch),
+            OsStr::new(branch),
             path.as_os_str(),
             OsStr::new("HEAD"),
         ],
@@ -147,14 +219,14 @@ pub fn create(raw_name: &str) -> ExitCode {
     // minutes. Until it passes, `swt` owns removing it — including when the user
     // gives up and hits Ctrl-C, and including when the check panics: the hold is
     // a guard, so an unwind past this point takes the worktree with it.
-    let hold = hold_unverified_worktree(&root, &path, &branch);
+    let hold = hold_unverified_worktree(&root, path, branch);
 
     // Checked in the new worktree, configured from the parent: the `.swt-check`
     // override is an uncommitted per-developer file, so it exists only in `root`,
     // while the tree worth verifying is the fresh one. Swapping these two
     // directories is the difference between verifying HEAD and verifying
     // whatever the user happens to have half-written.
-    let green = is_green(&path, Some(&root));
+    let green = is_green(path, Some(&root));
     if !green.ok {
         // The verdict before the cleanup: why the worktree is going away matters
         // more than the fact that it did. The check's output already ends in a
@@ -163,7 +235,7 @@ pub fn create(raw_name: &str) -> ExitCode {
         // Asked for explicitly rather than left to `hold`'s destructor, because
         // this is the one path with something to *say* about the teardown. The
         // drop that follows finds nothing left to do — the removal is latched.
-        report_teardown(&path, &branch);
+        report_teardown(path, branch);
         return ExitCode::FAILURE;
     }
 
@@ -205,13 +277,31 @@ fn report_teardown(path: &Path, branch: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{base36, branch_name, worktree_path};
+    use super::{base36, UniqueToken, WorktreeNaming};
     use crate::git::validate_worktree_name;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
+
+    /// A repository root for the naming tests.
+    const ROOT: &str = "/repos/tools";
+
+    /// A stand-in token, so the naming tests read as the pure functions of
+    /// `(root, name, token)` that they are.
+    const TOKEN: &str = "abc123";
 
     /// A validated name for the helpers under test.
     fn name(raw: &str) -> crate::git::WorktreeName {
         validate_worktree_name(raw).expect("fixture name should validate")
+    }
+
+    /// A token spelled literally, for tests about what is done *with* a token
+    /// rather than about how one is minted.
+    fn token(raw: &str) -> UniqueToken {
+        UniqueToken(raw.to_string())
+    }
+
+    /// Names both halves of one invocation from a literal token.
+    fn naming(raw_name: &str, raw_token: &str) -> WorktreeNaming {
+        WorktreeNaming::with_token(Path::new(ROOT), &name(raw_name), &token(raw_token))
     }
 
     // The branch suffix has to be spelled exactly the way the TypeScript
@@ -237,40 +327,133 @@ mod tests {
     #[test]
     fn the_worktree_is_a_sibling_of_the_repository_root() {
         assert_eq!(
-            worktree_path(Path::new("/repos/tools"), &name("fix-parser")),
-            PathBuf::from("/repos/fix-parser.swt"),
+            naming("fix-parser", TOKEN).path(),
+            Path::new("/repos/fix-parser-abc123.swt"),
             "the worktree belongs beside the repository, not inside it"
         );
     }
 
     #[test]
     fn a_root_with_no_parent_still_names_a_worktree() {
+        let no_parent = WorktreeNaming::with_token(Path::new("/"), &name("x"), &token(TOKEN));
         assert_eq!(
-            worktree_path(Path::new("/"), &name("x")),
-            PathBuf::from("/x.swt"),
+            no_parent.path(),
+            Path::new("/x-abc123.swt"),
             "a root with nothing above it resolves '..' to itself, as path resolution does"
         );
     }
 
     // The branch is namespaced under `swt/` so a repository's own branches are
-    // never confused for a subagent's, and suffixed so two runs cannot name the
-    // same branch. Every character in the suffix has to stay inside the rule the
-    // name itself was validated against.
+    // never confused for a subagent's.
     #[test]
-    fn a_branch_is_the_name_under_the_swt_namespace_with_a_timestamp_suffix() {
-        let branch = branch_name(&name("fix-parser"));
-        let suffix = branch
+    fn a_branch_is_the_name_under_the_swt_namespace_with_the_token_suffixed() {
+        assert_eq!(naming("fix-parser", TOKEN).branch(), "swt/fix-parser-abc123");
+    }
+
+    // The heart of issue #284. The branch was already keyed for uniqueness and
+    // the path was not, so the one resource two concurrent runs of the same name
+    // actually shared — the directory — was the one nothing distinguished. Both
+    // names carry the token, and it is the *same* token: a path and a branch
+    // keyed differently would be two worktrees wearing one name.
+    #[test]
+    fn the_worktree_path_and_the_branch_carry_the_same_token() {
+        let naming = naming("fix-parser", TOKEN);
+        let file_name = naming
+            .path()
+            .file_name()
+            .expect("a worktree path names a directory")
+            .to_string_lossy()
+            .into_owned();
+        let path_token = file_name
+            .strip_prefix("fix-parser-")
+            .and_then(|rest| rest.strip_suffix(".swt"))
+            .unwrap_or_else(|| {
+                panic!("the worktree path must embed a uniqueness token, got {file_name:?}")
+            });
+        let branch_token = naming
+            .branch()
             .strip_prefix("swt/fix-parser-")
-            .unwrap_or_else(|| panic!("branch should be namespaced and suffixed, got {branch:?}"));
-        assert!(
-            !suffix.is_empty(),
-            "the suffix is what stops two runs naming one branch: {branch}"
+            .unwrap_or_else(|| panic!("branch should be namespaced, got {:?}", naming.branch()));
+        assert_eq!(
+            path_token, branch_token,
+            "the directory and the branch of one run must be keyed on one token"
         );
-        assert!(
-            suffix
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-            "a branch suffix must stay inside the worktree name rule: {branch}"
+        assert_eq!(path_token, TOKEN, "and it must be the token supplied");
+    }
+
+    // Two `swt create <same-name>` runs differ only in their token, so the token
+    // is the only thing that can keep them apart — in *both* names. Before the
+    // fix the paths were equal, which is precisely the collision.
+    #[test]
+    fn one_name_with_two_tokens_names_two_worktrees_and_two_branches() {
+        let first = naming("fix-parser", "aaaaaa");
+        let second = naming("fix-parser", "bbbbbb");
+        assert_ne!(
+            first.path(),
+            second.path(),
+            "two runs of one name must not resolve to one directory"
         );
+        assert_ne!(
+            first.branch(),
+            second.branch(),
+            "two runs of one name must not resolve to one branch"
+        );
+    }
+
+    // The secondary issue #284 raises: a token spelled from the clock alone
+    // collides whenever an orchestrator fans two runs out inside the same
+    // millisecond, which is exactly when it is fanning them out at all. The pid
+    // is what makes them distinct, and it is taken as an argument here so the
+    // property is a fact about the function rather than a race the test hopes to
+    // win.
+    #[test]
+    fn two_processes_minting_in_the_same_millisecond_get_different_tokens() {
+        let millis: u128 = 1_706_651_234_567;
+        assert_ne!(
+            UniqueToken::from_parts(4242, millis),
+            UniqueToken::from_parts(4243, millis),
+            "two pids in one millisecond must not mint one token"
+        );
+        assert_ne!(
+            UniqueToken::from_parts(4242, millis),
+            UniqueToken::from_parts(4242, millis + 1),
+            "one pid across two milliseconds must not mint one token"
+        );
+        assert_eq!(
+            UniqueToken::from_parts(4242, millis),
+            UniqueToken::from_parts(4242, millis),
+            "the same readings must mint the same token, or nothing is a function"
+        );
+    }
+
+    // The token is spliced into a branch name and a path component without any
+    // further escaping, so every character it can produce has to be legal in
+    // both — which is the whole reason it is spelled in base 36.
+    #[test]
+    fn a_token_is_base36_and_legal_in_both_a_branch_name_and_a_path_component() {
+        let readings: [(u32, u128); 4] = [
+            (1, 0),
+            (u32::from(u16::MAX), 1_706_651_234_567),
+            (u32::MAX, 1_706_651_234_567),
+            (99_999, u128::from(u64::MAX)),
+        ];
+        for (pid, millis) in readings {
+            let token = UniqueToken::from_parts(pid, millis).to_string();
+            assert!(
+                !token.is_empty(),
+                "an empty token distinguishes nothing: pid {pid}, millis {millis}"
+            );
+            assert!(
+                token
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "a token must be base 36: {token:?}"
+            );
+            assert!(
+                validate_worktree_name(&format!("fix-parser-{token}")).is_some(),
+                "a name with the token spliced in must stay inside the worktree name rule: \
+                 {token:?}"
+            );
+        }
     }
 }
