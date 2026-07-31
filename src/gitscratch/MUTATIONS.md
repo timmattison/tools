@@ -35,6 +35,76 @@ not have to re-derive which guard belongs to which test.
 | `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `worktree remove --force` in teardown | `src/scratch.rs`, `impl Drop for Scratch` — drop the removal | remove |
 | `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | `commit.gpgsign=false` | `src/git.rs`, `Git::safety_config()` — drop the entry | remove |
 
+## What keeps each test honest
+
+A safety test can be incapable of failing and still look exactly like a safety
+test. Every test in this file ends in an assertion that something did *not*
+happen — no ref moved, no preimage was recorded, no hook fired, no worktree was
+left registered — and an assertion of that shape passes just as cheerfully when
+the thing it forbids was never possible in the first place. So each test needs
+something else alongside the assertion: evidence that it was ever at risk. There
+are two kinds of that evidence, they are easy to confuse, and they are not
+interchangeable.
+
+A **start-state control** proves the fixture begins where the test needs it to
+begin — the working tree really is dirty, `rr-cache` really is empty, exactly one
+worktree is really registered. Without one the closing assertion has no baseline
+and is measured against nothing. But a start-state control says nothing about
+whether the hazard was live. `rr-cache` can be empty at the end because it was
+empty at the start and *nothing ever tried to write to it*, which is precisely
+what the test would report if rerere had quietly stopped recording, if the config
+key had been renamed out from under the fixture, or if the write had gone
+somewhere the test is not looking. The test would be green, permanently, and
+green for a reason that has nothing to do with the guard.
+
+An **armed control** is the other half: proof that the hazard really would have
+happened had the guard not been there. It is a small deliberate demonstration,
+run through plain git before anything under test is involved — check the branch
+out and watch the planted hook drop its sentinel, make a commit and watch signing
+refuse it, ask git how many worktrees are registered while a live `Scratch` is
+holding one — after which the evidence is cleared and the real assertion runs
+against a clean slate again. A test carrying one cannot go quietly vacuous: on
+the day the hazard stops being armed, the control fails and names the reason,
+instead of the test passing and saying nothing.
+
+Arming is the half that rots. Guards get rewritten, git changes what it honours,
+fixtures get refactored by someone who did not know which line was load-bearing —
+and the failure mode is never a red test, it is a green one that has stopped
+meaning anything, in the file whose entire job is to be believed. The table below
+records what each test actually carries today. It is deliberately unflattering:
+several rows say the arming is missing, unasserted, or structural, because a
+registry that reports everything as fine is worth less than no registry at all.
+
+| Test | Start-state control | Armed control |
+| --- | --- | --- |
+| `never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled` | Implicit only. `repo.rev_parse` panics on a ref that does not resolve, so `main`, `left` and `right` provably exist before the replay. Nothing asserts the fixture's `rebase.updateRefs=true` was accepted. | **None.** Nothing shows the setting is live, and this is the only conflict-driving test with no `conflicts.files()` assertion, so a replay that replayed nothing passes too. Arming rests entirely on the mutation recorded below. |
+| `works_when_the_branches_are_checked_out_in_other_worktrees` | The two `repo.add_worktree` calls panic if git refuses, so both branches provably are checked out elsewhere when the replay starts. | **Structural, unasserted.** Those worktrees *are* the arming: git physically refuses a non-detached checkout of a branch held in another worktree, so dropping `--detach` cannot pass. `conflicts.files() == Files::new(1)`, `shared.txt` and `hunks() > Hunks::new(0)` stop an empty replay passing. But no assertion states the branches are held, so a change to `add_worktree` in `src/testing.rs` would disarm this silently. |
+| `never_disturbs_other_worktrees_whose_directories_are_temporarily_missing` | `assert!(admin_dir.is_dir(), "fixture must start with worktree state that could be lost")`. | **Partial.** The `expect("park the worktree directory")` rename physically creates the missing-directory condition a prune destroys, and the closing restore-then-`git status` proves what survived is a working worktree rather than a leftover directory. Nothing asserts git regarded the parked worktree as prunable while the replay ran; asserting `prunable` in `git worktree list` at that moment would close it. |
+| `never_records_a_rerere_preimage_even_when_rerere_is_enabled` | `assert!(!rr_cache.exists(), "fixture must start with nothing recorded, or this proves nothing")`, plus the `conflicts` assertions proving a genuine conflict was resolved. | **Missing.** Nothing here proves rerere was recording. A `rerere.enabled` git stopped honouring, or a config write that silently did nothing, leaves every assertion passing forever. The conflict assertions prove the replay happened, not that the hazard was live — that is the whole distinction, in one row. A follow-up commit adds the control on the hooks test's pattern: drive a conflict through plain git, assert `rr-cache` fills, clear it, re-assert empty. |
+| `never_fires_a_hook_from_the_developer_s_repository` | The sentinel directory is created empty, and after the control run `describe_tree(&sentinels)` is re-asserted `""` so the real assertion cannot mistake the control's evidence for the replay's. | **Full, and the model for the rest.** A `repo.checkout` pair through the fixture's own git must leave `post-checkout` behind — `"the planted hooks are not armed, so this test could only pass vacuously"` — before anything under test runs. Caveat: only `post-checkout` is proven to fire. `pre-rebase`, `post-rewrite` and `pre-merge-commit` are planted identically but never individually armed, and the last cannot fire from a rebase-only replay at all, which its own doc comment says. Non-Unix skips the test rather than passing it vacuously. |
+| `never_touches_the_real_working_tree_or_index` | Three, all explicit: `!before_status.is_empty()`, `!before_index.is_empty()`, and `before_branch == "main"` so a stray detach is visible. Plus the `conflicts` assertions. | **Structural, and un-armable in-test by design.** The file dirtied on purpose is `shared.txt`, the exact file both replayed branches rewrite, so a replay that escaped its scratch would have to collide with it. Arming that in-test means performing the damage the test exists to forbid; the mutation record below is the out-of-band substitute, and it is the reason this row is acceptable rather than merely unfinished. |
+| `never_leaves_a_scratch_worktree_registered_in_the_real_repository` | `before.lines().count() == 1` and `describe_tree(&worktrees_dir) == ""` — "or a leak has somewhere to hide". | **Full, twice over.** While the first `Scratch` is alive, `while_alive.lines().count() == 2` and `assert_ne!(describe_tree(&worktrees_dir), "")` — "or this test can only pass vacuously" — prove the harness really registers what teardown must remove. The third scope arms its own harder case separately: `!halted.success` and the `rebase-merge` path existing prove the scratch really was dropped mid-rebase. Only the first scope proves registration, though all three build a `Scratch` the same way. |
+| `replays_without_hanging_or_failing_when_commit_signing_is_enabled` | Implicit: `TestRepo::init` pins `commit.gpgsign=false` while building the fixture and signing is switched on afterwards, so the control below doubles as proof the config took. | **Full.** A plain `git commit --allow-empty` through the fixture must *fail* — `"commit signing is not armed ... a plain commit succeeded"` — and fail for the stated reason, `gpg failed to sign`. `--allow-empty` means arming leaves the fixture exactly as it found it. A second control lives inside `replay_under_signing`: the replayed commit must still be in `left..HEAD`, which catches a signing failure that came back disguised as a plausible answer. The hang branch cannot be armed at all — see the record below. |
+
+### The rule for the next test
+
+A new safety test in this crate is not finished when it goes green. It is
+finished when it carries an armed control, or when this table records in plain
+words why one cannot exist — and "I could not think of one" is not that reason.
+Two rows above are legitimate impossibilities, and they show the shape the reason
+has to take: the hang branch of the signing test would need a signing program
+that blocks, which no fixture may summon on a developer's machine, and the
+working-tree test would have to turn a replay loose in the real repository to
+prove it would do damage. Both fall back to the mutation record below, which is
+the same proof taken out of band, by hand, once.
+
+Two further things this table asks of you. Quote the assertion, so the next
+person can check the claim without re-deriving it from the test. And when the
+arming is *structural* — enforced by git or by the fixture's shape rather than by
+an assertion — say so rather than calling it armed, because structural arming is
+the kind that disappears without a sound: nothing fails at the moment it is lost,
+and the test keeps reporting green about a hazard that is no longer there.
+
 ## Why one of these runs backwards
 
 Seven of the eight guards are things the crate *does*, so breaking them means
