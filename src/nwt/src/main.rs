@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command, ExitStatus, Stdio};
 use std::thread;
@@ -43,6 +43,15 @@ const SKIP_DIRECTORIES: &[&str] = &[
     ".venv",
     "venv",
 ];
+
+/// Permission bits for `.env` files created in the new worktree (owner read/write only).
+///
+/// `.env` files hold secrets — API keys, database passwords, tokens. They must never
+/// land group- or world-readable, no matter how loose the main worktree's copy is.
+/// `fs::copy` would stamp the source's bits onto the destination, so the mode is set
+/// explicitly at creation time instead.
+#[cfg(unix)]
+const ENV_FILE_MODE: u32 = 0o600;
 
 /// Shell code to be installed by --shell-setup.
 ///
@@ -541,6 +550,35 @@ ENV FILE COPYING:
         .environment   - doesn't match the pattern
         Tracked files  - files already in git are never copied
 
+    A destination that already exists is never overwritten. If anything is already at the
+    destination path, nwt leaves it exactly as it found it and prints a line naming it:
+
+        Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)
+
+    A repo's 'post-checkout' hook lives in the shared git directory, so it runs during
+    'git worktree add' — before this copy. A hook that generates a worktree-specific .env
+    (a unique port, a unique database name, a freshly minted secret) would otherwise have
+    its work replaced by the main worktree's version. The worktree's own hook knows more
+    about that worktree than the main repo does, so nwt skips and says so.
+
+    The trade-off: nwt does not parse or merge .env files, so when the hook writes a
+    .env.local, the main worktree's .env.local does not reach the new worktree at all.
+    Keys that exist only in the main worktree's copy (DISABLE_AUTH, a shared API key)
+    will be missing, and you have to copy them over by hand. The per-file 'Kept existing:'
+    line is there so that divergence is discoverable. A trailing summary reports both
+    counts:
+
+        Copied 2 untracked .env files to new worktree
+        Kept 1 existing .env file already in the new worktree
+
+    Both the per-file lines and the summary are suppressed by --quiet.
+
+    On Unix, copied .env files are created at mode 0600 — owner read/write only — no
+    matter what the source file's mode is. A 0644 .env in the main worktree therefore no
+    longer propagates a world-readable secrets file into every worktree. The mode is
+    applied when the file is created, so the copy is never briefly readable by anyone
+    else. Windows has no equivalent mode; everything else behaves the same there.
+
     Use --no-copy-env to disable this for a single invocation, or set copy_env = false
     in ~/.nwt.toml to disable it by default.
 
@@ -686,6 +724,11 @@ struct Cli {
     /// .env.development) from the main worktree to the new worktree, preserving
     /// their relative paths. This is useful for development settings that shouldn't
     /// be committed to git.
+    ///
+    /// When copying is enabled, a destination that already exists (typically written
+    /// by a `post-checkout` hook during `git worktree add`) is kept as-is rather than
+    /// overwritten, and each copy is created at mode 0600 on Unix no matter what the
+    /// source file's mode is.
     ///
     /// Use this flag to disable this behavior for a single invocation, or set
     /// `copy_env = false` in ~/.nwt.toml to disable it by default.
@@ -1013,21 +1056,109 @@ fn get_tracked_files(repo_root: &Path) -> HashSet<PathBuf> {
     }
 }
 
+/// Outcome of an env-file copy pass, so callers (and tests) can see what
+/// happened without scraping stderr.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EnvCopySummary {
+    /// Files copied from the main worktree into the new worktree.
+    copied: usize,
+    /// Destinations that already existed and were deliberately left alone.
+    kept: usize,
+}
+
+/// Builds the user-facing line announcing a destination `.env` that was left alone.
+///
+/// The line states only the observed fact — the destination was already there — because
+/// the skip fires for *any* pre-existing file, not just one a post-checkout hook
+/// generated. A `.env.local` that is untracked in the main worktree but committed on the
+/// branch being checked out is placed there by `git worktree add` itself. The hook
+/// rationale is explained in the `--help` text and the README instead.
+fn kept_existing_message(relative_path: &Path) -> String {
+    format!(
+        "Kept existing: {} (already in the new worktree; not overwritten from main worktree)",
+        relative_path.display()
+    )
+}
+
+/// Reports a destination `.env` that already existed and was deliberately left alone.
+///
+/// Both the pre-flight existence check and the lost-the-race `AlreadyExists` path funnel
+/// through here so the two are worded identically — from the user's point of view they
+/// are the same outcome, and the wording lives in exactly one place.
+fn report_kept_existing(relative_path: &Path, quiet: bool) {
+    if !quiet {
+        eprintln!("{}", kept_existing_message(relative_path));
+    }
+}
+
+/// Copies a single `.env` file from `source` to `dest`, creating the destination
+/// exclusively and (on Unix) at mode 0600 — owner read/write only.
+///
+/// This deliberately does *not* use [`fs::copy`], which would both overwrite an existing
+/// destination and stamp the source's permission bits onto it.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::AlreadyExists`] if anything already exists at `dest` — the
+/// destination is never truncated or overwritten. Any other I/O error from opening
+/// `source`, creating `dest`, or streaming the bytes is returned as-is.
+fn copy_env_file(source: &Path, dest: &Path) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+
+    // create_new(true) is load-bearing twice over, and looks like removable ceremony:
+    //
+    // 1. Mode-at-creation. Combined with .mode() below, the file exists with 0600 from
+    //    the very first instant. The obvious alternative — copy, then
+    //    fs::set_permissions — leaves a window in which the secret is already on disk
+    //    wearing the source's bits (typically 0644). For a secrets file that window is
+    //    the entire point; anything scanning or racing the worktree during it wins.
+    //
+    // 2. TOCTOU. The caller checks symlink_metadata() before calling us, but a
+    //    post-checkout hook or a concurrent process can still create the destination
+    //    between that check and this open. create_new makes the open itself the atomic
+    //    test-and-create, so the loser of that race gets AlreadyExists instead of
+    //    silently clobbering a freshly generated worktree-specific .env. Note it also
+    //    refuses to follow a dangling symlink at dest, which would otherwise write
+    //    through to the symlink's target.
+    options.write(true).create_new(true);
+
+    // The mode is the only platform-varying part; everything else behaves identically
+    // on Windows, where the concept does not exist.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(ENV_FILE_MODE);
+    }
+
+    let mut reader = fs::File::open(source)?;
+    let mut writer = options.open(dest)?;
+    io::copy(&mut reader, &mut writer).map(|_| ())
+}
+
 /// Copies untracked .env files from the main worktree to the new worktree.
 ///
 /// This function:
 /// 1. Gets all tracked files from git in a single call (for performance)
 /// 2. Walks the main repo looking for `.env` or `.env.*` files (e.g., `.env.local`)
 /// 3. Skips the `.git` directory, tracked files, and unrelated dotfiles like `.envrc`
-/// 4. Copies untracked .env files to the same relative path in the new worktree
-/// 5. Creates parent directories as needed
-/// 6. Reports copied files unless quiet mode is enabled
+/// 4. Skips any destination that already exists, leaving it completely untouched —
+///    a `post-checkout` hook runs during `git worktree add` (before this copy), so a
+///    worktree-specific .env it generated must win over the main worktree's version
+/// 5. Copies the remaining untracked .env files to the same relative path in the new worktree
+/// 6. Creates parent directories as needed
+/// 7. Creates each copy exclusively and, on Unix, at mode 0600 (see [`copy_env_file`]), so a
+///    world-readable .env in the main worktree never propagates its permissions — and a
+///    destination that appears mid-pass is counted as kept rather than clobbered
+/// 8. Reports copied and kept files unless quiet mode is enabled
 ///
 /// Errors copying individual files are reported but don't stop the process.
-fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
+///
+/// Returns an [`EnvCopySummary`] recording how many files were copied and how many
+/// existing destinations were kept.
+fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) -> EnvCopySummary {
     // Get all tracked files in a single git call for performance
     let tracked_files = get_tracked_files(main_repo);
-    let mut copied_count = 0;
+    let mut summary = EnvCopySummary::default();
 
     for entry in WalkDir::new(main_repo)
         .follow_links(false) // Don't follow symlinks
@@ -1066,6 +1197,23 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
         };
         let dest_path = worktree.join(relative_path);
 
+        // Never clobber something the new worktree already has. Repo
+        // `post-checkout` hooks live in the shared git dir, so they run DURING
+        // `git worktree add` — before this copy — and a hook that generates a
+        // worktree-specific .env (unique port, unique DB name, freshly-minted
+        // secret) would otherwise have its work silently replaced.
+        //
+        // symlink_metadata(), not exists(): exists() follows symlinks and
+        // reports false for a broken one, and fs::copy would then write THROUGH
+        // the dangling symlink to its target — exactly the silent clobber this
+        // guard exists to prevent. symlink_metadata() answers "is there
+        // anything at this path", which is the question we actually mean.
+        if dest_path.symlink_metadata().is_ok() {
+            summary.kept += 1;
+            report_kept_existing(relative_path, quiet);
+            continue;
+        }
+
         // Create parent directories if needed (create_dir_all is idempotent)
         if let Some(parent) = dest_path.parent() {
             if let Err(e) = fs::create_dir_all(parent) {
@@ -1081,12 +1229,22 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
         }
 
         // Copy the file
-        match fs::copy(file_path, &dest_path) {
+        match copy_env_file(file_path, &dest_path) {
             Ok(_) => {
-                copied_count += 1;
+                summary.copied += 1;
                 if !quiet {
                     eprintln!("Copied: {}", relative_path.display());
                 }
+            }
+            // The race-loser twin of the symlink_metadata() check above: the
+            // destination did not exist when we looked, but existed by the time
+            // copy_env_file opened it (a post-checkout hook or a concurrent process
+            // got there first). Not dead code — it is the only thing standing
+            // between that race and a clobbered worktree .env. The outcome is
+            // identical to the pre-flight skip, so account for it identically.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                summary.kept += 1;
+                report_kept_existing(relative_path, quiet);
             }
             Err(e) => {
                 if !quiet {
@@ -1100,13 +1258,23 @@ fn copy_untracked_env_files(main_repo: &Path, worktree: &Path, quiet: bool) {
         }
     }
 
-    if copied_count > 0 && !quiet {
+    if summary.copied > 0 && !quiet {
         eprintln!(
             "Copied {} untracked .env file{} to new worktree",
-            copied_count,
-            if copied_count == 1 { "" } else { "s" }
+            summary.copied,
+            if summary.copied == 1 { "" } else { "s" }
         );
     }
+
+    if summary.kept > 0 && !quiet {
+        eprintln!(
+            "Kept {} existing .env file{} already in the new worktree",
+            summary.kept,
+            if summary.kept == 1 { "" } else { "s" }
+        );
+    }
+
+    summary
 }
 
 fn main() {
@@ -3190,6 +3358,25 @@ mod tests {
             fs::write(&path, content).expect("Failed to write file");
         }
 
+        /// Helper to read a file's permission bits (Unix only).
+        #[cfg(unix)]
+        fn mode_of(path: &Path) -> u32 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::metadata(path)
+                .expect("file should exist")
+                .permissions()
+                .mode()
+                & 0o777
+        }
+
+        /// Helper to chmod a file during test setup (Unix only).
+        #[cfg(unix)]
+        fn set_mode(path: &Path, mode: u32) {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .expect("Failed to set permissions");
+        }
+
         /// Helper to check if a file exists and has expected content.
         fn file_has_content(dir: &Path, name: &str, expected: &str) -> bool {
             let path = dir.join(name);
@@ -3444,6 +3631,324 @@ mod tests {
             assert!(
                 file_has_content(dest.path(), ".env.local", "UNTRACKED_SECRET=untracked"),
                 "Untracked .env.local should be copied"
+            );
+        }
+
+        #[test]
+        fn test_existing_dest_env_file_is_not_overwritten() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // The main worktree has one version of the file...
+            create_file(source.path(), ".env.local", "MAIN=from-main");
+            // ...and the new worktree already has its own, e.g. generated by a
+            // post-checkout hook during `git worktree add`.
+            create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.local", "WORKTREE=generated-by-hook"),
+                "Existing worktree .env.local must be left untouched, not overwritten from main"
+            );
+        }
+
+        #[test]
+        fn test_kept_file_is_not_counted_as_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env.local", "MAIN=from-main");
+            create_file(dest.path(), ".env.local", "WORKTREE=generated-by-hook");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert_eq!(
+                summary,
+                EnvCopySummary { copied: 0, kept: 1 },
+                "A skipped destination must count as kept, never as copied"
+            );
+        }
+
+        /// The skip fires for *any* pre-existing destination, not just one a
+        /// post-checkout hook generated. A `.env.local` that is untracked in the main
+        /// worktree but committed on the branch being checked out is placed there by
+        /// `git worktree add` itself, and the line must not tell the user that file was
+        /// "generated in worktree". The per-file line states the observed fact — the file
+        /// was already there — and leaves the hook rationale to the README and --help.
+        ///
+        /// Two assertions, because they fail for different reasons and neither subsumes
+        /// the other. The equality pins the exact user-facing contract, but on its own it
+        /// only enforces this test's *name* by convention: any reword breaks it with a
+        /// plain left/right mismatch, and the reflex repair is to paste the new string
+        /// into the expected value. Should that new wording happen to reintroduce the
+        /// false causal claim — "created by the worktree hook", say — the test would go
+        /// green again having silently re-admitted the exact defect it was written to
+        /// forbid. The `contains` check makes the named invariant mechanical rather than
+        /// advisory, so the bypass fails CI (see CLAUDE.md's enforced-helper rule).
+        ///
+        /// It is stated first deliberately: a reword that smuggles the claim back in
+        /// should fail with the *reason* it is wrong, not with a string diff a reader has
+        /// to decode. A benign reword still trips the equality below, which is where a
+        /// deliberate wording change belongs.
+        #[test]
+        fn test_kept_existing_message_does_not_claim_the_file_was_generated_in_the_worktree() {
+            let message = kept_existing_message(Path::new(".env.local"));
+
+            assert!(
+                !message.contains("generated in worktree"),
+                "The kept-existing line must not attribute the file to a post-checkout hook"
+            );
+
+            assert_eq!(
+                message,
+                "Kept existing: .env.local (already in the new worktree; not overwritten from main worktree)",
+                "The kept-existing line must report only that the destination already existed, not why"
+            );
+        }
+
+        /// The kept-existing line is quoted verbatim in three places: the format string
+        /// in [`kept_existing_message`], the ENV FILE COPYING sample inside `Cli`'s
+        /// `long_about`, and the README's `.env` section. Only the first is executable,
+        /// so only the first is naturally pinned — and the test above reaches it by
+        /// calling the function directly, which means it can never observe the other two.
+        ///
+        /// That gap has already produced a defect once. An earlier revision of the line
+        /// claimed the kept file was "generated in worktree", a causal claim that is false
+        /// whenever `git worktree add` itself checked the file out; fixing it required
+        /// hand-editing all three copies, and nothing but care stopped one from being
+        /// missed. A missed copy is worse than a stale comment: `--help` and the README
+        /// are where users go to understand the behavior, so the superseded wording would
+        /// keep asserting the false cause long after the program stopped printing it.
+        ///
+        /// This test closes that by making the docs assert the *runtime* string rather
+        /// than a hand-copied twin: it renders the line through `kept_existing_message`
+        /// and requires both documents to contain it byte-for-byte. Reword the format
+        /// string alone and this fails, naming which document drifted — the bypass fails
+        /// CI instead of relying on convention (see CLAUDE.md's enforced-helper rule).
+        ///
+        /// `include_str!` deliberately lives here, inside `#[cfg(test)]`, so the README's
+        /// ~100 KB is embedded in the test binary only and never in the shipped `nwt`.
+        #[test]
+        fn test_help_and_readme_samples_match_the_kept_existing_line() {
+            use clap::CommandFactory;
+
+            let sample = kept_existing_message(Path::new(".env.local"));
+
+            assert!(
+                Cli::command()
+                    .get_long_about()
+                    .expect("nwt sets long_about")
+                    .to_string()
+                    .contains(&sample),
+                "--help ENV FILE COPYING sample drifted from the runtime line: {sample}"
+            );
+
+            assert!(
+                include_str!("../../../README.md").contains(&sample),
+                "README sample drifted from the runtime line: {sample}"
+            );
+        }
+
+        #[test]
+        fn test_env_file_only_in_main_worktree_is_still_copied() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            // Nothing in the destination, so the copy must still happen.
+            create_file(source.path(), ".env.local", "MAIN=from-main");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env.local", "MAIN=from-main"),
+                "A .env file with no destination counterpart must still be copied"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary { copied: 1, kept: 0 },
+                "Copying must still be counted when nothing was skipped"
+            );
+        }
+
+        #[test]
+        fn test_mixed_copy_and_keep_counts() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "A=1");
+            create_file(source.path(), ".env.local", "B=2");
+            // Only .env.local already exists in the new worktree.
+            create_file(dest.path(), ".env.local", "B=already-here");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                file_has_content(dest.path(), ".env", "A=1"),
+                "Missing .env should be copied"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env.local", "B=already-here"),
+                "Pre-existing .env.local should be kept as-is"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary { copied: 1, kept: 1 },
+                "Copy and keep must be accounted separately in a single pass"
+            );
+        }
+
+        /// A `.env` holds secrets, so the copy in the new worktree must be owner-only
+        /// regardless of how loose the main worktree's permissions are.
+        #[cfg(unix)]
+        #[test]
+        fn test_copied_env_file_lands_at_0600() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "SECRET=value");
+            // A world-readable source is the whole point: fs::copy would propagate
+            // these bits into every worktree.
+            set_mode(&source.path().join(".env"), 0o644);
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert_eq!(
+                mode_of(&dest.path().join(".env")),
+                0o600,
+                "Copied .env must land at 0600 even when the source is 0644"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "SECRET=value"),
+                "Hardening the mode must not break the copy itself"
+            );
+        }
+
+        /// The parent-directory-creating path must harden the mode too.
+        #[cfg(unix)]
+        #[test]
+        fn test_copied_nested_env_file_lands_at_0600() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), "packages/api/.env", "NESTED=secret");
+            set_mode(&source.path().join("packages/api/.env"), 0o644);
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert_eq!(
+                mode_of(&dest.path().join("packages/api/.env")),
+                0o600,
+                "Nested .env must also land at 0600"
+            );
+            assert!(
+                file_has_content(dest.path(), "packages/api/.env", "NESTED=secret"),
+                "Nested .env content must still be copied"
+            );
+        }
+
+        /// Regression guard: the skip-existing path must never re-introduce the
+        /// permission downgrade by touching a destination it decided to keep.
+        #[cfg(unix)]
+        #[test]
+        fn test_existing_dest_env_keeps_its_own_mode() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "MAIN=from-main");
+            set_mode(&source.path().join(".env"), 0o644);
+            create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
+            set_mode(&dest.path().join(".env"), 0o600);
+
+            copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert_eq!(
+                mode_of(&dest.path().join(".env")),
+                0o600,
+                "A kept .env must keep its own 0600 mode, not inherit the source's 0644"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "WORKTREE=generated-by-hook"),
+                "A kept .env must keep its own content"
+            );
+        }
+
+        /// Pins the dangling-symlink case: a broken symlink at the destination must
+        /// never be written THROUGH, which would create the symlink's target and fill
+        /// it with the main worktree's secrets at whatever arbitrary path it names.
+        ///
+        /// Two independent layers prevent this, and this test pins their conjunction —
+        /// at least one must always survive:
+        ///
+        /// 1. The pre-flight `symlink_metadata()` guard in [`copy_untracked_env_files`].
+        ///    `exists()` follows symlinks and reports *false* for a broken one, so a
+        ///    guard written that way falls through; `symlink_metadata()` answers "is
+        ///    there anything at this path", which is what the guard actually means.
+        /// 2. `create_new(true)` in [`copy_env_file`]. `O_CREAT | O_EXCL` refuses to
+        ///    follow a symlink at all, dangling or not, and fails with `EEXIST`.
+        ///
+        /// Verified by mutation, all four combinations: degrading *either* layer alone
+        /// still passes (the other catches it), and degrading *both* — `exists()` plus
+        /// `create(true)` — fails on the first assertion below. So this test cannot be
+        /// satisfied vacuously, but it also will not fail on a single-layer regression;
+        /// the redundancy is deliberate defense in depth, not an accident.
+        #[cfg(unix)]
+        #[test]
+        fn test_dangling_symlink_dest_is_never_written_through() {
+            use std::os::unix::fs::symlink;
+
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+            // The symlink's target lives in its own TempDir, so a concurrent copy of
+            // this test can never race us over the same "must not exist" path.
+            let target_dir = TempDir::new().expect("Failed to create temp dir");
+            let target_path = target_dir.path().join("write-through-victim.env");
+
+            create_file(source.path(), ".env", "SECRET=from-main");
+            let dest_path = dest.path().join(".env");
+            symlink(&target_path, &dest_path).expect("Failed to create dangling symlink");
+
+            let summary = copy_untracked_env_files(source.path(), dest.path(), true);
+
+            assert!(
+                !target_path.exists(),
+                "Nothing may be created at a dangling symlink's target — writing through it would leak the main worktree's secrets to an arbitrary path"
+            );
+            assert!(
+                fs::symlink_metadata(&dest_path)
+                    .expect("The destination symlink must still be there")
+                    .file_type()
+                    .is_symlink(),
+                "The destination must still be the untouched symlink, not a regular file that replaced it"
+            );
+            assert_eq!(
+                summary,
+                EnvCopySummary { copied: 0, kept: 1 },
+                "A dangling symlink at the destination must count as kept, never as copied"
+            );
+        }
+
+        /// Pins the atomicity claim: the destination is created exclusively, so a
+        /// file that appears between the skip check and the open is never clobbered.
+        #[test]
+        fn test_copy_env_file_refuses_to_overwrite_existing_dest() {
+            let source = TempDir::new().expect("Failed to create temp dir");
+            let dest = TempDir::new().expect("Failed to create temp dir");
+
+            create_file(source.path(), ".env", "MAIN=from-main");
+            create_file(dest.path(), ".env", "WORKTREE=generated-by-hook");
+
+            let result = copy_env_file(&source.path().join(".env"), &dest.path().join(".env"));
+
+            let error = result.expect_err("copy_env_file must refuse an existing destination");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists,
+                "Refusal must be reported as AlreadyExists so callers can treat it as a keep"
+            );
+            assert!(
+                file_has_content(dest.path(), ".env", "WORKTREE=generated-by-hook"),
+                "The refused destination must be left byte-for-byte intact"
             );
         }
 
