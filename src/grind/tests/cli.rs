@@ -274,6 +274,109 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
     );
 }
 
+/// One of the three build-state words `CLAUDE.md` allows after the hash.
+const BUILD_STATES: [&str; 3] = ["clean", "dirty", "unknown"];
+
+/// How many characters of the commit hash the repository's version format
+/// carries.
+const HASH_LENGTH: usize = 7;
+
+/// Assert `line` has every part of the version format this repository requires:
+/// `grind 0.1.0 (abc1234, clean)`.
+///
+/// Checked as a *shape* rather than against a literal, because two of the four
+/// parts move on their own: the hash changes with every commit and the build
+/// state with every unstaged edit, so a golden string would fail on the next
+/// commit for a reason that has nothing to do with the format.
+///
+/// All four parts are checked, because the mistake the repository rule exists
+/// to prevent is dropping one of them — a tool wired up with clap's bare
+/// `version` prints `grind 0.1.0` and nothing else, which tells a developer
+/// holding a binary the release it claims to be but not which build it actually
+/// is. A substring assertion would pass for exactly that binary.
+fn assert_version_line(line: &str) {
+    let (name, rest) = line
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("the version line must name the tool, got {line:?}"));
+    assert_eq!(
+        name, "grind",
+        "the version line must start with the tool's own name, got {line:?}"
+    );
+
+    let (release, build) = rest.split_once(' ').unwrap_or_else(|| {
+        panic!("the version line must carry the build alongside the release, got {line:?}")
+    });
+
+    let components: Vec<&str> = release.split('.').collect();
+    assert_eq!(
+        components.len(),
+        3,
+        "the release must be a semver, got {release:?} in {line:?}"
+    );
+    assert!(
+        components
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())),
+        "every semver component must be a number, got {release:?} in {line:?}"
+    );
+
+    let inner = build
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("the build must be parenthesised, got {build:?} in {line:?}"));
+    let (hash, state) = inner
+        .split_once(", ")
+        .unwrap_or_else(|| panic!("the build must be a hash and a state, got {inner:?}"));
+
+    // `unknown` is the documented stand-in for a build made where git could not
+    // be consulted, so it is a legal hash - but nothing else short of a real
+    // abbreviated commit id is.
+    assert!(
+        hash == "unknown"
+            || (hash.chars().count() == HASH_LENGTH && hash.chars().all(|c| c.is_ascii_hexdigit())),
+        "the build must name the commit it came from as a {HASH_LENGTH}-character \
+         hash, got {hash:?} in {line:?}"
+    );
+    assert!(
+        BUILD_STATES.contains(&state),
+        "the build state must be one of {BUILD_STATES:?}, got {state:?} in {line:?}"
+    );
+}
+
+/// A binary that cannot say which build it is cannot be debugged from a bug
+/// report, which is why every tool in this repository owes the same four-part
+/// version line - name, release, commit, and whether the tree was dirty when it
+/// was built.
+///
+/// Run outside every repository on purpose: the version is a fact baked in at
+/// compile time, so asking for it must not depend on where the binary is
+/// standing when you ask.
+///
+/// `-V` is asserted to be byte-identical rather than merely present, because
+/// the documented rule names both spellings and two renderings of the same
+/// fact is precisely the drift a shared format exists to prevent.
+#[test]
+fn version_names_the_tool_the_release_and_the_build_it_came_from() {
+    let elsewhere = not_a_repository();
+
+    let long = streams(&grind(elsewhere.path(), &["--version"]));
+    let short = streams(&grind(elsewhere.path(), &["-V"]));
+
+    assert_eq!(
+        long.0,
+        Some(0),
+        "asking for the version is not a question about conflicts, so it \
+         succeeds\nstdout:\n{}\nstderr:\n{}",
+        long.1,
+        long.2
+    );
+    assert_version_line(&long.1);
+    assert_eq!(
+        short, long,
+        "-V and --version are two spellings of one switch, not two renderings"
+    );
+}
+
 /// Somewhere outside every repository there is no question to answer, and
 /// saying so has to be distinguishable from answering it.
 ///
