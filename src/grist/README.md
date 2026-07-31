@@ -2,11 +2,12 @@
 
 Work out which order to squash-merge branches in, before you commit to one.
 
-`grime` (does a merge conflict?) and `grind` (does a rebase conflict?) are
-planned siblings — neither exists yet, so don't go looking for them. `grist` is
-the one that's here, and it answers the question they can't: when you have
-several branches to land and each one makes the next one harder, **which order
-costs the least?**
+If your question is about *one* branch — would rebasing HEAD onto it conflict,
+and by how much? — that's [`grind`](../grind/README.md), which ships alongside
+this and answers with its exit code. `grime` (does a *merge* conflict?) is still
+a planned sibling and does not exist yet. `grist` answers the question neither of
+them can: when you have several branches to land and each one makes the next one
+harder, **which order costs the least?**
 
 ```console
 $ grist issue-130 issue-120
