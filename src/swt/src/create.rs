@@ -18,10 +18,19 @@
 //! missing — and claiming a cleanup that did not happen would strand the user
 //! with an orphaned worktree *and* branch they were told did not exist.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::git::{validate_worktree_name, WorktreeName, WORKTREE_NAME_RULE};
+use crate::git::{git_must, validate_worktree_name, WorktreeName, WORKTREE_NAME_RULE};
+use crate::green_check::{is_green, shell_quote};
+use crate::teardown::{
+    hold_unverified_worktree, keep_unverified_worktree, remove_unverified_worktree,
+};
+
+/// The git query that names the root of the worktree `swt` was invoked in.
+const TOPLEVEL_ARGS: [&str; 2] = ["rev-parse", "--show-toplevel"];
 
 /// Suffix every subagent worktree directory carries, so a stray directory beside
 /// a repository is recognizable as `swt`'s at a glance.
@@ -40,9 +49,40 @@ const BRANCH_SUFFIX_RADIX: u32 = 36;
 ///
 /// `value` is the number to spell. Returns its digits, most significant first;
 /// zero is `"0"` rather than the empty string.
-fn base36(value: u128) -> String {
-    let _ = value;
-    String::new()
+fn base36(mut value: u128) -> String {
+    let radix = u128::from(BRANCH_SUFFIX_RADIX);
+    let mut digits = String::new();
+    // Division peels the digits off least-significant first, so they are pushed
+    // in reverse and the string is flipped once at the end — cheaper and clearer
+    // than repeatedly inserting at the front.
+    loop {
+        let remainder = value % radix;
+        value /= radix;
+        // Both conversions are total: a remainder below the radix always fits in
+        // a `u32`, and `char::from_digit` covers every digit below 36. The
+        // fallback exists only so an impossible case cannot panic.
+        digits.push(
+            u32::try_from(remainder)
+                .ok()
+                .and_then(|digit| char::from_digit(digit, BRANCH_SUFFIX_RADIX))
+                .unwrap_or('0'),
+        );
+        if value == 0 {
+            break;
+        }
+    }
+    digits.chars().rev().collect()
+}
+
+/// Milliseconds since the UNIX epoch, the quantity the branch suffix spells.
+///
+/// A clock somehow set before the epoch yields `0` rather than killing the
+/// command: the suffix exists to distinguish two runs, and even a useless one is
+/// a better outcome than refusing to create a worktree over a clock reading.
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since_epoch| since_epoch.as_millis())
 }
 
 /// Names the directory a worktree called `name` belongs in: a sibling of the
@@ -51,8 +91,14 @@ fn base36(value: u128) -> String {
 ///
 /// `root` is the repository root and `name` the validated worktree name.
 fn worktree_path(root: &Path, name: &WorktreeName) -> PathBuf {
-    let _ = (root, name);
-    PathBuf::new()
+    // The lexical parent, which is what resolving `<root>/../<name>.swt` comes
+    // to: git answers `--show-toplevel` with an absolute, already-normalized
+    // path, so there is no `..` component left for a lexical step to get wrong.
+    // A root with nothing above it stands in for itself, exactly as path
+    // resolution treats `/..`.
+    root.parent()
+        .unwrap_or(root)
+        .join(format!("{name}{WORKTREE_SUFFIX}"))
 }
 
 /// Names the branch a fresh worktree is created on.
@@ -60,8 +106,7 @@ fn worktree_path(root: &Path, name: &WorktreeName) -> PathBuf {
 /// The timestamp suffix is what keeps two worktrees of the same name from
 /// naming the same branch. `name` is the validated worktree name.
 fn branch_name(name: &WorktreeName) -> String {
-    let _ = name;
-    String::new()
+    format!("{BRANCH_PREFIX}/{name}-{}", base36(now_millis()))
 }
 
 /// Creates a subagent worktree named `raw_name`, branched from a green HEAD.
@@ -82,8 +127,78 @@ pub fn create(raw_name: &str) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let _ = name;
+    let root = PathBuf::from(git_must(TOPLEVEL_ARGS, None));
+    let branch = branch_name(&name);
+    let path = worktree_path(&root, &name);
+
+    // The worktree comes first and the check runs inside it. `git worktree add`
+    // populates it from HEAD, so what gets verified is the commit a subagent
+    // would actually branch from rather than the parent's working tree.
+    git_must(
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-b"),
+            OsStr::new(&branch),
+            path.as_os_str(),
+            OsStr::new("HEAD"),
+        ],
+        Some(&root),
+    );
+    // Nothing has verified this worktree yet, and the check about to run can take
+    // minutes. Until it passes, `swt` owns removing it — including when the user
+    // gives up and hits Ctrl-C.
+    hold_unverified_worktree(&root, &path, &branch);
+
+    // Checked in the new worktree, configured from the parent: the `.swt-check`
+    // override is an uncommitted per-developer file, so it exists only in `root`,
+    // while the tree worth verifying is the fresh one. Swapping these two
+    // directories is the difference between verifying HEAD and verifying
+    // whatever the user happens to have half-written.
+    let green = is_green(&path, Some(&root));
+    if !green.ok {
+        // The verdict before the cleanup: why the worktree is going away matters
+        // more than the fact that it did. The check's output already ends in a
+        // newline of its own.
+        eprint!("HEAD not green: {}", green.out);
+        report_teardown(&path, &branch);
+        return ExitCode::FAILURE;
+    }
+
+    // Verified: it is the caller's worktree now, not `swt`'s to tear down.
+    keep_unverified_worktree();
+
+    // Only the path, and only on stdout — a caller captures this.
+    println!("{}", path.display());
     ExitCode::SUCCESS
+}
+
+/// Tears the unverified worktree down and says what actually happened to it.
+///
+/// `path` is the worktree directory and `branch` the branch checked out in it,
+/// both named in the message so a failed teardown leaves a copy-pasteable
+/// recovery command behind.
+fn report_teardown(path: &Path, branch: &str) {
+    // A teardown nobody had left to do is reported as a cleanup, because the
+    // state it claims is the state that holds: somebody else already got there.
+    let failure = remove_unverified_worktree().filter(|torn| !torn.ok);
+    let Some(failed) = failure else {
+        eprintln!(
+            "Cleaned up worktree {} and branch {branch}.",
+            path.display()
+        );
+        return;
+    };
+
+    // Teardown is best-effort, so claiming it worked would strand the user with
+    // an orphaned worktree *and* branch they were told did not exist. Report
+    // git's own account, then the command that finishes the job by hand.
+    eprint!("{}", failed.out);
+    eprintln!(
+        "Could not clean up {}. Remove it by hand:\n  git worktree remove --force {} && git branch -D {branch}",
+        path.display(),
+        shell_quote(&path.to_string_lossy())
+    );
 }
 
 #[cfg(test)]

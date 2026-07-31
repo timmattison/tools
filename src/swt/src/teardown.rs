@@ -21,6 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::git::remove_worktree;
 use crate::green_check::Outcome;
 
 /// A worktree that exists but has not passed its green check yet: the three
@@ -65,7 +66,11 @@ fn unverified_worktree() -> MutexGuard<'static, Option<UnverifiedWorktree>> {
 /// worktree directory that would be removed, and `branch` the branch checked out
 /// in it.
 pub fn hold_unverified_worktree(root: &Path, path: &Path, branch: &str) {
-    let _ = (root, path, branch);
+    *unverified_worktree() = Some(UnverifiedWorktree {
+        root: root.to_path_buf(),
+        path: path.to_path_buf(),
+        branch: branch.to_string(),
+    });
 }
 
 /// Releases the hold without removing anything: the check passed, so the
@@ -74,7 +79,9 @@ pub fn hold_unverified_worktree(root: &Path, path: &Path, branch: &str) {
 /// After this, [`remove_unverified_worktree`] has nothing to do — which is the
 /// point. A verified worktree belongs to the caller who asked for it, and no
 /// later signal may take it away.
-pub fn keep_unverified_worktree() {}
+pub fn keep_unverified_worktree() {
+    *unverified_worktree() = None;
+}
 
 /// Tears down the held worktree and its branch, if one is still held.
 ///
@@ -98,7 +105,13 @@ pub fn keep_unverified_worktree() {}
 ///   path — never from inside a raw `signal(2)` handler.
 #[must_use]
 pub fn remove_unverified_worktree() -> Option<Outcome> {
-    None
+    // The latch. Taking the hold out of the registry — and letting go of the
+    // mutex — happens before a single git command runs, so whoever gets here
+    // first carries the teardown through to the end while everybody after them
+    // finds nothing to do. Holding the lock across the git commands instead
+    // would make the second caller *wait* for the first and then repeat it.
+    let held = unverified_worktree().take()?;
+    Some(remove_worktree(&held.root, &held.path, &held.branch))
 }
 
 #[cfg(test)]
