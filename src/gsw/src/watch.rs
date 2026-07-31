@@ -2869,6 +2869,137 @@ mod tests {
     }
 
     #[test]
+    fn event_loop_recovers_and_reseeds_age_after_a_failed_walk() {
+        // Absorbing a failed walk is only half the promise; the other half is
+        // that "the next event retries" and the monitor visibly RECOVERS. The
+        // two failure tests above never let a walk succeed afterward, so
+        // neither can tell a loop that retries from one that has quietly
+        // wedged itself on the last good frame forever. This drives the whole
+        // arc: fail, then succeed.
+        //
+        // The recovery that matters is the age display. While the repo is
+        // unreadable the cached frame keeps aging truthfully (50 s here); the
+        // moment a walk succeeds, the fresh snapshot must render at age zero
+        // AND `collected_at` must be re-seeded to that walk's start, so every
+        // later re-render ages from the new walk rather than from the
+        // long-stale seed. The final resize is what makes the re-seed directly
+        // observable: it re-renders the cache with no walk, and its offset is
+        // `now - collected_at` — 3 s off the second walk, not 55 s off the
+        // original seed. Without that third frame a "do not re-seed after a
+        // failure" regression would leave the loop stuck reporting the stale
+        // seed's age while every assertion still passed.
+        //
+        // Clock reads, in order (a clamped sequence, so the test never sleeps
+        // on real time): iteration 1's `now` and the failed walk's cost end;
+        // iteration 2's `now` and the successful walk's cost end; iteration
+        // 3's `now`. No read for a deferred deadline — nothing lands
+        // mid-cooldown, so the throttle is never dirty.
+        let base = Instant::now();
+        let times = [
+            base + Duration::from_secs(50), // failed walk start (cache is 50 s stale)
+            base + Duration::from_millis(50_010), // failed walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_secs(52), // retry: past expiry → walks, and succeeds
+            base + Duration::from_millis(52_010), // successful walk end
+            base + Duration::from_secs(55), // resize re-render; trailing reads clamp here
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue first change");
+
+        let mut cache = seeded_cache(base);
+        cache.snapshot.branch = "last-good".to_string();
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut rendered: Vec<(String, Duration)> = Vec::new();
+        let result = event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            cache,
+            None, // decay timer off: isolate recovery from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    if collects == 1 {
+                        // The repo is momentarily unreadable — mid-`gc`, say.
+                        Err(anyhow::anyhow!(
+                            "status iter: The reference 'HEAD' did not exist"
+                        ))
+                    } else {
+                        // ...and then it isn't. A distinguishable branch name
+                        // proves the frame came from THIS walk, not the cache.
+                        let mut fresh = empty_snapshot();
+                        fresh.branch = "recovered".to_string();
+                        Ok(fresh)
+                    }
+                },
+                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                    rendered.push((snap.branch.clone(), offset));
+                    match rendered.len() {
+                        // Deliver the retry in its own iteration so it lands in
+                        // a separate debounce window instead of coalescing.
+                        1 => {
+                            let _ = tx.send(Event::FsChanged);
+                            frame("stale")
+                        }
+                        // A resize forces one more cached re-render (no walk),
+                        // whose age offset is read straight off `collected_at`.
+                        // The quit rides the same debounce window, so the loop
+                        // renders that frame and then stops.
+                        2 => {
+                            let _ = tx.send(Event::Resize);
+                            let _ = tx.send(Event::Quit);
+                            frame("fresh")
+                        }
+                        _ => frame("aged"),
+                    }
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: timer_off,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "a failure followed by a success must run to a clean stop: {result:?}",
+        );
+        assert_eq!(collects, 2, "the failed walk must be retried exactly once");
+        assert_eq!(
+            rendered.len(),
+            3,
+            "expected three frames: the absorbed failure, the recovery, and the \
+             cached re-render that exposes the re-seeded age",
+        );
+        assert_eq!(
+            rendered[0],
+            ("last-good".to_string(), Duration::from_secs(50)),
+            "while the walk is failing the CACHED snapshot keeps aging truthfully",
+        );
+        assert_eq!(
+            rendered[1],
+            ("recovered".to_string(), Duration::ZERO),
+            "the walk that succeeds after a failure must render its FRESH snapshot \
+             at age zero — recovery, not a permanently frozen last-good frame",
+        );
+        assert_eq!(
+            rendered[2],
+            ("recovered".to_string(), Duration::from_secs(3)),
+            "the successful walk must re-seed collected_at to its own start: the \
+             re-render 3s later ages from that walk (55s - 52s), not from the \
+             50s-stale seed the failure left in place",
+        );
+        assert_eq!(displayed, "aged");
+    }
+
+    #[test]
     fn should_repaint_suppresses_byte_identical_output() {
         // The suppression backstop: an unchanged snapshot must not trigger a
         // repaint, no matter how many accepted events drove the recompute.
