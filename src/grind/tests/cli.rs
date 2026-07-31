@@ -269,3 +269,45 @@ fn a_directory_that_is_not_a_repository_is_an_error_not_a_conflict() {
         "there was no rebase to conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+/// A rebase can fail outright, leaving no halted rebase and no unmerged paths
+/// to measure - and a replay that measures nothing must not therefore announce
+/// that nothing went wrong.
+///
+/// `@{-1}` looks like an arbitrary choice and is not. It is the trigger because
+/// it is *per-worktree*: it means "the branch checked out before this one", and
+/// git answers it from the HEAD reflog of whichever worktree is asking.
+///
+/// That splits the two places `grind` resolves things. Standing in the
+/// developer's repository - which has switched branches at least once, because
+/// the harness just checked one out - `@{-1}` resolves, so the pre-flight
+/// `Repo::resolve` accepts the argument and the run proceeds. The scratch
+/// worktree, however, was created seconds ago and detached, so its HEAD reflog
+/// holds no previous *branch* at all and `git rebase '@{-1}'` dies with
+/// `fatal: invalid upstream '@{-1}'`, exit 128, having entered no rebase.
+///
+/// That is exactly the shape being pinned - git failed, there is no rebase in
+/// progress, and `git diff --diff-filter=U` is empty - reached without
+/// corrupting a repository or racing a background process to produce it.
+#[test]
+fn a_rebase_that_fails_with_nothing_to_measure_is_neither_clean_nor_conflicts() {
+    let repo = independent_branches_repo();
+
+    let (code, stdout, stderr) = run(&repo, "alpha", "@{-1}");
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a rebase that failed outright must exit {ERROR}, not {CLEAN} for \
+         having counted no conflicts\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("invalid upstream"),
+        "git's own explanation is the only part that says what went wrong, so \
+         it has to survive to the user:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("clean") && !stdout.contains("conflicts"),
+        "a run that could not measure anything must claim neither verdict:\n{stdout}"
+    );
+}
