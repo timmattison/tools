@@ -3685,6 +3685,49 @@ mod tests {
             );
         }
 
+        /// The kept-existing line is quoted verbatim in three places: the format string
+        /// in [`kept_existing_message`], the ENV FILE COPYING sample inside `Cli`'s
+        /// `long_about`, and the README's `.env` section. Only the first is executable,
+        /// so only the first is naturally pinned — and the test above reaches it by
+        /// calling the function directly, which means it can never observe the other two.
+        ///
+        /// That gap has already produced a defect once. An earlier revision of the line
+        /// claimed the kept file was "generated in worktree", a causal claim that is false
+        /// whenever `git worktree add` itself checked the file out; fixing it required
+        /// hand-editing all three copies, and nothing but care stopped one from being
+        /// missed. A missed copy is worse than a stale comment: `--help` and the README
+        /// are where users go to understand the behavior, so the superseded wording would
+        /// keep asserting the false cause long after the program stopped printing it.
+        ///
+        /// This test closes that by making the docs assert the *runtime* string rather
+        /// than a hand-copied twin: it renders the line through `kept_existing_message`
+        /// and requires both documents to contain it byte-for-byte. Reword the format
+        /// string alone and this fails, naming which document drifted — the bypass fails
+        /// CI instead of relying on convention (see CLAUDE.md's enforced-helper rule).
+        ///
+        /// `include_str!` deliberately lives here, inside `#[cfg(test)]`, so the README's
+        /// ~100 KB is embedded in the test binary only and never in the shipped `nwt`.
+        #[test]
+        fn test_help_and_readme_samples_match_the_kept_existing_line() {
+            use clap::CommandFactory;
+
+            let sample = kept_existing_message(Path::new(".env.local"));
+
+            assert!(
+                Cli::command()
+                    .get_long_about()
+                    .expect("nwt sets long_about")
+                    .to_string()
+                    .contains(&sample),
+                "--help ENV FILE COPYING sample drifted from the runtime line: {sample}"
+            );
+
+            assert!(
+                include_str!("../../../README.md").contains(&sample),
+                "README sample drifted from the runtime line: {sample}"
+            );
+        }
+
         #[test]
         fn test_env_file_only_in_main_worktree_is_still_copied() {
             let source = TempDir::new().expect("Failed to create temp dir");
