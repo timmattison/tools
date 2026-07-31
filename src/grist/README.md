@@ -107,12 +107,24 @@ cargo build --release -p grist
 ```
 
 Most of the safety guarantees above belong to the shared harness, so that is
-where they are pinned: `gitscratch`'s `tests/safety.rs` covers the pinned
-`rebase.updateRefs=false` and the detached checkout, each verified by mutation —
-remove the guard, watch the test fail, put it back. `grist` keeps a
-`tests/safety.rs` of its own for the part `gitscratch` cannot see: that a full
-simulation, composed the way `grist` composes it, leaves every real branch ref
-where it found it.
+where they are pinned. `gitscratch`'s `tests/safety.rs` holds eight of them —
+`rebase.updateRefs=false`, the detached checkout, `rerere` recording nothing, no
+hook firing, the real working tree and index surviving untouched, both halves of
+teardown, and a replay neither hanging nor failing under commit signing — and
+every one has been watched to fail: break the guard, confirm that specific test
+goes red for the stated reason, put it back. A guard nobody has ever seen fail
+is indistinguishable from one that is quietly broken, since both report green
+forever. [`MUTATIONS.md`](../gitscratch/MUTATIONS.md) is where that evidence
+lives, guard by guard, alongside the failure output captured at the time.
 
-Disabling `rerere`, hooks and `gc.auto` is done by construction in the harness
-and is not yet covered by a test. Issue #329 tracks closing that gap.
+`grist` keeps a `tests/safety.rs` of its own for the part `gitscratch` cannot
+see: that a full simulation, composed the way `grist` composes it — `checkout
+--detach` → `replay_rebase` → `squash_into`, once per branch of every ordering —
+leaves every real branch ref where it found it. That detach belongs to `grist`,
+not to the harness, so dropping it would move a developer's real branches while
+every `gitscratch` test still passed.
+
+What is left over is small and worth naming: `gc.auto=0`, the
+`rebase.autoStash`/`autosquash` pair and `gpg.format` are established by
+construction in the harness's `safety_config` rather than pinned by a test of
+their own.
