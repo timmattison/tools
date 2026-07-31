@@ -59,15 +59,9 @@ impl RepoHandle {
     /// Bare repos have no work tree; gsw renders a per-file working-tree view,
     /// so there's nothing to show. Treat them like "not a repo".
     ///
-    /// This is the discovery path only. [`reopened`](Self::reopened) admits a
-    /// repository by the same rule — the repository must have a work tree — but
-    /// states it inline instead of calling here, because a re-open keeps the
-    /// work-tree root captured at discovery and has no use for the `PathBuf`
-    /// this builds. That is a weaker guarantee than one shared code path: the
-    /// two could drift. What keeps them honest is that the rule is a single
-    /// `workdir()` call on each side, small enough to compare at a glance, and
-    /// that changing it here without changing it there would leave a handle
-    /// whose `workdir` field no longer describes what a re-open will accept.
+    /// This is the discovery path only; [`reopened`](Self::reopened) admits a
+    /// repository by the same rule — it must have a work tree — but applies it
+    /// inline. See there for why the check is stated twice rather than shared.
     fn from_repo(repo: gix::Repository) -> Option<Self> {
         let workdir = repo.workdir()?.to_path_buf();
         Some(Self { repo, workdir })
@@ -103,6 +97,11 @@ impl RepoHandle {
     /// [`from_repo`](Self::from_repo): only the repository is being replaced,
     /// and building a second work-tree root just to drop it would suggest the
     /// captured one gets refreshed, which is exactly what this must not do.
+    /// That leaves one rule stated in two places, which could drift — an
+    /// accepted cost, because each side is a single `workdir()` call, small
+    /// enough to compare at a glance, and changing one without the other would
+    /// leave a handle whose `workdir` field no longer describes what a re-open
+    /// will accept.
     ///
     /// That "never a blank screen" property is **not** delivered here alone —
     /// this fallback only guarantees a usable *handle*. Reading a repository
