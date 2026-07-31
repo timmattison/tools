@@ -120,6 +120,7 @@ index measured under identical rules, not as an exact prediction.
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
+| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. Pinned here rather than fixed with `-z` per call site, because `-z` is per-invocation and the call site that forgets it fails silently. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -165,9 +166,14 @@ the backend its halted rebase is inspected under, and each gets a bullet:
   cannot resolve. The replay runs under a timeout, so the test catches a hang on
   a passphrase prompt and not only an outright failure.
 
-A tenth guarantee — **the `user.name`/`user.email` identity**, the last row
-above — is pinned by a unit test in `src/git.rs` instead, which reads back
-`git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
+A tenth guarantee — **the `user.name`/`user.email` identity** — is pinned by a
+unit test in `src/git.rs` instead, which reads back `git var GIT_AUTHOR_IDENT`
+rather than building a repository to commit into.
+
+**`core.quotePath=false`**, the last row above, is pinned from the other
+direction: `tests/conflicts.rs` asserts the *answer* a non-ASCII path produces,
+which is the only place the escaping is observable. Both halves of the defect
+are asserted together, because they break together — the name and the count.
 
 The remaining rows of the table above are established by construction rather
 than by a test of their own, in two different places. `gpg.format`, `gc.auto`,
@@ -201,10 +207,13 @@ is the *cheap rejection*: a directory that is not a repository and a revision
 that does not resolve both have to fail there, by name.
 
 `tests/conflicts.rs` covers the answer rather than the safety of getting it:
-whether a replay conflicted at all, and that the per-file breakdown accumulates
-across stops and adds up to the total it explains. `Report`'s own tests sit
-beside it in `src/report.rs`, because rendering a `Conflicts` is pure string
-work that needs no repository at all.
+whether a replay conflicted at all, that the per-file breakdown accumulates
+across stops and adds up to the total it explains, and that a conflicted
+`日本語.txt` comes back by its real name carrying its real hunk count. That last
+one is deliberately built on a file contested in *two* regions — with one, the
+undercount and the truth would both be 1 and the defect would pass. `Report`'s
+own tests sit beside it in `src/report.rs`, because rendering a `Conflicts` is
+pure string work that needs no repository at all.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
@@ -216,6 +225,16 @@ with known conflict shapes, shared by every crate built on the harness so the
 fixtures exist once rather than once per test binary. Every fixture lives in its
 own `TempDir`, so concurrent `cargo test` runs never share a path.
 
+| Fixture | Shape |
+| --- | --- |
+| `contested_region_repo()` | `iterated` rewrites one region across three commits, `single` touches it once — the asymmetry that makes a stop count worth printing. |
+| `stacked_branches_repo()` | `built-on-top` branched from `groundwork`, not from main. |
+| `equal_hunks_unequal_stops_repo()` | Two branches making the same two edits, packaged as one commit and as two, so they tie on hunks and differ on stops. |
+| `independent_branches_repo()` | Two branches that each add a file of their own, so nothing can conflict. |
+| `conflicting_repo()` | Two branches rewriting the same line, so a replay is guaranteed to conflict and resolve. |
+| `multi_byte_names_repo()` | Branches `left-左` and `right-右` colliding in `readme.md` and `日本語.txt` — a name git would escape, a hunk count that collapses when it does, and two names whose byte, character and column widths disagree. |
+| `not_a_repository()` | A directory outside every repository, which checks its own premise and says so if `TMPDIR` turns out to sit inside one. |
+
 ```toml
 [dev-dependencies]
 gitscratch = { workspace = true, features = ["testing"] }
@@ -224,3 +243,5 @@ gitscratch = { workspace = true, features = ["testing"] }
 ## Used by
 
 - [`grist`](../grist/README.md) — ranks squash-merge orderings by conflict cost
+- [`grind`](../grind/README.md) — would rebasing HEAD onto this branch conflict,
+  and by how much?

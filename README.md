@@ -46,11 +46,13 @@ Answering "would this rebase conflict, and how badly?" means actually performing
 repository, which is only safe because of a set of pinned settings — `rebase.updateRefs=false` so the replay
 doesn't rewrite the very branches being simulated, `rerere.enabled=false` so a simulated resolution never poisons
 the shared `rr-cache`, hooks redirected at an empty directory, `gc.auto=0`, `commit.gpgsign=false`, and an editor
-environment a halted rebase can't hang on. A scratch worktree can only be built through `Scratch`, and a `Scratch`
-only hands out a git runner that already carries that configuration, so no tool can drift onto a weaker version of
-it. Teardown removes the scratch worktree by path and deliberately never runs the repo-wide `git worktree prune`,
-which would delete the administrative state of any worktree whose directory is merely missing right now. Used by
-`grist`.
+environment a halted rebase can't hang on. `core.quotePath=false` is pinned for correctness rather than looks: git
+otherwise reports a path outside ASCII as a C-quoted octal escape, which names no file on disk, so a conflicted
+`日本語.txt` came back under a name nobody typed *and* silently floored at "1 hunk" — a plausible-looking wrong
+total. A scratch worktree can only be built through `Scratch`, and a `Scratch` only hands out a git runner that
+already carries that configuration, so no tool can drift onto a weaker version of it. Teardown removes the scratch
+worktree by path and deliberately never runs the repo-wide `git worktree prune`, which would delete the
+administrative state of any worktree whose directory is merely missing right now. Used by `grist` and `grind`.
 
 See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of guarantees.
 
@@ -600,6 +602,20 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Usage: `zth <PATH>`, `zth -j 32 /mnt/backups` (more readers for a network or spinning-rust
     volume; defaults to the machine's core count).
   - To install: `cargo install --git https://github.com/timmattison/tools zth`
+- grind (git rebase in another dimension)
+  - Answers "would rebasing HEAD onto that branch conflict, and by how much?" without touching your
+    repository. It replays your commits onto the branch in a detached scratch worktree in a temp
+    directory, walks the *whole* rebase instead of bailing at the first collision, and reports the
+    conflict hunks, the files they land in, and how many times the rebase would stop — the number a
+    merge can't give you, and the reason a branch that rewrote one region across three commits is
+    visibly more expensive than one that landed the same change in a single commit. The exit code is
+    the answer: 0 clean, 1 conflicts, 2 couldn't tell you (bad ref, not a repository, git failed with
+    nothing to measure). A dirty tree isn't an error — it notes on stderr that uncommitted work isn't
+    included and leaves the verdict alone. Nothing in your repo moves; the safety guarantees are the
+    shared `gitscratch` harness's, not a second copy of them.
+  - Usage: `grind <BRANCH>`, `grind -q main && git rebase main` (`-q` prints nothing at all, on both
+    streams, since the exit code is the whole answer).
+  - To install: `cargo install --git https://github.com/timmattison/tools grind`
 
 - krt (Knights of the Round Trip)
   - Records the network path to a destination, hop by hop. `krt` accepts one destination and the
