@@ -144,7 +144,9 @@ impl Git {
             .with_context(|| format!("could not resolve '{revision}' to a commit"))
     }
 
-    /// Configuration that keeps a simulation from touching anything real.
+    /// Configuration every git call is pinned to: the settings that keep a
+    /// simulation from touching anything real, and the one that keeps git's
+    /// answers readable coming back.
     fn safety_config(&self) -> Vec<String> {
         [
             // Recording resolutions from a simulated conflict would poison the
@@ -174,6 +176,33 @@ impl Git {
             "gc.auto=0",
             "commit.gpgsign=false",
             "gpg.format=openpgp",
+            // Git's default is to C-quote and octal-escape any path outside
+            // ASCII, so `日本語.txt` comes back from `diff --name-only` as
+            // `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a
+            // caller twice: it reports a name nobody typed, and the escaped
+            // string names no file on disk, so anything that then opens the
+            // path quietly falls back to whatever it does for a file it cannot
+            // read - in this crate, flooring a conflicted file at one hunk and
+            // undercounting the work.
+            //
+            // Pinned here rather than fixed with `-z` at the call sites on
+            // purpose. `-z` is per-invocation: every command that prints a path
+            // - today `diff --name-only` and `status --porcelain`, tomorrow
+            // whatever the next tool needs - has to remember both the flag and
+            // to split on NUL instead of newlines, and the one that forgets
+            // fails silently, with a name that looks almost right. This is a
+            // pin on the single door every git call already goes through, so a
+            // call site added later inherits it without knowing it exists.
+            //
+            // The one thing `-z` would buy that this does not is the true name
+            // of a path containing a control character, which git C-quotes
+            // whatever this is set to. Verified, and it is the benign half of
+            // the defect: the quoting keeps such a path on a single line, so
+            // the line-oriented readers above still agree with git about how
+            // many paths there were, and only the name is wrong. If that ever
+            // has to be handled the fix is a NUL-aware reader on `Git` - one
+            // more thing this type owns - not a flag sprinkled across callers.
+            "core.quotePath=false",
         ]
         .into_iter()
         .map(String::from)
