@@ -14,9 +14,11 @@
 //! is not one of them with a usage error rather than a guess.
 
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
+use swt::git::{validate_worktree_name, WorktreeName, WORKTREE_NAME_RULE};
 
 /// Command line surface of `swt`.
 ///
@@ -52,12 +54,23 @@ enum Command {
     },
 }
 
-/// Creates a subagent worktree named `name`, branched from a green HEAD.
+/// Creates a subagent worktree named `raw_name`, branched from a green HEAD.
+///
+/// The name is checked before any git runs, because it becomes both a branch and
+/// a directory: `..` or a leading `-` would otherwise have git create the wrong
+/// thing somewhere else entirely, and the cheapest place to stop that is before
+/// anything exists to clean up. A rejected name is reported on stderr together
+/// with the rule it broke, and the command fails.
 ///
 /// # Panics
 ///
-/// Always: the implementation lands in a later slice.
-fn create(name: &str) {
+/// After validation: the rest of the implementation lands in a later slice.
+fn create(raw_name: &str) -> ExitCode {
+    let Some(name): Option<WorktreeName> = validate_worktree_name(raw_name) else {
+        eprintln!("Invalid worktree name {raw_name:?} — {WORKTREE_NAME_RULE}.");
+        return ExitCode::FAILURE;
+    };
+
     todo!("swt create {name}: implemented in the `create` slice");
 }
 
@@ -66,14 +79,14 @@ fn create(name: &str) {
 /// # Panics
 ///
 /// Always: the implementation lands in a later slice.
-fn merge(worktree_path: &Path) {
+fn merge(worktree_path: &Path) -> ExitCode {
     todo!(
         "swt merge {}: implemented in the `merge` slice",
         worktree_path.display()
     );
 }
 
-fn main() {
+fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Create { name } => create(&name),
         Command::Merge { worktree_path } => merge(&worktree_path),
