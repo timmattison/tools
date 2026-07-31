@@ -37,10 +37,10 @@ fn describe_tree(dir: &Path) -> String {
         };
         for entry in entries.flatten() {
             let child = entry.path();
-            if child.is_dir() {
-                pending.push(child.clone());
-            }
             found.push(child.display().to_string());
+            if child.is_dir() {
+                pending.push(child);
+            }
         }
     }
 
