@@ -2499,6 +2499,7 @@ dependencies = [
  "anyhow",
  "gitscratch",
  "tempfile",
+ "unicode-width",
 ]
 
 [[package]]
@@ -3473,6 +3474,17 @@ dependencies = [
  "comfy-table",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "grind"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "gitscratch",
+ "unicode-width",
 ]
 
 [[package]]

@@ -16,7 +16,7 @@
 //! index for comparing candidates measured under identical rules, not as an
 //! exact prediction.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -138,8 +138,8 @@ impl Scratch {
 
             cost.stops += 1;
             for file in conflicted {
-                cost.hunks += count_conflict_hunks(&worktree.join(&file))?;
-                cost.files.insert(file);
+                let hunks = count_conflict_hunks(&worktree.join(&file))?;
+                cost.add_file(file, hunks);
             }
 
             git.run(&["add", "-A"])?;
@@ -187,16 +187,70 @@ impl Drop for Scratch {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Conflicts {
     stops: usize,
-    hunks: usize,
-    files: BTreeSet<String>,
+    /// Every file that conflicted, mapped to the hunks it contributed.
+    ///
+    /// A map rather than a set beside a separate running total, because a
+    /// report has to say *where* the work lands, and because the total is then
+    /// the sum of this map by definition. Storing the total alongside the names
+    /// would let the two drift the moment anything updated one without the
+    /// other; here they cannot disagree, so no invariant has to be remembered.
+    files: BTreeMap<String, usize>,
 }
 
 impl Conflicts {
+    /// Build a result straight from a per-file hunk breakdown.
+    ///
+    /// The total is summed from `files` rather than accepted alongside it, so a
+    /// hand-built `Conflicts` cannot claim a total its own breakdown
+    /// contradicts. That matters because this is the constructor a renderer's
+    /// tests reach for: a test fixture that can lie about the totals is a test
+    /// fixture that can make a broken renderer look correct.
+    ///
+    /// A name repeated in `files` accumulates, exactly as a file conflicting at
+    /// several stops does during a real replay.
+    #[must_use]
+    pub fn from_files(files: impl IntoIterator<Item = (String, usize)>, stops: usize) -> Self {
+        let mut conflicts = Self {
+            stops,
+            ..Self::default()
+        };
+        for (name, hunks) in files {
+            conflicts.add_file(name, hunks);
+        }
+        conflicts
+    }
+
     /// Fold another step's cost into this running total.
     pub fn absorb(&mut self, other: Self) {
         self.stops += other.stops;
-        self.hunks += other.hunks;
-        self.files.extend(other.files);
+        for (name, hunks) in other.files {
+            self.add_file(name, hunks);
+        }
+    }
+
+    /// Attribute `hunks` more conflict hunks to `name`.
+    ///
+    /// Adding rather than replacing is the whole reason a file is keyed at all:
+    /// the same file routinely conflicts at several stops of one replay, and
+    /// each of those collisions is separate work for whoever resolves it.
+    fn add_file(&mut self, name: String, hunks: usize) {
+        *self.files.entry(name).or_default() += hunks;
+    }
+
+    /// Whether the replay finished without a single conflict.
+    ///
+    /// Defined on the file set rather than on the counts, because the file set
+    /// is the primary fact: a conflict is something that happened *to a file*,
+    /// and the numbers are summaries of it. The three measures cannot disagree
+    /// anyway - [`count_conflict_hunks`] floors every conflicted file at one
+    /// hunk, and a file only enters the set from inside a stop - so hunks and
+    /// stops are both non-zero exactly when the set is non-empty. Anchoring on
+    /// the set keeps that true by construction instead of by coincidence: a
+    /// future measure that can legitimately be zero cannot make a conflicted
+    /// replay report itself clean.
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.files.is_empty()
     }
 
     /// How many times the replay halted for manual resolution.
@@ -206,9 +260,13 @@ impl Conflicts {
     }
 
     /// How many conflict hunks would need hand-merging.
+    ///
+    /// Summed from the per-file breakdown rather than tracked beside it, so the
+    /// headline number and the list underneath it can never tell a developer
+    /// two different stories.
     #[must_use]
     pub fn hunks(&self) -> Hunks {
-        Hunks::new(self.hunks)
+        Hunks::new(self.files.values().sum())
     }
 
     /// How many distinct files conflicted at least once.
@@ -220,10 +278,21 @@ impl Conflicts {
     /// Which files conflicted, in sorted order.
     ///
     /// A caller rendering the result needs the names, not just how many there
-    /// were; [`Conflicts::files`] is the count of exactly this set.
-    #[must_use]
-    pub fn file_names(&self) -> &BTreeSet<String> {
-        &self.files
+    /// were; [`Conflicts::files`] is the count of exactly this sequence.
+    pub fn file_names(&self) -> impl Iterator<Item = &str> {
+        self.files.keys().map(String::as_str)
+    }
+
+    /// Every conflicted file paired with how many hunks it contributed, in
+    /// sorted order.
+    ///
+    /// A verdict that says only "4 hunks across 2 files" tells a developer how
+    /// much work is coming but not where it lands, so the breakdown is part of
+    /// the answer rather than a nicety layered on top.
+    pub fn file_hunks(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.files
+            .iter()
+            .map(|(name, hunks)| (name.as_str(), *hunks))
     }
 }
 
