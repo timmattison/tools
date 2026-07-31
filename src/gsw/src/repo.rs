@@ -1351,6 +1351,39 @@ mod tests {
     }
 
     #[test]
+    fn rebase_step_prefers_the_directory_gix_classified_from() {
+        // Pins the precedence, not just the happy path: `gix::Repository::state`
+        // resolves `rebase-apply/` *before* `rebase-merge/`, so when both
+        // directories exist the step counts must come from the same directory
+        // the classification did. The `rebase-merge/` decoy below is deliberate
+        // — git never leaves both present at once, so only a hand-built one can
+        // catch the counters being read in the opposite order from the state.
+        let dir = diverged_repo();
+        let p = dir.path();
+        git_allowing_failure(p, &["rebase", "--apply", "main"]);
+        assert!(
+            p.join(".git/rebase-apply/rebasing").exists(),
+            "the apply backend must have left its `rebasing` marker, which is \
+             what makes gix classify from `rebase-apply/`",
+        );
+        let decoy = p.join(".git/rebase-merge");
+        std::fs::create_dir_all(&decoy).expect("create rebase-merge decoy");
+        std::fs::write(decoy.join("msgnum"), "7\n").expect("write decoy msgnum");
+        std::fs::write(decoy.join("end"), "9\n").expect("write decoy end");
+        let repo = open_at(p).unwrap();
+        assert_eq!(
+            super::operation_state(&repo, 1),
+            Some(Operation::Rebase {
+                step: Some(StepProgress {
+                    current: 1,
+                    total: 2,
+                }),
+                conflicts: 1,
+            }),
+        );
+    }
+
+    #[test]
     fn operation_state_reports_rebase_without_steps_when_counter_files_are_absent() {
         // Graceful degradation: the rebase is still surfaced when its step
         // counters cannot be read, just without the `current/total` clause.
