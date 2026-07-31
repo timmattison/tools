@@ -75,8 +75,9 @@ fn main() -> ExitCode {
 /// # Errors
 ///
 /// Returns an error if the current directory cannot be read, is not inside a
-/// git repository, does not contain `branch`, or if the replay itself failed
-/// without leaving a conflict to measure.
+/// git repository, does not contain `branch`, if the working tree cannot be
+/// inspected, or if the replay itself failed without leaving a conflict to
+/// measure.
 fn run(args: &Args) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
@@ -88,11 +89,19 @@ fn run(args: &Args) -> Result<ExitCode> {
     // of a bad argument.
     repo.resolve(&args.branch)?;
 
+    let action = format!("replaying HEAD onto {}", args.branch);
+    let report = Report::new(TOOL, &action);
+
+    // Before the verdict, and on stderr rather than stdout: a reader has to see
+    // the caveat before the sentence it qualifies, and a caller piping stdout
+    // somewhere has to get the same bytes whether or not the tree was dirty.
+    if let Some(note) = report.dirty_note(repo.uncommitted_files()?) {
+        eprintln!("{note}");
+    }
+
     let scratch = Scratch::create(repo.path(), "HEAD")?;
     let conflicts = scratch.replay_rebase(&args.branch)?;
 
-    let action = format!("replaying HEAD onto {}", args.branch);
-    let report = Report::new(TOOL, &action);
     println!("{}", report.render(&conflicts));
 
     // Read off the same fact the report was rendered from, so the words and the
