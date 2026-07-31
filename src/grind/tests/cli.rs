@@ -9,10 +9,13 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use gitscratch::testing::{independent_branches_repo, TestRepo};
+use gitscratch::testing::{equal_hunks_unequal_stops_repo, independent_branches_repo, TestRepo};
 
 /// Exit code for a replay that hit no conflicts.
 const CLEAN: i32 = 0;
+
+/// Exit code for a replay that hit conflicts.
+const CONFLICTS: i32 = 1;
 
 fn grind(repo: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_grind"))
@@ -56,6 +59,35 @@ fn a_rebase_that_collides_with_nothing_exits_clean_and_says_so_in_one_line() {
     );
     assert_eq!(
         stdout, "grind: clean - replaying HEAD onto beta hit no conflicts",
+        "stderr:\n{stderr}"
+    );
+}
+
+/// `one` rewrites the same line of `x.txt` and `y.txt` that `two` already
+/// rewrote, so replaying it collides in both files at once.
+///
+/// Asserted as one block rather than line by line because the shape *is* the
+/// contract - the header, the summary indented under it, the blank line, and
+/// the breakdown that says where the work lands - and a developer comparing
+/// this against `grime` reads all of it together.
+#[test]
+fn a_rebase_that_collides_exits_conflicts_and_says_how_much_work_lands_where() {
+    let repo = equal_hunks_unequal_stops_repo();
+
+    let (code, stdout, stderr) = run(&repo, "one", "two");
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "a conflicting rebase must exit {CONFLICTS}, not be lumped in with clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout,
+        r"grind: conflicts - replaying HEAD onto two
+       2 hunks across 2 files, 1 stop
+
+  x.txt    1 hunk
+  y.txt    1 hunk",
         "stderr:\n{stderr}"
     );
 }
