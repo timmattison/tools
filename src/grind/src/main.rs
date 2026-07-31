@@ -18,6 +18,12 @@ const TOOL: &str = "grind";
 /// Exit code for a replay that hit no conflicts.
 const CLEAN: u8 = 0;
 
+/// Exit code for a replay that hit conflicts.
+///
+/// The conflict verdict is the *answer*, not a failure, which is why it gets a
+/// code of its own rather than sharing one with the things that went wrong.
+const CONFLICTS: u8 = 1;
+
 /// Exit code for a run that could not answer the question at all - a branch
 /// that does not resolve, a directory that is not a repository, or git failing
 /// in a way that left no conflict to measure.
@@ -89,5 +95,11 @@ fn run(args: &Args) -> Result<ExitCode> {
     let report = Report::new(TOOL, &action);
     println!("{}", report.render(&conflicts));
 
-    Ok(ExitCode::from(CLEAN))
+    // Read off the same fact the report was rendered from, so the words and the
+    // number a script acts on cannot tell two different stories.
+    Ok(ExitCode::from(if conflicts.is_clean() {
+        CLEAN
+    } else {
+        CONFLICTS
+    }))
 }
