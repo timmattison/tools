@@ -143,7 +143,7 @@ impl LiveIgnore {
     /// Build the matcher from the repository's ignore sources as they are on
     /// disk right now. See [`build_ignore_matcher`] for which sources those are.
     pub(crate) fn new(repo: &gix::Repository) -> Self {
-        Self::from(build_ignore_matcher(repo))
+        Self(Arc::new(RwLock::new(build_ignore_matcher(repo))))
     }
 
     /// Re-read the repository's ignore sources so a rule added or removed since
@@ -200,11 +200,26 @@ impl LiveIgnore {
     }
 }
 
+#[cfg(test)]
 impl From<Gitignore> for LiveIgnore {
-    /// Share an already-built matcher. Production always goes through
-    /// [`LiveIgnore::new`]; this is the seam the [`should_react`] unit tests use
-    /// to hand in a matcher assembled from raw gitignore lines instead of from a
-    /// repository on disk.
+    /// Share an already-built matcher — **in test builds only**, and the
+    /// `#[cfg(test)]` above is load-bearing rather than tidiness.
+    ///
+    /// A [`LiveIgnore`] built from a bare [`Gitignore`] is one nobody refreshes.
+    /// It is assembled from a glob set the caller already had in hand, with no
+    /// repository behind it to re-read, so it is frozen at whatever those globs
+    /// said the moment it was handed over — the exact staleness this type was
+    /// introduced to prevent, wearing the type that promises the opposite. Left
+    /// ungated, that construction is reachable from anywhere in the crate, and
+    /// the liveness invariant degrades from something the compiler holds into
+    /// something a future caller is trusted to remember.
+    ///
+    /// Gating it leaves [`LiveIgnore::new`] as the only entrance that survives
+    /// into a production build, and `new` reads from a repository — so every
+    /// `LiveIgnore` that ships is one [`refresh`](LiveIgnore::refresh) can keep
+    /// current. Under `cfg(test)` the impl remains what it always was: the seam
+    /// the pure [`should_react`] tests use to hand in a matcher assembled from
+    /// raw gitignore lines instead of from a repository on disk.
     fn from(matcher: Gitignore) -> Self {
         Self(Arc::new(RwLock::new(matcher)))
     }
@@ -496,14 +511,24 @@ enum Event {
 /// walk, which only happens when the throttle admits a walk in the first place —
 /// and it rides along with a full status traversal that dwarfs both.
 /// [`RepoHandle::reopened`] keeps the previous handle if the re-open fails, so
-/// catching git mid-write costs a tick of stale configuration, never a blank
-/// screen.
+/// catching git mid-write costs a tick of stale configuration rather than a
+/// failed walk. That fallback is only half of "never a blank screen": it keeps
+/// the *handle*, while [`event_loop`] keeps the *frame* when the status walk on
+/// that handle fails anyway. Both halves are required — see the `# Errors`
+/// section.
 ///
 /// # Errors
 ///
 /// Propagates a [`collect_snapshot`] failure (the status walk). Neither a failed
 /// *re-open* nor an unreadable ignore file is an error: the first degrades to the
 /// handle already in hand, the second to a matcher without that source.
+///
+/// The one production caller, [`event_loop`], deliberately does **not** let that
+/// error out of watch mode: it keeps the last good snapshot, re-renders it at its
+/// true (still-advancing) age, arms the throttle from the failed walk's cost, and
+/// retries on the next event. So this signature says "this walk did not produce a
+/// snapshot", not "the monitor should stop" — a distinction worth preserving if a
+/// second caller ever appears.
 pub(crate) fn walk(
     handle: &mut RepoHandle,
     ignore: &LiveIgnore,
@@ -762,7 +787,24 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 ///   collect;
 /// - a recompute whose output is byte-identical to what's displayed paints
 ///   nothing (suppression);
+/// - a walk that *fails* does not end the loop: the last good snapshot is
+///   re-rendered at its true age and the next event retries (see below);
 /// - [`Event::Quit`] ends the loop, as does every sender hanging up.
+///
+/// A failed collect is absorbed rather than propagated because the failures are
+/// overwhelmingly transient and none of the user's doing — `git gc` swapping the
+/// ref store out from under the walk, a worktree being pruned, `.git` renamed
+/// mid-operation. This is the other half of [`RepoHandle::reopened`]'s "never a
+/// blank screen" guarantee: that fallback keeps a *handle* when the re-open
+/// fails, and this keeps a *frame* when the status walk on it fails. Either half
+/// alone leaves the monitor dying on a repository that is momentarily
+/// unreadable. The failed walk still arms the throttle from its measured cost —
+/// so a repo that fails every walk backs off on the same duty cycle instead of
+/// hot-looping — and deliberately does *not* advance `collected_at`, so the
+/// stale frame goes on aging honestly rather than resetting every displayed age
+/// to zero. The accepted cost: a repository deleted for good leaves a frozen
+/// (but visibly aging) frame until the user quits. That is the right failure for
+/// a monitor — a wrong-but-labeled-old screen beats no screen.
 fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
     rx: &Receiver<Event>,
     debounce: Duration,
@@ -888,15 +930,40 @@ where
 
         let render = if walk_now {
             cache.dims = (hooks.dimensions)();
-            // Re-seed the collection time to the walk's start so a later decay
-            // tick or resize advances ages from *this* walk, not the previous
-            // one. Measure the walk's wall-clock cost around collect and feed it
-            // to the throttle, which arms the next cooldown (= 100·cost) from it.
-            cache.collected_at = now;
-            cache.snapshot = (hooks.collect)()?;
+            let collected = (hooks.collect)();
+            // Measure the walk's wall-clock cost around collect and feed it to
+            // the throttle, which arms the next cooldown (= 100·cost) from it.
+            // Deliberately outside the match: a *failed* walk still paid for a
+            // status traversal, and a repo that is unreadable for a while fails
+            // every walk, so gating the retries on the same duty-cycle budget is
+            // what keeps a permanently-deleted repo from pinning a core.
             let cost = (hooks.clock)().saturating_duration_since(now);
             throttle.record(now, cost);
-            (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+            match collected {
+                Ok(snapshot) => {
+                    // Re-seed the collection time to the walk's start so a later
+                    // decay tick or resize advances ages from *this* walk, not
+                    // the previous one.
+                    cache.collected_at = now;
+                    cache.snapshot = snapshot;
+                    (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+                }
+                // A walk can fail for reasons that are none of the user's
+                // business and usually transient: `git gc` swapping the ref
+                // store, a worktree being pruned, `.git` renamed mid-operation.
+                // Ending watch mode over that would make the whole
+                // stale-configuration fallback in [`RepoHandle::reopened`]
+                // pointless, so absorb it: keep the last good snapshot and let
+                // the next event retry. `collected_at` is pointedly NOT advanced
+                // — a collection that never happened must not reset every
+                // displayed age to "just now", or the monitor would claim
+                // freshness exactly when it has none. The frame therefore keeps
+                // aging truthfully while the repository is unreadable.
+                Err(_) => {
+                    let age_offset = now.saturating_duration_since(cache.collected_at);
+                    (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+                }
+            }
         } else if saw_resize {
             cache.dims = (hooks.dimensions)();
             let age_offset = now.saturating_duration_since(cache.collected_at);
@@ -2648,6 +2715,288 @@ mod tests {
             "a forced refresh on an idle loop walks git once"
         );
         assert_eq!(paints, 1, "the forced walk repaints exactly once");
+    }
+
+    #[test]
+    fn event_loop_absorbs_a_failed_walk_and_keeps_the_last_good_frame() {
+        // A walk can fail for reasons that have nothing to do with the user:
+        // `git gc` swapping the ref store out from under us, a worktree being
+        // pruned, `.git` momentarily renamed by a tool. `RepoHandle::reopened`
+        // already degrades to the handle in hand rather than blanking the
+        // screen — but that fallback only matters if the loop survives the
+        // *status walk* failing too. So a failed collect must not end watch
+        // mode; it must re-render the LAST GOOD snapshot, and it must render it
+        // at its TRUE age: `collected_at` may not advance for a collection that
+        // never happened, or the monitor would show a stale repo with every
+        // file age reset to "just now" — lying about freshness precisely when
+        // it is least fresh. With the cache collected at `base` and the clock
+        // 50 s later, the render hook must see the cached snapshot and a 50 s
+        // offset, and the loop must return `Ok`.
+        let base = Instant::now();
+        let clock_at = base + Duration::from_secs(50);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue fs change");
+        drop(tx);
+
+        let mut cache = seeded_cache(base);
+        cache.snapshot.branch = "last-good".to_string();
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut rendered: Vec<(String, Duration)> = Vec::new();
+        let result = event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            cache,
+            None, // decay timer off: isolate the failed walk from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    // The exact shape `collect_snapshot` produces when the ref
+                    // store has gone missing mid-walk.
+                    Err(anyhow::anyhow!(
+                        "status iter: The reference 'HEAD' did not exist"
+                    ))
+                },
+                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                    rendered.push((snap.branch.clone(), offset));
+                    frame("last good frame")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || clock_at,
+                next_tick: timer_off,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "a failed walk must be absorbed, not propagated out of watch mode: {result:?}",
+        );
+        assert_eq!(collects, 1, "the failed walk still ran exactly once");
+        assert_eq!(
+            rendered.len(),
+            1,
+            "a failed walk must still produce a frame — the screen never blanks",
+        );
+        assert_eq!(
+            rendered[0].0, "last-good",
+            "the frame after a failed walk must come from the CACHED snapshot",
+        );
+        assert_eq!(
+            rendered[0].1,
+            Duration::from_secs(50),
+            "a failed walk must not advance collected_at: the cached snapshot has \
+             to keep aging truthfully (now - collected_at = 50s), not reset to 0",
+        );
+        assert_eq!(displayed, "last good frame");
+    }
+
+    #[test]
+    fn event_loop_keeps_throttling_when_every_walk_fails() {
+        // Absorbing a failed walk must not turn the loop into a hot spin. A
+        // repository that is unreadable for a while (mid-`gc`, mid-checkout)
+        // will fail *every* walk, and each failure still costs a real status
+        // traversal — so the failure path has to feed the throttle exactly like
+        // the success path does, or a deleted repo would burn a core retrying.
+        //
+        // Same shape as `event_loop_throttles_walks_after_an_idle_change`, but
+        // every collect fails: three FS changes across the cooldown boundary
+        // must still collapse to exactly TWO walks. The first walk costs
+        // D = 10 ms, arming a 100·D = 1 s cooldown; the change at base + 100 ms
+        // lands mid-cooldown and is deferred; the change at base + 2 s is past
+        // expiry and walks. The injected clock is a short clamped sequence, so
+        // the test never sleeps and stays deterministic.
+        let base = Instant::now();
+        let times = [
+            base,                              // first (failing) walk start
+            base + Duration::from_millis(10),  // first walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_millis(100), // second change: mid-cooldown → deferred
+            base + Duration::from_secs(2), // third change: past expiry → walks; trailing reads clamp here
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue first change");
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut changes_sent = 1_usize;
+        let result = event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            None, // decay timer off: isolate the throttle from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Err(anyhow::anyhow!("status platform: repository is gone"))
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                    // Deliver the next change in its own iteration so the three
+                    // never coalesce; quit once all three have been processed.
+                    if changes_sent < 3 {
+                        changes_sent += 1;
+                        let _ = tx.send(Event::FsChanged);
+                    } else {
+                        let _ = tx.send(Event::Quit);
+                    }
+                    frame(&format!("frame {changes_sent}"))
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: timer_off,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "failing walks must keep the loop alive: {result:?}",
+        );
+        assert_eq!(
+            collects, 2,
+            "a failing walk must arm the cooldown exactly like a successful one: \
+             three FS changes across the boundary walk twice, not three times",
+        );
+    }
+
+    #[test]
+    fn event_loop_recovers_and_reseeds_age_after_a_failed_walk() {
+        // Absorbing a failed walk is only half the promise; the other half is
+        // that "the next event retries" and the monitor visibly RECOVERS. The
+        // two failure tests above never let a walk succeed afterward, so
+        // neither can tell a loop that retries from one that has quietly
+        // wedged itself on the last good frame forever. This drives the whole
+        // arc: fail, then succeed.
+        //
+        // The recovery that matters is the age display. While the repo is
+        // unreadable the cached frame keeps aging truthfully (50 s here); the
+        // moment a walk succeeds, the fresh snapshot must render at age zero
+        // AND `collected_at` must be re-seeded to that walk's start, so every
+        // later re-render ages from the new walk rather than from the
+        // long-stale seed. The final resize is what makes the re-seed directly
+        // observable: it re-renders the cache with no walk, and its offset is
+        // `now - collected_at` — 3 s off the second walk, not 55 s off the
+        // original seed. Without that third frame a "do not re-seed after a
+        // failure" regression would leave the loop stuck reporting the stale
+        // seed's age while every assertion still passed.
+        //
+        // Clock reads, in order (a clamped sequence, so the test never sleeps
+        // on real time): iteration 1's `now` and the failed walk's cost end;
+        // iteration 2's `now` and the successful walk's cost end; iteration
+        // 3's `now`. No read for a deferred deadline — nothing lands
+        // mid-cooldown, so the throttle is never dirty.
+        let base = Instant::now();
+        let times = [
+            base + Duration::from_secs(50), // failed walk start (cache is 50 s stale)
+            base + Duration::from_millis(50_010), // failed walk end → D = 10 ms → 1 s cooldown
+            base + Duration::from_secs(52), // retry: past expiry → walks, and succeeds
+            base + Duration::from_millis(52_010), // successful walk end
+            base + Duration::from_secs(55), // resize re-render; trailing reads clamp here
+        ];
+        let clock_calls = std::cell::Cell::new(0_usize);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::FsChanged).expect("queue first change");
+
+        let mut cache = seeded_cache(base);
+        cache.snapshot.branch = "last-good".to_string();
+
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut rendered: Vec<(String, Duration)> = Vec::new();
+        let result = event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            cache,
+            None, // decay timer off: isolate recovery from tick behavior
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    if collects == 1 {
+                        // The repo is momentarily unreadable — mid-`gc`, say.
+                        Err(anyhow::anyhow!(
+                            "status iter: The reference 'HEAD' did not exist"
+                        ))
+                    } else {
+                        // ...and then it isn't. A distinguishable branch name
+                        // proves the frame came from THIS walk, not the cache.
+                        let mut fresh = empty_snapshot();
+                        fresh.branch = "recovered".to_string();
+                        Ok(fresh)
+                    }
+                },
+                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                    rendered.push((snap.branch.clone(), offset));
+                    match rendered.len() {
+                        // Deliver the retry in its own iteration so it lands in
+                        // a separate debounce window instead of coalescing.
+                        1 => {
+                            let _ = tx.send(Event::FsChanged);
+                            frame("stale")
+                        }
+                        // A resize forces one more cached re-render (no walk),
+                        // whose age offset is read straight off `collected_at`.
+                        // The quit rides the same debounce window, so the loop
+                        // renders that frame and then stops.
+                        2 => {
+                            let _ = tx.send(Event::Resize);
+                            let _ = tx.send(Event::Quit);
+                            frame("fresh")
+                        }
+                        _ => frame("aged"),
+                    }
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || {
+                    let i = clock_calls.get();
+                    clock_calls.set(i + 1);
+                    times[i.min(times.len() - 1)]
+                },
+                next_tick: timer_off,
+            },
+        );
+
+        assert!(
+            result.is_ok(),
+            "a failure followed by a success must run to a clean stop: {result:?}",
+        );
+        assert_eq!(collects, 2, "the failed walk must be retried exactly once");
+        assert_eq!(
+            rendered.len(),
+            3,
+            "expected three frames: the absorbed failure, the recovery, and the \
+             cached re-render that exposes the re-seeded age",
+        );
+        assert_eq!(
+            rendered[0],
+            ("last-good".to_string(), Duration::from_secs(50)),
+            "while the walk is failing the CACHED snapshot keeps aging truthfully",
+        );
+        assert_eq!(
+            rendered[1],
+            ("recovered".to_string(), Duration::ZERO),
+            "the walk that succeeds after a failure must render its FRESH snapshot \
+             at age zero — recovery, not a permanently frozen last-good frame",
+        );
+        assert_eq!(
+            rendered[2],
+            ("recovered".to_string(), Duration::from_secs(3)),
+            "the successful walk must re-seed collected_at to its own start: the \
+             re-render 3s later ages from that walk (55s - 52s), not from the \
+             50s-stale seed the failure left in place",
+        );
+        assert_eq!(displayed, "aged");
     }
 
     #[test]

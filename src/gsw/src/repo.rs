@@ -57,9 +57,11 @@ impl RepoHandle {
     /// Wrap an opened repository, rejecting one gsw can't render.
     ///
     /// Bare repos have no work tree; gsw renders a per-file working-tree view,
-    /// so there's nothing to show. Treat them like "not a repo". Shared by the
-    /// initial discovery and by [`reopened`](Self::reopened) so both apply the
-    /// same admission rule.
+    /// so there's nothing to show. Treat them like "not a repo".
+    ///
+    /// This is the discovery path only; [`reopened`](Self::reopened) admits a
+    /// repository by the same rule — it must have a work tree — but applies it
+    /// inline. See there for why the check is stated twice rather than shared.
     fn from_repo(repo: gix::Repository) -> Option<Self> {
         let workdir = repo.workdir()?.to_path_buf();
         Some(Self { repo, workdir })
@@ -90,10 +92,33 @@ impl RepoHandle {
     /// A failed re-open, or one that comes back without a work tree, keeps the
     /// handle already in hand: a monitor that blanks out for one tick because
     /// it caught git mid-write is worse than a monitor that repaints one
-    /// tick-old configuration and recovers on the next call.
+    /// tick-old configuration and recovers on the next call. The work-tree
+    /// check is written out here rather than borrowed from
+    /// [`from_repo`](Self::from_repo): only the repository is being replaced,
+    /// and building a second work-tree root just to drop it would suggest the
+    /// captured one gets refreshed, which is exactly what this must not do.
+    /// That leaves one rule stated in two places, which could drift — an
+    /// accepted cost, because each side is a single `workdir()` call, small
+    /// enough to compare at a glance, and changing one without the other would
+    /// leave a handle whose `workdir` field no longer describes what a re-open
+    /// will accept.
+    ///
+    /// That "never a blank screen" property is **not** delivered here alone —
+    /// this fallback only guarantees a usable *handle*. Reading a repository
+    /// that is mid-`gc`, mid-checkout, or renamed away can still fail on the
+    /// status walk performed against the handle it hands back, and watch mode's
+    /// `event_loop` is what absorbs *that* failure by re-rendering the last good
+    /// snapshot at its true age. Removing either half re-breaks the guarantee:
+    /// drop this fallback and a momentary re-open failure loses the
+    /// configuration; drop the loop's absorption and the same momentary failure
+    /// ends watch mode outright, which is precisely the bug this pairing was
+    /// written to close.
     pub fn reopened(&mut self) -> &gix::Repository {
-        if let Some(fresh) = gix::open(&self.workdir).ok().and_then(Self::from_repo) {
-            self.repo = fresh.repo;
+        if let Some(fresh) = gix::open(&self.workdir)
+            .ok()
+            .filter(|repo| repo.workdir().is_some())
+        {
+            self.repo = fresh;
         }
         &self.repo
     }
@@ -580,7 +605,9 @@ mod tests {
     use super::RepoHandle;
     use crate::git::FileStatus;
     use crate::render::Operation;
-    use crate::testrepo::{git, git_allowing_failure, init_repo, init_repo_with_upstream};
+    use crate::testrepo::{
+        git, git_allowing_failure, init_repo, init_repo_with_upstream, init_repo_with_worktree,
+    };
 
     /// Open a repo at an explicit path (tests can't rely on cwd under a
     /// parallel test runner).
@@ -1030,6 +1057,74 @@ mod tests {
             (up.ahead, up.behind),
             (0, 0),
             "the push left the branch level with its brand-new upstream",
+        );
+    }
+
+    /// Read the `gsw.probe` key out of the repository's config as it stands
+    /// *right now*, owned so the snapshot's borrow ends with the call.
+    ///
+    /// The key is one git itself never consults, so a non-`None` answer can only
+    /// have come from a fresh read of the config file the handle resolves to —
+    /// exactly the observation the re-open is supposed to make possible.
+    fn probe(repo: &gix::Repository) -> Option<String> {
+        repo.config_snapshot()
+            .string("gsw.probe")
+            .map(|value| value.to_string())
+    }
+
+    #[test]
+    fn reopened_handle_in_a_linked_worktree_sees_config_written_after_open() {
+        // Nearly all work on this repository happens in a linked worktree
+        // (`nwt`), so that is where gsw's watch mode actually runs, and it is
+        // the one layout whose work-tree root holds a `.git` *file* pointing at
+        // `<repo>/.git/worktrees/<name>` rather than a `.git` directory.
+        // `reopened()` re-opens with `gix::open` — chosen over `gix::discover`
+        // precisely because it resolves that pointer without walking up — so if
+        // resolution ever regressed, `open` would simply fail, the handle would
+        // fall back to the stale repository it already holds, and every config
+        // change made mid-watch (`git push -u origin <branch>` above all) would
+        // go unseen until restart, with nothing on screen to say so. The rest
+        // of the re-open tests run against a plain repo or a clone, where a
+        // broken pointer costs nothing.
+        //
+        // This guard is not red-first: the property already holds. It exists so
+        // a gix upgrade or a later refactor cannot turn the #334 fix into a
+        // no-op in the environment it is used in most while the suite stays
+        // green.
+        let (_repo, linked) = init_repo_with_worktree();
+
+        // The fixture only proves anything if it really is a linked worktree —
+        // a plain clone would exercise the `.git`-directory path and satisfy
+        // every assertion below while covering none of the pointer resolution.
+        assert!(
+            linked.join(".git").is_file(),
+            "a linked worktree's `.git` is a gitdir pointer file, not a directory",
+        );
+
+        // Opened BEFORE the config write and held across it, like watch mode.
+        let mut held = RepoHandle::discover(&linked).expect("linked worktree is a worktree repo");
+        assert_ne!(
+            held.repo().git_dir(),
+            held.repo().common_dir(),
+            "a linked worktree's per-worktree git dir lives under the main repo's common dir",
+        );
+        assert_eq!(probe(held.repo()), None, "nothing has written the key yet");
+
+        // What any `git config` run in another pane does mid-watch. From a
+        // linked worktree this lands in the *common* `.git/config`, which is
+        // reachable only by following the gitdir pointer.
+        git(&linked, &["config", "gsw.probe", "written-after-open"]);
+
+        assert_eq!(
+            probe(held.repo()),
+            None,
+            "the handle opened before the write still has the old config cached",
+        );
+        assert_eq!(
+            probe(held.reopened()).as_deref(),
+            Some("written-after-open"),
+            "re-opening from a work-tree root whose `.git` is a pointer file must \
+             still re-read the configuration it points at",
         );
     }
 
