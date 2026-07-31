@@ -81,7 +81,9 @@ guard, watch that specific test fail, put it back:
   `post-rewrite` and `pre-merge-commit` hooks that each touch a sentinel, and
   proving no sentinel appears.
 - **The scratch worktree itself**, asserted by dirtying the real working tree
-  and index and requiring both to survive a replay byte-identical.
+  and index three ways — a tracked edit, a staged change, and an untracked file
+  that no reflog or stash could get back — and requiring every one of them to
+  survive a replay unchanged, the two on disk compared byte for byte.
 - **`worktree remove --force` in teardown**, asserted after a clean run, after a
   resolved conflict, and after a `Scratch` dropped while a rebase was still
   halted — the path most likely to leak a registration.
@@ -96,13 +98,27 @@ above — is pinned by a unit test in `src/git.rs` instead, which reads back
 The remaining rows of the table above — the editor and prompt environment,
 `gpg.format`, `gc.auto`, and the `rebase.autoStash`/`autosquash` pair — are
 established by construction in `safety_config` and are not covered by a test of
-their own, though the `gpg.format` and editor guards are exercised indirectly by
-the signing and conflict tests.
+their own. The editor guard is at least exercised indirectly: every conflict
+test above drives a rebase that halts, and a halted rebase without `GIT_EDITOR`
+set sits waiting on a commit message.
+
+`gpg.format` looks like the signing test covers it and it does not, which is
+worth saying out loud so nobody re-derives the wrong answer. That test's fixture
+pins `gpg.format=openpgp` itself, deliberately — the format selects *which*
+program config git reads, so without it the fake signing program the fixture
+names would go unused on a developer who has `gpg.format = ssh` set globally —
+and `openpgp` is the same value `safety_config` pins. Removing the harness's
+entry would therefore change nothing that test can observe. The pin earns its
+place for the reason the table gives; it is just not what makes that test pass.
 
 [`MUTATIONS.md`](./MUTATIONS.md) records which guard each test pins, where that
-guard lives, and the failure output captured when it was removed. Anyone
-changing `safety_config`, `Scratch::create` or the teardown should re-run the
-relevant mutation rather than trusting a green suite.
+guard lives, and the failure output captured when it was removed. It also
+records the other half of the question — what keeps each test *honest*: the
+start-state control proving the fixture began where the test needs it to, and
+the armed control proving the hazard would really have fired without the guard.
+That second half is the one that rots, and it rots green. Anyone changing
+`safety_config`, `Scratch::create` or the teardown should re-run the relevant
+mutation rather than trusting a green suite.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
