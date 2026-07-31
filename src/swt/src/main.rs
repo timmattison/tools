@@ -13,12 +13,13 @@
 //! surface: it decides which command was asked for, and rejects everything that
 //! is not one of them with a usage error rather than a guess.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
 use swt::create::create;
+use swt::merge::merge;
 
 /// Command line surface of `swt`.
 ///
@@ -52,18 +53,6 @@ enum Command {
         /// Path to the subagent worktree to merge back.
         worktree_path: PathBuf,
     },
-}
-
-/// Merges the subagent worktree at `worktree_path` back into the parent.
-///
-/// # Panics
-///
-/// Always: the implementation lands in a later slice.
-fn merge(worktree_path: &Path) -> ExitCode {
-    todo!(
-        "swt merge {}: implemented in the `merge` slice",
-        worktree_path.display()
-    );
 }
 
 fn main() -> ExitCode {
