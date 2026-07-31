@@ -29,10 +29,38 @@
 //!   rather than report a vacuous green.
 
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 
 /// The per-developer green-check override script, looked up at the config root.
 const OVERRIDE_FILE: &str = ".swt-check";
+
+/// The manifest whose presence marks a directory as a JavaScript project.
+const PACKAGE_JSON: &str = "package.json";
+
+/// The lockfile whose presence means dependencies can be installed reproducibly.
+const PNPM_LOCKFILE: &str = "pnpm-lock.yaml";
+
+/// The directory whose presence means dependencies are already installed — and
+/// therefore that an install would be a mutation, not a setup step.
+const NODE_MODULES: &str = "node_modules";
+
+/// The cargo manifest at the worktree root, which cargo finds on its own.
+const ROOT_CARGO_MANIFEST: &str = "Cargo.toml";
+
+/// The second cargo manifest a Tauri-shaped repo carries. One constant serves as
+/// both the existence probe and the `--manifest-path` value, so the file that is
+/// looked for and the file that is checked can never drift apart.
+const TAURI_CARGO_MANIFEST: &str = "src-tauri/Cargo.toml";
+
+/// Preferred spelling of a type-checking script.
+const TYPECHECK_SCRIPT: &str = "typecheck";
+/// Fallback spelling of a typecheck script, used only when `typecheck` is absent.
+const TSC_SCRIPT: &str = "tsc";
+/// Lint script name.
+const LINT_SCRIPT: &str = "lint";
+/// Test script name.
+const TEST_SCRIPT: &str = "test";
 
 /// Wraps a string so `sh -c` sees exactly one literal argument.
 ///
@@ -50,9 +78,7 @@ const OVERRIDE_FILE: &str = ".swt-check";
 /// concatenate into a command line.
 #[must_use]
 pub fn shell_quote(s: &str) -> String {
-    // Deliberately wrong until the green commit: the caller gets its input back
-    // unquoted, so anything with a space, a quote or a `$` breaks under `sh -c`.
-    s.to_string()
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// Reads the script names declared in a directory's `package.json`.
@@ -64,10 +90,20 @@ pub fn shell_quote(s: &str) -> String {
 /// same conservative answer as "this is not a JavaScript project".
 #[must_use]
 pub fn pkg_scripts(dir: &Path) -> BTreeSet<String> {
-    // Deliberately wrong until the green commit: every directory looks
-    // script-less, so no pnpm check is ever produced.
-    let _ = dir;
-    BTreeSet::new()
+    // Reading and then failing to parse are the same answer here — "no scripts
+    // I can use" — so a missing file needs no separate existence probe, and the
+    // race between probing and reading it never arises.
+    let Ok(text) = fs::read_to_string(dir.join(PACKAGE_JSON)) else {
+        return BTreeSet::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return BTreeSet::new();
+    };
+    manifest
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+        .map(|scripts| scripts.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Determines the ordered list of shell commands that constitute the green check
@@ -86,9 +122,74 @@ pub fn pkg_scripts(dir: &Path) -> BTreeSet<String> {
 /// Returns the commands to run in order, or `None` when no check applies.
 #[must_use]
 pub fn build_check_plan(target: &Path, config_root: Option<&Path>) -> Option<Vec<String>> {
-    // Deliberately wrong until the green commit: no repo shape is ever detected.
-    let _ = (target, config_root);
-    None
+    // Resolved against the config root, run in the target. The escape hatch is
+    // documented as a file you *drop* at the repo root — uncommitted, and so
+    // absent from the fresh checkout of HEAD that `create` checks. Looking it up
+    // in the parent keeps that per-developer override working; running it in the
+    // target keeps the check honest about what it is verifying.
+    let override_path = config_root.unwrap_or(target).join(OVERRIDE_FILE);
+    if override_path.exists() {
+        return Some(vec![shell_quote(&override_path.to_string_lossy())]);
+    }
+
+    let mut cmds: Vec<String> = Vec::new();
+
+    if target.join(PACKAGE_JSON).exists() {
+        let scripts = pkg_scripts(target);
+        let mut js_checks: Vec<String> = Vec::new();
+        // `tsc` is the fallback spelling, not a second check: a repo declaring
+        // both would otherwise type-check itself twice.
+        if scripts.contains(TYPECHECK_SCRIPT) {
+            js_checks.push("pnpm typecheck".to_string());
+        } else if scripts.contains(TSC_SCRIPT) {
+            js_checks.push("pnpm exec tsc --noEmit".to_string());
+        }
+        if scripts.contains(LINT_SCRIPT) {
+            js_checks.push("pnpm lint".to_string());
+        }
+        if scripts.contains(TEST_SCRIPT) {
+            js_checks.push("pnpm test --run".to_string());
+        }
+
+        // The install verifies nothing on its own — it exists only so the js
+        // checks can run in a fresh worktree, which has no node_modules. A plan
+        // of just an install would report green having checked nothing, so it
+        // rides along with the js checks or not at all.
+        //
+        // And it only rides along into a tree that is actually fresh. The green
+        // check also runs against the parent worktree the user is living in,
+        // where an install is not a read-only step: `--frozen-lockfile` prunes
+        // extraneous packages and undoes local `pnpm link`s. An existing
+        // node_modules is the tell that the dependencies are already there —
+        // nothing to set up, and something to lose — so verification inspects
+        // that tree without touching it.
+        if !js_checks.is_empty() {
+            let needs_install =
+                target.join(PNPM_LOCKFILE).exists() && !target.join(NODE_MODULES).exists();
+            if needs_install {
+                cmds.push("pnpm install --frozen-lockfile".to_string());
+            }
+            cmds.append(&mut js_checks);
+        }
+    }
+
+    // Rust checks run alongside the package.json ones — Tauri repos have both.
+    // `None` is the root manifest, which cargo finds without being told.
+    let mut manifests: Vec<Option<&str>> = Vec::new();
+    if target.join(ROOT_CARGO_MANIFEST).exists() {
+        manifests.push(None);
+    }
+    if target.join(TAURI_CARGO_MANIFEST).exists() {
+        manifests.push(Some(TAURI_CARGO_MANIFEST));
+    }
+    for manifest in manifests {
+        let flag = manifest.map_or_else(String::new, |path| format!(" --manifest-path {path}"));
+        cmds.push(format!("cargo check{flag}"));
+        cmds.push(format!("cargo test{flag}"));
+        cmds.push(format!("cargo clippy{flag} -- -D warnings"));
+    }
+
+    (!cmds.is_empty()).then_some(cmds)
 }
 
 #[cfg(test)]
