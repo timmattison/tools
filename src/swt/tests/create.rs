@@ -399,10 +399,7 @@ fn a_red_check_tears_the_worktree_and_the_branch_down_and_says_so() {
     // The worktree is gone, so what it was called can only be read back out of
     // the report — which is also the only place the two names appear together,
     // and therefore the only place a run can be caught keying them differently.
-    let reported_path = format!(
-        "Cleaned up worktree {}/{name}-",
-        repo.siblings().display()
-    );
+    let reported_path = format!("Cleaned up worktree {}/{name}-", repo.siblings().display());
     let path_token = token_after(&stderr, &reported_path, WORKTREE_SUFFIX);
     let branch_token = token_after(&stderr, &format!(" and branch swt/{name}-"), ".");
     assert_eq!(

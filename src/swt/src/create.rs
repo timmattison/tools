@@ -13,6 +13,14 @@
 //! worktree over the moment `git worktree add` returns and takes it back only
 //! once the check has passed.
 //!
+//! The names are the other half. A worktree directory and a branch are both
+//! shared resources, and `swt` is for running several subagents at once, so
+//! every run keys *both* of them on one [`UniqueToken`] built from this
+//! process's id and the clock. Keying only the branch — which is what this
+//! started as — leaves two concurrent `swt create <same-name>` calls fighting
+//! over one directory, and a token spelled from the clock alone collides in the
+//! millisecond an orchestrator fans them out in.
+//!
 //! What survives a failed check is reported, never assumed. Teardown is
 //! best-effort — git refuses to remove a working tree whose `.git` link has gone
 //! missing — and claiming a cleanup that did not happen would strand the user
@@ -84,8 +92,25 @@ fn now_millis() -> u128 {
         .map_or(0, |since_epoch| since_epoch.as_millis())
 }
 
+/// Bits the packed uniqueness value reserves for the process id, low-order.
+///
+/// A `u32` pid is *exactly* 32 bits wide, which is what makes the packing
+/// injective: no pid can reach into the timestamp's bits, so distinct
+/// `(millis, pid)` pairs always pack to distinct numbers and therefore spell
+/// distinct tokens. Two readings interleaved into one number rather than
+/// concatenated as two strings for the same reason — `"1" + "23"` and
+/// `"12" + "3"` are the same six characters, and a separator between them
+/// would put a character in the token that is not a base-36 digit.
+const PID_BITS: u32 = 32;
+
 /// A token that distinguishes one `swt create` invocation from every other,
 /// minted once per run and spelled in base 36.
+///
+/// It is built from *both* the process id and the clock, and needs both. The
+/// clock alone — which is all the original spelled — collides whenever an
+/// orchestrator fans two runs out inside the same millisecond, which is exactly
+/// the situation `swt` exists to serve. The pid alone repeats as soon as the
+/// operating system recycles it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UniqueToken(String);
 
@@ -103,11 +128,10 @@ impl UniqueToken {
     /// in the same millisecond still get different tokens — can be pinned
     /// without racing two real clocks.
     fn from_parts(pid: u32, millis: u128) -> Self {
-        // Deliberately still the pre-fix spelling: the timestamp alone. The
-        // failing tests that go with this commit are what make the missing pid
-        // a behavioral fact rather than a claim.
-        let _ = pid;
-        Self(base36(millis))
+        // The shift cannot overflow a `u128` at any timestamp a clock can
+        // produce: 32 bits of headroom leaves 96 for the milliseconds, and
+        // 2^96 ms is some 10^18 times the age of the universe.
+        Self(base36((millis << PID_BITS) | u128::from(pid)))
     }
 }
 
@@ -146,19 +170,16 @@ impl WorktreeNaming {
     /// repository or a subprocess.
     fn with_token(root: &Path, name: &WorktreeName, token: &UniqueToken) -> Self {
         Self {
-            // The lexical parent, which is what resolving `<root>/../<name>…`
-            // comes to: git answers `--show-toplevel` with an absolute,
-            // already-normalized path, so there is no `..` component left for a
-            // lexical step to get wrong. A root with nothing above it stands in
-            // for itself, exactly as path resolution treats `/..`.
-            //
-            // Deliberately still the pre-fix spelling: the bare name, with no
-            // token in it. This is the collision issue #284 describes, and the
-            // failing tests that go with this commit are what pin it.
+            // The lexical parent, which is what resolving
+            // `<root>/../<name>-<token>.swt` comes to: git answers
+            // `--show-toplevel` with an absolute, already-normalized path, so
+            // there is no `..` component left for a lexical step to get wrong. A
+            // root with nothing above it stands in for itself, exactly as path
+            // resolution treats `/..`.
             path: root
                 .parent()
                 .unwrap_or(root)
-                .join(format!("{name}{WORKTREE_SUFFIX}")),
+                .join(format!("{name}-{token}{WORKTREE_SUFFIX}")),
             branch: format!("{BRANCH_PREFIX}/{name}-{token}"),
         }
     }
@@ -347,7 +368,10 @@ mod tests {
     // never confused for a subagent's.
     #[test]
     fn a_branch_is_the_name_under_the_swt_namespace_with_the_token_suffixed() {
-        assert_eq!(naming("fix-parser", TOKEN).branch(), "swt/fix-parser-abc123");
+        assert_eq!(
+            naming("fix-parser", TOKEN).branch(),
+            "swt/fix-parser-abc123"
+        );
     }
 
     // The heart of issue #284. The branch was already keyed for uniqueness and
