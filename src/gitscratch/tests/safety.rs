@@ -1012,10 +1012,20 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
     // it is the developer's repository behaving the way it normally would. It
     // is `--allow-empty` so that failing, which is what it is here to do, leaves
     // the fixture exactly as it found it.
+    //
+    // The locale is pinned because the assertion below matches git's own words.
+    // "gpg failed to sign the data" is wrapped in gettext, so a git built with
+    // NLS - Homebrew's is - answers a developer running under, say, `de_DE` with
+    // "gpg konnte die Daten nicht signieren", and this control then fails for a
+    // reason that has nothing to do with signing. `LC_ALL` is the one that
+    // decides; `LANG` is set alongside it because it costs nothing and spares
+    // the next reader from having to remember the precedence.
     let control = Command::new("git")
         .args(["commit", "--allow-empty", "-q", "-m", "control"])
         .current_dir(repo.path())
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
         .output()
         .expect("run the control commit in the fixture");
     let control_stderr = String::from_utf8_lossy(&control.stderr);
