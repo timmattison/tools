@@ -9,3 +9,4 @@
 
 pub mod git;
 pub mod green_check;
+pub mod lock;

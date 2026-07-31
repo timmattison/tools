@@ -1,0 +1,469 @@
+//! lock — the file that stops two `swt merge` runs interleaving in one
+//! repository, and the guarantee that it is always let go of again.
+//!
+//! Two things are load-bearing here and neither is obvious from the outside.
+//!
+//! **Where the lock lives.** It is `swt.lock` inside the git directory *shared*
+//! by every worktree of the repository, which is what `git rev-parse
+//! --git-common-dir` names. Not `<worktree>/.git/swt.lock`: `.git` is a
+//! directory only in the main worktree, and in a linked worktree — the only
+//! place the workflow `swt` exists for ever merges from — it is a regular file
+//! holding `gitdir: …`, so joining onto it is an `ENOTDIR`. The common dir is
+//! also exactly the serialization *scope* wanted: two `swt merge` runs launched
+//! from two different worktrees of one repository must contend for the same
+//! file.
+//!
+//! **That it is always released.** [`LockGuard`]'s [`Drop`] covers a region that
+//! returns and a region that panics; [`release_all_held_locks`] covers the third
+//! path, a process that exits from inside the region without unwinding anything.
+//! A process-global registry of the locks *this* process created is what makes
+//! that last one safe — a path that is not in the registry belongs to somebody
+//! else, and removing it would hand two merges the same repository.
+
+use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions};
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::git::git_must;
+
+/// Basename of the lock file, inside the repository's shared git directory.
+const LOCK_FILE: &str = "swt.lock";
+
+/// The git query that names the directory shared by every worktree of a repo.
+const GIT_COMMON_DIR_ARGS: [&str; 2] = ["rev-parse", "--git-common-dir"];
+
+/// What `swt` says when it gives up waiting for somebody else's merge.
+const TIMEOUT_MESSAGE: &str = "Timed out waiting for parent repo lock.\n";
+
+/// Status `swt` exits with when it cannot take the lock. The conventional "this
+/// did not work" status, distinct from the `2` reserved for a usage error.
+const LOCK_FAILURE_EXIT_STATUS: i32 = 1;
+
+/// Lock files this process created and is still responsible for removing.
+///
+/// Process-global because the responsibility is: teardown triggered from
+/// anywhere has to be able to find every lock this process owns, whichever call
+/// created it. It is also what makes removal *safe* — see [`release`].
+static HELD_LOCKS: Mutex<BTreeSet<PathBuf>> = Mutex::new(BTreeSet::new());
+
+/// Borrows the registry, ignoring poisoning.
+///
+/// Refusing to release a lock because some other thread panicked while holding
+/// this mutex for the length of one set operation would leave a stale lock
+/// behind for an hour — precisely the failure this module exists to prevent.
+/// There is no half-updated state to protect against either: every mutation is
+/// a single insert, removal or take.
+fn held_locks() -> MutexGuard<'static, BTreeSet<PathBuf>> {
+    HELD_LOCKS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Gives up one lock: deregisters it and, only if it was still registered,
+/// removes the file.
+///
+/// The registry check is the whole safety property. [`release_all_held_locks`]
+/// may already have dropped this lock on the way out of the process, after which
+/// another `swt` is free to create its own file at the same path — removing that
+/// one would hand two merges the same repository.
+fn release(path: &Path) {
+    let was_ours = held_locks().remove(path);
+    if was_ours {
+        // Best effort: a lock that is already gone is the state we wanted.
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Removes every lock file this process is currently holding, and never one it
+/// did not create.
+///
+/// This is the third release path, the one no destructor can cover: a process
+/// that exits from inside a locked region unwinds nothing, so [`LockGuard`]'s
+/// [`Drop`] never runs and the lock outlives its owner — blocking every later
+/// merge in that repository until the staleness reap an hour later.
+///
+/// # Contract for the signal handling that calls this
+///
+/// `swt`'s signal teardown is expected to call this on every path that ends the
+/// process, and it is built to be called that way:
+///
+/// - **Idempotent and latched.** The registry is emptied up front, so a second
+///   call — a signal arriving after an explicit release — finds nothing left to
+///   do rather than repeating work.
+/// - **Safe to interleave with a live region.** A [`LockGuard`] still on the
+///   stack when this runs will find its path already gone from the registry and
+///   remove nothing, so a lock a *successor* process has since taken is never
+///   deleted out from under it.
+/// - **Not async-signal-safe.** It takes a mutex and touches the filesystem, so
+///   it must be called from ordinary code — a signal-handling thread, or an
+///   exit hook — never from inside a raw `signal(2)` handler.
+pub fn release_all_held_locks() {
+    // Latched by taking the paths out of the registry up front.
+    let paths = std::mem::take(&mut *held_locks());
+    for path in paths {
+        // Best effort: the process is going down and there is nothing useful to
+        // report to.
+        let _ = fs::remove_file(&path);
+    }
+}
+
+/// Ownership of one lock file, released on every path out of the locked region
+/// that unwinds — a normal return and a panic alike.
+struct LockGuard {
+    /// The lock file this guard is responsible for.
+    path: PathBuf,
+}
+
+impl LockGuard {
+    /// Records a freshly created lock as this process's responsibility.
+    ///
+    /// `path` must be a lock file this process just created with `O_EXCL`;
+    /// registering somebody else's would authorize deleting it.
+    fn hold(path: PathBuf) -> Self {
+        held_locks().insert(path.clone());
+        Self { path }
+    }
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        release(&self.path);
+    }
+}
+
+/// The three durations that govern the acquisition loop.
+///
+/// Separated from the loop so a test can drive it in milliseconds. At the values
+/// `swt` actually ships with, none of the three is reachable by a test: a
+/// ten-minute timeout, an hour-long staleness window and a one-second backoff
+/// cannot be waited out.
+#[derive(Debug, Clone, Copy)]
+struct LockTimings {
+    /// Age past which an existing lock is presumed abandoned and reaped. Long
+    /// enough that no honest merge is ever mistaken for a corpse.
+    stale_after: Duration,
+    /// How long to keep waiting for somebody else's lock before giving up.
+    wait_at_most: Duration,
+    /// Pause between acquisition attempts.
+    retry_every: Duration,
+}
+
+impl LockTimings {
+    /// The values `swt` runs with.
+    const PRODUCTION: Self = Self {
+        stale_after: Duration::from_secs(60 * 60),
+        wait_at_most: Duration::from_secs(10 * 60),
+        retry_every: Duration::from_secs(1),
+    };
+}
+
+/// Why a locked region never ran.
+///
+/// Reported as a value rather than acted on, so the *caller* decides what it
+/// means — which is also what lets both cases be asserted in a test without
+/// taking the test binary down with them.
+#[derive(Debug)]
+enum LockFailure {
+    /// Somebody else held the lock for longer than [`LockTimings::wait_at_most`].
+    TimedOut,
+    /// The lock file could not be created for a reason other than "it already
+    /// exists" — a missing git directory, a read-only filesystem — so waiting
+    /// would never help.
+    Unusable(io::Error),
+}
+
+impl LockFailure {
+    /// The message `swt` prints before giving up.
+    ///
+    /// `lock_path` is the file that could not be taken; it is named only in the
+    /// case where naming it helps, since a timeout is about contention rather
+    /// than about the path.
+    fn message(&self, lock_path: &Path) -> String {
+        match self {
+            Self::TimedOut => TIMEOUT_MESSAGE.to_string(),
+            Self::Unusable(err) => format!(
+                "Could not create the parent repo lock at {}: {err}\n",
+                lock_path.display()
+            ),
+        }
+    }
+}
+
+/// Resolves the lock file that serializes merges for a repository.
+///
+/// `repo_root` is any worktree root of the repository. Returns the absolute path
+/// of that repository's one merge lock: from the main worktree git answers with
+/// a path relative to its cwd (`.git`), which is resolved against the root, and
+/// from a linked worktree it answers with the shared git directory's absolute
+/// path, which [`Path::join`] takes whole. Either way both worktrees name one
+/// file.
+///
+/// Exits the process with git's own message if git cannot answer — which is
+/// safe here precisely because it happens before anything is locked.
+fn parent_lock_path(repo_root: &Path) -> PathBuf {
+    // STUB: behaviorally wrong on purpose (red). `<root>/.git` is a regular file
+    // in a linked worktree, so this both names the wrong lock and cannot be
+    // written to.
+    repo_root.join(".git").join(LOCK_FILE)
+}
+
+/// Runs `f` while holding a lock file, retrying until it can be created.
+///
+/// The internal entrance every timing decision goes through, so a test can drive
+/// the loop in milliseconds instead of waiting out the shipped values.
+///
+/// `lock_path` is the file whose existence *is* the lock, `timings` the
+/// durations to run the loop at, and `f` the work to perform under it. Returns
+/// `f`'s value, or the reason the region never ran.
+fn locked<T>(
+    lock_path: &Path,
+    timings: LockTimings,
+    f: impl FnOnce() -> T,
+) -> Result<T, LockFailure> {
+    // STUB: behaviorally wrong on purpose (red). No lock is created, nothing is
+    // reaped, and no wait can ever time out.
+    let _ = (lock_path, timings);
+    Ok(f())
+}
+
+/// Runs `f` while holding the parent repository's merge lock, so concurrent
+/// `swt merge` runs against one repository are serialized.
+///
+/// The lock is released when `f` returns, when it panics, and — via
+/// [`release_all_held_locks`] — when the process exits from inside the region.
+/// Contention is waited out with a one-second backoff for up to ten minutes; a
+/// lock older than an hour is presumed abandoned and reaped. Giving up writes
+/// [`TIMEOUT_MESSAGE`] to stderr and exits, which is safe because it happens
+/// while holding nothing.
+///
+/// # Nothing inside the locked region may exit the process
+///
+/// An exit skips the [`Drop`] that releases the lock, and the failure most
+/// likely to tempt one — a rebase conflict — is the very case the region exists
+/// to handle. A lock leaked there blocks every later merge in the repository
+/// until the staleness reap an hour later. So the region must *return* its
+/// outcome and let the caller exit out here, after the lock is gone.
+/// [`git_must`](crate::git::git_must) is banned inside it for the same reason:
+/// it exits on failure.
+///
+/// `repo_root` is the root of any worktree of the parent repository, and `f` the
+/// work to perform under the lock. Returns whatever `f` returns.
+pub fn with_parent_lock<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
+    // STUB: behaviorally wrong on purpose (red). The region runs unserialized,
+    // holding nothing at all.
+    let _ = repo_root;
+    f()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{locked, LockFailure, LockTimings, LOCK_FILE};
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime};
+    use tempfile::TempDir;
+
+    /// How long a contended acquisition is given before it is called a timeout.
+    /// Generous enough to survive a loaded machine, short enough to fail fast.
+    const TEST_TIMEOUT: Duration = Duration::from_millis(400);
+
+    /// Backoff between attempts in tests — short enough that a waiter notices a
+    /// release promptly, long enough not to spin.
+    const TEST_BACKOFF: Duration = Duration::from_millis(5);
+
+    /// A staleness window nothing in a test is old enough to fall past.
+    const NEVER_STALE: Duration = Duration::from_secs(60 * 60);
+
+    /// Timings for a test that expects to acquire, possibly after waiting.
+    const FAST: LockTimings = LockTimings {
+        stale_after: NEVER_STALE,
+        // Mutual exclusion has to outlast the deliberate hold below on a loaded
+        // machine; giving up early would fail the test for the wrong reason.
+        wait_at_most: Duration::from_secs(30),
+        retry_every: TEST_BACKOFF,
+    };
+
+    /// How long the first holder stays inside its region. Long enough that a
+    /// second acquisition running unserialized would visibly interleave.
+    const HOLD: Duration = Duration::from_millis(150);
+
+    /// A private directory for one test's lock file.
+    ///
+    /// Every path comes from a fresh [`TempDir`], never a fixed name: two copies
+    /// of this test binary run concurrently in this repository, and a shared
+    /// lock path would have them contend for real.
+    fn lock_dir() -> TempDir {
+        tempfile::Builder::new()
+            .prefix("swt-lock-")
+            .tempdir()
+            .expect("lock fixture temp dir")
+    }
+
+    /// Creates a lock file and backdates its mtime by `age`, standing in for one
+    /// a run that died left behind.
+    fn aged_lock(path: &Path, age: Duration) {
+        let file = File::create(path).expect("lock fixture");
+        let when = SystemTime::now()
+            .checked_sub(age)
+            .expect("backdated mtime is after the epoch");
+        file.set_modified(when).expect("backdate the lock fixture");
+    }
+
+    #[test]
+    fn a_free_lock_is_taken_for_the_region_and_dropped_after_it() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+
+        let returned = locked(&lock, FAST, || {
+            assert!(
+                lock.exists(),
+                "the lock file must exist for as long as the region runs"
+            );
+            "region value"
+        })
+        .expect("an uncontended lock must be acquired");
+
+        assert_eq!(
+            returned, "region value",
+            "the region's value must come back"
+        );
+        assert!(!lock.exists(), "the lock outlived its region");
+    }
+
+    // A lock somebody else is still holding is not a corpse. Reaping it early is
+    // the one failure that would silently hand two merges the same repository,
+    // so a fresh lock has to be *waited* on — and the wait has to end in a
+    // reported timeout rather than in an acquisition.
+    #[test]
+    fn a_fresh_lock_is_waited_on_and_the_wait_ends_in_a_reported_timeout() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        File::create(&lock).expect("held lock fixture");
+
+        let timings = LockTimings {
+            stale_after: NEVER_STALE,
+            wait_at_most: TEST_TIMEOUT,
+            retry_every: TEST_BACKOFF,
+        };
+        let ran = AtomicBool::new(false);
+        let started = Instant::now();
+        let result = locked(&lock, timings, || ran.store(true, Ordering::SeqCst));
+
+        assert!(
+            matches!(result, Err(LockFailure::TimedOut)),
+            "a lock held by somebody else must be reported as a timeout, got {result:?}"
+        );
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "the region ran without holding the lock"
+        );
+        assert!(
+            lock.exists(),
+            "a fresh lock must never be reaped out from under its holder"
+        );
+        assert!(
+            started.elapsed() >= TEST_TIMEOUT,
+            "gave up after {:?}, before the wait was up",
+            started.elapsed()
+        );
+    }
+
+    // The other half: a lock nobody released because its owner died must not
+    // block the repository forever.
+    #[test]
+    fn a_lock_older_than_the_staleness_window_is_reaped() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        aged_lock(&lock, Duration::from_secs(1));
+
+        let timings = LockTimings {
+            stale_after: Duration::from_millis(100),
+            wait_at_most: TEST_TIMEOUT,
+            retry_every: TEST_BACKOFF,
+        };
+        let ran = locked(&lock, timings, || true).expect("a stale lock must be reaped");
+
+        assert!(ran, "the region never ran");
+        assert!(!lock.exists(), "the lock outlived its region");
+    }
+
+    // Real mutual exclusion, not merely a file that appears and disappears: the
+    // second region must not start until the first has finished. Unserialized,
+    // the log would read first-in, second-in, second-out, first-out.
+    #[test]
+    fn a_second_acquisition_waits_until_the_first_releases() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        let log: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+        let first_is_inside = AtomicBool::new(false);
+        let note = |event: &'static str| log.lock().expect("event log").push(event);
+
+        thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                locked(&lock, FAST, || {
+                    note("first in");
+                    first_is_inside.store(true, Ordering::SeqCst);
+                    thread::sleep(HOLD);
+                    note("first out");
+                })
+                .expect("the first acquisition is uncontended")
+            });
+
+            // Contend only once the first holder is demonstrably inside, so the
+            // test pins waiting rather than a race it happened to win.
+            while !first_is_inside.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            let second = scope.spawn(|| {
+                locked(&lock, FAST, || {
+                    note("second in");
+                    note("second out");
+                })
+                .expect("the second acquisition must succeed once the first releases")
+            });
+
+            first.join().expect("first thread");
+            second.join().expect("second thread");
+        });
+
+        assert_eq!(
+            *log.lock().expect("event log"),
+            vec!["first in", "first out", "second in", "second out"],
+            "the two regions interleaved, so nothing was actually excluded"
+        );
+        assert!(!lock.exists(), "the lock outlived both regions");
+    }
+
+    // A lock file cannot be created where there is no directory to create it in,
+    // and no amount of waiting will change that — so it is reported straight
+    // away rather than waited out as if somebody else held it.
+    #[test]
+    fn a_lock_that_cannot_be_created_is_reported_without_waiting() {
+        let dir = lock_dir();
+        let lock: PathBuf = dir.path().join("no-such-directory").join(LOCK_FILE);
+
+        let timings = LockTimings {
+            stale_after: NEVER_STALE,
+            wait_at_most: Duration::from_secs(30),
+            retry_every: TEST_BACKOFF,
+        };
+        let started = Instant::now();
+        let result = locked(&lock, timings, || unreachable!("the region must not run"));
+
+        assert!(
+            matches!(result, Err(LockFailure::Unusable(_))),
+            "an uncreatable lock is not contention, got {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "an uncreatable lock must not be waited out"
+        );
+    }
+}
