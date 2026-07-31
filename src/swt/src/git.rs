@@ -22,6 +22,24 @@ use std::fmt;
 pub const WORKTREE_NAME_RULE: &str =
     "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
 
+/// Names that are built only from allowed characters and are still meaningless
+/// as a path component: `.` resolves to the worktree parent directory itself and
+/// `..` resolves to its parent, so either one would have git create the worktree
+/// on top of a directory that already exists and belongs to someone else.
+const RESERVED_WORKTREE_NAMES: [&str; 2] = [".", ".."];
+
+/// The character set a worktree name may be built from — the Rust spelling of
+/// the original `/^[A-Za-z0-9._-]+$/`.
+///
+/// Deliberately a `char` predicate rather than a regular expression: the rule is
+/// a one-line membership test, and expressing it directly keeps a regex engine
+/// out of the dependency tree for no loss of clarity. Iterating `chars()` also
+/// means a multi-byte character is judged as the single character it is instead
+/// of as the bytes it happens to encode to.
+fn is_worktree_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')
+}
+
 /// A worktree base name that has passed [`validate_worktree_name`] and is
 /// therefore safe to splice into a branch name and a filesystem path.
 ///
@@ -63,6 +81,17 @@ impl fmt::Display for WorktreeName {
 /// their own wording.
 #[must_use]
 pub fn validate_worktree_name(name: &str) -> Option<WorktreeName> {
+    // `all` is vacuously true for an empty name, so the emptiness check is what
+    // stands in for the `+` in the original pattern.
+    if name.is_empty() || !name.chars().all(is_worktree_name_char) {
+        return None;
+    }
+    if name.starts_with('-') {
+        return None;
+    }
+    if RESERVED_WORKTREE_NAMES.contains(&name) {
+        return None;
+    }
     Some(WorktreeName(name.to_string()))
 }
 
