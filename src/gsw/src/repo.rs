@@ -320,10 +320,16 @@ pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operati
 /// same base [`gix::Repository::state`] inspects, which keeps this worktree-
 /// aware — exactly as git's own prompt does:
 ///
-/// - `rebase-merge/msgnum` + `rebase-merge/end` — the merge backend, used by
-///   both plain and interactive rebases.
 /// - `rebase-apply/next` + `rebase-apply/last` — the apply backend
 ///   (`git rebase --apply`).
+/// - `rebase-merge/msgnum` + `rebase-merge/end` — the merge backend, used by
+///   both plain and interactive rebases.
+///
+/// They are listed — and tried — in the order [`gix::Repository::state`] itself
+/// resolves them, `rebase-apply/` before `rebase-merge/`, so the step counts
+/// can only ever come from the directory the classification came from. git
+/// never leaves both directories present at once, but pinning the order means
+/// the two can't disagree even if it did.
 ///
 /// A missing, unreadable, or unparseable counter degrades to `None` rather than
 /// failing the whole indicator: the operation is still worth surfacing without
@@ -332,8 +338,8 @@ fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
     /// Both counter pairs, in the order [`gix::Repository::state`] resolves the
     /// directories they live in.
     const COUNTERS: [(&str, &str); 2] = [
-        ("rebase-merge/msgnum", "rebase-merge/end"),
         ("rebase-apply/next", "rebase-apply/last"),
+        ("rebase-merge/msgnum", "rebase-merge/end"),
     ];
 
     let read = |name: &str| -> Option<u32> {
