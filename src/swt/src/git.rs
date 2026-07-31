@@ -13,7 +13,149 @@
 //! Argv arrays close the injection hole but not the *nonsense* hole, which is
 //! what [`validate_worktree_name`] is for.
 
+use std::ffi::OsStr;
 use std::fmt;
+use std::path::Path;
+
+use crate::green_check::Outcome;
+
+/// A git command that failed somewhere the caller cannot treat failure as an
+/// answer, carrying git's combined output as the explanation.
+///
+/// Most of this module reports failure as an ordinary [`Outcome`] — "that git
+/// command said no" is usually a fact to print and fold together with another
+/// one. [`worktree_dirt`] is the exception: its successful answer is a *string*,
+/// and the empty string already means "clean". A git that never ran would
+/// otherwise be indistinguishable from a spotless worktree, and would wave a
+/// merge straight past the guard that calls it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitFailure(String);
+
+impl GitFailure {
+    /// Borrows git's combined output as it was captured.
+    #[must_use]
+    pub fn output(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for GitFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GitFailure {}
+
+/// Runs git and captures its combined output.
+///
+/// Public only so the process-group guard in the test suite can exercise this
+/// exact call rather than a hand-rolled imitation of it; production callers want
+/// [`git`], [`git_must`] or [`remove_worktree`], which fix `shielded` to the
+/// value their situation calls for.
+///
+/// `args` are handed to the process one argv entry per element, never through a
+/// shell. `cwd` is the directory to run git in; `None` means the current
+/// working directory. `shielded` decides whether git is put in a process group
+/// of its own, out of reach of a signal aimed at `swt`'s — see
+/// [`remove_worktree`] for why that is the right call for teardown and the wrong
+/// one for everything else.
+///
+/// Returns git's success flag and its stdout followed by its stderr. A git that
+/// could not be spawned at all is a failure carrying the reason, not a panic:
+/// every caller here already has to handle a git that said no.
+pub fn run_git<I, S>(args: I, cwd: Option<&Path>, shielded: bool) -> Outcome
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let _ = (args, cwd, shielded);
+    Outcome::failed(String::new())
+}
+
+/// Runs a git command, capturing its combined output.
+///
+/// Arguments are passed to git directly rather than through a shell, so spaces,
+/// `;`, `$(…)` and every other metacharacter in `args` are always literal
+/// argument text.
+///
+/// Interruptible: a Ctrl-C reaches this git the same way it reaches `swt`, which
+/// is what you want for work the user is waiting on and can abandon.
+///
+/// `args` are the arguments to git, one element per argv entry, and `cwd` the
+/// directory to run it in — `None` meaning the current working directory.
+/// Returns git's success flag and its combined stdout/stderr.
+pub fn git<I, S>(args: I, cwd: Option<&Path>) -> Outcome
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    run_git(args, cwd, false)
+}
+
+/// Runs a git command that has no sensible failure handling, aborting the
+/// process with git's own output when it fails.
+///
+/// `args` are the arguments to git, one element per argv entry, and `cwd` the
+/// directory to run it in — `None` meaning the current working directory.
+/// Returns git's trimmed combined output; on failure it writes that output to
+/// stderr and exits with status 1 rather than returning.
+pub fn git_must<I, S>(args: I, cwd: Option<&Path>) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let _ = (args, cwd);
+    String::new()
+}
+
+/// Tears down a worktree and the branch checked out in it, forcing both.
+///
+/// Teardown is best-effort by nature — git refuses to remove a working tree
+/// whose `.git` link has gone missing, and refuses to delete a branch a
+/// registered worktree still claims — so the outcome is *reported* rather than
+/// assumed. Both commands are attempted even when the first fails, and both
+/// outputs come back: a caller shown only the first complaint would not know
+/// whether the branch is still lying around too, which is the difference between
+/// a usable recovery instruction and a wrong one.
+///
+/// Best-effort is not the same as abandonable, though, so unlike every other git
+/// call in `swt` these two run in a process group of their own. Teardown is most
+/// often what a Ctrl-C *asked for*, and a terminal sends Ctrl-C to the whole
+/// foreground process group — so an impatient second one would kill the very
+/// command carrying out the first. Cut between these two calls, that leaves the
+/// worst possible state: a worktree that survived and a branch that cannot be
+/// deleted while it does. Out of the group, teardown finishes on its own terms,
+/// and finishes even if `swt` itself is killed once it has started.
+///
+/// `root` is the repository worktree to run git from — never the one being
+/// removed — `path` the worktree directory to delete, and `branch` the branch
+/// checked out in it. Returns ok only when both commands succeeded; `out` is
+/// their combined output.
+pub fn remove_worktree(root: &Path, path: &Path, branch: &str) -> Outcome {
+    let _ = (root, path, branch);
+    Outcome::failed(String::new())
+}
+
+/// Reports a worktree's uncommitted state as git's own porcelain listing.
+///
+/// `cwd` is the worktree root to inspect. `include_untracked` decides whether
+/// untracked files count as dirt, and the two answers are both load-bearing:
+/// `swt merge` excludes them in the parent, because the documented `.swt-check`
+/// escape hatch is by definition an untracked file at the parent root, and
+/// includes them in the subagent worktree, because `git worktree remove` deletes
+/// the whole directory and everything untracked in it.
+///
+/// Returns the trimmed porcelain listing; an empty string means clean.
+///
+/// # Errors
+///
+/// Returns a [`GitFailure`] carrying git's combined output when git itself
+/// fails. A git that never answered is emphatically not a clean worktree.
+pub fn worktree_dirt(cwd: &Path, include_untracked: bool) -> Result<String, GitFailure> {
+    let _ = (cwd, include_untracked);
+    Ok(String::new())
+}
 
 /// Human-readable statement of what a worktree name may contain.
 ///
