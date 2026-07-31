@@ -1,0 +1,19 @@
+[package]
+name = "swt"
+version = "0.1.0"
+edition.workspace = true
+
+[[bin]]
+name = "swt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+
+[dev-dependencies]
+regex.workspace = true
+
+[lints]
+workspace = true
