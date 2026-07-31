@@ -7,6 +7,8 @@
 //! be tested through its own stdout, which is a poor place to pin the meaning of
 //! a predicate.
 
+pub mod create;
 pub mod git;
 pub mod green_check;
 pub mod lock;
+pub mod teardown;

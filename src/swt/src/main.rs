@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 use buildinfo::version_string;
 use clap::{Parser, Subcommand};
-use swt::git::{validate_worktree_name, WorktreeName, WORKTREE_NAME_RULE};
+use swt::create::create;
 
 /// Command line surface of `swt`.
 ///
@@ -52,26 +52,6 @@ enum Command {
         /// Path to the subagent worktree to merge back.
         worktree_path: PathBuf,
     },
-}
-
-/// Creates a subagent worktree named `raw_name`, branched from a green HEAD.
-///
-/// The name is checked before any git runs, because it becomes both a branch and
-/// a directory: `..` or a leading `-` would otherwise have git create the wrong
-/// thing somewhere else entirely, and the cheapest place to stop that is before
-/// anything exists to clean up. A rejected name is reported on stderr together
-/// with the rule it broke, and the command fails.
-///
-/// # Panics
-///
-/// After validation: the rest of the implementation lands in a later slice.
-fn create(raw_name: &str) -> ExitCode {
-    let Some(name): Option<WorktreeName> = validate_worktree_name(raw_name) else {
-        eprintln!("Invalid worktree name {raw_name:?} — {WORKTREE_NAME_RULE}.");
-        return ExitCode::FAILURE;
-    };
-
-    todo!("swt create {name}: implemented in the `create` slice");
 }
 
 /// Merges the subagent worktree at `worktree_path` back into the parent.
