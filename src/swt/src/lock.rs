@@ -30,6 +30,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::git::git_must;
+use crate::teardown::arm_signal_teardown;
 
 /// Basename of the lock file, inside the repository's shared git directory.
 const LOCK_FILE: &str = "swt.lock";
@@ -110,6 +111,17 @@ pub fn release_all_held_locks() {
     }
 }
 
+/// Reports whether this process is holding any lock file right now.
+///
+/// The signal teardown asks before it decides what a signal means: a lock this
+/// process created is one of the two things a signal would orphan, and a lock
+/// left behind blocks every later merge in that repository until the staleness
+/// reap an hour later. The answer is also what keeps `swt` from changing what a
+/// signal means in a window where it owns nothing.
+pub(crate) fn holds_any_lock() -> bool {
+    !held_locks().is_empty()
+}
+
 /// Ownership of one lock file, released on every path out of the locked region
 /// that unwinds — a normal return and a panic alike.
 struct LockGuard {
@@ -124,6 +136,9 @@ impl LockGuard {
     /// registering somebody else's would authorize deleting it.
     fn hold(path: PathBuf) -> Self {
         held_locks().insert(path.clone());
+        // There is now something a signal would orphan, and this is the more
+        // expensive of the two: a leaked lock blocks the whole repository.
+        arm_signal_teardown();
         Self { path }
     }
 }

@@ -216,6 +216,27 @@ impl RunningSwt {
         // the test runner, and the cleanup in `Drop` can name the whole group.
         command.process_group(0);
 
+        // SAFETY: the closure runs in the forked child between `fork` and
+        // `exec`, where only async-signal-safe calls are legal. `signal(2)` is
+        // one, and it touches nothing else in the child.
+        unsafe {
+            command.pre_exec(|| {
+                // Every assertion here is stated against the *default*
+                // disposition, so each run has to start from it. A shell sets
+                // SIGINT and SIGQUIT to ignore for a background job, and a
+                // disposition of "ignore" survives `exec` — so a suite run in
+                // the background would otherwise hand `swt` a SIGINT it can
+                // never feel, and the test would measure the harness instead of
+                // the tool.
+                for signal in [libc::SIGINT, libc::SIGTERM] {
+                    if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+
         Self {
             child: command.spawn().expect("spawn swt"),
             log,
@@ -459,16 +480,16 @@ fn a_lock_held_when_the_signal_arrives_does_not_outlive_the_run() {
     let started = scratch.path().join("rebase-check-started");
     // Invocation 1 is the parent's check, 2 the subagent's, 3 the
     // re-verification after the rebase — the only one under the lock.
-    write_swt_check(
-        repo.path(),
-        &stalling_on_nth_check(&counter, &started, 3),
-    );
+    write_swt_check(repo.path(), &stalling_on_nth_check(&counter, &started, 3));
 
     // Work on both sides, so the branches have diverged and the merge has to
     // rebase — which is what makes a third check happen at all.
     fs::write(subagent.path.join("subagent.txt"), "subagent work\n").expect("subagent work");
     git(&subagent.path, &["add", "--", "subagent.txt"]);
-    git(&subagent.path, &["commit", "--quiet", "-m", "subagent work"]);
+    git(
+        &subagent.path,
+        &["commit", "--quiet", "-m", "subagent work"],
+    );
     repo.commit_file("parent.txt", "parent work\n");
 
     let lock = repo.path().join(".git").join(LOCK_FILE);
