@@ -9,7 +9,9 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use gitscratch::testing::{equal_hunks_unequal_stops_repo, independent_branches_repo, TestRepo};
+use gitscratch::testing::{
+    contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo, TestRepo,
+};
 
 /// Exit code for a replay that hit no conflicts.
 const CLEAN: i32 = 0;
@@ -89,5 +91,59 @@ fn a_rebase_that_collides_exits_conflicts_and_says_how_much_work_lands_where() {
   x.txt    1 hunk
   y.txt    1 hunk",
         "stderr:\n{stderr}"
+    );
+}
+
+/// How many stops the summary line reports.
+///
+/// Read back out of the rendered text rather than asserted as a whole block,
+/// because what this test cares about is the *number* - the hunk count that
+/// travels with it is an artefact of how conflict markers accumulate across
+/// three collisions, and pinning it here would make the test fail for a reason
+/// it is not about.
+fn stop_count(stdout: &str) -> usize {
+    let summary = stdout
+        .lines()
+        .find(|line| line.contains(" across "))
+        .unwrap_or_else(|| panic!("no summary line in:\n{stdout}"));
+
+    let clause = summary
+        .rsplit(", ")
+        .next()
+        .expect("rsplit always yields at least one piece");
+    let (count, unit) = clause
+        .split_once(' ')
+        .unwrap_or_else(|| panic!("summary does not end in a counted clause:\n{stdout}"));
+
+    assert!(
+        unit.starts_with("stop"),
+        "the summary should end with the stop count, got {clause:?} in:\n{stdout}"
+    );
+    count
+        .parse()
+        .unwrap_or_else(|_| panic!("stop count {count:?} is not a number in:\n{stdout}"))
+}
+
+/// The asymmetry that makes a stop count worth printing at all: `iterated`
+/// rewrote one line across three commits, so replaying it onto a branch that
+/// already changed that line halts the rebase once per commit.
+///
+/// A tool that reported this as a single collision - the way a merge would, and
+/// the way a rebase measured only at its first stop does - would tell a
+/// developer the cheap and the expensive branch cost the same.
+#[test]
+fn a_branch_that_rewrote_one_region_across_three_commits_stops_more_than_once() {
+    let repo = contested_region_repo();
+
+    let (code, stdout, stderr) = run(&repo, "iterated", "single");
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stop_count(&stdout) > 1,
+        "three commits over one contested line must halt the rebase more than once, got:\n{stdout}"
     );
 }
