@@ -19,6 +19,13 @@ const CLEAN: i32 = 0;
 /// Exit code for a replay that hit conflicts.
 const CONFLICTS: i32 = 1;
 
+/// Exit code for a run that could not answer the question at all.
+///
+/// Deliberately not [`CONFLICTS`]: "the rebase would collide" and "I could not
+/// tell you" are different answers, and conflating them is the defect `grind`
+/// exists to fix.
+const ERROR: i32 = 2;
+
 fn grind(repo: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_grind"))
         .args(args)
@@ -29,10 +36,7 @@ fn grind(repo: &Path, args: &[&str]) -> Output {
 
 /// Everything a test wants to look at, gathered once so an assertion failure
 /// can print the whole picture rather than the one stream it happened to check.
-fn run(repo: &TestRepo, head: &str, onto: &str) -> (Option<i32>, String, String) {
-    repo.checkout(head);
-    let output = grind(repo.path(), &[onto]);
-
+fn streams(output: &Output) -> (Option<i32>, String, String) {
     (
         output.status.code(),
         String::from_utf8_lossy(&output.stdout)
@@ -42,6 +46,12 @@ fn run(repo: &TestRepo, head: &str, onto: &str) -> (Option<i32>, String, String)
             .trim_end()
             .to_string(),
     )
+}
+
+fn run(repo: &TestRepo, head: &str, onto: &str) -> (Option<i32>, String, String) {
+    repo.checkout(head);
+
+    streams(&grind(repo.path(), &[onto]))
 }
 
 /// Two branches that each add a file of their own rebase onto each other
@@ -145,5 +155,89 @@ fn a_branch_that_rewrote_one_region_across_three_commits_stops_more_than_once() 
     assert!(
         stop_count(&stdout) > 1,
         "three commits over one contested line must halt the rebase more than once, got:\n{stdout}"
+    );
+}
+
+/// Run `grind` with nowhere to put a temporary directory, so creating a scratch
+/// worktree is guaranteed to fail and everything before it is not.
+///
+/// `TMPDIR` is set on the child process only. `std::env::set_var` is
+/// process-global and Rust runs the tests in this binary as threads of one
+/// process, so poisoning it there would sabotage every other test in the file.
+fn grind_with_nowhere_to_put_a_scratch(
+    repo: &TestRepo,
+    branch: &str,
+) -> (Option<i32>, String, String) {
+    // Under the fixture's own `TempDir`, so two concurrent copies of this test
+    // cannot name the same path - and never created, so it stays missing.
+    let missing = repo.path().join("tmpdir-that-does-not-exist");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grind"))
+        .arg(branch)
+        .current_dir(repo.path())
+        .env("TMPDIR", missing)
+        .output()
+        .expect("failed to run grind");
+
+    streams(&output)
+}
+
+/// A branch name that does not resolve is a bad argument, not a conflict, and
+/// answering it must not cost a scratch worktree.
+///
+/// Proving *no scratch worktree was created* needs a discriminator that
+/// survives the tool's own cleanup. `git worktree list` is not one: a `Scratch`
+/// removes itself on drop, so the list comes back empty whether one was built
+/// or not, and the assertion would pass for exactly the binary it is supposed
+/// to catch.
+///
+/// `TMPDIR` is that discriminator. `Scratch::create` calls `TempDir::new`,
+/// which resolves `TMPDIR`; `Repo` deliberately creates no temporary directory
+/// at all, which is what makes the pre-flight unconditionally cheap. Pointing
+/// `TMPDIR` at a path that does not exist therefore breaks exactly one of the
+/// two - so if resolution still gets its word in, it demonstrably ran first.
+///
+/// The control half is what makes the first half mean anything: it proves the
+/// poisoned `TMPDIR` really does reach `Scratch::create` rather than being
+/// quietly ignored, which would make "no scratch error" vacuously true.
+#[test]
+fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {
+    let repo = independent_branches_repo();
+
+    let (code, stdout, stderr) = grind_with_nowhere_to_put_a_scratch(&repo, "nonexistent-branch");
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "an unresolvable branch must exit {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not resolve 'nonexistent-branch'"),
+        "the message must name the ref that did not resolve, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("scratch directory"),
+        "resolution must happen before a scratch worktree is built, but the run \
+         got as far as needing one:\n{stderr}"
+    );
+    // The live defect this tool was written to kill: the shell function it
+    // replaces ran a bare `git rebase` and announced a typo as a conflict.
+    assert!(
+        !stdout.contains("conflicts") && !stderr.contains("conflicts"),
+        "a typo'd branch name must never be reported as a conflict\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    let (control_code, control_stdout, control_stderr) =
+        grind_with_nowhere_to_put_a_scratch(&repo, "beta");
+
+    assert_eq!(
+        control_code,
+        Some(ERROR),
+        "stdout:\n{control_stdout}\nstderr:\n{control_stderr}"
+    );
+    assert!(
+        control_stderr.contains("could not create a scratch directory"),
+        "a resolvable branch with the same poisoned TMPDIR must fail at the \
+         scratch, or the assertion above proves nothing:\n{control_stderr}"
     );
 }
