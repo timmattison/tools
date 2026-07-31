@@ -104,7 +104,10 @@ fn commit_in(dir: &Path, rel_path: &str, contents: &str) -> PathBuf {
     let full = dir.join(rel_path);
     fs::write(&full, contents).expect("fixture file");
     git(dir, &["add", "--", rel_path]);
-    git(dir, &["commit", "--quiet", "-m", &format!("add {rel_path}")]);
+    git(
+        dir,
+        &["commit", "--quiet", "-m", &format!("add {rel_path}")],
+    );
     full
 }
 
