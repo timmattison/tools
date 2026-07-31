@@ -3611,6 +3611,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "grind"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buildinfo",
+ "clap",
+ "gitscratch",
+]
+
+[[package]]
 name = "grist"
 version = "0.1.0"
 dependencies = [
