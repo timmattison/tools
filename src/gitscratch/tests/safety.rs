@@ -53,23 +53,112 @@ fn describe_tree(dir: &Path) -> String {
 /// turned it on must not lose their branches to a dry run.
 #[test]
 fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
+    /// A branch the fixture does not have, created and deleted entirely inside
+    /// the control below. It exists so the control has a ref of its own to put
+    /// at risk rather than one of the fixture's, and it is gone again before the
+    /// baseline is taken, so the `["main", "left", "right"]` snapshot still
+    /// covers every ref that outlives it. The name only has to be unique inside
+    /// this fixture's own `TempDir`, so a concurrent run of this same test is
+    /// creating its namesake in a different repository entirely.
+    const CONTROL_BRANCH: &str = "updaterefs-control";
+    /// A file nothing else in the fixture touches, so the control's rebase
+    /// replays cleanly. That is not a convenience: a rebase that halts on a
+    /// conflict never reaches the point of updating refs, so a control that
+    /// conflicted would say nothing about `rebase.updateRefs` either way.
+    const CONTROL_FILE: &str = "updaterefs-control.txt";
+
     let repo = conflicting_repo();
     repo.git(&["config", "rebase.updateRefs", "true"]);
 
-    let before: Vec<(String, String)> = ["main", "left", "right"]
-        .iter()
-        .map(|name| ((*name).to_string(), repo.rev_parse(name)))
-        .collect();
+    let branch_refs = || -> Vec<(String, String)> {
+        ["main", "left", "right"]
+            .iter()
+            .map(|name| ((*name).to_string(), repo.rev_parse(name)))
+            .collect()
+    };
+
+    // Control: prove `rebase.updateRefs` is live in this fixture before proving
+    // the replay is unaffected by it. Every assertion this test ends in says a
+    // ref did not move - and a ref that was never at risk does not move either,
+    // so a renamed config key, a git that quietly stopped honouring the setting,
+    // or a config write that did nothing would leave this test green forever
+    // while pinning nothing at all. The demonstration runs through plain git in
+    // the fixture rather than through `gitscratch`, so nothing under test is
+    // involved: it is the developer's own repository doing the exact thing the
+    // guard exists to prevent.
+    let pristine = branch_refs();
+    repo.git(&["checkout", "-q", "-b", CONTROL_BRANCH, "main"]);
+    repo.commit_file(CONTROL_FILE, "control work\n", "control work");
+    let planted = repo.rev_parse(CONTROL_BRANCH);
+    // Detached, the way a replay checks a branch out - and not incidentally.
+    // `--update-refs` pointedly skips a branch that is checked out somewhere, so
+    // a control that rebased this branch while sitting on it would move the ref
+    // for the ordinary reason every rebase moves the branch it is on, and would
+    // demonstrate nothing. Detaching is what makes the ref eligible, which is
+    // also why the replay - which detaches for its own reasons - is exposed.
+    repo.git(&["checkout", "-q", "--detach", CONTROL_BRANCH]);
+    repo.git(&["rebase", "left"]);
+    assert_ne!(
+        repo.rev_parse(CONTROL_BRANCH),
+        planted,
+        "`rebase.updateRefs` is not live in {}, so this test could only pass \
+         vacuously; a plain rebase of a detached branch pointing into the \
+         replayed range left '{CONTROL_BRANCH}' sitting at {planted}",
+        repo.path().display()
+    );
+
+    // Put the fixture back exactly as it was found. The control has just moved a
+    // real ref in the real repository, and the assertion this test ends in
+    // cannot tell the control's damage from the replay's - so the undo is by
+    // ref: `update-ref -d` deletes precisely the ref the control created, where
+    // `branch -D` is a force delete aimed at a name.
+    repo.checkout("main");
+    let control_ref = format!("refs/heads/{CONTROL_BRANCH}");
+    repo.git(&["update-ref", "-d", &control_ref]);
+    assert_eq!(
+        branch_refs(),
+        pristine,
+        "the control moved one of the branches this test measures and did not \
+         put it back, so the closing assertion would blame the replay for it"
+    );
+    let status = repo.git(&["status", "--porcelain"]);
+    assert!(
+        status.is_empty(),
+        "the control left the fixture's working tree changed, which is not how \
+         it found it:\n{status}"
+    );
+
+    // Read only now, after the control has completely unwound: a baseline taken
+    // any earlier would carry the control's own rebase into what the replay is
+    // held to.
+    let before = branch_refs();
 
     // Scoped so the scratch is torn down before the refs are re-read: teardown
     // is part of what must not move a branch.
-    {
+    let conflicts = {
         let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
         replay(&scratch, "left", "main");
         // `right` onto `left` is the replay that genuinely conflicts, and the
         // replayed range is what `rebase.updateRefs` would rewrite.
-        replay(&scratch, "right", "left");
-    }
+        replay(&scratch, "right", "left")
+    };
+
+    // Asserting on the conflict that was resolved, so this cannot pass by having
+    // quietly replayed nothing for `rebase.updateRefs` to rewrite a ref into.
+    assert_eq!(
+        conflicts.files(),
+        Files::new(1),
+        "the contested file should have conflicted"
+    );
+    assert!(
+        conflicts.file_names().contains("shared.txt"),
+        "the contested file should be named in the conflicts: {:?}",
+        conflicts.file_names()
+    );
+    assert!(
+        conflicts.hunks() > Hunks::new(0),
+        "replaying a contested branch should have hunks to hand-merge"
+    );
 
     for (name, sha) in before {
         assert_eq!(repo.rev_parse(&name), sha, "replay moved branch '{name}'");
