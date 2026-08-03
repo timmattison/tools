@@ -1659,6 +1659,62 @@ mod tests {
     }
 
     #[test]
+    fn the_doc_drift_guard_rejects_a_spec_that_writes_the_counter_pairs_backwards() {
+        // The other half of the ordering contract. The fixture above transposes
+        // the two *pairs*; this one leaves the pairs where they are and writes
+        // each pair's own names backwards — `<total> + <current>` — which is the
+        // spec saying the denominator is the numerator. A re-implementer driven
+        // from that spec would read `rebase-apply/last` as the current step.
+        //
+        // Both pairs are transposed at once, and both clauses are required, for
+        // the same reason the missing-name fixtures redact from both backends: a
+        // rejection that stops at the first misordered neighbour only ever names
+        // the apply pair, because that pair is flattened first, which leaves the
+        // merge backend's internal `msgnum` + `end` layout unpinned. Requiring
+        // both clauses is what kills the mutations that narrow the ordering scan
+        // — `.skip(1)` (drops the `next`/`last` comparison), `.skip(1).take(1)`
+        // (keeps only the comparison *between* the pairs), and truncating the
+        // collected violations to the first one.
+        //
+        // The mutation is derived from `REBASE_COUNTERS` rather than spelled
+        // out, so a third counter pair added to the table is pinned here the day
+        // it is added.
+        let spec = read_design_spec();
+        let mut mutated = spec.clone();
+        for (current, total) in super::REBASE_COUNTERS {
+            let documented = format!("`{current}` + `{total}`");
+            let transposed = format!("`{total}` + `{current}`");
+            assert!(
+                mutated.contains(&documented),
+                "the fixture transposed nothing: the spec no longer spells this \
+                 pair as {documented}, so update this fixture to match its \
+                 current wording rather than deleting the check — otherwise it \
+                 would assert against an unmutated spec and pass for the wrong \
+                 reason",
+            );
+            mutated = mutated.replace(&documented, &transposed);
+        }
+        let problem = check_spec_documents_the_counter_order(&mutated).expect_err(
+            "a spec that documents each counter pair as `<total> + <current>` \
+             names the denominator where `rebase_step` reads the numerator, so \
+             the guard must reject it",
+        );
+        for (current, total) in super::REBASE_COUNTERS {
+            // The exact clause, not just the names: the rejection already lists
+            // every name in its trailing `(found ...)` offsets, so a bare
+            // `contains(name)` check would pass even when the pair's own
+            // ordering was never reported.
+            let clause = format!("`{current}` must be documented before `{total}`");
+            assert!(
+                problem.contains(&clause),
+                "the rejection must name every misordered counter pair so the \
+                 spec can be repaired in one pass, but it never says {clause}, \
+                 got: {problem}",
+            );
+        }
+    }
+
+    #[test]
     fn operation_state_reports_rebase_without_steps_when_counter_files_are_absent() {
         // Graceful degradation: the rebase is still surfaced when its step
         // counters cannot be read, just without the `current/total` clause.
