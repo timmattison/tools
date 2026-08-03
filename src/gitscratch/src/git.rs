@@ -250,20 +250,12 @@ impl Git {
         // leading space of the first path, which is one of the two spellings this
         // method exists to preserve. Git terminates every path with a NUL, so the
         // split always ends in an empty remainder.
-        output
+        Ok(output
             .stdout
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
-            .map(|path| {
-                String::from_utf8(path.to_vec()).with_context(|| {
-                    format!(
-                        "git {} listed a path that is not valid UTF-8: {}",
-                        asked.join(" "),
-                        String::from_utf8_lossy(path)
-                    )
-                })
-            })
-            .collect()
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect())
     }
 
     /// Resolve a revision to a full commit id.
@@ -353,6 +345,80 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{Git, HARNESS_EMAIL, HARNESS_NAME};
+    use crate::testing::TestRepo;
+
+    /// Exactly the invocation `stopped_commit_is_already_in_head` makes to find
+    /// out which paths a halted commit touched, with the commit left off the
+    /// end. Spelled once so the tests below pin the call the replay actually
+    /// depends on rather than a plausible-looking neighbour of it.
+    const TOUCHED_PATHS: [&str; 5] = ["diff-tree", "--no-commit-id", "--name-only", "-r", "--root"];
+
+    /// A path git cannot spell as UTF-8 has to stop the replay, not be repaired
+    /// into one that matches nothing.
+    ///
+    /// This is the one loss [`Git::paths`] cannot undo. The quoting and the
+    /// trimming it exists to defeat are both reversible — ask git for NUL
+    /// delimiters and the original bytes come back — but a byte that is not
+    /// valid UTF-8 has no `String` to come back *as*. Decoding it lossily, the
+    /// way [`Git::try_run`] decodes git's output everywhere else, substitutes
+    /// U+FFFD and yields a name no file has. That name goes straight back into
+    /// the next invocation as a pathspec, matches nothing, and leaves the
+    /// `missing` set empty — which is what "the new base already has this
+    /// commit's work" looks like, so the commit is skipped and the work is
+    /// gone. Every other test in this suite would still pass, because no other
+    /// fixture holds a name git has to refuse.
+    ///
+    /// So the guard is pinned here, at [`Git::paths`], rather than end-to-end
+    /// through a sealed-object-store replay. Such a replay would need the
+    /// undecodable name in a working tree, and on macOS no working tree can
+    /// hold one: APFS rejects the name with `EILSEQ` before git is involved.
+    /// [`TestRepo::commit_file_named_by_bytes`] builds the commit in the object
+    /// database instead, which is portable and is also exactly the repository a
+    /// developer on this machine gets by cloning one written on a filesystem
+    /// that does permit the name.
+    ///
+    /// The ordinary commit is asserted first, and deliberately: without it a
+    /// fixture that failed before reaching the decode — a bad argument list, a
+    /// commit id that resolves to nothing — would produce an error too, and the
+    /// test would pass for a reason that has nothing to do with the guard.
+    #[test]
+    fn refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte() {
+        let repo = TestRepo::init();
+        repo.commit_file("ordinary.txt", "ordinary work\n", "ordinary work");
+        let git = Git::new(repo.path(), "");
+
+        let mut ordinary = TOUCHED_PATHS.to_vec();
+        ordinary.push("HEAD");
+        assert_eq!(
+            git.paths(&ordinary)
+                .expect("list the paths an ordinary commit touched"),
+            ["ordinary.txt"],
+            "the negative case below only means anything if this invocation reaches the decode \
+             at all"
+        );
+
+        // `café.txt` as a latin-1 filesystem spells it: one 0xe9 byte where
+        // UTF-8 needs two. Invalid, not merely non-ASCII - a non-ASCII name
+        // that happens to be valid UTF-8 decodes fine and proves nothing here.
+        let undecodable = repo.commit_file_named_by_bytes(
+            b"caf\xe9.txt",
+            "the branch's work\n",
+            "a latin-1 name",
+        );
+        let mut listed = TOUCHED_PATHS.to_vec();
+        listed.push(&undecodable);
+
+        let error = git.paths(&listed).expect_err(
+            "a name git cannot spell as UTF-8 must stop the replay; decoding it lossily hands \
+             back a U+FFFD name that matches nothing, and a pathspec matching nothing is how a \
+             commit gets skipped and its work lost",
+        );
+        assert!(
+            format!("{error:#}").contains("listed a path that is not valid UTF-8"),
+            "the refusal has to name what went wrong, since the developer's next move is to look \
+             at the path git could not hand over: {error:#}"
+        );
+    }
 
     /// The identity git hands a child through the environment instead of
     /// through configuration. git sets all six for every hook it runs, and sets

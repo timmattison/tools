@@ -103,6 +103,93 @@ impl TestRepo {
         self.git(&["commit", "-q", "-m", message]);
     }
 
+    /// Commit `contents` under a file name given as raw bytes, and return the
+    /// id of the commit that holds it.
+    ///
+    /// `name` never reaches the filesystem: the blob, the tree and the commit
+    /// are written straight into the object database, by `hash-object`,
+    /// `mktree` and `commit-tree`. That is not a shortcut, it is the only route
+    /// there. A name that is not valid UTF-8 cannot be created on disk on macOS
+    /// at all — APFS rejects it with `EILSEQ`, so `std::fs::write` fails before
+    /// git is asked anything — and `#[cfg(unix)]` does not rescue an on-disk
+    /// fixture either, because macOS *is* unix. The object store has no such
+    /// opinion on any platform, which is what makes this portable.
+    ///
+    /// It is also the honest fixture rather than a contrivance. Git records a
+    /// path as bytes, so a repository cloned from a filesystem that does permit
+    /// such a name — a latin-1 name on Linux, say — holds exactly what this
+    /// builds, and the developer running the replay is on the machine that
+    /// cannot spell it.
+    ///
+    /// The tree record goes in on stdin, which is what lets a byte no `&str`
+    /// argument could carry become a path. The commit is parentless and nothing
+    /// references it, so it is reachable only by the id returned here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `git` cannot be spawned or any of the three steps fails.
+    pub fn commit_file_named_by_bytes(&self, name: &[u8], contents: &str, message: &str) -> String {
+        let blob = self.git_with_stdin(&["hash-object", "-w", "--stdin"], contents.as_bytes());
+
+        // `mktree`'s build-tree-entry format: mode, type and object id
+        // space-separated, then a tab, then the name. `-z` terminates the
+        // record with a NUL instead of a newline, and turns off the quoting git
+        // would otherwise apply to the name on the way *in* as well as out.
+        let mut record = format!("100644 blob {blob}\t").into_bytes();
+        record.extend_from_slice(name);
+        record.push(0);
+        let tree = self.git_with_stdin(&["mktree", "-z"], &record);
+
+        self.git(&["commit-tree", &tree, "-m", message])
+    }
+
+    /// Run a git command in the repo with `stdin` piped to it, panicking on
+    /// failure.
+    ///
+    /// Separate from [`TestRepo::git`] because that one's arguments are `&str`,
+    /// and the one thing a fixture cannot say in UTF-8 is a path git records as
+    /// bytes. Stdin is the way in that has no such constraint.
+    fn git_with_stdin(&self, args: &[&str], stdin: &[u8]) -> String {
+        use std::io::Write as _;
+
+        let mut command = Command::new("git");
+        // The same immunity `git_in` takes, for the same reason: a fixture that
+        // inherits a redirected `GIT_DIR` or `GIT_INDEX_FILE` writes its
+        // objects into the developer's real repository instead of this one.
+        crate::git::shed_inherited_git_environment(&mut command);
+
+        let mut child = command
+            .args(args)
+            .current_dir(self.dir.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+
+        // Taken and dropped, so git sees end-of-input rather than waiting on a
+        // pipe this process still holds open.
+        child
+            .stdin
+            .take()
+            .expect("git's stdin was piped")
+            .write_all(stdin)
+            .unwrap_or_else(|e| panic!("failed to write stdin to git {args:?}: {e}"));
+
+        let output = child
+            .wait_with_output()
+            .unwrap_or_else(|e| panic!("failed to wait for git {args:?}: {e}"));
+
+        assert!(
+            output.status.success(),
+            "git {args:?} failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
     /// Create `name` at HEAD and check it out.
     ///
     /// # Panics
