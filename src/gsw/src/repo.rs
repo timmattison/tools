@@ -1492,22 +1492,36 @@ mod tests {
     /// pins the prose to the code instead of becoming a third copy free to
     /// drift on its own.
     ///
-    /// Both rejections name the counter files at fault — the missing one, or
+    /// Both rejections name the counter files at fault — *every* missing one, or
     /// the neighbouring pair found out of order, alongside every name's byte
-    /// offset — so the spec can be repaired from the failure alone.
+    /// offset — so the spec can be repaired from the failure alone. Presence is
+    /// checked for the whole table before the ordering pass runs, so a name that
+    /// is absent is always reported as absent rather than as a transposition,
+    /// and reporting all of them at once keeps the merge backend's half of the
+    /// table load-bearing: stopping at the first miss would only ever name an
+    /// `rebase-apply/` file, since that pair is flattened first.
     fn check_spec_documents_the_counter_order(spec: &str) -> Result<(), String> {
         let mut mentions: Vec<(&str, usize)> = Vec::new();
+        let mut missing: Vec<&str> = Vec::new();
         for name in super::REBASE_COUNTERS
             .iter()
             .flat_map(|(current, total)| [*current, *total])
         {
-            let at = spec.find(name).ok_or_else(|| {
-                format!(
-                    "the design spec never mentions `{name}`, so it no longer \
-                     documents the counter pairs `rebase_step` reads",
-                )
-            })?;
-            mentions.push((name, at));
+            match spec.find(name) {
+                Some(at) => mentions.push((name, at)),
+                None => missing.push(name),
+            }
+        }
+        if !missing.is_empty() {
+            let names = missing
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "the design spec never mentions {names}, so it no longer \
+                 documents the counter pairs `rebase_step` reads",
+            ));
         }
         if let Some(out_of_order) = mentions.windows(2).find(|pair| pair[0].1 >= pair[1].1) {
             let (earlier, earlier_at) = out_of_order[0];
