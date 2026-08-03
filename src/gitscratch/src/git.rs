@@ -5,6 +5,10 @@
 //! through [`Git`], which pins the configuration that makes simulation
 //! non-destructive — most importantly `rebase.updateRefs=false`, which would
 //! otherwise move the very branch refs being simulated.
+//!
+//! The other half of "against the right repository" is the *environment*, which
+//! [`NoInheritedRepository`] strips, because a git invocation obeys it before it
+//! obeys the directory it was pointed at.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -30,6 +34,70 @@ const INHERITED_IDENTITY_VARS: [&str; 6] = [
     "GIT_COMMITTER_EMAIL",
     "GIT_COMMITTER_DATE",
 ];
+
+/// Every environment variable that answers "which repository?" before the
+/// working directory gets a say.
+///
+/// Git exports the first four into every hook it runs, so anything a hook
+/// spawns inherits them — and `.husky/pre-commit` in this repository spawns
+/// `cargo test`. A tool run this way looks like it is working on the directory
+/// it was handed and is in fact working on the hook's repository.
+///
+/// The list is one constant rather than a `.env_remove` chain per call site
+/// because the sites cannot be allowed to drift: a spawn that scrubs three of
+/// them is a spawn with a hole in it, and holes of this shape are silent.
+///
+/// | Variable | Leak |
+/// | --- | --- |
+/// | `GIT_DIR` | Exported to every hook. Names the repository outright, so `git init` re-initialises it and every read and write goes there. |
+/// | `GIT_WORK_TREE` | Travels with `GIT_DIR`. Moves the *files* git compares against, so pathspecs resolve somewhere else entirely. |
+/// | `GIT_INDEX_FILE` | Exported to `pre-commit` and friends. The subtler half: discovery still finds the right repository, so a run looks fine while `git add` stages phantom entries into the hook's index. |
+/// | `GIT_PREFIX` | Exported to every hook. Names the subdirectory the hook was invoked from, so relative pathspecs resolve against the wrong directory. |
+/// | `GIT_COMMON_DIR` | Not exported by hooks, but honoured whenever it is set — and it is what worktree-manipulating scripts export. Scrubbing `GIT_DIR` without it leaves the same door open by its other name: refs and config still come from the repository it points at. |
+/// | `GIT_OBJECT_DIRECTORY` | Set by `receive-pack` for `pre-receive`/`update` hooks, which run with the push quarantined. Objects written under it are discarded when the push is rejected, so a replay's commits evaporate for no visible reason. |
+/// | `GIT_ALTERNATE_OBJECT_DIRECTORIES` | Set alongside the above by the same quarantine. Read-only contamination rather than a write, but it is what lets a scratch repository resolve objects it does not have — so a test that asserts an object is absent passes for the wrong reason. |
+///
+/// Two near-misses are deliberately *not* here. `GIT_NAMESPACE` can redirect a
+/// ref write, but only within the repository already selected, and nothing
+/// short of `git http-backend` sets it. `GIT_CEILING_DIRECTORIES` can only stop
+/// discovery, never redirect it — it makes a run fail, which is loud, rather
+/// than succeed against the wrong repository, which is not.
+pub const REPOSITORY_LOCATION_VARS: [&str; 7] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_PREFIX",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// Spawn a command that takes its repository from its working directory alone.
+///
+/// Public, and an extension trait rather than a private helper, because the
+/// commands that need it are not all git: a consumer's test suite spawning its
+/// own binary inherits exactly the same environment, and a second copy of
+/// [`REPOSITORY_LOCATION_VARS`] living in a test file is the drift this exists
+/// to prevent.
+pub trait NoInheritedRepository {
+    /// Remove every variable in [`REPOSITORY_LOCATION_VARS`] from the
+    /// environment this command will be spawned with.
+    ///
+    /// A no-op in normal use — nothing sets these outside a hook — which is
+    /// precisely why it has to be unconditional. The one run where it matters
+    /// is the one nobody is watching.
+    fn without_inherited_repository(&mut self) -> &mut Self;
+}
+
+impl NoInheritedRepository for Command {
+    fn without_inherited_repository(&mut self) -> &mut Self {
+        for name in REPOSITORY_LOCATION_VARS {
+            self.env_remove(name);
+        }
+
+        self
+    }
+}
 
 /// The outcome of one git invocation.
 pub struct GitOutput {
@@ -63,9 +131,9 @@ impl Git {
     /// Spawn git and hand back its output untouched.
     ///
     /// The single place a git process is actually created, so the safety
-    /// configuration and the environment overrides cannot be reached around by
-    /// anything above. Private because raw output is a footgun in the one way
-    /// this crate cares about: everything public either trims it deliberately
+    /// configuration, the scrub and the environment overrides cannot be reached
+    /// around by anything above. Private because raw output is a footgun in the
+    /// one way this crate cares about: everything public either trims it deliberately
     /// ([`Git::try_run`], [`Git::run`]) or deliberately does not
     /// ([`Git::nul_separated`]), and which of those a caller wants is not a
     /// choice worth re-making per call site.
@@ -75,6 +143,10 @@ impl Git {
             .args(self.safety_config())
             .args(args)
             .current_dir(&self.cwd)
+            // `cwd` is only where the repository is if nothing in the inherited
+            // environment says otherwise. Run from inside a git hook - a
+            // pre-push gate, `git bisect run`, `rebase --exec` - something does.
+            .without_inherited_repository()
             // A rebase that stops would otherwise try to open an editor and
             // hang forever on a commit message or a todo list.
             .env("GIT_EDITOR", "true")

@@ -61,6 +61,15 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     # branch, and parallel runs flooded the real .git/config with lock errors.)
     # Scrub them for the test run so every test's git stays sandboxed.
     #
+    # This is now defence in depth rather than the only defence, and it stays
+    # for two reasons. It is per-INVOCATION, so it protects nothing about the
+    # other routes to the same `cargo test` - a pre-push hook, `git bisect run`,
+    # `rebase --exec`, `swt`'s green check called from a hook - which is why
+    # `gitscratch` scrubs the same variables at every git spawn of its own
+    # (`REPOSITORY_LOCATION_VARS`, pinned by `src/gitscratch/tests/isolation.rs`).
+    # And it is workspace-wide, where that fix is not: every other crate's
+    # fixtures still lean on this line.
+    #
     # CLICOLOR_FORCE=1 makes the `colored` crate paint whatever the run writes
     # to. Without it, `colored` paints only when file descriptor 1 is a
     # terminal, so a test that compares painted output against plain text

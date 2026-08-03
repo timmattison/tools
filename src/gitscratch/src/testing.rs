@@ -6,12 +6,18 @@
 //! rebuilt per crate and drifting apart.
 //!
 //! Every repo lives in its own `TempDir`, so concurrent `cargo test` runs (the
-//! pre-commit hook's and yours) never share a path.
+//! pre-commit hook's and yours) never share a path. A private path is only half
+//! of it, though: a `cargo test` run *from* the pre-commit hook inherits the
+//! hook's git environment, which names the developer's real repository, so every
+//! spawn here goes through [`NoInheritedRepository`] as well. See
+//! [`REPOSITORY_LOCATION_VARS`](crate::git::REPOSITORY_LOCATION_VARS).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
+
+use crate::git::NoInheritedRepository;
 
 /// A throwaway repository that deletes itself when dropped.
 pub struct TestRepo {
@@ -58,6 +64,7 @@ impl TestRepo {
         let output = Command::new("git")
             .args(args)
             .current_dir(cwd)
+            .without_inherited_repository()
             .output()
             .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
 
@@ -178,6 +185,11 @@ impl NotARepo {
 /// away from the reason, so the fixture proves its own claim up front and
 /// panics with the offending path if it cannot.
 ///
+/// The probe is scrubbed like every other spawn here, and for a sharper reason
+/// than most: an inherited `GIT_DIR` makes `rev-parse` succeed from *anywhere*,
+/// so the check would fail on a perfectly good directory and blame it for the
+/// hook's environment.
+///
 /// # Panics
 ///
 /// Panics if the temporary directory cannot be created, if `git` is not
@@ -189,6 +201,7 @@ pub fn not_a_repository() -> NotARepo {
     let probe = Command::new("git")
         .args(["rev-parse", "--git-dir"])
         .current_dir(dir.path())
+        .without_inherited_repository()
         .output()
         .expect("failed to spawn git rev-parse --git-dir");
 

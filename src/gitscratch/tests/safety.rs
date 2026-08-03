@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use gitscratch::testing::conflicting_repo;
-use gitscratch::{Conflicts, Files, Hunks, Scratch};
+use gitscratch::{Conflicts, Files, Hunks, NoInheritedRepository, Scratch};
 
 /// Replay `branch` onto `onto` the way a consumer does: check it out detached
 /// in the scratch worktree, then rebase.
@@ -270,12 +270,17 @@ fn never_disturbs_other_worktrees_whose_directories_are_temporarily_missing() {
 
     // The volume comes back.
     std::fs::rename(&parked, &elsewhere).expect("restore the worktree directory");
+    // Scrubbed like every other spawn in this crate: an inherited `GIT_DIR`
+    // outranks even `-C`, so this would report on the hook's repository - which
+    // is alive and well - and call the restored worktree healthy without ever
+    // having looked at it.
     let status = Command::new("git")
         .args([
             "-C",
             elsewhere.to_str().expect("utf-8 worktree path"),
             "status",
         ])
+        .without_inherited_repository()
         .output()
         .expect("run git status in the restored worktree");
     assert!(
