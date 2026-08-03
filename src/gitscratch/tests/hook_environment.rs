@@ -34,6 +34,11 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
     std::env::set_var("GIT_AUTHOR_DATE", "@1700000000 +0000");
     std::env::set_var("GIT_INDEX_FILE", ".git/index");
     std::env::set_var("GIT_PREFIX", "");
+    // A pre-commit hook is handed the author half only, but the committer half
+    // travels the same way - exported by other hooks, and by plenty of CI - and
+    // git reads both ahead of any configuration.
+    std::env::set_var("GIT_COMMITTER_NAME", "A Developer");
+    std::env::set_var("GIT_COMMITTER_EMAIL", "developer@example.com");
 
     // The fixtures build repositories by running git too, so they have to be as
     // immune as the harness is - a fixture that inherits the environment cannot
@@ -58,12 +63,35 @@ fn replays_under_the_environment_a_git_hook_hands_down() {
         "the contested file should still have conflicted: {conflicts:?}"
     );
 
-    let author = git
-        .run(&["log", "-1", "--format=%an <%ae>"])
-        .expect("read the author of the commit the replay wrote");
+    // The *committer*, deliberately: a rebase carries each replayed commit's
+    // original author across by design, so the author here belongs to whoever
+    // wrote the fixture's commit and says nothing about the harness. Who made
+    // the new commit is the committer, and that is the harness.
+    let committer = git
+        .run(&["log", "-1", "--format=%cn <%ce>"])
+        .expect("read the committer of the commit the replay wrote");
     assert_eq!(
-        author, "gitscratch <gitscratch@localhost>",
+        committer, "gitscratch <gitscratch@localhost>",
         "a replay must stay attributable to the harness that made it, even when the environment \
          it inherited names the developer"
+    );
+
+    // A commit the harness makes from nothing has no original author to
+    // inherit, so both halves are its own - which is the shape a consumer's
+    // squash step uses, and the one an inherited GIT_AUTHOR_NAME and
+    // GIT_AUTHOR_DATE would sign with the developer's name and the timestamp of
+    // whatever commit the hook was running for.
+    let tree = git
+        .run(&["rev-parse", "HEAD^{tree}"])
+        .expect("read the replayed tree");
+    let squashed = git
+        .run(&["commit-tree", &tree, "-m", "squash"])
+        .expect("make a commit the way a consumer squashes one in");
+    let identity = git
+        .run(&["log", "-1", "--format=%an <%ae>|%cn <%ce>", &squashed])
+        .expect("read the identity on the squashed commit");
+    assert_eq!(
+        identity, "gitscratch <gitscratch@localhost>|gitscratch <gitscratch@localhost>",
+        "a commit the harness creates is entirely its own, author included"
     );
 }
