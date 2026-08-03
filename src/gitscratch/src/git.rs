@@ -147,6 +147,8 @@ impl Git {
 
 #[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use super::Git;
 
     /// `git var GIT_AUTHOR_IDENT` reports exactly the identity git would stamp
@@ -165,6 +167,77 @@ mod tests {
         assert!(
             ident.starts_with("gitscratch <gitscratch@localhost>"),
             "scratch commits should be authored by the crate, not a consumer: {ident}"
+        );
+    }
+
+    /// Every pin in [`Git::safety_config`] is only as good as the environment it
+    /// runs in, because git's environment beats `-c`. That is not a hypothetical:
+    /// a consumer invoked from inside a git hook is handed `GIT_AUTHOR_NAME`,
+    /// `GIT_AUTHOR_EMAIL` and `GIT_AUTHOR_DATE` naming the developer, plus
+    /// `GIT_INDEX_FILE` — *relative*, so it re-anchors on whatever directory the
+    /// runner happens to be in — and other hooks add `GIT_DIR` and
+    /// `GIT_WORK_TREE`. So an inherited environment can both sign the harness's
+    /// commits with the developer's name and aim the whole replay at the
+    /// repository they were committing to, which is the one thing this crate
+    /// exists to keep it away from.
+    ///
+    /// Both halves are asserted together, in one test, so this binary's
+    /// environment is only ever mutated in one place; the mutation is what the
+    /// guard is being asked to survive, and after the guard exists it cannot
+    /// reach the sibling test above either.
+    #[test]
+    fn ignores_an_inherited_git_environment_naming_another_identity_or_repository() {
+        // Stands in for the developer's real repository - the place a leaked
+        // environment would redirect the replay to.
+        let elsewhere = TempDir::new().expect("create the stand-in for a real repository");
+        let elsewhere_git_dir = elsewhere.path().join("their-repo.git");
+        let elsewhere_index = elsewhere.path().join("their-index");
+
+        std::env::set_var("GIT_AUTHOR_NAME", "A Developer");
+        std::env::set_var("GIT_AUTHOR_EMAIL", "developer@example.com");
+        std::env::set_var("GIT_COMMITTER_NAME", "A Developer");
+        std::env::set_var("GIT_COMMITTER_EMAIL", "developer@example.com");
+        std::env::set_var("GIT_DIR", &elsewhere_git_dir);
+        std::env::set_var("GIT_WORK_TREE", elsewhere.path());
+        std::env::set_var("GIT_INDEX_FILE", &elsewhere_index);
+
+        let here = TempDir::new().expect("create the scratch stand-in");
+        let git = Git::new(here.path(), "");
+        git.run(&["init", "-q", "-b", "main"])
+            .expect("initialise the repository the runner is rooted in");
+
+        for variable in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
+            let ident = git
+                .run(&["var", variable])
+                .expect("read the identity git would stamp");
+            assert!(
+                ident.starts_with("gitscratch <gitscratch@localhost>"),
+                "an inherited environment must not put a developer's name on a scratch \
+                 commit, but {variable} is {ident}"
+            );
+        }
+
+        // Canonicalised on both sides: macOS resolves the temporary directory's
+        // /var to /private/var, so the raw paths would never compare equal.
+        let expected = std::fs::canonicalize(here.path()).expect("canonicalise the scratch path");
+        let git_dir = git
+            .run(&["rev-parse", "--absolute-git-dir"])
+            .expect("ask git which repository it is operating on");
+        assert!(
+            std::fs::canonicalize(&git_dir)
+                .expect("canonicalise git's answer")
+                .starts_with(&expected),
+            "the runner must operate on the repository it is rooted in ({}), not the one an \
+             inherited GIT_DIR names ({git_dir})",
+            expected.display()
+        );
+
+        let index = git
+            .run(&["rev-parse", "--git-path", "index"])
+            .expect("ask git which index it would write");
+        assert!(
+            !index.contains("their-index"),
+            "an inherited GIT_INDEX_FILE must not become the index a replay stages into: {index}"
         );
     }
 }
