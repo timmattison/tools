@@ -108,7 +108,9 @@ impl Scratch {
     /// histories, a repository in a state the replay cannot enter - if git
     /// could not *write* a commit it was replaying, since carrying on would
     /// mean discarding that commit and reporting a cost for a branch that was
-    /// never replayed, or if the resolution loop still has not finished after
+    /// never replayed, if git refused to skip a commit that had become empty,
+    /// which leaves the rebase unfinished however many times it is asked again,
+    /// or if the resolution loop still has not finished after
     /// `MAX_RESOLUTION_ROUNDS` rounds.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
         let git = self.git();
@@ -145,6 +147,22 @@ impl Scratch {
                     outcome = git
                         .try_run(&["rebase", "--skip"])
                         .with_context(|| format!("could not skip the empty commit {stopped}"))?;
+
+                    // Read here, before the loop can come round again, because
+                    // coming round again is how this used to be lost. A skip git
+                    // refused cannot start working - re-issuing it only spins to
+                    // `MAX_RESOLUTION_ROUNDS` - and each new invocation
+                    // overwrites the one message that said what went wrong,
+                    // while the next round classifies wherever the failed skip
+                    // left the rebase sitting rather than the commit the skip was
+                    // dropping.
+                    anyhow::ensure!(
+                        outcome.success,
+                        "the rebase halted on a commit that adds nothing to the new base, but \
+                         git would not `rebase --skip` it: {stopped}\ngit said:\n{}\n{}",
+                        outcome.stdout,
+                        outcome.stderr
+                    );
                 }
                 Halt::UnwritableCommit { stopped, evidence } => {
                     // `outcome` still holds the invocation that failed, which is
