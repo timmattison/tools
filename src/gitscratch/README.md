@@ -134,6 +134,7 @@ index measured under identical rules, not as an exact prediction.
 | `rerere.enabled=false`, `rerere.autoupdate=false` | A simulated resolution would otherwise land in the shared `rr-cache` and silently pre-resolve the developer's real merges later. |
 | `core.hooksPath` → an empty directory | No hook fires. An empty *value* is not "hooks off" — git still resolves lookups against it — so the path is a real, empty, temporary directory, validated once at creation. `Repo`'s read-only pre-flight points it at a relative path this crate never creates instead: reads fire no hooks, and rejecting a typo must not be able to fail for want of a writable temp directory. |
 | `GIT_EDITOR`, `GIT_SEQUENCE_EDITOR`, `GIT_TERMINAL_PROMPT` | A halted rebase would otherwise open an editor and hang forever. |
+| `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_PREFIX`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` **removed** | The guard that decides *which* repository every other row protects. Git obeys these before it obeys the directory it was pointed at, and it exports the first four into every hook it runs — so anything a hook spawns inherits them. Run from a `pre-push` gate, `git bisect run`, `rebase --exec`, or `cargo test` from `.husky/pre-commit`, an unscrubbed simulation aims itself at the hook's repository: `git init` re-initialises it, `git config` overwrites the developer's identity in it, and `git add` stages phantom entries into its index. Removed at the single place a git process is created, at every fixture spawn, and — via the public `NoInheritedRepository` — at the consumers' own spawns, so the list cannot drift between them. |
 | `commit.gpgsign=false` | A signing config in the developer's global gitconfig would otherwise prompt or fail mid-replay. |
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
@@ -183,6 +184,22 @@ over both classes of name the setting cannot rescue: one git quotes anyway
 together, because they break together — the name and the count. `tests/repo.rs`
 covers the other call site's one wrinkle: `status --porcelain -z` spends two
 fields on a rename, and a rename is one uncommitted file.
+
+**The removed location variables**, the last row above, are pinned by
+`tests/isolation.rs`, which has to reach for a mechanism the rest of the suite
+does not. `std::env::set_var` is process-global and `unsafe`, and Rust runs a
+binary's tests as threads of one process, so poisoning the environment there
+would race every other test. The tests re-execute the test binary instead, with
+the variables set on the *child* — which is the leak verbatim, a whole process
+whose environment names another repository, and is parallel-safe because nothing
+outside that child ever sees them. Each one builds a victim repository, snapshots
+the file the leak corrupts, and asserts the bytes are identical afterwards: a
+snapshot rather than a second interrogation through git, because once a phantom
+index entry points at an object the victim does not have, git's own answers about
+it stop being trustworthy. Both shapes are covered — the severe one, where the
+fixture directory never gets a `.git` at all, and the `GIT_INDEX_FILE`-only one a
+`pre-commit` hook produces on its own. `grind`'s `tests/cli.rs` pins the same
+thing end to end through the binary.
 
 The remaining rows of the table above — the `rerere` pair, `core.hooksPath`, the
 editor and prompt environment, `commit.gpgsign`, `gpg.format`, `gc.auto`, and

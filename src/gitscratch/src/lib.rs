@@ -10,6 +10,15 @@
 //! directory so no hook fires, `GIT_EDITOR=true` so a halted rebase cannot hang
 //! on an editor, and more besides.
 //!
+//! One of those guards is about the environment rather than the configuration,
+//! and it is the one that decides *which* repository all the others protect:
+//! git obeys `GIT_DIR` and its relatives before it obeys the directory it was
+//! pointed at, and it exports them into every hook it runs. Run from inside one
+//! — a pre-push gate, `git bisect run`, `rebase --exec`, `cargo test` from
+//! `.husky/pre-commit` — an unscrubbed tool would aim the whole simulation at
+//! the hook's repository. [`NoInheritedRepository`] takes them back off, at the
+//! single place a git process is created and at every fixture spawn besides.
+//!
 //! Every one of those guarantees is a guard that a second implementation would
 //! silently be missing. So this crate owns them, and it owns them behind a
 //! narrow door: a scratch worktree can only be built through [`Scratch`], and a
@@ -45,7 +54,7 @@ pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use git::{Git, GitOutput};
+pub use git::{Git, GitOutput, NoInheritedRepository, REPOSITORY_LOCATION_VARS};
 pub use metrics::{BranchName, Files, Hunks, Stops};
 pub use repo::Repo;
 pub use report::Report;

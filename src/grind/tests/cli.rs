@@ -13,6 +13,7 @@ use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
     multi_byte_names_repo, not_a_repository, TestRepo,
 };
+use gitscratch::NoInheritedRepository;
 use unicode_width::UnicodeWidthStr;
 
 /// Exit code for a replay that hit no conflicts.
@@ -41,10 +42,20 @@ const EQUAL_HUNKS_VERDICT: &str = r"grind: conflicts - replaying HEAD onto two
   x.txt    1 hunk
   y.txt    1 hunk";
 
+/// Run `grind` in `repo`, with the ambient git environment taken back off.
+///
+/// The scrub is belt to the binary's braces. `grind` reaches git only through
+/// `gitscratch`, which scrubs at the single place it spawns one, so a leak
+/// cannot reach the tool - but a test suite that let one through would be
+/// asserting against a run nobody could reproduce, and the two tests at the
+/// bottom of this file set these variables *deliberately*. Leaving the ambient
+/// environment in play everywhere else is what keeps those two the only place
+/// the answer depends on it.
 fn grind(repo: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_grind"))
         .args(args)
         .current_dir(repo)
+        .without_inherited_repository()
         .output()
         .expect("failed to run grind")
 }
@@ -310,6 +321,7 @@ fn grind_with_nowhere_to_put_a_scratch(
     let output = Command::new(env!("CARGO_BIN_EXE_grind"))
         .arg(branch)
         .current_dir(repo.path())
+        .without_inherited_repository()
         .env("TMPDIR", missing)
         .output()
         .expect("failed to run grind");

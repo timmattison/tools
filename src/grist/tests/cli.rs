@@ -6,13 +6,23 @@ use std::process::Command;
 use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
 };
+use gitscratch::NoInheritedRepository;
 
 const TIE_ADVICE: &str = "Every order costs the same";
 
+/// Run `grist` in `repo`, with the ambient git environment taken back off.
+///
+/// A `cargo test` run from `.husky/pre-commit` inherits the hook's `GIT_DIR`
+/// and `GIT_INDEX_FILE`, which name the developer's real repository. `grist`
+/// reaches git only through `gitscratch`, which scrubs at the single place it
+/// spawns one, so this is belt to the binary's braces — but it costs one call
+/// and it means what these tests assert does not depend on how the suite was
+/// started.
 fn grist(repo: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_grist"))
         .args(args)
         .current_dir(repo)
+        .without_inherited_repository()
         .output()
         .expect("failed to run grist")
 }
