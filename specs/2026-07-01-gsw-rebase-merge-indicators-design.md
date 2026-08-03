@@ -107,11 +107,23 @@ not conclude the interactive arm is dead code.
 (`repo.path()`, the same base gix's `state()` uses), exactly as git's prompt
 does:
 
-- `rebase-merge/msgnum` + `rebase-merge/end` (merge-backend / interactive rebase), else
-- `rebase-apply/next` + `rebase-apply/last` (apply-backend rebase).
+- `rebase-apply/next` + `rebase-apply/last` (apply-backend rebase), else
+- `rebase-merge/msgnum` + `rebase-merge/end` (merge-backend / interactive rebase).
+
+**The order is load-bearing, and it is not the intuitive one.** It mirrors the
+order `gix::Repository::state` resolves the directories in — that function tests
+`rebase-apply/applying`, `rebase-apply/rebasing`, and bare `rebase-apply/`
+*before* `rebase-merge/interactive` and bare `rebase-merge/` (verified against
+gix 0.83.0) — so `rebase-apply/` wins the classification and the counters must
+be read in the same precedence. Trying `rebase-merge/` first would let the step
+counts come from a different directory than the classification did. git never
+leaves both directories present at once, so nothing observable depends on this
+today; pinning the order means the two cannot disagree even if it did.
 
 Parse each as `u32`; if either file is missing or unparseable, `step` is `None`.
-Extract a small private helper:
+Extract a small private helper, with the counter table as a module-level
+`REBASE_COUNTERS` constant — the single source of truth for the order, which a
+unit test compares this document's prose against so the two cannot drift:
 
 ```rust
 fn rebase_step(git_dir: &Path) -> Option<StepProgress>
