@@ -41,8 +41,10 @@ two different stories.
 Every count that crosses the boundary is one of the newtypes in `metrics`, in
 both directions: `file_hunks()` yields `Hunks` for the same reason `hunks()`
 does, so a renderer never throws the type away and immediately rebuilds it, and
-three counts that are all `usize` underneath can never be transposed on the way
-in or out.
+counts that are all `usize` underneath can never be transposed on the way in or
+out. That holds off the conflict path too — `Repo::uncommitted_files()` returns
+an `Uncommitted`, whose noun is the whole `"uncommitted file"`, so the one count
+that is *not* about conflicts still arrives knowing what to call itself.
 
 `is_clean()` reads the file set rather than the counts, and the agreement
 between them is structural rather than observed. Adding to the breakdown is the
@@ -83,9 +85,9 @@ than arriving later disguised as a failed simulation:
 ```rust
 use gitscratch::Repo;
 
-let repo = Repo::open(cwd)?;          // errors if `cwd` is not inside a repository
-let onto = repo.resolve("main")?;     // errors naming the revision that did not resolve
-let dirty = repo.uncommitted_files()?; // staged + unstaged + untracked, counted per file
+let repo = Repo::open(cwd)?;           // errors if `cwd` is not inside a repository
+let onto = repo.resolve("main")?;      // errors naming the revision that did not resolve
+let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + untracked, per file
 
 let scratch = Scratch::create(repo.path(), &onto)?;
 ```
@@ -127,7 +129,11 @@ the stop count for `grime`: a merge halts exactly once, so the number would be a
 constant dressed up as a measurement. Everything else is fixed — the indent is
 measured from the tool's own name, the counts are padded in *display* width so a
 CJK filename still lines its column up, and every noun is pluralised by the
-metric newtype that owns it rather than by whoever is printing it.
+metric newtype that owns it rather than by whoever is printing it. The dirty
+note is the shape of that last rule: `dirty_note` takes an `Uncommitted` and
+chooses only the verb, because "1 uncommitted file **is**" and "3 uncommitted
+files **are**" are one agreement written in two places, and the half that names
+the thing being counted belongs to the counter.
 
 This is a deliberate, spec-sanctioned acceptance of a little presentation logic
 in a library crate. The alternative is two copies of it.
@@ -235,6 +241,16 @@ one is deliberately built on a file contested in *two* regions — with one, the
 undercount and the truth would both be 1 and the defect would pass. `Report`'s
 own tests sit beside it in `src/report.rs`, because rendering a `Conflicts` is
 pure string work that needs no repository at all.
+
+**That a counter's noun is the counter's own business** is pinned by a unit test
+in `src/metrics.rs` on `Uncommitted` — the newest counter, and the one whose
+noun is two words rather than one, so it is where the macro's suffix-`s` rule is
+most worth asserting. `src/report.rs` pins the other end of the same seam: the
+note reads as a sentence at one file and at three, with the noun coming from the
+counter and the verb from the renderer, so the two cannot drift apart unnoticed.
+A default `Uncommitted` is a clean tree, which is what lets a caller that could
+not measure fall back to saying nothing rather than to saying something about
+zero files.
 
 **The replay's round budget** is pinned by unit tests in `src/scratch.rs`, which
 the integration suite could not serve: the constant is 1000, and the case that
