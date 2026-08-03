@@ -181,10 +181,10 @@ exercising anything.
 That leaves the rows named nowhere above — the `rerere` pair, `core.hooksPath`,
 the editor and prompt environment, `commit.gpgsign`, `gpg.format`, `gc.auto`,
 and the `rebase.autoStash`/`autosquash` pair. They are established by
-construction in `safety_config` and are **not yet covered by a test**. Issue #329 tracks growing
-the suite to eight guarantees and mutation-verifying every guard; the `rerere`
-pair, `core.hooksPath` and `commit.gpgsign` are the rows it reaches, so this
-paragraph shrinks rather than disappears when it lands.
+construction in `safety_config` and are **not yet covered by a test**. Issue
+#329 tracks growing the suite to eight guarantees and mutation-verifying every
+guard; the `rerere` pair, `core.hooksPath` and `commit.gpgsign` are the rows it
+reaches, so this paragraph shrinks rather than disappears when it lands.
 
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
