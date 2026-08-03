@@ -428,6 +428,98 @@ mod tests {
         );
     }
 
+    /// The README's `What it guarantees` table is written as an exhaustive
+    /// inventory, so a guard missing from it is not a documentation gap but a
+    /// false statement about what the harness pins.
+    ///
+    /// Someone deciding whether to point this crate at their own repository
+    /// reads that table and takes it for the whole list. That is the table's
+    /// value and also its liability: every row is a promise, and the promise the
+    /// reader most needs is the one nobody wrote down. `--literal-pathspecs` is
+    /// how this test came to exist. It went into [`Git::safety_config`] as the
+    /// guard between a path git printed and the pathspec that path becomes on
+    /// the way back in, it is load-bearing enough that removing it makes a
+    /// `tests/halts.rs` case misclassify a commit as adding nothing to the new
+    /// base — the silent skip that throws work away — and it reached the table
+    /// in neither the row list nor the prose beneath it. Nothing failed. The
+    /// inventory just quietly became a subset.
+    ///
+    /// So the completeness of the table is checked here rather than maintained
+    /// by care. What is asserted is only that: completeness, not correctness.
+    /// Whether a row *explains* its guard well is a human's judgement and stays
+    /// one — but a guard the config pins and the table never names cannot ship,
+    /// and the failure below says which guard went missing.
+    ///
+    /// The check is scoped to that one section, cut at the next `##`, because a
+    /// mention anywhere else in the README is exactly what must not satisfy it:
+    /// the finding is that the *inventory* is short, and a stray sentence three
+    /// sections away does not lengthen it. Everything that could make the check
+    /// vacuous — a renamed heading, an emptied section, a config that pins
+    /// nothing — panics instead of passing, since a guard that reports clean
+    /// because it found nothing to look at is worse than no guard at all.
+    #[test]
+    fn every_guard_the_safety_config_pins_is_named_in_the_readme_inventory() {
+        /// Embedded under `#[cfg(test)]` only, so the README rides in the test
+        /// binary and never in anything a consumer ships.
+        const README: &str = include_str!("../README.md");
+        const INVENTORY_HEADING: &str = "## What it guarantees";
+
+        let (_, below_heading) = README.split_once(INVENTORY_HEADING).unwrap_or_else(|| {
+            panic!(
+                "the README has no `{INVENTORY_HEADING}` section, so there is no inventory left \
+                 to check the guards against; a renamed or deleted heading has to fail here \
+                 rather than let this test pass by finding nothing"
+            )
+        });
+        let inventory = below_heading
+            .split_once("\n## ")
+            .map_or(below_heading, |(section, _)| section);
+        assert!(
+            !inventory.trim().is_empty(),
+            "the `{INVENTORY_HEADING}` section is empty, which would make every check below \
+             succeed against nothing"
+        );
+
+        // The hooks path is deliberately empty: this runner exists only to be
+        // asked what it would pin, and an empty value is what makes the
+        // computed-value rule below observable.
+        let settings = Git::new(std::env::temp_dir(), "").safety_config();
+        assert!(
+            !settings.is_empty(),
+            "safety_config pins nothing at all, so there is no guard for the inventory to be \
+             missing and this test is asserting nothing"
+        );
+
+        for argument in settings.iter().filter(|argument| argument.as_str() != "-c") {
+            let named = match argument.split_once('=') {
+                // `core.hooksPath`'s value is a per-run temporary directory, so
+                // no document could quote it and the key alone is the whole
+                // promise. Anything else with a computed value lands here too
+                // and fails on the key rather than passing on a coincidence,
+                // which is the safe direction: a new guard the README has never
+                // heard of stops the build instead of slipping past it.
+                Some((key, value)) if value.is_empty() => key,
+                // A settled value is part of the guarantee - `gpg.format=ssh`
+                // is a different promise from `gpg.format=openpgp` - so the
+                // whole `key=value` has to be the thing the table says.
+                Some(_) => argument.as_str(),
+                // Not a `-c` setting at all, so there is no key to fall back
+                // to: the option is its own name. `--literal-pathspecs` today.
+                None => argument.as_str(),
+            };
+
+            assert!(
+                inventory.contains(named),
+                "`{named}` is pinned by safety_config and named nowhere in the README's \
+                 `{INVENTORY_HEADING}` inventory. That table is what someone reads to decide \
+                 whether this harness is safe to point at their real repository, and they read \
+                 it as the complete list; a guard missing from it is a guarantee they cannot \
+                 know they have, and its absence from the list reads as its absence from the \
+                 harness. Add a row for it, or remove it from safety_config."
+            );
+        }
+    }
+
     /// The identity git hands a child through the environment instead of
     /// through configuration. git sets all six for every hook it runs, and sets
     /// the author trio again for each commit that rebase, cherry-pick, or am
