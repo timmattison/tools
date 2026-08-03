@@ -15,7 +15,8 @@
 #![cfg(unix)]
 
 use gitscratch::testing::{
-    branches_behind_main_repo, commit_emptied_by_main_repo, modify_delete_repo,
+    branches_behind_main_repo, branches_behind_main_with_quoted_and_space_led_paths_repo,
+    commit_emptied_by_main_repo, modify_delete_repo,
 };
 use gitscratch::{Files, Hunks, Scratch, Stops};
 
@@ -167,6 +168,110 @@ fn refuses_to_report_a_cost_when_a_clean_pick_could_not_be_committed() {
         error.contains("alpha.txt"),
         "the error should name the file whose change would have been lost: {error}"
     );
+    assert!(
+        !error.contains("uncommitted"),
+        "nothing was left uncommitted - git rolled the index back - so the evidence must come \
+         from the commit's content being absent from the new base: {error}"
+    );
+}
+
+/// The same clean-pick failure again, in the one shape that makes the probe
+/// answer backwards instead of not answering at all.
+///
+/// The probe asks git which paths the stopped commit touched and then asks
+/// whether the new base already holds that commit's content *at those paths*, so
+/// the paths make a round trip: out of one invocation as output, back into the
+/// next as pathspecs. Git does not spell a path the same way in both directions.
+/// It C-quotes a non-ASCII name into `"caf\303\251.txt"` when it prints one per
+/// line, and a leading space survives git only to be eaten by anything that
+/// trims the line — and it dequotes neither on the way back in. A pathspec that
+/// no longer names the file matches nothing, so a commit whose work is nowhere
+/// in the new base reads as a commit that adds nothing to it — and the replay
+/// reaches for `rebase --skip`, which is how the work gets thrown away and a
+/// cost of zero gets reported for a branch that was never replayed.
+///
+/// So the assertions below are about the *classification*, not merely about
+/// getting an error out. A sealed object database happens to refuse the skip too,
+/// so the replay stops either way; what it stops and says is the whole
+/// difference between naming the two files whose work is at stake and blaming a
+/// skip for a commit it has already mislabelled as empty.
+///
+/// Hence a fixture whose commit touches no plainly-spelled path at all: one
+/// ordinary file alongside would come back matching and carry the refusal on its
+/// own, leaving the mangled names' silence invisible.
+#[test]
+fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_committed() {
+    let repo = branches_behind_main_with_quoted_and_space_led_paths_repo();
+    // Read the abbreviation from the same object database the implementation
+    // will abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "branch"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
+
+    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    scratch
+        .git()
+        .run(&["checkout", "-q", "--detach", "branch"])
+        .expect("check out the branch detached in the scratch worktree");
+
+    // Sealed only now: adding the worktree and checking out write no objects,
+    // but everything before this point would fail against a read-only store.
+    let sealed = repo.seal_object_store();
+    let result = scratch.replay_rebase("main");
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let error = match result {
+        Ok(conflicts) => panic!(
+            "the replay reported a cost for a commit git never wrote: {conflicts:?}\n\
+             a path git quotes is still a path whose work would be thrown away"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains(&dropped_sha),
+        "the error should name the commit that was about to be dropped ({dropped_sha}): {error}"
+    );
+    assert!(
+        error.contains(&dropped_subject),
+        "the error should carry the dropped commit's subject ({dropped_subject}): {error}"
+    );
+
+    // The classification itself, pinned separately from the fact that something
+    // went wrong. This commit adds two files the new base has never seen, so
+    // calling it a commit that adds nothing to the new base is simply false - and
+    // it is the false half, not the failed skip that follows from it, that would
+    // cost a developer their work in a repository where the skip succeeds.
+    assert!(
+        !error.contains("adds nothing to the new base"),
+        "a commit whose files are absent from the new base is not an empty commit, whatever \
+         spelling git reported its paths in: {error}"
+    );
+
+    // Both names, in the spelling the developer gave them. Whatever the replay
+    // shows a human has to be findable in their own repository, and the C-quoted
+    // form is not that - it is the artefact of having read git's output the wrong
+    // way, so seeing it here would mean the round trip is still broken and the
+    // refusal above happened for some other reason.
+    assert!(
+        error.contains("café.txt"),
+        "the error should name the quoted file whose change would have been lost, as it is \
+         actually spelled: {error}"
+    );
+    assert!(
+        error.contains(" leading space.txt"),
+        "the error should name the space-led file whose change would have been lost, with its \
+         leading space intact: {error}"
+    );
+    assert!(
+        !error.contains("caf\\303\\251"),
+        "the error should carry the file's real name, not git's C-quoted rendering of it: {error}"
+    );
+
+    // The rollback left the repository pristine, so there is no uncommitted
+    // content for the other probe to find; the only thing that proves the commit
+    // was lost is that its changes are absent from the new base.
     assert!(
         !error.contains("uncommitted"),
         "nothing was left uncommitted - git rolled the index back - so the evidence must come \
