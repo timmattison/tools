@@ -28,6 +28,19 @@ const CONFLICTS: i32 = 1;
 /// exists to fix.
 const ERROR: i32 = 2;
 
+/// The whole verdict for replaying `one` onto `two` in
+/// [`equal_hunks_unequal_stops_repo`].
+///
+/// A constant because three tests assert it: the verdict itself, and the two
+/// leaked-environment tests, which are only worth anything if the answer they
+/// check is the *same* answer the undisturbed run produces. Two copies of it
+/// could drift into checking two different claims.
+const EQUAL_HUNKS_VERDICT: &str = r"grind: conflicts - replaying HEAD onto two
+       2 hunks across 2 files, 1 stop
+
+  x.txt    1 hunk
+  y.txt    1 hunk";
+
 fn grind(repo: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_grind"))
         .args(args)
@@ -126,15 +139,7 @@ fn a_rebase_that_collides_exits_conflicts_and_says_how_much_work_lands_where() {
         Some(CONFLICTS),
         "a conflicting rebase must exit {CONFLICTS}, not be lumped in with clean\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    assert_eq!(
-        stdout,
-        r"grind: conflicts - replaying HEAD onto two
-       2 hunks across 2 files, 1 stop
-
-  x.txt    1 hunk
-  y.txt    1 hunk",
-        "stderr:\n{stderr}"
-    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
 }
 
 /// A file name and a branch name that are both outside ASCII, end to end
@@ -627,4 +632,117 @@ fn quiet_prints_nothing_when_the_run_cannot_answer_at_all() {
     let output = run_raw(&repo, "alpha", &["-q", "nonexistent-branch"]);
 
     assert_silent(&output, ERROR, "error");
+}
+
+/// Read a file that must come back byte-identical after `grind` has run.
+///
+/// # Panics
+///
+/// Panics if the file cannot be read.
+fn snapshot(path: &Path) -> Vec<u8> {
+    std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// `grind` answering a question about the repository it is standing in, while
+/// its environment insists the repository is somewhere else entirely.
+///
+/// Not a contrived situation: git exports `GIT_DIR`, `GIT_WORK_TREE`,
+/// `GIT_INDEX_FILE` and `GIT_PREFIX` into every hook it runs, and every child
+/// of that hook inherits them. A `pre-push` hook that asks `grind` whether the
+/// branch about to be pushed would rebase cleanly is exactly this shape - and
+/// so is `git bisect run`, `rebase --exec`, and a `cargo test` run from
+/// `.husky/pre-commit`.
+///
+/// The environment is set on the *child* process. `std::env::set_var` is
+/// process-global and Rust runs the tests in this binary as threads of one
+/// process, so poisoning it there would sabotage every other test in the file -
+/// and a whole process whose environment names another repository is the leak
+/// verbatim anyway.
+///
+/// The two branches are named so they cannot exist in the repository the
+/// environment points at, which is what makes the failure unambiguous: a
+/// `grind` that took the environment's word for where it was would be looking
+/// for `two` in a repository that has only `alpha`, `beta` and `main`.
+#[test]
+fn a_leaked_repository_location_does_not_redirect_the_replay() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let hooks_repo = independent_branches_repo();
+    repo.checkout("one");
+
+    let git_dir = hooks_repo.path().join(".git");
+    let config = snapshot(&git_dir.join("config"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grind"))
+        .arg("two")
+        .current_dir(repo.path())
+        .env("GIT_DIR", &git_dir)
+        .env("GIT_WORK_TREE", hooks_repo.path())
+        .env("GIT_PREFIX", "")
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the answer is about the directory grind is standing in, not the one \
+         the environment names\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        snapshot(&git_dir.join("config")),
+        config,
+        "grind wrote into the config of the repository the environment named"
+    );
+    assert!(
+        !git_dir.join("worktrees").exists(),
+        "grind built its scratch worktree in the repository the environment named"
+    );
+}
+
+/// The half of the leak that a hook produces on its own: `.husky/pre-commit`
+/// runs `cargo test`, and `GIT_INDEX_FILE` is what that inherits. Repository
+/// discovery still finds the right repository, so the run looks fine - but
+/// every index read and write goes to the hook's repository instead.
+///
+/// Two things give it away. `git status` against a foreign index sees the whole
+/// working tree as uncommitted, so the note appears over a tree with nothing
+/// uncommitted in it; and the index it read is left rewritten, carrying entries
+/// for files that do not exist in that repository at all. The index is
+/// snapshotted rather than re-read through git, because once a phantom entry
+/// points at an object the victim does not have, git's own answers about it
+/// stop being trustworthy.
+#[test]
+fn a_leaked_index_file_is_neither_read_from_nor_written_to() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let hooks_repo = independent_branches_repo();
+    repo.checkout("one");
+
+    let index = hooks_repo.path().join(".git").join("index");
+    let before = snapshot(&index);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grind"))
+        .arg("two")
+        .current_dir(repo.path())
+        .env("GIT_INDEX_FILE", &index)
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        stderr, "",
+        "the tree has nothing uncommitted in it; a note here means the status \
+         was taken against the index the environment named\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        snapshot(&index),
+        before,
+        "grind wrote into the index the environment named"
+    );
 }
