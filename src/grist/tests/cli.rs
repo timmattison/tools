@@ -5,6 +5,7 @@ use std::process::Command;
 
 use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
+    not_a_repository,
 };
 use gitscratch::NoInheritedRepository;
 
@@ -150,6 +151,45 @@ fn rejects_an_over_limit_branch_count_without_panicking_or_announcing_a_run() {
     assert!(
         !stderr.contains("Simulating"),
         "grist must not announce a run it is about to refuse, got:\n{stderr}"
+    );
+}
+
+/// Somewhere outside every repository there is no ordering to rank, and grist
+/// has to say so in those words before it starts anything.
+///
+/// `gitscratch::Repo` is the pre-flight that produces that answer, and `grist`
+/// is the consumer that skipped it: it went straight to building a scratch
+/// worktree, so the refusal arrived as git's own `not a git repository`
+/// complaint from inside `worktree add` — after the run had already been
+/// announced, and naming `.git` rather than the directory the user pointed at.
+///
+/// All three halves of that matter to somebody reading a terminal. The message
+/// has to be the pre-flight's, so it reads as a bad argument rather than a
+/// simulation that fell over; it has to name the directory, because that is the
+/// thing that was wrong; and nothing may announce a run that cannot happen,
+/// which is the same rule an over-limit branch list is already held to above.
+#[test]
+fn refuses_a_directory_that_is_not_a_repository_before_announcing_a_run() {
+    let elsewhere = not_a_repository();
+
+    let output = grist(elsewhere.path(), &["--onto", "main", "left", "right"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "there is no repository to simulate against, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("is not inside a git repository"),
+        "the refusal has to be the pre-flight's, not a failed simulation's, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&elsewhere.path().display().to_string()),
+        "the refusal has to name the directory it was pointed at, got:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("Simulating"),
+        "grist must not announce a run it cannot start, got:\n{stderr}"
     );
 }
 
