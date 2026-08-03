@@ -1469,7 +1469,9 @@ mod tests {
         // constant rather than restated, so this pins the two together instead
         // of becoming a third copy free to drift on its own.
         const SPEC: &str = "specs/2026-07-01-gsw-rebase-merge-indicators-design.md";
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(SPEC);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(SPEC);
         let spec = std::fs::read_to_string(&path).unwrap_or_else(|e| {
             panic!(
                 "cannot read the design spec at {}: {e}. If it was renamed or \
