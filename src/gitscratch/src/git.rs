@@ -283,7 +283,7 @@ impl Git {
     /// first, so [`Git::command`] also pins the identity as environment and
     /// strips everything that would redirect git elsewhere.
     fn safety_config(&self) -> Vec<String> {
-        let arguments: Vec<String> = [
+        let mut arguments: Vec<String> = [
             // Recording resolutions from a simulated conflict would poison the
             // shared rr-cache and silently pre-resolve the developer's real
             // merges later.
@@ -314,6 +314,25 @@ impl Git {
         ])
         .flat_map(|setting| ["-c".to_string(), setting])
         .collect();
+
+        // Paths read out of one invocation are fed straight back into the next
+        // as pathspecs, and a pathspec is not a path: a leading `:` is pathspec
+        // magic, and `*`, `?` and `[` are wildcards. Without this a file
+        // genuinely called `star*.txt` matches `starOTHER.txt` too, so a probe
+        // asking whether *this* path's content is in the new base quietly
+        // answers about some other file's. A main option rather than a `-c`
+        // pair, so it belongs here with them, ahead of the subcommand.
+        //
+        // Over-matching like that is the mild half. It can only add to the set
+        // of paths a probe finds missing, and a bigger set only ever buys a
+        // refusal nobody needed. The half worth the guard is `:/foo.txt`, a
+        // `foo.txt` in a directory named `:`: read as magic its `:/` means from
+        // the top of the working tree, so it answers about the root `foo.txt`
+        // instead, and if that one is unchanged the diff comes back empty. An
+        // empty diff is a commit that adds nothing to the new base, which is a
+        // `rebase --skip`, which is the work gone and a cost of zero reported
+        // for a branch that was never replayed. Pinned by tests/halts.rs.
+        arguments.push("--literal-pathspecs".to_string());
 
         arguments
     }
