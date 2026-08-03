@@ -11,6 +11,39 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
+/// Who scratch commits are attributed to. Spelled once and used both as
+/// configuration and as environment, because those are two ways of saying the
+/// same thing and git resolves them in that order - so they must not drift.
+const HARNESS_NAME: &str = "gitscratch";
+const HARNESS_EMAIL: &str = "gitscratch@localhost";
+
+/// Environment that would aim git at a repository other than the one the runner
+/// is rooted in, and is therefore stripped from every invocation.
+///
+/// This is not a hypothetical set. A tool built on this crate can be invoked
+/// from inside a git hook, and git hands its hooks `GIT_INDEX_FILE` - often
+/// *relative*, so it silently re-anchors on the runner's own working directory -
+/// along with `GIT_DIR` and `GIT_WORK_TREE` for several hooks. Inheriting any of
+/// them would point the replay at the developer's real repository and index,
+/// which is precisely what a scratch worktree exists to avoid. The rest are here
+/// for the same reason: each one redirects some part of where git reads or
+/// writes, and none of them can mean anything useful to a throwaway replay.
+const REDIRECTING_ENVIRONMENT: [&str; 9] = [
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CEILING_DIRECTORIES",
+];
+
+/// Timestamps a hook hands down for the commit it is running for. A replay's
+/// commits are its own, made now, so they are dropped rather than inherited.
+const INHERITED_DATES: [&str; 2] = ["GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"];
+
 /// The outcome of one git invocation.
 pub struct GitOutput {
     pub success: bool,
@@ -46,7 +79,8 @@ impl Git {
     ///
     /// Returns an error only if git could not be spawned at all.
     pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
             .args(self.safety_config())
             .args(args)
             .current_dir(&self.cwd)
@@ -55,6 +89,21 @@ impl Git {
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true")
             .env("GIT_TERMINAL_PROMPT", "0")
+            // Set, not merely left to the configuration above: git reads the
+            // environment *in preference to* `-c`, so an inherited
+            // `GIT_AUTHOR_NAME` - which is what a git hook hands anything it
+            // runs - would otherwise sign the harness's commits with the
+            // developer's name however firmly the config pins it.
+            .env("GIT_AUTHOR_NAME", HARNESS_NAME)
+            .env("GIT_AUTHOR_EMAIL", HARNESS_EMAIL)
+            .env("GIT_COMMITTER_NAME", HARNESS_NAME)
+            .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL);
+
+        for variable in REDIRECTING_ENVIRONMENT.into_iter().chain(INHERITED_DATES) {
+            command.env_remove(variable);
+        }
+
+        let output = command
             .output()
             .with_context(|| format!("failed to run git {}", args.join(" ")))?;
 
@@ -110,6 +159,10 @@ impl Git {
     }
 
     /// Configuration that keeps a simulation from touching anything real.
+    ///
+    /// Configuration alone is not the whole guard: git resolves the environment
+    /// first, so [`Git::try_run`] also pins the identity as environment and
+    /// strips everything that would redirect git elsewhere.
     fn safety_config(&self) -> Vec<String> {
         [
             // Recording resolutions from a simulated conflict would poison the
@@ -129,18 +182,18 @@ impl Git {
             "gc.auto=0",
             "commit.gpgsign=false",
             "gpg.format=openpgp",
-            // The identity belongs to this crate, not to whichever tool is
-            // driving it, so every consumer's scratch commits are attributable
-            // to the harness that actually made them.
-            "user.name=gitscratch",
-            "user.email=gitscratch@localhost",
         ]
         .iter()
-        .flat_map(|setting| ["-c".to_string(), (*setting).to_string()])
+        .map(|setting| (*setting).to_string())
+        // The identity belongs to this crate, not to whichever tool is driving
+        // it, so every consumer's scratch commits are attributable to the
+        // harness that actually made them.
         .chain([
-            "-c".to_string(),
+            format!("user.name={HARNESS_NAME}"),
+            format!("user.email={HARNESS_EMAIL}"),
             format!("core.hooksPath={}", self.hooks_path),
         ])
+        .flat_map(|setting| ["-c".to_string(), setting])
         .collect()
     }
 }
