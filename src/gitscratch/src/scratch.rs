@@ -126,7 +126,9 @@ impl Scratch {
     /// mean discarding that commit and reporting a cost for a branch that was
     /// never replayed, if git refused to skip a commit that had become empty,
     /// which leaves the rebase unfinished however many times it is asked again,
-    /// or if the resolution loop still has not finished after
+    /// if git lists a path that is not valid UTF-8, since a lossily-decoded
+    /// name would match nothing and the commit would be dropped for that
+    /// reason, or if the resolution loop still has not finished after
     /// `MAX_RESOLUTION_ROUNDS` rounds.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
         let git = self.git();
