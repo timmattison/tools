@@ -413,6 +413,92 @@ pub fn multi_byte_names_repo() -> TestRepo {
     repo
 }
 
+/// A conflict in five files whose names a line of git output cannot carry
+/// intact, beside a `plain.txt` that it can.
+///
+/// [`multi_byte_names_repo`] covers the one class `core.quotePath=false` fixes.
+/// These are the classes it does not, and they split into two mechanisms that a
+/// single fixture is cheaper to hold than two:
+///
+/// **Git quotes these whatever `core.quotePath` says.** `quote_c_style` escapes
+/// a double quote and a backslash independently of that setting - `quotePath`
+/// only governs bytes at or above `0x80` - so `back\slash.txt` comes back as
+/// `"back\\slash.txt"` and `quo"te.txt` as `"quo\"te.txt"`, wrapped in the
+/// quotes git added. Those names open no file on disk.
+///
+/// **A reader that trims kills the rest.** Nothing quotes a path that merely
+/// begins or ends with whitespace, so git hands the real name over and a
+/// whitespace-trimming reader is what destroys it. `\u{3000}wide.txt ` opens
+/// with an IDEOGRAPHIC SPACE, which Rust's Unicode-aware `str::trim` strips as
+/// readily as the ASCII spaces on ` lead.txt` and `trail.txt `.
+///
+/// Where each name lands in git's byte-sorted output is load-bearing, because a
+/// reader can trim per line, or trim the whole of stdout once, or both, and only
+/// the middle of the list survives the second. ` lead.txt` sorts first, so its
+/// leading space is the first byte of stdout; `\u{3000}wide.txt ` sorts last, so
+/// its trailing space is the last. `trail.txt ` sits between them, reachable
+/// only by a per-line trim. All three have to come back for the reader to be
+/// doing no trimming at all, which is the only thing that is correct.
+///
+/// Every file is contested in the *same two regions*, for the reason
+/// [`multi_byte_names_repo`] contests its wide name twice: a conflicted file
+/// that cannot be opened is floored at one hunk, so a one-region fixture would
+/// report the right number by accident and let a mangled name pass. Uniformity
+/// is the rest of it - the expected answer is "two hunks each", so the only
+/// thing a failure can be about is the name.
+///
+/// Unix-only. A name containing `"` or `\` is illegal on Windows, so the fixture
+/// could not be built there to be tested at all.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+#[cfg(unix)]
+pub fn awkward_names_repo() -> TestRepo {
+    /// The two regions every file is contested in, far enough apart that git's
+    /// 3-line diff context cannot merge them into one conflict.
+    const CONTESTED_LINES: [usize; 2] = [5, 25];
+    /// In git's byte-sorted order, which is what puts a leading space at the
+    /// very front of stdout and a trailing one at the very back.
+    const AWKWARD_NAMES: [&str; 6] = [
+        " lead.txt",
+        "back\\slash.txt",
+        "plain.txt",
+        "quo\"te.txt",
+        "trail.txt ",
+        "\u{3000}wide.txt ",
+    ];
+
+    let repo = TestRepo::init();
+    let base = numbered_lines(30);
+    let files: Vec<(&str, &str)> = AWKWARD_NAMES
+        .iter()
+        .map(|name| (*name, base.as_str()))
+        .collect();
+    repo.commit_files(&files, "base");
+
+    // Both branches rewrite both regions of every file with different content,
+    // so all six collide and the two branches are otherwise symmetric.
+    for (branch, edit) in [("left", "left-edit"), ("right", "right-edit")] {
+        repo.checkout("main");
+        repo.branch(branch);
+
+        let mut contested = base.clone();
+        for line in CONTESTED_LINES {
+            contested = replace_line(&contested, line, edit);
+        }
+
+        let files: Vec<(&str, &str)> = AWKWARD_NAMES
+            .iter()
+            .map(|name| (*name, contested.as_str()))
+            .collect();
+        repo.commit_files(&files, &format!("{branch} rewrites every file"));
+    }
+
+    repo.checkout("main");
+    repo
+}
+
 /// Two branches that both rewrite the same line, so the simulation is
 /// guaranteed to actually conflict and resolve rather than no-op.
 ///
