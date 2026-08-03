@@ -132,7 +132,7 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     repo.resolve(&args.branch)?;
 
     let action = format!("replaying HEAD onto {}", args.branch);
-    let report = Report::new(TOOL, &action);
+    let report = Report::for_tool(TOOL).describing(&action);
 
     // Before the verdict, and on stderr rather than stdout: a reader has to see
     // the caveat before the sentence it qualifies, and a caller piping stdout
