@@ -40,6 +40,26 @@ two different stories.
 carries the whole safety configuration, so there is no way to get a worktree
 from here without also getting the hardening — which is the point.
 
+That `Git` offers exactly one way to read a **list of paths** back out of git,
+`nul_separated`, which inserts `-z` and splits stdout on NUL without trimming
+anything:
+
+```rust
+let conflicted = git.nul_separated(&["diff", "--name-only", "--diff-filter=U"])?;
+```
+
+There is deliberately no line-oriented equivalent, because one cannot be made
+correct. Git C-quotes a path containing `"`, `\` or a control character no
+matter how `core.quotePath` is set, so a quoted name arrives naming no file on
+disk; and a name that merely begins or ends with whitespace arrives intact and
+is destroyed by the reader instead, since Rust's `str::trim` is Unicode-aware
+and strips `U+3000` as readily as a space. Either way the path cannot be opened,
+and in this crate a conflicted file that cannot be opened is floored at one hunk
+— a wrong total that looks entirely plausible. `-z` is the one mode with no
+quoting and a separator no path can contain, so the reader that uses it is the
+only reader there is. `run` and `try_run` trim, and are for output meant for a
+human.
+
 ## The pre-flight
 
 Not every question is worth a worktree. `Repo` answers the cheap ones first, so
@@ -119,7 +139,7 @@ index measured under identical rules, not as an exact prediction.
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
-| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. Pinned here rather than fixed with `-z` per call site, because `-z` is per-invocation and the call site that forgets it fails silently. |
+| `core.quotePath=false` | Correctness, not cosmetics. By default git C-quotes and octal-escapes any path outside ASCII, so `日本語.txt` comes back from `diff --name-only` as `"\346\227\245\346\234\254\350\252\236.txt"`. That breaks a caller twice: it reports a name nobody typed, *and* the escaped string names no file on disk, so reading it fails and the hunk counter floors that file at 1 — a plausible-looking wrong total. This is the belt, not the braces: it governs only bytes ≥ `0x80`, and git quotes a `"`, a `\` or a control character whatever it is set to. Reading a path list is `Git::nul_separated`'s job (above); this narrows what a call site that reaches around it can get wrong. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
 `git worktree prune`. Pruning is repo-wide and immediate: it deletes the
@@ -146,10 +166,23 @@ A fourth guarantee — **the `user.name`/`user.email` identity** — is pinned b
 unit test in `src/git.rs` instead, which reads back `git var GIT_AUTHOR_IDENT`
 rather than building a repository to commit into.
 
-**`core.quotePath=false`**, the last row above, is pinned from the other
-direction: `tests/conflicts.rs` asserts the *answer* a non-ASCII path produces,
-which is the only place the escaping is observable. Both halves of the defect
-are asserted together, because they break together — the name and the count.
+**`core.quotePath=false`**, the last row above, is pinned by a second unit test
+in `src/git.rs`, for a reason worth stating: it used to be pinned from the other
+direction, by `tests/conflicts.rs` asserting the *answer* a non-ASCII path
+produces. That stopped testing this setting the moment `nul_separated` became
+the only path reader, because `-z` output is unquoted whatever `quotePath` says
+— remove the pin today and all eighteen integration tests stay green, verified.
+The unit test asserts it against `Git::run` instead, the surface it still
+covers.
+
+`tests/conflicts.rs` now pins the reader rather than the setting, and pins it
+over both classes of name the setting cannot rescue: one git quotes anyway
+(`back\slash.txt`, `quo"te.txt`) and one a trimming reader erodes (` lead.txt`,
+`trail.txt `, `　wide.txt `, whose leading `U+3000` Rust's Unicode-aware
+`str::trim` eats as readily as a space). Both halves of the defect are asserted
+together, because they break together — the name and the count. `tests/repo.rs`
+covers the other call site's one wrinkle: `status --porcelain -z` spends two
+fields on a rename, and a rename is one uncommitted file.
 
 The remaining rows of the table above — the `rerere` pair, `core.hooksPath`, the
 editor and prompt environment, `commit.gpgsign`, `gpg.format`, `gc.auto`, and

@@ -7,7 +7,7 @@
 //! otherwise move the very branch refs being simulated.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
 
 use anyhow::{Context, Result};
 
@@ -40,13 +40,17 @@ impl Git {
         }
     }
 
-    /// Run git, returning the outcome whether or not it succeeded.
+    /// Spawn git and hand back its output untouched.
     ///
-    /// # Errors
-    ///
-    /// Returns an error only if git could not be spawned at all.
-    pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
-        let output = Command::new("git")
+    /// The single place a git process is actually created, so the safety
+    /// configuration and the environment overrides cannot be reached around by
+    /// anything above. Private because raw output is a footgun in the one way
+    /// this crate cares about: everything public either trims it deliberately
+    /// ([`Git::try_run`], [`Git::run`]) or deliberately does not
+    /// ([`Git::nul_separated`]), and which of those a caller wants is not a
+    /// choice worth re-making per call site.
+    fn output(&self, args: &[&str]) -> Result<Output> {
+        Command::new("git")
             .args(self.safety_config())
             .args(args)
             .current_dir(&self.cwd)
@@ -56,7 +60,21 @@ impl Git {
             .env("GIT_SEQUENCE_EDITOR", "true")
             .env("GIT_TERMINAL_PROMPT", "0")
             .output()
-            .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+            .with_context(|| format!("failed to run git {}", args.join(" ")))
+    }
+
+    /// Run git, returning the outcome whether or not it succeeded.
+    ///
+    /// Both streams come back trimmed, which is what a caller reporting them to
+    /// a human wants and what every caller of this method does with them. A
+    /// caller reading *paths* wants the opposite and must use
+    /// [`Git::nul_separated`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if git could not be spawned at all.
+    pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
+        let output = self.output(args)?;
 
         Ok(GitOutput {
             success: output.status.success(),
@@ -84,17 +102,46 @@ impl Git {
         Ok(output.stdout)
     }
 
-    /// Run git and return stdout split into non-empty lines.
+    /// Run git with `-z` and return stdout split on NUL, byte for byte.
+    ///
+    /// The only way to read a list of paths out of git, and the only reader
+    /// this type offers, because the line-oriented alternative it replaced could
+    /// not be made correct. `-z` is the single output mode in which git prints a
+    /// path exactly as it is stored: no C-quoting, no octal escaping, and no
+    /// ambiguity about where one path ends, since NUL is the one byte a path
+    /// cannot contain. That last part is why nothing here trims. A path may
+    /// legitimately begin or end with a space - or with U+3000, which Rust's
+    /// Unicode-aware `str::trim` eats just as readily - and a separator that
+    /// cannot occur inside a path means there is nothing to trim *for*.
+    ///
+    /// `-z` goes in straight after the subcommand rather than on the end, so an
+    /// argument list that finishes with `--` and a pathspec still gets it as a
+    /// flag rather than as a path.
+    ///
+    /// Empty fields are dropped. Git terminates rather than separates, so the
+    /// last NUL always leaves one; no path is ever the empty string, so nothing
+    /// real is lost with it.
     ///
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
-    pub fn lines(&self, args: &[&str]) -> Result<Vec<String>> {
-        Ok(self
-            .run(args)?
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
+    pub fn nul_separated(&self, args: &[&str]) -> Result<Vec<String>> {
+        let mut with_nul = args.to_vec();
+        with_nul.insert(args.len().min(1), "-z");
+
+        let output = self.output(&with_nul)?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            with_nul.join(" "),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .filter(|field| !field.is_empty())
             .map(ToOwned::to_owned)
             .collect())
     }
@@ -145,23 +192,24 @@ impl Git {
             // read - in this crate, flooring a conflicted file at one hunk and
             // undercounting the work.
             //
-            // Pinned here rather than fixed with `-z` at the call sites on
-            // purpose. `-z` is per-invocation: every command that prints a path
-            // - today `diff --name-only` and `status --porcelain`, tomorrow
-            // whatever the next tool needs - has to remember both the flag and
-            // to split on NUL instead of newlines, and the one that forgets
-            // fails silently, with a name that looks almost right. This is a
-            // pin on the single door every git call already goes through, so a
-            // call site added later inherits it without knowing it exists.
+            // This is the belt, not the braces. `quotePath` governs exactly one
+            // class - bytes at or above 0x80 - and git's `quote_c_style` quotes
+            // a double quote, a backslash and any control character no matter
+            // what it is set to. So `back\slash.txt` and `quo"te.txt` come back
+            // quoted and escaped with this pinned, and are just as unopenable,
+            // and cost just as many uncounted hunks, as a Japanese name would
+            // be without it. A path list therefore cannot be read off git's
+            // lines under any setting, which is why the only reader this type
+            // offers is [`Git::nul_separated`]: `-z` turns quoting off outright
+            // and separates on the one byte a path cannot contain.
             //
-            // The one thing `-z` would buy that this does not is the true name
-            // of a path containing a control character, which git C-quotes
-            // whatever this is set to. Verified, and it is the benign half of
-            // the defect: the quoting keeps such a path on a single line, so
-            // the line-oriented readers above still agree with git about how
-            // many paths there were, and only the name is wrong. If that ever
-            // has to be handled the fix is a NUL-aware reader on `Git` - one
-            // more thing this type owns - not a flag sprinkled across callers.
+            // Kept anyway, because it costs one `-c` and it narrows what a
+            // future call site can do wrong. Anything reading a path back
+            // through `run` rather than `nul_separated` is a bug, but with this
+            // pinned it is a bug that survives the common case instead of
+            // mangling every non-ASCII name in the repository. Pinning it on
+            // the single door every git call goes through is what makes that
+            // free.
             "core.quotePath=false",
         ]
         .iter()
@@ -177,6 +225,38 @@ impl Git {
 #[cfg(test)]
 mod tests {
     use super::Git;
+    use crate::testing::TestRepo;
+
+    /// `core.quotePath=false` needs its own test now that it protects nothing a
+    /// caller can otherwise observe.
+    ///
+    /// It used to be pinned indirectly, by `tests/conflicts.rs` asserting the
+    /// answer a non-ASCII conflicted path produces. That stopped being a test of
+    /// this setting the moment [`Git::nul_separated`] became the only path
+    /// reader: `-z` output is unquoted whatever `quotePath` says, so removing
+    /// the pin would leave every one of those tests green. A guard nothing can
+    /// fail is a guard that quietly stops working, so this asserts it against
+    /// the surface it still covers — [`Git::run`], the reader a future call site
+    /// would reach for by mistake, where an escaped name would be silent.
+    ///
+    /// `diff --cached --name-only` rather than a conflict, because the escaping
+    /// is a property of how git prints a path and needs no conflict to show it.
+    #[test]
+    fn a_non_ascii_path_read_back_through_run_is_not_octal_escaped() {
+        let repo = TestRepo::init();
+        repo.write_file("日本語.txt", "staged\n");
+        repo.git(&["add", "日本語.txt"]);
+
+        let staged = Git::new(repo.path(), "")
+            .run(&["diff", "--cached", "--name-only"])
+            .expect("list the staged path");
+
+        assert_eq!(
+            staged, "日本語.txt",
+            "git must report the path as it is stored, not C-quoted and \
+             octal-escaped"
+        );
+    }
 
     /// `git var GIT_AUTHOR_IDENT` reports exactly the identity git would stamp
     /// on a commit, so it proves what [`Git::safety_config`] actually pins

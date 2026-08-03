@@ -97,10 +97,22 @@ impl Repo {
     ///
     /// Returns an error if git could not be spawned or reported a failure.
     pub fn uncommitted_files(&self) -> Result<usize> {
-        Ok(self
-            .git()
-            .lines(&["status", "--porcelain", "--untracked-files=all"])?
-            .len())
+        let records =
+            self.git()
+                .nul_separated(&["status", "--porcelain", "--untracked-files=all"])?;
+
+        // Not `records.len()`: a rename spends two fields on one file. See
+        // `moved_from_elsewhere`.
+        let mut fields = records.iter();
+        let mut count = 0;
+        while let Some(record) = fields.next() {
+            count += 1;
+            if moved_from_elsewhere(record) {
+                fields.next();
+            }
+        }
+
+        Ok(count)
     }
 
     /// A runner rooted in the real repository, carrying the crate's safety
@@ -108,4 +120,28 @@ impl Repo {
     fn git(&self) -> Git {
         Git::new(&self.path, PREFLIGHT_HOOKS_PATH)
     }
+}
+
+/// Whether a porcelain record is a rename or a copy, and so spends a *second*
+/// NUL-separated field naming where the content came from.
+///
+/// The one place the two porcelain formats disagree about shape. Without `-z`
+/// git writes a rename as a single `R  old -> new`, and counting records is
+/// counting lines; with `-z` it writes `R  new`, NUL, `old`, because a path
+/// containing ` -> ` would otherwise be unparseable. Counting fields would call
+/// that two uncommitted files. It is one file, moved.
+///
+/// The status is the first two characters of the record - one for the index,
+/// one for the working tree - and either may carry the letter. Read as
+/// characters rather than bytes so a path is never sliced mid-codepoint; the
+/// path cannot reach these two positions anyway, since a space always separates
+/// it from the status.
+fn moved_from_elsewhere(record: &str) -> bool {
+    /// Index status and worktree status, in that order.
+    const STATUS_WIDTH: usize = 2;
+
+    record
+        .chars()
+        .take(STATUS_WIDTH)
+        .any(|status| status == 'R' || status == 'C')
 }

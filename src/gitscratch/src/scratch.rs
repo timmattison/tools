@@ -126,7 +126,7 @@ impl Scratch {
                 return Ok(cost);
             }
 
-            let conflicted = git.lines(&["diff", "--name-only", "--diff-filter=U"])?;
+            let conflicted = git.nul_separated(&["diff", "--name-only", "--diff-filter=U"])?;
 
             if conflicted.is_empty() {
                 // The rebase halted without unmerged paths - typically a commit
