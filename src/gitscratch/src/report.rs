@@ -60,6 +60,23 @@ impl<'a> Report<'a> {
         }
     }
 
+    /// Begin wording a verdict for `tool`.
+    #[must_use]
+    pub fn for_tool(tool: &'a str) -> Self {
+        Self {
+            tool,
+            action: "",
+            show_stops: true,
+        }
+    }
+
+    /// Say what was replayed.
+    #[must_use]
+    pub fn describing(self, action: &'a str) -> Self {
+        let _ = action;
+        self
+    }
+
     /// Drop the stop count from the summary.
     ///
     /// A merge halts exactly once, so the number carries no information for
@@ -198,7 +215,7 @@ mod tests {
 
     #[test]
     fn a_clean_replay_gets_one_line_naming_the_tool_and_what_it_tried() {
-        let report = Report::new("grind", "replaying HEAD onto origin/main");
+        let report = Report::for_tool("grind").describing("replaying HEAD onto origin/main");
 
         assert_eq!(
             report.render(&Conflicts::default()),
@@ -212,7 +229,7 @@ mod tests {
     /// aligned counts - is the contract, not the individual lines.
     #[test]
     fn a_conflicted_replay_gets_a_header_a_summary_and_a_per_file_breakdown() {
-        let report = Report::new("grind", "replaying HEAD onto main");
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
 
         assert_eq!(
             report.render(&sample()),
@@ -231,7 +248,9 @@ mod tests {
     /// comparable at a glance.
     #[test]
     fn dropping_the_stop_count_removes_that_clause_and_nothing_else() {
-        let report = Report::new("grime", "merging feature into HEAD").without_stops();
+        let report = Report::for_tool("grime")
+            .describing("merging feature into HEAD")
+            .without_stops();
 
         assert_eq!(
             report.render(&sample()),
@@ -248,7 +267,7 @@ mod tests {
     /// before shipping it.
     #[test]
     fn a_single_hunk_in_a_single_file_reads_in_the_singular_throughout() {
-        let report = Report::new("grind", "replaying HEAD onto main");
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
         let one = Conflicts::from_files([file("src/lib.rs", 1)], Stops::new(1));
 
         assert_eq!(
@@ -266,7 +285,7 @@ mod tests {
     /// width lines these up for the person actually reading them.
     #[test]
     fn the_hunk_counts_line_up_by_display_width_not_by_character_count() {
-        let report = Report::new("grind", "replaying HEAD onto main");
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
         // `日本語.txt` is 7 characters and 13 bytes, but 10 columns wide - one
         // wider than `readme.md`, which is 9 of all three.
         let wide =
@@ -300,7 +319,7 @@ mod tests {
     /// something about zero files".
     #[test]
     fn a_clean_tree_gets_no_dirty_note() {
-        let report = Report::new("grind", "replaying HEAD onto main");
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
 
         assert_eq!(report.dirty_note(Uncommitted::new(0)), None);
         assert_eq!(report.dirty_note(Uncommitted::default()), None);
@@ -315,7 +334,7 @@ mod tests {
     /// different places and still have to agree about the number.
     #[test]
     fn the_dirty_note_agrees_with_itself_about_how_many_files_there_are() {
-        let report = Report::new("grind", "replaying HEAD onto main");
+        let report = Report::for_tool("grind").describing("replaying HEAD onto main");
 
         assert_eq!(
             report.dirty_note(Uncommitted::new(1)).as_deref(),
