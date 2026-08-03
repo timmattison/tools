@@ -55,7 +55,16 @@ impl TestRepo {
     }
 
     fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        // The same immunity the runner has, from the same list, because a
+        // fixture is not exempt from an inherited environment just because it is
+        // only building something to test with. A test suite run from inside a
+        // git hook inherits a *relative* `GIT_INDEX_FILE`, and a linked
+        // worktree's `.git` is a file, so a fixture that keeps it cannot add one
+        // at all - it fails before the code under test is ever reached.
+        crate::git::shed_inherited_environment(&mut command);
+
+        let output = command
             .args(args)
             .current_dir(cwd)
             .output()

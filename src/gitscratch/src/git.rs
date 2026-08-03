@@ -40,9 +40,33 @@ const REDIRECTING_ENVIRONMENT: [&str; 9] = [
     "GIT_CEILING_DIRECTORIES",
 ];
 
-/// Timestamps a hook hands down for the commit it is running for. A replay's
-/// commits are its own, made now, so they are dropped rather than inherited.
-const INHERITED_DATES: [&str; 2] = ["GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"];
+/// Who a hook says the commit it is running for belongs to, and when. Git reads
+/// all six in preference to `-c` *and* to `git config`, so leaving them in place
+/// silently re-attributes anything this crate commits - and a caller that set an
+/// identity of its own would find it ignored.
+const INHERITED_ATTRIBUTION: [&str; 6] = [
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_DATE",
+];
+
+/// Detach `command` from whatever git environment this process inherited.
+///
+/// Every git invocation this crate makes goes through here, the runner's and the
+/// test fixtures' alike: a fixture that inherits a redirected index cannot even
+/// build the repository the runner is supposed to replay, so both need the same
+/// immunity and neither should be describing the danger in its own words.
+pub(crate) fn shed_inherited_environment(command: &mut Command) {
+    for variable in REDIRECTING_ENVIRONMENT
+        .into_iter()
+        .chain(INHERITED_ATTRIBUTION)
+    {
+        command.env_remove(variable);
+    }
+}
 
 /// The outcome of one git invocation.
 pub struct GitOutput {
@@ -80,6 +104,7 @@ impl Git {
     /// Returns an error only if git could not be spawned at all.
     pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
         let mut command = Command::new("git");
+        shed_inherited_environment(&mut command);
         command
             .args(self.safety_config())
             .args(args)
@@ -89,19 +114,14 @@ impl Git {
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true")
             .env("GIT_TERMINAL_PROMPT", "0")
-            // Set, not merely left to the configuration above: git reads the
-            // environment *in preference to* `-c`, so an inherited
-            // `GIT_AUTHOR_NAME` - which is what a git hook hands anything it
-            // runs - would otherwise sign the harness's commits with the
-            // developer's name however firmly the config pins it.
+            // Belt to the configuration's braces. Shedding the inherited
+            // attribution above already leaves `-c user.name` to decide, but
+            // saying it twice means the identity survives either guard being
+            // edited away, and git resolves the environment first.
             .env("GIT_AUTHOR_NAME", HARNESS_NAME)
             .env("GIT_AUTHOR_EMAIL", HARNESS_EMAIL)
             .env("GIT_COMMITTER_NAME", HARNESS_NAME)
             .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL);
-
-        for variable in REDIRECTING_ENVIRONMENT.into_iter().chain(INHERITED_DATES) {
-            command.env_remove(variable);
-        }
 
         let output = command
             .output()
