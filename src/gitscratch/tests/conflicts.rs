@@ -4,6 +4,8 @@
 //! repository acceptable. These pin the answer itself: whether a replay
 //! conflicted at all, and where the hunks landed.
 
+#[cfg(unix)]
+use gitscratch::testing::awkward_names_repo;
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
     independent_branches_repo, multi_byte_names_repo,
@@ -126,6 +128,49 @@ fn a_conflicted_non_ascii_path_keeps_its_real_name_and_its_real_hunk_count() {
         vec![("readme.md", 1), ("日本語.txt", 2)],
         "a non-ASCII path must survive the round trip through git by name and \
          by count"
+    );
+}
+
+/// The classes of awkward name `core.quotePath=false` does *not* rescue have to
+/// survive the round trip too, by name and by count.
+///
+/// Two separate mechanisms wreck them, and the fixture holds both. Git C-quotes
+/// a path containing a backslash or a double quote whatever `core.quotePath`
+/// says, so those two arrive wrapped in quotes git added, naming no file on
+/// disk. The three whitespace-edged names arrive from git perfectly intact and
+/// are destroyed by the reader instead - by a trim, which is Unicode-aware and
+/// so eats an IDEOGRAPHIC SPACE as readily as an ASCII one. Both failures end in
+/// the same place: the name cannot be opened, and a conflicted file that cannot
+/// be opened is floored at one hunk.
+///
+/// So the hunk counts are the assertion that matters. Every file here is
+/// genuinely contested in two regions; a mangled name reports 1, and the total
+/// still looks like a plausible answer. Asserting the whole breakdown at once
+/// catches the name and the undercount together, which is right, because they
+/// are the same defect seen from two sides.
+///
+/// Unix-only: `awkward_names_repo` cannot be built on a filesystem that rejects
+/// `"` or `\` in a name.
+#[cfg(unix)]
+#[test]
+fn a_conflicted_path_git_cannot_print_plainly_keeps_its_name_and_its_hunk_count() {
+    let repo = awkward_names_repo();
+    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+
+    let conflicts = replay(&scratch, "right", "left");
+
+    assert_eq!(
+        conflicts.file_hunks().collect::<Vec<_>>(),
+        vec![
+            (" lead.txt", 2),
+            ("back\\slash.txt", 2),
+            ("plain.txt", 2),
+            ("quo\"te.txt", 2),
+            ("trail.txt ", 2),
+            ("\u{3000}wide.txt ", 2),
+        ],
+        "a path git quotes, or one a trim would erode, must survive the round \
+         trip through git by name and by count"
     );
 }
 
