@@ -1,8 +1,14 @@
 //! Newtyped conflict metrics.
 //!
-//! All three cost measures are counts, so a bare `usize` triple invites
+//! Every measure here is a count, so passing them as bare `usize`s invites
 //! transposition bugs that no compiler would catch. Each gets its own opaque
 //! type with a private field.
+//!
+//! Each also owns the *noun* it is counted in, and the `s` that noun takes in
+//! the plural, so the two never have to be remembered by whoever is printing
+//! the number. That is what makes a renderer unable to word the same count two
+//! ways, and it is why a count crosses this crate's boundary as a counter
+//! rather than as the integer inside it.
 
 /// A git branch name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,22 +48,14 @@ pub struct Hunks(usize);
 
 /// Count of files a replay would not carry with it - staged, unstaged, or
 /// untracked.
+///
+/// Its noun is the whole `"uncommitted file"`, not `"file"`, because the word
+/// the count is *about* is what the reader needs and what the renderer must
+/// not be left to supply. `Files` counts files that conflicted; this counts
+/// files that were never committed. Two counts of files that mean opposite
+/// things, so each says which it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct Uncommitted(usize);
-
-impl Uncommitted {
-    /// Wrap a raw count.
-    #[must_use]
-    pub fn new(count: usize) -> Self {
-        Self(count)
-    }
-
-    /// The count with its noun.
-    #[must_use]
-    pub fn phrase(&self) -> String {
-        format!("{} uncommitted file", self.0)
-    }
-}
 
 macro_rules! counter {
     ($name:ident, $noun:literal) => {
@@ -96,6 +94,7 @@ macro_rules! counter {
 counter!(Stops, "stop");
 counter!(Files, "file");
 counter!(Hunks, "hunk");
+counter!(Uncommitted, "uncommitted file");
 
 impl Stops {
     /// The raw count, for the one place in this crate that has to put a `Stops`
