@@ -429,6 +429,44 @@ pub fn branches_behind_main_repo() -> TestRepo {
     repo
 }
 
+/// A branch whose first commit arrives at content `main` has since reached by a
+/// different route, followed by a second commit that is real work. Replaying the
+/// branch onto `main` empties that first commit while the second one still has
+/// to survive — the legitimate half of the halt that a commit git could not write
+/// shares.
+///
+/// The *different route* is what makes the shape work. `main` walks
+/// `x1 -> x2 -> x3` in two commits and the branch jumps `x1 -> x3` in one, so no
+/// commit on either side shares a patch id with a commit on the other. Without
+/// that, git recognises the branch's commit as already upstream and drops it
+/// before the rebase ever halts; with it, the commit applies, produces exactly
+/// what HEAD already holds, and git stops on it.
+///
+/// `y.txt` is untouched by `main` and rewritten by the branch's second commit,
+/// so a replay that walks the whole rebase leaves `x.txt` at `x3` and `y.txt` at
+/// `y2`, and one that gave up somewhere in the middle does not.
+///
+/// Reaching the stop still takes `--empty=stop` on git's command line — see the
+/// test that uses this repo for why nothing else gets there.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn commit_emptied_by_main_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_files(&[("x.txt", "x1\n"), ("y.txt", "y1\n")], "base");
+
+    repo.branch("branch");
+    repo.commit_file("x.txt", "x3\n", "branch jumps x straight to x3");
+    repo.commit_file("y.txt", "y2\n", "branch's real work on y");
+
+    repo.checkout("main");
+    repo.commit_file("x.txt", "x2\n", "main steps x to x2");
+    repo.commit_file("x.txt", "x3\n", "main steps x to x3");
+
+    repo
+}
+
 /// Two branches that both rewrite the same line, so the simulation is
 /// guaranteed to actually conflict and resolve rather than no-op.
 ///
