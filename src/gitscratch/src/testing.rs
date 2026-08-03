@@ -475,6 +475,75 @@ pub fn branches_behind_main_with_quoted_and_space_led_paths_repo() -> TestRepo {
     repo
 }
 
+/// [`branches_behind_main_repo`]'s shape with the branch's work moved into a
+/// path git hands back verbatim and then reads back as something else entirely:
+/// `:/foo.txt`, a `foo.txt` inside a directory literally named `:`.
+///
+/// Nothing is lost on the way out here — the name is plain ASCII, so git neither
+/// quotes it nor leaves anything for a trim to eat — and that is the point. The
+/// mangling happens on the way back in, because a pathspec is not a path: a
+/// leading `:` is pathspec magic, and `:/` specifically means *from the top of
+/// the working tree*. Fed back as a pathspec the name therefore asks about the
+/// root `foo.txt` instead of the one the commit added, and `foo.txt` at the root
+/// is exactly what this fixture puts there — committed in the base, touched by
+/// neither side afterwards, and so identical in the replayed commit and the new
+/// base. A probe asking whether the commit's work is already in the new base
+/// gets an empty diff back, the honest answer about the *other* file, and reads
+/// it as yes.
+///
+/// That points the opposite way from the quoted names in
+/// [`branches_behind_main_with_quoted_and_space_led_paths_repo`], which is why
+/// it is worth a fixture of its own. A pathspec that matches nothing can only
+/// grow the set of paths a probe finds missing, and a bigger set only ever
+/// produces a refusal nobody needed; a pathspec that matches the *wrong* file
+/// can shrink that set to empty, which is a commit reclassified as adding
+/// nothing to the new base, skipped, and gone.
+///
+/// The branch's commit touches no plainly-spelled path at all, for the same
+/// reason that one does not: one ordinary file alongside would come back
+/// matching, the probe would find *its* work missing and refuse on that alone,
+/// and the magic name's silence would never show.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, the `:` directory or
+/// the file inside it not writable, or a command failing.
+pub fn branches_behind_main_with_a_pathspec_magic_path_repo() -> TestRepo {
+    // The file the branch adds, and - at the repository root, where `:/` sends
+    // anything that reads the name as magic - the decoy that answers for it.
+    const DECOY: &str = "foo.txt";
+    const MAGIC_DIRECTORY: &str = ":";
+
+    let repo = TestRepo::init();
+    repo.commit_files(
+        &[
+            ("shared.txt", &numbered_lines(30)),
+            (DECOY, "the file pathspec magic answers about instead\n"),
+        ],
+        "base",
+    );
+
+    repo.branch("branch");
+    // Not `commit_files`: it would neither make the `:` directory nor stage what
+    // landed in it, because it stages by handing the name to `git add`, where a
+    // leading `:` is read as magic exactly as it is everywhere else. Staging
+    // this file needs the same literal reading the code under test needs.
+    std::fs::create_dir(repo.path().join(MAGIC_DIRECTORY)).expect("create the ':' directory");
+    std::fs::write(
+        repo.path().join(MAGIC_DIRECTORY).join(DECOY),
+        "the branch's work\n",
+    )
+    .expect("write fixture file");
+    let magic_path = format!("{MAGIC_DIRECTORY}/{DECOY}");
+    repo.git(&["--literal-pathspecs", "add", "--", &magic_path]);
+    repo.git(&["commit", "-q", "-m", "branch work"]);
+
+    repo.checkout("main");
+    repo.commit_file("main.txt", "main moved on\n", "main moves ahead");
+
+    repo
+}
+
 /// [`conflicting_repo`]'s shape, moved into `café.txt` and stretched to two
 /// contested regions: both branches rewrite line 10 and line 22 of the same
 /// file, twelve lines apart so git's 3-line diff context cannot merge them into

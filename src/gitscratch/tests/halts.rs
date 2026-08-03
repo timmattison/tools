@@ -15,8 +15,9 @@
 #![cfg(unix)]
 
 use gitscratch::testing::{
-    branches_behind_main_repo, branches_behind_main_with_quoted_and_space_led_paths_repo,
-    commit_emptied_by_main_repo, modify_delete_repo,
+    branches_behind_main_repo, branches_behind_main_with_a_pathspec_magic_path_repo,
+    branches_behind_main_with_quoted_and_space_led_paths_repo, commit_emptied_by_main_repo,
+    modify_delete_repo,
 };
 use gitscratch::{Files, Hunks, Scratch, Stops};
 
@@ -272,6 +273,99 @@ fn refuses_to_report_a_cost_when_a_clean_pick_of_quoted_paths_could_not_be_commi
     // The rollback left the repository pristine, so there is no uncommitted
     // content for the other probe to find; the only thing that proves the commit
     // was lost is that its changes are absent from the new base.
+    assert!(
+        !error.contains("uncommitted"),
+        "nothing was left uncommitted - git rolled the index back - so the evidence must come \
+         from the commit's content being absent from the new base: {error}"
+    );
+}
+
+/// The same clean-pick failure a third time, in the half of the round trip the
+/// test above cannot reach: the way back in.
+///
+/// That test is about names git will not hand back verbatim. This one is about a
+/// name it hands back perfectly and then refuses to read back the same way,
+/// because the path leaving git is a path and the pathspec going in is not one.
+/// `:/foo.txt` — a `foo.txt` in a directory literally named `:` — is plain
+/// ASCII, so it survives git's output untouched; as a pathspec its leading `:/`
+/// is magic meaning *from the top of the working tree*, and it quietly names the
+/// root `foo.txt` instead. The fixture keeps an untouched `foo.txt` at the root
+/// for it to name, so the probe's diff comes back empty: a true answer about a
+/// file nobody asked about.
+///
+/// Which is why this shape is the more dangerous of the two and gets pinned
+/// separately. A mangled pathspec matching nothing can only *add* to the paths a
+/// probe finds missing, and the extra ones only ever buy a refusal that was not
+/// needed. A pathspec matching the wrong file *removes* them — here down to
+/// none — and no paths missing is the halt reading as a commit that adds nothing
+/// to the new base, which is `rebase --skip`, which is the work gone and a cost
+/// of zero reported for a branch that was never replayed. So the assertions
+/// below are about the classification: not that something went wrong, but that
+/// the commit was never called empty and that the path whose work was at stake
+/// is named as the developer spelled it.
+#[test]
+fn refuses_to_report_a_cost_when_a_clean_pick_of_a_pathspec_magic_path_could_not_be_committed() {
+    let repo = branches_behind_main_with_a_pathspec_magic_path_repo();
+    // Read the abbreviation from the same object database the implementation
+    // will abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "branch"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "branch"]);
+
+    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    scratch
+        .git()
+        .run(&["checkout", "-q", "--detach", "branch"])
+        .expect("check out the branch detached in the scratch worktree");
+
+    // Sealed only now: adding the worktree and checking out write no objects,
+    // but everything before this point would fail against a read-only store.
+    let sealed = repo.seal_object_store();
+    let result = scratch.replay_rebase("main");
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let error = match result {
+        Ok(conflicts) => panic!(
+            "the replay reported a cost for a commit git never wrote: {conflicts:?}\n\
+             a path git reads back as pathspec magic is still a path whose work would be \
+             thrown away"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains(&dropped_sha),
+        "the error should name the commit that was about to be dropped ({dropped_sha}): {error}"
+    );
+    assert!(
+        error.contains(&dropped_subject),
+        "the error should carry the dropped commit's subject ({dropped_subject}): {error}"
+    );
+
+    // The classification, pinned separately from the fact that something went
+    // wrong, because here the two come apart completely: the magic pathspec's
+    // empty diff is what *makes* this commit look empty, and calling it empty is
+    // the decision that throws the work away in any repository where the skip
+    // that follows succeeds.
+    assert!(
+        !error.contains("adds nothing to the new base"),
+        "a commit that adds a file the new base has never seen is not an empty commit, whatever \
+         the pathspec built from its name happens to match instead: {error}"
+    );
+
+    // The path itself, in the spelling the developer gave it. Naming the root
+    // `foo.txt` the magic resolves to would be reporting the decoy, and naming
+    // nothing at all would mean the refusal came from somewhere else entirely.
+    assert!(
+        error.contains(":/foo.txt"),
+        "the error should name the file whose change would have been lost, as it is actually \
+         spelled: {error}"
+    );
+
+    // The rollback left the repository pristine, so there is no uncommitted
+    // content for the other probe to find; the only thing that proves the commit
+    // was lost is that its change is absent from the new base.
     assert!(
         !error.contains("uncommitted"),
         "nothing was left uncommitted - git rolled the index back - so the evidence must come \
