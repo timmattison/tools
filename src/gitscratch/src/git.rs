@@ -63,8 +63,14 @@ const INHERITED_ATTRIBUTION: [&str; 6] = [
 /// Public because the danger is not this crate's alone. Anything in this
 /// repository that spawns git - a tool that adds a worktree, a test that builds
 /// a throwaway repository - is broken the same way by the same environment, and
-/// the list of what to shed is knowledge worth having in exactly one place
-/// rather than copied into each of them to drift.
+/// the list of what to shed is worth keeping in one reusable place rather than
+/// copied into each of them to drift.
+///
+/// That is an offer, not a guarantee. Most of the repository's git spawns still
+/// build their own command and inherit whatever this process was handed, and
+/// nothing - no lint, no type, no guard - obliges them to call this. Immunity
+/// holds where this is called and nowhere else, so anyone who wants it
+/// repository-wide has to enforce it first.
 ///
 /// ```no_run
 /// let mut command = std::process::Command::new("git");
