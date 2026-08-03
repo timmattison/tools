@@ -418,6 +418,43 @@ mod tests {
         );
     }
 
+    /// The heading the guard inventory lives under. Named once because the
+    /// tests below have to agree on which section of the README is the
+    /// inventory before they can agree on what it says.
+    const INVENTORY_HEADING: &str = "## What it guarantees";
+
+    /// The one section a heading opens, cut out of the document around it.
+    ///
+    /// The inventory check below is a claim about a single table, so it has to
+    /// read a single table. `--literal-pathspecs` and `core.hooksPath` are the
+    /// two guards matched by bare name, and the README's prose names both of
+    /// them outside the inventory; a check handed the whole document would be
+    /// satisfied by those sentences and report clean for a table that never
+    /// grew the row. Cutting the section out is what keeps "named in the
+    /// inventory" from quietly degrading into "mentioned somewhere in the
+    /// README". Anything that leaves no trustworthy scope to cut — a renamed
+    /// heading, an emptied section — panics rather than handing back a scope
+    /// the caller cannot rely on.
+    fn inventory_section<'a>(document: &'a str, heading: &str) -> &'a str {
+        let (_, below_heading) = document.split_once(heading).unwrap_or_else(|| {
+            panic!(
+                "the README has no `{heading}` section, so there is no inventory left to check \
+                 the guards against; a renamed or deleted heading has to fail here rather than \
+                 let this test pass by finding nothing"
+            )
+        });
+        let inventory = below_heading
+            .split_once("\n## ")
+            .map_or(below_heading, |(section, _)| section);
+        assert!(
+            !inventory.trim().is_empty(),
+            "the `{heading}` section is empty, which would make every check below succeed \
+             against nothing"
+        );
+
+        inventory
+    }
+
     /// The README's `What it guarantees` table is written as an exhaustive
     /// inventory, so a guard missing from it is not a documentation gap but a
     /// false statement about what the harness pins.
@@ -452,23 +489,8 @@ mod tests {
         /// Embedded under `#[cfg(test)]` only, so the README rides in the test
         /// binary and never in anything a consumer ships.
         const README: &str = include_str!("../README.md");
-        const INVENTORY_HEADING: &str = "## What it guarantees";
 
-        let (_, below_heading) = README.split_once(INVENTORY_HEADING).unwrap_or_else(|| {
-            panic!(
-                "the README has no `{INVENTORY_HEADING}` section, so there is no inventory left \
-                 to check the guards against; a renamed or deleted heading has to fail here \
-                 rather than let this test pass by finding nothing"
-            )
-        });
-        let inventory = below_heading
-            .split_once("\n## ")
-            .map_or(below_heading, |(section, _)| section);
-        assert!(
-            !inventory.trim().is_empty(),
-            "the `{INVENTORY_HEADING}` section is empty, which would make every check below \
-             succeed against nothing"
-        );
+        let inventory = inventory_section(README, INVENTORY_HEADING);
 
         // The hooks path is deliberately empty: this runner exists only to be
         // asked what it would pin, and an empty value is what makes the
@@ -508,6 +530,76 @@ mod tests {
                  harness. Add a row for it, or remove it from safety_config."
             );
         }
+    }
+
+    /// The scope the inventory check runs in has to end at the next heading of
+    /// *any* level, because a heading is not required to stay the level it was
+    /// written at.
+    ///
+    /// Cutting the section at a literal `\n## ` asks a lexical question about a
+    /// structural thing, and the answer is wrong for every spelling that is
+    /// still a heading: demote `## Testing` to `### Testing` — one character —
+    /// and the section silently grows to swallow everything under it. That is
+    /// not an abstract widening. The prose below this table names
+    /// `--literal-pathspecs` and `core.hooksPath`, the exact two guards the
+    /// check matches by bare name, so a swallowed Testing section makes both of
+    /// them satisfiable without a row ever existing. The check would go on
+    /// reporting clean while checking nothing, which is the failure that costs
+    /// the most to notice: an over-wide scope never says a word.
+    ///
+    /// So each level gets its own fixture rather than the one that prompted
+    /// this, and each fixture's stray sentence is the sentence that would do
+    /// the damage.
+    #[test]
+    fn the_inventory_section_stops_at_the_next_heading_of_any_level() {
+        const STRAY_GUARD: &str = "--literal-pathspecs";
+
+        for level in ["# ", "### ", "#### "] {
+            let document = format!(
+                "# gitscratch\n\n{INVENTORY_HEADING}\n\n\
+                 | Guard | Why |\n| --- | --- |\n\
+                 | `gc.auto=0` | A gc could collect a loose simulated commit. |\n\n\
+                 {level}Testing\n\n\
+                 The suite pins the {STRAY_GUARD} guard by mutation.\n\n\
+                 ## Used by\n\ngrist.\n"
+            );
+
+            let inventory = inventory_section(&document, INVENTORY_HEADING);
+
+            assert!(
+                !inventory.contains(STRAY_GUARD),
+                "a `{level}` heading ends the `{INVENTORY_HEADING}` section as surely as a `## ` \
+                 one does, so the prose under it is outside the inventory; swallowing it lets a \
+                 sentence stand in for the row `{STRAY_GUARD}` needs: {inventory}"
+            );
+            assert!(
+                inventory.contains("gc.auto=0"),
+                "the cut has to keep the table it is scoping to, or the check below would pass \
+                 against nothing for the opposite reason: {inventory}"
+            );
+        }
+    }
+
+    /// An inventory section with no heading after it is refused, not read to
+    /// the end of the file.
+    ///
+    /// Falling back to "everything below the heading" is the same widening as
+    /// missing the cut, arrived at from the other side, and it is the one the
+    /// old fallback took silently. A section that is last in the document has
+    /// no boundary this check can trust, and a scope nobody bounded is a scope
+    /// that will match the first sentence that happens to say the right words.
+    /// Refusing says so; returning the rest of the file says nothing and passes.
+    #[test]
+    #[should_panic(expected = "runs to the end of the document with no heading after it")]
+    fn an_inventory_section_that_nothing_closes_is_refused_rather_than_run_to_the_end() {
+        let document = format!(
+            "# gitscratch\n\n{INVENTORY_HEADING}\n\n\
+             | Guard | Why |\n| --- | --- |\n\
+             | `gc.auto=0` | A gc could collect a loose simulated commit. |\n\n\
+             The suite pins the --literal-pathspecs guard by mutation.\n"
+        );
+
+        inventory_section(&document, INVENTORY_HEADING);
     }
 
     /// `git var GIT_AUTHOR_IDENT` reports exactly the identity git would stamp
