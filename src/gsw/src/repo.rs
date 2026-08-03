@@ -1482,7 +1482,7 @@ mod tests {
     }
 
     /// Whether `spec` still documents the rebase counter files in the order
-    /// [`super::REBASE_COUNTERS`] tries them, reporting the first divergence.
+    /// [`super::REBASE_COUNTERS`] tries them, reporting every divergence.
     ///
     /// Every file name in the table is required, not just the `current` half:
     /// the pairs are flattened to `current, total, current, total`, which is
@@ -1493,13 +1493,15 @@ mod tests {
     /// drift on its own.
     ///
     /// Both rejections name the counter files at fault — *every* missing one, or
-    /// the neighbouring pair found out of order, alongside every name's byte
+    /// *every* neighbouring pair found out of order, alongside every name's byte
     /// offset — so the spec can be repaired from the failure alone. Presence is
     /// checked for the whole table before the ordering pass runs, so a name that
     /// is absent is always reported as absent rather than as a transposition,
     /// and reporting all of them at once keeps the merge backend's half of the
-    /// table load-bearing: stopping at the first miss would only ever name an
-    /// `rebase-apply/` file, since that pair is flattened first.
+    /// table load-bearing: stopping at the first miss — or at the first
+    /// misordered neighbour — would only ever name an `rebase-apply/` file,
+    /// since that pair is flattened first, leaving the merge pair's own
+    /// `<current> + <total>` layout unpinned.
     fn check_spec_documents_the_counter_order(spec: &str) -> Result<(), String> {
         let mut mentions: Vec<(&str, usize)> = Vec::new();
         let mut missing: Vec<&str> = Vec::new();
@@ -1523,9 +1525,21 @@ mod tests {
                  documents the counter pairs `rebase_step` reads",
             ));
         }
-        if let Some(out_of_order) = mentions.windows(2).find(|pair| pair[0].1 >= pair[1].1) {
-            let (earlier, earlier_at) = out_of_order[0];
-            let (later, later_at) = out_of_order[1];
+        let out_of_order = mentions
+            .windows(2)
+            .filter(|pair| pair[0].1 >= pair[1].1)
+            .map(|pair| {
+                let (earlier, earlier_at) = pair[0];
+                let (later, later_at) = pair[1];
+                format!(
+                    "`{earlier}` must be documented before `{later}`, but \
+                     appears at byte offset {earlier_at}, after `{later}` at \
+                     {later_at}"
+                )
+            })
+            .collect::<Vec<_>>();
+        if !out_of_order.is_empty() {
+            let violations = out_of_order.join("; ");
             let found = mentions
                 .iter()
                 .map(|(name, at)| format!("`{name}` at {at}"))
@@ -1533,10 +1547,8 @@ mod tests {
                 .join(", ");
             return Err(format!(
                 "the design spec lists the rebase counter files in a different \
-                 order from `REBASE_COUNTERS`: `{earlier}` must be documented \
-                 before `{later}`, but appears at byte offset {earlier_at}, \
-                 after `{later}` at {later_at} (found {found}). The spec must \
-                 document each pair as `<current> + <total>`, and \
+                 order from `REBASE_COUNTERS`: {violations} (found {found}). \
+                 The spec must document each pair as `<current> + <total>`, and \
                  `rebase-apply/` before `rebase-merge/` — the order \
                  `gix::Repository::state` resolves them in — or a \
                  re-implementation driven from the spec reinstates the \
@@ -1679,8 +1691,7 @@ mod tests {
         // The mutation is derived from `REBASE_COUNTERS` rather than spelled
         // out, so a third counter pair added to the table is pinned here the day
         // it is added.
-        let spec = read_design_spec();
-        let mut mutated = spec.clone();
+        let mut mutated = read_design_spec();
         for (current, total) in super::REBASE_COUNTERS {
             let documented = format!("`{current}` + `{total}`");
             let transposed = format!("`{total}` + `{current}`");
