@@ -433,8 +433,8 @@ mod tests {
     /// grew the row. Cutting the section out is what keeps "named in the
     /// inventory" from quietly degrading into "mentioned somewhere in the
     /// README". Anything that leaves no trustworthy scope to cut — a renamed
-    /// heading, an emptied section — panics rather than handing back a scope
-    /// the caller cannot rely on.
+    /// heading, an emptied section, one that nothing below it closes — panics
+    /// rather than handing back a scope the caller cannot rely on.
     fn inventory_section<'a>(document: &'a str, heading: &str) -> &'a str {
         let (_, below_heading) = document.split_once(heading).unwrap_or_else(|| {
             panic!(
@@ -443,9 +443,30 @@ mod tests {
                  let this test pass by finding nothing"
             )
         });
+        // Cut at the next heading of *any* level rather than at the next
+        // `## `: a heading demoted by one character is still the end of this
+        // section, and a cut that cannot see it widens the scope instead of
+        // failing. The first segment is the tail of the heading line itself,
+        // so only a line beginning after it can close the section.
+        let mut lines = below_heading.split_inclusive('\n');
+        let heading_tail = lines.next().unwrap_or_default().len();
+        let body: usize = lines
+            .take_while(|line| !line.trim_start().starts_with('#'))
+            .map(str::len)
+            .sum();
+        let ends_at = heading_tail + body;
+        assert!(
+            ends_at < below_heading.len(),
+            "the `{heading}` section runs to the end of the document with no heading after it, \
+             so nothing bounds the inventory and its scope would silently become the whole rest \
+             of the file; a check that is supposed to be asking about one table cannot be handed \
+             everything below it"
+        );
+        // A sum of whole line lengths lands on a line boundary, which is always
+        // a character boundary - but `get` says so without a way to panic.
         let inventory = below_heading
-            .split_once("\n## ")
-            .map_or(below_heading, |(section, _)| section);
+            .get(..ends_at)
+            .expect("a cut summed from whole lines lands on a character boundary");
         assert!(
             !inventory.trim().is_empty(),
             "the `{heading}` section is empty, which would make every check below succeed \
@@ -477,13 +498,15 @@ mod tests {
     /// one — but a guard the config pins and the table never names cannot ship,
     /// and the failure below says which guard went missing.
     ///
-    /// The check is scoped to that one section, cut at the next `##`, because a
-    /// mention anywhere else in the README is exactly what must not satisfy it:
-    /// the finding is that the *inventory* is short, and a stray sentence three
+    /// The check is scoped to that one section — cut at the next heading of any
+    /// level, and refused outright when no heading follows — because a mention
+    /// anywhere else in the README is exactly what must not satisfy it: the
+    /// finding is that the *inventory* is short, and a stray sentence three
     /// sections away does not lengthen it. Everything that could make the check
-    /// vacuous — a renamed heading, an emptied section, a config that pins
-    /// nothing — panics instead of passing, since a guard that reports clean
-    /// because it found nothing to look at is worse than no guard at all.
+    /// vacuous — a renamed heading, an emptied section, one nothing closes, a
+    /// config that pins nothing — panics instead of passing, since a guard that
+    /// reports clean because it found nothing to look at is worse than no guard
+    /// at all.
     #[test]
     fn every_guard_the_safety_config_pins_is_named_in_the_readme_inventory() {
         /// Embedded under `#[cfg(test)]` only, so the README rides in the test
