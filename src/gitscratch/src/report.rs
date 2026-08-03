@@ -37,6 +37,14 @@ const FILE_INDENT: &str = "  ";
 const COUNT_GAP: usize = 4;
 
 /// A conflict verdict, and how to word it for one particular tool.
+///
+/// Three `Copy` fields, so the type is `Copy` too - which is what lets every
+/// builder method take `self` without the value it was called on being spent.
+/// `Debug` is here for the reason the API guidelines give: a consumer holding
+/// one has to be able to derive `Debug` on the struct that holds it, and an
+/// assertion that fails while comparing two renderings has to be able to say
+/// which report produced them.
+#[derive(Debug, Clone, Copy)]
 pub struct Report<'a> {
     tool: &'a str,
     action: &'a str,
@@ -44,23 +52,25 @@ pub struct Report<'a> {
 }
 
 impl<'a> Report<'a> {
-    /// Word the verdict for `tool`, describing the replay as `action`.
+    /// Begin wording a verdict for `tool`.
     ///
     /// `tool` is the binary's own name - `"grind"` - because every line the
     /// tool prints is prefixed with it, the way a well-behaved unix tool
-    /// identifies itself in a pipeline. `action` is a present participle phrase
-    /// describing what was replayed, such as `"replaying HEAD onto main"`, so
-    /// it reads correctly in both the clean sentence and the conflict header.
-    #[must_use]
-    pub fn new(tool: &'a str, action: &'a str) -> Self {
-        Self {
-            tool,
-            action,
-            show_stops: true,
-        }
-    }
-
-    /// Begin wording a verdict for `tool`.
+    /// identifies itself in a pipeline.
+    ///
+    /// The other half of the sentence arrives through [`describing`] rather
+    /// than as a second argument here, and the split is the whole point: two
+    /// adjacent `&str` parameters can be handed over the wrong way round in
+    /// perfect silence, and the result is not a compile error but a report
+    /// prefixed with `"replaying HEAD onto main"` and indented to the width of
+    /// it. Named calls cannot be transposed, so the mistake stops being
+    /// available rather than merely being documented against.
+    ///
+    /// A report that is never given an action words itself with an empty one -
+    /// visibly wrong at a glance, and reachable only by not finishing the
+    /// sentence, which no call site does.
+    ///
+    /// [`describing`]: Report::describing
     #[must_use]
     pub fn for_tool(tool: &'a str) -> Self {
         Self {
@@ -71,10 +81,14 @@ impl<'a> Report<'a> {
     }
 
     /// Say what was replayed.
+    ///
+    /// `action` is a present participle phrase - `"replaying HEAD onto main"`,
+    /// `"merging feature into HEAD"` - so it reads correctly in both the clean
+    /// sentence and the conflict header, which are the only two places it
+    /// lands.
     #[must_use]
     pub fn describing(self, action: &'a str) -> Self {
-        let _ = action;
-        self
+        Self { action, ..self }
     }
 
     /// Drop the stop count from the summary.
@@ -83,6 +97,10 @@ impl<'a> Report<'a> {
     /// `grime` and printing it would invite a reader to compare a constant
     /// against `grind`'s real measurement. [`Conflicts`] still records it; this
     /// only decides whether it is worth saying out loud.
+    ///
+    /// Takes `self` and leaves the original usable, because [`Report`] is
+    /// `Copy`: a caller wanting both wordings of the same verdict gets them
+    /// without building the report twice.
     #[must_use]
     pub fn without_stops(self) -> Self {
         Self {
@@ -260,6 +278,39 @@ mod tests {
   src/lib.rs     3 hunks
   src/main.rs    1 hunk"
         );
+    }
+
+    /// Both derives, exercised the way a consumer would.
+    ///
+    /// This one is a compile-time guarantee wearing a test's clothes, and it is
+    /// worth being plain about that: drop `Copy` and the second use of `report`
+    /// is a use-after-move, drop `Debug` and the format string does not build.
+    /// Neither failure is an assertion that goes red - the crate simply stops
+    /// compiling - so what this really does is write the requirement down
+    /// somewhere that a person deleting a derive will trip over it.
+    ///
+    /// The assertions themselves are the part that *can* fail at runtime: a
+    /// hand-written `Debug` that named neither the tool nor the action would
+    /// satisfy the trait and still be useless in the assertion message the
+    /// guideline exists to serve.
+    #[test]
+    fn a_report_can_be_debugged_and_used_again_after_being_narrowed() {
+        let report = Report::for_tool("grime").describing("merging feature into HEAD");
+
+        // `without_stops` consumes a copy, so the report it was called on is
+        // still there - and still says everything it said before.
+        let brief = report.without_stops();
+        assert!(report.render(&sample()).contains("3 stops"));
+        assert!(!brief.render(&sample()).contains("stops"));
+
+        let debugged = format!("{report:?}");
+        for expected in ["grime", "merging feature into HEAD"] {
+            assert!(
+                debugged.contains(expected),
+                "a debug representation that omits {expected:?} tells a failing \
+                 assertion nothing: {debugged}"
+            );
+        }
     }
 
     /// The smallest possible conflict is also the most common one, and "1 hunks

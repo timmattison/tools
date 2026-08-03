@@ -108,13 +108,20 @@ on exactly the details that make the two answers comparable at a glance:
 ```rust
 use gitscratch::Report;
 
-let report = Report::new("grind", "replaying HEAD onto main");
+let report = Report::for_tool("grind").describing("replaying HEAD onto main");
 
 if let Some(note) = report.dirty_note(repo.uncommitted_files()?) {
     eprintln!("{note}");
 }
 println!("{}", report.render(&conflicts));
 ```
+
+The tool name and the action arrive through two differently-named calls rather
+than as two arguments to one constructor, because both are `&str`: passing them
+the wrong way round would compile, and produce a report prefixed with `replaying
+HEAD onto main` and indented to the width of it. Named calls cannot be
+transposed. `Report` is `Copy`, so neither `describing` nor `without_stops`
+spends the value it was called on.
 
 ```console
 grind: conflicts - replaying HEAD onto main
@@ -251,6 +258,15 @@ counter and the verb from the renderer, so the two cannot drift apart unnoticed.
 A default `Uncommitted` is a clean tree, which is what lets a caller that could
 not measure fall back to saying nothing rather than to saying something about
 zero files.
+
+One test there is honest about being a compile-time guarantee in a test's
+clothing: `Report`'s `Debug` and `Copy` derives cannot fail an assertion, only a
+build — drop `Copy` and using a report after `without_stops()` is a
+use-after-move, drop `Debug` and the format string does not compile. It is
+written as a test so that whoever deletes a derive trips over the reason it was
+added. What it *does* assert at runtime is the part a hand-written `Debug` could
+still get wrong: that the representation names the tool and the action, which is
+the only thing that makes it worth anything in a failing assertion's message.
 
 **The replay's round budget** is pinned by unit tests in `src/scratch.rs`, which
 the integration suite could not serve: the constant is 1000, and the case that
