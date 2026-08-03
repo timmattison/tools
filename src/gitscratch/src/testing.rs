@@ -395,6 +395,40 @@ pub fn modify_delete_repo() -> TestRepo {
     repo
 }
 
+/// Two independent branches, plus a `main` that has moved on since they were
+/// cut. Nothing conflicts — each branch owns a file of its own, and main's extra
+/// commit touches neither — but neither branch is a fast-forward any more, so
+/// replaying one onto `main` has to *write* a commit rather than just move a
+/// ref.
+///
+/// That is what makes a failed commit write observable. The pick applies
+/// cleanly, so git has nothing to leave unmerged and nothing to leave staged;
+/// when it cannot write the commit it rolls the index back and reschedules the
+/// pick. The rebase is then halted with nothing unmerged and nothing dirty
+/// anywhere — a state that uncommitted content alone cannot tell apart from a
+/// commit that genuinely became empty. Seal the object database with
+/// [`TestRepo::seal_object_store`] to reach it.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn branches_behind_main_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("shared.txt", &numbered_lines(30), "base");
+
+    repo.branch("alpha");
+    repo.commit_file("alpha.txt", "alpha work\n", "alpha work");
+
+    repo.checkout("main");
+    repo.branch("beta");
+    repo.commit_file("beta.txt", "beta work\n", "beta work");
+
+    repo.checkout("main");
+    repo.commit_file("main.txt", "main moved on\n", "main moves ahead");
+
+    repo
+}
+
 /// Two branches that both rewrite the same line, so the simulation is
 /// guaranteed to actually conflict and resolve rather than no-op.
 ///

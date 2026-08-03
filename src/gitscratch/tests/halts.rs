@@ -10,7 +10,7 @@
 //! is a Unix permission trick, so the whole suite is Unix-only.
 #![cfg(unix)]
 
-use gitscratch::testing::modify_delete_repo;
+use gitscratch::testing::{branches_behind_main_repo, modify_delete_repo};
 use gitscratch::Scratch;
 
 /// The replay's whole job is to say what an operation would cost. A commit git
@@ -69,5 +69,81 @@ fn refuses_to_report_a_cost_when_a_staged_resolution_could_not_be_committed() {
     assert!(
         error.contains(&objects),
         "the error should carry git's own message, which names {objects}: {error}"
+    );
+}
+
+/// The same silent skip, in the shape no amount of looking for uncommitted
+/// content can see. When a *clean* pick fails to write its commit, git rolls the
+/// index back and reschedules the pick: the index matches HEAD, the worktree
+/// matches the index, and there is nothing dirty anywhere to find. The halt is
+/// byte-for-byte the one a genuinely empty commit produces. What still separates
+/// them is the commit itself — its work is nowhere in the new base — and the
+/// replay has to refuse on that basis alone.
+#[test]
+fn refuses_to_report_a_cost_when_a_clean_pick_could_not_be_committed() {
+    let repo = branches_behind_main_repo();
+    // Read the abbreviation from the same object database the implementation
+    // will abbreviate against, so `%h` here and `%h` there agree.
+    let dropped_sha = repo.git(&["log", "-1", "--format=%h", "alpha"]);
+    let dropped_subject = repo.git(&["log", "-1", "--format=%s", "alpha"]);
+    let objects = std::fs::canonicalize(repo.path().join(".git").join("objects"))
+        .expect("canonicalize the object database path");
+
+    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    scratch
+        .git()
+        .run(&["checkout", "-q", "--detach", "alpha"])
+        .expect("check out alpha detached in the scratch worktree");
+
+    // Sealed only now: adding the worktree and checking out write no objects,
+    // but everything before this point would fail against a read-only store.
+    let sealed = repo.seal_object_store();
+    let result = scratch.replay_rebase("main");
+    // Released before a single assertion runs, so a failing one cannot leave a
+    // read-only directory behind for the temporary directory to trip over.
+    drop(sealed);
+
+    let error = match result {
+        Ok(conflicts) => panic!(
+            "the replay reported a cost for a commit git never wrote: {conflicts:?}\n\
+             a dry run may answer 'expensive' or 'I cannot answer', never 'cheap'"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+
+    assert!(
+        error.contains(&dropped_sha),
+        "the error should name the commit that was about to be dropped ({dropped_sha}): {error}"
+    );
+    assert!(
+        error.contains(&dropped_subject),
+        "the error should carry the dropped commit's subject ({dropped_subject}): {error}"
+    );
+
+    // git says: "error: insufficient permission for adding an object to
+    // repository database <path>". The path is interpolated rather than
+    // translated, so matching on it is locale-independent - and it is the
+    // canonicalized one because macOS resolves a temp dir's /var/... to
+    // /private/var/....
+    let objects = objects.display().to_string();
+    assert!(
+        error.contains(&objects),
+        "the error should carry git's own message, which names {objects}: {error}"
+    );
+
+    // The two assertions below are what keep this test about *this* shape. The
+    // rollback left the repository pristine, so there is no uncommitted content
+    // for the other probe to find; the only thing that proves the commit was
+    // lost is that alpha.txt's change is absent from the new base. If the
+    // evidence ever came back phrased as leftover uncommitted content, this
+    // test would silently have become a second copy of the one above.
+    assert!(
+        error.contains("alpha.txt"),
+        "the error should name the file whose change would have been lost: {error}"
+    );
+    assert!(
+        !error.contains("uncommitted"),
+        "nothing was left uncommitted - git rolled the index back - so the evidence must come \
+         from the commit's content being absent from the new base: {error}"
     );
 }
