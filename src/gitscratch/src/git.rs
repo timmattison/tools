@@ -11,25 +11,38 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 
-/// The name every scratch commit is authored and committed under.
-const SCRATCH_USER_NAME: &str = "gitscratch";
+/// Who scratch commits are attributed to. Spelled once and used both as
+/// configuration and as environment, because those are two ways of saying the
+/// same thing and git resolves them in that order - so they must not drift.
+const HARNESS_NAME: &str = "gitscratch";
+const HARNESS_EMAIL: &str = "gitscratch@localhost";
 
-/// The email every scratch commit is authored and committed under.
-const SCRATCH_USER_EMAIL: &str = "gitscratch@localhost";
-
-/// The identity git hands a child through the environment instead of through
-/// configuration. git sets all six for every hook it runs, and sets the author
-/// trio again for each commit that rebase, cherry-pick, or am replays. An
-/// environment variable outranks every config source, `-c` included, so
-/// [`Git::try_run`] removes them to keep the pinned identity in force.
-const INHERITED_IDENTITY_VARS: [&str; 6] = [
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_AUTHOR_DATE",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-    "GIT_COMMITTER_DATE",
+/// Environment that would aim git at a repository other than the one the runner
+/// is rooted in, and is therefore stripped from every invocation.
+///
+/// This is not a hypothetical set. A tool built on this crate can be invoked
+/// from inside a git hook, and git hands its hooks `GIT_INDEX_FILE` - often
+/// *relative*, so it silently re-anchors on the runner's own working directory -
+/// along with `GIT_DIR` and `GIT_WORK_TREE` for several hooks. Inheriting any of
+/// them would point the replay at the developer's real repository and index,
+/// which is precisely what a scratch worktree exists to avoid. The rest are here
+/// for the same reason: each one redirects some part of where git reads or
+/// writes, and none of them can mean anything useful to a throwaway replay.
+const REDIRECTING_ENVIRONMENT: [&str; 9] = [
+    "GIT_DIR",
+    "GIT_COMMON_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+    "GIT_CEILING_DIRECTORIES",
 ];
+
+/// Timestamps a hook hands down for the commit it is running for. A replay's
+/// commits are its own, made now, so they are dropped rather than inherited.
+const INHERITED_DATES: [&str; 2] = ["GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"];
 
 /// The outcome of one git invocation.
 pub struct GitOutput {
@@ -75,17 +88,18 @@ impl Git {
             // hang forever on a commit message or a todo list.
             .env("GIT_EDITOR", "true")
             .env("GIT_SEQUENCE_EDITOR", "true")
-            .env("GIT_TERMINAL_PROMPT", "0");
+            .env("GIT_TERMINAL_PROMPT", "0")
+            // Set, not merely left to the configuration above: git reads the
+            // environment *in preference to* `-c`, so an inherited
+            // `GIT_AUTHOR_NAME` - which is what a git hook hands anything it
+            // runs - would otherwise sign the harness's commits with the
+            // developer's name however firmly the config pins it.
+            .env("GIT_AUTHOR_NAME", HARNESS_NAME)
+            .env("GIT_AUTHOR_EMAIL", HARNESS_EMAIL)
+            .env("GIT_COMMITTER_NAME", HARNESS_NAME)
+            .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL);
 
-        // Config alone does not settle the identity. Whichever tool drives this
-        // crate may itself be running under a git that exported the identity
-        // into the environment - every hook gets it, and so does every commit
-        // replayed by rebase, cherry-pick, or am - and those variables outrank
-        // the `user.name` pinned in safety_config. Left in place they put the
-        // developer's own name on scratch commits, which is the single thing
-        // the pin exists to prevent. Same leak class as the GIT_DIR scrub the
-        // repository's pre-commit hook performs before it runs the test suite.
-        for variable in INHERITED_IDENTITY_VARS {
+        for variable in REDIRECTING_ENVIRONMENT.into_iter().chain(INHERITED_DATES) {
             command.env_remove(variable);
         }
 
@@ -145,6 +159,10 @@ impl Git {
     }
 
     /// Configuration that keeps a simulation from touching anything real.
+    ///
+    /// Configuration alone is not the whole guard: git resolves the environment
+    /// first, so [`Git::try_run`] also pins the identity as environment and
+    /// strips everything that would redirect git elsewhere.
     fn safety_config(&self) -> Vec<String> {
         [
             // Recording resolutions from a simulated conflict would poison the
@@ -175,16 +193,14 @@ impl Git {
             "commit.gpgsign=false",
             "gpg.format=openpgp",
         ]
-        .into_iter()
-        .map(String::from)
+        .iter()
+        .map(|setting| (*setting).to_string())
+        // The identity belongs to this crate, not to whichever tool is driving
+        // it, so every consumer's scratch commits are attributable to the
+        // harness that actually made them.
         .chain([
-            // The identity belongs to this crate, not to whichever tool is
-            // driving it, so every consumer's scratch commits are attributable
-            // to the harness that actually made them. These two settle it only
-            // in company with the environment scrub in `try_run`, which removes
-            // the identity variables that would otherwise outrank them.
-            format!("user.name={SCRATCH_USER_NAME}"),
-            format!("user.email={SCRATCH_USER_EMAIL}"),
+            format!("user.name={HARNESS_NAME}"),
+            format!("user.email={HARNESS_EMAIL}"),
             format!("core.hooksPath={}", self.hooks_path),
         ])
         .flat_map(|setting| ["-c".to_string(), setting])
@@ -196,7 +212,23 @@ impl Git {
 mod tests {
     use tempfile::TempDir;
 
-    use super::{Git, INHERITED_IDENTITY_VARS, SCRATCH_USER_EMAIL, SCRATCH_USER_NAME};
+    use super::{Git, HARNESS_EMAIL, HARNESS_NAME};
+
+    /// The identity git hands a child through the environment instead of
+    /// through configuration. git sets all six for every hook it runs, and sets
+    /// the author trio again for each commit that rebase, cherry-pick, or am
+    /// replays. Named here rather than beside the runner because the runner no
+    /// longer removes them as a set: it pins the four name and email variables
+    /// to the harness by hand and drops the two dates. This list is what a
+    /// failure has to report, which is a different job.
+    const INHERITED_IDENTITY_VARS: [&str; 6] = [
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+    ];
 
     /// The identity variables this process holds, named and valued, for a
     /// failure message. Reports their absence just as plainly: a mismatch with
@@ -240,7 +272,7 @@ mod tests {
             .run(&["var", "GIT_AUTHOR_IDENT"])
             .expect("git var GIT_AUTHOR_IDENT");
 
-        let expected = format!("{SCRATCH_USER_NAME} <{SCRATCH_USER_EMAIL}>");
+        let expected = format!("{HARNESS_NAME} <{HARNESS_EMAIL}>");
         assert!(
             ident.starts_with(&expected),
             "scratch commits must be authored by the crate, not by a consumer.\n  \
@@ -248,9 +280,10 @@ mod tests {
              got:         {ident}\n  \
              inherited:   {}\n\
              An identity variable outranks every config source, `-c` included, so \
-             Git::try_run removes the six of them before it spawns git. git exports \
-             them into every hook it runs, and into every commit that rebase, \
-             cherry-pick, or am replays.",
+             Git::try_run pins the four name and email variables to the harness and \
+             drops the two dates before it spawns git. git exports them into every \
+             hook it runs, and into every commit that rebase, cherry-pick, or am \
+             replays.",
             inherited_identity()
         );
     }
