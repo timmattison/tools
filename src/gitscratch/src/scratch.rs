@@ -105,9 +105,11 @@ impl Scratch {
     ///
     /// Returns an error if git could not be spawned, if the rebase fails
     /// without leaving a rebase to resolve - an unresolvable ref, unrelated
-    /// histories, a repository in a state the replay cannot enter - or if the
-    /// resolution loop still has not finished after `MAX_RESOLUTION_ROUNDS`
-    /// rounds.
+    /// histories, a repository in a state the replay cannot enter - if git
+    /// could not *write* a commit it was replaying, since carrying on would
+    /// mean discarding that commit and reporting a cost for a branch that was
+    /// never replayed, or if the resolution loop still has not finished after
+    /// `MAX_RESOLUTION_ROUNDS` rounds.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
         let git = self.git();
         let worktree = self.path();
@@ -126,24 +128,39 @@ impl Scratch {
                 return Ok(cost);
             }
 
-            let conflicted = git.lines(&["diff", "--name-only", "--diff-filter=U"])?;
+            match classify_halt(&git)? {
+                Halt::Conflict(conflicted) => {
+                    cost.stops += 1;
+                    for file in conflicted {
+                        cost.hunks += count_conflict_hunks(&worktree.join(&file))?;
+                        cost.files.insert(file);
+                    }
 
-            if conflicted.is_empty() {
-                // The rebase halted without unmerged paths - typically a commit
-                // that became empty once its changes were already present.
-                // Nothing for a human to resolve, so it costs nothing.
-                outcome = git.try_run(&["rebase", "--skip"])?;
-                continue;
+                    git.run(&["add", "-A"])?;
+                    outcome = git.try_run(&["rebase", "--continue"])?;
+                }
+                Halt::EmptyCommit { stopped } => {
+                    // Nothing for a human to resolve and nothing lost by
+                    // dropping it, so it costs nothing.
+                    outcome = git
+                        .try_run(&["rebase", "--skip"])
+                        .with_context(|| format!("could not skip the empty commit {stopped}"))?;
+                }
+                Halt::UnwritableCommit { stopped, evidence } => {
+                    // `outcome` still holds the invocation that failed, which is
+                    // where git explained itself. Skipping used to overwrite it
+                    // before anyone could read it, so the one message that said
+                    // what had gone wrong was discarded along with the commit.
+                    anyhow::bail!(
+                        "the rebase halted with nothing to merge, but git did not write the \
+                         commit it was replaying: {stopped}\n{evidence}\n\
+                         Skipping it would silently throw that work away and report a cost for \
+                         a branch that was never replayed. git said:\n{}\n{}",
+                        outcome.stdout,
+                        outcome.stderr
+                    );
+                }
             }
-
-            cost.stops += 1;
-            for file in conflicted {
-                cost.hunks += count_conflict_hunks(&worktree.join(&file))?;
-                cost.files.insert(file);
-            }
-
-            git.run(&["add", "-A"])?;
-            outcome = git.try_run(&["rebase", "--continue"])?;
         }
 
         anyhow::bail!("gave up on the rebase after {MAX_RESOLUTION_ROUNDS} resolution rounds")
@@ -224,6 +241,67 @@ impl Conflicts {
     #[must_use]
     pub fn file_names(&self) -> &BTreeSet<String> {
         &self.files
+    }
+}
+
+/// Why a replay is sitting in a halted rebase.
+enum Halt {
+    /// Paths git could not merge; a human would hand-merge these.
+    Conflict(Vec<String>),
+    /// Git stopped at a commit that adds nothing to the new base, so dropping
+    /// it loses no work. `stopped` describes it for any message about it.
+    EmptyCommit { stopped: String },
+    /// Git could not write the commit it was replaying. Skipping would throw
+    /// that work away; `evidence` says which state proved it.
+    UnwritableCommit { stopped: String, evidence: String },
+}
+
+/// Work out, from repository state alone, why the rebase is halted.
+///
+/// A halt with nothing unmerged is a *classification point*, not a single known
+/// case. Git stops there for a commit that has become empty, which is free to
+/// drop, and it stops there for a commit it could not write, where dropping it
+/// loses the work and reports a cost for a branch that was never replayed.
+/// Nothing in git's exit status separates the two, so the answer has to come
+/// from what the repository looks like. Every probe below errs toward the loud
+/// answer, which is the safe direction: a dry run may say "expensive" or "I
+/// cannot answer", never "cheap" because it quietly discarded something.
+fn classify_halt(git: &Git) -> Result<Halt> {
+    let conflicted = git.lines(&["diff", "--name-only", "--diff-filter=U"])?;
+    if !conflicted.is_empty() {
+        return Ok(Halt::Conflict(conflicted));
+    }
+
+    // Without REBASE_HEAD the loop cannot even name the commit it is about to
+    // drop, so it has no business dropping it.
+    let Ok(stopped) = git.run(&["log", "-1", "--format=%h %s", "REBASE_HEAD"]) else {
+        return Ok(Halt::UnwritableCommit {
+            stopped: "a commit git would not name".to_owned(),
+            evidence: "REBASE_HEAD does not resolve, so the replay cannot say which commit the \
+                       rebase halted on"
+                .to_owned(),
+        });
+    };
+
+    // Content left behind is content that failed to be committed: a commit that
+    // truly became empty leaves the index matching HEAD and the worktree
+    // matching the index. Asked as `lines`, not as a `--quiet` exit code, so
+    // git failing to answer is an error rather than a vote for "empty".
+    let mut uncommitted = git.lines(&["diff", "--cached", "--name-only", "HEAD"])?;
+    uncommitted.extend(git.lines(&["diff", "--name-only"])?);
+    uncommitted.sort();
+    uncommitted.dedup();
+
+    if uncommitted.is_empty() {
+        Ok(Halt::EmptyCommit { stopped })
+    } else {
+        Ok(Halt::UnwritableCommit {
+            stopped,
+            evidence: format!(
+                "this content was left uncommitted: {}",
+                uncommitted.join(", ")
+            ),
+        })
     }
 }
 
