@@ -25,8 +25,18 @@ use tempfile::TempDir;
 use crate::git::Git;
 use crate::metrics::{Files, Hunks, Stops};
 
-/// Upper bound on rebase resolution rounds per branch, so a git state we failed
-/// to anticipate stalls the run instead of spinning forever.
+/// Upper bound on the rounds one replay may spend advancing a halted rebase, so
+/// a git state we failed to anticipate stalls the run instead of spinning
+/// forever.
+///
+/// A round is a round of *work* on a rebase that is still going: resolving a
+/// stop, or skipping a commit that arrived with nothing unmerged. Skips are
+/// charged because they are exactly as capable of failing to make progress as a
+/// resolution is - a `--skip` that leaves the rebase halted and still empty is
+/// the runaway this bound exists to catch, and one that went uncounted would
+/// spin forever. Noticing that the rebase has *finished* costs nothing, so a
+/// replay that stops `MAX_RESOLUTION_ROUNDS` times is answered rather than
+/// abandoned.
 const MAX_RESOLUTION_ROUNDS: usize = 1_000;
 
 /// A detached scratch worktree that removes itself.
@@ -106,23 +116,30 @@ impl Scratch {
     /// Returns an error if git could not be spawned, if the rebase fails
     /// without leaving a rebase to resolve - an unresolvable ref, unrelated
     /// histories, a repository in a state the replay cannot enter - or if the
-    /// resolution loop still has not finished after `MAX_RESOLUTION_ROUNDS`
-    /// rounds.
+    /// rebase is still unfinished once `MAX_RESOLUTION_ROUNDS` rounds have been
+    /// spent trying to advance it.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
         self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS)
     }
 
-    /// [`Scratch::replay_rebase`] with the round budget named rather than
-    /// baked in, so the boundary can be pinned without a thousand-commit
-    /// fixture.
+    /// [`Scratch::replay_rebase`] with the round budget named rather than baked
+    /// in, so the boundary can be pinned on a three-stop fixture instead of a
+    /// thousand-commit one.
+    ///
+    /// The budget is spent only on rounds that *act* on a rebase still in
+    /// progress. Finding no rebase left is the exit, checked before anything is
+    /// charged, so a replay whose last round completed the rebase leaves with
+    /// its answer rather than with a claim it was abandoned - and the refusal
+    /// below is unreachable for a rebase that actually finished.
     fn replay_rebase_within(&self, onto: &str, max_rounds: usize) -> Result<Conflicts> {
         let git = self.git();
         let worktree = self.path();
 
         let mut cost = Conflicts::default();
         let mut outcome = git.try_run(&["rebase", onto])?;
+        let mut rounds = 0;
 
-        for _ in 0..max_rounds {
+        loop {
             if !rebase_in_progress(&git, worktree)? {
                 anyhow::ensure!(
                     outcome.success,
@@ -133,12 +150,21 @@ impl Scratch {
                 return Ok(cost);
             }
 
+            anyhow::ensure!(
+                rounds < max_rounds,
+                "gave up on the rebase after {max_rounds} resolution rounds"
+            );
+            rounds += 1;
+
             let conflicted = git.nul_separated(&["diff", "--name-only", "--diff-filter=U"])?;
 
             if conflicted.is_empty() {
                 // The rebase halted without unmerged paths - typically a commit
                 // that became empty once its changes were already present.
-                // Nothing for a human to resolve, so it costs nothing.
+                // Nothing for a human to resolve, so it costs nothing in
+                // conflicts - but it costs a round, because a `--skip` that
+                // fails to advance the rebase is the runaway the budget exists
+                // to stop.
                 outcome = git.try_run(&["rebase", "--skip"])?;
                 continue;
             }
@@ -152,8 +178,6 @@ impl Scratch {
             git.run(&["add", "-A"])?;
             outcome = git.try_run(&["rebase", "--continue"])?;
         }
-
-        anyhow::bail!("gave up on the rebase after {max_rounds} resolution rounds")
     }
 
     fn worktree_arg(&self) -> Result<&str> {
