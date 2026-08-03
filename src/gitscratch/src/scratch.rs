@@ -354,7 +354,7 @@ mod tests {
     use anyhow::Result;
 
     use super::{Conflicts, Scratch};
-    use crate::metrics::Stops;
+    use crate::metrics::{Hunks, Stops};
     use crate::testing::contested_region_repo;
 
     /// How many rounds replaying `iterated` onto `single` spends.
@@ -401,6 +401,58 @@ mod tests {
             "every round the fixture spends is a stop, so the budget it just \
              exhausted has to show up as the stop count"
         );
+    }
+
+    /// A file in the breakdown is a file that conflicted, so it costs at least
+    /// one hunk - and that floor has to sit where every path into the breakdown
+    /// crosses it.
+    ///
+    /// The only floor today is inside [`count_conflict_hunks`], which is on the
+    /// replay path alone. A file attributed a measured count of zero therefore
+    /// lands in the map at zero, and the accessors immediately contradict each
+    /// other: [`Conflicts::is_clean`] says something conflicted while
+    /// [`Conflicts::hunks`] says nothing did, and a report built from it reads
+    /// "0 hunks across 1 file" with a "0 hunks" row underneath.
+    #[test]
+    fn a_conflicted_file_that_measured_no_hunks_still_costs_one() {
+        let mut conflicts = Conflicts::default();
+        conflicts.add_file("src/lib.rs".to_string(), 0);
+
+        assert!(
+            !conflicts.is_clean(),
+            "a name in the breakdown is a file that conflicted"
+        );
+        assert_eq!(
+            conflicts.hunks(),
+            Hunks::new(1),
+            "a conflicted file is at least one decision for whoever resolves \
+             it, so it can never contribute zero to the total its breakdown is \
+             supposed to explain"
+        );
+    }
+
+    /// A hand-built result has to agree with itself about whether anything
+    /// conflicted.
+    ///
+    /// Stops with no files is the quiet half of that: `is_clean` reads the file
+    /// set, so an empty set carrying a stop count renders the clean line and
+    /// the stops vanish without a word. A fixture that can do that is a fixture
+    /// that can make a broken renderer look correct, which is the one thing
+    /// this constructor exists not to do.
+    #[test]
+    #[should_panic(expected = "has to agree with itself")]
+    fn a_hand_built_result_cannot_claim_stops_it_has_no_conflicted_files_for() {
+        let _ = Conflicts::from_files(std::iter::empty::<(String, usize)>(), 7);
+    }
+
+    /// The other direction of the same disagreement. A file only ever enters
+    /// the breakdown from inside a stop, so a breakdown with no stops describes
+    /// a replay that never halted and still found work - rendered as "1 hunk
+    /// across 1 file, 0 stops".
+    #[test]
+    #[should_panic(expected = "has to agree with itself")]
+    fn a_hand_built_result_cannot_claim_conflicted_files_it_has_no_stops_for() {
+        let _ = Conflicts::from_files([("src/lib.rs".to_string(), 1)], 0);
     }
 
     /// The other side of the same boundary: the budget still has to bite.
