@@ -19,7 +19,6 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::metrics::Hunks;
 use crate::scratch::Conflicts;
 
 /// Width of the `": "` between the tool name and the verdict on the first line.
@@ -115,10 +114,7 @@ impl<'a> Report<'a> {
 
         for (name, hunks) in conflicts.file_hunks() {
             let gap = " ".repeat(widest.saturating_sub(name.width()) + COUNT_GAP);
-            lines.push(format!(
-                "{FILE_INDENT}{name}{gap}{}",
-                Hunks::new(hunks).phrase()
-            ));
+            lines.push(format!("{FILE_INDENT}{name}{gap}{}", hunks.phrase()));
         }
 
         lines.join("\n")
@@ -158,9 +154,12 @@ impl<'a> Report<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use unicode_width::UnicodeWidthStr;
 
     use super::Report;
+    use crate::metrics::Stops;
     use crate::scratch::Conflicts;
 
     /// Which terminal column the hunk count starts in, measured in display
@@ -173,16 +172,25 @@ mod tests {
             .width()
     }
 
+    /// One entry of a per-file breakdown.
+    ///
+    /// The count is a [`NonZeroUsize`] in the constructor, because a file that
+    /// conflicted cost at least one decision, so every fixture goes through
+    /// this rather than repeating the wrap at each call site.
+    fn file(name: &str, hunks: usize) -> (String, NonZeroUsize) {
+        (
+            name.to_string(),
+            NonZeroUsize::new(hunks).expect("a conflicted file contributes at least one hunk"),
+        )
+    }
+
     /// The two-file, four-hunk, three-stop result the design spec's sample
     /// output describes, so every rendering test is measured against the shape
     /// `grind` and `grime` promised to print.
     fn sample() -> Conflicts {
         Conflicts::from_files(
-            [
-                ("src/lib.rs".to_string(), 3),
-                ("src/main.rs".to_string(), 1),
-            ],
-            3,
+            [file("src/lib.rs", 3), file("src/main.rs", 1)],
+            Stops::new(3),
         )
     }
 
@@ -239,7 +247,7 @@ mod tests {
     #[test]
     fn a_single_hunk_in_a_single_file_reads_in_the_singular_throughout() {
         let report = Report::new("grind", "replaying HEAD onto main");
-        let one = Conflicts::from_files([("src/lib.rs".to_string(), 1)], 1);
+        let one = Conflicts::from_files([file("src/lib.rs", 1)], Stops::new(1));
 
         assert_eq!(
             report.render(&one),
@@ -259,10 +267,8 @@ mod tests {
         let report = Report::new("grind", "replaying HEAD onto main");
         // `日本語.txt` is 7 characters and 13 bytes, but 10 columns wide - one
         // wider than `readme.md`, which is 9 of all three.
-        let wide = Conflicts::from_files(
-            [("readme.md".to_string(), 2), ("日本語.txt".to_string(), 1)],
-            2,
-        );
+        let wide =
+            Conflicts::from_files([file("readme.md", 2), file("日本語.txt", 1)], Stops::new(2));
 
         let rendered = report.render(&wide);
 
