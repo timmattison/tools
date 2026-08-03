@@ -125,6 +125,43 @@ fn uncommitted_files_counts_staged_unstaged_and_untracked_work() {
     );
 }
 
+/// A renamed file is one uncommitted file, and the format the count is read
+/// from is the one that makes that hard to see.
+///
+/// `git status --porcelain` writes a rename as a single `R  old -> new`, so
+/// counting records was counting lines. Its NUL-separated form cannot do that -
+/// a path may itself contain ` -> ` - and spends *two* fields on the one record
+/// instead, the new name and then the old. Counting fields would call a moved
+/// file two uncommitted files, and inflate every warning about uncovered work
+/// in precisely the situation a developer is most likely to be in: mid-refactor,
+/// with a pile of renames staged.
+///
+/// The two plain files beside the rename are what make this fail from both
+/// directions, and both directions are reachable. Pair nothing and the answer is
+/// 4, one field per name. Pair unconditionally - swallow whatever follows every
+/// record rather than only what follows a rename - and it is 2. Only a count
+/// that pairs exactly the rename gives 3.
+#[test]
+fn uncommitted_files_counts_a_rename_as_the_one_file_it_is() {
+    let fixture = TestRepo::init();
+    fixture.commit_file("before.txt", "committed\n", "base");
+
+    // `git mv` stages the rename, which is what lets git's rename detection
+    // report it as one `R` record rather than a delete beside an addition.
+    fixture.git(&["mv", "before.txt", "after.txt"]);
+    for name in ["one-more.txt", "two-more.txt"] {
+        std::fs::write(fixture.path().join(name), "brand new\n").expect("write a new file");
+    }
+
+    let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+
+    assert_eq!(
+        repo.uncommitted_files().expect("count uncommitted files"),
+        3,
+        "a rename is one uncommitted file, not one per name it has had"
+    );
+}
+
 /// By default git collapses an untracked directory into a single line, so a
 /// hundred new files would report as one. The count is meant to convey how much
 /// work is sitting outside the commit graph, which makes that a lie worth

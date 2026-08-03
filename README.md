@@ -46,10 +46,12 @@ Answering "would this rebase conflict, and how badly?" means actually performing
 repository, which is only safe because of a set of pinned settings — `rebase.updateRefs=false` so the replay
 doesn't rewrite the very branches being simulated, `rerere.enabled=false` so a simulated resolution never poisons
 the shared `rr-cache`, hooks redirected at an empty directory, `gc.auto=0`, `commit.gpgsign=false`, and an editor
-environment a halted rebase can't hang on. `core.quotePath=false` is pinned for correctness rather than looks: git
-otherwise reports a path outside ASCII as a C-quoted octal escape, which names no file on disk, so a conflicted
-`日本語.txt` came back under a name nobody typed *and* silently floored at "1 hunk" — a plausible-looking wrong
-total. A scratch worktree can only be built through `Scratch`, and a `Scratch` only hands out a git runner that
+environment a halted rebase can't hang on. Path *names* get the same treatment: git will C-quote and octal-escape
+a name, which then matches no file on disk, so a conflicted `日本語.txt` came back under a name nobody typed *and*
+silently floored at "1 hunk" — a plausible-looking wrong total. `core.quotePath=false` is pinned against the
+common case, but it only governs non-ASCII, so the fix that actually holds is that the runner offers exactly one
+way to read a list of paths — `-z`, split on NUL, never trimmed — and no line-oriented alternative to forget it
+for. A scratch worktree can only be built through `Scratch`, and a `Scratch` only hands out a git runner that
 already carries that configuration, so no tool can drift onto a weaker version of it. Teardown removes the scratch
 worktree by path and deliberately never runs the repo-wide `git worktree prune`, which would delete the
 administrative state of any worktree whose directory is merely missing right now. Used by `grist` and `grind`.
