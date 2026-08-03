@@ -143,20 +143,24 @@ the backend its halted rebase is inspected under, and each gets a bullet:
   a passphrase prompt and not only an outright failure.
 
 The unit tests in `src/git.rs` pin what needs no repository built around it, and
-there are four of them. **The `user.name`/`user.email` identity**, the last row
-above, is read back through `git var GIT_AUTHOR_IDENT` rather than by committing
-into a fixture. **The inherited git environment, shed** is asserted by setting a
-developer's name and another repository's `GIT_DIR` and `GIT_INDEX_FILE` in the
-test process and watching neither reach git. **The UTF-8 refusal in
-`Git::paths`** — `refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte`
-— covers the one loss the `-z` round trip cannot undo: a byte that is not UTF-8
-has no `String` to come back *as*, and repairing it into U+FFFD would hand back a
-name no file has, which is a pathspec matching nothing, which is how a commit
-gets called empty and skipped. macOS will not let a working tree hold such a name
-at all, so the commit is built directly in the object database and the guard is
+there are seven of them. Three are about the code itself. **The
+`user.name`/`user.email` identity**, the last row above, is read back through
+`git var GIT_AUTHOR_IDENT` rather than by committing into a fixture, by
+`commits_under_the_crate_s_own_identity_not_a_consuming_tool_s`. **The inherited
+git environment, shed** is asserted by
+`ignores_an_inherited_git_environment_naming_another_identity_or_repository`,
+which sets a developer's name and another repository's `GIT_DIR` and
+`GIT_INDEX_FILE` in the test process and watches neither reach git. **The UTF-8
+refusal in `Git::paths`** —
+`refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte` — covers
+the one loss the `-z` round trip cannot undo: a byte that is not UTF-8 has no
+`String` to come back *as*, and repairing it into U+FFFD would hand back a name
+no file has, which is a pathspec matching nothing, which is how a commit gets
+called empty and skipped. macOS will not let a working tree hold such a name at
+all, so the commit is built directly in the object database and the guard is
 pinned here rather than end-to-end.
 
-The fourth is about this document rather than about the code.
+The other four are about this document rather than about the code.
 `every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks
 `safety_config` what it pins and requires the **What it guarantees** section
 above to name every one of them — the whole `key=value` for a settled value, the
@@ -166,6 +170,25 @@ merely maintained: a guard added to the configuration and forgotten here fails
 the build instead of leaving a reader with a table they will reasonably take for
 the complete list. `--literal-pathspecs` is why the test exists — it was
 load-bearing in `safety_config` for a while before it was ever a row.
+
+Two more pin the *scope* that check reads, since a check pointed at the wrong
+span of the file reports clean without ever having seen the table.
+`the_inventory_section_stops_at_the_next_heading_of_any_level` ends a section at
+the next heading whatever its level: demoting the heading below the inventory —
+one character — would otherwise widen it to swallow the prose here, which names
+`--literal-pathspecs` and `core.hooksPath`, the exact two guards matched by bare
+name, so both would be satisfiable with no row for either.
+`an_inventory_section_that_nothing_closes_is_refused_rather_than_run_to_the_end`
+shuts the same gap from the other side: a section with no heading after it is
+refused outright rather than read to the end of the file.
+
+The last one turns that treatment on this section.
+`every_unit_test_in_this_file_is_named_in_the_readme_testing_section` reads
+`src/git.rs` back as text, collects every test defined in it, and requires the
+paragraphs above both to name each one and to state their number correctly. Two
+of this README's lists have now drifted out from under it — the guard table, and
+this count, which went on saying four through the commits that made it six — so
+this one is checked rather than trusted too.
 
 `tests/halts.rs` covers the other half of telling the truth: not that the
 harness leaves the repository alone, but that it does not report a cheap number
