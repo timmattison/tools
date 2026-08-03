@@ -141,6 +141,88 @@ impl TestRepo {
     }
 }
 
+#[cfg(unix)]
+impl TestRepo {
+    /// Make the repository's object database unwritable until the returned
+    /// guard is dropped, so any git command that has to add an object fails.
+    ///
+    /// This is the one cause of a failed commit write that is reachable through
+    /// this harness. Signing, hooks and the editor — the other everyday ways a
+    /// commit fails to be written — are all pinned off by `Git::safety_config`,
+    /// and a scratch worktree does not get an object database of its own: it
+    /// writes its objects straight into the developer's real one. Sealing that
+    /// database is therefore how a test puts a replay in the state where git
+    /// halts the rebase with nothing left to merge and the commit *not*
+    /// written.
+    ///
+    /// Only directories are sealed, and only their write bits, so git can still
+    /// read and traverse the store — it simply cannot add to it. Every original
+    /// mode is restored on drop, which the temporary directory's own removal
+    /// depends on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the object database cannot be walked or its permissions cannot
+    /// be changed.
+    #[must_use]
+    pub fn seal_object_store(&self) -> SealedObjectStore {
+        let mut restore = Vec::new();
+        seal_directories_under(&self.dir.path().join(".git").join("objects"), &mut restore);
+        SealedObjectStore { restore }
+    }
+}
+
+/// A repository object database held read-only for as long as this guard lives.
+///
+/// Built by [`TestRepo::seal_object_store`], which explains what it is for.
+#[cfg(unix)]
+pub struct SealedObjectStore {
+    /// Every directory sealed, with the mode it had beforehand, in walk order.
+    restore: Vec<(PathBuf, std::fs::Permissions)>,
+}
+
+#[cfg(unix)]
+impl Drop for SealedObjectStore {
+    fn drop(&mut self) {
+        // Exactly the walk, run backwards. The order is not load-bearing -
+        // only write bits were ever touched, so traversal never stopped
+        // working - but an unwind that mirrors the walk is one less thing to
+        // reason about. Best effort: a panic here would replace whatever
+        // failure the test was actually reporting.
+        for (path, permissions) in self.restore.drain(..).rev() {
+            let _ = std::fs::set_permissions(&path, permissions);
+        }
+    }
+}
+
+/// Strip the write bits from `path` and every directory beneath it, recording
+/// what each one had so the guard can put it back.
+#[cfg(unix)]
+fn seal_directories_under(path: &Path, restore: &mut Vec<(PathBuf, std::fs::Permissions)>) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let original = std::fs::metadata(path)
+        .unwrap_or_else(|e| panic!("read permissions of {}: {e}", path.display()))
+        .permissions();
+
+    // Children before their parent, so the root of the walk is recorded last
+    // and the guard's reverse unwind starts there.
+    for entry in std::fs::read_dir(path)
+        .unwrap_or_else(|e| panic!("list {}: {e}", path.display()))
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            seal_directories_under(&entry.path(), restore);
+        }
+    }
+
+    let mut sealed = original.clone();
+    sealed.set_mode(original.mode() & !0o222);
+    std::fs::set_permissions(path, sealed)
+        .unwrap_or_else(|e| panic!("seal {}: {e}", path.display()));
+    restore.push((path.to_path_buf(), original));
+}
+
 /// A numbered file with `count` lines, so edits can be placed far enough apart
 /// that git's 3-line diff context does not make them overlap by accident.
 pub fn numbered_lines(count: usize) -> String {
@@ -282,6 +364,34 @@ pub fn independent_branches_repo() -> TestRepo {
     repo.commit_file("beta.txt", "beta work\n", "beta work");
 
     repo.checkout("main");
+    repo
+}
+
+/// A branch that modifies the file main deleted, so replaying `branch` onto
+/// `main` is a modify/delete conflict.
+///
+/// That conflict is the shape for testing what happens when git cannot *write*
+/// a commit, because its auto-resolution needs no new object: staging the
+/// surviving version of `x.txt` stages a blob the object database already
+/// holds. So `git add -A` still succeeds against a sealed object store - see
+/// [`TestRepo::seal_object_store`] - the replay gets all the way to
+/// `rebase --continue`, and the commit write is the only thing that fails,
+/// leaving the resolution staged and the rebase halted with nothing unmerged.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, or a command failing.
+pub fn modify_delete_repo() -> TestRepo {
+    let repo = TestRepo::init();
+    repo.commit_file("x.txt", "base\n", "base");
+
+    repo.branch("branch");
+    repo.commit_file("x.txt", "the branch's version\n", "branch modifies x");
+
+    repo.checkout("main");
+    repo.git(&["rm", "-q", "x.txt"]);
+    repo.git(&["commit", "-q", "-m", "main deletes x"]);
+
     repo
 }
 
