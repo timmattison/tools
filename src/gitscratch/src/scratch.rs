@@ -15,6 +15,22 @@
 //! commits conflicting against the resolved state. Treat the totals as a cost
 //! index for comparing candidates measured under identical rules, not as an
 //! exact prediction.
+//!
+//! # Why a halt with nothing unmerged is a question, not an answer
+//!
+//! A rebase can also stop with no unmerged paths at all, and that state has
+//! more than one cause. Git stops there for a commit that adds nothing to the
+//! new base, which is free to drop - and it stops there for a commit it could
+//! not *write*, where dropping it throws the work away and reports a cost for a
+//! branch that was never replayed. Signing, hooks, a full or read-only object
+//! database, an unusable editor: they all land in the same place, and git's
+//! exit status is non-zero for the harmless case too, so nothing about the
+//! invocation separates them.
+//!
+//! So the replay classifies that halt from repository state - see the `Halt`
+//! enum below - rather than assuming the harmless cause. A dry run may legitimately answer
+//! "this is expensive" or "I cannot answer"; it must never answer "this is
+//! cheap" because it quietly discarded the work it was asked to measure.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

@@ -41,6 +41,46 @@ again, which is faithful to reality, since a human resolution also leaves later
 commits conflicting against the resolved state. Treat a `Conflicts` as a cost
 index measured under identical rules, not as an exact prediction.
 
+## Three ways a rebase halts, and why the third one matters
+
+A halted rebase with **no unmerged paths** is a classification point, not a
+single known case. Git stops there for a commit that adds nothing to the new
+base — free to drop — and it stops there for a commit it could not *write*,
+where dropping it throws the work away and answers with a cost for a branch
+that was never replayed. Signing, hooks, a full or read-only object database, an
+unusable editor all land in that same state, and git exits non-zero for the
+harmless case too, so nothing about the invocation separates them.
+
+| Halt | What it means | What the replay does |
+| --- | --- | --- |
+| Unmerged paths | A human would hand-merge these | Count them, stage the markers, continue |
+| Nothing unmerged, commit adds nothing | The work is already in the new base | `rebase --skip`, costs nothing |
+| Nothing unmerged, commit could not be written | git refused to create the commit | **Fail**, naming the commit and quoting git |
+
+The third row is separated from the second by two probes, both of them
+repository state rather than a match on git's wording, since wording changes and
+state does not:
+
+1. **Anything left uncommitted.** A commit that truly became empty leaves the
+   index matching `HEAD` and the worktree matching the index. Content left
+   behind is content that failed to be committed.
+2. **Whether the stopped commit's work is already in the new base.** A failed
+   commit write on a *clean* pick leaves nothing behind at all — git rolls the
+   index back and reschedules the pick — so probe 1 has nothing to see. What
+   still separates the two is the commit itself: for every path `REBASE_HEAD`
+   touches, does `HEAD` already hold exactly that content? If so the commit is
+   genuinely empty, and airtight rather than heuristic — applying `C` onto
+   `HEAD` is a three-way merge (base `C^`, ours `HEAD`, theirs `C`), and on a
+   path where both sides already agree the merge changes nothing, while a path
+   `C` never touched cannot change either.
+
+A refused `git rebase --skip` fails the replay immediately, carrying git's own
+message, rather than being re-issued until the round limit runs out.
+
+Both probes err toward the loud answer, which is the safe direction: a dry run
+may say "this is expensive" or "I cannot answer", but never "this is cheap"
+because it quietly discarded the work.
+
 ## What it guarantees
 
 | Guard | Why |
@@ -53,6 +93,7 @@ index measured under identical rules, not as an exact prediction.
 | `gpg.format=openpgp` | Belt to `commit.gpgsign`'s braces. `gpg.format = ssh` is a different signing backend entirely, with its own key and helper program; pinning the format back to git's default means that configuration is never consulted, so signing cannot be attempted through it. |
 | `gc.auto=0` | Simulated commits are loose and nothing references them yet; an opportunistic gc could collect one out from under the run. |
 | `rebase.autoStash=false`, `rebase.autosquash=false` | The replay must be the operation as written, not a rewritten variant of it. |
+| The inherited git environment, shed | Configuration is only as strong as the environment it runs in, because git reads the environment *first*. A tool built on this crate can be invoked from inside a git hook, and git hands its hooks the commit it is making: `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_AUTHOR_DATE` naming the developer, and `GIT_INDEX_FILE` — often the *relative* `.git/index`, which silently re-anchors on whichever directory each command runs in. `GIT_DIR` and `GIT_WORK_TREE` travel the same way. Every one is stripped, so a replay cannot be re-attributed or aimed at the repository the developer was committing to. `shed_inherited_git_environment` is public: the danger is not this crate's alone, and the list belongs in one place. |
 | `user.name=gitscratch`, `user.email=gitscratch@localhost` | Scratch commits are throwaway, but they still have to be attributable to the harness that made them rather than to whichever tool is driving it — and a developer's real name and address have no business being stamped on commits that only ever simulated something. |
 
 Teardown removes the scratch worktree **by path** and deliberately never runs
@@ -79,6 +120,29 @@ remove the guard, watch that specific test fail, put it back:
 A fourth guarantee — **the `user.name`/`user.email` identity**, the last row
 above — is pinned by a unit test in `src/git.rs` instead, which reads back
 `git var GIT_AUTHOR_IDENT` rather than building a repository to commit into.
+
+`tests/halts.rs` covers the other half of telling the truth: not that the
+harness leaves the repository alone, but that it does not report a cheap number
+for work it dropped. It puts a replay in each halt state *for real* — a resolved
+conflict whose commit cannot be written, a clean pick whose commit cannot be
+written, a commit that genuinely became empty, and a `--skip` git refuses — by
+making the object database unwritable, which is the only cause of a failed
+commit write still reachable through the harness once signing, hooks and the
+editor are pinned off. It is Unix-only for that reason.
+
+`tests/hook_environment.rs` runs a whole replay under the environment `git
+commit` actually exports to a pre-commit hook — the everyday way a consumer is
+invoked, since a pre-commit hook running a test suite runs whatever that suite
+drives. It is a test binary of its own because the environment is process-wide,
+and cargo gives every integration test file its own process.
+
+The genuinely-empty halt is driven explicitly rather than assumed: on git 2.55 a
+patch already upstream is dropped without halting, a resolution that empties a
+commit is dropped silently by `rebase --continue`, and the `rebase.empty` config
+key is ignored on this path — only `--empty=stop` on git's command line reaches
+that stop. The test starts that rebase itself and asserts the halt happened, so
+a git that stops halting fails the test instead of quietly passing without
+exercising anything.
 
 The remaining rows of the table above — the `rerere` pair, `core.hooksPath`, the
 editor and prompt environment, `commit.gpgsign`, `gpg.format`, `gc.auto`, and
