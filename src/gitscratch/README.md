@@ -222,6 +222,18 @@ undercount and the truth would both be 1 and the defect would pass. `Report`'s
 own tests sit beside it in `src/report.rs`, because rendering a `Conflicts` is
 pure string work that needs no repository at all.
 
+**The replay's round budget** is pinned by unit tests in `src/scratch.rs`, which
+the integration suite could not serve: the constant is 1000, and the case that
+matters is a replay needing exactly that many rounds. So the tests name the
+budget instead — `replay_rebase_within` is `replay_rebase` with the bound as a
+parameter — and spend it on `contested_region_repo()`, whose three colliding
+commits take exactly three rounds. Both sides of the boundary are asserted:
+three rounds must produce the answer, two must still refuse. Noticing that the
+rebase has *finished* costs no round, so a fully-measured replay is never
+reported as one the harness gave up on. A `--skip` round does cost one, because
+a `--skip` that leaves the rebase halted and still empty is exactly the runaway
+the bound exists to catch.
+
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
 `replay_rebase` → `squash_into` sequence, which this crate's tests cannot see —
