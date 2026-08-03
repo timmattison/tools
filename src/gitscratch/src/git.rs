@@ -283,7 +283,7 @@ impl Git {
     /// first, so [`Git::command`] also pins the identity as environment and
     /// strips everything that would redirect git elsewhere.
     fn safety_config(&self) -> Vec<String> {
-        let mut arguments: Vec<String> = [
+        let arguments: Vec<String> = [
             // Recording resolutions from a simulated conflict would poison the
             // shared rr-cache and silently pre-resolve the developer's real
             // merges later.
@@ -314,15 +314,6 @@ impl Git {
         ])
         .flat_map(|setting| ["-c".to_string(), setting])
         .collect();
-
-        // Paths read out of one invocation are fed straight back into the next
-        // as pathspecs, and a pathspec is not a path: a leading `:` is pathspec
-        // magic, and `*`, `?` and `[` are wildcards. Without this a file
-        // genuinely called `star*.txt` matches `starOTHER.txt` too, so a probe
-        // asking whether *this* path's content is in the new base quietly
-        // answers about some other file's. A main option rather than a `-c`
-        // pair, so it belongs here with them, ahead of the subcommand.
-        arguments.push("--literal-pathspecs".to_string());
 
         arguments
     }
