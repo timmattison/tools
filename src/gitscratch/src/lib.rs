@@ -33,6 +33,6 @@ pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
 
-pub use git::{Git, GitOutput};
+pub use git::{shed_inherited_git_environment, Git, GitOutput};
 pub use metrics::{BranchName, Files, Hunks, Stops};
 pub use scratch::{Conflicts, Scratch};
