@@ -10,8 +10,8 @@
 //! is a Unix permission trick, so the whole suite is Unix-only.
 #![cfg(unix)]
 
-use gitscratch::Scratch;
 use gitscratch::testing::modify_delete_repo;
+use gitscratch::Scratch;
 
 /// The replay's whole job is to say what an operation would cost. A commit git
 /// could not write costs nothing to `--skip`, and the rebase then finishes
