@@ -318,11 +318,13 @@ pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operati
 /// `rebase-merge/`. See [`rebase_step`], which reads them, for why the order
 /// is load-bearing.
 ///
-/// This is the single source of truth for that order. The design spec
-/// (`specs/2026-07-01-gsw-rebase-merge-indicators-design.md`) restates it in
-/// prose, and prose does not get compiled, so a test derives the expected
-/// documentation order from this constant rather than restating it a third
-/// time.
+/// This is the single source of truth for both that order and the file names
+/// themselves. The design spec
+/// (`specs/2026-07-01-gsw-rebase-merge-indicators-design.md`) restates them in
+/// prose, and prose does not get compiled, so a test derives what the
+/// documentation must contain from this constant — every one of the four names,
+/// in this flattened `current, total, current, total` order — rather than
+/// restating it a third time.
 const REBASE_COUNTERS: [(&str, &str); 2] = [
     ("rebase-apply/next", "rebase-apply/last"),
     ("rebase-merge/msgnum", "rebase-merge/end"),
@@ -1482,12 +1484,19 @@ mod tests {
     /// Whether `spec` still documents the rebase counter files in the order
     /// [`super::REBASE_COUNTERS`] tries them, reporting the first divergence.
     ///
-    /// The expectation is derived from the constant rather than restated, so
-    /// this pins the prose to the code instead of becoming a third copy free to
+    /// Every file name in the table is required, not just the `current` half:
+    /// the pairs are flattened to `current, total, current, total`, which is
+    /// also the order the spec writes each bullet in (`<current> + <total>`), so
+    /// the ordering assertion pins the pairs' internal layout too. The
+    /// expectation is derived from the constant rather than restated, so this
+    /// pins the prose to the code instead of becoming a third copy free to
     /// drift on its own.
     fn check_spec_documents_the_counter_order(spec: &str) -> Result<(), String> {
         let mut mentions = Vec::new();
-        for name in super::REBASE_COUNTERS.iter().map(|(current, _)| *current) {
+        for name in super::REBASE_COUNTERS
+            .iter()
+            .flat_map(|(current, total)| [*current, *total])
+        {
             let at = spec.find(name).ok_or_else(|| {
                 format!(
                     "the design spec never mentions `{name}`, so it no longer \
@@ -1500,8 +1509,9 @@ mod tests {
             return Err(format!(
                 "the design spec lists the rebase counter files in a different \
                  order from `REBASE_COUNTERS` (byte offsets {mentions:?}). It \
-                 must document `rebase-apply/` before `rebase-merge/` — the \
-                 order `gix::Repository::state` resolves them in — or a \
+                 must document each pair as `<current> + <total>`, and \
+                 `rebase-apply/` before `rebase-merge/` — the order \
+                 `gix::Repository::state` resolves them in — or a \
                  re-implementation driven from the spec reinstates the \
                  wrong-directory bug.",
             ));
