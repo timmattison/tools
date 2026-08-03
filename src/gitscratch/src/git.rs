@@ -488,7 +488,7 @@ mod tests {
                 // and fails on the key rather than passing on a coincidence,
                 // which is the safe direction: a new guard the README has never
                 // heard of stops the build instead of slipping past it.
-                Some((key, value)) if value.is_empty() => key,
+                Some((key, "")) => key,
                 // A settled value is part of the guarantee - `gpg.format=ssh`
                 // is a different promise from `gpg.format=openpgp` - so the
                 // whole `key=value` has to be the thing the table says.
