@@ -1458,6 +1458,57 @@ mod tests {
         );
     }
 
+    /// Path of the design spec whose prose restates [`super::REBASE_COUNTERS`].
+    const DESIGN_SPEC: &str = "specs/2026-07-01-gsw-rebase-merge-indicators-design.md";
+
+    /// The real design spec's text, or a panic naming what to do about it.
+    ///
+    /// Kept separate from [`check_spec_documents_the_counter_order`] so the
+    /// checking logic can be exercised against mutated spec text without
+    /// touching the file on disk.
+    fn read_design_spec() -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(DESIGN_SPEC);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read the design spec at {}: {e}. If it was renamed or \
+                 moved, repoint DESIGN_SPEC rather than deleting this check.",
+                path.display(),
+            )
+        })
+    }
+
+    /// Whether `spec` still documents the rebase counter files in the order
+    /// [`super::REBASE_COUNTERS`] tries them, reporting the first divergence.
+    ///
+    /// The expectation is derived from the constant rather than restated, so
+    /// this pins the prose to the code instead of becoming a third copy free to
+    /// drift on its own.
+    fn check_spec_documents_the_counter_order(spec: &str) -> Result<(), String> {
+        let mut mentions = Vec::new();
+        for name in super::REBASE_COUNTERS.iter().map(|(current, _)| *current) {
+            let at = spec.find(name).ok_or_else(|| {
+                format!(
+                    "the design spec never mentions `{name}`, so it no longer \
+                     documents the counter pairs `rebase_step` reads",
+                )
+            })?;
+            mentions.push(at);
+        }
+        if !mentions.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Err(format!(
+                "the design spec lists the rebase counter files in a different \
+                 order from `REBASE_COUNTERS` (byte offsets {mentions:?}). It \
+                 must document `rebase-apply/` before `rebase-merge/` — the \
+                 order `gix::Repository::state` resolves them in — or a \
+                 re-implementation driven from the spec reinstates the \
+                 wrong-directory bug.",
+            ));
+        }
+        Ok(())
+    }
+
     #[test]
     fn design_spec_documents_the_counter_order_the_code_tries() {
         // The order in `REBASE_COUNTERS` is load-bearing — it is what keeps the
@@ -1465,38 +1516,32 @@ mod tests {
         // classified from — and the design spec restates it in prose. Prose is
         // not compiled, so nothing else catches the spec describing the
         // opposite order, which is precisely the bug a re-implementation driven
-        // from the spec would reinstate. The expectation is derived from the
-        // constant rather than restated, so this pins the two together instead
-        // of becoming a third copy free to drift on its own.
-        const SPEC: &str = "specs/2026-07-01-gsw-rebase-merge-indicators-design.md";
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(SPEC);
-        let spec = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-            panic!(
-                "cannot read the design spec at {}: {e}. If it was renamed or \
-                 moved, repoint SPEC rather than deleting this check.",
-                path.display(),
-            )
-        });
-        let mentions: Vec<usize> = super::REBASE_COUNTERS
-            .iter()
-            .map(|(current, _)| {
-                spec.find(current).unwrap_or_else(|| {
-                    panic!(
-                        "the design spec never mentions `{current}`, so it no \
-                         longer documents the counter pairs `rebase_step` reads",
-                    )
-                })
-            })
-            .collect();
+        // from the spec would reinstate.
+        if let Err(problem) = check_spec_documents_the_counter_order(&read_design_spec()) {
+            panic!("{problem}");
+        }
+    }
+
+    #[test]
+    fn the_doc_drift_guard_rejects_a_spec_that_stops_naming_the_total_files() {
+        // Half a counter pair documents half a rebase: without the `total`
+        // files the spec no longer says where the denominator comes from for
+        // either backend, and a re-implementation driven from it would have to
+        // guess. The guard must reject that spec the same way it rejects one
+        // that drops the `current` files.
+        const REDACTED: &str = "<counter file redacted>";
+        let mutated = read_design_spec()
+            .replace("rebase-apply/last", REDACTED)
+            .replace("rebase-merge/end", REDACTED);
+        let problem = check_spec_documents_the_counter_order(&mutated).expect_err(
+            "a spec that has stopped naming `rebase-apply/last` and \
+             `rebase-merge/end` no longer documents the counter pairs \
+             `rebase_step` reads, so the guard must reject it",
+        );
         assert!(
-            mentions.windows(2).all(|pair| pair[0] < pair[1]),
-            "the design spec lists the rebase counter pairs in a different \
-             order from `REBASE_COUNTERS` (byte offsets {mentions:?}). It must \
-             document `rebase-apply/` before `rebase-merge/` — the order \
-             `gix::Repository::state` resolves them in — or a re-implementation \
-             driven from the spec reinstates the wrong-directory bug.",
+            problem.contains("rebase-apply/last"),
+            "the rejection must name the missing counter file so the spec can \
+             be repaired, got: {problem}",
         );
     }
 
