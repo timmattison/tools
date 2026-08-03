@@ -306,14 +306,6 @@ impl Conflicts {
         Files::new(self.files.len())
     }
 
-    /// Which files conflicted, in sorted order.
-    ///
-    /// A caller rendering the result needs the names, not just how many there
-    /// were; [`Conflicts::files`] is the count of exactly this sequence.
-    pub fn file_names(&self) -> impl Iterator<Item = &str> {
-        self.files.keys().map(String::as_str)
-    }
-
     /// Every conflicted file paired with how many hunks it contributed, in
     /// sorted order.
     ///
