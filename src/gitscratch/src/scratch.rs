@@ -301,7 +301,7 @@ enum Halt {
 /// answer, which is the safe direction: a dry run may say "expensive" or "I
 /// cannot answer", never "cheap" because it quietly discarded something.
 fn classify_halt(git: &Git) -> Result<Halt> {
-    let conflicted = git.lines(&["diff", "--name-only", "--diff-filter=U"])?;
+    let conflicted = git.paths(&["diff", "--name-only", "--diff-filter=U"])?;
     if !conflicted.is_empty() {
         return Ok(Halt::Conflict(conflicted));
     }
@@ -319,10 +319,11 @@ fn classify_halt(git: &Git) -> Result<Halt> {
 
     // Content left behind is content that failed to be committed: a commit that
     // truly became empty leaves the index matching HEAD and the worktree
-    // matching the index. Asked as `lines`, not as a `--quiet` exit code, so
-    // git failing to answer is an error rather than a vote for "empty".
-    let mut uncommitted = git.lines(&["diff", "--cached", "--name-only", "HEAD"])?;
-    uncommitted.extend(git.lines(&["diff", "--name-only"])?);
+    // matching the index. Asked for the paths themselves, not as a `--quiet`
+    // exit code, so git failing to answer is an error rather than a vote for
+    // "empty".
+    let mut uncommitted = git.paths(&["diff", "--cached", "--name-only", "HEAD"])?;
+    uncommitted.extend(git.paths(&["diff", "--name-only"])?);
     uncommitted.sort();
     uncommitted.dedup();
 
@@ -361,8 +362,16 @@ fn classify_halt(git: &Git) -> Result<Halt> {
 /// touched whose content is *not* in HEAD is work about to be dropped, and the
 /// replay says so rather than reporting a cheap number for a branch it never
 /// replayed.
+///
+/// The paths make a round trip to get that answer - out of the first invocation
+/// as output, back into the second as pathspecs - so both go through
+/// [`Git::paths`] rather than [`Git::lines`]. Git's line-oriented output C-quotes
+/// a non-ASCII name and leaves a leading space to be trimmed away, and it
+/// dequotes nothing on the way back in: a mangled pathspec matches no file, an
+/// empty diff is what "the new base already has this" looks like, and the commit
+/// would be dropped for the one reason that is never allowed to be a guess.
 fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt> {
-    let touched = git.lines(&[
+    let touched = git.paths(&[
         "diff-tree",
         "--no-commit-id",
         "--name-only",
@@ -381,7 +390,7 @@ fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt>
 
     let mut diff = vec!["diff", "--name-only", "REBASE_HEAD", "HEAD", "--"];
     diff.extend(touched.iter().map(String::as_str));
-    let missing = git.lines(&diff)?;
+    let missing = git.paths(&diff)?;
 
     if missing.is_empty() {
         Ok(Halt::EmptyCommit { stopped })

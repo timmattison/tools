@@ -108,12 +108,14 @@ impl Git {
         }
     }
 
-    /// Run git, returning the outcome whether or not it succeeded.
+    /// The one git invocation this crate makes, before anyone decides how to
+    /// read its output.
     ///
-    /// # Errors
-    ///
-    /// Returns an error only if git could not be spawned at all.
-    pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
+    /// Every guard the crate has lives here — the inherited environment shed,
+    /// the safety configuration pinned, the editors pinned off — so a second way
+    /// of reading git's answer cannot be a second, weaker way of asking the
+    /// question.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new("git");
         shed_inherited_git_environment(&mut command);
         command
@@ -133,8 +135,17 @@ impl Git {
             .env("GIT_AUTHOR_EMAIL", HARNESS_EMAIL)
             .env("GIT_COMMITTER_NAME", HARNESS_NAME)
             .env("GIT_COMMITTER_EMAIL", HARNESS_EMAIL);
+        command
+    }
 
-        let output = command
+    /// Run git, returning the outcome whether or not it succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if git could not be spawned at all.
+    pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
+        let output = self
+            .command(args)
             .output()
             .with_context(|| format!("failed to run git {}", args.join(" ")))?;
 
@@ -166,6 +177,10 @@ impl Git {
 
     /// Run git and return stdout split into non-empty lines.
     ///
+    /// Not for a list of paths — use [`Git::paths`]. Git escapes a path on its
+    /// way out of a line-oriented listing and the trimming here finishes the
+    /// job, so a name can come back spelled differently from the file it names.
+    ///
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or exited non-zero.
@@ -179,6 +194,72 @@ impl Git {
             .collect())
     }
 
+    /// Run git and return the paths it listed, as the developer spelled them.
+    ///
+    /// [`Git::lines`] cannot be used for a path, because git's line-oriented
+    /// output is not a faithful rendering of one. A name with a byte outside
+    /// printable ASCII comes back C-quoted - `café.txt` as `"caf\303\251.txt"` -
+    /// and a name with a leading or trailing space comes back intact only to
+    /// lose it to trimming. Neither loss announces itself, and a path read out of
+    /// one invocation is usually fed straight back into the next as a pathspec,
+    /// which git does not dequote: the mangled spelling matches nothing, and
+    /// matching nothing is indistinguishable from there being nothing to match.
+    ///
+    /// So the paths are asked for NUL-delimited instead, which is git's own
+    /// answer to this and turns the escaping off entirely. `-z` goes immediately
+    /// after the subcommand rather than at the end, because a command that
+    /// carries a pathspec ends in `-- <paths>` and everything after `--` is a
+    /// path, not an option.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `args` is empty, if git could not be spawned, if it
+    /// exited non-zero, or if a path it printed is not valid UTF-8. That last one
+    /// is deliberately fatal: replacing an undecodable byte would substitute
+    /// U+FFFD and hand back a name that matches nothing, which is the very
+    /// silence this method exists to remove.
+    pub fn paths(&self, args: &[&str]) -> Result<Vec<String>> {
+        let (subcommand, rest) = args
+            .split_first()
+            .context("cannot ask git for paths without a subcommand")?;
+        let mut asked = Vec::with_capacity(args.len() + 1);
+        asked.push(*subcommand);
+        asked.push("-z");
+        asked.extend_from_slice(rest);
+
+        let output = self
+            .command(&asked)
+            .output()
+            .with_context(|| format!("failed to run git {}", asked.join(" ")))?;
+
+        anyhow::ensure!(
+            output.status.success(),
+            "git {} failed:\n{}\n{}",
+            asked.join(" "),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+
+        // Raw and untrimmed on purpose: trimming stdout as a whole would eat the
+        // leading space of the first path, which is one of the two spellings this
+        // method exists to preserve. Git terminates every path with a NUL, so the
+        // split always ends in an empty remainder.
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| {
+                String::from_utf8(path.to_vec()).with_context(|| {
+                    format!(
+                        "git {} listed a path that is not valid UTF-8: {}",
+                        asked.join(" "),
+                        String::from_utf8_lossy(path)
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Resolve a revision to a full commit id.
     ///
     /// # Errors
@@ -189,13 +270,14 @@ impl Git {
             .with_context(|| format!("could not resolve '{revision}' to a commit"))
     }
 
-    /// Configuration that keeps a simulation from touching anything real.
+    /// Configuration that keeps a simulation from touching anything real, plus
+    /// the one main option that belongs beside it.
     ///
     /// Configuration alone is not the whole guard: git resolves the environment
-    /// first, so [`Git::try_run`] also pins the identity as environment and
+    /// first, so [`Git::command`] also pins the identity as environment and
     /// strips everything that would redirect git elsewhere.
     fn safety_config(&self) -> Vec<String> {
-        [
+        let mut arguments: Vec<String> = [
             // Recording resolutions from a simulated conflict would poison the
             // shared rr-cache and silently pre-resolve the developer's real
             // merges later.
@@ -225,7 +307,18 @@ impl Git {
             format!("core.hooksPath={}", self.hooks_path),
         ])
         .flat_map(|setting| ["-c".to_string(), setting])
-        .collect()
+        .collect();
+
+        // Paths read out of one invocation are fed straight back into the next
+        // as pathspecs, and a pathspec is not a path: a leading `:` is pathspec
+        // magic, and `*`, `?` and `[` are wildcards. Without this a file
+        // genuinely called `star*.txt` matches `starOTHER.txt` too, so a probe
+        // asking whether *this* path's content is in the new base quietly
+        // answers about some other file's. A main option rather than a `-c`
+        // pair, so it belongs here with them, ahead of the subcommand.
+        arguments.push("--literal-pathspecs".to_string());
+
+        arguments
     }
 }
 

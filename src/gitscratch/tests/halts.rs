@@ -330,7 +330,7 @@ fn drops_a_commit_that_genuinely_became_empty_and_finishes_the_rebase() {
         started.stderr
     );
     let unmerged = git
-        .lines(&["diff", "--name-only", "--diff-filter=U"])
+        .paths(&["diff", "--name-only", "--diff-filter=U"])
         .expect("list unmerged paths at the halt");
     assert!(
         unmerged.is_empty(),
@@ -445,7 +445,7 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
         started.stderr
     );
     let unmerged = git
-        .lines(&["diff", "--name-only", "--diff-filter=U"])
+        .paths(&["diff", "--name-only", "--diff-filter=U"])
         .expect("list unmerged paths at the halt");
     assert!(
         unmerged.is_empty(),
@@ -453,10 +453,10 @@ fn refuses_to_report_a_cost_when_an_empty_commit_cannot_be_skipped() {
          unmerged, which is a conflict and a different code path"
     );
     let mut left_behind = git
-        .lines(&["diff", "--cached", "--name-only", "HEAD"])
+        .paths(&["diff", "--cached", "--name-only", "HEAD"])
         .expect("list staged content at the halt");
     left_behind.extend(
-        git.lines(&["diff", "--name-only"])
+        git.paths(&["diff", "--name-only"])
             .expect("list unstaged content at the halt"),
     );
     assert!(
