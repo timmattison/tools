@@ -109,13 +109,20 @@ impl Scratch {
     /// resolution loop still has not finished after `MAX_RESOLUTION_ROUNDS`
     /// rounds.
     pub fn replay_rebase(&self, onto: &str) -> Result<Conflicts> {
+        self.replay_rebase_within(onto, MAX_RESOLUTION_ROUNDS)
+    }
+
+    /// [`Scratch::replay_rebase`] with the round budget named rather than
+    /// baked in, so the boundary can be pinned without a thousand-commit
+    /// fixture.
+    fn replay_rebase_within(&self, onto: &str, max_rounds: usize) -> Result<Conflicts> {
         let git = self.git();
         let worktree = self.path();
 
         let mut cost = Conflicts::default();
         let mut outcome = git.try_run(&["rebase", onto])?;
 
-        for _ in 0..MAX_RESOLUTION_ROUNDS {
+        for _ in 0..max_rounds {
             if !rebase_in_progress(&git, worktree)? {
                 anyhow::ensure!(
                     outcome.success,
@@ -146,7 +153,7 @@ impl Scratch {
             outcome = git.try_run(&["rebase", "--continue"])?;
         }
 
-        anyhow::bail!("gave up on the rebase after {MAX_RESOLUTION_ROUNDS} resolution rounds")
+        anyhow::bail!("gave up on the rebase after {max_rounds} resolution rounds")
     }
 
     fn worktree_arg(&self) -> Result<&str> {
@@ -324,4 +331,80 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
         .count();
 
     Ok(markers.max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+
+    use super::{Conflicts, Scratch};
+    use crate::metrics::Stops;
+    use crate::testing::contested_region_repo;
+
+    /// How many rounds replaying `iterated` onto `single` spends.
+    ///
+    /// [`contested_region_repo`] gives `iterated` three commits over one region
+    /// that `single` has already rewritten, so every one of them collides and
+    /// none of them arrives empty: three rounds, all three of them stops. That
+    /// the two numbers are equal is asserted below rather than assumed, because
+    /// a fixture that quietly gained a `--skip` round would otherwise turn the
+    /// boundary test into a test of something one round off it.
+    const CONTESTED_ROUNDS: usize = 3;
+
+    /// Replay `iterated` onto `single` with exactly `max_rounds` to spend.
+    ///
+    /// The error is handed back rather than unwrapped, because both sides of
+    /// the boundary are the point: one caller needs the answer, the other needs
+    /// the refusal.
+    fn replay_contested_within(max_rounds: usize) -> Result<Conflicts> {
+        let repo = contested_region_repo();
+        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        scratch
+            .git()
+            .run(&["checkout", "-q", "--detach", "iterated"])
+            .expect("check out the branch detached in the scratch worktree");
+        scratch.replay_rebase_within("single", max_rounds)
+    }
+
+    /// Noticing that a rebase has finished must not cost a round.
+    ///
+    /// A replay that spends its whole budget and finishes has been measured
+    /// completely — every stop counted, every hunk attributed — so the only
+    /// honest thing to hand back is the answer. Charging the terminating check
+    /// a round of its own would instead report that fully-measured replay as a
+    /// rebase the harness gave up on, which is the same exit code a consumer
+    /// uses for "I could not tell you".
+    #[test]
+    fn a_replay_that_spends_its_whole_budget_still_reports_its_answer() {
+        let conflicts = replay_contested_within(CONTESTED_ROUNDS)
+            .expect("a replay that spends exactly its budget of rounds has finished, not stalled");
+
+        assert_eq!(
+            conflicts.stops(),
+            Stops::new(CONTESTED_ROUNDS),
+            "every round the fixture spends is a stop, so the budget it just \
+             exhausted has to show up as the stop count"
+        );
+    }
+
+    /// The other side of the same boundary: the budget still has to bite.
+    ///
+    /// Giving the terminating check its own round must not turn the bound into
+    /// no bound at all — a git state the replay cannot advance is exactly what
+    /// it exists to stop, and it has to stop it one round after the last one it
+    /// was allowed.
+    #[test]
+    fn a_replay_that_outruns_its_budget_still_gives_up() {
+        let budget = CONTESTED_ROUNDS - 1;
+
+        let error = replay_contested_within(budget)
+            .expect_err("a replay needing more rounds than it has must not report an answer");
+
+        assert!(
+            error.to_string().contains(&format!(
+                "gave up on the rebase after {budget} resolution rounds"
+            )),
+            "the refusal has to say what it ran out of, got: {error}"
+        );
+    }
 }
