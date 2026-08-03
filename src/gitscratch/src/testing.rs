@@ -62,7 +62,7 @@ impl TestRepo {
         // git hook inherits a *relative* `GIT_INDEX_FILE`, and a linked
         // worktree's `.git` is a file, so a fixture that keeps it cannot add one
         // at all - it fails before the code under test is ever reached.
-        crate::git::shed_inherited_environment(&mut command);
+        crate::git::shed_inherited_git_environment(&mut command);
 
         let output = command
             .args(args)

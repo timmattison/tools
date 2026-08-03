@@ -59,7 +59,18 @@ const INHERITED_ATTRIBUTION: [&str; 6] = [
 /// test fixtures' alike: a fixture that inherits a redirected index cannot even
 /// build the repository the runner is supposed to replay, so both need the same
 /// immunity and neither should be describing the danger in its own words.
-pub(crate) fn shed_inherited_environment(command: &mut Command) {
+///
+/// Public because the danger is not this crate's alone. Anything in this
+/// repository that spawns git - a tool that adds a worktree, a test that builds
+/// a throwaway repository - is broken the same way by the same environment, and
+/// the list of what to shed is knowledge worth having in exactly one place
+/// rather than copied into each of them to drift.
+///
+/// ```no_run
+/// let mut command = std::process::Command::new("git");
+/// gitscratch::shed_inherited_git_environment(&mut command);
+/// ```
+pub fn shed_inherited_git_environment(command: &mut Command) {
     for variable in REDIRECTING_ENVIRONMENT
         .into_iter()
         .chain(INHERITED_ATTRIBUTION)
@@ -104,7 +115,7 @@ impl Git {
     /// Returns an error only if git could not be spawned at all.
     pub fn try_run(&self, args: &[&str]) -> Result<GitOutput> {
         let mut command = Command::new("git");
-        shed_inherited_environment(&mut command);
+        shed_inherited_git_environment(&mut command);
         command
             .args(self.safety_config())
             .args(args)
