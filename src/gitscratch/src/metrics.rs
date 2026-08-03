@@ -40,6 +40,25 @@ pub struct Files(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct Hunks(usize);
 
+/// Count of files a replay would not carry with it - staged, unstaged, or
+/// untracked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+pub struct Uncommitted(usize);
+
+impl Uncommitted {
+    /// Wrap a raw count.
+    #[must_use]
+    pub fn new(count: usize) -> Self {
+        Self(count)
+    }
+
+    /// The count with its noun.
+    #[must_use]
+    pub fn phrase(&self) -> String {
+        format!("{} uncommitted file", self.0)
+    }
+}
+
 macro_rules! counter {
     ($name:ident, $noun:literal) => {
         impl $name {
@@ -90,5 +109,22 @@ impl Stops {
     #[cfg(any(test, feature = "testing"))]
     pub(crate) const fn count(self) -> usize {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Uncommitted;
+
+    /// Both halves of the noun - the word and the `s` - belong to the counter,
+    /// because a renderer that has to remember the word *and* when to add the
+    /// `s` is a renderer that can get one of them wrong. The default is a
+    /// clean tree, so a caller that has nothing to report says "0 uncommitted
+    /// files" in the plural, the way English counts nothing.
+    #[test]
+    fn the_uncommitted_counter_owns_both_halves_of_its_noun() {
+        assert_eq!(Uncommitted::new(1).phrase(), "1 uncommitted file");
+        assert_eq!(Uncommitted::new(3).phrase(), "3 uncommitted files");
+        assert_eq!(Uncommitted::default().phrase(), "0 uncommitted files");
     }
 }

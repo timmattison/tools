@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::git::Git;
+use crate::metrics::Uncommitted;
 
 /// Where hook lookups are pointed while answering a pre-flight question.
 ///
@@ -96,7 +97,7 @@ impl Repo {
     /// # Errors
     ///
     /// Returns an error if git could not be spawned or reported a failure.
-    pub fn uncommitted_files(&self) -> Result<usize> {
+    pub fn uncommitted_files(&self) -> Result<Uncommitted> {
         let records =
             self.git()
                 .nul_separated(&["status", "--porcelain", "--untracked-files=all"])?;
@@ -112,7 +113,7 @@ impl Repo {
             }
         }
 
-        Ok(count)
+        Ok(Uncommitted::new(count))
     }
 
     /// A runner rooted in the real repository, carrying the crate's safety

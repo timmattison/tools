@@ -55,7 +55,7 @@ pub mod scratch;
 pub mod testing;
 
 pub use git::{Git, GitOutput, NoInheritedRepository, REPOSITORY_LOCATION_VARS};
-pub use metrics::{BranchName, Files, Hunks, Stops};
+pub use metrics::{BranchName, Files, Hunks, Stops, Uncommitted};
 pub use repo::Repo;
 pub use report::Report;
 pub use scratch::{Conflicts, Scratch};

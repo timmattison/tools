@@ -19,6 +19,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::metrics::Uncommitted;
 use crate::scratch::Conflicts;
 
 /// Width of the `": "` between the tool name and the verdict on the first line.
@@ -131,23 +132,24 @@ impl<'a> Report<'a> {
     /// line for a tree that had nothing worth warning about: there either is a
     /// note or there is not.
     #[must_use]
-    pub fn dirty_note(&self, uncommitted: usize) -> Option<String> {
-        if uncommitted == 0 {
+    pub fn dirty_note(&self, uncommitted: Uncommitted) -> Option<String> {
+        if uncommitted == Uncommitted::new(0) {
             return None;
         }
 
-        // Noun and verb move together - "1 uncommitted file is", "3
-        // uncommitted files are" - so they are chosen together and cannot end
-        // up disagreeing.
-        let (noun, verb) = if uncommitted == 1 {
-            ("file", "is")
+        // The noun and its plural are [`Uncommitted`]'s business, so all that
+        // is left here is the verb that has to agree with the number the
+        // counter is about to word.
+        let verb = if uncommitted == Uncommitted::new(1) {
+            "is"
         } else {
-            ("files", "are")
+            "are"
         };
 
         Some(format!(
-            "{}: note: {uncommitted} uncommitted {noun} {verb} not included; simulating from HEAD",
-            self.tool
+            "{}: note: {} {verb} not included; simulating from HEAD",
+            self.tool,
+            uncommitted.phrase()
         ))
     }
 }
@@ -159,7 +161,7 @@ mod tests {
     use unicode_width::UnicodeWidthStr;
 
     use super::Report;
-    use crate::metrics::Stops;
+    use crate::metrics::{Stops, Uncommitted};
     use crate::scratch::Conflicts;
 
     /// Which terminal column the hunk count starts in, measured in display
@@ -291,27 +293,36 @@ mod tests {
 
     /// A clean tree has nothing to warn about, and warning anyway would train
     /// people to ignore the line that matters.
+    ///
+    /// Asserted through both spellings of nothing, because a default
+    /// [`Uncommitted`] is what a caller that could not measure the tree falls
+    /// back to, and falling back must mean "say nothing" rather than "say
+    /// something about zero files".
     #[test]
     fn a_clean_tree_gets_no_dirty_note() {
-        assert_eq!(
-            Report::new("grind", "replaying HEAD onto main").dirty_note(0),
-            None
-        );
+        let report = Report::new("grind", "replaying HEAD onto main");
+
+        assert_eq!(report.dirty_note(Uncommitted::new(0)), None);
+        assert_eq!(report.dirty_note(Uncommitted::default()), None);
     }
 
     /// The note exists so a `clean` verdict is never misread as covering work
     /// that was never committed, which means it has to read like a sentence
     /// rather than like a counter - "1 uncommitted file is", not "1 files are".
+    ///
+    /// The noun comes from [`Uncommitted`] and only the verb is chosen here, so
+    /// this pins the seam: the two halves of the sentence are written in two
+    /// different places and still have to agree about the number.
     #[test]
     fn the_dirty_note_agrees_with_itself_about_how_many_files_there_are() {
         let report = Report::new("grind", "replaying HEAD onto main");
 
         assert_eq!(
-            report.dirty_note(1).as_deref(),
+            report.dirty_note(Uncommitted::new(1)).as_deref(),
             Some("grind: note: 1 uncommitted file is not included; simulating from HEAD")
         );
         assert_eq!(
-            report.dirty_note(3).as_deref(),
+            report.dirty_note(Uncommitted::new(3)).as_deref(),
             Some("grind: note: 3 uncommitted files are not included; simulating from HEAD")
         );
     }

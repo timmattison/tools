@@ -10,7 +10,7 @@
 use tempfile::TempDir;
 
 use gitscratch::testing::{conflicting_repo, TestRepo};
-use gitscratch::Repo;
+use gitscratch::{Repo, Uncommitted};
 
 /// The whole point of opening a repository up front is that "you pointed me at
 /// somewhere that is not a repository" is a different, cheaper answer than "the
@@ -92,7 +92,7 @@ fn uncommitted_files_is_zero_on_a_clean_tree() {
 
     assert_eq!(
         repo.uncommitted_files().expect("count uncommitted files"),
-        0,
+        Uncommitted::new(0),
         "a freshly committed fixture should have nothing uncommitted"
     );
 }
@@ -120,7 +120,7 @@ fn uncommitted_files_counts_staged_unstaged_and_untracked_work() {
 
     assert_eq!(
         repo.uncommitted_files().expect("count uncommitted files"),
-        3,
+        Uncommitted::new(3),
         "staged, unstaged and untracked work should each count"
     );
 }
@@ -157,7 +157,7 @@ fn uncommitted_files_counts_a_rename_as_the_one_file_it_is() {
 
     assert_eq!(
         repo.uncommitted_files().expect("count uncommitted files"),
-        3,
+        Uncommitted::new(3),
         "a rename is one uncommitted file, not one per name it has had"
     );
 }
@@ -180,7 +180,7 @@ fn uncommitted_files_counts_every_file_inside_an_untracked_directory() {
 
     assert_eq!(
         repo.uncommitted_files().expect("count uncommitted files"),
-        2,
+        Uncommitted::new(2),
         "an untracked directory should count its files, not itself"
     );
 }
