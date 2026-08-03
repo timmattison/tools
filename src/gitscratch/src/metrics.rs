@@ -77,3 +77,18 @@ macro_rules! counter {
 counter!(Stops, "stop");
 counter!(Files, "file");
 counter!(Hunks, "hunk");
+
+impl Stops {
+    /// The raw count, for the one place in this crate that has to put a `Stops`
+    /// back into the `usize` a `Conflicts` stores it as.
+    ///
+    /// Compiled only alongside its single caller,
+    /// [`crate::scratch::Conflicts::from_files`], which is the whole
+    /// justification for it existing. Unwrapping a counter is precisely what
+    /// these types are here to stop, so the unwrap exists only in the builds
+    /// that have the fixture constructor to feed - never in a released binary.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) const fn count(self) -> usize {
+        self.0
+    }
+}

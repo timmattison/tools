@@ -17,6 +17,8 @@
 //! exact prediction.
 
 use std::collections::BTreeMap;
+#[cfg(any(test, feature = "testing"))]
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -237,17 +239,52 @@ impl Conflicts {
     /// tests reach for: a test fixture that can lie about the totals is a test
     /// fixture that can make a broken renderer look correct.
     ///
+    /// The parameter types carry the rest of that honesty. A hunk count is a
+    /// [`NonZeroUsize`] because a file only reaches a breakdown by having
+    /// conflicted, and a file that conflicted is at least one decision - so "a
+    /// conflicted file that cost nothing" is not a fixture this can be asked
+    /// for. The stop count is a [`Stops`] rather than a second bare number, so
+    /// it cannot be transposed with the file count it is read beside.
+    ///
     /// A name repeated in `files` accumulates, exactly as a file conflicting at
     /// several stops does during a real replay.
+    ///
+    /// Compiled only for tests and for the `testing` feature. Every call site
+    /// is a fixture, and production code has no business minting a verdict that
+    /// nothing measured.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the breakdown and the stop count disagree about whether
+    /// anything conflicted at all - files with no stops, or stops with no
+    /// files. A file only ever enters the breakdown from inside a stop, so the
+    /// two are non-empty together or not at all. A fixture that broke that
+    /// would render either a clean verdict that swallowed its stops or a
+    /// conflict verdict for a replay that never halted, and both read as
+    /// perfectly plausible output.
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
-    pub fn from_files(files: impl IntoIterator<Item = (String, usize)>, stops: usize) -> Self {
+    pub fn from_files(
+        files: impl IntoIterator<Item = (String, NonZeroUsize)>,
+        stops: Stops,
+    ) -> Self {
         let mut conflicts = Self {
-            stops,
+            stops: stops.count(),
             ..Self::default()
         };
         for (name, hunks) in files {
-            conflicts.add_file(name, hunks);
+            conflicts.add_file(name, hunks.get());
         }
+
+        assert_eq!(
+            conflicts.is_clean(),
+            conflicts.stops == 0,
+            "a hand-built result has to agree with itself about whether \
+             anything conflicted, got {} and {}",
+            conflicts.files().phrase(),
+            stops.phrase()
+        );
+
         conflicts
     }
 
@@ -259,26 +296,37 @@ impl Conflicts {
         }
     }
 
-    /// Attribute `hunks` more conflict hunks to `name`.
+    /// Attribute `hunks` more conflict hunks to `name`, never fewer than one.
     ///
     /// Adding rather than replacing is the whole reason a file is keyed at all:
     /// the same file routinely conflicts at several stops of one replay, and
     /// each of those collisions is separate work for whoever resolves it.
+    ///
+    /// The floor lives here, at the single door into the breakdown, rather than
+    /// in whichever caller remembered it. Being in this map at all means the
+    /// file conflicted, and a file that conflicted is at least one decision, so
+    /// the rule holds for every route in - the replay loop and the fixture
+    /// constructor alike - and the invariant [`Conflicts::is_clean`] rests on
+    /// is structural rather than incidental.
     fn add_file(&mut self, name: String, hunks: usize) {
-        *self.files.entry(name).or_default() += hunks;
+        *self.files.entry(name).or_default() += hunks.max(1);
     }
 
     /// Whether the replay finished without a single conflict.
     ///
     /// Defined on the file set rather than on the counts, because the file set
     /// is the primary fact: a conflict is something that happened *to a file*,
-    /// and the numbers are summaries of it. The three measures cannot disagree
-    /// anyway - [`count_conflict_hunks`] floors every conflicted file at one
-    /// hunk, and a file only enters the set from inside a stop - so hunks and
-    /// stops are both non-zero exactly when the set is non-empty. Anchoring on
-    /// the set keeps that true by construction instead of by coincidence: a
-    /// future measure that can legitimately be zero cannot make a conflicted
-    /// replay report itself clean.
+    /// and the numbers are summaries of it. The three measures cannot disagree,
+    /// and that holds by construction on every route in rather than on the
+    /// replay path alone. [`Conflicts::add_file`] is the only door into the
+    /// set and it floors each entry at one hunk, so hunks are non-zero exactly
+    /// when the set is non-empty. Stops track the set for two different
+    /// reasons: the replay only ever adds a file from inside a stop, and
+    /// `from_files` refuses a stop count its own breakdown contradicts.
+    ///
+    /// Anchoring on the set keeps that true by construction instead of by
+    /// coincidence: a future measure that can legitimately be zero cannot make
+    /// a conflicted replay report itself clean.
     #[must_use]
     pub fn is_clean(&self) -> bool {
         self.files.is_empty()
@@ -312,10 +360,16 @@ impl Conflicts {
     /// A verdict that says only "4 hunks across 2 files" tells a developer how
     /// much work is coming but not where it lands, so the breakdown is part of
     /// the answer rather than a nicety layered on top.
-    pub fn file_hunks(&self) -> impl Iterator<Item = (&str, usize)> {
+    ///
+    /// Each count comes out as the same [`Hunks`] the headline
+    /// [`Conflicts::hunks`] returns, so a renderer never throws the type away
+    /// and immediately rebuilds it to say the word "hunk" - and cannot pair a
+    /// bare number with the wrong noun if it forgets which of the three counts
+    /// it is holding.
+    pub fn file_hunks(&self) -> impl Iterator<Item = (&str, Hunks)> {
         self.files
             .iter()
-            .map(|(name, hunks)| (name.as_str(), *hunks))
+            .map(|(name, hunks)| (name.as_str(), Hunks::new(*hunks)))
     }
 }
 
@@ -334,6 +388,14 @@ fn rebase_in_progress(git: &Git, worktree: &Path) -> Result<bool> {
 ///
 /// Conflicts with no markers at all - binary files, add/add on a blob git will
 /// not diff, delete/modify - still cost one decision each.
+///
+/// [`Conflicts::add_file`] floors its entries at one too, which makes this
+/// floor redundant for the total but not for the measurement, so it stays. The
+/// two encode different facts: `add_file` says that a file in a breakdown
+/// conflicted, while this says what a marker-less conflict actually costs the
+/// person resolving it. Dropping it here would leave this function returning a
+/// zero that is simply wrong about the file, rescued downstream by a rule that
+/// knows nothing about binary blobs.
 fn count_conflict_hunks(path: &Path) -> Result<usize> {
     let Ok(contents) = std::fs::read(path) else {
         // A delete/modify conflict can leave no file on disk; it is still one
@@ -353,7 +415,7 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
 mod tests {
     use anyhow::Result;
 
-    use super::{Conflicts, Scratch};
+    use super::{Conflicts, NonZeroUsize, Scratch};
     use crate::metrics::{Hunks, Stops};
     use crate::testing::contested_region_repo;
 
@@ -407,10 +469,13 @@ mod tests {
     /// one hunk - and that floor has to sit where every path into the breakdown
     /// crosses it.
     ///
-    /// The only floor today is inside [`count_conflict_hunks`], which is on the
-    /// replay path alone. A file attributed a measured count of zero therefore
-    /// lands in the map at zero, and the accessors immediately contradict each
-    /// other: [`Conflicts::is_clean`] says something conflicted while
+    /// [`Conflicts::add_file`] is that place, which is why the test goes
+    /// through it rather than through a constructor. The public constructor
+    /// takes a [`NonZeroUsize`] per file, so a zero-hunk file cannot even be
+    /// spelled there; the replay path, by contrast, still hands in a count
+    /// measured at runtime, and this is the rule that catches one that came
+    /// back zero. Without the floor the accessors contradict each other:
+    /// [`Conflicts::is_clean`] says something conflicted while
     /// [`Conflicts::hunks`] says nothing did, and a report built from it reads
     /// "0 hunks across 1 file" with a "0 hunks" row underneath.
     #[test]
@@ -442,7 +507,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "has to agree with itself")]
     fn a_hand_built_result_cannot_claim_stops_it_has_no_conflicted_files_for() {
-        let _ = Conflicts::from_files(std::iter::empty::<(String, usize)>(), 7);
+        let _ = Conflicts::from_files(std::iter::empty::<(String, NonZeroUsize)>(), Stops::new(7));
     }
 
     /// The other direction of the same disagreement. A file only ever enters
@@ -452,7 +517,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "has to agree with itself")]
     fn a_hand_built_result_cannot_claim_conflicted_files_it_has_no_stops_for() {
-        let _ = Conflicts::from_files([("src/lib.rs".to_string(), 1)], 0);
+        let one = NonZeroUsize::new(1).expect("1 is not zero");
+
+        let _ = Conflicts::from_files([("src/lib.rs".to_string(), one)], Stops::new(0));
     }
 
     /// The other side of the same boundary: the budget still has to bite.

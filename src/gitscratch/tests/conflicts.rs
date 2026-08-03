@@ -4,13 +4,15 @@
 //! repository acceptable. These pin the answer itself: whether a replay
 //! conflicted at all, and where the hunks landed.
 
+use std::num::NonZeroUsize;
+
 #[cfg(unix)]
 use gitscratch::testing::awkward_names_repo;
 use gitscratch::testing::{
     conflicting_repo, contested_region_repo, equal_hunks_unequal_stops_repo,
     independent_branches_repo, multi_byte_names_repo,
 };
-use gitscratch::{Conflicts, Hunks, Scratch};
+use gitscratch::{Conflicts, Hunks, Scratch, Stops};
 
 /// Replay `branch` onto `onto` the way a consumer does: check it out detached
 /// in the scratch worktree, then rebase.
@@ -22,6 +24,18 @@ fn replay(scratch: &Scratch, branch: &str, onto: &str) -> Conflicts {
     scratch
         .replay_rebase(onto)
         .expect("replay the branch onto the simulated base")
+}
+
+/// One entry of a hand-built per-file breakdown.
+///
+/// `Conflicts::from_files` takes a [`NonZeroUsize`] per file, because a file
+/// that conflicted cost at least one decision, so every fixture wraps its count
+/// here rather than at each call site.
+fn file(name: &str, hunks: usize) -> (String, NonZeroUsize) {
+    (
+        name.to_string(),
+        NonZeroUsize::new(hunks).expect("a conflicted file contributes at least one hunk"),
+    )
 }
 
 /// The whole point of the tools built on this crate is a yes-or-no verdict, so
@@ -68,7 +82,7 @@ fn the_breakdown_says_which_file_each_hunk_belonged_to() {
 
     assert_eq!(
         conflicts.file_hunks().collect::<Vec<_>>(),
-        vec![("x.txt", 1), ("y.txt", 1)],
+        vec![("x.txt", Hunks::new(1)), ("y.txt", Hunks::new(1))],
         "each contested file should carry its own hunk count"
     );
 }
@@ -93,11 +107,11 @@ fn a_file_that_conflicts_repeatedly_accumulates_against_its_own_name() {
     );
     assert_eq!(breakdown[0].0, "shared.txt");
     assert!(
-        breakdown[0].1 > 1,
+        breakdown[0].1 > Hunks::new(1),
         "three colliding commits should leave more than one hunk on the file, got {breakdown:?}"
     );
     assert_eq!(
-        Hunks::new(breakdown[0].1),
+        breakdown[0].1,
         conflicts.hunks(),
         "the breakdown has to add up to the total it explains"
     );
@@ -125,7 +139,7 @@ fn a_conflicted_non_ascii_path_keeps_its_real_name_and_its_real_hunk_count() {
 
     assert_eq!(
         conflicts.file_hunks().collect::<Vec<_>>(),
-        vec![("readme.md", 1), ("日本語.txt", 2)],
+        vec![("readme.md", Hunks::new(1)), ("日本語.txt", Hunks::new(2))],
         "a non-ASCII path must survive the round trip through git by name and \
          by count"
     );
@@ -162,12 +176,12 @@ fn a_conflicted_path_git_cannot_print_plainly_keeps_its_name_and_its_hunk_count(
     assert_eq!(
         conflicts.file_hunks().collect::<Vec<_>>(),
         vec![
-            (" lead.txt", 2),
-            ("back\\slash.txt", 2),
-            ("plain.txt", 2),
-            ("quo\"te.txt", 2),
-            ("trail.txt ", 2),
-            ("\u{3000}wide.txt ", 2),
+            (" lead.txt", Hunks::new(2)),
+            ("back\\slash.txt", Hunks::new(2)),
+            ("plain.txt", Hunks::new(2)),
+            ("quo\"te.txt", Hunks::new(2)),
+            ("trail.txt ", Hunks::new(2)),
+            ("\u{3000}wide.txt ", Hunks::new(2)),
         ],
         "a path git quotes, or one a trim would erode, must survive the round \
          trip through git by name and by count"
@@ -180,20 +194,21 @@ fn a_conflicted_path_git_cannot_print_plainly_keeps_its_name_and_its_hunk_count(
 #[test]
 fn absorbing_a_step_folds_its_breakdown_into_the_running_total() {
     let mut total = Conflicts::from_files(
-        [
-            ("src/lib.rs".to_string(), 3),
-            ("src/main.rs".to_string(), 1),
-        ],
-        2,
+        [file("src/lib.rs", 3), file("src/main.rs", 1)],
+        Stops::new(2),
     );
     total.absorb(Conflicts::from_files(
-        [("src/lib.rs".to_string(), 2), ("README.md".to_string(), 4)],
-        1,
+        [file("src/lib.rs", 2), file("README.md", 4)],
+        Stops::new(1),
     ));
 
     assert_eq!(
         total.file_hunks().collect::<Vec<_>>(),
-        vec![("README.md", 4), ("src/lib.rs", 5), ("src/main.rs", 1)],
+        vec![
+            ("README.md", Hunks::new(4)),
+            ("src/lib.rs", Hunks::new(5)),
+            ("src/main.rs", Hunks::new(1))
+        ],
         "a file hit by both steps should carry the sum of the two"
     );
     assert_eq!(total.hunks(), Hunks::new(10));

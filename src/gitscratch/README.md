@@ -25,7 +25,9 @@ if conflicts.is_clean() {
     // Nothing conflicted.
 } else {
     for (file, hunks) in conflicts.file_hunks() {
-        println!("{file}: {hunks}");
+        // `hunks` is a `Hunks` — the same type the headline total comes back
+        // as, so it already knows its own noun.
+        println!("{file}: {}", hunks.phrase());
     }
 }
 ```
@@ -35,6 +37,18 @@ conflicted, how many hunks it contributed. The headline totals — `hunks()`,
 `files()`, `stops()` — are summaries of that breakdown rather than numbers
 tracked beside it, so the total and the list underneath it cannot tell a reader
 two different stories.
+
+Every count that crosses the boundary is one of the newtypes in `metrics`, in
+both directions: `file_hunks()` yields `Hunks` for the same reason `hunks()`
+does, so a renderer never throws the type away and immediately rebuilds it, and
+three counts that are all `usize` underneath can never be transposed on the way
+in or out.
+
+`is_clean()` reads the file set rather than the counts, and the agreement
+between them is structural rather than observed. Adding to the breakdown is the
+one door in, and it floors every entry at one hunk, so hunks are non-zero
+exactly when the set is non-empty — on the replay path and in a hand-built
+fixture alike.
 
 `Scratch` is the only way to get a worktree. It hands out a `Git` that already
 carries the whole safety configuration, so there is no way to get a worktree
@@ -234,6 +248,17 @@ reported as one the harness gave up on. A `--skip` round does cost one, because
 a `--skip` that leaves the rebase halted and still empty is exactly the runaway
 the bound exists to catch.
 
+**That a `Conflicts` cannot contradict its own accessors** is pinned by three
+further unit tests in `src/scratch.rs`, which need no repository either. One
+attributes a measured count of zero to a file and requires the total to come
+back as one hunk: the floor lives at the single door into the breakdown, so it
+covers the replay path — the one place a count is still measured at runtime —
+and not just the constructor, whose `NonZeroUsize` makes a zero-hunk file
+unspellable. The other two require the constructor to refuse a breakdown and a
+stop count that disagree about whether anything conflicted, in both directions:
+stops with no files would otherwise render the clean line and swallow them, and
+files with no stops would report a replay that never halted.
+
 Consumers pin what they compose on top of the harness. `grist`'s own
 `tests/safety.rs` asserts that a full simulation — its `checkout --detach` →
 `replay_rebase` → `squash_into` sequence, which this crate's tests cannot see —
@@ -243,6 +268,11 @@ The `testing` feature exposes `gitscratch::testing`: throwaway git repositories
 with known conflict shapes, shared by every crate built on the harness so the
 fixtures exist once rather than once per test binary. Every fixture lives in its
 own `TempDir`, so concurrent `cargo test` runs never share a path.
+
+It also gates `Conflicts::from_files`, the hand-built-breakdown constructor
+`Report`'s tests are built on. Every call site is a fixture, and a released
+binary has no business minting a verdict that nothing measured, so the
+constructor is simply not compiled into one.
 
 | Fixture | Shape |
 | --- | --- |
