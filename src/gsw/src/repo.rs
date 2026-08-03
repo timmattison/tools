@@ -1491,8 +1491,12 @@ mod tests {
     /// expectation is derived from the constant rather than restated, so this
     /// pins the prose to the code instead of becoming a third copy free to
     /// drift on its own.
+    ///
+    /// Both rejections name the counter files at fault — the missing one, or
+    /// the neighbouring pair found out of order, alongside every name's byte
+    /// offset — so the spec can be repaired from the failure alone.
     fn check_spec_documents_the_counter_order(spec: &str) -> Result<(), String> {
-        let mut mentions = Vec::new();
+        let mut mentions: Vec<(&str, usize)> = Vec::new();
         for name in super::REBASE_COUNTERS
             .iter()
             .flat_map(|(current, total)| [*current, *total])
@@ -1503,13 +1507,22 @@ mod tests {
                      documents the counter pairs `rebase_step` reads",
                 )
             })?;
-            mentions.push(at);
+            mentions.push((name, at));
         }
-        if !mentions.windows(2).all(|pair| pair[0] < pair[1]) {
+        if let Some(out_of_order) = mentions.windows(2).find(|pair| pair[0].1 >= pair[1].1) {
+            let (earlier, earlier_at) = out_of_order[0];
+            let (later, later_at) = out_of_order[1];
+            let found = mentions
+                .iter()
+                .map(|(name, at)| format!("`{name}` at {at}"))
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(format!(
                 "the design spec lists the rebase counter files in a different \
-                 order from `REBASE_COUNTERS` (byte offsets {mentions:?}). It \
-                 must document each pair as `<current> + <total>`, and \
+                 order from `REBASE_COUNTERS`: `{earlier}` must be documented \
+                 before `{later}`, but appears at byte offset {earlier_at}, \
+                 after `{later}` at {later_at} (found {found}). The spec must \
+                 document each pair as `<current> + <total>`, and \
                  `rebase-apply/` before `rebase-merge/` — the order \
                  `gix::Repository::state` resolves them in — or a \
                  re-implementation driven from the spec reinstates the \
