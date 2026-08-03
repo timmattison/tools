@@ -1545,6 +1545,9 @@ mod tests {
         }
     }
 
+    /// Placeholder a fixture substitutes for a counter file name it redacts.
+    const REDACTED_COUNTER: &str = "<counter file redacted>";
+
     #[test]
     fn the_doc_drift_guard_rejects_a_spec_that_stops_naming_the_total_files() {
         // Half a counter pair documents half a rebase: without the `total`
@@ -1552,20 +1555,55 @@ mod tests {
         // either backend, and a re-implementation driven from it would have to
         // guess. The guard must reject that spec the same way it rejects one
         // that drops the `current` files.
-        const REDACTED: &str = "<counter file redacted>";
+        //
+        // Redacting one file from *each* backend and requiring both to be named
+        // is what keeps the whole flattened table load-bearing: a rejection that
+        // stopped at the first missing name would leave the merge-backend half
+        // unpinned, and a guard narrowed to the apply pair alone would still
+        // pass. See the merge-backend fixture below for the other half.
         let mutated = read_design_spec()
-            .replace("rebase-apply/last", REDACTED)
-            .replace("rebase-merge/end", REDACTED);
+            .replace("rebase-apply/last", REDACTED_COUNTER)
+            .replace("rebase-merge/end", REDACTED_COUNTER);
         let problem = check_spec_documents_the_counter_order(&mutated).expect_err(
             "a spec that has stopped naming `rebase-apply/last` and \
              `rebase-merge/end` no longer documents the counter pairs \
              `rebase_step` reads, so the guard must reject it",
         );
-        assert!(
-            problem.contains("rebase-apply/last"),
-            "the rejection must name the missing counter file so the spec can \
-             be repaired, got: {problem}",
+        for name in ["rebase-apply/last", "rebase-merge/end"] {
+            assert!(
+                problem.contains(name),
+                "the rejection must name every missing counter file so the spec \
+                 can be repaired in one pass, but it never mentions `{name}`, \
+                 got: {problem}",
+            );
+        }
+    }
+
+    #[test]
+    fn the_doc_drift_guard_rejects_a_spec_that_stops_naming_the_merge_backend_files() {
+        // One fixture per half of the flattened table. The apply pair is tried
+        // first, so any rejection that reports a single name reports an
+        // `rebase-apply/` one — which leaves the merge backend's entry in
+        // `REBASE_COUNTERS` unpinned unless a fixture redacts *only* it. This is
+        // that fixture: it is the one that fails if the guard is ever narrowed
+        // to the apply pair alone.
+        let mutated = read_design_spec()
+            .replace("rebase-merge/msgnum", REDACTED_COUNTER)
+            .replace("rebase-merge/end", REDACTED_COUNTER);
+        let problem = check_spec_documents_the_counter_order(&mutated).expect_err(
+            "a spec that has stopped naming `rebase-merge/msgnum` and \
+             `rebase-merge/end` no longer documents the merge backend's counter \
+             pair, which is the one both plain and interactive rebases use, so \
+             the guard must reject it",
         );
+        for name in ["rebase-merge/msgnum", "rebase-merge/end"] {
+            assert!(
+                problem.contains(name),
+                "the rejection must name every missing counter file so the spec \
+                 can be repaired in one pass, but it never mentions `{name}`, \
+                 got: {problem}",
+            );
+        }
     }
 
     #[test]
