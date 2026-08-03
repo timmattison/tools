@@ -292,14 +292,71 @@ fn classify_halt(git: &Git) -> Result<Halt> {
     uncommitted.sort();
     uncommitted.dedup();
 
-    if uncommitted.is_empty() {
+    if !uncommitted.is_empty() {
+        return Ok(Halt::UnwritableCommit {
+            stopped,
+            evidence: format!(
+                "this content was left uncommitted: {}",
+                uncommitted.join(", ")
+            ),
+        });
+    }
+
+    stopped_commit_is_already_in_head(git, stopped)
+}
+
+/// Decide whether the halted commit adds anything the new base does not already
+/// have - the second probe, and the only one left once the repository is
+/// pristine.
+///
+/// A commit write that fails on a *clean* pick leaves nothing behind at all: git
+/// rolls the index back and reschedules the pick, so index, worktree and HEAD
+/// all agree and the probe above has nothing to see. What still separates that
+/// from a commit that really did become empty is the commit itself.
+///
+/// The test is: for every path the stopped commit touches, does HEAD already
+/// hold exactly that commit's content? If so the commit is empty, and that
+/// answer is airtight rather than a heuristic. Applying commit `C` onto HEAD is
+/// a three-way merge with base `C^`, ours HEAD and theirs `C`. On a path where
+/// HEAD's blob already equals `C`'s blob both sides agree, so the merge changes
+/// nothing there; a path `C` never touched cannot change either, since neither
+/// side moved it. So the merge result is HEAD exactly, and the commit adds
+/// nothing.
+///
+/// Like the first probe this errs toward the loud answer: a path the commit
+/// touched whose content is *not* in HEAD is work about to be dropped, and the
+/// replay says so rather than reporting a cheap number for a branch it never
+/// replayed.
+fn stopped_commit_is_already_in_head(git: &Git, stopped: String) -> Result<Halt> {
+    let touched = git.lines(&[
+        "diff-tree",
+        "--no-commit-id",
+        "--name-only",
+        "-r",
+        "--root",
+        "REBASE_HEAD",
+    ])?;
+
+    // Guarded before the diff below is built, because `git diff ... --` with an
+    // empty pathspec is not "diff nothing", it is "diff everything" - which
+    // would invert this answer for the one commit that cannot possibly lose
+    // anything, since it changes no path at all.
+    if touched.is_empty() {
+        return Ok(Halt::EmptyCommit { stopped });
+    }
+
+    let mut diff = vec!["diff", "--name-only", "REBASE_HEAD", "HEAD", "--"];
+    diff.extend(touched.iter().map(String::as_str));
+    let missing = git.lines(&diff)?;
+
+    if missing.is_empty() {
         Ok(Halt::EmptyCommit { stopped })
     } else {
         Ok(Halt::UnwritableCommit {
             stopped,
             evidence: format!(
-                "this content was left uncommitted: {}",
-                uncommitted.join(", ")
+                "the new base does not have this commit's changes to: {}",
+                missing.join(", ")
             ),
         })
     }
