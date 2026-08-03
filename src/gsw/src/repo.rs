@@ -313,6 +313,21 @@ pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operati
     }
 }
 
+/// Both rebase step-counter pairs, in the order [`gix::Repository::state`]
+/// resolves the directories they live in: `rebase-apply/` before
+/// `rebase-merge/`. See [`rebase_step`], which reads them, for why the order
+/// is load-bearing.
+///
+/// This is the single source of truth for that order. The design spec
+/// (`specs/2026-07-01-gsw-rebase-merge-indicators-design.md`) restates it in
+/// prose, and prose does not get compiled, so a test derives the expected
+/// documentation order from this constant rather than restating it a third
+/// time.
+const REBASE_COUNTERS: [(&str, &str); 2] = [
+    ("rebase-apply/next", "rebase-apply/last"),
+    ("rebase-merge/msgnum", "rebase-merge/end"),
+];
+
 /// How far through a rebase git is, or `None` when the counters cannot be read.
 ///
 /// gix classifies the operation but does not expose its progress, so the two
@@ -335,13 +350,6 @@ pub fn operation_state(repo: &gix::Repository, conflicts: u32) -> Option<Operati
 /// failing the whole indicator: the operation is still worth surfacing without
 /// its `current/total` clause.
 fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
-    /// Both counter pairs, in the order [`gix::Repository::state`] resolves the
-    /// directories they live in.
-    const COUNTERS: [(&str, &str); 2] = [
-        ("rebase-apply/next", "rebase-apply/last"),
-        ("rebase-merge/msgnum", "rebase-merge/end"),
-    ];
-
     let read = |name: &str| -> Option<u32> {
         std::fs::read_to_string(git_dir.join(name))
             .ok()?
@@ -350,7 +358,7 @@ fn rebase_step(git_dir: &std::path::Path) -> Option<StepProgress> {
             .ok()
     };
 
-    COUNTERS.iter().find_map(|&(current, total)| {
+    REBASE_COUNTERS.iter().find_map(|&(current, total)| {
         Some(StepProgress {
             current: read(current)?,
             total: read(total)?,
@@ -1447,6 +1455,46 @@ mod tests {
                 }),
                 conflicts: 1,
             }),
+        );
+    }
+
+    #[test]
+    fn design_spec_documents_the_counter_order_the_code_tries() {
+        // The order in `REBASE_COUNTERS` is load-bearing — it is what keeps the
+        // step counts coming from the directory `gix::Repository::state`
+        // classified from — and the design spec restates it in prose. Prose is
+        // not compiled, so nothing else catches the spec describing the
+        // opposite order, which is precisely the bug a re-implementation driven
+        // from the spec would reinstate. The expectation is derived from the
+        // constant rather than restated, so this pins the two together instead
+        // of becoming a third copy free to drift on its own.
+        const SPEC: &str = "specs/2026-07-01-gsw-rebase-merge-indicators-design.md";
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(SPEC);
+        let spec = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "cannot read the design spec at {}: {e}. If it was renamed or \
+                 moved, repoint SPEC rather than deleting this check.",
+                path.display(),
+            )
+        });
+        let mentions: Vec<usize> = super::REBASE_COUNTERS
+            .iter()
+            .map(|(current, _)| {
+                spec.find(current).unwrap_or_else(|| {
+                    panic!(
+                        "the design spec never mentions `{current}`, so it no \
+                         longer documents the counter pairs `rebase_step` reads",
+                    )
+                })
+            })
+            .collect();
+        assert!(
+            mentions.windows(2).all(|pair| pair[0] < pair[1]),
+            "the design spec lists the rebase counter pairs in a different \
+             order from `REBASE_COUNTERS` (byte offsets {mentions:?}). It must \
+             document `rebase-apply/` before `rebase-merge/` — the order \
+             `gix::Repository::state` resolves them in — or a re-implementation \
+             driven from the spec reinstates the wrong-directory bug.",
         );
     }
 
