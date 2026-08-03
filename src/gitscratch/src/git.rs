@@ -250,12 +250,20 @@ impl Git {
         // leading space of the first path, which is one of the two spellings this
         // method exists to preserve. Git terminates every path with a NUL, so the
         // split always ends in an empty remainder.
-        Ok(output
+        output
             .stdout
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
-            .map(|path| String::from_utf8_lossy(path).into_owned())
-            .collect())
+            .map(|path| {
+                String::from_utf8(path.to_vec()).with_context(|| {
+                    format!(
+                        "git {} listed a path that is not valid UTF-8: {}",
+                        asked.join(" "),
+                        String::from_utf8_lossy(path)
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Resolve a revision to a full commit id.
