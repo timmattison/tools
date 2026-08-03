@@ -1556,6 +1556,44 @@ mod tests {
     }
 
     #[test]
+    fn the_doc_drift_guard_rejects_a_spec_that_transposes_the_two_backends() {
+        // The order is the whole reason this guard exists: `rebase-apply/` wins
+        // `gix::Repository::state`'s classification, so a spec that documents
+        // the merge backend's pair first describes exactly the wrong-directory
+        // bug this branch fixed. Only the two counter-file pairs are swapped —
+        // the backend labels around them are deliberately left stale, because
+        // the guard's subject is the order of the *names*, not the prose.
+        const PLACEHOLDER: &str = "<counter pair placeholder>";
+        const APPLY_PAIR: &str = "`rebase-apply/next` + `rebase-apply/last`";
+        const MERGE_PAIR: &str = "`rebase-merge/msgnum` + `rebase-merge/end`";
+        let spec = read_design_spec();
+        let mutated = spec
+            .replace(APPLY_PAIR, PLACEHOLDER)
+            .replace(MERGE_PAIR, APPLY_PAIR)
+            .replace(PLACEHOLDER, MERGE_PAIR);
+        assert_ne!(
+            mutated, spec,
+            "the fixture transposed nothing: the spec no longer spells the \
+             counter pairs as `{APPLY_PAIR}` and `{MERGE_PAIR}`, so update \
+             this fixture to match its current wording rather than letting it \
+             assert against an unmutated spec",
+        );
+        let problem = check_spec_documents_the_counter_order(&mutated).expect_err(
+            "a spec that documents `rebase-merge/` before `rebase-apply/` \
+             contradicts the precedence `gix::Repository::state` resolves the \
+             directories in, so the guard must reject it",
+        );
+        for name in ["rebase-apply/next", "rebase-merge/msgnum"] {
+            assert!(
+                problem.contains(name),
+                "the rejection must name the counter files that are out of \
+                 order so the spec can be repaired, but it never mentions \
+                 `{name}`, got: {problem}",
+            );
+        }
+    }
+
+    #[test]
     fn operation_state_reports_rebase_without_steps_when_counter_files_are_absent() {
         // Graceful degradation: the rebase is still surfaced when its step
         // counters cannot be read, just without the `current/total` clause.
