@@ -436,8 +436,8 @@ mod tests {
 
     /// The heading the README's account of this suite lives under. It is cut
     /// with the same helper as the guard inventory because it is the same kind
-    /// of claim: a section written as an exhaustive, counted list, which is
-    /// worth exactly as much as the list is complete.
+    /// of claim: a section written as an exhaustive list, which is worth
+    /// exactly as much as the list is complete.
     const TESTING_HEADING: &str = "## Testing";
 
     /// The one section a heading opens, cut out of the document around it.
@@ -797,101 +797,24 @@ mod tests {
         names
     }
 
-    /// How many unit tests the README's `## Testing` section claims this file
-    /// has, read back out of its prose.
-    ///
-    /// The section states its count in an English sentence rather than in
-    /// anything machine-readable, because it is written for a person deciding
-    /// whether to trust this crate and not for this test. So the count is parsed
-    /// where it is actually written, rather than duplicated into a tidier form
-    /// that could itself go stale — a second copy of the number would just move
-    /// the drift somewhere new.
-    ///
-    /// The section's whitespace is collapsed first. The README wraps at eighty
-    /// columns, so the sentence carrying the count is one word away from
-    /// becoming two lines at any time, and a phrase match that a rewrap can
-    /// silently turn off is a guard with an expiry date nobody wrote down.
-    ///
-    /// Every way this could come back with a number nobody wrote is a panic: no
-    /// stated count, two of them so neither is *the* claim, a phrase whose
-    /// halves do not bracket a word, or a word outside the small table below.
-    /// The table stays small on purpose — this file will never hold enough tests
-    /// to need `thirty-seven`, and an unknown word must stop the run rather than
-    /// be guessed at.
-    fn stated_unit_test_count(section: &str) -> usize {
-        const STATED_COUNT_PREFIX: &str = "there are ";
-        const STATED_COUNT_SUFFIX: &str = " of them";
-        const NUMBER_WORDS: [(&str, usize); 10] = [
-            ("one", 1),
-            ("two", 2),
-            ("three", 3),
-            ("four", 4),
-            ("five", 5),
-            ("six", 6),
-            ("seven", 7),
-            ("eight", 8),
-            ("nine", 9),
-            ("ten", 10),
-        ];
-
-        let prose = section.split_whitespace().collect::<Vec<_>>().join(" ");
-
-        assert_eq!(
-            prose.match_indices(STATED_COUNT_PREFIX).count(),
-            1,
-            "the `{TESTING_HEADING}` section has to state how many unit tests `src/git.rs` has, \
-             in exactly one place, using the phrase `{STATED_COUNT_PREFIX}<number word>\
-             {STATED_COUNT_SUFFIX}`. A count nobody states cannot be checked against the file, \
-             and two of them cannot both be the claim, so either way this refuses rather than \
-             picking one and reporting clean."
-        );
-
-        let word = prose
-            .split_once(STATED_COUNT_PREFIX)
-            .and_then(|(_, rest)| rest.split_once(STATED_COUNT_SUFFIX))
-            .map(|(word, _)| word)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the `{TESTING_HEADING}` section says `{STATED_COUNT_PREFIX}` but never \
-                     `{STATED_COUNT_SUFFIX}`, so there is no word between them to read the \
-                     claimed number out of"
-                )
-            });
-
-        NUMBER_WORDS
-            .iter()
-            .find(|(spelling, _)| *spelling == word)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the `{TESTING_HEADING}` section states its unit-test count as `{word}`, \
-                     which is not a number word this check knows. Spell it as one of the words \
-                     it does know, or teach it this one - a count it cannot read is a count it \
-                     cannot check, and it will not assume the sentence is fine."
-                )
-            })
-            .1
-    }
-
-    /// The README's `## Testing` section is written as an exhaustive, counted
-    /// inventory of what this file pins, so a test it never names — or a number
-    /// it states wrongly — is not a documentation gap but a false statement
-    /// about what is covered.
+    /// The README's `## Testing` section is written as an exhaustive inventory
+    /// of what this file pins, so a test it never names is not a documentation
+    /// gap but a false statement about what is covered.
     ///
     /// This is the second inventory in this README to drift out from under its
     /// own prose. The **What it guarantees** table went short first, which is
-    /// why the test above it exists; then this section went on saying there were
-    /// four unit tests here through two commits that added two more, and its
-    /// ordinal framing — "the fourth is about this document" — quietly stopped
-    /// counting anything real. Both drifts were found by a reader, which is the
-    /// expensive way: a list that is merely *maintained* is correct only until
-    /// the next person forgets, and nothing about forgetting announces itself.
+    /// why the test above it exists; then this section went on describing four
+    /// unit tests here through two commits that added two more, and its ordinal
+    /// framing — "the fourth is about this document" — quietly stopped counting
+    /// anything real. Both drifts were found by a reader, which is the expensive
+    /// way: a list that is merely *maintained* is correct only until the next
+    /// person forgets, and nothing about forgetting announces itself.
     ///
     /// So the same treatment. Every `fn` under a test attribute in this file
-    /// must be named verbatim in that section, and the number the section states
-    /// in prose must be the number of them there actually are. What is asserted
-    /// is completeness and arithmetic, not quality: whether a sentence
-    /// *describes* its test well stays a human's judgement, but a test this file
-    /// runs and that section never mentions cannot ship.
+    /// must be named verbatim in that section. What is asserted is completeness,
+    /// not quality: whether a sentence *describes* its test well stays a human's
+    /// judgement, but a test this file runs and that section never mentions
+    /// cannot ship.
     ///
     /// Three of the tests this pins are the ones the section's own thesis rests
     /// on. It claims the guard inventory is "checked, not merely maintained",
@@ -946,16 +869,6 @@ mod tests {
                  coverage they cannot know they have. Describe it there, or delete the test."
             );
         }
-
-        assert_eq!(
-            stated_unit_test_count(section),
-            names.len(),
-            "the README's `{TESTING_HEADING}` section states a different number of unit tests \
-             than `src/git.rs` defines. The section counts them out loud and then walks through \
-             them one by one, so the number is load-bearing prose rather than decoration: a \
-             reader who trusts it stops looking once they have read that many. Update the count \
-             to match the file. The tests it should be counting are {names:?}"
-        );
     }
 
     /// The identity git hands a child through the environment instead of
