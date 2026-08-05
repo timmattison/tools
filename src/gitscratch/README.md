@@ -118,10 +118,10 @@ remove the guard, watch that specific test fail, put it back:
   the opposite direction — *add* a prune and watch the test fail — because the
   guarantee is that it is not there.
 
-The unit tests in `src/git.rs` pin what needs no repository built around it, and
-there are eight of them. Three are about the code itself. **The
-`user.name`/`user.email` identity**, the last row above, is read back through
-`git var GIT_AUTHOR_IDENT` rather than by committing into a fixture, by
+The unit tests in `src/git.rs` pin what needs no repository built around it.
+Some are about the code itself. **The `user.name`/`user.email` identity**, the
+last row above, is read back through `git var GIT_AUTHOR_IDENT` rather than by
+committing into a fixture, by
 `commits_under_the_crate_s_own_identity_not_a_consuming_tool_s`. **The inherited
 git environment, shed** is asserted by
 `ignores_an_inherited_git_environment_naming_another_identity_or_repository`,
@@ -136,7 +136,7 @@ called empty and skipped. macOS will not let a working tree hold such a name at
 all, so the commit is built directly in the object database and the guard is
 pinned here rather than end-to-end.
 
-The other five are about this document rather than about the code.
+The rest are about this document rather than about the code.
 `every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks
 `safety_config` what it pins and requires the **What it guarantees** section
 above to name every one of them — the whole `key=value` for a settled value, the
@@ -147,8 +147,8 @@ the build instead of leaving a reader with a table they will reasonably take for
 the complete list. `--literal-pathspecs` is why the test exists — it was
 load-bearing in `safety_config` for a while before it was ever a row.
 
-Three more pin the *scope* those checks read, since a check pointed at the wrong
-span of the file reports clean without ever having seen the table.
+More of them pin the *scope* those checks read, since a check pointed at the
+wrong span of the file reports clean without ever having seen the table.
 `the_inventory_section_stops_at_the_next_heading_of_any_level` ends a section at
 the next heading whatever its level: demoting the heading below the inventory —
 one character — would otherwise widen it to swallow the prose here, which names
@@ -167,13 +167,13 @@ reporting clean. The bounds come from a CommonMark parse for that reason: it is
 the only thing that answers "is this line a heading?" instead of answering some
 particular spelling of the question.
 
-The last one turns that treatment on this section.
+One more turns that treatment on this section.
 `every_unit_test_in_this_file_is_named_in_the_readme_testing_section` reads
 `src/git.rs` back as text, collects every test defined in it, and requires the
-paragraphs above both to name each one and to state their number correctly. Two
-of this README's lists have now drifted out from under it — the guard table, and
-this count, which went on saying four through the commits that made it six — so
-this one is checked rather than trusted too.
+paragraphs above to name each one. Two of this README's lists have drifted out
+from under it — the guard table, and this walkthrough, which went on describing
+four tests through the commits that added two more — so this one is checked
+rather than trusted too.
 
 `tests/halts.rs` covers the other half of telling the truth: not that the
 harness leaves the repository alone, but that it does not report a cheap number
