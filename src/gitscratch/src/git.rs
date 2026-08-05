@@ -340,6 +340,7 @@ impl Git {
 
 #[cfg(test)]
 mod tests {
+    use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
     use super::Git;
@@ -431,48 +432,62 @@ mod tests {
 
     /// The one section a heading opens, cut out of the document around it.
     ///
-    /// The inventory check below is a claim about a single table, so it has to
-    /// read a single table. `--literal-pathspecs` and `core.hooksPath` are the
-    /// two guards matched by bare name, and the README's prose names both of
-    /// them outside the inventory; a check handed the whole document would be
-    /// satisfied by those sentences and report clean for a table that never
-    /// grew the row. Cutting the section out is what keeps "named in the
-    /// inventory" from quietly degrading into "mentioned somewhere in the
-    /// README". Anything that leaves no trustworthy scope to cut — a renamed
-    /// heading, an emptied section, one that nothing below it closes — panics
-    /// rather than handing back a scope the caller cannot rely on.
+    /// The checks below are claims about one section, so they must read one
+    /// section, or "named in the inventory" degrades into "mentioned somewhere
+    /// in the README". A scope that cannot be trusted — a renamed heading, an
+    /// emptied section, one nothing closes — panics rather than being returned.
+    ///
+    /// The bounds come from a CommonMark parse, because "is this line a
+    /// heading?" is a question about syntax and every lexical answer to it has
+    /// been wrong here: `\n## ` missed a heading demoted by one character, then
+    /// `starts_with('#')` cut this README's `## Testing` nineteen lines early
+    /// at a wrapped `#329`, with a fenced `# comment` and a setext heading two
+    /// more spellings still to come. A parse settles all four at once.
     fn inventory_section<'a>(document: &'a str, heading: &str) -> &'a str {
-        let (_, below_heading) = document.split_once(heading).unwrap_or_else(|| {
+        // The line a source offset opens, `\n` included, so summing it with the
+        // offset lands on the character after the heading.
+        let line_at = |offset: usize| -> &'a str {
+            document
+                .get(offset..)
+                .expect("a parser reports offsets at character boundaries")
+                .split_inclusive('\n')
+                .next()
+                .unwrap_or_default()
+        };
+
+        let headings: Vec<usize> = Parser::new(document)
+            .into_offset_iter()
+            .filter_map(|(event, span)| match event {
+                Event::Start(Tag::Heading { .. }) => Some(span.start),
+                _ => None,
+            })
+            .collect();
+
+        let opens = headings
+            .iter()
+            .position(|&offset| line_at(offset).trim_end() == heading)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the README has no `{heading}` section, so there is no inventory left to \
+                     check the guards against; a renamed or deleted heading has to fail here \
+                     rather than let this test pass by finding nothing"
+                )
+            });
+        let opened_at = headings[opens];
+        let closed_at = *headings.get(opens + 1).unwrap_or_else(|| {
             panic!(
-                "the README has no `{heading}` section, so there is no inventory left to check \
-                 the guards against; a renamed or deleted heading has to fail here rather than \
-                 let this test pass by finding nothing"
+                "the `{heading}` section runs to the end of the document with no heading after \
+                 it, so nothing bounds the inventory and its scope would silently become the \
+                 whole rest of the file; a check that is supposed to be asking about one table \
+                 cannot be handed everything below it"
             )
         });
-        // Cut at the next heading of *any* level rather than at the next
-        // `## `: a heading demoted by one character is still the end of this
-        // section, and a cut that cannot see it widens the scope instead of
-        // failing. The first segment is the tail of the heading line itself,
-        // so only a line beginning after it can close the section.
-        let mut lines = below_heading.split_inclusive('\n');
-        let heading_tail = lines.next().unwrap_or_default().len();
-        let body: usize = lines
-            .take_while(|line| !line.trim_start().starts_with('#'))
-            .map(str::len)
-            .sum();
-        let ends_at = heading_tail + body;
-        assert!(
-            ends_at < below_heading.len(),
-            "the `{heading}` section runs to the end of the document with no heading after it, \
-             so nothing bounds the inventory and its scope would silently become the whole rest \
-             of the file; a check that is supposed to be asking about one table cannot be handed \
-             everything below it"
-        );
-        // A sum of whole line lengths lands on a line boundary, which is always
-        // a character boundary - but `get` says so without a way to panic.
-        let inventory = below_heading
-            .get(..ends_at)
-            .expect("a cut summed from whole lines lands on a character boundary");
+
+        // The heading's own line is left out, so an inventory of nothing but a
+        // heading still reads as empty below.
+        let inventory = document
+            .get(opened_at + line_at(opened_at).len()..closed_at)
+            .expect("both ends are character boundaries the parser reported");
         assert!(
             !inventory.trim().is_empty(),
             "the `{heading}` section is empty, which would make every check below succeed \
@@ -565,20 +580,21 @@ mod tests {
     /// *any* level, because a heading is not required to stay the level it was
     /// written at.
     ///
-    /// Cutting the section at a literal `\n## ` asks a lexical question about a
-    /// structural thing, and the answer is wrong for every spelling that is
-    /// still a heading: demote `## Testing` to `### Testing` — one character —
-    /// and the section silently grows to swallow everything under it. That is
-    /// not an abstract widening. The prose below this table names
-    /// `--literal-pathspecs` and `core.hooksPath`, the exact two guards the
-    /// check matches by bare name, so a swallowed Testing section makes both of
-    /// them satisfiable without a row ever existing. The check would go on
-    /// reporting clean while checking nothing, which is the failure that costs
-    /// the most to notice: an over-wide scope never says a word.
+    /// Demote `## Testing` to `### Testing` — one character — and a cut that
+    /// ends only at the level it was told about silently grows the section to
+    /// swallow everything under it. That is not an abstract widening. The prose
+    /// below this table names `--literal-pathspecs` and `core.hooksPath`, the
+    /// exact two guards the check matches by bare name, so a swallowed Testing
+    /// section makes both of them satisfiable without a row ever existing. The
+    /// check would go on reporting clean while checking nothing, which is the
+    /// failure that costs the most to notice: an over-wide scope never says a
+    /// word.
     ///
-    /// So each level gets its own fixture rather than the one that prompted
-    /// this, and each fixture's stray sentence is the sentence that would do
-    /// the damage.
+    /// [`inventory_section`] gets this for free, since every level is a heading
+    /// to a CommonMark parser, and what is pinned here is that it is *asked*
+    /// about every level rather than filtered back down to one. So each level
+    /// gets its own fixture rather than the one that prompted this, and each
+    /// fixture's stray sentence is the sentence that would do the damage.
     #[test]
     fn the_inventory_section_stops_at_the_next_heading_of_any_level() {
         const STRAY_GUARD: &str = "--literal-pathspecs";
@@ -867,19 +883,20 @@ mod tests {
     /// *describes* its test well stays a human's judgement, but a test this file
     /// runs and that section never mentions cannot ship.
     ///
-    /// Two of the tests this pins are the ones the section's own thesis rests
+    /// Three of the tests this pins are the ones the section's own thesis rests
     /// on. It claims the guard inventory is "checked, not merely maintained",
     /// and that claim is only safe to believe because the scope the check runs
-    /// in is itself pinned — so those two, of all of them, are the ones that
+    /// in is itself pinned — so those three, of all of them, are the ones that
     /// must not go unnamed.
     ///
     /// Every way this could pass while checking nothing is closed off: the
     /// section is cut by the same helper that refuses a renamed heading, an
-    /// emptied section and one nothing closes; a scan that found no tests at all
-    /// fails; and a scan that found tests but not a test known to be in this
-    /// file fails too, since a matcher quietly reduced to finding some other
-    /// shape would otherwise sail through against a short list of its own
-    /// making.
+    /// emptied section and one nothing closes, and cut from a parse, so the
+    /// `#329` this very section wraps onto a line of its own is prose rather
+    /// than a boundary; a scan that found no tests at all fails; and a scan that
+    /// found tests but not a test known to be in this file fails too, since a
+    /// matcher quietly reduced to finding some other shape would otherwise sail
+    /// through against a short list of its own making.
     #[test]
     fn every_unit_test_in_this_file_is_named_in_the_readme_testing_section() {
         /// Embedded under `#[cfg(test)]` only, so the README rides in the test

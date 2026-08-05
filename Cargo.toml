@@ -116,6 +116,10 @@ wait-timeout = "0.2"
 # Dev dependencies
 tempfile = "3"
 mockito = "1.7"
+# CommonMark parser, for tests that ask a document where its headings are
+# instead of guessing from the text. Default features off: the `getopts` binary
+# and the `html` renderer are not wanted, only the parser.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 # Platform-specific
 procfs = "0.17"
