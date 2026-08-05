@@ -98,6 +98,14 @@ measured under identical rules**, not as a prediction of exactly how many
 conflict markers you'll see. The ranking is the product; the absolute numbers
 are supporting evidence.
 
+What it will not do is guess. If git cannot carry a replay out — it refuses to
+write a commit because the object database is full or read-only, say — `grist`
+fails and tells you which branch and which commit, rather than counting the
+dropped work as zero and handing you a ranking of orderings it never measured.
+That matters most when the cause is systematic, since a failure that hits every
+branch would otherwise make every ordering tie and turn the answer into a
+confident "pick whichever you prefer".
+
 ## Development
 
 ```console
