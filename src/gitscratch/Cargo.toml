@@ -14,6 +14,10 @@ tempfile.workspace = true
 # anyone having to remember `--features testing`. Cargo permits this one cycle
 # precisely so a crate can enable its own optional test scaffolding.
 gitscratch = { path = ".", features = ["testing"] }
+# Locates the headings that bound the README sections `src/git.rs` checks
+# itself against. A dev-dependency only, so nothing a consumer ships gains a
+# markdown parser.
+pulldown-cmark.workspace = true
 
 [features]
 # Shared git fixture builders for the test suites of crates built on gitscratch.
