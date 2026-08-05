@@ -631,6 +631,86 @@ mod tests {
         inventory_section(&document, INVENTORY_HEADING);
     }
 
+    /// A `#` is not a heading, and the cut has to know the difference.
+    ///
+    /// This README wraps at eighty columns, so `Issue #329` broke across a line
+    /// and left `#329` as the first word of one — a `#` run with no space after
+    /// it, which opens no heading in any markdown dialect. A cut that stops at
+    /// any line starting with `#` stopped there, nineteen lines early, and both
+    /// halves of that are bad. The mild half is the narrowing: a test named in
+    /// the tail of the section reads as named nowhere. The severe half is that
+    /// the bogus boundary *satisfies* the refusal above — a section nothing
+    /// closes still finds a `#` to end at, so the one guard against an unbounded
+    /// scope reports clean while the scope is unbounded, which is the exact
+    /// false green that refusal was written for.
+    ///
+    /// Fenced code is the same mistake with a different spelling: `# a comment`
+    /// inside a ```` ```sh ```` block is shell, not a section boundary. Each
+    /// spelling gets its own fixture, because enumerating spellings is what this
+    /// is meant to stop.
+    #[test]
+    fn a_hash_that_is_not_a_heading_does_not_end_a_section() {
+        // Placed after the stray `#` in every fixture, so a section cut there
+        // loses it and a section cut at a real heading keeps it.
+        const KEPT: &str = "gc.auto=0";
+
+        let wrapped = format!(
+            "# gitscratch\n\n{INVENTORY_HEADING}\n\n\
+             Issue\n#329 tracks growing the suite to eight guarantees.\n\n\
+             | Guard | Why |\n| --- | --- |\n\
+             | `{KEPT}` | A gc could collect a loose simulated commit. |\n\n\
+             ## Used by\n\ngrist.\n"
+        );
+        let fenced = format!(
+            "# gitscratch\n\n{INVENTORY_HEADING}\n\n\
+             ```sh\n# not a heading, a shell comment\ngit gc --auto\n```\n\n\
+             | Guard | Why |\n| --- | --- |\n\
+             | `{KEPT}` | A gc could collect a loose simulated commit. |\n\n\
+             ## Used by\n\ngrist.\n"
+        );
+
+        for (spelling, document) in [
+            ("a wrapped `#329`", &wrapped),
+            ("a `#` comment inside a fenced block", &fenced),
+        ] {
+            let inventory = inventory_section(document, INVENTORY_HEADING);
+
+            assert!(
+                inventory.contains(KEPT),
+                "{spelling} opens no heading, so it cannot end the `{INVENTORY_HEADING}` \
+                 section; cutting there hands back a scope missing everything the section says \
+                 below it, and a row that is present reads as a row that is absent: {inventory}"
+            );
+        }
+
+        // The same non-heading `#`, with nothing after the section at all. The
+        // refusal above has to fire; a cut at `#329` used to stand in for the
+        // heading it needs and let an unbounded scope pass for a bounded one.
+        let unclosed = format!(
+            "# gitscratch\n\n{INVENTORY_HEADING}\n\n\
+             Issue\n#329 tracks growing the suite to eight guarantees.\n\n\
+             | Guard | Why |\n| --- | --- |\n\
+             | `{KEPT}` | A gc could collect a loose simulated commit. |\n"
+        );
+
+        let refusal = std::panic::catch_unwind(|| inventory_section(&unclosed, INVENTORY_HEADING))
+            .expect_err(
+                "nothing closes this section, so it has to be refused; a `#` that opens no \
+                 heading must not be allowed to pass for the boundary that is missing, or the \
+                 one check standing between this scope and the rest of the file is satisfied by \
+                 a line of prose",
+            );
+        let message = refusal
+            .downcast_ref::<String>()
+            .map_or("", |panicked| panicked.as_str());
+
+        assert!(
+            message.contains("runs to the end of the document with no heading after it"),
+            "the refusal has to be the unbounded-scope one, since that is the guarantee at \
+             stake; failing for some other reason would leave it untested: {message}"
+        );
+    }
+
     /// Every test this file defines, named the way the compiler sees it.
     ///
     /// Read off the source text because nothing in Rust hands a test its own

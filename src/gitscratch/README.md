@@ -119,7 +119,7 @@ remove the guard, watch that specific test fail, put it back:
   guarantee is that it is not there.
 
 The unit tests in `src/git.rs` pin what needs no repository built around it, and
-there are seven of them. Three are about the code itself. **The
+there are eight of them. Three are about the code itself. **The
 `user.name`/`user.email` identity**, the last row above, is read back through
 `git var GIT_AUTHOR_IDENT` rather than by committing into a fixture, by
 `commits_under_the_crate_s_own_identity_not_a_consuming_tool_s`. **The inherited
@@ -136,7 +136,7 @@ called empty and skipped. macOS will not let a working tree hold such a name at
 all, so the commit is built directly in the object database and the guard is
 pinned here rather than end-to-end.
 
-The other four are about this document rather than about the code.
+The other five are about this document rather than about the code.
 `every_guard_the_safety_config_pins_is_named_in_the_readme_inventory` asks
 `safety_config` what it pins and requires the **What it guarantees** section
 above to name every one of them — the whole `key=value` for a settled value, the
@@ -147,7 +147,7 @@ the build instead of leaving a reader with a table they will reasonably take for
 the complete list. `--literal-pathspecs` is why the test exists — it was
 load-bearing in `safety_config` for a while before it was ever a row.
 
-Two more pin the *scope* that check reads, since a check pointed at the wrong
+Three more pin the *scope* those checks read, since a check pointed at the wrong
 span of the file reports clean without ever having seen the table.
 `the_inventory_section_stops_at_the_next_heading_of_any_level` ends a section at
 the next heading whatever its level: demoting the heading below the inventory —
@@ -157,6 +157,15 @@ name, so both would be satisfiable with no row for either.
 `an_inventory_section_that_nothing_closes_is_refused_rather_than_run_to_the_end`
 shuts the same gap from the other side: a section with no heading after it is
 refused outright rather than read to the end of the file.
+`a_hash_that_is_not_a_heading_does_not_end_a_section` shuts the third, the one
+this very section fell down. A `#` is not a heading: the `#329` below is the
+wrapped tail of an `Issue`, and a `#` opening a line inside a fenced shell block
+is a comment. A cut that stopped at either ended this section well short of its
+own end — so a test named down there read as named nowhere — and, worse, handed
+the refusal above a boundary to be satisfied by, leaving an unbounded scope
+reporting clean. The bounds come from a CommonMark parse for that reason: it is
+the only thing that answers "is this line a heading?" instead of answering some
+particular spelling of the question.
 
 The last one turns that treatment on this section.
 `every_unit_test_in_this_file_is_named_in_the_readme_testing_section` reads
