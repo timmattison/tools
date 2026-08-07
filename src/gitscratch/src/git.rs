@@ -193,7 +193,11 @@ mod tests {
     fn inherited_identity() -> String {
         let held: Vec<String> = INHERITED_IDENTITY_VARS
             .iter()
-            .filter_map(|name| std::env::var(name).ok().map(|value| format!("{name}={value}")))
+            .filter_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .map(|value| format!("{name}={value}"))
+            })
             .collect();
 
         if held.is_empty() {
