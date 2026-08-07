@@ -167,4 +167,66 @@ mod tests {
             "scratch commits should be authored by the crate, not a consumer: {ident}"
         );
     }
+
+    /// Marks the re-executed child half of
+    /// [`the_pinned_identity_survives_a_hook_environment`].
+    const CHILD_MARKER: &str = "GITSCRATCH_HOOK_ENVIRONMENT_CHILD";
+
+    /// libtest's exact filter for the one test the child half runs.
+    const HOOK_TEST_PATH: &str = "git::tests::the_pinned_identity_survives_a_hook_environment";
+
+    /// The identity variables git exports into every hook it runs, carrying
+    /// values that stand in for a developer's own git identity.
+    const HOOK_ENVIRONMENT: [(&str, &str); 4] = [
+        ("GIT_AUTHOR_NAME", "Consuming Tool"),
+        ("GIT_AUTHOR_EMAIL", "consumer@example.invalid"),
+        ("GIT_COMMITTER_NAME", "Consuming Tool"),
+        ("GIT_COMMITTER_EMAIL", "consumer@example.invalid"),
+    ];
+
+    /// A consumer invoked from a git hook inherits `GIT_AUTHOR_NAME` and its
+    /// siblings, and those variables outrank the `-c user.name` that
+    /// [`Git::safety_config`] pins. This test reproduces that environment, so
+    /// the suite catches the leak on its own instead of a developer's own
+    /// pre-commit run catching it on an unrelated commit.
+    ///
+    /// The environment belongs to a re-executed child of this test binary
+    /// rather than to this process. `std::env::set_var` would leak into every
+    /// other test in the binary, and a child process keeps concurrent runs of
+    /// this suite isolated from each other.
+    #[test]
+    fn the_pinned_identity_survives_a_hook_environment() {
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let git = Git::new(std::env::temp_dir(), "");
+
+            let ident = git
+                .run(&["var", "GIT_AUTHOR_IDENT"])
+                .expect("git var GIT_AUTHOR_IDENT");
+
+            assert!(
+                ident.starts_with("gitscratch <gitscratch@localhost>"),
+                "scratch commits should be authored by the crate, not a consumer: {ident}"
+            );
+            return;
+        }
+
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("path of the running test binary"),
+        );
+        child
+            .args([HOOK_TEST_PATH, "--exact", "--nocapture"])
+            .env(CHILD_MARKER, "1");
+        for (name, value) in HOOK_ENVIRONMENT {
+            child.env(name, value);
+        }
+
+        let output = child.output().expect("re-run this test binary");
+
+        assert!(
+            output.status.success(),
+            "the pinned identity did not survive a hook environment:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
