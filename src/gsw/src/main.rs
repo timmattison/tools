@@ -74,7 +74,9 @@ struct Cli {
     #[arg(long, default_value_t = 20)]
     log_lines: usize,
 
-    /// Disable the recent-commit section entirely.
+    /// Disable the recent-commit section entirely. The newest commit's age
+    /// lives on the first row of that section, so this takes the commit age
+    /// off the frame as well.
     #[arg(long)]
     no_log: bool,
 

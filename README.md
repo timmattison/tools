@@ -402,8 +402,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     a `git log --oneline` tail. Ages use two units and get coarser as they grow — `5m23s`,
     `2h14m`, `3d12h`, `5y6mo` — so a repo untouched for years stays readable. Every age sits on
     the row of the thing it ages, a file or a commit, and each is shown exactly once: the newest
-    commit's age is on the first log row, not also in the header. An age gsw cannot compute —
-    a commit timestamp ahead of the local clock, say — renders as `?` rather than `0s`. Respects
+    commit's age is on the first log row, not also in the header (so `--no-log` takes the commit
+    age off the frame too). An age gsw cannot compute — a commit timestamp ahead of the local
+    clock, say — renders as `?` rather than `0s`. Respects
     `COLUMNS` and preserves colors under watch wrappers. Nothing it prints ever wraps: the age
     column is fixed-width by contract, and the header shrinks to fit by dropping the tracking
     ref's name and shortening the branch from the middle.
