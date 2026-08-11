@@ -1357,13 +1357,21 @@ mod tests {
     #[test]
     fn separator_with_a_clock_still_spans_the_terminal_width() {
         // The rule is a full-width frame element. Text inside it must displace
-        // dashes, never add columns — one extra column wraps the row.
-        for width in 40..=200 {
+        // dashes, never add columns — one extra column wraps the row. Sweeping
+        // from zero covers the fallback boundary too: at every width the rule is
+        // either a plain run of dashes or carries the clock whole, never a
+        // truncated duration, and it is always exactly as wide as asked.
+        for width in 0..=200 {
             let sep = strip_ansi(&render_separator(width, Some(&refresh_status())));
             assert_eq!(
                 UnicodeWidthStr::width(sep.as_str()),
                 width,
                 "separator with a clock must be exactly {width} columns: {sep:?}",
+            );
+            assert!(
+                sep.chars().all(|c| c == '─')
+                    || sep.contains("last refresh: 3m2s ago, next refresh: 15s"),
+                "at {width} columns the rule is neither plain nor whole: {sep:?}",
             );
         }
     }
