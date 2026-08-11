@@ -150,13 +150,6 @@ pub fn resolve_base(repo: &gix::Repository) -> String {
     "HEAD".to_string()
 }
 
-/// Committer timestamp of HEAD as unix seconds, or `None` (no commits, etc.).
-/// Matches `git log -1 --format=%ct` (committer date, not author date).
-pub fn head_commit_secs(repo: &gix::Repository) -> Option<i64> {
-    let commit = repo.head_commit().ok()?;
-    Some(commit.time().ok()?.seconds)
-}
-
 /// The `n` most recent commits from HEAD as `(short_hash, unix_secs, summary)`.
 /// Empty when `n == 0` or there are no commits.
 pub fn recent_log(repo: &gix::Repository, n: usize) -> Vec<(String, i64, String)> {
@@ -762,14 +755,6 @@ mod tests {
         let repo = open_at(dir.path()).unwrap();
         let status = super::base_status(&repo, "no-such-branch");
         assert_eq!((status.ahead, status.behind), (0, 0));
-    }
-
-    #[test]
-    fn head_commit_secs_is_some_for_a_repo_with_a_commit() {
-        let dir = init_repo();
-        let repo = open_at(dir.path()).unwrap();
-        let secs = super::head_commit_secs(&repo).expect("a commit exists");
-        assert!(secs > 1_000_000_000, "looks like a unix timestamp: {secs}");
     }
 
     #[test]

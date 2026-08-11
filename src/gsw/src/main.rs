@@ -32,8 +32,8 @@ mod watch;
 #[command(
     about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
-                  commits ahead of (and behind) the base branch, last-commit age, and a per-file \
-                  list showing a magnitude bar, +/- counts, and recency. On a TTY it \
+                  commits ahead of (and behind) the base branch, a recent-commit log, and a \
+                  per-file list showing a magnitude bar, +/- counts, and recency. On a TTY it \
                   runs as a self-refreshing watch that repaints on filesystem changes and \
                   re-walks the repository every --refresh-interval seconds, with the \
                   separator under the header showing how stale the screen is and how long \
@@ -386,17 +386,20 @@ pub(crate) struct Render {
 /// This is what the watch-mode decay timer keys its cadence off: a young frame
 /// ticks fast to keep the live seconds/minutes text and the color fade current,
 /// while an old one lets the timer idle. `None` means nothing aging is on
-/// screen (no commits *and* a clean tree), which the caller reads as "disable
-/// the timer". Files with no recorded mtime (deleted files, untracked dirs)
-/// contribute nothing.
+/// screen, which the caller reads as "disable the timer".
+///
+/// Both halves are read off what the frame actually draws, so the timer can
+/// never pace something the reader cannot see. The commit age comes from the
+/// newest log row — with `--no-log` there is no commit age on screen and none
+/// here either. Items with no recorded age (deleted files, untracked dirs, a
+/// commit timestamp that does not resolve) contribute nothing: they render a
+/// fixed mark that never needs repainting.
 fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
     // The youngest item wins, so the timer ticks fast enough for whatever is
-    // freshest. Files with no recorded mtime contribute nothing.
+    // freshest. The log is newest-first, so its head is the newest commit.
     let freshest_change = snapshot.files.iter().filter_map(|f| f.age).min();
-    [snapshot.last_commit_age, freshest_change]
-        .into_iter()
-        .flatten()
-        .min()
+    let newest_commit = snapshot.log.first().and_then(|entry| entry.age);
+    [newest_commit, freshest_change].into_iter().flatten().min()
 }
 
 /// Walk the repository and render the full status frame for `dims`.
@@ -425,9 +428,9 @@ pub(crate) fn build_output(
 /// git-work half of the render pipeline.
 ///
 /// This is the expensive, side-effecting step: it queries the current branch,
-/// resolves the base ref and counts commits ahead/behind, reads the last-commit
-/// age, collects working-tree changes and their mtimes, and fetches the
-/// recent-commit log and upstream status. The result is a pure description of
+/// resolves the base ref and counts commits ahead/behind, collects working-tree
+/// changes and their mtimes, and fetches the recent-commit log and upstream
+/// status. The result is a pure description of
 /// repository state, independent of the live terminal — turning it into a frame
 /// for a given [`watch::Dimensions`] is the separate, cheap [`render_frame`]
 /// half. Watch mode collects once per filesystem change and re-renders the
@@ -437,8 +440,6 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
     let base_status = repo::base_status(repo, &base);
-
-    let last_commit_age = last_commit_age(repo);
 
     let repo::Changes {
         entries,
@@ -453,7 +454,6 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
         base,
         base_status.ahead,
         base_status.behind,
-        last_commit_age,
         entries,
         &staged_numstat,
         &unstaged_numstat,
@@ -606,14 +606,6 @@ fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
         .collect()
 }
 
-/// How long ago HEAD was committed, or `None` when undeterminable.
-fn last_commit_age(repo: &gix::Repository) -> Option<Duration> {
-    let secs = repo::head_commit_secs(repo)?;
-    let secs = u64::try_from(secs).ok()?;
-    let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-    SystemTime::now().duration_since(when).ok()
-}
-
 /// Get mtime ages for each entry's path, where the path still exists on disk.
 ///
 /// `repo_root` anchors the lookup: gix status reports paths relative to the
@@ -745,7 +737,6 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age: Some(Duration::from_secs(30)),
             files,
             log: Vec::new(),
             upstream: None,
@@ -765,10 +756,23 @@ mod tests {
     /// Build a minimal [`Snapshot`] with the given HEAD-commit age and a file
     /// row per supplied mtime age, so the freshest-age tests can exercise the
     /// commit-vs-change comparison without walking a real repo.
+    ///
+    /// `head_commit_age` becomes the single log row, which is where the frame
+    /// shows the newest commit's age. `None` means a repository with no commits
+    /// on screen at all.
     fn snapshot_with(
-        last_commit_age: Option<Duration>,
+        head_commit_age: Option<Duration>,
         file_ages: &[Option<Duration>],
     ) -> Snapshot {
+        let log = head_commit_age
+            .map(|age| {
+                vec![LogEntry {
+                    hash: "abc1234".into(),
+                    subject: "the newest commit".into(),
+                    age: Some(age),
+                }]
+            })
+            .unwrap_or_default();
         let files = file_ages
             .iter()
             .enumerate()
@@ -788,9 +792,8 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age,
             files,
-            log: Vec::new(),
+            log,
             upstream: None,
             operation: None,
         }
@@ -897,7 +900,6 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age: Some(Duration::from_secs(10)),
             files: vec![RenderEntry {
                 path: "f.rs".into(),
                 orig_path: None,

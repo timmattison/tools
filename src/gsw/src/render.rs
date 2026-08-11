@@ -20,9 +20,12 @@ pub struct Snapshot {
     /// Commits on the base not reachable from HEAD — how far behind the base
     /// the branch is, i.e. whether it needs a rebase. `0` when up to date.
     pub commits_behind: u32,
-    pub last_commit_age: Option<Duration>,
     pub files: Vec<RenderEntry>,
     /// Most recent commits, newest first. Empty when not requested.
+    ///
+    /// The head of this list is HEAD, so its age is the last-commit age. The
+    /// frame shows that age here and nowhere else, and the watch-mode decay
+    /// timer reads it from here too.
     pub log: Vec<LogEntry>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
@@ -1293,7 +1296,6 @@ mod tests {
             base: "main".into(),
             commits_ahead: 3,
             commits_behind: 0,
-            last_commit_age: Some(Duration::from_secs(5 * 60 + 23)),
             files,
             log: vec![],
             upstream: None,
@@ -1555,7 +1557,6 @@ mod tests {
         stale_untracked.age = Some(ancient());
 
         let mut snap = snap_with(vec![stale_file, stale_untracked]);
-        snap.last_commit_age = Some(ancient());
         snap.log = vec![LogEntry {
             hash: "52ef922".into(),
             subject: "an old commit that has been sitting here for a very long time".into(),
@@ -3575,7 +3576,6 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
-        snap.last_commit_age = Some(Duration::from_secs(10));
         snap.files[0].age = Some(Duration::from_secs(20));
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),

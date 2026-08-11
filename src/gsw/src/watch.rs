@@ -2185,7 +2185,6 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age: None,
             files: Vec::new(),
             log: Vec::new(),
             upstream: None,
