@@ -1761,6 +1761,32 @@ mod tests {
     const CHEAP: Duration = Duration::from_millis(150);
 
     #[test]
+    fn the_two_clock_numbers_always_sum_to_the_interval() {
+        // "last refresh: 1s ago, next refresh: 58s" on a 60-second interval
+        // makes a reader check their arithmetic. Both numbers are printed as
+        // whole seconds, so the elapsed half rounds down and the remaining half
+        // must round up — then the pair reads as one interval, and the countdown
+        // never claims less time than is actually left.
+        let t0 = Instant::now();
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        for millis in [0, 1, 400, 999, 1000, 1400, 30_500, 58_999, 59_999] {
+            let now = t0 + Duration::from_millis(millis);
+            let frame = timing(now.saturating_duration_since(t0), &schedule, now);
+            let elapsed = frame.age_offset.as_secs();
+            let remaining = frame
+                .next_refresh_in
+                .expect("a scheduled walk has a countdown")
+                .as_secs();
+            assert_eq!(
+                elapsed + remaining,
+                TEST_INTERVAL.as_secs(),
+                "at {millis}ms the clock reads {elapsed}s ago / {remaining}s left, \
+                 which does not add up to one {TEST_INTERVAL:?} interval",
+            );
+        }
+    }
+
+    #[test]
     fn timed_walk_falls_due_one_interval_after_the_last_walk() {
         // The countdown the refresh clock shows: with no filesystem event at
         // all, gsw still re-walks every interval. Instants derive from one base,
