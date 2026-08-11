@@ -201,7 +201,7 @@ pub(crate) fn render_with_offset(
         prefix,
         behind,
         suffix,
-    } = header_segments(snapshot, age_offset, opts.terminal_width);
+    } = header_segments(snapshot, opts.terminal_width);
     // The whole header is bold as before; the optional behind segment is
     // additionally warning-colored (yellow) to flag that the branch needs a
     // rebase. When `behind` is `None` the prefix+suffix reproduce today's
@@ -335,7 +335,7 @@ struct HeaderSegments {
     prefix: String,
     /// `, {m} behind` — present only when `commits_behind > 0`.
     behind: Option<String>,
-    /// The upstream field and `• last commit {age} ago` tail.
+    /// The upstream field. Empty when the branch tracks nothing.
     suffix: String,
 }
 
@@ -347,7 +347,7 @@ impl HeaderSegments {
             + UnicodeWidthStr::width(self.suffix.as_str())
     }
 
-    /// Cut the line down to `width` columns, reserving the age tail.
+    /// Cut the line down to `width` columns, reserving the upstream field.
     ///
     /// The ladder in [`header_segments`] normally lands inside the terminal
     /// without reaching this; it is the backstop for widths so narrow that
@@ -355,9 +355,9 @@ impl HeaderSegments {
     /// beats a wrapped one: wrapping shifts every row below it.
     ///
     /// What gives is the identity text — the branch name and the ahead-count
-    /// clause — because the `last commit {age} ago` tail is the field the
-    /// header exists to carry. Only a terminal too narrow for the tail alone
-    /// cuts into the tail itself.
+    /// clause — because by the time the ladder reaches here it has already
+    /// decided the upstream field earns its columns. Only a terminal too
+    /// narrow for that field alone cuts into the field itself.
     fn clamp(self, width: usize) -> Self {
         let suffix = truncate_to_budget(&self.suffix, width);
         let identity_budget = width - UnicodeWidthStr::width(suffix.as_str());
@@ -398,26 +398,19 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// Split the header into independently-styleable pieces, sized to fit
 /// `width` columns.
 ///
-/// The header is a single line of free text with the last-commit age at its
-/// end, so anything that overflows takes the age with it onto a wrapped
-/// second line. When the natural header is too wide it is shrunk in order of
-/// what costs the reader least: the tracking ref's name (a duplicate of the
-/// branch), then the branch and base names shaved toward
-/// [`HEADER_NAME_FLOOR`] longest-first, then the upstream field entirely,
-/// then a hard cut. The `• last commit {age} ago` tail is never the thing
-/// that gives way.
+/// The header is a single line of free text, so one column of overflow wraps
+/// it onto a second row and shifts everything below. When the natural header
+/// is too wide it is shrunk in order of what costs the reader least: the
+/// tracking ref's name (a duplicate of the branch), then the branch and base
+/// names shaved toward [`HEADER_NAME_FLOOR`] longest-first, then the upstream
+/// field entirely, then a hard cut.
 ///
-/// `age_offset` is added (saturating) to the last-commit age before it is
-/// formatted, so the header's `last commit {age} ago` advances in lockstep
-/// with the file and log ages. `Duration::ZERO` leaves the age unchanged. An
-/// unknown last-commit age (`None`) stays `?` regardless of the offset.
-fn header_segments(snap: &Snapshot, age_offset: Duration, width: usize) -> HeaderSegments {
-    let age = snap
-        .last_commit_age
-        .map(|a| a.saturating_add(age_offset))
-        .map_or_else(|| UNKNOWN_AGE.to_string(), format_age_detailed);
+/// The header carries no age. Every age on the frame belongs to a row that
+/// names what it is aging — a file or a commit — and the newest commit's age
+/// sits on the first log row, directly beneath this line.
+fn header_segments(snap: &Snapshot, width: usize) -> HeaderSegments {
     let compose = |branch: &str, base: &str, detail: UpstreamDetail| {
-        compose_header(snap, branch, base, &age, detail)
+        compose_header(snap, branch, base, detail)
     };
 
     let full = compose(&snap.branch, &snap.base, UpstreamDetail::Full);
@@ -451,7 +444,6 @@ fn compose_header(
     snap: &Snapshot,
     branch: &str,
     base: &str,
-    age: &str,
     detail: UpstreamDetail,
 ) -> HeaderSegments {
     let commit_word = if snap.commits_ahead == 1 {
@@ -474,7 +466,7 @@ fn compose_header(
         word = commit_word,
     );
     let behind = (snap.commits_behind > 0).then(|| format!(", {} behind", snap.commits_behind));
-    let suffix = format!("{upstream_field} • last commit {age} ago");
+    let suffix = upstream_field;
     HeaderSegments {
         prefix,
         behind,
@@ -1612,9 +1604,8 @@ mod tests {
     #[test]
     fn header_never_exceeds_the_terminal_width() {
         // The header is the one line gsw draws as free text, so a long branch
-        // or tracking-ref name used to run straight past the terminal edge —
-        // dropping the `last commit {age} ago` tail, the very thing the eye
-        // goes to, onto a second line.
+        // or tracking-ref name used to run straight past the terminal edge and
+        // wrap onto a second row, shifting every row below it.
         let header = header_of(&snap_with_overlong_header(), &opts());
         assert!(
             UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
@@ -1625,20 +1616,19 @@ mod tests {
     }
 
     #[test]
-    fn header_keeps_the_age_tail_when_squeezed() {
-        // Whatever else the header sheds to fit, the age survives intact —
-        // at every width where the tail fits on the line at all. Past the
-        // point where shaving names can pay for the overflow, the cut has to
-        // come out of the branch and the ahead-count text, not out of the
-        // one field the header exists to carry.
+    fn header_keeps_the_branch_identity_when_squeezed() {
+        // Whatever else the header sheds to fit, it stays a header: the branch
+        // name survives at every width where the line can carry anything at
+        // all. Shaving is middle-truncation, so the name keeps both ends.
         let snap = snap_with_overlong_header();
         for terminal_width in [100, 80, 60, 45, 40] {
             let mut o = opts();
             o.terminal_width = terminal_width;
             let header = header_of(&snap, &o);
             assert!(
-                header.ends_with("• last commit 5m23s ago"),
-                "header squeezed to {terminal_width} columns dropped the age tail: {header:?}",
+                header.contains("featu") && header.contains("ever"),
+                "header squeezed to {terminal_width} columns lost both ends of the \
+                 branch name: {header:?}",
             );
             assert!(
                 UnicodeWidthStr::width(header.as_str()) <= terminal_width,
@@ -1776,7 +1766,7 @@ mod tests {
     }
 
     #[test]
-    fn header_mentions_branch_commits_and_age() {
+    fn header_mentions_branch_and_commit_count() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
         assert!(
@@ -1786,10 +1776,6 @@ mod tests {
         assert!(
             header_line.contains("3 commits ahead of main"),
             "header should mention commit count and base: {header_line}",
-        );
-        assert!(
-            header_line.contains("5m23s"),
-            "header should mention last-commit age: {header_line}",
         );
     }
 
@@ -2562,26 +2548,6 @@ mod tests {
             UnicodeWidthStr::width(file_row.trim_end()),
             UnicodeWidthStr::width(log_line.trim_end()),
             "file row and log row should occupy the same width so age columns align:\n  file: {file_row:?}\n  log:  {log_line:?}",
-        );
-    }
-
-    #[test]
-    fn header_renders_question_mark_when_last_commit_age_unknown() {
-        // When git can't tell us when HEAD was authored (empty repo, malformed
-        // %ct, clock skew), the header used to say "last commit 0s ago" — i.e.
-        // it lied about a fresh commit. Render an explicit "?" instead so the
-        // unknown state is visible.
-        let mut snap = snap_with(vec![]);
-        snap.last_commit_age = None;
-        let out = strip_ansi(&render(&snap, &opts()));
-        let header = out.lines().next().unwrap_or("");
-        assert!(
-            header.contains("last commit ? ago"),
-            "header should mark unknown last-commit age explicitly: {header}",
-        );
-        assert!(
-            !header.contains("0s ago"),
-            "unknown age must not be misrepresented as 0s: {header}",
         );
     }
 
@@ -3534,14 +3500,19 @@ mod tests {
         // The behind segment is warning-colored (yellow + bold). Force
         // `colored` on so the rendered header carries the real ANSI we'd
         // emit on a terminal, then assert: (1) a yellow SGR appears, (2) the
-        // plain text is `…ahead of main, 87 behind • last commit…` with the
-        // segment wedged between the base name and the suffix.
+        // plain text is `…ahead of main, 87 behind • ↑2 ↓0 …` with the
+        // segment wedged between the base name and the upstream field.
         let _guard = COLORED_OVERRIDE_GUARD
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let mut snap = snap_with(vec![]);
         snap.commits_behind = 87;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 0,
+        });
         let rendered = render(&snap, &opts());
         colored::control::unset_override();
 
@@ -3552,19 +3523,18 @@ mod tests {
         );
         let plain = strip_ansi(header_line);
         assert!(
-            plain.contains("ahead of main, 87 behind • last commit"),
+            plain.contains("ahead of main, 87 behind • ↑2 ↓0"),
             "behind segment should sit between the base name and the suffix: {plain}",
         );
     }
 
     #[test]
-    fn age_offset_advances_header_file_and_log_ages() {
+    fn age_offset_advances_file_and_log_ages() {
         // A render-time age offset advances every displayed age by a single
-        // Duration: the header's last-commit age, each file row's mtime age,
-        // and each commit-log row's age. The three base ages are picked so the
-        // advanced strings can't collide with the un-advanced ones.
+        // Duration: each file row's mtime age and each commit-log row's age.
+        // The two base ages are picked so the advanced strings can't collide
+        // with the un-advanced ones.
         let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
-        snap.last_commit_age = Some(Duration::from_secs(10)); // header: "10s"
         snap.files[0].age = Some(Duration::from_secs(20)); // file row: "20s"
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
@@ -3576,10 +3546,6 @@ mod tests {
 
         let advanced = strip_ansi(&render_with_offset(&snap, &o, Duration::from_secs(50)));
         assert!(
-            advanced.contains("1m0s"),
-            "header age 10s + 50s offset should render as 1m0s: {advanced}",
-        );
-        assert!(
             advanced.contains("1m10s"),
             "file age 20s + 50s offset should render as 1m10s: {advanced}",
         );
@@ -3589,7 +3555,6 @@ mod tests {
         );
 
         let base = strip_ansi(&render(&snap, &o));
-        assert!(base.contains("10s"), "header age unoffset is 10s: {base}");
         assert!(base.contains("20s"), "file age unoffset is 20s: {base}");
         assert!(base.contains("1m40s"), "log age unoffset is 1m40s: {base}");
     }

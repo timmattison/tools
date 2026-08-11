@@ -659,8 +659,8 @@ fn one_shot_flag_matches_default_piped_output() {
     fs::write(dir.path().join("b.txt"), "untracked\n").unwrap();
 
     // The two invocations run back-to-back but a fraction of a second apart, so
-    // any age rendered at second granularity ("last commit 0s ago", a file row
-    // ending in "0s") can tick over between them and make the byte comparison
+    // any age rendered at second granularity (a commit row or a file row ending
+    // in "0s") can tick over between them and make the byte comparison
     // flake. Backdate every age source — the HEAD commit's committer time and
     // the untracked file's mtime — to a fixed instant over a day in the past so
     // the formatter renders them as `XdYh` (smallest shown unit is hours);
@@ -753,6 +753,14 @@ fn commit_dated(dir: &Path, message: &str, date: &str) {
     assert!(status.success(), "dated git commit failed");
 }
 
+/// Subject of the 2011-dated fixture commit, long enough that the log row has
+/// to truncate it — which is part of what this test pins.
+const ANCIENT_COMMIT_SUBJECT: &str = "an old commit that has been sitting here for a very long time";
+
+/// The head of [`ANCIENT_COMMIT_SUBJECT`], short enough to survive that
+/// truncation, so the row can still be found in the rendered frame.
+const ANCIENT_COMMIT_PREFIX: &str = "an old commit that has been";
+
 #[test]
 fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
     // Regression, end to end: a repo whose last commit is years old rendered
@@ -765,11 +773,7 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
     let p = dir.path();
     fs::write(p.join("a.txt"), "changed\n").unwrap();
     run_git(p, &["add", "a.txt"]);
-    commit_dated(
-        p,
-        "an old commit that has been sitting here for a very long time",
-        "2011-03-04T05:06:07",
-    );
+    commit_dated(p, ANCIENT_COMMIT_SUBJECT, "2011-03-04T05:06:07");
     // A dirty working tree so the file-row age column renders too.
     fs::write(p.join("b.txt"), "untracked\n").unwrap();
 
@@ -796,15 +800,15 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
 
     // And the age itself reads in years+months rather than a day count. The
     // fixture commit is from 2011, so this holds however long from now the
-    // suite runs.
-    let age = out
-        .split_once("last commit ")
-        .and_then(|(_, rest)| rest.split_once(" ago"))
-        .map(|(age, _)| age)
-        .expect("header should carry a `last commit {age} ago` field");
+    // suite runs. The age lives on the commit's own log row.
+    let row = out
+        .lines()
+        .find(|line| line.contains(ANCIENT_COMMIT_PREFIX))
+        .unwrap_or_else(|| panic!("the ancient commit should have a log row:\n{out}"));
+    let age = row.trim_end().rsplit(' ').next().unwrap_or_default();
     assert!(
         age.contains('y') && age.ends_with("mo"),
-        "a commit from 2011 should render as years+months, got {age:?}",
+        "a commit from 2011 should render as years+months, got {age:?} from {row:?}",
     );
 }
 

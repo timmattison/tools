@@ -882,7 +882,11 @@ mod tests {
                 binary: false,
                 age: Some(Duration::from_secs(40)),
             }],
-            log: Vec::new(),
+            log: vec![LogEntry {
+                hash: "abc1234".into(),
+                subject: "the newest commit".into(),
+                age: Some(Duration::from_secs(10)),
+            }],
             upstream: None,
             operation: None,
         };
@@ -890,7 +894,7 @@ mod tests {
             base: None,
             max_files: None,
             bar_width: 6,
-            log_lines: 0,
+            log_lines: 1,
             truecolor: false,
             refresh_interval: None,
             width_offset: 0,
@@ -900,7 +904,7 @@ mod tests {
             height: 40,
         };
 
-        // No offset: the header shows the un-advanced commit age and the
+        // No offset: the commit's row shows the un-advanced commit age and the
         // freshest age is the raw commit age.
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         assert_eq!(
@@ -910,12 +914,12 @@ mod tests {
         );
         assert!(
             frame.output.contains("10s"),
-            "header should show the un-advanced commit age: {:?}",
+            "the commit row should show the un-advanced commit age: {:?}",
             frame.output,
         );
 
-        // A 50s offset advances the commit age to 60s ("1m0s") in the header
-        // AND the returned freshest_age to 60s, in lockstep.
+        // A 50s offset advances the commit age to 60s ("1m0s") on its row AND
+        // the returned freshest_age to 60s, in lockstep.
         let frame = render_frame(
             &snap,
             &cfg,
