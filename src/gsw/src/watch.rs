@@ -28,8 +28,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
 use crate::{
-    collect_snapshot, effective_terminal_height, effective_terminal_width, render_frame, Render,
-    RenderConfig, DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
+    collect_snapshot, effective_terminal_height, effective_terminal_width, render_frame,
+    FrameTiming, Render, RenderConfig, DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
 };
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
@@ -618,7 +618,7 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
     let snapshot = collect_snapshot(handle.repo(), cfg)?;
-    let first = render_frame(&snapshot, cfg, dims, Duration::ZERO);
+    let first = render_frame(&snapshot, cfg, dims, FrameTiming::fresh());
     paint_output(&first.output)?;
     let mut displayed = first.output;
     let initial_freshest = first.freshest_age;
@@ -648,10 +648,11 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
         &mut displayed,
         cache,
         initial_freshest,
+        cfg.refresh_interval,
         LoopHooks {
             collect: || walk(&mut handle, &ignore, cfg),
-            render: |snap: &Snapshot, dims: Dimensions, offset: Duration| {
-                render_frame(snap, cfg, dims, offset)
+            render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
+                render_frame(snap, cfg, dims, timing)
             },
             dimensions: || current_dimensions(cfg.width_offset),
             paint: |output: &str| paint_output(output),
@@ -797,7 +798,7 @@ struct SnapshotCache {
 struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
     /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
-    /// Render a snapshot at the given dimensions, advancing ages by the offset.
+    /// Render a snapshot at the given dimensions and timing.
     render: RenderFn,
     /// Query the current terminal dimensions (re-evaluated on resize).
     dimensions: Dims,
@@ -858,17 +859,19 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
     displayed: &mut String,
     mut cache: SnapshotCache,
     initial_freshest: Option<Duration>,
+    refresh_interval: Option<Duration>,
     mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick>,
 ) -> Result<()>
 where
     Collect: FnMut() -> Result<Snapshot>,
-    RenderFn: FnMut(&Snapshot, Dimensions, Duration) -> Render,
+    RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
     Dims: Fn() -> Dimensions,
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
+    let _ = refresh_interval;
     let mut schedule = WalkSchedule::unscheduled();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
@@ -993,7 +996,14 @@ where
                     // the previous one.
                     cache.collected_at = now;
                     cache.snapshot = snapshot;
-                    (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+                    (hooks.render)(
+                        &cache.snapshot,
+                        cache.dims,
+                        FrameTiming {
+                            age_offset: Duration::ZERO,
+                            next_refresh_in: None,
+                        },
+                    )
                 }
                 // A walk can fail for reasons that are none of the user's
                 // business and usually transient: `git gc` swapping the ref
@@ -1008,18 +1018,39 @@ where
                 // aging truthfully while the repository is unreadable.
                 Err(_) => {
                     let age_offset = now.saturating_duration_since(cache.collected_at);
-                    (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+                    (hooks.render)(
+                        &cache.snapshot,
+                        cache.dims,
+                        FrameTiming {
+                            age_offset,
+                            next_refresh_in: None,
+                        },
+                    )
                 }
             }
         } else if saw_resize {
             cache.dims = (hooks.dimensions)();
             let age_offset = now.saturating_duration_since(cache.collected_at);
-            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+            (hooks.render)(
+                &cache.snapshot,
+                cache.dims,
+                FrameTiming {
+                    age_offset,
+                    next_refresh_in: None,
+                },
+            )
         } else {
             // Decay tick, or an FS change the throttle deferred: re-render the
             // cached snapshot, advancing every displayed age by the elapsed time.
             let age_offset = now.saturating_duration_since(cache.collected_at);
-            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+            (hooks.render)(
+                &cache.snapshot,
+                cache.dims,
+                FrameTiming {
+                    age_offset,
+                    next_refresh_in: None,
+                },
+            )
         };
 
         if should_repaint(&render.output, displayed) {
@@ -1197,6 +1228,7 @@ mod tests {
             log_lines: 0,
             truecolor: false,
             width_offset: 0,
+            refresh_interval: None,
         }
     }
 
@@ -1391,7 +1423,7 @@ mod tests {
             width: 200,
             height: 40,
         };
-        let frame = render_frame(snapshot, cfg, dims, Duration::ZERO);
+        let frame = render_frame(snapshot, cfg, dims, FrameTiming::fresh());
         crate::render::strip_ansi(frame.output.lines().next().unwrap_or_default())
     }
 
@@ -2045,6 +2077,11 @@ mod tests {
     /// these tests deterministic regardless of the exact value here.
     const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
 
+    /// No timed refresh: the loop under test is purely event-driven, so a walk
+    /// can only come from a filesystem change. Every test that predates the
+    /// timed refresh passes this, keeping its subject isolated from it.
+    const NO_TIMED_REFRESH: Option<Duration> = None;
+
     /// A `next_tick` that always disables the timer, so the loop blocks purely
     /// on channel events. The event-driven tests use this to stay independent
     /// of the decay-timer behavior, which has its own dedicated tests.
@@ -2093,6 +2130,149 @@ mod tests {
         }
     }
 
+    /// A clock that steps forward by `step` on every read, from `base`. The loop
+    /// reads the clock several times per iteration, so a stepping clock is what
+    /// lets a test cross a scheduled deadline without sleeping — deterministic
+    /// and parallel-safe, unlike a real timer.
+    fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
+        let reads = std::cell::Cell::new(0_u32);
+        move || {
+            let n = reads.get();
+            reads.set(n + 1);
+            base + step * n
+        }
+    }
+
+    #[test]
+    fn event_loop_walks_on_the_timed_deadline_with_no_filesystem_event() {
+        // The timed refresh: with the decay timer off and not one filesystem
+        // event, the loop must still re-walk git once the interval elapses.
+        // Without this, "next refresh" counts down to nothing.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let base = Instant::now();
+        let interval = Duration::from_millis(5);
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            Some(Duration::ZERO),
+            Some(interval),
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    // One wake is enough to decide: a decay tick alone never
+                    // walks, so any collect at all came from the timed deadline.
+                    let _ = tx.send(Event::Quit);
+                    frame("timed")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                // Steps past the deadline by the time the loop re-reads it.
+                clock: stepping_clock(base, interval),
+                // A decay tick on the same cadence, so the loop always wakes:
+                // the test must fail when no walk is scheduled, not block.
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 1,
+            "the timed deadline must walk git with no filesystem event",
+        );
+    }
+
+    #[test]
+    fn event_loop_hands_the_render_a_countdown_to_the_next_walk() {
+        // The clock in the separator: the render hook must be told how long is
+        // left until the next scheduled walk, alongside how stale the snapshot
+        // already is. A tick 50s after collection, on a 60s interval, leaves 10s.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut seen: Option<FrameTiming> = None;
+        let collected_at = Instant::now();
+        let clock_at = collected_at + Duration::from_secs(50);
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(collected_at),
+            Some(Duration::ZERO),
+            Some(Duration::from_secs(60)),
+            LoopHooks {
+                collect: || Ok(empty_snapshot()),
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    seen = Some(timing);
+                    let _ = tx.send(Event::Quit);
+                    frame("tick")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || clock_at,
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            seen,
+            Some(FrameTiming {
+                age_offset: Duration::from_secs(50),
+                next_refresh_in: Some(Duration::from_secs(10)),
+            }),
+            "the frame must carry both how stale it is and how long until the next walk",
+        );
+    }
+
+    #[test]
+    fn event_loop_without_an_interval_never_walks_on_a_timeout() {
+        // `--refresh-interval 0` keeps today's purely event-driven gsw: a decay
+        // tick re-renders from cache and walks nothing, and the frame carries no
+        // countdown because no walk is scheduled.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut seen: Option<FrameTiming> = None;
+        let base = Instant::now();
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            Some(Duration::ZERO),
+            NO_TIMED_REFRESH,
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    seen = Some(timing);
+                    let _ = tx.send(Event::Quit);
+                    frame("tick")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: stepping_clock(base, Duration::from_secs(60)),
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(collects, 0, "no interval means no timed walk, ever");
+        assert_eq!(
+            seen.and_then(|t| t.next_refresh_in),
+            None,
+            "with nothing scheduled there is no countdown to show",
+        );
+    }
+
     #[test]
     fn event_loop_coalesces_a_burst_into_one_repaint() {
         // A `git commit` is a storm of `.git/` writes; an editor save is a
@@ -2114,12 +2294,13 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("frame"),
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("frame"),
                 dimensions: || TEST_DIMS,
                 paint: |_output: &str| {
                     paints += 1;
@@ -2154,12 +2335,15 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("unchanged"),
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    frame("unchanged")
+                },
                 dimensions: || TEST_DIMS,
                 paint: |_output: &str| {
                     paints += 1;
@@ -2193,12 +2377,13 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("frame"),
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("frame"),
                 dimensions: || TEST_DIMS,
                 paint: |_output: &str| {
                     paints += 1;
@@ -2230,9 +2415,10 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             Some(Duration::ZERO),
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     // End the loop right after this first tick-driven render.
                     let _ = tx.send(Event::Quit);
@@ -2274,9 +2460,10 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             Some(Duration::from_secs(30)),
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     let _ = tx.send(Event::Quit);
                     frame("steady")
@@ -2315,14 +2502,15 @@ mod tests {
             &mut displayed,
             seeded_cache(collected_at),
             Some(Duration::ZERO),
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     renders += 1;
-                    seen_offset = Some(offset);
+                    seen_offset = Some(timing.age_offset);
                     let _ = tx.send(Event::Quit);
                     frame(&format!("tick {renders}"))
                 },
@@ -2365,12 +2553,13 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, dims: Dimensions, _timing: FrameTiming| {
                     seen_dims = Some(dims);
                     frame("resized")
                 },
@@ -2415,10 +2604,11 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
-                render: |_snap: &Snapshot, _dims: Dimensions, offset: Duration| {
-                    offsets.push(offset);
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    offsets.push(timing.age_offset);
                     // First render is the FS walk (offset 0); the next wake is a
                     // decay tick. End the loop once the tick render has happened.
                     if offsets.len() >= 2 {
@@ -2488,12 +2678,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     // Deliver the next change in its own iteration so the three
                     // never coalesce; quit once all three have been processed.
                     if changes_sent < 3 {
@@ -2560,12 +2751,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the arming walk: fire a burst of three changes
@@ -2629,12 +2821,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the arming walk: one FS change lands mid-cooldown
@@ -2699,12 +2892,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the arming walk: a manual refresh lands mid-cooldown.
@@ -2769,12 +2963,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the forced walk: an FS change lands mid-cooldown.
@@ -2828,12 +3023,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the forced walk from tick behavior
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     // End the loop right after the forced walk's render.
                     let _ = tx.send(Event::Quit);
                     frame("forced")
@@ -2890,6 +3086,7 @@ mod tests {
             &mut displayed,
             cache,
             None, // decay timer off: isolate the failed walk from tick behavior
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2899,8 +3096,8 @@ mod tests {
                         "status iter: The reference 'HEAD' did not exist"
                     ))
                 },
-                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
-                    rendered.push((snap.branch.clone(), offset));
+                render: |snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    rendered.push((snap.branch.clone(), timing.age_offset));
                     frame("last good frame")
                 },
                 dimensions: || TEST_DIMS,
@@ -2969,12 +3166,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Err(anyhow::anyhow!("status platform: repository is gone"))
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     // Deliver the next change in its own iteration so the three
                     // never coalesce; quit once all three have been processed.
                     if changes_sent < 3 {
@@ -3058,6 +3256,7 @@ mod tests {
             &mut displayed,
             cache,
             None, // decay timer off: isolate recovery from tick behavior
+            NO_TIMED_REFRESH,
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3074,8 +3273,8 @@ mod tests {
                         Ok(fresh)
                     }
                 },
-                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
-                    rendered.push((snap.branch.clone(), offset));
+                render: |snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    rendered.push((snap.branch.clone(), timing.age_offset));
                     match rendered.len() {
                         // Deliver the retry in its own iteration so it lands in
                         // a separate debounce window instead of coalescing.

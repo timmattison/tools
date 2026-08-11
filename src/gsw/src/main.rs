@@ -10,7 +10,7 @@ use colored::Colorize;
 
 use crate::git::{FileEntry, FileStatus};
 use crate::render::{
-    plan_section_caps, render, render_with_offset, LogEntry, RenderOptions, Snapshot,
+    plan_section_caps, render, render_with_offset, LogEntry, RefreshStatus, RenderOptions, Snapshot,
 };
 use crate::snapshot::build_snapshot;
 
@@ -244,6 +244,7 @@ fn main() -> Result<()> {
         log_lines: if cli.no_log { 0 } else { cli.log_lines },
         truecolor,
         width_offset: cli.width_offset,
+        refresh_interval: None,
     };
 
     match decide_mode(cli.one_shot, stdout_is_tty) {
@@ -306,6 +307,38 @@ pub(crate) struct RenderConfig {
     pub truecolor: bool,
     /// Columns to subtract from the detected width (`--width-offset`).
     pub width_offset: usize,
+    /// How often watch mode re-walks the repository with no filesystem event to
+    /// prompt it (`--refresh-interval`), or `None` to stay purely event-driven.
+    pub refresh_interval: Option<Duration>,
+}
+
+/// Where a frame sits in time: how stale the snapshot behind it is, and when
+/// the next one is due.
+///
+/// The two travel together because the refresh clock prints both, and printing
+/// them from one value is what stops the clock and the ages under it from
+/// disagreeing — `age_offset` *is* "last refresh N ago".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameTiming {
+    /// How long ago the snapshot was collected. Added (saturating) to every
+    /// displayed age. `Duration::ZERO` renders a freshly-walked snapshot.
+    pub age_offset: Duration,
+    /// How long until the next scheduled walk, or `None` when none is
+    /// scheduled — one-shot mode, or `--refresh-interval 0`. `None` also
+    /// suppresses the refresh clock: with no schedule there is nothing to count
+    /// down to.
+    pub next_refresh_in: Option<Duration>,
+}
+
+impl FrameTiming {
+    /// Timing for a just-collected frame with no schedule behind it: one-shot
+    /// mode, and watch mode's seed frame before the loop arms its schedule.
+    pub(crate) fn fresh() -> Self {
+        Self {
+            age_offset: Duration::ZERO,
+            next_refresh_in: None,
+        }
+    }
 }
 
 /// A rendered frame plus the metadata watch mode needs to schedule its next
@@ -353,7 +386,7 @@ pub(crate) fn build_output(
     dims: watch::Dimensions,
 ) -> Result<Render> {
     let snapshot = collect_snapshot(repo, cfg)?;
-    Ok(render_frame(&snapshot, cfg, dims, Duration::ZERO))
+    Ok(render_frame(&snapshot, cfg, dims, FrameTiming::fresh()))
 }
 
 /// Walk the repository and assemble the fully-populated [`Snapshot`] — the
@@ -432,8 +465,9 @@ pub(crate) fn render_frame(
     snapshot: &Snapshot,
     cfg: &RenderConfig,
     dims: watch::Dimensions,
-    age_offset: Duration,
+    timing: FrameTiming,
 ) -> Render {
+    let age_offset = timing.age_offset;
     let terminal_width = dims.width;
     let terminal_height = dims.height;
 
@@ -490,7 +524,12 @@ pub(crate) fn render_frame(
         max_files: file_cap_opt,
         log_lines: log_cap,
         truecolor: cfg.truecolor,
-        refresh: None,
+        // The clock renders only when a walk is actually scheduled, and it
+        // reports the same offset every age on this frame was advanced by.
+        refresh: timing.next_refresh_in.map(|next_refresh_in| RefreshStatus {
+            last_refresh_ago: age_offset,
+            next_refresh_in,
+        }),
     };
 
     // One-shot mode and the watch seed walk render at offset zero, which is
@@ -600,6 +639,7 @@ mod tests {
             bar_width: 6,
             log_lines: 0,
             truecolor: false,
+            refresh_interval: None,
             width_offset: 0,
         };
         let dims = watch::Dimensions {
@@ -617,7 +657,7 @@ mod tests {
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
         };
-        let frame = render_frame(&snap, &cfg, dims, Duration::ZERO);
+        let frame = render_frame(&snap, &cfg, dims, FrameTiming::fresh());
         let lines = frame.output.lines().count();
         assert!(
             lines <= dims.height,
@@ -758,6 +798,7 @@ mod tests {
             bar_width: 6,
             log_lines: 0,
             truecolor: false,
+            refresh_interval: None,
             width_offset: 0,
         };
         let dims = watch::Dimensions {
@@ -767,7 +808,7 @@ mod tests {
 
         // No offset: the header shows the un-advanced commit age and the
         // freshest age is the raw commit age.
-        let frame = render_frame(&snap, &cfg, dims, Duration::ZERO);
+        let frame = render_frame(&snap, &cfg, dims, FrameTiming::fresh());
         assert_eq!(
             frame.freshest_age,
             Some(Duration::from_secs(10)),
@@ -781,7 +822,15 @@ mod tests {
 
         // A 50s offset advances the commit age to 60s ("1m0s") in the header
         // AND the returned freshest_age to 60s, in lockstep.
-        let frame = render_frame(&snap, &cfg, dims, Duration::from_secs(50));
+        let frame = render_frame(
+            &snap,
+            &cfg,
+            dims,
+            FrameTiming {
+                age_offset: Duration::from_secs(50),
+                next_refresh_in: None,
+            },
+        );
         assert_eq!(
             frame.freshest_age,
             Some(Duration::from_secs(60)),
