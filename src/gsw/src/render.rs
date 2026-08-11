@@ -1390,7 +1390,7 @@ mod tests {
             "the dash run should lead and the tail should be short: {sep:?}",
         );
         assert!(
-            before.ends_with('\u{a0}') || before.ends_with(' '),
+            before.ends_with(' '),
             "the clock needs a gap from the dashes on its left: {before:?}",
         );
         assert!(
