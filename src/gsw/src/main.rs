@@ -359,10 +359,9 @@ impl FrameTiming {
     /// This is watch mode's seed frame and one-shot's only frame. One-shot
     /// passes `None` — it exits, so no walk follows.
     pub(crate) fn at_walk(interval: Option<Duration>) -> Self {
-        let _ = interval;
         Self {
             age_offset: Duration::ZERO,
-            next_refresh_in: None,
+            next_refresh_in: interval,
         }
     }
 }
