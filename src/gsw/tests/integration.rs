@@ -807,3 +807,39 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
         "a commit from 2011 should render as years+months, got {age:?}",
     );
 }
+
+/// A commit date far enough ahead that no clock this test runs on has reached
+/// it. A fixed date keeps the fixture deterministic.
+const FUTURE_COMMIT_DATE: &str = "2099-01-01T00:00:00 +0000";
+
+/// Subject of the future-dated fixture commit, used to find its log row.
+const FUTURE_COMMIT_SUBJECT: &str = "a commit dated in the future";
+
+#[test]
+fn a_future_dated_commit_renders_an_unknown_log_age_not_zero_seconds() {
+    // A commit whose timestamp is ahead of the local clock has no elapsed
+    // time to report. Clock skew between machines and a hand-set `--date` both
+    // produce one. The log row must say `?`, the same mark the header uses for
+    // an age it cannot compute. Saying `0s` claims the commit landed this very
+    // second, which is the one thing we know is false.
+    let dir = setup_repo();
+    let p = dir.path();
+    fs::write(p.join("b.txt"), "from the future\n").unwrap();
+    run_git(p, &["add", "b.txt"]);
+    commit_dated(p, FUTURE_COMMIT_SUBJECT, FUTURE_COMMIT_DATE);
+
+    let out = run_gsw_args(p, &["--log-lines", "5"]);
+    let row = out
+        .lines()
+        .find(|line| line.contains(FUTURE_COMMIT_SUBJECT))
+        .unwrap_or_else(|| panic!("the future-dated commit should have a log row:\n{out}"));
+
+    assert!(
+        row.trim_end().ends_with('?'),
+        "an unresolvable commit age should render as `?` in the log age column: {row:?}",
+    );
+    assert!(
+        !row.contains("0s"),
+        "an unresolvable commit age must not be misrepresented as 0s: {row:?}",
+    );
+}
