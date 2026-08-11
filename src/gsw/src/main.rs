@@ -86,6 +86,28 @@ struct Cli {
     /// to the 8-color path even on a terminal that supports truecolor.
     #[arg(long, conflicts_with = "truecolor")]
     no_truecolor: bool,
+
+    /// Seconds between watch-mode refreshes when nothing on disk changes.
+    /// Filesystem events still refresh immediately; this is the floor under
+    /// them, and it is what the "next refresh" countdown in the separator
+    /// counts down to. `0` turns the timed refresh off, which also removes the
+    /// countdown and leaves gsw purely event-driven.
+    #[arg(long, default_value_t = DEFAULT_REFRESH_SECS)]
+    refresh_interval: u64,
+}
+
+/// Default seconds between timed watch-mode refreshes. A minute keeps a screen
+/// left open in a pane honest without walking git often enough to matter — and
+/// the duty-cycle budget still overrides it on a repository where a walk is
+/// expensive.
+const DEFAULT_REFRESH_SECS: u64 = 60;
+
+/// Resolve `--refresh-interval` seconds into the schedule watch mode runs on.
+///
+/// `0` means "no timed refresh": gsw stays purely event-driven, and with no
+/// scheduled walk there is no countdown to print.
+fn refresh_interval(secs: u64) -> Option<Duration> {
+    Some(Duration::from_secs(secs))
 }
 
 /// Decide the effective terminal width gsw should render for.
@@ -612,6 +634,40 @@ mod tests {
     use crate::git::FileStatus;
     use crate::render::Operation;
     use crate::render::RenderEntry;
+
+    #[test]
+    fn refresh_interval_zero_turns_the_timed_refresh_off() {
+        // The escape hatch for anyone who wants gsw's idle cost back at zero:
+        // `--refresh-interval 0` schedules nothing, so nothing wakes the loop
+        // but the filesystem, and the countdown has nothing to count.
+        assert_eq!(
+            refresh_interval(0),
+            None,
+            "0 seconds must mean no timed refresh, not a zero-length one",
+        );
+    }
+
+    #[test]
+    fn refresh_interval_passes_a_positive_value_through() {
+        assert_eq!(refresh_interval(60), Some(Duration::from_secs(60)));
+        assert_eq!(refresh_interval(1), Some(Duration::from_secs(1)));
+        assert_eq!(refresh_interval(3600), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn refresh_interval_defaults_to_a_minute() {
+        let cli = Cli::parse_from(["gsw"]);
+        assert_eq!(
+            refresh_interval(cli.refresh_interval),
+            Some(Duration::from_secs(60)),
+            "gsw with no flags should refresh once a minute",
+        );
+        let explicit = Cli::parse_from(["gsw", "--refresh-interval", "5"]);
+        assert_eq!(
+            refresh_interval(explicit.refresh_interval),
+            Some(Duration::from_secs(5)),
+        );
+    }
 
     #[test]
     fn operation_line_reserves_a_chrome_row_so_file_list_is_not_clipped() {
