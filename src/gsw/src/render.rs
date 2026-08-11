@@ -92,9 +92,15 @@ pub struct StepProgress {
 pub struct LogEntry {
     pub hash: String,
     pub subject: String,
-    /// How long ago this commit was authored. Same `Duration` shape as the
-    /// per-file age column so the two render in identical units.
-    pub age: Duration,
+    /// How long ago this commit was authored. Same `Option<Duration>` shape as
+    /// the per-file age column, so the two render in identical units.
+    ///
+    /// `None` is an age git cannot give us: a commit timestamp ahead of the
+    /// local clock (skew between machines, a hand-set `--date`) or one that
+    /// does not convert to a wall-clock instant at all. Such a row renders
+    /// [`UNKNOWN_AGE`] rather than a number, because every number available
+    /// here is a lie — `0s` in particular claims the commit landed this second.
+    pub age: Option<Duration>,
 }
 
 /// One file row in the frame.
@@ -154,6 +160,13 @@ const DELS_FIELD: usize = 4;
 /// return — so no age can push a row past the terminal width and wrap. The
 /// two constants are one and the same on purpose: they cannot drift.
 const AGE_FIELD: usize = AGE_WIDTH;
+
+/// What an age gsw cannot compute renders as.
+///
+/// Every alternative is a number, and every number here is a claim gsw cannot
+/// support — `0s` most of all, which reads as "this just happened". One mark,
+/// used everywhere an age is missing, so the reader learns it once.
+pub const UNKNOWN_AGE: &str = "?";
 
 /// Visible separator characters between columns.
 const SEP_BAR_ADDS: usize = 2;
@@ -270,12 +283,14 @@ const LOG_HASH_SUBJECT_SEP: &str = "  ";
 /// `age_offset` is added (saturating) to the commit's age before it is
 /// formatted and used to drive the hash/subject/age fades, so the whole row
 /// ages forward by a single shared `Duration`. `Duration::ZERO` leaves the
-/// row byte-identical to the un-offset render.
+/// row byte-identical to the un-offset render. An age the repository could not
+/// give us ([`LogEntry::age`] of `None`) stays unknown whatever the offset —
+/// advancing a duration gsw never had produces a number it still cannot back.
 fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: Duration) -> String {
     // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
     // hold the right-aligned age, matching the file-row age column exactly.
     // The subject is padded to fill the gap so the age column lines up.
-    let effective_age = entry.age.saturating_add(age_offset);
+    let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
@@ -286,7 +301,7 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: D
     let subject_truncated = truncate_right(&entry.subject, subject_budget);
     let subject_padded = pad_right(&subject_truncated, subject_budget);
 
-    let age_raw = format_age_detailed(effective_age);
+    let age_raw = effective_age.map_or_else(|| UNKNOWN_AGE.to_string(), format_age_detailed);
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
 
     let hash_str = colorize_log_hash(&entry.hash, effective_age, truecolor);
@@ -400,7 +415,7 @@ fn header_segments(snap: &Snapshot, age_offset: Duration, width: usize) -> Heade
     let age = snap
         .last_commit_age
         .map(|a| a.saturating_add(age_offset))
-        .map_or_else(|| "?".to_string(), format_age_detailed);
+        .map_or_else(|| UNKNOWN_AGE.to_string(), format_age_detailed);
     let compose = |branch: &str, base: &str, detail: UpstreamDetail| {
         compose_header(snap, branch, base, &age, detail)
     };
@@ -586,7 +601,7 @@ fn render_row(
 ) -> String {
     let (icon, letter) = icon_and_letter(entry);
     let effective_age = entry.age.map(|a| a.saturating_add(age_offset));
-    let factor = file_fade_factor(effective_age);
+    let factor = fade_factor(effective_age);
     let truecolor = opts.truecolor;
 
     let path_display_raw = match &entry.orig_path {
@@ -923,13 +938,14 @@ const FILE_BAR_RGB: (u8, u8, u8) = (60, 200, 200);
 const FILE_BAR_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
 const FILE_BIN_RGB: (u8, u8, u8) = (160, 160, 160);
 
-/// Fade factor for a file row.
+/// Fade factor for any row carrying an optional age.
 ///
-/// `Some(age)` shares the commit-log ramp via [`age_fade_factor`] so the
-/// file list and log section darken in lockstep. `None` returns `1.0`
-/// so files we can't stat (deleted entries, skipped untracked dirs)
-/// render at the dark floor.
-fn file_fade_factor(age: Option<Duration>) -> f32 {
+/// `Some(age)` rides the [`age_fade_factor`] ramp, so the file list and the
+/// log section darken in lockstep. `None` returns `1.0` — the dark floor —
+/// for every row whose age gsw could not determine: files it will not stat
+/// (deleted entries, skipped untracked dirs) and commits whose timestamp does
+/// not resolve. One rule, so an unknown age looks the same in both sections.
+fn fade_factor(age: Option<Duration>) -> f32 {
     age.map_or(1.0, age_fade_factor)
 }
 
@@ -938,8 +954,8 @@ fn file_fade_factor(age: Option<Duration>) -> f32 {
 /// Shared by every truecolor commit-log colorizer so the fade math lives
 /// in exactly one place — keeps the per-column functions to a single
 /// readable `if truecolor { fade } else { fallback }` shape.
-fn fade_truecolor(s: &str, age: Duration, base: (u8, u8, u8)) -> ColoredString {
-    let (r, g, b) = fade_rgb(base, age_fade_factor(age));
+fn fade_truecolor(s: &str, age: Option<Duration>, base: (u8, u8, u8)) -> ColoredString {
+    let (r, g, b) = fade_rgb(base, fade_factor(age));
     s.truecolor(r, g, b)
 }
 
@@ -948,7 +964,8 @@ fn fade_truecolor(s: &str, age: Duration, base: (u8, u8, u8)) -> ColoredString {
 /// With `truecolor`, the hash starts at [`LOG_HASH_BASE_RGB`] and fades
 /// toward the dark floor as `age` grows. Without, falls back to the
 /// legacy ANSI yellow so eight-color terminals still get a coloured hash.
-fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredString {
+/// An unknown age (`None`) renders at the floor, like the oldest commit.
+fn colorize_log_hash(hash: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(hash, age, LOG_HASH_BASE_RGB)
     } else {
@@ -960,24 +977,25 @@ fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredStrin
 ///
 /// With `truecolor`, the subject fades from a near-white base toward the
 /// dark floor. Without, falls back to the same Aging/Stale dim styling as
-/// the file-row age column, so the row still gets quieter as it ages.
-fn colorize_log_subject(subject: &str, age: Duration, truecolor: bool) -> ColoredString {
+/// the file-row age column, so the row still gets quieter as it ages. An
+/// unknown age (`None`) takes the quietest styling, like the oldest commit.
+fn colorize_log_subject(subject: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(subject, age, LOG_SUBJECT_BASE_RGB)
     } else {
-        match age_dim_level(age) {
-            AgeDim::Fresh | AgeDim::Recent => subject.normal(),
-            AgeDim::Aging | AgeDim::Stale => subject.dimmed(),
+        match age.map(age_dim_level) {
+            Some(AgeDim::Fresh | AgeDim::Recent) => subject.normal(),
+            Some(AgeDim::Aging | AgeDim::Stale) | None => subject.dimmed(),
         }
     }
 }
 
 /// Color the right-aligned age column for a commit-log row.
-fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString {
+fn colorize_log_age(text: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(text, age, LOG_AGE_BASE_RGB)
     } else {
-        colorize_age_ansi(text, Some(age))
+        colorize_age_ansi(text, age)
     }
 }
 
@@ -1549,7 +1567,7 @@ mod tests {
         snap.log = vec![LogEntry {
             hash: "52ef922".into(),
             subject: "an old commit that has been sitting here for a very long time".into(),
-            age: ancient(),
+            age: Some(ancient()),
         }];
         let mut o = opts();
         o.log_lines = 5;
@@ -2266,8 +2284,95 @@ mod tests {
         LogEntry {
             hash: hash.into(),
             subject: subject.into(),
-            age: Duration::from_secs(age_secs),
+            age: Some(Duration::from_secs(age_secs)),
         }
+    }
+
+    /// A log row whose age the repository could not give us.
+    fn log_entry_without_age(hash: &str, subject: &str) -> LogEntry {
+        LogEntry {
+            hash: hash.into(),
+            subject: subject.into(),
+            age: None,
+        }
+    }
+
+    #[test]
+    fn log_row_marks_an_unknown_age_instead_of_claiming_zero_seconds() {
+        // A commit timestamp ahead of the local clock yields no elapsed time.
+        // The row must say `?` — the same mark the frame uses everywhere an age
+        // is missing. `0s` would rank the commit as the freshest on screen.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry_without_age("abc1234", "a commit from the future")];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with(UNKNOWN_AGE),
+            "an unknown commit age should render as `{UNKNOWN_AGE}`: {row:?}",
+        );
+        assert!(
+            !row.contains("0s"),
+            "an unknown commit age must not be misrepresented as 0s: {row:?}",
+        );
+    }
+
+    #[test]
+    fn an_age_offset_leaves_an_unknown_log_age_unknown() {
+        // Watch mode advances every displayed age between git walks. An age
+        // gsw never had cannot be advanced into one it can back, so the mark
+        // survives the offset rather than becoming the offset itself.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry_without_age("abc1234", "a commit from the future")];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render_with_offset(&snap, &o, Duration::from_secs(50)));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with(UNKNOWN_AGE),
+            "an offset must not turn an unknown age into a number: {row:?}",
+        );
+        assert!(
+            !row.contains("50s"),
+            "the offset itself must never be reported as the commit's age: {row:?}",
+        );
+    }
+
+    #[test]
+    fn a_log_row_without_an_age_keeps_the_age_column_aligned() {
+        // The `?` sits in the same right-aligned AGE_FIELD as every other row.
+        // A mark that drifts out of the column reads as a broken frame.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            log_entry("abc1234", "known age", 30),
+            log_entry_without_age("def5678", "unknown age"),
+        ];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let known = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .expect("known-age row");
+        let unknown = out
+            .lines()
+            .find(|line| line.contains("def5678"))
+            .expect("unknown-age row");
+        assert_eq!(
+            UnicodeWidthStr::width(known),
+            UnicodeWidthStr::width(unknown),
+            "both log rows should occupy the same width:\n  known:   {known:?}\n  unknown: {unknown:?}",
+        );
     }
 
     #[test]
@@ -2299,7 +2404,7 @@ mod tests {
             .map(|i| LogEntry {
                 hash: format!("h{i:06}"),
                 subject: format!("subj {i}"),
-                age: Duration::from_secs(i * 60),
+                age: Some(Duration::from_secs(i * 60)),
             })
             .collect();
         let mut o = opts();
@@ -2332,7 +2437,7 @@ mod tests {
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "really long subject ".repeat(20),
-            age: Duration::from_secs(30),
+            age: Some(Duration::from_secs(30)),
         }];
         let mut o = opts();
         o.log_lines = 1;
@@ -2585,7 +2690,7 @@ mod tests {
         // 24-bit RGB value (not the legacy `Color::Yellow`), so the gradient
         // has somewhere to fade *from*.
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), true);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor when truecolor=true, got {other:?}"),
@@ -2598,7 +2703,7 @@ mod tests {
         // through — otherwise we silently drop hash colouring on terminals
         // that can't render 24-bit RGB.
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), false);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), false);
         assert_eq!(cs.fgcolor, Some(Color::Yellow));
     }
 
@@ -2608,8 +2713,8 @@ mod tests {
         // out darker (lower channel values) than a fresh commit's hash on
         // every channel.
         use colored::Color;
-        let fresh = colorize_log_hash("abc1234", Duration::from_secs(0), true);
-        let hour = colorize_log_hash("abc1234", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_hash("abc1234", Some(Duration::from_secs(60 * 60)), true);
         let (
             Some(Color::TrueColor {
                 r: fr,
@@ -2638,7 +2743,7 @@ mod tests {
         // the FADE_FLOOR fraction of its base value.
         use crate::age::FADE_FLOOR;
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(60 * 60 * 24 * 7), true);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(60 * 60 * 24 * 7)), true);
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
@@ -2673,7 +2778,7 @@ mod tests {
         // Subjects need to fade too, otherwise the hash darkens while the
         // text next to it stays bright — visually inconsistent.
         use colored::Color;
-        let cs = colorize_log_subject("a commit subject", Duration::from_secs(0), true);
+        let cs = colorize_log_subject("a commit subject", Some(Duration::from_secs(0)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor for subject when truecolor=true, got {other:?}"),
@@ -2683,8 +2788,8 @@ mod tests {
     #[test]
     fn log_subject_darkens_with_age_under_truecolor() {
         use colored::Color;
-        let fresh = colorize_log_subject("subj", Duration::from_secs(0), true);
-        let hour = colorize_log_subject("subj", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_subject("subj", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_subject("subj", Some(Duration::from_secs(60 * 60)), true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
             (fresh.fgcolor, hour.fgcolor)
         else {
@@ -2699,7 +2804,7 @@ mod tests {
     #[test]
     fn log_age_uses_truecolor_when_enabled() {
         use colored::Color;
-        let cs = colorize_log_age("5m23s", Duration::from_secs(5 * 60 + 23), true);
+        let cs = colorize_log_age("5m23s", Some(Duration::from_secs(5 * 60 + 23)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor for age when truecolor=true, got {other:?}"),
@@ -2709,8 +2814,8 @@ mod tests {
     #[test]
     fn log_age_darkens_with_age_under_truecolor() {
         use colored::Color;
-        let fresh = colorize_log_age("0s", Duration::from_secs(0), true);
-        let hour = colorize_log_age("1h0m", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_age("0s", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_age("1h0m", Some(Duration::from_secs(60 * 60)), true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
             (fresh.fgcolor, hour.fgcolor)
         else {
@@ -2767,7 +2872,7 @@ mod tests {
         use colored::Styles;
         let stale = colorize_log_subject(
             "an old subject",
-            Duration::from_secs(60 * 60 * 24 * 7),
+            Some(Duration::from_secs(60 * 60 * 24 * 7)),
             false,
         );
         assert!(
@@ -2777,32 +2882,33 @@ mod tests {
     }
 
     #[test]
-    fn file_fade_factor_is_zero_for_fresh_age() {
+    fn fade_factor_is_zero_for_fresh_age() {
         // A file modified moments ago must render at full base brightness,
         // which means factor=0 — the no-fade end of the ramp.
         assert!(
-            (file_fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
+            (fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
             "fresh file should produce factor=0",
         );
     }
 
     #[test]
-    fn file_fade_factor_floors_when_age_is_none() {
-        // Deleted files and unstat'd untracked dirs have no mtime. They must
-        // render at the dark floor (factor=1.0) so the row visually announces
-        // "this is an unusual state, not actively changing".
+    fn fade_factor_floors_when_age_is_none() {
+        // Deleted files, unstat'd untracked dirs, and commits whose timestamp
+        // does not resolve all have no age. They must render at the dark floor
+        // (factor=1.0) so the row announces "this is an unusual state, not
+        // something actively changing".
         assert!(
-            (file_fade_factor(None) - 1.0).abs() < 1e-6,
+            (fade_factor(None) - 1.0).abs() < 1e-6,
             "None age should clamp to factor=1.0 (the floor)",
         );
     }
 
     #[test]
-    fn file_fade_factor_matches_commit_ramp_for_some_age() {
+    fn fade_factor_matches_commit_ramp_for_some_age() {
         // The file fade must share the *same* ramp as commit rows so the two
         // sections darken in lockstep under viddy. Spot-check the 1h midpoint.
         let one_hour = Duration::from_secs(60 * 60);
-        let file = file_fade_factor(Some(one_hour));
+        let file = fade_factor(Some(one_hour));
         let commit = age_fade_factor(one_hour);
         assert!(
             (file - commit).abs() < 1e-6,
@@ -3423,7 +3529,7 @@ mod tests {
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "test".into(),
-            age: Duration::from_secs(100),
+            age: Some(Duration::from_secs(100)),
         }]; // log: "1m40s"
         let mut o = opts();
         o.log_lines = 5; // so the log section renders
@@ -3469,7 +3575,7 @@ mod tests {
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "test".into(),
-            age: Duration::from_secs(100),
+            age: Some(Duration::from_secs(100)),
         }];
         let mut o = opts();
         o.log_lines = 5;

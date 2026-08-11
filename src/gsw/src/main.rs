@@ -586,6 +586,12 @@ pub(crate) fn render_frame(
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits.
+///
+/// A commit whose timestamp does not resolve into an elapsed duration — a
+/// negative epoch second, or a time ahead of the local clock through skew or a
+/// hand-set `--date` — yields `age: None`. The row then renders the unknown-age
+/// mark. Collapsing such a commit to `Duration::ZERO` instead would paint it as
+/// the freshest thing on screen, which is the one reading ruled out.
 fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
     let now = SystemTime::now();
     repo::recent_log(repo, n)
@@ -594,8 +600,7 @@ fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
             let age = u64::try_from(secs)
                 .ok()
                 .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
-                .and_then(|when| now.duration_since(when).ok())
-                .unwrap_or(Duration::ZERO);
+                .and_then(|when| now.duration_since(when).ok());
             LogEntry { hash, subject, age }
         })
         .collect()
