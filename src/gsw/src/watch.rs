@@ -381,11 +381,11 @@ struct WalkSchedule {
     next_timed_at: Option<Instant>,
 }
 
-/// A schedule that runs no timed walk: gsw stays purely event-driven and the
-/// duty-cycle gate is the only timing policy. Takes no instant on purpose — with
-/// no interval there is nothing to count from, and this type reads no clock of
-/// its own.
 impl WalkSchedule {
+    /// A schedule that runs no timed walk: gsw stays purely event-driven and
+    /// the duty-cycle gate is the only timing policy. Takes no instant on
+    /// purpose — with no interval there is nothing to count from, and this type
+    /// reads no clock of its own.
     #[cfg(test)]
     fn unscheduled() -> Self {
         Self {
@@ -395,9 +395,7 @@ impl WalkSchedule {
             next_timed_at: None,
         }
     }
-}
 
-impl WalkSchedule {
     /// Build a schedule whose timed walks run every `interval`, counting from
     /// `last_walk_at` — the start of the walk that seeded the first frame —
     /// and gated by what that walk cost, exactly as [`Self::record`] gates
