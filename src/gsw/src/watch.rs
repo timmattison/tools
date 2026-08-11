@@ -368,14 +368,48 @@ struct WalkSchedule {
     /// deferred and exactly one coalesced walk is now owed at the cooldown's
     /// expiry. Cleared by [`Self::record`] once that owed walk is performed.
     dirty: bool,
+    /// How often a walk runs with no filesystem event to prompt it. `None`
+    /// disables the timed walk, leaving gsw purely event-driven.
+    interval: Option<Duration>,
+    /// When the next timed walk falls due. `None` while no interval is set.
+    next_timed_at: Option<Instant>,
 }
 
+/// A schedule that runs no timed walk: gsw stays purely event-driven and the
+/// duty-cycle gate is the only timing policy. Takes no instant on purpose — with
+/// no interval there is nothing to count from, and this type reads no clock of
+/// its own.
 impl WalkSchedule {
-    fn new() -> Self {
+    fn unscheduled() -> Self {
         Self {
             next_allowed_at: None,
             dirty: false,
+            interval: None,
+            next_timed_at: None,
         }
+    }
+}
+
+impl WalkSchedule {
+    /// Build a schedule whose timed walks run every `interval`, counting from
+    /// `last_walk_at` — the start of the walk that seeded the first frame.
+    fn new(interval: Option<Duration>, last_walk_at: Instant) -> Self {
+        Self {
+            next_allowed_at: None,
+            dirty: false,
+            interval,
+            next_timed_at: interval.map(|i| last_walk_at + i),
+        }
+    }
+
+    /// When the next walk this schedule *owes* falls due, or `None` when it owes
+    /// none. Both a deferred filesystem change and a timed walk are walks that
+    /// will happen with no further input, so the sooner of the two wins.
+    ///
+    /// This is what the refresh clock counts down to. A filesystem event can
+    /// still walk earlier, which is why the clock says "scheduled".
+    fn next_walk_at(&self) -> Option<Instant> {
+        self.next_allowed()
     }
 
     /// Decide whether a change arriving at `now` may walk git: [`Walk::Now`] once
@@ -820,7 +854,7 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
-    let mut schedule = WalkSchedule::new();
+    let mut schedule = WalkSchedule::unscheduled();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -1591,7 +1625,7 @@ mod tests {
         let t0 = Instant::now();
 
         // Representative cost: a 150 ms walk gates the next for 100·150 ms = 15 s.
-        let mut representative = WalkSchedule::new();
+        let mut representative = WalkSchedule::unscheduled();
         representative.record(t0, Duration::from_millis(150));
         assert_eq!(
             representative.on_change(t0 + Duration::from_secs(15) - Duration::from_nanos(1)),
@@ -1605,7 +1639,7 @@ mod tests {
         );
 
         // No ceiling: a 5 s walk gates the next for 100·5 s = 500 s, uncapped.
-        let mut costly = WalkSchedule::new();
+        let mut costly = WalkSchedule::unscheduled();
         costly.record(t0, Duration::from_secs(5));
         assert_eq!(
             costly.on_change(t0 + Duration::from_secs(500) - Duration::from_nanos(1)),
@@ -1620,7 +1654,7 @@ mod tests {
 
         // Recompute-from-latest: a later record fully replaces the earlier one,
         // gating from the LATEST walk start at 100× the LATEST cost.
-        let mut last_write_wins = WalkSchedule::new();
+        let mut last_write_wins = WalkSchedule::unscheduled();
         let t1 = t0 + Duration::from_secs(1);
         last_write_wins.record(t0, Duration::from_millis(500)); // would gate until t0 + 50 s
         last_write_wins.record(t1, Duration::from_millis(30)); // replaced: gate until t1 + 3 s
@@ -1636,11 +1670,94 @@ mod tests {
         );
 
         // A fresh throttle that has never recorded imposes no cooldown.
-        let mut fresh = WalkSchedule::new();
+        let mut fresh = WalkSchedule::unscheduled();
         assert_eq!(
             fresh.on_change(t0),
             Walk::Now,
             "a throttle that has never walked allows a walk immediately",
+        );
+    }
+
+    /// The default timed-refresh cadence used across the schedule tests.
+    const TEST_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// A walk cheap enough that its duty-cycle cooldown (100× cost, floored at
+    /// 150 ms) stays far inside `TEST_INTERVAL` — so the interval, not the
+    /// budget, decides when the timed walk falls due.
+    const CHEAP: Duration = Duration::from_millis(150);
+
+    #[test]
+    fn timed_walk_falls_due_one_interval_after_the_last_walk() {
+        // The countdown the refresh clock shows: with no filesystem event at
+        // all, gsw still re-walks every interval. Instants derive from one base,
+        // so the test is deterministic and parallel-safe — no real sleeping.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + TEST_INTERVAL),
+            "the first timed walk is due one interval after the seed walk",
+        );
+
+        // Each walk re-arms the schedule from its own start.
+        let t1 = t0 + Duration::from_secs(90);
+        schedule.record(t1, CHEAP);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t1 + TEST_INTERVAL),
+            "a walk re-arms the timed walk one interval from that walk's start",
+        );
+    }
+
+    #[test]
+    fn timed_walk_never_outruns_the_duty_cycle_budget() {
+        // On an expensive repo the 1% budget outranks the interval: a 2 s walk
+        // earns a 200 s cooldown, so the timed walk waits 200 s, not 60 s.
+        // Otherwise the "next refresh" countdown would promise a walk the gate
+        // has no intention of admitting.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        let costly = Duration::from_secs(2);
+        schedule.record(t0, costly);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + Duration::from_secs(200)),
+            "the timed walk must wait out the duty-cycle cooldown",
+        );
+    }
+
+    #[test]
+    fn a_deferred_change_pulls_the_next_walk_in_ahead_of_the_interval() {
+        // A filesystem change deferred mid-cooldown owes a walk at the
+        // cooldown's expiry, which is sooner than the interval. The clock must
+        // count down to the sooner of the two, or it would over-promise the wait.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        schedule.record(t0, CHEAP); // cooldown expires at t0 + 15 s
+        assert_eq!(schedule.on_change(t0 + Duration::from_secs(1)), Walk::Defer);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + Duration::from_secs(15)),
+            "an owed walk at 15 s beats the timed walk at 60 s",
+        );
+    }
+
+    #[test]
+    fn a_disabled_interval_owes_no_timed_walk() {
+        // `--refresh-interval 0` restores today's purely event-driven gsw: the
+        // gate still applies, but nothing falls due on its own.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::unscheduled();
+        assert_eq!(
+            schedule.next_walk_at(),
+            None,
+            "an unscheduled walk schedule owes nothing on its own",
+        );
+        schedule.record(t0, CHEAP);
+        assert_eq!(
+            schedule.next_walk_at(),
+            None,
+            "recording a walk must not invent a timed walk",
         );
     }
 
@@ -1654,7 +1771,7 @@ mod tests {
         // derived from one base, so the test is deterministic and parallel-safe.
         let t0 = Instant::now();
 
-        let mut schedule = WalkSchedule::new();
+        let mut schedule = WalkSchedule::unscheduled();
         schedule.record(t0, Duration::from_millis(1));
         assert_eq!(
             schedule.on_change(t0 + Duration::from_millis(100)),
@@ -1679,7 +1796,7 @@ mod tests {
         // Instants derive from one base — deterministic and parallel-safe.
         let t0 = Instant::now();
 
-        let mut schedule = WalkSchedule::new();
+        let mut schedule = WalkSchedule::unscheduled();
         schedule.record(t0, Duration::from_millis(150));
         assert_eq!(
             schedule.next_allowed(),
@@ -1710,7 +1827,7 @@ mod tests {
         // derive from one base — deterministic and parallel-safe, no sleeping.
         let t0 = Instant::now();
 
-        let mut schedule = WalkSchedule::new();
+        let mut schedule = WalkSchedule::unscheduled();
         schedule.record(t0, Duration::from_millis(150)); // next_allowed_at = t0 + 15 s
         assert_eq!(
             schedule.on_change(t0 + Duration::from_secs(1)),
@@ -1749,7 +1866,7 @@ mod tests {
         // from one base — deterministic and parallel-safe, no sleeping.
         let t0 = Instant::now();
 
-        let mut schedule = WalkSchedule::new();
+        let mut schedule = WalkSchedule::unscheduled();
         schedule.record(t0, Duration::from_millis(150)); // cooldown until t0 + 15 s
         assert_eq!(
             schedule.on_change(t0 + Duration::from_secs(1)),
