@@ -492,9 +492,42 @@ fn shave_names(branch: &str, base: &str, over: usize) -> (String, String) {
     )
 }
 
+/// Dashes kept to the right of the refresh clock, so the rule still closes as a
+/// rule rather than trailing off after the text.
+const CLOCK_TAIL: usize = 5;
+
+/// Dashes kept to the left of the refresh clock. Below this the rule reads as a
+/// caption with a stray dash rather than a rule with text in it, so the clock is
+/// dropped instead.
+const CLOCK_MIN_LEAD: usize = 4;
+
+/// Render the full-width rule, optionally with the live-refresh clock set into
+/// it: a leading dash run, the clock, then a short dash tail.
+///
+/// The clock displaces dashes and never adds columns — the rule is exactly
+/// `width` columns either way, because one column of overflow wraps the row.
+/// Where the terminal is too narrow to seat the whole clock between
+/// [`CLOCK_MIN_LEAD`] and [`CLOCK_TAIL`] dashes, the rule falls back to plain
+/// dashes: a truncated duration (`next refresh: 1`) would be worse than none.
 fn render_separator(width: usize, refresh: Option<&RefreshStatus>) -> String {
-    let _ = refresh;
-    "─".repeat(width).dimmed().to_string()
+    let Some(status) = refresh else {
+        return "─".repeat(width).dimmed().to_string();
+    };
+    let clock = format!(
+        "last refresh: {} ago, next refresh: {}",
+        format_age_detailed(status.last_refresh_ago),
+        format_age_detailed(status.next_refresh_in),
+    );
+    // The clock is ASCII, so its display width is its byte length; the gaps are
+    // one column each.
+    let seated = clock.len() + 2 + CLOCK_TAIL + CLOCK_MIN_LEAD;
+    if seated > width {
+        return "─".repeat(width).dimmed().to_string();
+    }
+    let lead = width - clock.len() - 2 - CLOCK_TAIL;
+    format!("{} {clock} {}", "─".repeat(lead), "─".repeat(CLOCK_TAIL),)
+        .dimmed()
+        .to_string()
 }
 
 /// Render the in-progress-operation indicator line shown between the header
