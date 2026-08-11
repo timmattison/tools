@@ -1649,6 +1649,46 @@ mod tests {
     }
 
     #[test]
+    fn the_header_does_not_restate_the_newest_commit_age() {
+        // The header's age field and the first log row's age are the same
+        // commit read through the same formatter, so the header spent about
+        // two dozen columns repeating the line directly beneath it. The
+        // columns go back to the branch name and the tracking ref, which are
+        // what the header alone can tell you.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry("abc1234", "the newest commit", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let header = header_of(&snap, &o);
+        assert!(
+            !header.contains("last commit"),
+            "the header should not repeat the newest commit's age: {header:?}",
+        );
+    }
+
+    #[test]
+    fn the_newest_commit_age_still_renders_on_its_own_row() {
+        // The other half of the same contract: dropping the header field must
+        // deduplicate the age, not remove it. The commit's own row still
+        // carries it.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry("abc1234", "the newest commit", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with("5m23s"),
+            "the newest commit's age belongs on its own row: {row:?}",
+        );
+    }
+
+    #[test]
     fn header_truncates_the_branch_from_the_middle() {
         // Branch names share long prefixes (`feature/…`) and carry the part
         // that identifies them at the end, so a squeezed name keeps both ends

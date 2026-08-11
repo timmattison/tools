@@ -808,6 +808,36 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
     );
 }
 
+#[test]
+fn the_newest_commit_age_is_shown_once_not_twice() {
+    // The header used to end in `last commit {age} ago`, restating the age on
+    // the first log row directly beneath it — the same commit, read through the
+    // same formatter. The header is the copy that pays for itself in columns,
+    // so it is the copy that goes. The age itself stays on the commit's row.
+    let dir = setup_repo();
+    let p = dir.path();
+    fs::write(p.join("b.txt"), "newest\n").unwrap();
+    run_git(p, &["add", "b.txt"]);
+    commit_dated(p, "the newest commit", "2011-03-04T05:06:07");
+
+    let out = run_gsw_args(p, &["--log-lines", "5"]);
+    let header = out.lines().next().unwrap_or("");
+    assert!(
+        !header.contains("last commit"),
+        "the header should not repeat the newest commit's age: {header:?}",
+    );
+
+    let row = out
+        .lines()
+        .find(|line| line.contains("the newest commit"))
+        .unwrap_or_else(|| panic!("the newest commit should have a log row:\n{out}"));
+    let age = row.trim_end().rsplit(' ').next().unwrap_or_default();
+    assert!(
+        age.contains('y') && age.ends_with("mo"),
+        "the commit's own row should still carry its age, got {age:?} from {row:?}",
+    );
+}
+
 /// A commit date far enough ahead that no clock this test runs on has reached
 /// it. A fixed date keeps the fixture deterministic.
 const FUTURE_COMMIT_DATE: &str = "2099-01-01T00:00:00 +0000";
