@@ -399,8 +399,11 @@ impl WalkSchedule {
 
 impl WalkSchedule {
     /// Build a schedule whose timed walks run every `interval`, counting from
-    /// `last_walk_at` — the start of the walk that seeded the first frame.
-    fn new(interval: Option<Duration>, last_walk_at: Instant) -> Self {
+    /// `last_walk_at` — the start of the walk that seeded the first frame —
+    /// and gated by what that walk cost, exactly as [`Self::record`] gates
+    /// every walk after it.
+    fn new(interval: Option<Duration>, last_walk_at: Instant, last_walk_cost: Duration) -> Self {
+        let _ = last_walk_cost;
         Self {
             next_allowed_at: None,
             dirty: false,
@@ -942,7 +945,7 @@ where
     let mut freshest = initial_freshest;
     // The seed walk that filled the cache is the first walk, so the first timed
     // walk falls due one interval after it.
-    let mut schedule = WalkSchedule::new(refresh_interval, cache.collected_at);
+    let mut schedule = WalkSchedule::new(refresh_interval, cache.collected_at, Duration::ZERO);
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -1806,7 +1809,7 @@ mod tests {
         // must round up — then the pair reads as one interval, and the countdown
         // never claims less time than is actually left.
         let t0 = Instant::now();
-        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
         for millis in [0, 1, 400, 999, 1000, 1400, 30_500, 58_999, 59_999] {
             let now = t0 + Duration::from_millis(millis);
             let frame = timing(now.saturating_duration_since(t0), &schedule, now);
@@ -1825,12 +1828,46 @@ mod tests {
     }
 
     #[test]
+    fn the_seed_walks_cost_gates_the_first_timed_walk() {
+        // The walk that seeds the first frame is a walk like any other, so its
+        // cost has to buy the same duty-cycle cooldown. Without that, the first
+        // timed refresh spends a budget nothing paid for: on a repository whose
+        // walk costs 2 s, gsw would re-walk at 60 s instead of the 200 s the
+        // budget owes, running that first cycle at ~3.3% against a stated 1%.
+        let t0 = Instant::now();
+        let costly = Duration::from_secs(2);
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, costly);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + Duration::from_secs(200)),
+            "the seed walk's cost must gate the first timed walk, like every later walk",
+        );
+    }
+
+    #[test]
+    fn the_seed_frame_counts_down_to_the_schedule_the_loop_runs_on() {
+        // The frame the seed walk paints and the schedule handed to the loop
+        // have to quote the same deadline. A frame opening with "next refresh:
+        // 60s" over a schedule that will not walk for 200 s promises a refresh
+        // the gate has no intention of admitting — the exact dishonesty the
+        // budget-outranks-the-interval rule exists to prevent.
+        let t0 = Instant::now();
+        let costly = Duration::from_secs(2);
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, costly);
+        assert_eq!(
+            timing(Duration::ZERO, &schedule, t0).next_refresh_in,
+            Some(Duration::from_secs(200)),
+            "the seed frame must count down to the schedule's own first walk",
+        );
+    }
+
+    #[test]
     fn timed_walk_falls_due_one_interval_after_the_last_walk() {
         // The countdown the refresh clock shows: with no filesystem event at
         // all, gsw still re-walks every interval. Instants derive from one base,
         // so the test is deterministic and parallel-safe — no real sleeping.
         let t0 = Instant::now();
-        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
         assert_eq!(
             schedule.next_walk_at(),
             Some(t0 + TEST_INTERVAL),
@@ -1854,7 +1891,7 @@ mod tests {
         // Otherwise the "next refresh" countdown would promise a walk the gate
         // has no intention of admitting.
         let t0 = Instant::now();
-        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
         let costly = Duration::from_secs(2);
         schedule.record(t0, costly);
         assert_eq!(
@@ -1870,7 +1907,7 @@ mod tests {
         // cooldown's expiry, which is sooner than the interval. The clock must
         // count down to the sooner of the two, or it would over-promise the wait.
         let t0 = Instant::now();
-        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
         schedule.record(t0, CHEAP); // cooldown expires at t0 + 15 s
         assert_eq!(schedule.on_change(t0 + Duration::from_secs(1)), Walk::Defer);
         assert_eq!(
@@ -1905,7 +1942,7 @@ mod tests {
     #[test]
     fn the_countdown_tracks_the_next_scheduled_walk() {
         let t0 = Instant::now();
-        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
         assert_eq!(
             schedule.countdown(t0 + Duration::from_secs(15)),
             Some(Duration::from_secs(45)),
