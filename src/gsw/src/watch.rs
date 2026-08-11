@@ -403,12 +403,16 @@ impl WalkSchedule {
     /// and gated by what that walk cost, exactly as [`Self::record`] gates
     /// every walk after it.
     fn new(interval: Option<Duration>, last_walk_at: Instant, last_walk_cost: Duration) -> Self {
-        let _ = last_walk_cost;
+        let cooldown = cooldown(last_walk_cost);
         Self {
+            // The seed walk arms no cooldown gate: a filesystem change landing
+            // right after startup still walks immediately, as it always has.
+            // Only the *timed* walk is held to the budget here — the gate is
+            // record()'s job, and the seed walk is over before this is built.
             next_allowed_at: None,
             dirty: false,
             interval,
-            next_timed_at: interval.map(|i| last_walk_at + i),
+            next_timed_at: interval.map(|i| last_walk_at + i.max(cooldown)),
         }
     }
 
@@ -682,11 +686,21 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
     let snapshot = collect_snapshot(handle.repo(), cfg)?;
+    // The seed walk pays into the duty-cycle budget like every walk after it,
+    // so its cost is what the schedule's first timed walk is gated on. The seed
+    // frame then counts down to that same schedule rather than to the raw
+    // interval — one deadline, quoted once, so the opening frame cannot promise
+    // a refresh the loop will not make.
+    let schedule = WalkSchedule::new(
+        cfg.refresh_interval,
+        collected_at,
+        Instant::now().saturating_duration_since(collected_at),
+    );
     let first = render_frame(
         &snapshot,
         cfg,
         dims,
-        FrameTiming::at_walk(cfg.refresh_interval),
+        timing(Duration::ZERO, &schedule, collected_at),
     );
     paint_output(&first.output)?;
     let mut displayed = first.output;
@@ -717,7 +731,7 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
         &mut displayed,
         cache,
         initial_freshest,
-        cfg.refresh_interval,
+        schedule,
         LoopHooks {
             collect: || walk(&mut handle, &ignore, cfg),
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
@@ -886,6 +900,9 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 /// *cached* [`Snapshot`] (Part A), so a decay tick on an unchanged repo still
 /// costs no git work at all.
 ///
+/// `schedule` arrives already anchored to the walk that filled `cache`, so the
+/// caller's seed frame and this loop count down to the same deadline.
+///
 /// No timer needs a thread of its own: every deadline is folded into the
 /// `recv_timeout` window by [`wait_window`], so a timeout *is* the tick, and the
 /// window is recomputed after every render. Three sources feed it — the decay
@@ -931,7 +948,7 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
     displayed: &mut String,
     mut cache: SnapshotCache,
     initial_freshest: Option<Duration>,
-    refresh_interval: Option<Duration>,
+    mut schedule: WalkSchedule,
     mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick>,
 ) -> Result<()>
 where
@@ -943,9 +960,6 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
-    // The seed walk that filled the cache is the first walk, so the first timed
-    // walk falls due one interval after it.
-    let mut schedule = WalkSchedule::new(refresh_interval, cache.collected_at, Duration::ZERO);
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -966,7 +980,7 @@ where
         let wait = wait_window(&[
             (hooks.next_tick)(freshest),
             walk_wait,
-            refresh_interval.map(|_| CLOCK_CADENCE),
+            schedule.interval.map(|_| CLOCK_CADENCE),
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
@@ -2245,7 +2259,9 @@ mod tests {
     /// No timed refresh: the loop under test is purely event-driven, so a walk
     /// can only come from a filesystem change. Every test that predates the
     /// timed refresh passes this, keeping its subject isolated from it.
-    const NO_TIMED_REFRESH: Option<Duration> = None;
+    fn no_timed_refresh() -> WalkSchedule {
+        WalkSchedule::unscheduled()
+    }
 
     /// A `next_tick` that always disables the timer, so the loop blocks purely
     /// on channel events. The event-driven tests use this to stay independent
@@ -2316,14 +2332,17 @@ mod tests {
         let mut displayed = String::new();
         let mut collects = 0_usize;
         let base = Instant::now();
-        let interval = Duration::from_millis(5);
+        // Above FLOOR, so the interval is what sets the deadline: every walk's
+        // cooldown is floored at 150 ms, and a sub-floor interval would be
+        // stretched to it. The CLI takes whole seconds, so it cannot ask for one.
+        let interval = Duration::from_millis(200);
         event_loop(
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
-            Some(interval),
+            WalkSchedule::new(Some(interval), base, Duration::ZERO),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2338,7 +2357,7 @@ mod tests {
                 dimensions: || TEST_DIMS,
                 paint: |_output: &str| Ok(()),
                 // Steps past the deadline by the time the loop re-reads it.
-                clock: stepping_clock(base, interval),
+                clock: stepping_clock(base, interval * 5),
                 // A decay tick on the same cadence, so the loop always wakes:
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
@@ -2368,7 +2387,7 @@ mod tests {
             &mut displayed,
             seeded_cache(collected_at),
             Some(Duration::ZERO),
-            Some(Duration::from_secs(60)),
+            WalkSchedule::new(Some(Duration::from_secs(60)), collected_at, Duration::ZERO),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
@@ -2410,7 +2429,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2458,7 +2477,7 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2499,7 +2518,7 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2541,7 +2560,7 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2579,7 +2598,7 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             Some(Duration::ZERO),
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
@@ -2624,7 +2643,7 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             Some(Duration::from_secs(30)),
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
@@ -2666,7 +2685,7 @@ mod tests {
             &mut displayed,
             seeded_cache(collected_at),
             Some(Duration::ZERO),
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2717,7 +2736,7 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2768,7 +2787,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
@@ -2842,7 +2861,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2915,7 +2934,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2985,7 +3004,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3056,7 +3075,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3127,7 +3146,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3187,7 +3206,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the forced walk from tick behavior
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3250,7 +3269,7 @@ mod tests {
             &mut displayed,
             cache,
             None, // decay timer off: isolate the failed walk from tick behavior
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3330,7 +3349,7 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3420,7 +3439,7 @@ mod tests {
             &mut displayed,
             cache,
             None, // decay timer off: isolate recovery from tick behavior
-            NO_TIMED_REFRESH,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
