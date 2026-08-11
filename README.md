@@ -412,7 +412,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     clock — `──── last refresh: 3m2s ago, next refresh: 15s ─────` — so you can tell at a glance
     whether the screen is still live. Filesystem changes refresh it immediately; with nothing
     happening on disk it re-walks the repository every `--refresh-interval` seconds (default 60),
-    which is what the countdown counts down to. The two halves always add up to one interval.
+    which is what the countdown counts down to. The two halves add up to the wait the countdown is
+    measuring: one interval while nothing else is pending, less when a filesystem change deferred
+    through the cooldown pulls the next walk in, more when the duty-cycle budget pushes it out.
     `--refresh-interval 0` turns the timed refresh off, which removes the clock with it and leaves
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait

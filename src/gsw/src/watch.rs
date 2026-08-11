@@ -1814,12 +1814,17 @@ mod tests {
     const CHEAP: Duration = Duration::from_millis(150);
 
     #[test]
-    fn the_two_clock_numbers_always_sum_to_the_interval() {
+    fn the_two_clock_numbers_sum_to_the_interval_with_nothing_else_pending() {
         // "last refresh: 1s ago, next refresh: 58s" on a 60-second interval
         // makes a reader check their arithmetic. Both numbers are printed as
         // whole seconds, so the elapsed half rounds down and the remaining half
         // must round up — then the pair reads as one interval, and the countdown
         // never claims less time than is actually left.
+        //
+        // One interval is what the pair sums to only in this steady state. A
+        // deferred change pulls the next walk in and a costly walk's cooldown
+        // pushes it out; either way the sum is the wait actually being measured,
+        // which those cases cover.
         let t0 = Instant::now();
         let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
         for millis in [0, 1, 400, 999, 1000, 1400, 30_500, 58_999, 59_999] {
