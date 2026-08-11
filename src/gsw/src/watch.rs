@@ -153,7 +153,7 @@ impl LiveIgnore {
     /// Called once per git walk, unconditionally. That is deliberate: rebuilding
     /// reads at most three small files and recompiles a handful of globs, which
     /// is negligible against the status traversal it rides along with — and
-    /// watch-mode walks are already gated to a ~1% duty cycle by [`Throttle`], so
+    /// watch-mode walks are already gated to a ~1% duty cycle by [`WalkSchedule`], so
     /// the rebuild rate is bounded by the same budget. Do **not** "optimize" this
     /// into a build-once cache or an mtime check: building it exactly once is the
     /// staleness this method exists to fix.
@@ -329,7 +329,7 @@ pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Whether a filesystem change may walk git right now, or must wait out the
-/// adaptive cooldown. Returned by [`Throttle::on_change`].
+/// adaptive cooldown. Returned by [`WalkSchedule::on_change`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Walk {
     /// The cooldown has expired (or none is armed): walk git now.
@@ -361,7 +361,7 @@ const FLOOR: Duration = Duration::from_millis(150);
 /// (= 100·`D`), so an expensive repo automatically backs off and a cheap one
 /// stays responsive — all decided here with injected instants, no clock of its
 /// own.
-struct Throttle {
+struct WalkSchedule {
     /// Earliest instant the next walk may start. `None` = a walk is allowed now.
     next_allowed_at: Option<Instant>,
     /// Set when a change arrives during an active cooldown: a walk has been
@@ -370,7 +370,7 @@ struct Throttle {
     dirty: bool,
 }
 
-impl Throttle {
+impl WalkSchedule {
     fn new() -> Self {
         Self {
             next_allowed_at: None,
@@ -447,17 +447,15 @@ fn cooldown(cost: Duration) -> Duration {
         .max(FLOOR)
 }
 
-/// The loop's wait window: the soonest of the decay-tick cadence
-/// (`decay_tick`) and a pending deferred walk's remaining cooldown
-/// (`deferred_walk`), or `None` to block until an event arrives. Both inputs
-/// are already expressed as durations from now; a `None` from either source
-/// means that source imposes no deadline.
-fn wait_window(decay_tick: Option<Duration>, deferred_walk: Option<Duration>) -> Option<Duration> {
-    match (decay_tick, deferred_walk) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, None) => a,
-        (None, b) => b,
-    }
+/// The loop's wait window: the soonest deadline any source imposes, or `None`
+/// to block until an event arrives.
+///
+/// Every input is already expressed as a duration from now, and a `None` from a
+/// source means that source imposes no deadline. Taking a slice rather than a
+/// fixed pair is what lets a new source (the timed refresh, the refresh clock's
+/// own cadence) join without every caller and test changing shape.
+fn wait_window(deadlines: &[Option<Duration>]) -> Option<Duration> {
+    deadlines.iter().flatten().min().copied()
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
@@ -822,7 +820,7 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
-    let mut throttle = Throttle::new();
+    let mut schedule = WalkSchedule::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -835,10 +833,10 @@ where
         // Wait window: the soonest of the decay-tick cadence and, when a walk was
         // deferred during a cooldown, that cooldown's expiry. The clock is read
         // for the deferred deadline only when one is actually pending.
-        let deferred_wait = throttle
+        let deferred_wait = schedule
             .next_allowed()
             .map(|expiry| expiry.saturating_duration_since((hooks.clock)()));
-        let wait = wait_window((hooks.next_tick)(freshest), deferred_wait);
+        let wait = wait_window(&[(hooks.next_tick)(freshest), deferred_wait]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
@@ -914,16 +912,16 @@ where
         let walk_now = if saw_force {
             // Manual refresh (`r`): lift the cooldown gate and walk now. The walk
             // branch re-measures cost and re-arms the throttle from it.
-            throttle.force();
+            schedule.force();
             true
         } else if saw_fs {
-            matches!(throttle.on_change(now), Walk::Now)
+            matches!(schedule.on_change(now), Walk::Now)
         } else if woke_for_timeout {
             // Only the OWED walk fires here, and only once its cooldown has
             // actually expired: a plain decay tick that fires mid-cooldown (a
             // shorter wait than the deferred deadline) re-renders from cache
             // without walking, so Part A and Part B compose.
-            matches!(throttle.next_allowed(), Some(expiry) if now >= expiry)
+            matches!(schedule.next_allowed(), Some(expiry) if now >= expiry)
         } else {
             false
         };
@@ -938,7 +936,7 @@ where
             // every walk, so gating the retries on the same duty-cycle budget is
             // what keeps a permanently-deleted repo from pinning a core.
             let cost = (hooks.clock)().saturating_duration_since(now);
-            throttle.record(now, cost);
+            schedule.record(now, cost);
             match collected {
                 Ok(snapshot) => {
                     // Re-seed the collection time to the walk's start so a later
@@ -1554,23 +1552,32 @@ mod tests {
 
     #[test]
     fn wait_window_picks_the_earliest_deadline() {
-        // The loop waits on the SOONER of the decay-tick cadence and a pending
-        // deferred walk's remaining cooldown. A `None` from either source means
-        // it imposes no deadline; both `None` means block until an event arrives.
+        // The loop waits on the SOONEST deadline any source imposes. A `None`
+        // from a source means it imposes no deadline; all `None` means block
+        // until an event arrives.
         let short = Duration::from_secs(5);
         let long = Duration::from_secs(60);
 
-        // Earliest of two present deadlines wins, regardless of argument order.
-        assert_eq!(wait_window(Some(long), Some(short)), Some(short));
-        assert_eq!(wait_window(Some(short), Some(long)), Some(short));
-        assert_eq!(wait_window(Some(short), Some(short)), Some(short));
+        // Earliest of the present deadlines wins, regardless of argument order.
+        assert_eq!(wait_window(&[Some(long), Some(short)]), Some(short));
+        assert_eq!(wait_window(&[Some(short), Some(long)]), Some(short));
+        assert_eq!(wait_window(&[Some(short), Some(short)]), Some(short));
 
         // One source absent: the other's deadline stands.
-        assert_eq!(wait_window(Some(short), None), Some(short));
-        assert_eq!(wait_window(None, Some(short)), Some(short));
+        assert_eq!(wait_window(&[Some(short), None]), Some(short));
+        assert_eq!(wait_window(&[None, Some(short)]), Some(short));
 
-        // Neither source imposes a deadline: block until an event arrives.
-        assert_eq!(wait_window(None, None), None);
+        // Any number of sources, not just two.
+        let mid = Duration::from_secs(30);
+        assert_eq!(
+            wait_window(&[Some(long), Some(short), Some(mid)]),
+            Some(short)
+        );
+        assert_eq!(wait_window(&[None, Some(mid), None, Some(long)]), Some(mid));
+
+        // No source imposes a deadline: block until an event arrives.
+        assert_eq!(wait_window(&[None, None]), None);
+        assert_eq!(wait_window(&[]), None);
     }
 
     #[test]
@@ -1584,7 +1591,7 @@ mod tests {
         let t0 = Instant::now();
 
         // Representative cost: a 150 ms walk gates the next for 100·150 ms = 15 s.
-        let mut representative = Throttle::new();
+        let mut representative = WalkSchedule::new();
         representative.record(t0, Duration::from_millis(150));
         assert_eq!(
             representative.on_change(t0 + Duration::from_secs(15) - Duration::from_nanos(1)),
@@ -1598,7 +1605,7 @@ mod tests {
         );
 
         // No ceiling: a 5 s walk gates the next for 100·5 s = 500 s, uncapped.
-        let mut costly = Throttle::new();
+        let mut costly = WalkSchedule::new();
         costly.record(t0, Duration::from_secs(5));
         assert_eq!(
             costly.on_change(t0 + Duration::from_secs(500) - Duration::from_nanos(1)),
@@ -1613,7 +1620,7 @@ mod tests {
 
         // Recompute-from-latest: a later record fully replaces the earlier one,
         // gating from the LATEST walk start at 100× the LATEST cost.
-        let mut last_write_wins = Throttle::new();
+        let mut last_write_wins = WalkSchedule::new();
         let t1 = t0 + Duration::from_secs(1);
         last_write_wins.record(t0, Duration::from_millis(500)); // would gate until t0 + 50 s
         last_write_wins.record(t1, Duration::from_millis(30)); // replaced: gate until t1 + 3 s
@@ -1629,7 +1636,7 @@ mod tests {
         );
 
         // A fresh throttle that has never recorded imposes no cooldown.
-        let mut fresh = Throttle::new();
+        let mut fresh = WalkSchedule::new();
         assert_eq!(
             fresh.on_change(t0),
             Walk::Now,
@@ -1647,15 +1654,15 @@ mod tests {
         // derived from one base, so the test is deterministic and parallel-safe.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(1));
+        let mut schedule = WalkSchedule::new();
+        schedule.record(t0, Duration::from_millis(1));
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_millis(100)),
+            schedule.on_change(t0 + Duration::from_millis(100)),
             Walk::Defer,
             "still gated past the un-floored 100 ms cooldown — the floor extends it",
         );
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_millis(150)),
+            schedule.on_change(t0 + Duration::from_millis(150)),
             Walk::Now,
             "allowed exactly at the 150 ms floor, never faster than today's debounce",
         );
@@ -1672,21 +1679,21 @@ mod tests {
         // Instants derive from one base — deterministic and parallel-safe.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(150));
+        let mut schedule = WalkSchedule::new();
+        schedule.record(t0, Duration::from_millis(150));
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             None,
             "a recorded-but-unchanged throttle owes no walk yet — nothing is pending",
         );
 
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Defer,
             "a change 1 s into the 15 s cooldown is deferred, not walked",
         );
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             Some(t0 + Duration::from_secs(15)),
             "that deferred change now owes one coalesced walk at the cooldown's expiry",
         );
@@ -1703,20 +1710,20 @@ mod tests {
         // derive from one base — deterministic and parallel-safe, no sleeping.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(150)); // next_allowed_at = t0 + 15 s
+        let mut schedule = WalkSchedule::new();
+        schedule.record(t0, Duration::from_millis(150)); // next_allowed_at = t0 + 15 s
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Defer,
             "a change 1 s into the 15 s cooldown is deferred, not walked",
         );
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(2)),
+            schedule.on_change(t0 + Duration::from_secs(2)),
             Walk::Defer,
             "a second mid-cooldown change coalesces into the same owed walk",
         );
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             Some(t0 + Duration::from_secs(15)),
             "still exactly one walk owed at the original expiry — coalesced, not doubled or moved",
         );
@@ -1724,9 +1731,9 @@ mod tests {
         // The owed walk runs at expiry and is recorded: that walk reflects the
         // latest coalesced state, so the single owed walk is consumed and the
         // deferral resets — nothing is pending afterward.
-        throttle.record(t0 + Duration::from_secs(15), Duration::from_millis(150));
+        schedule.record(t0 + Duration::from_secs(15), Duration::from_millis(150));
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             None,
             "the owed walk is consumed by the record; no walk is owed afterward",
         );
@@ -1742,17 +1749,17 @@ mod tests {
         // from one base — deterministic and parallel-safe, no sleeping.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(150)); // cooldown until t0 + 15 s
+        let mut schedule = WalkSchedule::new();
+        schedule.record(t0, Duration::from_millis(150)); // cooldown until t0 + 15 s
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Defer,
             "a change 1 s into the 15 s cooldown is deferred — we're genuinely mid-cooldown",
         );
 
-        throttle.force();
+        schedule.force();
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Now,
             "after force, the same mid-cooldown instant walks immediately — the gate is lifted",
         );
