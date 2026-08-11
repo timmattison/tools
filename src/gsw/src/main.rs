@@ -490,6 +490,7 @@ pub(crate) fn render_frame(
         max_files: file_cap_opt,
         log_lines: log_cap,
         truecolor: cfg.truecolor,
+        refresh: None,
     };
 
     // One-shot mode and the watch seed walk render at offset zero, which is

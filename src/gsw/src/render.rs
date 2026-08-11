@@ -124,6 +124,27 @@ pub struct RenderOptions {
     /// a dark floor as commits age, using 24-bit (truecolor) ANSI. When
     /// false, log rows use the same 8-color/dim styling as everything else.
     pub truecolor: bool,
+    /// Live-refresh clock printed inside the post-header separator, or `None`
+    /// to leave that rule blank. One-shot mode passes `None`: a render that
+    /// exits has no next refresh to count down to, and stamping a countdown
+    /// into piped output would date the capture the moment it is read.
+    pub refresh: Option<RefreshStatus>,
+}
+
+/// When the displayed snapshot was collected, and when the next one is due.
+///
+/// Watch mode prints both inside the post-header separator so the rule that
+/// already spans the frame carries the answer to "is this screen still live?"
+/// without spending a row on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshStatus {
+    /// How long ago the displayed snapshot was walked out of the repository.
+    /// This is watch mode's age offset — the same duration every displayed age
+    /// is advanced by — so the clock and the ages under it can never disagree.
+    pub last_refresh_ago: Duration,
+    /// How long until the next scheduled walk. `Duration::ZERO` reads as `0s`,
+    /// which is what the frame painted by that walk shows for an instant.
+    pub next_refresh_in: Duration,
 }
 
 /// Width of the "+adds" / "-dels" / age column fields.
@@ -180,7 +201,7 @@ pub(crate) fn render_with_offset(
     if let Some(op) = &snapshot.operation {
         lines.push(render_operation_line(op, opts.terminal_width));
     }
-    lines.push(render_separator(opts.terminal_width));
+    lines.push(render_separator(opts.terminal_width, opts.refresh.as_ref()));
 
     let display_count = match opts.max_files {
         Some(0) | None => snapshot.files.len(),
@@ -216,7 +237,10 @@ pub(crate) fn render_with_offset(
         // the post-header separator already sits directly above the files, so
         // adding another would produce a double rule with nothing between them.
         if log_rendered {
-            lines.push(render_separator(opts.terminal_width));
+            // The inter-section rule stays blank: the refresh clock belongs to
+            // the frame, not to the file list, and printing it twice would make
+            // a reader check whether the two copies agree.
+            lines.push(render_separator(opts.terminal_width, None));
         }
         for entry in snapshot.files.iter().take(display_count) {
             lines.push(render_row(entry, opts, max_change, path_width, age_offset));
@@ -468,7 +492,8 @@ fn shave_names(branch: &str, base: &str, over: usize) -> (String, String) {
     )
 }
 
-fn render_separator(width: usize) -> String {
+fn render_separator(width: usize, refresh: Option<&RefreshStatus>) -> String {
+    let _ = refresh;
     "─".repeat(width).dimmed().to_string()
 }
 
@@ -1215,6 +1240,7 @@ mod tests {
             max_files: None,
             log_lines: 0,
             truecolor: false,
+            refresh: None,
         }
     }
 
@@ -1260,6 +1286,117 @@ mod tests {
             opts.terminal_width,
             "separator width should match terminal width ({})\n  sep: {sep:?}",
             opts.terminal_width,
+        );
+    }
+
+    /// A refresh clock reading `3m2s ago` / `15s`, the example the feature was
+    /// specified with.
+    fn refresh_status() -> RefreshStatus {
+        RefreshStatus {
+            last_refresh_ago: Duration::from_secs(3 * 60 + 2),
+            next_refresh_in: Duration::from_secs(15),
+        }
+    }
+
+    #[test]
+    fn separator_carries_the_refresh_clock() {
+        // The whole point of the feature: the rule under the header answers
+        // "when did this last update, and when does it update again?".
+        let sep = strip_ansi(&render_separator(80, Some(&refresh_status())));
+        assert!(
+            sep.contains("last refresh: 3m2s ago, next refresh: 15s"),
+            "separator should carry the refresh clock: {sep:?}",
+        );
+    }
+
+    #[test]
+    fn separator_with_a_clock_still_spans_the_terminal_width() {
+        // The rule is a full-width frame element. Text inside it must displace
+        // dashes, never add columns — one extra column wraps the row.
+        for width in 40..=200 {
+            let sep = strip_ansi(&render_separator(width, Some(&refresh_status())));
+            assert_eq!(
+                UnicodeWidthStr::width(sep.as_str()),
+                width,
+                "separator with a clock must be exactly {width} columns: {sep:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn separator_clock_sits_between_dashes() {
+        // Tim's sketch: a long run of dashes, the clock, then a short tail —
+        // so the rule still reads as a rule rather than as a caption.
+        let sep = strip_ansi(&render_separator(80, Some(&refresh_status())));
+        let clock = "last refresh: 3m2s ago, next refresh: 15s";
+        let (before, after) = sep
+            .split_once(clock)
+            .unwrap_or_else(|| panic!("no clock in the rule: {sep:?}"));
+        assert!(
+            before.len() > after.len(),
+            "the dash run should lead and the tail should be short: {sep:?}",
+        );
+        assert!(
+            before.ends_with('\u{a0}') || before.ends_with(' '),
+            "the clock needs a gap from the dashes on its left: {before:?}",
+        );
+        assert!(
+            after.starts_with(' ') && after.trim_start().chars().all(|c| c == '─'),
+            "the clock needs a gap, then a pure dash tail, on its right: {after:?}",
+        );
+    }
+
+    #[test]
+    fn separator_without_a_clock_is_unchanged() {
+        // One-shot output and the inter-section rule keep today's plain rule,
+        // byte for byte.
+        let sep = strip_ansi(&render_separator(80, None));
+        assert_eq!(sep, "─".repeat(80), "a clockless rule should be all dashes");
+    }
+
+    #[test]
+    fn separator_drops_the_clock_rather_than_overflow_a_narrow_terminal() {
+        // Below the width the clock needs, the rule falls back to plain dashes.
+        // Truncating the clock instead would print a half-written duration.
+        for width in 0..40 {
+            let sep = strip_ansi(&render_separator(width, Some(&refresh_status())));
+            assert_eq!(
+                UnicodeWidthStr::width(sep.as_str()),
+                width,
+                "narrow separator must still be exactly {width} columns: {sep:?}",
+            );
+            assert!(
+                sep.chars().all(|c| c == '─') || sep.contains("next refresh:"),
+                "a narrow rule must be all dashes or carry a whole clock: {sep:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn frame_puts_the_clock_on_the_post_header_rule_only() {
+        // Two rules render when a log and a file list both show. The clock
+        // belongs to the frame, so it appears once, on the rule under the
+        // header — not repeated above the file list.
+        let mut opts = opts();
+        opts.log_lines = 2;
+        opts.refresh = Some(refresh_status());
+        let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, false, 1, 0)]);
+        snap.log = vec![log_entry("abc1234", "first", 10)];
+        let out = strip_ansi(&render(&snap, &opts));
+        let rules: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with('─') || l.contains("last refresh:"))
+            .collect();
+        assert_eq!(rules.len(), 2, "expected two rules in:\n{out}");
+        assert!(
+            rules[0].contains("last refresh: 3m2s ago, next refresh: 15s"),
+            "the post-header rule should carry the clock: {:?}",
+            rules[0],
+        );
+        assert!(
+            !rules[1].contains("last refresh:"),
+            "the inter-section rule should stay blank: {:?}",
+            rules[1],
         );
     }
 
@@ -1751,6 +1888,7 @@ mod tests {
                 max_files: None,
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         let row = out.lines().nth(2).unwrap_or("");
@@ -1773,6 +1911,7 @@ mod tests {
                 max_files: None,
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         );
         let stripped = strip_ansi(&out);
@@ -1861,6 +2000,7 @@ mod tests {
                 max_files: Some(3),
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         assert!(out.contains("f0.rs"));
@@ -1889,6 +2029,7 @@ mod tests {
                 max_files: Some(0),
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         for i in 0..5 {
