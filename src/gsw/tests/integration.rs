@@ -755,7 +755,8 @@ fn commit_dated(dir: &Path, message: &str, date: &str) {
 
 /// Subject of the 2011-dated fixture commit, long enough that the log row has
 /// to truncate it — which is part of what this test pins.
-const ANCIENT_COMMIT_SUBJECT: &str = "an old commit that has been sitting here for a very long time";
+const ANCIENT_COMMIT_SUBJECT: &str =
+    "an old commit that has been sitting here for a very long time";
 
 /// The head of [`ANCIENT_COMMIT_SUBJECT`], short enough to survive that
 /// truncation, so the row can still be found in the rendered frame.
