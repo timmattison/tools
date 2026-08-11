@@ -34,9 +34,11 @@ mod watch;
     long_about = "Prints a compact, color-coded view of the current branch's state: \
                   commits ahead of (and behind) the base branch, last-commit age, and a per-file \
                   list showing a magnitude bar, +/- counts, and recency. On a TTY it \
-                  runs as a self-refreshing watch that repaints on filesystem changes; \
-                  with `--one-shot` (or when its output is piped) it renders once and \
-                  exits."
+                  runs as a self-refreshing watch that repaints on filesystem changes and \
+                  re-walks the repository every --refresh-interval seconds, with the \
+                  separator under the header showing how stale the screen is and how long \
+                  until the next refresh; with `--one-shot` (or when its output is piped) \
+                  it renders once and exits."
 )]
 struct Cli {
     /// Render once and exit instead of entering the live watch loop. This is

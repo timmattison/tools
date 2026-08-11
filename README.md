@@ -404,6 +404,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     and preserves colors under watch wrappers. Nothing it prints ever wraps: the age column is
     fixed-width by contract, and the header shrinks to fit by dropping the tracking ref's name and
     shortening the branch, always keeping the `last commit {age} ago` tail.
+  - On a TTY it runs as a live watch instead, and the separator under the header carries a refresh
+    clock — `──── last refresh: 3m2s ago, next refresh: 15s ─────` — so you can tell at a glance
+    whether the screen is still live. Filesystem changes refresh it immediately; with nothing
+    happening on disk it re-walks the repository every `--refresh-interval` seconds (default 60),
+    which is what the countdown counts down to. The two halves always add up to one interval.
+    `--refresh-interval 0` turns the timed refresh off, which removes the clock with it and leaves
+    gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
+    budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
+    rather than promising one it will not keep.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —

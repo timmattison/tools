@@ -311,6 +311,12 @@ fn should_repaint(new: &str, displayed: &str) -> bool {
 /// | `1 min – 2 h` | 60 s | minute text ticks over; fade moves ~1 RGB unit/min |
 /// | `≥ 2 h` | `None` | fade frozen at the floor — FS events only, idle ≈ 0 |
 ///
+/// This is only one of the loop's deadline sources, and the least demanding of
+/// them: while a refresh countdown is on screen, [`CLOCK_CADENCE`] wakes the
+/// loop every second regardless of what this returns. `None` here therefore
+/// means "the fade needs no tick", not "the loop will sleep" — it sleeps only
+/// when `--refresh-interval 0` takes the countdown away too.
+///
 /// [`FADE_DARKEST_AT`]: crate::age::FADE_DARKEST_AT
 pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
     if freshest_age < Duration::from_secs(60) {
@@ -630,13 +636,14 @@ pub(crate) fn walk(
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
 /// cache with one git walk, paint the first frame, then re-render on filesystem
-/// changes, terminal resizes, and decay-timer ticks until the user quits with
-/// `q` or Ctrl-C.
+/// changes, terminal resizes, timed refreshes, and decay-timer ticks until the
+/// user quits with `q` or Ctrl-C.
 ///
-/// Filesystem changes [`walk`] git — re-opening the repository so config
-/// changed in another pane takes effect — and re-seed the cache; decay ticks
-/// and resizes re-render the cached snapshot with no git work (Part A). The
-/// [`TerminalGuard`] restores the main screen and cursor on every exit path.
+/// Filesystem changes and timed refreshes [`walk`] git — re-opening the
+/// repository so config changed in another pane takes effect — and re-seed the
+/// cache; decay ticks and resizes re-render the cached snapshot with no git work
+/// (Part A). The [`TerminalGuard`] restores the main screen and cursor on every
+/// exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
 /// the rest of the process, and each refresh mutates the handle in place by
@@ -858,15 +865,18 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 }
 
 /// The render loop's terminal-free core: wait for a filesystem event, a resize,
-/// or a decay-timer tick, then update the screen. Only a filesystem change walks
-/// git; a tick or resize re-renders the *cached* [`Snapshot`] (Part A), so the
-/// idle-after-commit decay tick no longer pins a core re-walking an unchanged
-/// repo.
+/// or a timeout, then update the screen. A filesystem change walks git, and so
+/// does a timeout at which [`WalkSchedule`] owes a walk — a timed refresh, or a
+/// change deferred through a cooldown. Every other timeout re-renders the
+/// *cached* [`Snapshot`] (Part A), so a decay tick on an unchanged repo still
+/// costs no git work at all.
 ///
-/// The decay timer needs no thread of its own: `next_tick` (in `hooks`) turns
-/// the freshest displayed-item age into the `recv_timeout` window, so a timeout
-/// *is* a tick and the cadence is recomputed after every render. `None` disables
-/// the timer — the loop blocks indefinitely on events.
+/// No timer needs a thread of its own: every deadline is folded into the
+/// `recv_timeout` window by [`wait_window`], so a timeout *is* the tick, and the
+/// window is recomputed after every render. Three sources feed it — the decay
+/// cadence from `next_tick` (in `hooks`), the walk the schedule owes, and, while
+/// a countdown is on screen, [`CLOCK_CADENCE`]. With all three absent the loop
+/// blocks indefinitely on events.
 ///
 /// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
 /// clock, tick cadence) so the loop is one function testable without a TTY or
