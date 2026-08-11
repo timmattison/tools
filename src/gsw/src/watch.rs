@@ -380,6 +380,7 @@ struct WalkSchedule {
 /// no interval there is nothing to count from, and this type reads no clock of
 /// its own.
 impl WalkSchedule {
+    #[cfg(test)]
     fn unscheduled() -> Self {
         Self {
             next_allowed_at: None,
@@ -643,7 +644,12 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
     let snapshot = collect_snapshot(handle.repo(), cfg)?;
-    let first = render_frame(&snapshot, cfg, dims, FrameTiming::fresh());
+    let first = render_frame(
+        &snapshot,
+        cfg,
+        dims,
+        FrameTiming::at_walk(cfg.refresh_interval),
+    );
     paint_output(&first.output)?;
     let mut displayed = first.output;
     let initial_freshest = first.freshest_age;
@@ -1444,7 +1450,7 @@ mod tests {
             width: 200,
             height: 40,
         };
-        let frame = render_frame(snapshot, cfg, dims, FrameTiming::fresh());
+        let frame = render_frame(snapshot, cfg, dims, FrameTiming::at_walk(None));
         crate::render::strip_ansi(frame.output.lines().next().unwrap_or_default())
     }
 

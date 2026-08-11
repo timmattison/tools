@@ -353,9 +353,13 @@ pub(crate) struct FrameTiming {
 }
 
 impl FrameTiming {
-    /// Timing for a just-collected frame with no schedule behind it: one-shot
-    /// mode, and watch mode's seed frame before the loop arms its schedule.
-    pub(crate) fn fresh() -> Self {
+    /// Timing for a frame painted by a walk that has just finished: nothing has
+    /// aged since, and the next walk is a full `interval` away.
+    ///
+    /// This is watch mode's seed frame and one-shot's only frame. One-shot
+    /// passes `None` — it exits, so no walk follows.
+    pub(crate) fn at_walk(interval: Option<Duration>) -> Self {
+        let _ = interval;
         Self {
             age_offset: Duration::ZERO,
             next_refresh_in: None,
@@ -408,7 +412,12 @@ pub(crate) fn build_output(
     dims: watch::Dimensions,
 ) -> Result<Render> {
     let snapshot = collect_snapshot(repo, cfg)?;
-    Ok(render_frame(&snapshot, cfg, dims, FrameTiming::fresh()))
+    Ok(render_frame(
+        &snapshot,
+        cfg,
+        dims,
+        FrameTiming::at_walk(None),
+    ))
 }
 
 /// Walk the repository and assemble the fully-populated [`Snapshot`] — the
@@ -636,6 +645,29 @@ mod tests {
     use crate::render::RenderEntry;
 
     #[test]
+    fn the_frame_a_walk_paints_counts_down_a_whole_interval() {
+        // Watch mode's very first frame is painted by the seed walk. It must
+        // carry the clock like every frame after it — otherwise gsw opens with a
+        // blank rule and grows a clock a second later, which reads as a glitch.
+        let interval = Duration::from_secs(60);
+        assert_eq!(
+            FrameTiming::at_walk(Some(interval)),
+            FrameTiming {
+                age_offset: Duration::ZERO,
+                next_refresh_in: Some(interval),
+            },
+            "a frame painted by a walk is 0s old with a full interval to run",
+        );
+    }
+
+    #[test]
+    fn a_frame_with_no_schedule_behind_it_shows_no_countdown() {
+        // One-shot mode renders and exits, so no walk follows and there is
+        // nothing to count down to.
+        assert_eq!(FrameTiming::at_walk(None).next_refresh_in, None);
+    }
+
+    #[test]
     fn refresh_interval_zero_turns_the_timed_refresh_off() {
         // The escape hatch for anyone who wants gsw's idle cost back at zero:
         // `--refresh-interval 0` schedules nothing, so nothing wakes the loop
@@ -713,7 +745,7 @@ mod tests {
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
         };
-        let frame = render_frame(&snap, &cfg, dims, FrameTiming::fresh());
+        let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
         assert!(
             lines <= dims.height,
@@ -864,7 +896,7 @@ mod tests {
 
         // No offset: the header shows the un-advanced commit age and the
         // freshest age is the raw commit age.
-        let frame = render_frame(&snap, &cfg, dims, FrameTiming::fresh());
+        let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         assert_eq!(
             frame.freshest_age,
             Some(Duration::from_secs(10)),
