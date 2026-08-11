@@ -423,6 +423,16 @@ impl WalkSchedule {
         }
     }
 
+    /// The countdown the refresh clock prints at `now`, or `None` when this
+    /// schedule runs no timed walks and therefore shows no clock.
+    ///
+    /// Scaffolding: reports the next owed walk regardless of whether timed walks
+    /// are configured at all.
+    fn countdown(&self, now: Instant) -> Option<Duration> {
+        self.next_walk_at()
+            .map(|at| ceil_secs(at.saturating_duration_since(now)))
+    }
+
     /// Decide whether a change arriving at `now` may walk git: [`Walk::Now`] once
     /// the armed cooldown has elapsed (or none is armed), otherwise [`Walk::Defer`].
     fn on_change(&mut self, now: Instant) -> Walk {
@@ -1865,6 +1875,43 @@ mod tests {
             schedule.next_walk_at(),
             Some(t0 + Duration::from_secs(15)),
             "an owed walk at 15 s beats the timed walk at 60 s",
+        );
+    }
+
+    #[test]
+    fn a_disabled_interval_shows_no_countdown_even_with_a_walk_owed() {
+        // `--refresh-interval 0` takes the clock away. A change deferred through
+        // a cooldown still owes a walk — the loop must fire it — but printing a
+        // countdown for it would contradict the flag that removed the clock, and
+        // on an expensive repo that stray countdown would sit there for minutes.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::unscheduled();
+        schedule.record(t0, CHEAP);
+        let during_cooldown = t0 + Duration::from_secs(1);
+        assert_eq!(schedule.on_change(during_cooldown), Walk::Defer);
+        assert!(
+            schedule.next_walk_at().is_some(),
+            "a deferred change still owes a walk the loop has to fire",
+        );
+        assert_eq!(
+            schedule.countdown(during_cooldown),
+            None,
+            "a schedule with no interval must show no countdown, owed walk or not",
+        );
+    }
+
+    #[test]
+    fn the_countdown_tracks_the_next_scheduled_walk() {
+        let t0 = Instant::now();
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0);
+        assert_eq!(
+            schedule.countdown(t0 + Duration::from_secs(15)),
+            Some(Duration::from_secs(45)),
+        );
+        // Overdue reads as due now rather than underflowing.
+        assert_eq!(
+            schedule.countdown(t0 + Duration::from_secs(120)),
+            Some(Duration::ZERO),
         );
     }
 
