@@ -851,6 +851,32 @@ mod tests {
     }
 
     #[test]
+    fn freshest_age_reads_the_commit_age_off_the_newest_log_row() {
+        // The freshest age sets how often watch mode repaints, so it has to
+        // track what the frame actually draws. The newest commit's age is drawn
+        // on the first log row and nowhere else, so that row is where the
+        // cadence comes from.
+        let mut snap = snapshot_with(None, &[]);
+        snap.log = vec![
+            LogEntry {
+                hash: "abc1234".into(),
+                subject: "the newest commit".into(),
+                age: Some(Duration::from_secs(10)),
+            },
+            LogEntry {
+                hash: "def5678".into(),
+                subject: "an older commit".into(),
+                age: Some(Duration::from_secs(900)),
+            },
+        ];
+        assert_eq!(
+            snapshot_freshest_age(&snap),
+            Some(Duration::from_secs(10)),
+            "the newest commit row (10s) sets the cadence",
+        );
+    }
+
+    #[test]
     fn freshest_age_is_none_for_an_empty_clean_repo() {
         // Nothing aging on screen (no commits, clean tree) → the timer should
         // be disabled, which the caller infers from `None`.
