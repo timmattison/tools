@@ -95,8 +95,12 @@ struct Cli {
     /// Filesystem events still refresh immediately; this is the floor under
     /// them, and it is what the "next refresh" countdown in the separator
     /// counts down to. `0` turns the timed refresh off, which also removes the
-    /// countdown and leaves gsw purely event-driven.
-    #[arg(long, default_value_t = DEFAULT_REFRESH_SECS)]
+    /// countdown and leaves gsw purely event-driven. Accepts up to a year.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_REFRESH_SECS,
+        value_parser = clap::value_parser!(u64).range(0..=MAX_REFRESH_SECS),
+    )]
     refresh_interval: u64,
 }
 
