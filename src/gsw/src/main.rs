@@ -10,7 +10,7 @@ use colored::Colorize;
 
 use crate::git::{FileEntry, FileStatus};
 use crate::render::{
-    plan_section_caps, render, render_with_offset, LogEntry, RenderOptions, Snapshot,
+    plan_section_caps, render, render_with_offset, LogEntry, RefreshStatus, RenderOptions, Snapshot,
 };
 use crate::snapshot::build_snapshot;
 
@@ -32,11 +32,13 @@ mod watch;
 #[command(
     about = "Compact git status watch — event-driven, self-refreshing branch-state view",
     long_about = "Prints a compact, color-coded view of the current branch's state: \
-                  commits ahead of (and behind) the base branch, last-commit age, and a per-file \
-                  list showing a magnitude bar, +/- counts, and recency. On a TTY it \
-                  runs as a self-refreshing watch that repaints on filesystem changes; \
-                  with `--one-shot` (or when its output is piped) it renders once and \
-                  exits."
+                  commits ahead of (and behind) the base branch, a recent-commit log, and a \
+                  per-file list showing a magnitude bar, +/- counts, and recency. On a TTY it \
+                  runs as a self-refreshing watch that repaints on filesystem changes and \
+                  re-walks the repository every --refresh-interval seconds, with the \
+                  separator under the header showing how stale the screen is and how long \
+                  until the next refresh; with `--one-shot` (or when its output is piped) \
+                  it renders once and exits."
 )]
 struct Cli {
     /// Render once and exit instead of entering the live watch loop. This is
@@ -72,7 +74,9 @@ struct Cli {
     #[arg(long, default_value_t = 20)]
     log_lines: usize,
 
-    /// Disable the recent-commit section entirely.
+    /// Disable the recent-commit section entirely. The newest commit's age
+    /// lives on the first row of that section, so this takes the commit age
+    /// off the frame as well.
     #[arg(long)]
     no_log: bool,
 
@@ -86,6 +90,42 @@ struct Cli {
     /// to the 8-color path even on a terminal that supports truecolor.
     #[arg(long, conflicts_with = "truecolor")]
     no_truecolor: bool,
+
+    /// Seconds between watch-mode refreshes when nothing on disk changes.
+    /// Filesystem events still refresh immediately; this is the floor under
+    /// them, and it is what the "next refresh" countdown in the separator
+    /// counts down to. `0` turns the timed refresh off, which also removes the
+    /// countdown and leaves gsw purely event-driven. Accepts up to a year.
+    #[arg(
+        long,
+        default_value_t = DEFAULT_REFRESH_SECS,
+        value_parser = clap::value_parser!(u64).range(0..=MAX_REFRESH_SECS),
+    )]
+    refresh_interval: u64,
+}
+
+/// Default seconds between timed watch-mode refreshes. A minute keeps a screen
+/// left open in a pane honest without walking git often enough to matter — and
+/// the duty-cycle budget still overrides it on a repository where a walk is
+/// expensive.
+const DEFAULT_REFRESH_SECS: u64 = 60;
+
+/// Largest accepted `--refresh-interval`, in seconds: one year.
+///
+/// Every scheduled deadline is an `Instant` plus a `Duration`, and that
+/// addition *panics* on overflow — so an unbounded seconds count turns a typo
+/// into an abort, after watch mode has already taken the alternate screen.
+/// A year is far past the point where a timed refresh is distinguishable from
+/// `0`, and small enough to be representable on any clock, so rejecting
+/// anything larger costs nothing real and removes the panic.
+const MAX_REFRESH_SECS: u64 = 365 * 24 * 60 * 60;
+
+/// Resolve `--refresh-interval` seconds into the schedule watch mode runs on.
+///
+/// `0` means "no timed refresh": gsw stays purely event-driven, and with no
+/// scheduled walk there is no countdown to print.
+fn refresh_interval(secs: u64) -> Option<Duration> {
+    (secs > 0).then(|| Duration::from_secs(secs))
 }
 
 /// Decide the effective terminal width gsw should render for.
@@ -244,6 +284,7 @@ fn main() -> Result<()> {
         log_lines: if cli.no_log { 0 } else { cli.log_lines },
         truecolor,
         width_offset: cli.width_offset,
+        refresh_interval: refresh_interval(cli.refresh_interval),
     };
 
     match decide_mode(cli.one_shot, stdout_is_tty) {
@@ -306,6 +347,41 @@ pub(crate) struct RenderConfig {
     pub truecolor: bool,
     /// Columns to subtract from the detected width (`--width-offset`).
     pub width_offset: usize,
+    /// How often watch mode re-walks the repository with no filesystem event to
+    /// prompt it (`--refresh-interval`), or `None` to stay purely event-driven.
+    pub refresh_interval: Option<Duration>,
+}
+
+/// Where a frame sits in time: how stale the snapshot behind it is, and when
+/// the next one is due.
+///
+/// The two travel together because the refresh clock prints both, and printing
+/// them from one value is what stops the clock and the ages under it from
+/// disagreeing — `age_offset` *is* "last refresh N ago".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameTiming {
+    /// How long ago the snapshot was collected. Added (saturating) to every
+    /// displayed age. `Duration::ZERO` renders a freshly-walked snapshot.
+    pub age_offset: Duration,
+    /// How long until the next scheduled walk, or `None` when none is
+    /// scheduled — one-shot mode, or `--refresh-interval 0`. `None` also
+    /// suppresses the refresh clock: with no schedule there is nothing to count
+    /// down to.
+    pub next_refresh_in: Option<Duration>,
+}
+
+impl FrameTiming {
+    /// Timing for a frame painted by a walk that has just finished: nothing has
+    /// aged since, and the next walk is a full `interval` away.
+    ///
+    /// This is watch mode's seed frame and one-shot's only frame. One-shot
+    /// passes `None` — it exits, so no walk follows.
+    pub(crate) fn at_walk(interval: Option<Duration>) -> Self {
+        Self {
+            age_offset: Duration::ZERO,
+            next_refresh_in: interval,
+        }
+    }
 }
 
 /// A rendered frame plus the metadata watch mode needs to schedule its next
@@ -326,17 +402,22 @@ pub(crate) struct Render {
 /// This is what the watch-mode decay timer keys its cadence off: a young frame
 /// ticks fast to keep the live seconds/minutes text and the color fade current,
 /// while an old one lets the timer idle. `None` means nothing aging is on
-/// screen (no commits *and* a clean tree), which the caller reads as "disable
-/// the timer". Files with no recorded mtime (deleted files, untracked dirs)
-/// contribute nothing.
+/// screen, which the caller reads as "disable the timer".
+///
+/// Both halves are read off the rows the frame draws, so the timer paces the
+/// screen rather than the repository. The commit age comes from the newest log
+/// row — with `--no-log` there is no commit age on screen and none here either.
+/// The section caps are the gap: a row a short terminal cannot fit still counts
+/// here, which costs a wake whose repaint is then suppressed. Items with no
+/// recorded age (deleted files, untracked dirs, a commit timestamp that does
+/// not resolve) contribute nothing: they render a fixed mark that never needs
+/// repainting.
 fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
     // The youngest item wins, so the timer ticks fast enough for whatever is
-    // freshest. Files with no recorded mtime contribute nothing.
+    // freshest. The log is newest-first, so its head is the newest commit.
     let freshest_change = snapshot.files.iter().filter_map(|f| f.age).min();
-    [snapshot.last_commit_age, freshest_change]
-        .into_iter()
-        .flatten()
-        .min()
+    let newest_commit = snapshot.log.first().and_then(|entry| entry.age);
+    [newest_commit, freshest_change].into_iter().flatten().min()
 }
 
 /// Walk the repository and render the full status frame for `dims`.
@@ -353,16 +434,21 @@ pub(crate) fn build_output(
     dims: watch::Dimensions,
 ) -> Result<Render> {
     let snapshot = collect_snapshot(repo, cfg)?;
-    Ok(render_frame(&snapshot, cfg, dims, Duration::ZERO))
+    Ok(render_frame(
+        &snapshot,
+        cfg,
+        dims,
+        FrameTiming::at_walk(None),
+    ))
 }
 
 /// Walk the repository and assemble the fully-populated [`Snapshot`] — the
 /// git-work half of the render pipeline.
 ///
 /// This is the expensive, side-effecting step: it queries the current branch,
-/// resolves the base ref and counts commits ahead/behind, reads the last-commit
-/// age, collects working-tree changes and their mtimes, and fetches the
-/// recent-commit log and upstream status. The result is a pure description of
+/// resolves the base ref and counts commits ahead/behind, collects working-tree
+/// changes and their mtimes, and fetches the recent-commit log and upstream
+/// status. The result is a pure description of
 /// repository state, independent of the live terminal — turning it into a frame
 /// for a given [`watch::Dimensions`] is the separate, cheap [`render_frame`]
 /// half. Watch mode collects once per filesystem change and re-renders the
@@ -372,8 +458,6 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
 
     let base = cfg.base.clone().unwrap_or_else(|| repo::resolve_base(repo));
     let base_status = repo::base_status(repo, &base);
-
-    let last_commit_age = last_commit_age(repo);
 
     let repo::Changes {
         entries,
@@ -388,7 +472,6 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
         base,
         base_status.ahead,
         base_status.behind,
-        last_commit_age,
         entries,
         &staged_numstat,
         &unstaged_numstat,
@@ -432,8 +515,9 @@ pub(crate) fn render_frame(
     snapshot: &Snapshot,
     cfg: &RenderConfig,
     dims: watch::Dimensions,
-    age_offset: Duration,
+    timing: FrameTiming,
 ) -> Render {
+    let age_offset = timing.age_offset;
     let terminal_width = dims.width;
     let terminal_height = dims.height;
 
@@ -490,6 +574,12 @@ pub(crate) fn render_frame(
         max_files: file_cap_opt,
         log_lines: log_cap,
         truecolor: cfg.truecolor,
+        // The clock renders only when a walk is actually scheduled, and it
+        // reports the same offset every age on this frame was advanced by.
+        refresh: timing.next_refresh_in.map(|next_refresh_in| RefreshStatus {
+            last_refresh_ago: age_offset,
+            next_refresh_in,
+        }),
     };
 
     // One-shot mode and the watch seed walk render at offset zero, which is
@@ -514,6 +604,12 @@ pub(crate) fn render_frame(
 /// Fetch the `n` most recent commits as [`LogEntry`] records via gix.
 ///
 /// Returns an empty list when `n == 0` or the repo has no commits.
+///
+/// A commit whose timestamp does not resolve into an elapsed duration — a
+/// negative epoch second, or a time ahead of the local clock through skew or a
+/// hand-set `--date` — yields `age: None`. The row then renders the unknown-age
+/// mark. Collapsing such a commit to `Duration::ZERO` instead would paint it as
+/// the freshest thing on screen, which is the one reading ruled out.
 fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
     let now = SystemTime::now();
     repo::recent_log(repo, n)
@@ -522,19 +618,10 @@ fn fetch_log(repo: &gix::Repository, n: usize) -> Vec<LogEntry> {
             let age = u64::try_from(secs)
                 .ok()
                 .map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
-                .and_then(|when| now.duration_since(when).ok())
-                .unwrap_or(Duration::ZERO);
+                .and_then(|when| now.duration_since(when).ok());
             LogEntry { hash, subject, age }
         })
         .collect()
-}
-
-/// How long ago HEAD was committed, or `None` when undeterminable.
-fn last_commit_age(repo: &gix::Repository) -> Option<Duration> {
-    let secs = repo::head_commit_secs(repo)?;
-    let secs = u64::try_from(secs).ok()?;
-    let when = SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
-    SystemTime::now().duration_since(when).ok()
 }
 
 /// Get mtime ages for each entry's path, where the path still exists on disk.
@@ -574,6 +661,86 @@ mod tests {
     use crate::render::RenderEntry;
 
     #[test]
+    fn the_frame_a_walk_paints_counts_down_a_whole_interval() {
+        // Watch mode's very first frame is painted by the seed walk. It must
+        // carry the clock like every frame after it — otherwise gsw opens with a
+        // blank rule and grows a clock a second later, which reads as a glitch.
+        let interval = Duration::from_secs(60);
+        assert_eq!(
+            FrameTiming::at_walk(Some(interval)),
+            FrameTiming {
+                age_offset: Duration::ZERO,
+                next_refresh_in: Some(interval),
+            },
+            "a frame painted by a walk is 0s old with a full interval to run",
+        );
+    }
+
+    #[test]
+    fn a_frame_with_no_schedule_behind_it_shows_no_countdown() {
+        // One-shot mode renders and exits, so no walk follows and there is
+        // nothing to count down to.
+        assert_eq!(FrameTiming::at_walk(None).next_refresh_in, None);
+    }
+
+    #[test]
+    fn refresh_interval_zero_turns_the_timed_refresh_off() {
+        // The escape hatch for anyone who wants gsw's idle cost back at zero:
+        // `--refresh-interval 0` schedules nothing, so nothing wakes the loop
+        // but the filesystem, and the countdown has nothing to count.
+        assert_eq!(
+            refresh_interval(0),
+            None,
+            "0 seconds must mean no timed refresh, not a zero-length one",
+        );
+    }
+
+    #[test]
+    fn refresh_interval_passes_a_positive_value_through() {
+        assert_eq!(refresh_interval(60), Some(Duration::from_secs(60)));
+        assert_eq!(refresh_interval(1), Some(Duration::from_secs(1)));
+        assert_eq!(refresh_interval(3600), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn refresh_interval_rejects_a_value_that_would_overflow_the_clock() {
+        // Every scheduled deadline is `Instant + Duration`, which panics on
+        // overflow rather than saturating. Verified: an Instant plus
+        // Duration::from_secs(1 << 63) has no representable sum, so a
+        // 19-digit typo aborts gsw *after* the terminal guard has taken the
+        // alternate screen. The parser is where that has to stop, with a
+        // message naming the range — not the scheduler, with a panic.
+        assert!(
+            Cli::try_parse_from(["gsw", "--refresh-interval", "18446744073709551615"]).is_err(),
+            "an interval large enough to overflow Instant must be a parse error",
+        );
+        assert!(
+            Cli::try_parse_from(["gsw", "--refresh-interval", &MAX_REFRESH_SECS.to_string()])
+                .is_ok(),
+            "the largest accepted interval must still parse",
+        );
+        assert!(
+            Cli::try_parse_from(["gsw", "--refresh-interval", "0"]).is_ok(),
+            "0 stays valid — it is the documented way to turn the timed refresh off",
+        );
+    }
+
+    #[test]
+    fn refresh_interval_defaults_to_a_minute() {
+        let cli = Cli::parse_from(["gsw"]);
+        assert_eq!(
+            refresh_interval(cli.refresh_interval),
+            Some(Duration::from_secs(60)),
+            "gsw with no flags should refresh once a minute",
+        );
+        let explicit = Cli::parse_from(["gsw", "--refresh-interval", "5"]);
+        assert_eq!(
+            refresh_interval(explicit.refresh_interval),
+            Some(Duration::from_secs(5)),
+        );
+    }
+
+    #[test]
     fn operation_line_reserves_a_chrome_row_so_file_list_is_not_clipped() {
         // When an in-progress operation adds its indicator line between the
         // header and the separator, render_frame must count that line as
@@ -599,6 +766,7 @@ mod tests {
             bar_width: 6,
             log_lines: 0,
             truecolor: false,
+            refresh_interval: None,
             width_offset: 0,
         };
         let dims = watch::Dimensions {
@@ -610,13 +778,12 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age: Some(Duration::from_secs(30)),
             files,
             log: Vec::new(),
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
         };
-        let frame = render_frame(&snap, &cfg, dims, Duration::ZERO);
+        let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
         assert!(
             lines <= dims.height,
@@ -630,10 +797,23 @@ mod tests {
     /// Build a minimal [`Snapshot`] with the given HEAD-commit age and a file
     /// row per supplied mtime age, so the freshest-age tests can exercise the
     /// commit-vs-change comparison without walking a real repo.
+    ///
+    /// `head_commit_age` becomes the single log row, which is where the frame
+    /// shows the newest commit's age. `None` means a repository with no commits
+    /// on screen at all.
     fn snapshot_with(
-        last_commit_age: Option<Duration>,
+        head_commit_age: Option<Duration>,
         file_ages: &[Option<Duration>],
     ) -> Snapshot {
+        let log = head_commit_age
+            .map(|age| {
+                vec![LogEntry {
+                    hash: "abc1234".into(),
+                    subject: "the newest commit".into(),
+                    age: Some(age),
+                }]
+            })
+            .unwrap_or_default();
         let files = file_ages
             .iter()
             .enumerate()
@@ -653,9 +833,8 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age,
             files,
-            log: Vec::new(),
+            log,
             upstream: None,
             operation: None,
         }
@@ -716,6 +895,32 @@ mod tests {
     }
 
     #[test]
+    fn freshest_age_reads_the_commit_age_off_the_newest_log_row() {
+        // The freshest age sets how often watch mode repaints, so it has to
+        // track what the frame actually draws. The newest commit's age is drawn
+        // on the first log row and nowhere else, so that row is where the
+        // cadence comes from.
+        let mut snap = snapshot_with(None, &[]);
+        snap.log = vec![
+            LogEntry {
+                hash: "abc1234".into(),
+                subject: "the newest commit".into(),
+                age: Some(Duration::from_secs(10)),
+            },
+            LogEntry {
+                hash: "def5678".into(),
+                subject: "an older commit".into(),
+                age: Some(Duration::from_secs(900)),
+            },
+        ];
+        assert_eq!(
+            snapshot_freshest_age(&snap),
+            Some(Duration::from_secs(10)),
+            "the newest commit row (10s) sets the cadence",
+        );
+    }
+
+    #[test]
     fn freshest_age_is_none_for_an_empty_clean_repo() {
         // Nothing aging on screen (no commits, clean tree) → the timer should
         // be disabled, which the caller infers from `None`.
@@ -736,7 +941,6 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age: Some(Duration::from_secs(10)),
             files: vec![RenderEntry {
                 path: "f.rs".into(),
                 orig_path: None,
@@ -747,7 +951,11 @@ mod tests {
                 binary: false,
                 age: Some(Duration::from_secs(40)),
             }],
-            log: Vec::new(),
+            log: vec![LogEntry {
+                hash: "abc1234".into(),
+                subject: "the newest commit".into(),
+                age: Some(Duration::from_secs(10)),
+            }],
             upstream: None,
             operation: None,
         };
@@ -755,8 +963,9 @@ mod tests {
             base: None,
             max_files: None,
             bar_width: 6,
-            log_lines: 0,
+            log_lines: 1,
             truecolor: false,
+            refresh_interval: None,
             width_offset: 0,
         };
         let dims = watch::Dimensions {
@@ -764,9 +973,9 @@ mod tests {
             height: 40,
         };
 
-        // No offset: the header shows the un-advanced commit age and the
+        // No offset: the commit's row shows the un-advanced commit age and the
         // freshest age is the raw commit age.
-        let frame = render_frame(&snap, &cfg, dims, Duration::ZERO);
+        let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         assert_eq!(
             frame.freshest_age,
             Some(Duration::from_secs(10)),
@@ -774,13 +983,21 @@ mod tests {
         );
         assert!(
             frame.output.contains("10s"),
-            "header should show the un-advanced commit age: {:?}",
+            "the commit row should show the un-advanced commit age: {:?}",
             frame.output,
         );
 
-        // A 50s offset advances the commit age to 60s ("1m0s") in the header
-        // AND the returned freshest_age to 60s, in lockstep.
-        let frame = render_frame(&snap, &cfg, dims, Duration::from_secs(50));
+        // A 50s offset advances the commit age to 60s ("1m0s") on its row AND
+        // the returned freshest_age to 60s, in lockstep.
+        let frame = render_frame(
+            &snap,
+            &cfg,
+            dims,
+            FrameTiming {
+                age_offset: Duration::from_secs(50),
+                next_refresh_in: None,
+            },
+        );
         assert_eq!(
             frame.freshest_age,
             Some(Duration::from_secs(60)),

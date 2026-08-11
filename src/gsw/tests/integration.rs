@@ -659,8 +659,8 @@ fn one_shot_flag_matches_default_piped_output() {
     fs::write(dir.path().join("b.txt"), "untracked\n").unwrap();
 
     // The two invocations run back-to-back but a fraction of a second apart, so
-    // any age rendered at second granularity ("last commit 0s ago", a file row
-    // ending in "0s") can tick over between them and make the byte comparison
+    // any age rendered at second granularity (a commit row or a file row ending
+    // in "0s") can tick over between them and make the byte comparison
     // flake. Backdate every age source — the HEAD commit's committer time and
     // the untracked file's mtime — to a fixed instant over a day in the past so
     // the formatter renders them as `XdYh` (smallest shown unit is hours);
@@ -753,6 +753,15 @@ fn commit_dated(dir: &Path, message: &str, date: &str) {
     assert!(status.success(), "dated git commit failed");
 }
 
+/// Subject of the 2011-dated fixture commit, long enough that the log row has
+/// to truncate it — which is part of what this test pins.
+const ANCIENT_COMMIT_SUBJECT: &str =
+    "an old commit that has been sitting here for a very long time";
+
+/// The head of [`ANCIENT_COMMIT_SUBJECT`], short enough to survive that
+/// truncation, so the row can still be found in the rendered frame.
+const ANCIENT_COMMIT_PREFIX: &str = "an old commit that has been";
+
 #[test]
 fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
     // Regression, end to end: a repo whose last commit is years old rendered
@@ -765,11 +774,7 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
     let p = dir.path();
     fs::write(p.join("a.txt"), "changed\n").unwrap();
     run_git(p, &["add", "a.txt"]);
-    commit_dated(
-        p,
-        "an old commit that has been sitting here for a very long time",
-        "2011-03-04T05:06:07",
-    );
+    commit_dated(p, ANCIENT_COMMIT_SUBJECT, "2011-03-04T05:06:07");
     // A dirty working tree so the file-row age column renders too.
     fs::write(p.join("b.txt"), "untracked\n").unwrap();
 
@@ -796,14 +801,80 @@ fn an_ancient_repo_never_wraps_a_line_past_the_terminal_width() {
 
     // And the age itself reads in years+months rather than a day count. The
     // fixture commit is from 2011, so this holds however long from now the
-    // suite runs.
-    let age = out
-        .split_once("last commit ")
-        .and_then(|(_, rest)| rest.split_once(" ago"))
-        .map(|(age, _)| age)
-        .expect("header should carry a `last commit {age} ago` field");
+    // suite runs. The age lives on the commit's own log row.
+    let row = out
+        .lines()
+        .find(|line| line.contains(ANCIENT_COMMIT_PREFIX))
+        .unwrap_or_else(|| panic!("the ancient commit should have a log row:\n{out}"));
+    let age = row.trim_end().rsplit(' ').next().unwrap_or_default();
     assert!(
         age.contains('y') && age.ends_with("mo"),
-        "a commit from 2011 should render as years+months, got {age:?}",
+        "a commit from 2011 should render as years+months, got {age:?} from {row:?}",
+    );
+}
+
+#[test]
+fn the_newest_commit_age_is_shown_once_not_twice() {
+    // The header used to end in `last commit {age} ago`, restating the age on
+    // the first log row directly beneath it — the same commit, read through the
+    // same formatter. The header is the copy that pays for itself in columns,
+    // so it is the copy that goes. The age itself stays on the commit's row.
+    let dir = setup_repo();
+    let p = dir.path();
+    fs::write(p.join("b.txt"), "newest\n").unwrap();
+    run_git(p, &["add", "b.txt"]);
+    commit_dated(p, "the newest commit", "2011-03-04T05:06:07");
+
+    let out = run_gsw_args(p, &["--log-lines", "5"]);
+    let header = out.lines().next().unwrap_or("");
+    assert!(
+        !header.contains("last commit"),
+        "the header should not repeat the newest commit's age: {header:?}",
+    );
+
+    let row = out
+        .lines()
+        .find(|line| line.contains("the newest commit"))
+        .unwrap_or_else(|| panic!("the newest commit should have a log row:\n{out}"));
+    let age = row.trim_end().rsplit(' ').next().unwrap_or_default();
+    assert!(
+        age.contains('y') && age.ends_with("mo"),
+        "the commit's own row should still carry its age, got {age:?} from {row:?}",
+    );
+}
+
+/// A commit date far enough ahead that no clock this test runs on has reached
+/// it. A fixed date keeps the fixture deterministic.
+const FUTURE_COMMIT_DATE: &str = "2099-01-01T00:00:00 +0000";
+
+/// Subject of the future-dated fixture commit, used to find its log row.
+const FUTURE_COMMIT_SUBJECT: &str = "a commit dated in the future";
+
+#[test]
+fn a_future_dated_commit_renders_an_unknown_log_age_not_zero_seconds() {
+    // A commit whose timestamp is ahead of the local clock has no elapsed
+    // time to report. Clock skew between machines and a hand-set `--date` both
+    // produce one. The log row must say `?`, the same mark the header uses for
+    // an age it cannot compute. Saying `0s` claims the commit landed this very
+    // second, which is the one thing we know is false.
+    let dir = setup_repo();
+    let p = dir.path();
+    fs::write(p.join("b.txt"), "from the future\n").unwrap();
+    run_git(p, &["add", "b.txt"]);
+    commit_dated(p, FUTURE_COMMIT_SUBJECT, FUTURE_COMMIT_DATE);
+
+    let out = run_gsw_args(p, &["--log-lines", "5"]);
+    let row = out
+        .lines()
+        .find(|line| line.contains(FUTURE_COMMIT_SUBJECT))
+        .unwrap_or_else(|| panic!("the future-dated commit should have a log row:\n{out}"));
+
+    assert!(
+        row.trim_end().ends_with('?'),
+        "an unresolvable commit age should render as `?` in the log age column: {row:?}",
+    );
+    assert!(
+        !row.contains("0s"),
+        "an unresolvable commit age must not be misrepresented as 0s: {row:?}",
     );
 }

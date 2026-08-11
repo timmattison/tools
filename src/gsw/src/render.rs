@@ -20,9 +20,12 @@ pub struct Snapshot {
     /// Commits on the base not reachable from HEAD — how far behind the base
     /// the branch is, i.e. whether it needs a rebase. `0` when up to date.
     pub commits_behind: u32,
-    pub last_commit_age: Option<Duration>,
     pub files: Vec<RenderEntry>,
     /// Most recent commits, newest first. Empty when not requested.
+    ///
+    /// The head of this list is HEAD, so its age is the last-commit age. The
+    /// frame shows that age here and nowhere else, and the watch-mode decay
+    /// timer reads it from here too.
     pub log: Vec<LogEntry>,
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
@@ -92,9 +95,15 @@ pub struct StepProgress {
 pub struct LogEntry {
     pub hash: String,
     pub subject: String,
-    /// How long ago this commit was authored. Same `Duration` shape as the
-    /// per-file age column so the two render in identical units.
-    pub age: Duration,
+    /// How long ago this commit was authored. Same `Option<Duration>` shape as
+    /// the per-file age column, so the two render in identical units.
+    ///
+    /// `None` is an age git cannot give us: a commit timestamp ahead of the
+    /// local clock (skew between machines, a hand-set `--date`) or one that
+    /// does not convert to a wall-clock instant at all. Such a row renders
+    /// [`UNKNOWN_AGE`] rather than a number, because every number available
+    /// here is a lie — `0s` in particular claims the commit landed this second.
+    pub age: Option<Duration>,
 }
 
 /// One file row in the frame.
@@ -124,6 +133,27 @@ pub struct RenderOptions {
     /// a dark floor as commits age, using 24-bit (truecolor) ANSI. When
     /// false, log rows use the same 8-color/dim styling as everything else.
     pub truecolor: bool,
+    /// Live-refresh clock printed inside the post-header separator, or `None`
+    /// to leave that rule blank. One-shot mode passes `None`: a render that
+    /// exits has no next refresh to count down to, and stamping a countdown
+    /// into piped output would date the capture the moment it is read.
+    pub refresh: Option<RefreshStatus>,
+}
+
+/// When the displayed snapshot was collected, and when the next one is due.
+///
+/// Watch mode prints both inside the post-header separator so the rule that
+/// already spans the frame carries the answer to "is this screen still live?"
+/// without spending a row on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshStatus {
+    /// How long ago the displayed snapshot was walked out of the repository.
+    /// This is watch mode's age offset — the same duration every displayed age
+    /// is advanced by — so the clock and the ages under it can never disagree.
+    pub last_refresh_ago: Duration,
+    /// How long until the next scheduled walk. `Duration::ZERO` reads as `0s`,
+    /// which is what the frame painted by that walk shows for an instant.
+    pub next_refresh_in: Duration,
 }
 
 /// Width of the "+adds" / "-dels" / age column fields.
@@ -133,6 +163,13 @@ const DELS_FIELD: usize = 4;
 /// return — so no age can push a row past the terminal width and wrap. The
 /// two constants are one and the same on purpose: they cannot drift.
 const AGE_FIELD: usize = AGE_WIDTH;
+
+/// What an age gsw cannot compute renders as.
+///
+/// Every alternative is a number, and every number here is a claim gsw cannot
+/// support — `0s` most of all, which reads as "this just happened". One mark,
+/// used everywhere an age is missing, so the reader learns it once.
+pub const UNKNOWN_AGE: &str = "?";
 
 /// Visible separator characters between columns.
 const SEP_BAR_ADDS: usize = 2;
@@ -167,7 +204,7 @@ pub(crate) fn render_with_offset(
         prefix,
         behind,
         suffix,
-    } = header_segments(snapshot, age_offset, opts.terminal_width);
+    } = header_segments(snapshot, opts.terminal_width);
     // The whole header is bold as before; the optional behind segment is
     // additionally warning-colored (yellow) to flag that the branch needs a
     // rebase. When `behind` is `None` the prefix+suffix reproduce today's
@@ -180,7 +217,7 @@ pub(crate) fn render_with_offset(
     if let Some(op) = &snapshot.operation {
         lines.push(render_operation_line(op, opts.terminal_width));
     }
-    lines.push(render_separator(opts.terminal_width));
+    lines.push(render_separator(opts.terminal_width, opts.refresh.as_ref()));
 
     let display_count = match opts.max_files {
         Some(0) | None => snapshot.files.len(),
@@ -216,7 +253,10 @@ pub(crate) fn render_with_offset(
         // the post-header separator already sits directly above the files, so
         // adding another would produce a double rule with nothing between them.
         if log_rendered {
-            lines.push(render_separator(opts.terminal_width));
+            // The inter-section rule stays blank: the refresh clock belongs to
+            // the frame, not to the file list, and printing it twice would make
+            // a reader check whether the two copies agree.
+            lines.push(render_separator(opts.terminal_width, None));
         }
         for entry in snapshot.files.iter().take(display_count) {
             lines.push(render_row(entry, opts, max_change, path_width, age_offset));
@@ -246,12 +286,14 @@ const LOG_HASH_SUBJECT_SEP: &str = "  ";
 /// `age_offset` is added (saturating) to the commit's age before it is
 /// formatted and used to drive the hash/subject/age fades, so the whole row
 /// ages forward by a single shared `Duration`. `Duration::ZERO` leaves the
-/// row byte-identical to the un-offset render.
+/// row byte-identical to the un-offset render. An age the repository could not
+/// give us ([`LogEntry::age`] of `None`) stays unknown whatever the offset —
+/// advancing a duration gsw never had produces a number it still cannot back.
 fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: Duration) -> String {
     // Layout: `{hash}  {subject…}   {age}` — the rightmost AGE_FIELD cells
     // hold the right-aligned age, matching the file-row age column exactly.
     // The subject is padded to fill the gap so the age column lines up.
-    let effective_age = entry.age.saturating_add(age_offset);
+    let effective_age = entry.age.map(|age| age.saturating_add(age_offset));
     let hash_width = UnicodeWidthStr::width(entry.hash.as_str());
     let hash_sep_width = LOG_HASH_SUBJECT_SEP.chars().count();
     let sep_to_age = " ".repeat(SEP_DELS_AGE);
@@ -262,7 +304,7 @@ fn render_log_row(entry: &LogEntry, width: usize, truecolor: bool, age_offset: D
     let subject_truncated = truncate_right(&entry.subject, subject_budget);
     let subject_padded = pad_right(&subject_truncated, subject_budget);
 
-    let age_raw = format_age_detailed(effective_age);
+    let age_raw = effective_age.map_or_else(|| UNKNOWN_AGE.to_string(), format_age_detailed);
     let age_field = format!("{age_raw:>width$}", width = AGE_FIELD);
 
     let hash_str = colorize_log_hash(&entry.hash, effective_age, truecolor);
@@ -296,7 +338,7 @@ struct HeaderSegments {
     prefix: String,
     /// `, {m} behind` — present only when `commits_behind > 0`.
     behind: Option<String>,
-    /// The upstream field and `• last commit {age} ago` tail.
+    /// The upstream field. Empty when the branch tracks nothing.
     suffix: String,
 }
 
@@ -308,7 +350,7 @@ impl HeaderSegments {
             + UnicodeWidthStr::width(self.suffix.as_str())
     }
 
-    /// Cut the line down to `width` columns, reserving the age tail.
+    /// Cut the line down to `width` columns, reserving the upstream field.
     ///
     /// The ladder in [`header_segments`] normally lands inside the terminal
     /// without reaching this; it is the backstop for widths so narrow that
@@ -316,9 +358,9 @@ impl HeaderSegments {
     /// beats a wrapped one: wrapping shifts every row below it.
     ///
     /// What gives is the identity text — the branch name and the ahead-count
-    /// clause — because the `last commit {age} ago` tail is the field the
-    /// header exists to carry. Only a terminal too narrow for the tail alone
-    /// cuts into the tail itself.
+    /// clause — because by the time the ladder reaches here it has already
+    /// decided the upstream field earns its columns. Only a terminal too
+    /// narrow for that field alone cuts into the field itself.
     fn clamp(self, width: usize) -> Self {
         let suffix = truncate_to_budget(&self.suffix, width);
         let identity_budget = width - UnicodeWidthStr::width(suffix.as_str());
@@ -359,26 +401,19 @@ const HEADER_NAME_FLOOR: usize = 10;
 /// Split the header into independently-styleable pieces, sized to fit
 /// `width` columns.
 ///
-/// The header is a single line of free text with the last-commit age at its
-/// end, so anything that overflows takes the age with it onto a wrapped
-/// second line. When the natural header is too wide it is shrunk in order of
-/// what costs the reader least: the tracking ref's name (a duplicate of the
-/// branch), then the branch and base names shaved toward
-/// [`HEADER_NAME_FLOOR`] longest-first, then the upstream field entirely,
-/// then a hard cut. The `• last commit {age} ago` tail is never the thing
-/// that gives way.
+/// The header is a single line of free text, so one column of overflow wraps
+/// it onto a second row and shifts everything below. When the natural header
+/// is too wide it is shrunk in order of what costs the reader least: the
+/// tracking ref's name (a duplicate of the branch), then the branch and base
+/// names shaved toward [`HEADER_NAME_FLOOR`] longest-first, then the upstream
+/// field entirely, then a hard cut.
 ///
-/// `age_offset` is added (saturating) to the last-commit age before it is
-/// formatted, so the header's `last commit {age} ago` advances in lockstep
-/// with the file and log ages. `Duration::ZERO` leaves the age unchanged. An
-/// unknown last-commit age (`None`) stays `?` regardless of the offset.
-fn header_segments(snap: &Snapshot, age_offset: Duration, width: usize) -> HeaderSegments {
-    let age = snap
-        .last_commit_age
-        .map(|a| a.saturating_add(age_offset))
-        .map_or_else(|| "?".to_string(), format_age_detailed);
+/// The header carries no age. Every age on the frame belongs to a row that
+/// names what it is aging — a file or a commit — and the newest commit's age
+/// sits on the first log row, directly beneath this line.
+fn header_segments(snap: &Snapshot, width: usize) -> HeaderSegments {
     let compose = |branch: &str, base: &str, detail: UpstreamDetail| {
-        compose_header(snap, branch, base, &age, detail)
+        compose_header(snap, branch, base, detail)
     };
 
     let full = compose(&snap.branch, &snap.base, UpstreamDetail::Full);
@@ -412,7 +447,6 @@ fn compose_header(
     snap: &Snapshot,
     branch: &str,
     base: &str,
-    age: &str,
     detail: UpstreamDetail,
 ) -> HeaderSegments {
     let commit_word = if snap.commits_ahead == 1 {
@@ -435,7 +469,7 @@ fn compose_header(
         word = commit_word,
     );
     let behind = (snap.commits_behind > 0).then(|| format!(", {} behind", snap.commits_behind));
-    let suffix = format!("{upstream_field} • last commit {age} ago");
+    let suffix = upstream_field;
     HeaderSegments {
         prefix,
         behind,
@@ -468,8 +502,42 @@ fn shave_names(branch: &str, base: &str, over: usize) -> (String, String) {
     )
 }
 
-fn render_separator(width: usize) -> String {
-    "─".repeat(width).dimmed().to_string()
+/// Dashes kept to the right of the refresh clock, so the rule still closes as a
+/// rule rather than trailing off after the text.
+const CLOCK_TAIL: usize = 5;
+
+/// Dashes kept to the left of the refresh clock. Below this the rule reads as a
+/// caption with a stray dash rather than a rule with text in it, so the clock is
+/// dropped instead.
+const CLOCK_MIN_LEAD: usize = 4;
+
+/// Render the full-width rule, optionally with the live-refresh clock set into
+/// it: a leading dash run, the clock, then a short dash tail.
+///
+/// The clock displaces dashes and never adds columns — the rule is exactly
+/// `width` columns either way, because one column of overflow wraps the row.
+/// Where the terminal is too narrow to seat the whole clock between
+/// [`CLOCK_MIN_LEAD`] and [`CLOCK_TAIL`] dashes, the rule falls back to plain
+/// dashes: a truncated duration (`next refresh: 1`) would be worse than none.
+fn render_separator(width: usize, refresh: Option<&RefreshStatus>) -> String {
+    let Some(status) = refresh else {
+        return "─".repeat(width).dimmed().to_string();
+    };
+    let clock = format!(
+        "last refresh: {} ago, next refresh: {}",
+        format_age_detailed(status.last_refresh_ago),
+        format_age_detailed(status.next_refresh_in),
+    );
+    // The clock is ASCII, so its display width is its byte length; the gaps are
+    // one column each.
+    let seated = clock.len() + 2 + CLOCK_TAIL + CLOCK_MIN_LEAD;
+    if seated > width {
+        return "─".repeat(width).dimmed().to_string();
+    }
+    let lead = width - clock.len() - 2 - CLOCK_TAIL;
+    format!("{} {clock} {}", "─".repeat(lead), "─".repeat(CLOCK_TAIL),)
+        .dimmed()
+        .to_string()
 }
 
 /// Render the in-progress-operation indicator line shown between the header
@@ -528,7 +596,7 @@ fn render_row(
 ) -> String {
     let (icon, letter) = icon_and_letter(entry);
     let effective_age = entry.age.map(|a| a.saturating_add(age_offset));
-    let factor = file_fade_factor(effective_age);
+    let factor = fade_factor(effective_age);
     let truecolor = opts.truecolor;
 
     let path_display_raw = match &entry.orig_path {
@@ -865,13 +933,14 @@ const FILE_BAR_RGB: (u8, u8, u8) = (60, 200, 200);
 const FILE_BAR_CONFLICT_RGB: (u8, u8, u8) = (255, 80, 80);
 const FILE_BIN_RGB: (u8, u8, u8) = (160, 160, 160);
 
-/// Fade factor for a file row.
+/// Fade factor for any row carrying an optional age.
 ///
-/// `Some(age)` shares the commit-log ramp via [`age_fade_factor`] so the
-/// file list and log section darken in lockstep. `None` returns `1.0`
-/// so files we can't stat (deleted entries, skipped untracked dirs)
-/// render at the dark floor.
-fn file_fade_factor(age: Option<Duration>) -> f32 {
+/// `Some(age)` rides the [`age_fade_factor`] ramp, so the file list and the
+/// log section darken in lockstep. `None` returns `1.0` — the dark floor —
+/// for every row whose age gsw could not determine: files it will not stat
+/// (deleted entries, skipped untracked dirs) and commits whose timestamp does
+/// not resolve. One rule, so an unknown age looks the same in both sections.
+fn fade_factor(age: Option<Duration>) -> f32 {
     age.map_or(1.0, age_fade_factor)
 }
 
@@ -880,8 +949,8 @@ fn file_fade_factor(age: Option<Duration>) -> f32 {
 /// Shared by every truecolor commit-log colorizer so the fade math lives
 /// in exactly one place — keeps the per-column functions to a single
 /// readable `if truecolor { fade } else { fallback }` shape.
-fn fade_truecolor(s: &str, age: Duration, base: (u8, u8, u8)) -> ColoredString {
-    let (r, g, b) = fade_rgb(base, age_fade_factor(age));
+fn fade_truecolor(s: &str, age: Option<Duration>, base: (u8, u8, u8)) -> ColoredString {
+    let (r, g, b) = fade_rgb(base, fade_factor(age));
     s.truecolor(r, g, b)
 }
 
@@ -890,7 +959,8 @@ fn fade_truecolor(s: &str, age: Duration, base: (u8, u8, u8)) -> ColoredString {
 /// With `truecolor`, the hash starts at [`LOG_HASH_BASE_RGB`] and fades
 /// toward the dark floor as `age` grows. Without, falls back to the
 /// legacy ANSI yellow so eight-color terminals still get a coloured hash.
-fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredString {
+/// An unknown age (`None`) renders at the floor, like the oldest commit.
+fn colorize_log_hash(hash: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(hash, age, LOG_HASH_BASE_RGB)
     } else {
@@ -902,24 +972,25 @@ fn colorize_log_hash(hash: &str, age: Duration, truecolor: bool) -> ColoredStrin
 ///
 /// With `truecolor`, the subject fades from a near-white base toward the
 /// dark floor. Without, falls back to the same Aging/Stale dim styling as
-/// the file-row age column, so the row still gets quieter as it ages.
-fn colorize_log_subject(subject: &str, age: Duration, truecolor: bool) -> ColoredString {
+/// the file-row age column, so the row still gets quieter as it ages. An
+/// unknown age (`None`) takes the quietest styling, like the oldest commit.
+fn colorize_log_subject(subject: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(subject, age, LOG_SUBJECT_BASE_RGB)
     } else {
-        match age_dim_level(age) {
-            AgeDim::Fresh | AgeDim::Recent => subject.normal(),
-            AgeDim::Aging | AgeDim::Stale => subject.dimmed(),
+        match age.map(age_dim_level) {
+            Some(AgeDim::Fresh | AgeDim::Recent) => subject.normal(),
+            Some(AgeDim::Aging | AgeDim::Stale) | None => subject.dimmed(),
         }
     }
 }
 
 /// Color the right-aligned age column for a commit-log row.
-fn colorize_log_age(text: &str, age: Duration, truecolor: bool) -> ColoredString {
+fn colorize_log_age(text: &str, age: Option<Duration>, truecolor: bool) -> ColoredString {
     if truecolor {
         fade_truecolor(text, age, LOG_AGE_BASE_RGB)
     } else {
-        colorize_age_ansi(text, Some(age))
+        colorize_age_ansi(text, age)
     }
 }
 
@@ -1215,6 +1286,7 @@ mod tests {
             max_files: None,
             log_lines: 0,
             truecolor: false,
+            refresh: None,
         }
     }
 
@@ -1224,7 +1296,6 @@ mod tests {
             base: "main".into(),
             commits_ahead: 3,
             commits_behind: 0,
-            last_commit_age: Some(Duration::from_secs(5 * 60 + 23)),
             files,
             log: vec![],
             upstream: None,
@@ -1260,6 +1331,125 @@ mod tests {
             opts.terminal_width,
             "separator width should match terminal width ({})\n  sep: {sep:?}",
             opts.terminal_width,
+        );
+    }
+
+    /// A refresh clock reading `3m2s ago` / `15s`, the example the feature was
+    /// specified with.
+    fn refresh_status() -> RefreshStatus {
+        RefreshStatus {
+            last_refresh_ago: Duration::from_secs(3 * 60 + 2),
+            next_refresh_in: Duration::from_secs(15),
+        }
+    }
+
+    #[test]
+    fn separator_carries_the_refresh_clock() {
+        // The whole point of the feature: the rule under the header answers
+        // "when did this last update, and when does it update again?".
+        let sep = strip_ansi(&render_separator(80, Some(&refresh_status())));
+        assert!(
+            sep.contains("last refresh: 3m2s ago, next refresh: 15s"),
+            "separator should carry the refresh clock: {sep:?}",
+        );
+    }
+
+    #[test]
+    fn separator_with_a_clock_still_spans_the_terminal_width() {
+        // The rule is a full-width frame element. Text inside it must displace
+        // dashes, never add columns — one extra column wraps the row. Sweeping
+        // from zero covers the fallback boundary too: at every width the rule is
+        // either a plain run of dashes or carries the clock whole, never a
+        // truncated duration, and it is always exactly as wide as asked.
+        for width in 0..=200 {
+            let sep = strip_ansi(&render_separator(width, Some(&refresh_status())));
+            assert_eq!(
+                UnicodeWidthStr::width(sep.as_str()),
+                width,
+                "separator with a clock must be exactly {width} columns: {sep:?}",
+            );
+            assert!(
+                sep.chars().all(|c| c == '─')
+                    || sep.contains("last refresh: 3m2s ago, next refresh: 15s"),
+                "at {width} columns the rule is neither plain nor whole: {sep:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn separator_clock_sits_between_dashes() {
+        // Tim's sketch: a long run of dashes, the clock, then a short tail —
+        // so the rule still reads as a rule rather than as a caption.
+        let sep = strip_ansi(&render_separator(80, Some(&refresh_status())));
+        let clock = "last refresh: 3m2s ago, next refresh: 15s";
+        let (before, after) = sep
+            .split_once(clock)
+            .unwrap_or_else(|| panic!("no clock in the rule: {sep:?}"));
+        assert!(
+            before.len() > after.len(),
+            "the dash run should lead and the tail should be short: {sep:?}",
+        );
+        assert!(
+            before.ends_with(' '),
+            "the clock needs a gap from the dashes on its left: {before:?}",
+        );
+        assert!(
+            after.starts_with(' ') && after.trim_start().chars().all(|c| c == '─'),
+            "the clock needs a gap, then a pure dash tail, on its right: {after:?}",
+        );
+    }
+
+    #[test]
+    fn separator_without_a_clock_is_unchanged() {
+        // One-shot output and the inter-section rule keep today's plain rule,
+        // byte for byte.
+        let sep = strip_ansi(&render_separator(80, None));
+        assert_eq!(sep, "─".repeat(80), "a clockless rule should be all dashes");
+    }
+
+    #[test]
+    fn separator_drops_the_clock_rather_than_overflow_a_narrow_terminal() {
+        // Below the width the clock needs, the rule falls back to plain dashes.
+        // Truncating the clock instead would print a half-written duration.
+        for width in 0..40 {
+            let sep = strip_ansi(&render_separator(width, Some(&refresh_status())));
+            assert_eq!(
+                UnicodeWidthStr::width(sep.as_str()),
+                width,
+                "narrow separator must still be exactly {width} columns: {sep:?}",
+            );
+            assert!(
+                sep.chars().all(|c| c == '─') || sep.contains("next refresh:"),
+                "a narrow rule must be all dashes or carry a whole clock: {sep:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn frame_puts_the_clock_on_the_post_header_rule_only() {
+        // Two rules render when a log and a file list both show. The clock
+        // belongs to the frame, so it appears once, on the rule under the
+        // header — not repeated above the file list.
+        let mut opts = opts();
+        opts.log_lines = 2;
+        opts.refresh = Some(refresh_status());
+        let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, false, 1, 0)]);
+        snap.log = vec![log_entry("abc1234", "first", 10)];
+        let out = strip_ansi(&render(&snap, &opts));
+        let rules: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with('─') || l.contains("last refresh:"))
+            .collect();
+        assert_eq!(rules.len(), 2, "expected two rules in:\n{out}");
+        assert!(
+            rules[0].contains("last refresh: 3m2s ago, next refresh: 15s"),
+            "the post-header rule should carry the clock: {:?}",
+            rules[0],
+        );
+        assert!(
+            !rules[1].contains("last refresh:"),
+            "the inter-section rule should stay blank: {:?}",
+            rules[1],
         );
     }
 
@@ -1375,11 +1565,10 @@ mod tests {
         stale_untracked.age = Some(ancient());
 
         let mut snap = snap_with(vec![stale_file, stale_untracked]);
-        snap.last_commit_age = Some(ancient());
         snap.log = vec![LogEntry {
             hash: "52ef922".into(),
             subject: "an old commit that has been sitting here for a very long time".into(),
-            age: ancient(),
+            age: Some(ancient()),
         }];
         let mut o = opts();
         o.log_lines = 5;
@@ -1424,9 +1613,8 @@ mod tests {
     #[test]
     fn header_never_exceeds_the_terminal_width() {
         // The header is the one line gsw draws as free text, so a long branch
-        // or tracking-ref name used to run straight past the terminal edge —
-        // dropping the `last commit {age} ago` tail, the very thing the eye
-        // goes to, onto a second line.
+        // or tracking-ref name used to run straight past the terminal edge and
+        // wrap onto a second row, shifting every row below it.
         let header = header_of(&snap_with_overlong_header(), &opts());
         assert!(
             UnicodeWidthStr::width(header.as_str()) <= opts().terminal_width,
@@ -1437,20 +1625,19 @@ mod tests {
     }
 
     #[test]
-    fn header_keeps_the_age_tail_when_squeezed() {
-        // Whatever else the header sheds to fit, the age survives intact —
-        // at every width where the tail fits on the line at all. Past the
-        // point where shaving names can pay for the overflow, the cut has to
-        // come out of the branch and the ahead-count text, not out of the
-        // one field the header exists to carry.
+    fn header_keeps_the_branch_identity_when_squeezed() {
+        // Whatever else the header sheds to fit, it stays a header: the branch
+        // name survives at every width where the line can carry anything at
+        // all. Shaving is middle-truncation, so the name keeps both ends.
         let snap = snap_with_overlong_header();
         for terminal_width in [100, 80, 60, 45, 40] {
             let mut o = opts();
             o.terminal_width = terminal_width;
             let header = header_of(&snap, &o);
             assert!(
-                header.ends_with("• last commit 5m23s ago"),
-                "header squeezed to {terminal_width} columns dropped the age tail: {header:?}",
+                header.contains("featu") && header.contains("ever"),
+                "header squeezed to {terminal_width} columns lost both ends of the \
+                 branch name: {header:?}",
             );
             assert!(
                 UnicodeWidthStr::width(header.as_str()) <= terminal_width,
@@ -1458,6 +1645,46 @@ mod tests {
                 UnicodeWidthStr::width(header.as_str()),
             );
         }
+    }
+
+    #[test]
+    fn the_header_does_not_restate_the_newest_commit_age() {
+        // The header's age field and the first log row's age are the same
+        // commit read through the same formatter, so the header spent about
+        // two dozen columns repeating the line directly beneath it. The
+        // columns go back to the branch name and the tracking ref, which are
+        // what the header alone can tell you.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry("abc1234", "the newest commit", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let header = header_of(&snap, &o);
+        assert!(
+            !header.contains("last commit"),
+            "the header should not repeat the newest commit's age: {header:?}",
+        );
+    }
+
+    #[test]
+    fn the_newest_commit_age_still_renders_on_its_own_row() {
+        // The other half of the same contract: dropping the header field must
+        // deduplicate the age, not remove it. The commit's own row still
+        // carries it.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry("abc1234", "the newest commit", 5 * 60 + 23)];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with("5m23s"),
+            "the newest commit's age belongs on its own row: {row:?}",
+        );
     }
 
     #[test]
@@ -1548,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn header_mentions_branch_commits_and_age() {
+    fn header_mentions_branch_and_commit_count() {
         let out = strip_ansi(&render(&snap_with(vec![]), &opts()));
         let header_line = out.lines().next().unwrap_or("");
         assert!(
@@ -1558,10 +1785,6 @@ mod tests {
         assert!(
             header_line.contains("3 commits ahead of main"),
             "header should mention commit count and base: {header_line}",
-        );
-        assert!(
-            header_line.contains("5m23s"),
-            "header should mention last-commit age: {header_line}",
         );
     }
 
@@ -1751,6 +1974,7 @@ mod tests {
                 max_files: None,
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         let row = out.lines().nth(2).unwrap_or("");
@@ -1773,6 +1997,7 @@ mod tests {
                 max_files: None,
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         );
         let stripped = strip_ansi(&out);
@@ -1861,6 +2086,7 @@ mod tests {
                 max_files: Some(3),
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         assert!(out.contains("f0.rs"));
@@ -1889,6 +2115,7 @@ mod tests {
                 max_files: Some(0),
                 log_lines: 0,
                 truecolor: false,
+                refresh: None,
             },
         ));
         for i in 0..5 {
@@ -2092,8 +2319,95 @@ mod tests {
         LogEntry {
             hash: hash.into(),
             subject: subject.into(),
-            age: Duration::from_secs(age_secs),
+            age: Some(Duration::from_secs(age_secs)),
         }
+    }
+
+    /// A log row whose age the repository could not give us.
+    fn log_entry_without_age(hash: &str, subject: &str) -> LogEntry {
+        LogEntry {
+            hash: hash.into(),
+            subject: subject.into(),
+            age: None,
+        }
+    }
+
+    #[test]
+    fn log_row_marks_an_unknown_age_instead_of_claiming_zero_seconds() {
+        // A commit timestamp ahead of the local clock yields no elapsed time.
+        // The row must say `?` — the same mark the frame uses everywhere an age
+        // is missing. `0s` would rank the commit as the freshest on screen.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry_without_age("abc1234", "a commit from the future")];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with(UNKNOWN_AGE),
+            "an unknown commit age should render as `{UNKNOWN_AGE}`: {row:?}",
+        );
+        assert!(
+            !row.contains("0s"),
+            "an unknown commit age must not be misrepresented as 0s: {row:?}",
+        );
+    }
+
+    #[test]
+    fn an_age_offset_leaves_an_unknown_log_age_unknown() {
+        // Watch mode advances every displayed age between git walks. An age
+        // gsw never had cannot be advanced into one it can back, so the mark
+        // survives the offset rather than becoming the offset itself.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![log_entry_without_age("abc1234", "a commit from the future")];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render_with_offset(&snap, &o, Duration::from_secs(50)));
+        let row = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .unwrap_or_else(|| panic!("the log row should render: {out}"));
+        assert!(
+            row.trim_end().ends_with(UNKNOWN_AGE),
+            "an offset must not turn an unknown age into a number: {row:?}",
+        );
+        assert!(
+            !row.contains("50s"),
+            "the offset itself must never be reported as the commit's age: {row:?}",
+        );
+    }
+
+    #[test]
+    fn a_log_row_without_an_age_keeps_the_age_column_aligned() {
+        // The `?` sits in the same right-aligned AGE_FIELD as every other row.
+        // A mark that drifts out of the column reads as a broken frame.
+        let mut snap = snap_with(vec![]);
+        snap.log = vec![
+            log_entry("abc1234", "known age", 30),
+            log_entry_without_age("def5678", "unknown age"),
+        ];
+        let mut o = opts();
+        o.log_lines = 5;
+
+        let out = strip_ansi(&render(&snap, &o));
+        let known = out
+            .lines()
+            .find(|line| line.contains("abc1234"))
+            .expect("known-age row");
+        let unknown = out
+            .lines()
+            .find(|line| line.contains("def5678"))
+            .expect("unknown-age row");
+        assert_eq!(
+            UnicodeWidthStr::width(known),
+            UnicodeWidthStr::width(unknown),
+            "both log rows should occupy the same width:\n  known:   {known:?}\n  unknown: {unknown:?}",
+        );
     }
 
     #[test]
@@ -2125,7 +2439,7 @@ mod tests {
             .map(|i| LogEntry {
                 hash: format!("h{i:06}"),
                 subject: format!("subj {i}"),
-                age: Duration::from_secs(i * 60),
+                age: Some(Duration::from_secs(i * 60)),
             })
             .collect();
         let mut o = opts();
@@ -2158,7 +2472,7 @@ mod tests {
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "really long subject ".repeat(20),
-            age: Duration::from_secs(30),
+            age: Some(Duration::from_secs(30)),
         }];
         let mut o = opts();
         o.log_lines = 1;
@@ -2243,26 +2557,6 @@ mod tests {
             UnicodeWidthStr::width(file_row.trim_end()),
             UnicodeWidthStr::width(log_line.trim_end()),
             "file row and log row should occupy the same width so age columns align:\n  file: {file_row:?}\n  log:  {log_line:?}",
-        );
-    }
-
-    #[test]
-    fn header_renders_question_mark_when_last_commit_age_unknown() {
-        // When git can't tell us when HEAD was authored (empty repo, malformed
-        // %ct, clock skew), the header used to say "last commit 0s ago" — i.e.
-        // it lied about a fresh commit. Render an explicit "?" instead so the
-        // unknown state is visible.
-        let mut snap = snap_with(vec![]);
-        snap.last_commit_age = None;
-        let out = strip_ansi(&render(&snap, &opts()));
-        let header = out.lines().next().unwrap_or("");
-        assert!(
-            header.contains("last commit ? ago"),
-            "header should mark unknown last-commit age explicitly: {header}",
-        );
-        assert!(
-            !header.contains("0s ago"),
-            "unknown age must not be misrepresented as 0s: {header}",
         );
     }
 
@@ -2411,7 +2705,7 @@ mod tests {
         // 24-bit RGB value (not the legacy `Color::Yellow`), so the gradient
         // has somewhere to fade *from*.
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), true);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor when truecolor=true, got {other:?}"),
@@ -2424,7 +2718,7 @@ mod tests {
         // through — otherwise we silently drop hash colouring on terminals
         // that can't render 24-bit RGB.
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(0), false);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), false);
         assert_eq!(cs.fgcolor, Some(Color::Yellow));
     }
 
@@ -2434,8 +2728,8 @@ mod tests {
         // out darker (lower channel values) than a fresh commit's hash on
         // every channel.
         use colored::Color;
-        let fresh = colorize_log_hash("abc1234", Duration::from_secs(0), true);
-        let hour = colorize_log_hash("abc1234", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_hash("abc1234", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_hash("abc1234", Some(Duration::from_secs(60 * 60)), true);
         let (
             Some(Color::TrueColor {
                 r: fr,
@@ -2464,7 +2758,7 @@ mod tests {
         // the FADE_FLOOR fraction of its base value.
         use crate::age::FADE_FLOOR;
         use colored::Color;
-        let cs = colorize_log_hash("abc1234", Duration::from_secs(60 * 60 * 24 * 7), true);
+        let cs = colorize_log_hash("abc1234", Some(Duration::from_secs(60 * 60 * 24 * 7)), true);
         let Some(Color::TrueColor { r, g, b }) = cs.fgcolor else {
             panic!("expected TrueColor under truecolor=true");
         };
@@ -2499,7 +2793,7 @@ mod tests {
         // Subjects need to fade too, otherwise the hash darkens while the
         // text next to it stays bright — visually inconsistent.
         use colored::Color;
-        let cs = colorize_log_subject("a commit subject", Duration::from_secs(0), true);
+        let cs = colorize_log_subject("a commit subject", Some(Duration::from_secs(0)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor for subject when truecolor=true, got {other:?}"),
@@ -2509,8 +2803,8 @@ mod tests {
     #[test]
     fn log_subject_darkens_with_age_under_truecolor() {
         use colored::Color;
-        let fresh = colorize_log_subject("subj", Duration::from_secs(0), true);
-        let hour = colorize_log_subject("subj", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_subject("subj", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_subject("subj", Some(Duration::from_secs(60 * 60)), true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
             (fresh.fgcolor, hour.fgcolor)
         else {
@@ -2525,7 +2819,7 @@ mod tests {
     #[test]
     fn log_age_uses_truecolor_when_enabled() {
         use colored::Color;
-        let cs = colorize_log_age("5m23s", Duration::from_secs(5 * 60 + 23), true);
+        let cs = colorize_log_age("5m23s", Some(Duration::from_secs(5 * 60 + 23)), true);
         match cs.fgcolor {
             Some(Color::TrueColor { .. }) => {}
             other => panic!("expected TrueColor for age when truecolor=true, got {other:?}"),
@@ -2535,8 +2829,8 @@ mod tests {
     #[test]
     fn log_age_darkens_with_age_under_truecolor() {
         use colored::Color;
-        let fresh = colorize_log_age("0s", Duration::from_secs(0), true);
-        let hour = colorize_log_age("1h0m", Duration::from_secs(60 * 60), true);
+        let fresh = colorize_log_age("0s", Some(Duration::from_secs(0)), true);
+        let hour = colorize_log_age("1h0m", Some(Duration::from_secs(60 * 60)), true);
         let (Some(Color::TrueColor { r: fr, .. }), Some(Color::TrueColor { r: hr, .. })) =
             (fresh.fgcolor, hour.fgcolor)
         else {
@@ -2593,7 +2887,7 @@ mod tests {
         use colored::Styles;
         let stale = colorize_log_subject(
             "an old subject",
-            Duration::from_secs(60 * 60 * 24 * 7),
+            Some(Duration::from_secs(60 * 60 * 24 * 7)),
             false,
         );
         assert!(
@@ -2603,32 +2897,33 @@ mod tests {
     }
 
     #[test]
-    fn file_fade_factor_is_zero_for_fresh_age() {
+    fn fade_factor_is_zero_for_fresh_age() {
         // A file modified moments ago must render at full base brightness,
         // which means factor=0 — the no-fade end of the ramp.
         assert!(
-            (file_fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
+            (fade_factor(Some(Duration::from_secs(0))) - 0.0).abs() < 1e-6,
             "fresh file should produce factor=0",
         );
     }
 
     #[test]
-    fn file_fade_factor_floors_when_age_is_none() {
-        // Deleted files and unstat'd untracked dirs have no mtime. They must
-        // render at the dark floor (factor=1.0) so the row visually announces
-        // "this is an unusual state, not actively changing".
+    fn fade_factor_floors_when_age_is_none() {
+        // Deleted files, unstat'd untracked dirs, and commits whose timestamp
+        // does not resolve all have no age. They must render at the dark floor
+        // (factor=1.0) so the row announces "this is an unusual state, not
+        // something actively changing".
         assert!(
-            (file_fade_factor(None) - 1.0).abs() < 1e-6,
+            (fade_factor(None) - 1.0).abs() < 1e-6,
             "None age should clamp to factor=1.0 (the floor)",
         );
     }
 
     #[test]
-    fn file_fade_factor_matches_commit_ramp_for_some_age() {
+    fn fade_factor_matches_commit_ramp_for_some_age() {
         // The file fade must share the *same* ramp as commit rows so the two
         // sections darken in lockstep under viddy. Spot-check the 1h midpoint.
         let one_hour = Duration::from_secs(60 * 60);
-        let file = file_fade_factor(Some(one_hour));
+        let file = fade_factor(Some(one_hour));
         let commit = age_fade_factor(one_hour);
         assert!(
             (file - commit).abs() < 1e-6,
@@ -3214,14 +3509,19 @@ mod tests {
         // The behind segment is warning-colored (yellow + bold). Force
         // `colored` on so the rendered header carries the real ANSI we'd
         // emit on a terminal, then assert: (1) a yellow SGR appears, (2) the
-        // plain text is `…ahead of main, 87 behind • last commit…` with the
-        // segment wedged between the base name and the suffix.
+        // plain text is `…ahead of main, 87 behind • ↑2 ↓0 …` with the
+        // segment wedged between the base name and the upstream field.
         let _guard = COLORED_OVERRIDE_GUARD
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let mut snap = snap_with(vec![]);
         snap.commits_behind = 87;
+        snap.upstream = Some(UpstreamStatus {
+            name: "origin/gsv".into(),
+            ahead: 2,
+            behind: 0,
+        });
         let rendered = render(&snap, &opts());
         colored::control::unset_override();
 
@@ -3232,33 +3532,28 @@ mod tests {
         );
         let plain = strip_ansi(header_line);
         assert!(
-            plain.contains("ahead of main, 87 behind • last commit"),
+            plain.contains("ahead of main, 87 behind • ↑2 ↓0"),
             "behind segment should sit between the base name and the suffix: {plain}",
         );
     }
 
     #[test]
-    fn age_offset_advances_header_file_and_log_ages() {
+    fn age_offset_advances_file_and_log_ages() {
         // A render-time age offset advances every displayed age by a single
-        // Duration: the header's last-commit age, each file row's mtime age,
-        // and each commit-log row's age. The three base ages are picked so the
-        // advanced strings can't collide with the un-advanced ones.
+        // Duration: each file row's mtime age and each commit-log row's age.
+        // The two base ages are picked so the advanced strings can't collide
+        // with the un-advanced ones.
         let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
-        snap.last_commit_age = Some(Duration::from_secs(10)); // header: "10s"
         snap.files[0].age = Some(Duration::from_secs(20)); // file row: "20s"
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "test".into(),
-            age: Duration::from_secs(100),
+            age: Some(Duration::from_secs(100)),
         }]; // log: "1m40s"
         let mut o = opts();
         o.log_lines = 5; // so the log section renders
 
         let advanced = strip_ansi(&render_with_offset(&snap, &o, Duration::from_secs(50)));
-        assert!(
-            advanced.contains("1m0s"),
-            "header age 10s + 50s offset should render as 1m0s: {advanced}",
-        );
         assert!(
             advanced.contains("1m10s"),
             "file age 20s + 50s offset should render as 1m10s: {advanced}",
@@ -3269,7 +3564,6 @@ mod tests {
         );
 
         let base = strip_ansi(&render(&snap, &o));
-        assert!(base.contains("10s"), "header age unoffset is 10s: {base}");
         assert!(base.contains("20s"), "file age unoffset is 20s: {base}");
         assert!(base.contains("1m40s"), "log age unoffset is 1m40s: {base}");
     }
@@ -3290,12 +3584,11 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         colored::control::set_override(true);
         let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
-        snap.last_commit_age = Some(Duration::from_secs(10));
         snap.files[0].age = Some(Duration::from_secs(20));
         snap.log = vec![LogEntry {
             hash: "abc1234".into(),
             subject: "test".into(),
-            age: Duration::from_secs(100),
+            age: Some(Duration::from_secs(100)),
         }];
         let mut o = opts();
         o.log_lines = 5;

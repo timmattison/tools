@@ -28,8 +28,8 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
 use crate::{
-    collect_snapshot, effective_terminal_height, effective_terminal_width, render_frame, Render,
-    RenderConfig, DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
+    collect_snapshot, effective_terminal_height, effective_terminal_width, render_frame,
+    FrameTiming, Render, RenderConfig, DEFAULT_TERMINAL_HEIGHT, DEFAULT_TERMINAL_WIDTH,
 };
 
 /// Which rendering mode `gsw` is running in. The mode — not ambient env
@@ -153,7 +153,7 @@ impl LiveIgnore {
     /// Called once per git walk, unconditionally. That is deliberate: rebuilding
     /// reads at most three small files and recompiles a handful of globs, which
     /// is negligible against the status traversal it rides along with — and
-    /// watch-mode walks are already gated to a ~1% duty cycle by [`Throttle`], so
+    /// watch-mode walks are already gated to a ~1% duty cycle by [`WalkSchedule`], so
     /// the rebuild rate is bounded by the same budget. Do **not** "optimize" this
     /// into a build-once cache or an mtime check: building it exactly once is the
     /// staleness this method exists to fix.
@@ -311,6 +311,12 @@ fn should_repaint(new: &str, displayed: &str) -> bool {
 /// | `1 min – 2 h` | 60 s | minute text ticks over; fade moves ~1 RGB unit/min |
 /// | `≥ 2 h` | `None` | fade frozen at the floor — FS events only, idle ≈ 0 |
 ///
+/// This is only one of the loop's deadline sources, and the least demanding of
+/// them: while a refresh countdown is on screen, [`CLOCK_CADENCE`] wakes the
+/// loop every second regardless of what this returns. `None` here therefore
+/// means "the fade needs no tick", not "the loop will sleep" — it sleeps only
+/// when `--refresh-interval 0` takes the countdown away too.
+///
 /// [`FADE_DARKEST_AT`]: crate::age::FADE_DARKEST_AT
 pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
     if freshest_age < Duration::from_secs(60) {
@@ -329,7 +335,7 @@ pub(crate) fn next_tick(freshest_age: Duration) -> Option<Duration> {
 const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Whether a filesystem change may walk git right now, or must wait out the
-/// adaptive cooldown. Returned by [`Throttle::on_change`].
+/// adaptive cooldown. Returned by [`WalkSchedule::on_change`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Walk {
     /// The cooldown has expired (or none is armed): walk git now.
@@ -361,21 +367,79 @@ const FLOOR: Duration = Duration::from_millis(150);
 /// (= 100·`D`), so an expensive repo automatically backs off and a cheap one
 /// stays responsive — all decided here with injected instants, no clock of its
 /// own.
-struct Throttle {
+struct WalkSchedule {
     /// Earliest instant the next walk may start. `None` = a walk is allowed now.
     next_allowed_at: Option<Instant>,
     /// Set when a change arrives during an active cooldown: a walk has been
     /// deferred and exactly one coalesced walk is now owed at the cooldown's
     /// expiry. Cleared by [`Self::record`] once that owed walk is performed.
     dirty: bool,
+    /// How often a walk runs with no filesystem event to prompt it. `None`
+    /// disables the timed walk, leaving gsw purely event-driven.
+    interval: Option<Duration>,
+    /// When the next timed walk falls due. `None` while no interval is set.
+    next_timed_at: Option<Instant>,
 }
 
-impl Throttle {
-    fn new() -> Self {
+impl WalkSchedule {
+    /// A schedule that runs no timed walk: gsw stays purely event-driven and
+    /// the duty-cycle gate is the only timing policy. Takes no instant on
+    /// purpose — with no interval there is nothing to count from, and this type
+    /// reads no clock of its own.
+    #[cfg(test)]
+    fn unscheduled() -> Self {
         Self {
             next_allowed_at: None,
             dirty: false,
+            interval: None,
+            next_timed_at: None,
         }
+    }
+
+    /// Build a schedule whose timed walks run every `interval`, counting from
+    /// `last_walk_at` — the start of the walk that seeded the first frame —
+    /// and gated by what that walk cost, exactly as [`Self::record`] gates
+    /// every walk after it.
+    fn new(interval: Option<Duration>, last_walk_at: Instant, last_walk_cost: Duration) -> Self {
+        let cooldown = cooldown(last_walk_cost);
+        Self {
+            // The seed walk arms no cooldown gate: a filesystem change landing
+            // right after startup still walks immediately, as it always has.
+            // Only the *timed* walk is held to the budget here — the gate is
+            // record()'s job, and the seed walk is over before this is built.
+            next_allowed_at: None,
+            dirty: false,
+            interval,
+            next_timed_at: interval.map(|i| last_walk_at + i.max(cooldown)),
+        }
+    }
+
+    /// When the next walk this schedule *owes* falls due, or `None` when it owes
+    /// none. Both a deferred filesystem change and a timed walk are walks that
+    /// will happen with no further input, so the sooner of the two wins.
+    ///
+    /// This is what the refresh clock counts down to. A filesystem event can
+    /// still walk earlier, which is why the clock says "scheduled".
+    fn next_walk_at(&self) -> Option<Instant> {
+        match (self.next_allowed(), self.next_timed_at) {
+            (Some(owed), Some(timed)) => Some(owed.min(timed)),
+            (owed, None) => owed,
+            (None, timed) => timed,
+        }
+    }
+
+    /// The countdown the refresh clock prints at `now`, or `None` when this
+    /// schedule runs no timed walks and therefore shows no clock.
+    ///
+    /// Deliberately not just "the next walk owed": a change deferred through a
+    /// cooldown is owed under `--refresh-interval 0` too, and counting down to
+    /// it would put the clock back on screen under the flag that took it away.
+    /// The interval is what decides whether a clock exists at all; once it does,
+    /// the countdown tracks whichever walk lands first.
+    fn countdown(&self, now: Instant) -> Option<Duration> {
+        self.interval?;
+        self.next_walk_at()
+            .map(|at| ceil_secs(at.saturating_duration_since(now)))
     }
 
     /// Decide whether a change arriving at `now` may walk git: [`Walk::Now`] once
@@ -398,9 +462,20 @@ impl Throttle {
     /// last-write-wins — each call replaces any prior cooldown, no averaging.
     /// Clears any pending deferred walk: a freshly-recorded walk reflects the
     /// latest coalesced state, so no walk is owed afterward (see [`Self::dirty`]).
+    ///
+    /// The timed walk is re-armed from the same `walk_start`, at whichever is
+    /// later: one `interval`, or the cooldown this walk just earned. The budget
+    /// outranks the interval on purpose — a repo whose walk costs two seconds
+    /// owes a 200-second cooldown, and a 60-second timed walk into that window
+    /// would either violate the duty cycle or promise a refresh the gate refuses
+    /// to admit. Pushing the timed walk out keeps the countdown honest.
     fn record(&mut self, walk_start: Instant, cost: Duration) {
-        self.next_allowed_at = Some(walk_start + cooldown(cost));
+        let cooldown = cooldown(cost);
+        self.next_allowed_at = Some(walk_start + cooldown);
         self.dirty = false;
+        self.next_timed_at = self
+            .interval
+            .map(|interval| walk_start + interval.max(cooldown));
     }
 
     /// The instant a pending deferred walk should fire — the cooldown's expiry —
@@ -447,17 +522,54 @@ fn cooldown(cost: Duration) -> Duration {
         .max(FLOOR)
 }
 
-/// The loop's wait window: the soonest of the decay-tick cadence
-/// (`decay_tick`) and a pending deferred walk's remaining cooldown
-/// (`deferred_walk`), or `None` to block until an event arrives. Both inputs
-/// are already expressed as durations from now; a `None` from either source
-/// means that source imposes no deadline.
-fn wait_window(decay_tick: Option<Duration>, deferred_walk: Option<Duration>) -> Option<Duration> {
-    match (decay_tick, deferred_walk) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, None) => a,
-        (None, b) => b,
+/// How often the loop repaints purely to move the refresh clock along. The
+/// clock prints whole seconds, so a second is exactly what it needs — waking
+/// more often would repaint an identical frame, and less often would leave a
+/// countdown visibly stuck.
+///
+/// This cadence applies only while a countdown is on screen. With
+/// `--refresh-interval 0` there is no countdown, no clock tick, and the
+/// adaptive decay cadence is once again the only timer — which is what keeps
+/// today's idle-at-zero behavior available to anyone who wants it back.
+const CLOCK_CADENCE: Duration = Duration::from_secs(1);
+
+/// Place a frame in time: how stale its snapshot is, and how long until the
+/// walk `schedule` next owes — the countdown the refresh clock prints.
+///
+/// Called after [`WalkSchedule::record`] on a walking wake, so a frame painted
+/// by a walk shows the interval it just re-armed rather than the one it spent.
+fn timing(age_offset: Duration, schedule: &WalkSchedule, now: Instant) -> FrameTiming {
+    FrameTiming {
+        age_offset,
+        next_refresh_in: schedule.countdown(now),
     }
+}
+
+/// Round a duration up to the next whole second.
+///
+/// The clock prints whole seconds, and its two halves round in opposite
+/// directions on purpose: an elapsed time floors (0.9 s ago really is "0s ago"
+/// so far), while a countdown ceils (0.1 s left must not read as "0s"). Rounding
+/// both the same way loses a second between them, and the pair stops adding up
+/// to the interval it is measuring.
+fn ceil_secs(remaining: Duration) -> Duration {
+    let secs = remaining.as_secs();
+    if remaining.subsec_nanos() > 0 {
+        Duration::from_secs(secs.saturating_add(1))
+    } else {
+        Duration::from_secs(secs)
+    }
+}
+
+/// The loop's wait window: the soonest deadline any source imposes, or `None`
+/// to block until an event arrives.
+///
+/// Every input is already expressed as a duration from now, and a `None` from a
+/// source means that source imposes no deadline. Taking a slice rather than a
+/// fixed pair is what lets a new source (the timed refresh, the refresh clock's
+/// own cadence) join without every caller and test changing shape.
+fn wait_window(deadlines: &[Option<Duration>]) -> Option<Duration> {
+    deadlines.iter().flatten().min().copied()
 }
 
 /// Events the watch loop reacts to. The main thread owns all rendering and
@@ -541,13 +653,14 @@ pub(crate) fn walk(
 
 /// Run the live watch loop: take over the alternate screen, seed the snapshot
 /// cache with one git walk, paint the first frame, then re-render on filesystem
-/// changes, terminal resizes, and decay-timer ticks until the user quits with
-/// `q` or Ctrl-C.
+/// changes, terminal resizes, timed refreshes, and decay-timer ticks until the
+/// user quits with `q` or Ctrl-C.
 ///
-/// Filesystem changes [`walk`] git — re-opening the repository so config
-/// changed in another pane takes effect — and re-seed the cache; decay ticks
-/// and resizes re-render the cached snapshot with no git work (Part A). The
-/// [`TerminalGuard`] restores the main screen and cursor on every exit path.
+/// Filesystem changes and timed refreshes [`walk`] git — re-opening the
+/// repository so config changed in another pane takes effect — and re-seed the
+/// cache; decay ticks and resizes re-render the cached snapshot with no git work
+/// (Part A). The [`TerminalGuard`] restores the main screen and cursor on every
+/// exit path.
 ///
 /// Takes the [`RepoHandle`] **by value**: watch mode owns the repository for
 /// the rest of the process, and each refresh mutates the handle in place by
@@ -571,7 +684,22 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let dims = current_dimensions(cfg.width_offset);
     let collected_at = Instant::now();
     let snapshot = collect_snapshot(handle.repo(), cfg)?;
-    let first = render_frame(&snapshot, cfg, dims, Duration::ZERO);
+    // The seed walk pays into the duty-cycle budget like every walk after it,
+    // so its cost is what the schedule's first timed walk is gated on. The seed
+    // frame then counts down to that same schedule rather than to the raw
+    // interval — one deadline, quoted once, so the opening frame cannot promise
+    // a refresh the loop will not make.
+    let schedule = WalkSchedule::new(
+        cfg.refresh_interval,
+        collected_at,
+        Instant::now().saturating_duration_since(collected_at),
+    );
+    let first = render_frame(
+        &snapshot,
+        cfg,
+        dims,
+        timing(Duration::ZERO, &schedule, collected_at),
+    );
     paint_output(&first.output)?;
     let mut displayed = first.output;
     let initial_freshest = first.freshest_age;
@@ -601,10 +729,11 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
         &mut displayed,
         cache,
         initial_freshest,
+        schedule,
         LoopHooks {
             collect: || walk(&mut handle, &ignore, cfg),
-            render: |snap: &Snapshot, dims: Dimensions, offset: Duration| {
-                render_frame(snap, cfg, dims, offset)
+            render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
+                render_frame(snap, cfg, dims, timing)
             },
             dimensions: || current_dimensions(cfg.width_offset),
             paint: |output: &str| paint_output(output),
@@ -750,7 +879,7 @@ struct SnapshotCache {
 struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
     /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
-    /// Render a snapshot at the given dimensions, advancing ages by the offset.
+    /// Render a snapshot at the given dimensions and timing.
     render: RenderFn,
     /// Query the current terminal dimensions (re-evaluated on resize).
     dimensions: Dims,
@@ -763,15 +892,21 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 }
 
 /// The render loop's terminal-free core: wait for a filesystem event, a resize,
-/// or a decay-timer tick, then update the screen. Only a filesystem change walks
-/// git; a tick or resize re-renders the *cached* [`Snapshot`] (Part A), so the
-/// idle-after-commit decay tick no longer pins a core re-walking an unchanged
-/// repo.
+/// or a timeout, then update the screen. A filesystem change walks git, and so
+/// does a timeout at which [`WalkSchedule`] owes a walk — a timed refresh, or a
+/// change deferred through a cooldown. Every other timeout re-renders the
+/// *cached* [`Snapshot`] (Part A), so a decay tick on an unchanged repo still
+/// costs no git work at all.
 ///
-/// The decay timer needs no thread of its own: `next_tick` (in `hooks`) turns
-/// the freshest displayed-item age into the `recv_timeout` window, so a timeout
-/// *is* a tick and the cadence is recomputed after every render. `None` disables
-/// the timer — the loop blocks indefinitely on events.
+/// `schedule` arrives already anchored to the walk that filled `cache`, so the
+/// caller's seed frame and this loop count down to the same deadline.
+///
+/// No timer needs a thread of its own: every deadline is folded into the
+/// `recv_timeout` window by [`wait_window`], so a timeout *is* the tick, and the
+/// window is recomputed after every render. Three sources feed it — the decay
+/// cadence from `next_tick` (in `hooks`), the walk the schedule owes, and, while
+/// a countdown is on screen, [`CLOCK_CADENCE`]. With all three absent the loop
+/// blocks indefinitely on events.
 ///
 /// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
 /// clock, tick cadence) so the loop is one function testable without a TTY or
@@ -811,18 +946,18 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
     displayed: &mut String,
     mut cache: SnapshotCache,
     initial_freshest: Option<Duration>,
+    mut schedule: WalkSchedule,
     mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick>,
 ) -> Result<()>
 where
     Collect: FnMut() -> Result<Snapshot>,
-    RenderFn: FnMut(&Snapshot, Dimensions, Duration) -> Render,
+    RenderFn: FnMut(&Snapshot, Dimensions, FrameTiming) -> Render,
     Dims: Fn() -> Dimensions,
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
-    let mut throttle = Throttle::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -832,13 +967,19 @@ where
         let mut saw_fs = false;
         let mut saw_resize = false;
         let mut saw_force = false;
-        // Wait window: the soonest of the decay-tick cadence and, when a walk was
-        // deferred during a cooldown, that cooldown's expiry. The clock is read
-        // for the deferred deadline only when one is actually pending.
-        let deferred_wait = throttle
-            .next_allowed()
-            .map(|expiry| expiry.saturating_duration_since((hooks.clock)()));
-        let wait = wait_window((hooks.next_tick)(freshest), deferred_wait);
+        // Wait window: the soonest of the decay-tick cadence, the next walk this
+        // schedule owes (a timed refresh, or a walk deferred during a cooldown),
+        // and — while a countdown is on screen — the cadence that countdown
+        // needs to keep moving. The clock is read only when a walk is actually
+        // owed.
+        let walk_wait = schedule
+            .next_walk_at()
+            .map(|at| at.saturating_duration_since((hooks.clock)()));
+        let wait = wait_window(&[
+            (hooks.next_tick)(freshest),
+            walk_wait,
+            schedule.interval.map(|_| CLOCK_CADENCE),
+        ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
@@ -914,16 +1055,17 @@ where
         let walk_now = if saw_force {
             // Manual refresh (`r`): lift the cooldown gate and walk now. The walk
             // branch re-measures cost and re-arms the throttle from it.
-            throttle.force();
+            schedule.force();
             true
         } else if saw_fs {
-            matches!(throttle.on_change(now), Walk::Now)
+            matches!(schedule.on_change(now), Walk::Now)
         } else if woke_for_timeout {
-            // Only the OWED walk fires here, and only once its cooldown has
-            // actually expired: a plain decay tick that fires mid-cooldown (a
-            // shorter wait than the deferred deadline) re-renders from cache
-            // without walking, so Part A and Part B compose.
-            matches!(throttle.next_allowed(), Some(expiry) if now >= expiry)
+            // Only a walk the schedule OWES fires here — a deferred change's
+            // coalesced walk, or a timed refresh — and only once it has actually
+            // fallen due: a decay tick or a clock tick that fires ahead of it (a
+            // shorter wait than the walk deadline) re-renders from cache without
+            // walking, so Part A and Part B compose.
+            matches!(schedule.next_walk_at(), Some(due) if now >= due)
         } else {
             false
         };
@@ -938,7 +1080,7 @@ where
             // every walk, so gating the retries on the same duty-cycle budget is
             // what keeps a permanently-deleted repo from pinning a core.
             let cost = (hooks.clock)().saturating_duration_since(now);
-            throttle.record(now, cost);
+            schedule.record(now, cost);
             match collected {
                 Ok(snapshot) => {
                     // Re-seed the collection time to the walk's start so a later
@@ -946,7 +1088,11 @@ where
                     // the previous one.
                     cache.collected_at = now;
                     cache.snapshot = snapshot;
-                    (hooks.render)(&cache.snapshot, cache.dims, Duration::ZERO)
+                    (hooks.render)(
+                        &cache.snapshot,
+                        cache.dims,
+                        timing(Duration::ZERO, &schedule, now),
+                    )
                 }
                 // A walk can fail for reasons that are none of the user's
                 // business and usually transient: `git gc` swapping the ref
@@ -961,18 +1107,30 @@ where
                 // aging truthfully while the repository is unreadable.
                 Err(_) => {
                     let age_offset = now.saturating_duration_since(cache.collected_at);
-                    (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+                    (hooks.render)(
+                        &cache.snapshot,
+                        cache.dims,
+                        timing(age_offset, &schedule, now),
+                    )
                 }
             }
         } else if saw_resize {
             cache.dims = (hooks.dimensions)();
             let age_offset = now.saturating_duration_since(cache.collected_at);
-            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+            (hooks.render)(
+                &cache.snapshot,
+                cache.dims,
+                timing(age_offset, &schedule, now),
+            )
         } else {
             // Decay tick, or an FS change the throttle deferred: re-render the
             // cached snapshot, advancing every displayed age by the elapsed time.
             let age_offset = now.saturating_duration_since(cache.collected_at);
-            (hooks.render)(&cache.snapshot, cache.dims, age_offset)
+            (hooks.render)(
+                &cache.snapshot,
+                cache.dims,
+                timing(age_offset, &schedule, now),
+            )
         };
 
         if should_repaint(&render.output, displayed) {
@@ -1150,6 +1308,7 @@ mod tests {
             log_lines: 0,
             truecolor: false,
             width_offset: 0,
+            refresh_interval: None,
         }
     }
 
@@ -1344,7 +1503,7 @@ mod tests {
             width: 200,
             height: 40,
         };
-        let frame = render_frame(snapshot, cfg, dims, Duration::ZERO);
+        let frame = render_frame(snapshot, cfg, dims, FrameTiming::at_walk(None));
         crate::render::strip_ansi(frame.output.lines().next().unwrap_or_default())
     }
 
@@ -1554,23 +1713,32 @@ mod tests {
 
     #[test]
     fn wait_window_picks_the_earliest_deadline() {
-        // The loop waits on the SOONER of the decay-tick cadence and a pending
-        // deferred walk's remaining cooldown. A `None` from either source means
-        // it imposes no deadline; both `None` means block until an event arrives.
+        // The loop waits on the SOONEST deadline any source imposes. A `None`
+        // from a source means it imposes no deadline; all `None` means block
+        // until an event arrives.
         let short = Duration::from_secs(5);
         let long = Duration::from_secs(60);
 
-        // Earliest of two present deadlines wins, regardless of argument order.
-        assert_eq!(wait_window(Some(long), Some(short)), Some(short));
-        assert_eq!(wait_window(Some(short), Some(long)), Some(short));
-        assert_eq!(wait_window(Some(short), Some(short)), Some(short));
+        // Earliest of the present deadlines wins, regardless of argument order.
+        assert_eq!(wait_window(&[Some(long), Some(short)]), Some(short));
+        assert_eq!(wait_window(&[Some(short), Some(long)]), Some(short));
+        assert_eq!(wait_window(&[Some(short), Some(short)]), Some(short));
 
         // One source absent: the other's deadline stands.
-        assert_eq!(wait_window(Some(short), None), Some(short));
-        assert_eq!(wait_window(None, Some(short)), Some(short));
+        assert_eq!(wait_window(&[Some(short), None]), Some(short));
+        assert_eq!(wait_window(&[None, Some(short)]), Some(short));
 
-        // Neither source imposes a deadline: block until an event arrives.
-        assert_eq!(wait_window(None, None), None);
+        // Any number of sources, not just two.
+        let mid = Duration::from_secs(30);
+        assert_eq!(
+            wait_window(&[Some(long), Some(short), Some(mid)]),
+            Some(short)
+        );
+        assert_eq!(wait_window(&[None, Some(mid), None, Some(long)]), Some(mid));
+
+        // No source imposes a deadline: block until an event arrives.
+        assert_eq!(wait_window(&[None, None]), None);
+        assert_eq!(wait_window(&[]), None);
     }
 
     #[test]
@@ -1584,7 +1752,7 @@ mod tests {
         let t0 = Instant::now();
 
         // Representative cost: a 150 ms walk gates the next for 100·150 ms = 15 s.
-        let mut representative = Throttle::new();
+        let mut representative = WalkSchedule::unscheduled();
         representative.record(t0, Duration::from_millis(150));
         assert_eq!(
             representative.on_change(t0 + Duration::from_secs(15) - Duration::from_nanos(1)),
@@ -1598,7 +1766,7 @@ mod tests {
         );
 
         // No ceiling: a 5 s walk gates the next for 100·5 s = 500 s, uncapped.
-        let mut costly = Throttle::new();
+        let mut costly = WalkSchedule::unscheduled();
         costly.record(t0, Duration::from_secs(5));
         assert_eq!(
             costly.on_change(t0 + Duration::from_secs(500) - Duration::from_nanos(1)),
@@ -1613,7 +1781,7 @@ mod tests {
 
         // Recompute-from-latest: a later record fully replaces the earlier one,
         // gating from the LATEST walk start at 100× the LATEST cost.
-        let mut last_write_wins = Throttle::new();
+        let mut last_write_wins = WalkSchedule::unscheduled();
         let t1 = t0 + Duration::from_secs(1);
         last_write_wins.record(t0, Duration::from_millis(500)); // would gate until t0 + 50 s
         last_write_wins.record(t1, Duration::from_millis(30)); // replaced: gate until t1 + 3 s
@@ -1629,11 +1797,196 @@ mod tests {
         );
 
         // A fresh throttle that has never recorded imposes no cooldown.
-        let mut fresh = Throttle::new();
+        let mut fresh = WalkSchedule::unscheduled();
         assert_eq!(
             fresh.on_change(t0),
             Walk::Now,
             "a throttle that has never walked allows a walk immediately",
+        );
+    }
+
+    /// The default timed-refresh cadence used across the schedule tests.
+    const TEST_INTERVAL: Duration = Duration::from_secs(60);
+
+    /// A walk cheap enough that its duty-cycle cooldown (100× cost, floored at
+    /// 150 ms) stays far inside `TEST_INTERVAL` — so the interval, not the
+    /// budget, decides when the timed walk falls due.
+    const CHEAP: Duration = Duration::from_millis(150);
+
+    #[test]
+    fn the_two_clock_numbers_sum_to_the_interval_with_nothing_else_pending() {
+        // "last refresh: 1s ago, next refresh: 58s" on a 60-second interval
+        // makes a reader check their arithmetic. Both numbers are printed as
+        // whole seconds, so the elapsed half rounds down and the remaining half
+        // must round up — then the pair reads as one interval, and the countdown
+        // never claims less time than is actually left.
+        //
+        // One interval is what the pair sums to only in this steady state. A
+        // deferred change pulls the next walk in and a costly walk's cooldown
+        // pushes it out; either way the sum is the wait actually being measured,
+        // which those cases cover.
+        let t0 = Instant::now();
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        for millis in [0, 1, 400, 999, 1000, 1400, 30_500, 58_999, 59_999] {
+            let now = t0 + Duration::from_millis(millis);
+            let frame = timing(now.saturating_duration_since(t0), &schedule, now);
+            let elapsed = frame.age_offset.as_secs();
+            let remaining = frame
+                .next_refresh_in
+                .expect("a scheduled walk has a countdown")
+                .as_secs();
+            assert_eq!(
+                elapsed + remaining,
+                TEST_INTERVAL.as_secs(),
+                "at {millis}ms the clock reads {elapsed}s ago / {remaining}s left, \
+                 which does not add up to one {TEST_INTERVAL:?} interval",
+            );
+        }
+    }
+
+    #[test]
+    fn the_seed_walks_cost_gates_the_first_timed_walk() {
+        // The walk that seeds the first frame is a walk like any other, so its
+        // cost has to buy the same duty-cycle cooldown. Without that, the first
+        // timed refresh spends a budget nothing paid for: on a repository whose
+        // walk costs 2 s, gsw would re-walk at 60 s instead of the 200 s the
+        // budget owes, running that first cycle at ~3.3% against a stated 1%.
+        let t0 = Instant::now();
+        let costly = Duration::from_secs(2);
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, costly);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + Duration::from_secs(200)),
+            "the seed walk's cost must gate the first timed walk, like every later walk",
+        );
+    }
+
+    #[test]
+    fn the_seed_frame_counts_down_to_the_schedule_the_loop_runs_on() {
+        // The frame the seed walk paints and the schedule handed to the loop
+        // have to quote the same deadline. A frame opening with "next refresh:
+        // 60s" over a schedule that will not walk for 200 s promises a refresh
+        // the gate has no intention of admitting — the exact dishonesty the
+        // budget-outranks-the-interval rule exists to prevent.
+        let t0 = Instant::now();
+        let costly = Duration::from_secs(2);
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, costly);
+        assert_eq!(
+            timing(Duration::ZERO, &schedule, t0).next_refresh_in,
+            Some(Duration::from_secs(200)),
+            "the seed frame must count down to the schedule's own first walk",
+        );
+    }
+
+    #[test]
+    fn timed_walk_falls_due_one_interval_after_the_last_walk() {
+        // The countdown the refresh clock shows: with no filesystem event at
+        // all, gsw still re-walks every interval. Instants derive from one base,
+        // so the test is deterministic and parallel-safe — no real sleeping.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + TEST_INTERVAL),
+            "the first timed walk is due one interval after the seed walk",
+        );
+
+        // Each walk re-arms the schedule from its own start.
+        let t1 = t0 + Duration::from_secs(90);
+        schedule.record(t1, CHEAP);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t1 + TEST_INTERVAL),
+            "a walk re-arms the timed walk one interval from that walk's start",
+        );
+    }
+
+    #[test]
+    fn timed_walk_never_outruns_the_duty_cycle_budget() {
+        // On an expensive repo the 1% budget outranks the interval: a 2 s walk
+        // earns a 200 s cooldown, so the timed walk waits 200 s, not 60 s.
+        // Otherwise the "next refresh" countdown would promise a walk the gate
+        // has no intention of admitting.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        let costly = Duration::from_secs(2);
+        schedule.record(t0, costly);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + Duration::from_secs(200)),
+            "the timed walk must wait out the duty-cycle cooldown",
+        );
+    }
+
+    #[test]
+    fn a_deferred_change_pulls_the_next_walk_in_ahead_of_the_interval() {
+        // A filesystem change deferred mid-cooldown owes a walk at the
+        // cooldown's expiry, which is sooner than the interval. The clock must
+        // count down to the sooner of the two, or it would over-promise the wait.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        schedule.record(t0, CHEAP); // cooldown expires at t0 + 15 s
+        assert_eq!(schedule.on_change(t0 + Duration::from_secs(1)), Walk::Defer);
+        assert_eq!(
+            schedule.next_walk_at(),
+            Some(t0 + Duration::from_secs(15)),
+            "an owed walk at 15 s beats the timed walk at 60 s",
+        );
+    }
+
+    #[test]
+    fn a_disabled_interval_shows_no_countdown_even_with_a_walk_owed() {
+        // `--refresh-interval 0` takes the clock away. A change deferred through
+        // a cooldown still owes a walk — the loop must fire it — but printing a
+        // countdown for it would contradict the flag that removed the clock, and
+        // on an expensive repo that stray countdown would sit there for minutes.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::unscheduled();
+        schedule.record(t0, CHEAP);
+        let during_cooldown = t0 + Duration::from_secs(1);
+        assert_eq!(schedule.on_change(during_cooldown), Walk::Defer);
+        assert!(
+            schedule.next_walk_at().is_some(),
+            "a deferred change still owes a walk the loop has to fire",
+        );
+        assert_eq!(
+            schedule.countdown(during_cooldown),
+            None,
+            "a schedule with no interval must show no countdown, owed walk or not",
+        );
+    }
+
+    #[test]
+    fn the_countdown_tracks_the_next_scheduled_walk() {
+        let t0 = Instant::now();
+        let schedule = WalkSchedule::new(Some(TEST_INTERVAL), t0, Duration::ZERO);
+        assert_eq!(
+            schedule.countdown(t0 + Duration::from_secs(15)),
+            Some(Duration::from_secs(45)),
+        );
+        // Overdue reads as due now rather than underflowing.
+        assert_eq!(
+            schedule.countdown(t0 + Duration::from_secs(120)),
+            Some(Duration::ZERO),
+        );
+    }
+
+    #[test]
+    fn a_disabled_interval_owes_no_timed_walk() {
+        // `--refresh-interval 0` restores today's purely event-driven gsw: the
+        // gate still applies, but nothing falls due on its own.
+        let t0 = Instant::now();
+        let mut schedule = WalkSchedule::unscheduled();
+        assert_eq!(
+            schedule.next_walk_at(),
+            None,
+            "an unscheduled walk schedule owes nothing on its own",
+        );
+        schedule.record(t0, CHEAP);
+        assert_eq!(
+            schedule.next_walk_at(),
+            None,
+            "recording a walk must not invent a timed walk",
         );
     }
 
@@ -1647,15 +2000,15 @@ mod tests {
         // derived from one base, so the test is deterministic and parallel-safe.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(1));
+        let mut schedule = WalkSchedule::unscheduled();
+        schedule.record(t0, Duration::from_millis(1));
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_millis(100)),
+            schedule.on_change(t0 + Duration::from_millis(100)),
             Walk::Defer,
             "still gated past the un-floored 100 ms cooldown — the floor extends it",
         );
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_millis(150)),
+            schedule.on_change(t0 + Duration::from_millis(150)),
             Walk::Now,
             "allowed exactly at the 150 ms floor, never faster than today's debounce",
         );
@@ -1672,21 +2025,21 @@ mod tests {
         // Instants derive from one base — deterministic and parallel-safe.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(150));
+        let mut schedule = WalkSchedule::unscheduled();
+        schedule.record(t0, Duration::from_millis(150));
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             None,
             "a recorded-but-unchanged throttle owes no walk yet — nothing is pending",
         );
 
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Defer,
             "a change 1 s into the 15 s cooldown is deferred, not walked",
         );
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             Some(t0 + Duration::from_secs(15)),
             "that deferred change now owes one coalesced walk at the cooldown's expiry",
         );
@@ -1703,20 +2056,20 @@ mod tests {
         // derive from one base — deterministic and parallel-safe, no sleeping.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(150)); // next_allowed_at = t0 + 15 s
+        let mut schedule = WalkSchedule::unscheduled();
+        schedule.record(t0, Duration::from_millis(150)); // next_allowed_at = t0 + 15 s
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Defer,
             "a change 1 s into the 15 s cooldown is deferred, not walked",
         );
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(2)),
+            schedule.on_change(t0 + Duration::from_secs(2)),
             Walk::Defer,
             "a second mid-cooldown change coalesces into the same owed walk",
         );
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             Some(t0 + Duration::from_secs(15)),
             "still exactly one walk owed at the original expiry — coalesced, not doubled or moved",
         );
@@ -1724,9 +2077,9 @@ mod tests {
         // The owed walk runs at expiry and is recorded: that walk reflects the
         // latest coalesced state, so the single owed walk is consumed and the
         // deferral resets — nothing is pending afterward.
-        throttle.record(t0 + Duration::from_secs(15), Duration::from_millis(150));
+        schedule.record(t0 + Duration::from_secs(15), Duration::from_millis(150));
         assert_eq!(
-            throttle.next_allowed(),
+            schedule.next_allowed(),
             None,
             "the owed walk is consumed by the record; no walk is owed afterward",
         );
@@ -1742,17 +2095,17 @@ mod tests {
         // from one base — deterministic and parallel-safe, no sleeping.
         let t0 = Instant::now();
 
-        let mut throttle = Throttle::new();
-        throttle.record(t0, Duration::from_millis(150)); // cooldown until t0 + 15 s
+        let mut schedule = WalkSchedule::unscheduled();
+        schedule.record(t0, Duration::from_millis(150)); // cooldown until t0 + 15 s
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Defer,
             "a change 1 s into the 15 s cooldown is deferred — we're genuinely mid-cooldown",
         );
 
-        throttle.force();
+        schedule.force();
         assert_eq!(
-            throttle.on_change(t0 + Duration::from_secs(1)),
+            schedule.on_change(t0 + Duration::from_secs(1)),
             Walk::Now,
             "after force, the same mid-cooldown instant walks immediately — the gate is lifted",
         );
@@ -1906,6 +2259,13 @@ mod tests {
     /// these tests deterministic regardless of the exact value here.
     const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
 
+    /// No timed refresh: the loop under test is purely event-driven, so a walk
+    /// can only come from a filesystem change. Every test that predates the
+    /// timed refresh passes this, keeping its subject isolated from it.
+    fn no_timed_refresh() -> WalkSchedule {
+        WalkSchedule::unscheduled()
+    }
+
     /// A `next_tick` that always disables the timer, so the loop blocks purely
     /// on channel events. The event-driven tests use this to stay independent
     /// of the decay-timer behavior, which has its own dedicated tests.
@@ -1930,7 +2290,6 @@ mod tests {
             base: "main".into(),
             commits_ahead: 0,
             commits_behind: 0,
-            last_commit_age: None,
             files: Vec::new(),
             log: Vec::new(),
             upstream: None,
@@ -1954,6 +2313,152 @@ mod tests {
         }
     }
 
+    /// A clock that steps forward by `step` on every read, from `base`. The loop
+    /// reads the clock several times per iteration, so a stepping clock is what
+    /// lets a test cross a scheduled deadline without sleeping — deterministic
+    /// and parallel-safe, unlike a real timer.
+    fn stepping_clock(base: Instant, step: Duration) -> impl Fn() -> Instant {
+        let reads = std::cell::Cell::new(0_u32);
+        move || {
+            let n = reads.get();
+            reads.set(n + 1);
+            base + step * n
+        }
+    }
+
+    #[test]
+    fn event_loop_walks_on_the_timed_deadline_with_no_filesystem_event() {
+        // The timed refresh: with the decay timer off and not one filesystem
+        // event, the loop must still re-walk git once the interval elapses.
+        // Without this, "next refresh" counts down to nothing.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let base = Instant::now();
+        // Above FLOOR, so the interval is what sets the deadline: every walk's
+        // cooldown is floored at 150 ms, and a sub-floor interval would be
+        // stretched to it. The CLI takes whole seconds, so it cannot ask for one.
+        let interval = Duration::from_millis(200);
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            Some(Duration::ZERO),
+            WalkSchedule::new(Some(interval), base, Duration::ZERO),
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    // One wake is enough to decide: a decay tick alone never
+                    // walks, so any collect at all came from the timed deadline.
+                    let _ = tx.send(Event::Quit);
+                    frame("timed")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                // Steps past the deadline by the time the loop re-reads it.
+                clock: stepping_clock(base, interval * 5),
+                // A decay tick on the same cadence, so the loop always wakes:
+                // the test must fail when no walk is scheduled, not block.
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            collects, 1,
+            "the timed deadline must walk git with no filesystem event",
+        );
+    }
+
+    #[test]
+    fn event_loop_hands_the_render_a_countdown_to_the_next_walk() {
+        // The clock in the separator: the render hook must be told how long is
+        // left until the next scheduled walk, alongside how stale the snapshot
+        // already is. A tick 50s after collection, on a 60s interval, leaves 10s.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut seen: Option<FrameTiming> = None;
+        let collected_at = Instant::now();
+        let clock_at = collected_at + Duration::from_secs(50);
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(collected_at),
+            Some(Duration::ZERO),
+            WalkSchedule::new(Some(Duration::from_secs(60)), collected_at, Duration::ZERO),
+            LoopHooks {
+                collect: || Ok(empty_snapshot()),
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    seen = Some(timing);
+                    let _ = tx.send(Event::Quit);
+                    frame("tick")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: || clock_at,
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(
+            seen,
+            Some(FrameTiming {
+                age_offset: Duration::from_secs(50),
+                next_refresh_in: Some(Duration::from_secs(10)),
+            }),
+            "the frame must carry both how stale it is and how long until the next walk",
+        );
+    }
+
+    #[test]
+    fn event_loop_without_an_interval_never_walks_on_a_timeout() {
+        // `--refresh-interval 0` keeps today's purely event-driven gsw: a decay
+        // tick re-renders from cache and walks nothing, and the frame carries no
+        // countdown because no walk is scheduled.
+        let (tx, rx) = mpsc::channel();
+        let mut displayed = String::new();
+        let mut collects = 0_usize;
+        let mut seen: Option<FrameTiming> = None;
+        let base = Instant::now();
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            seeded_cache(base),
+            Some(Duration::ZERO),
+            no_timed_refresh(),
+            LoopHooks {
+                collect: || {
+                    collects += 1;
+                    Ok(empty_snapshot())
+                },
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    seen = Some(timing);
+                    let _ = tx.send(Event::Quit);
+                    frame("tick")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: stepping_clock(base, Duration::from_secs(60)),
+                next_tick: |_freshest| Some(Duration::from_millis(5)),
+            },
+        )
+        .expect("loop");
+
+        assert_eq!(collects, 0, "no interval means no timed walk, ever");
+        assert_eq!(
+            seen.and_then(|t| t.next_refresh_in),
+            None,
+            "with nothing scheduled there is no countdown to show",
+        );
+    }
+
     #[test]
     fn event_loop_coalesces_a_burst_into_one_repaint() {
         // A `git commit` is a storm of `.git/` writes; an editor save is a
@@ -1975,12 +2480,13 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("frame"),
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("frame"),
                 dimensions: || TEST_DIMS,
                 paint: |_output: &str| {
                     paints += 1;
@@ -2015,12 +2521,15 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("unchanged"),
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                    frame("unchanged")
+                },
                 dimensions: || TEST_DIMS,
                 paint: |_output: &str| {
                     paints += 1;
@@ -2054,12 +2563,13 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| frame("frame"),
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("frame"),
                 dimensions: || TEST_DIMS,
                 paint: |_output: &str| {
                     paints += 1;
@@ -2091,9 +2601,10 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             Some(Duration::ZERO),
+            no_timed_refresh(),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     // End the loop right after this first tick-driven render.
                     let _ = tx.send(Event::Quit);
@@ -2135,9 +2646,10 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             Some(Duration::from_secs(30)),
+            no_timed_refresh(),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     renders += 1;
                     let _ = tx.send(Event::Quit);
                     frame("steady")
@@ -2176,14 +2688,15 @@ mod tests {
             &mut displayed,
             seeded_cache(collected_at),
             Some(Duration::ZERO),
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
                     renders += 1;
-                    seen_offset = Some(offset);
+                    seen_offset = Some(timing.age_offset);
                     let _ = tx.send(Event::Quit);
                     frame(&format!("tick {renders}"))
                 },
@@ -2226,12 +2739,13 @@ mod tests {
             &mut displayed,
             seeded_cache(now),
             None,
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, dims: Dimensions, _timing: FrameTiming| {
                     seen_dims = Some(dims);
                     frame("resized")
                 },
@@ -2276,10 +2790,11 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
+            no_timed_refresh(),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
-                render: |_snap: &Snapshot, _dims: Dimensions, offset: Duration| {
-                    offsets.push(offset);
+                render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    offsets.push(timing.age_offset);
                     // First render is the FS walk (offset 0); the next wake is a
                     // decay tick. End the loop once the tick render has happened.
                     if offsets.len() >= 2 {
@@ -2349,12 +2864,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     // Deliver the next change in its own iteration so the three
                     // never coalesce; quit once all three have been processed.
                     if changes_sent < 3 {
@@ -2421,12 +2937,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the arming walk: fire a burst of three changes
@@ -2490,12 +3007,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             Some(Duration::ZERO),
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the arming walk: one FS change lands mid-cooldown
@@ -2560,12 +3078,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the arming walk: a manual refresh lands mid-cooldown.
@@ -2630,12 +3149,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     stage += 1;
                     match stage {
                         // After the forced walk: an FS change lands mid-cooldown.
@@ -2689,12 +3209,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the forced walk from tick behavior
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Ok(empty_snapshot())
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     // End the loop right after the forced walk's render.
                     let _ = tx.send(Event::Quit);
                     frame("forced")
@@ -2751,6 +3272,7 @@ mod tests {
             &mut displayed,
             cache,
             None, // decay timer off: isolate the failed walk from tick behavior
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2760,8 +3282,8 @@ mod tests {
                         "status iter: The reference 'HEAD' did not exist"
                     ))
                 },
-                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
-                    rendered.push((snap.branch.clone(), offset));
+                render: |snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    rendered.push((snap.branch.clone(), timing.age_offset));
                     frame("last good frame")
                 },
                 dimensions: || TEST_DIMS,
@@ -2830,12 +3352,13 @@ mod tests {
             &mut displayed,
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
                     Err(anyhow::anyhow!("status platform: repository is gone"))
                 },
-                render: |_snap: &Snapshot, _dims: Dimensions, _offset: Duration| {
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
                     // Deliver the next change in its own iteration so the three
                     // never coalesce; quit once all three have been processed.
                     if changes_sent < 3 {
@@ -2919,6 +3442,7 @@ mod tests {
             &mut displayed,
             cache,
             None, // decay timer off: isolate recovery from tick behavior
+            no_timed_refresh(),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2935,8 +3459,8 @@ mod tests {
                         Ok(fresh)
                     }
                 },
-                render: |snap: &Snapshot, _dims: Dimensions, offset: Duration| {
-                    rendered.push((snap.branch.clone(), offset));
+                render: |snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
+                    rendered.push((snap.branch.clone(), timing.age_offset));
                     match rendered.len() {
                         // Deliver the retry in its own iteration so it lands in
                         // a separate debounce window instead of coalescing.
