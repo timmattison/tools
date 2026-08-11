@@ -107,7 +107,7 @@ const DEFAULT_REFRESH_SECS: u64 = 60;
 /// `0` means "no timed refresh": gsw stays purely event-driven, and with no
 /// scheduled walk there is no countdown to print.
 fn refresh_interval(secs: u64) -> Option<Duration> {
-    Some(Duration::from_secs(secs))
+    (secs > 0).then(|| Duration::from_secs(secs))
 }
 
 /// Decide the effective terminal width gsw should render for.
@@ -266,7 +266,7 @@ fn main() -> Result<()> {
         log_lines: if cli.no_log { 0 } else { cli.log_lines },
         truecolor,
         width_offset: cli.width_offset,
-        refresh_interval: None,
+        refresh_interval: refresh_interval(cli.refresh_interval),
     };
 
     match decide_mode(cli.one_shot, stdout_is_tty) {
