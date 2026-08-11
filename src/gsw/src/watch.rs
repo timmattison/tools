@@ -426,9 +426,13 @@ impl WalkSchedule {
     /// The countdown the refresh clock prints at `now`, or `None` when this
     /// schedule runs no timed walks and therefore shows no clock.
     ///
-    /// Scaffolding: reports the next owed walk regardless of whether timed walks
-    /// are configured at all.
+    /// Deliberately not just "the next walk owed": a change deferred through a
+    /// cooldown is owed under `--refresh-interval 0` too, and counting down to
+    /// it would put the clock back on screen under the flag that took it away.
+    /// The interval is what decides whether a clock exists at all; once it does,
+    /// the countdown tracks whichever walk lands first.
     fn countdown(&self, now: Instant) -> Option<Duration> {
+        self.interval?;
         self.next_walk_at()
             .map(|at| ceil_secs(at.saturating_duration_since(now)))
     }
@@ -532,9 +536,7 @@ const CLOCK_CADENCE: Duration = Duration::from_secs(1);
 fn timing(age_offset: Duration, schedule: &WalkSchedule, now: Instant) -> FrameTiming {
     FrameTiming {
         age_offset,
-        next_refresh_in: schedule
-            .next_walk_at()
-            .map(|at| ceil_secs(at.saturating_duration_since(now))),
+        next_refresh_in: schedule.countdown(now),
     }
 }
 
