@@ -496,6 +496,31 @@ fn cooldown(cost: Duration) -> Duration {
         .max(FLOOR)
 }
 
+/// How often the loop repaints purely to move the refresh clock along. The
+/// clock prints whole seconds, so a second is exactly what it needs — waking
+/// more often would repaint an identical frame, and less often would leave a
+/// countdown visibly stuck.
+///
+/// This cadence applies only while a countdown is on screen. With
+/// `--refresh-interval 0` there is no countdown, no clock tick, and the
+/// adaptive decay cadence is once again the only timer — which is what keeps
+/// today's idle-at-zero behavior available to anyone who wants it back.
+const CLOCK_CADENCE: Duration = Duration::from_secs(1);
+
+/// Place a frame in time: how stale its snapshot is, and how long until the
+/// walk `schedule` next owes — the countdown the refresh clock prints.
+///
+/// Called after [`WalkSchedule::record`] on a walking wake, so a frame painted
+/// by a walk shows the interval it just re-armed rather than the one it spent.
+fn timing(age_offset: Duration, schedule: &WalkSchedule, now: Instant) -> FrameTiming {
+    FrameTiming {
+        age_offset,
+        next_refresh_in: schedule
+            .next_walk_at()
+            .map(|at| at.saturating_duration_since(now)),
+    }
+}
+
 /// The loop's wait window: the soonest deadline any source imposes, or `None`
 /// to block until an event arrives.
 ///
@@ -871,8 +896,9 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
 {
     let mut freshest = initial_freshest;
-    let _ = refresh_interval;
-    let mut schedule = WalkSchedule::unscheduled();
+    // The seed walk that filled the cache is the first walk, so the first timed
+    // walk falls due one interval after it.
+    let mut schedule = WalkSchedule::new(refresh_interval, cache.collected_at);
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -882,13 +908,19 @@ where
         let mut saw_fs = false;
         let mut saw_resize = false;
         let mut saw_force = false;
-        // Wait window: the soonest of the decay-tick cadence and, when a walk was
-        // deferred during a cooldown, that cooldown's expiry. The clock is read
-        // for the deferred deadline only when one is actually pending.
-        let deferred_wait = schedule
-            .next_allowed()
-            .map(|expiry| expiry.saturating_duration_since((hooks.clock)()));
-        let wait = wait_window(&[(hooks.next_tick)(freshest), deferred_wait]);
+        // Wait window: the soonest of the decay-tick cadence, the next walk this
+        // schedule owes (a timed refresh, or a walk deferred during a cooldown),
+        // and — while a countdown is on screen — the cadence that countdown
+        // needs to keep moving. The clock is read only when a walk is actually
+        // owed.
+        let walk_wait = schedule
+            .next_walk_at()
+            .map(|at| at.saturating_duration_since((hooks.clock)()));
+        let wait = wait_window(&[
+            (hooks.next_tick)(freshest),
+            walk_wait,
+            refresh_interval.map(|_| CLOCK_CADENCE),
+        ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
                 Ok(Event::Quit) => break,
@@ -969,11 +1001,12 @@ where
         } else if saw_fs {
             matches!(schedule.on_change(now), Walk::Now)
         } else if woke_for_timeout {
-            // Only the OWED walk fires here, and only once its cooldown has
-            // actually expired: a plain decay tick that fires mid-cooldown (a
-            // shorter wait than the deferred deadline) re-renders from cache
-            // without walking, so Part A and Part B compose.
-            matches!(schedule.next_allowed(), Some(expiry) if now >= expiry)
+            // Only a walk the schedule OWES fires here — a deferred change's
+            // coalesced walk, or a timed refresh — and only once it has actually
+            // fallen due: a decay tick or a clock tick that fires ahead of it (a
+            // shorter wait than the walk deadline) re-renders from cache without
+            // walking, so Part A and Part B compose.
+            matches!(schedule.next_walk_at(), Some(due) if now >= due)
         } else {
             false
         };
@@ -999,10 +1032,7 @@ where
                     (hooks.render)(
                         &cache.snapshot,
                         cache.dims,
-                        FrameTiming {
-                            age_offset: Duration::ZERO,
-                            next_refresh_in: None,
-                        },
+                        timing(Duration::ZERO, &schedule, now),
                     )
                 }
                 // A walk can fail for reasons that are none of the user's
@@ -1021,10 +1051,7 @@ where
                     (hooks.render)(
                         &cache.snapshot,
                         cache.dims,
-                        FrameTiming {
-                            age_offset,
-                            next_refresh_in: None,
-                        },
+                        timing(age_offset, &schedule, now),
                     )
                 }
             }
@@ -1034,10 +1061,7 @@ where
             (hooks.render)(
                 &cache.snapshot,
                 cache.dims,
-                FrameTiming {
-                    age_offset,
-                    next_refresh_in: None,
-                },
+                timing(age_offset, &schedule, now),
             )
         } else {
             // Decay tick, or an FS change the throttle deferred: re-render the
@@ -1046,10 +1070,7 @@ where
             (hooks.render)(
                 &cache.snapshot,
                 cache.dims,
-                FrameTiming {
-                    age_offset,
-                    next_refresh_in: None,
-                },
+                timing(age_offset, &schedule, now),
             )
         };
 
