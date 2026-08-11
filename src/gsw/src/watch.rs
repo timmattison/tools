@@ -409,7 +409,11 @@ impl WalkSchedule {
     /// This is what the refresh clock counts down to. A filesystem event can
     /// still walk earlier, which is why the clock says "scheduled".
     fn next_walk_at(&self) -> Option<Instant> {
-        self.next_allowed()
+        match (self.next_allowed(), self.next_timed_at) {
+            (Some(owed), Some(timed)) => Some(owed.min(timed)),
+            (owed, None) => owed,
+            (None, timed) => timed,
+        }
     }
 
     /// Decide whether a change arriving at `now` may walk git: [`Walk::Now`] once
@@ -432,9 +436,20 @@ impl WalkSchedule {
     /// last-write-wins — each call replaces any prior cooldown, no averaging.
     /// Clears any pending deferred walk: a freshly-recorded walk reflects the
     /// latest coalesced state, so no walk is owed afterward (see [`Self::dirty`]).
+    ///
+    /// The timed walk is re-armed from the same `walk_start`, at whichever is
+    /// later: one `interval`, or the cooldown this walk just earned. The budget
+    /// outranks the interval on purpose — a repo whose walk costs two seconds
+    /// owes a 200-second cooldown, and a 60-second timed walk into that window
+    /// would either violate the duty cycle or promise a refresh the gate refuses
+    /// to admit. Pushing the timed walk out keeps the countdown honest.
     fn record(&mut self, walk_start: Instant, cost: Duration) {
-        self.next_allowed_at = Some(walk_start + cooldown(cost));
+        let cooldown = cooldown(cost);
+        self.next_allowed_at = Some(walk_start + cooldown);
         self.dirty = false;
+        self.next_timed_at = self
+            .interval
+            .map(|interval| walk_start + interval.max(cooldown));
     }
 
     /// The instant a pending deferred walk should fire — the cooldown's expiry —
