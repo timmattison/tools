@@ -106,6 +106,16 @@ struct Cli {
 /// expensive.
 const DEFAULT_REFRESH_SECS: u64 = 60;
 
+/// Largest accepted `--refresh-interval`, in seconds: one year.
+///
+/// Every scheduled deadline is an `Instant` plus a `Duration`, and that
+/// addition *panics* on overflow — so an unbounded seconds count turns a typo
+/// into an abort, after watch mode has already taken the alternate screen.
+/// A year is far past the point where a timed refresh is distinguishable from
+/// `0`, and small enough to be representable on any clock, so rejecting
+/// anything larger costs nothing real and removes the panic.
+const MAX_REFRESH_SECS: u64 = 365 * 24 * 60 * 60;
+
 /// Resolve `--refresh-interval` seconds into the schedule watch mode runs on.
 ///
 /// `0` means "no timed refresh": gsw stays purely event-driven, and with no
@@ -684,6 +694,29 @@ mod tests {
         assert_eq!(refresh_interval(60), Some(Duration::from_secs(60)));
         assert_eq!(refresh_interval(1), Some(Duration::from_secs(1)));
         assert_eq!(refresh_interval(3600), Some(Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn refresh_interval_rejects_a_value_that_would_overflow_the_clock() {
+        // Every scheduled deadline is `Instant + Duration`, which panics on
+        // overflow rather than saturating. Verified: an Instant plus
+        // Duration::from_secs(1 << 63) has no representable sum, so a
+        // 19-digit typo aborts gsw *after* the terminal guard has taken the
+        // alternate screen. The parser is where that has to stop, with a
+        // message naming the range — not the scheduler, with a panic.
+        assert!(
+            Cli::try_parse_from(["gsw", "--refresh-interval", "18446744073709551615"]).is_err(),
+            "an interval large enough to overflow Instant must be a parse error",
+        );
+        assert!(
+            Cli::try_parse_from(["gsw", "--refresh-interval", &MAX_REFRESH_SECS.to_string()])
+                .is_ok(),
+            "the largest accepted interval must still parse",
+        );
+        assert!(
+            Cli::try_parse_from(["gsw", "--refresh-interval", "0"]).is_ok(),
+            "0 stays valid — it is the documented way to turn the timed refresh off",
+        );
     }
 
     #[test]
