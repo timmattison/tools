@@ -404,12 +404,14 @@ pub(crate) struct Render {
 /// while an old one lets the timer idle. `None` means nothing aging is on
 /// screen, which the caller reads as "disable the timer".
 ///
-/// Both halves are read off what the frame actually draws, so the timer can
-/// never pace something the reader cannot see. The commit age comes from the
-/// newest log row — with `--no-log` there is no commit age on screen and none
-/// here either. Items with no recorded age (deleted files, untracked dirs, a
-/// commit timestamp that does not resolve) contribute nothing: they render a
-/// fixed mark that never needs repainting.
+/// Both halves are read off the rows the frame draws, so the timer paces the
+/// screen rather than the repository. The commit age comes from the newest log
+/// row — with `--no-log` there is no commit age on screen and none here either.
+/// The section caps are the gap: a row a short terminal cannot fit still counts
+/// here, which costs a wake whose repaint is then suppressed. Items with no
+/// recorded age (deleted files, untracked dirs, a commit timestamp that does
+/// not resolve) contribute nothing: they render a fixed mark that never needs
+/// repainting.
 fn snapshot_freshest_age(snapshot: &Snapshot) -> Option<Duration> {
     // The youngest item wins, so the timer ticks fast enough for whatever is
     // freshest. The log is newest-first, so its head is the newest commit.
