@@ -397,8 +397,9 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     pass/fail status is printed in color before each run.
   - To install: `cargo install --git https://github.com/timmattison/tools ng`
 - gsw (git status watch)
-  - Compact one-shot pretty output of branch state, designed to be wrapped by `viddy` (or `watch`)
-    for a continuously refreshing dashboard. Shows branch, ahead/behind, working-tree changes, and
+  - Compact pretty output of branch state: a self-refreshing live watch on a TTY, and a single
+    render when its output is piped or `--one-shot` is given — so it needs no `viddy`/`watch`
+    wrapper, but still works under one. Shows branch, ahead/behind, working-tree changes, and
     a `git log --oneline` tail. Ages use two units and get coarser as they grow — `5m23s`,
     `2h14m`, `3d12h`, `5y6mo` — so a repo untouched for years stays readable. Every age sits on
     the row of the thing it ages, a file or a commit, and each is shown exactly once: the newest
@@ -408,7 +409,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `COLUMNS` and preserves colors under watch wrappers. Nothing it prints ever wraps: the age
     column is fixed-width by contract, and the header shrinks to fit by dropping the tracking
     ref's name and shortening the branch from the middle.
-  - On a TTY it runs as a live watch instead, and the separator under the header carries a refresh
+  - Under the live watch, the separator under the header carries a refresh
     clock — `──── last refresh: 3m2s ago, next refresh: 15s ─────` — so you can tell at a glance
     whether the screen is still live. Filesystem changes refresh it immediately; with nothing
     happening on disk it re-walks the repository every `--refresh-interval` seconds (default 60),
