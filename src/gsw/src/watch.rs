@@ -518,7 +518,23 @@ fn timing(age_offset: Duration, schedule: &WalkSchedule, now: Instant) -> FrameT
         age_offset,
         next_refresh_in: schedule
             .next_walk_at()
-            .map(|at| at.saturating_duration_since(now)),
+            .map(|at| ceil_secs(at.saturating_duration_since(now))),
+    }
+}
+
+/// Round a duration up to the next whole second.
+///
+/// The clock prints whole seconds, and its two halves round in opposite
+/// directions on purpose: an elapsed time floors (0.9 s ago really is "0s ago"
+/// so far), while a countdown ceils (0.1 s left must not read as "0s"). Rounding
+/// both the same way loses a second between them, and the pair stops adding up
+/// to the interval it is measuring.
+fn ceil_secs(remaining: Duration) -> Duration {
+    let secs = remaining.as_secs();
+    if remaining.subsec_nanos() > 0 {
+        Duration::from_secs(secs.saturating_add(1))
+    } else {
+        Duration::from_secs(secs)
     }
 }
 
