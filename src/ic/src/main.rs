@@ -1499,12 +1499,20 @@ fn draw_progress_bar(
     Ok(())
 }
 
+/// The width of the terminal that `ic` assumes when it cannot read the real
+/// width.
+const FALLBACK_TERMINAL_COLS: u32 = 80;
+
+/// The height of the terminal that `ic` assumes when it cannot read the real
+/// height.
+const FALLBACK_TERMINAL_ROWS: u32 = 24;
+
 fn get_terminal_size() -> Result<(u32, u32)> {
     if let Some((Width(w), Height(h))) = terminal_size() {
         Ok((w as u32, h as u32))
     } else {
         // Fallback to common terminal size if detection fails
-        Ok((80, 24))
+        Ok((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS))
     }
 }
 
@@ -1716,7 +1724,8 @@ fn calculate_aspect_preserving_size(
 /// estimated constants if the ioctl fails or the terminal reports zero dimensions.
 fn get_cell_pixel_dimensions() -> (u32, u32) {
     if let Some((total_px_w, total_px_h)) = get_terminal_pixel_size() {
-        let (term_cols, term_rows) = get_terminal_size().unwrap_or((80, 24));
+        let (term_cols, term_rows) =
+            get_terminal_size().unwrap_or((FALLBACK_TERMINAL_COLS, FALLBACK_TERMINAL_ROWS));
         if term_cols > 0 && term_rows > 0 {
             return (total_px_w / term_cols, total_px_h / term_rows);
         }
@@ -1966,6 +1975,27 @@ fn image_rows_in_cells(
     }
 }
 
+/// Calculate the number of rows that the cursor contract reserves for an image.
+///
+/// The reservation is one newline for each row of the image, but the height of
+/// the terminal bounds it. An image taller than the screen has no row below it,
+/// and CUU and CUD both stop at the edge of the screen, so no reservation can
+/// put the cursor below such an image. A reservation larger than the screen only
+/// scrolls the content of the user out of view and gives nothing back for it.
+/// The bound therefore holds the scroll to one screen.
+///
+/// # Arguments
+/// * `image_rows` - The height of the image in terminal rows.
+/// * `term_height` - The height of the terminal in rows.
+///
+/// # Returns
+/// The number of rows to reserve. The result leaves one row for the cursor to
+/// land on, and it is always 1 or more, so the contract never asks the terminal
+/// for a movement of zero rows, which a terminal reads as one row.
+fn reservation_rows(image_rows: u32, term_height: u32) -> u32 {
+    image_rows.min(term_height.saturating_sub(1)).max(1)
+}
+
 /// Where a display routine must leave the cursor after it writes an image.
 ///
 /// Sixel gives no contract for the position of the cursor after the string
@@ -1979,9 +2009,42 @@ enum CursorContract {
     CallerManaged,
     /// Column 1 of the first row below the image.
     BelowImage {
-        /// The height of the image in terminal rows.
+        /// The number of rows that the contract reserves, which is the height
+        /// of the image in terminal rows bounded by the height of the terminal.
+        /// [`reservation_rows`] gives the value.
         rows: u32,
     },
+}
+
+impl CursorContract {
+    /// Give the contract for one image of a display routine.
+    ///
+    /// This is the one place that reads the height of the terminal and bounds
+    /// the reservation with [`reservation_rows`], so no display routine can
+    /// reserve more rows than the terminal has.
+    ///
+    /// The row count of the image arrives as a closure, because the caller must
+    /// read the size of a character cell from the terminal to compute it. Video
+    /// playback asks for [`CursorContract::CallerManaged`] one time for each
+    /// frame, and the closure keeps that path clear of the terminal.
+    ///
+    /// # Arguments
+    /// * `no_newline` - True when the caller puts the cursor where it wants it.
+    /// * `image_rows` - Gives the height of the image in terminal rows.
+    ///
+    /// # Returns
+    /// The promise that the display routine must keep.
+    fn below_image(no_newline: bool, image_rows: impl FnOnce() -> u32) -> Self {
+        if no_newline {
+            return CursorContract::CallerManaged;
+        }
+
+        let term_height = get_terminal_size().map_or(FALLBACK_TERMINAL_ROWS, |(_, rows)| rows);
+
+        CursorContract::BelowImage {
+            rows: reservation_rows(image_rows(), term_height),
+        }
+    }
 }
 
 /// Write an image payload and keep the promise of a [`CursorContract`].
@@ -1993,8 +2056,11 @@ enum CursorContract {
 ///
 /// [`CursorContract::BelowImage`] writes four parts:
 ///
-/// 1. One newline for each row of the image. The reservation makes an image at
-///    the bottom of the screen scroll the terminal instead of run off it.
+/// 1. One newline for each row of the image, bounded by the height of the
+///    terminal. The reservation makes an image at the bottom of the screen
+///    scroll the terminal instead of run off it. An image taller than the
+///    screen cannot have a row below it, so the bound holds the scroll to one
+///    screen. [`CursorContract::below_image`] applies the bound.
 /// 2. CUU, which goes back to the top of the reservation.
 /// 3. DECSC, the payload and DECRC. The brackets make sure that cursor motion
 ///    inside the payload cannot change the final position of the cursor.
@@ -2108,14 +2174,10 @@ fn display_image_sixel(
     // Output the sixel data
     let mut stdout = io::stdout().lock();
 
-    let contract = if no_newline {
-        CursorContract::CallerManaged
-    } else {
+    let contract = CursorContract::below_image(no_newline, || {
         let (_, cell_height_px) = get_cell_pixel_dimensions();
-        CursorContract::BelowImage {
-            rows: image_rows(resized_img.height(), cell_height_px),
-        }
-    };
+        image_rows(resized_img.height(), cell_height_px)
+    });
 
     write_image_with_cursor_contract(&mut stdout, contract, |out| write!(out, "{}", sixel_output))?;
 
@@ -2826,21 +2888,17 @@ fn print_kitty_image(
     let base64_data = BASE64_STANDARD.encode(rgb_data);
     let chunk_size = 4096; // Kitty recommended chunk size
 
-    let contract = if no_newline {
-        CursorContract::CallerManaged
-    } else {
+    let contract = CursorContract::below_image(no_newline, || {
         let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
-        CursorContract::BelowImage {
-            rows: image_rows_in_cells(
-                img_width,
-                img_height,
-                display_width,
-                display_height,
-                cell_width_px,
-                cell_height_px,
-            ),
-        }
-    };
+        image_rows_in_cells(
+            img_width,
+            img_height,
+            display_width,
+            display_height,
+            cell_width_px,
+            cell_height_px,
+        )
+    });
 
     // The key list that opens the first command. `C=1` tells Kitty not to move
     // the cursor, because this routine states the position of the cursor
@@ -2913,21 +2971,17 @@ fn print_iterm2_image(
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
 
-    let contract = if no_newline {
-        CursorContract::CallerManaged
-    } else {
+    let contract = CursorContract::below_image(no_newline, || {
         let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
-        CursorContract::BelowImage {
-            rows: image_rows_in_cells(
-                img_width_px,
-                img_height_px,
-                width,
-                height,
-                cell_width_px,
-                cell_height_px,
-            ),
-        }
-    };
+        image_rows_in_cells(
+            img_width_px,
+            img_height_px,
+            width,
+            height,
+            cell_width_px,
+            cell_height_px,
+        )
+    });
 
     // The width and the height are in character cells, so they carry no `px`
     // suffix. `doNotMoveCursor=1` tells iTerm2 not to move the cursor, because
@@ -4452,6 +4506,35 @@ not_a_number zellij a work
             ),
             1
         );
+    }
+
+    // =========================================================================
+    // Tests for reservation_rows
+    // =========================================================================
+
+    #[test]
+    fn reservation_rows_takes_the_whole_image_when_it_fits() {
+        // An image that leaves room for the row below it keeps every row.
+        assert_eq!(reservation_rows(5, 24), 5);
+        assert_eq!(reservation_rows(23, 24), 23);
+    }
+
+    #[test]
+    fn reservation_rows_stops_at_the_height_of_the_terminal() {
+        // An image taller than the screen has no row below it, so the
+        // reservation keeps the scroll to one screen.
+        assert_eq!(reservation_rows(39, 24), 23);
+        assert_eq!(reservation_rows(100, 24), 23);
+        assert_eq!(reservation_rows(24, 24), 23);
+    }
+
+    #[test]
+    fn reservation_rows_never_gives_zero() {
+        // A movement of zero rows means one row to a terminal, so the
+        // reservation must stay at 1 or more, even in a terminal of no height.
+        assert_eq!(reservation_rows(1, 1), 1);
+        assert_eq!(reservation_rows(5, 0), 1);
+        assert_eq!(reservation_rows(0, 24), 1);
     }
 
     // =========================================================================

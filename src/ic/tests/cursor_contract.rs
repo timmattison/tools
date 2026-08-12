@@ -6,6 +6,11 @@
 //! caller must move it. `ic` must therefore state where the cursor ends, in
 //! every routine, instead of a guess of one newline.
 //!
+//! Each routine reserves one row for each row of the image before it draws, and
+//! the height of the terminal bounds that reservation. An image taller than the
+//! screen cannot have a row below it, so the bound holds the scroll to one
+//! screen.
+//!
 //! These tests drive the real binary and look at the bytes it writes. They
 //! measure the cursor movement that the stream *requests*, not the exact escape
 //! sequences, so a change of spelling keeps them alive.
@@ -279,7 +284,9 @@ fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 ///
 /// 1. The stream reserves the rows of the image before the payload and then
 ///    takes them back, so an image at the bottom of the screen scrolls the
-///    terminal instead of running off it.
+///    terminal instead of running off it. The height of the terminal bounds the
+///    reservation, and the image of these tests is much shorter than that, so
+///    the reservation here is the full height of the image.
 /// 2. DECSC comes immediately before the payload and DECRC immediately after
 ///    it, so cursor motion inside the payload cannot change the final position
 ///    of the cursor.

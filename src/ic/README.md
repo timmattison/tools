@@ -109,8 +109,11 @@ The Kitty protocol and the iTerm2 protocol each have a flag that holds the
 cursor still, but then the caller must move it. `ic` therefore states the
 position itself. Each routine writes four parts:
 
-1. One newline for each row of the image. The reservation makes an image at the
-   bottom of the screen scroll the terminal instead of run off it.
+1. One newline for each row of the image, bounded by the height of the terminal.
+   The reservation makes an image at the bottom of the screen scroll the
+   terminal instead of run off it. An image taller than the screen cannot have a
+   row below it, because the cursor stops at the edge of the screen. The bound
+   therefore holds the scroll to one screen.
 2. CUU, which goes back to the top of the reservation.
 3. DECSC, the image, and DECRC. The brackets make sure that cursor motion inside
    the image cannot change the final position.
