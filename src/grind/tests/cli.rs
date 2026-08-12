@@ -391,6 +391,79 @@ fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists(
     );
 }
 
+/// A run depends on *two* revisions - the branch the user named and the HEAD
+/// being replayed - and only one of them arrives as an argument, so the other is
+/// the one a pre-flight is liable to forget.
+///
+/// An orphan branch is the shape where they disagree: `git checkout --orphan`
+/// leaves HEAD naming a branch that has no commit on it, while every other
+/// branch in the repository resolves as usual. Built inline rather than added to
+/// `gitscratch::testing` because it is one git call on top of an existing
+/// fixture, and *which* revision is unborn is the whole subject of this test
+/// rather than a shape other suites would share.
+///
+/// The exit code was never wrong here, so this is about the message. Before HEAD
+/// was resolved up front, a repository with nothing committed paid for a
+/// `TempDir` and a real `git worktree add` on the way to being told off, and was
+/// then told off in git's words rather than grind's - `fatal: invalid reference:
+/// HEAD`, wrapped around an absolute path inside a temporary directory that no
+/// longer exists by the time anybody reads it. A bad argument has to arrive
+/// looking like a bad argument, which is `repo.rs`'s own stated reason for the
+/// pre-flight existing at all.
+///
+/// `TMPDIR` is pointed somewhere this test knows the name of, which is what makes
+/// the leak assertable rather than merely unlikely: the scratch path is otherwise
+/// a name only the child process ever learns.
+#[test]
+fn a_head_with_no_commit_on_it_is_refused_in_grinds_own_words_and_costs_no_worktree() {
+    let repo = independent_branches_repo();
+    repo.git(&["checkout", "-q", "--orphan", "unborn"]);
+
+    // Under the fixture's own `TempDir`, so two concurrent copies of this test
+    // cannot name the same path, and created rather than missing, so a run that
+    // gets as far as building a scratch worktree succeeds at it and leaks the
+    // path instead of failing earlier for an unrelated reason.
+    let scratch_tmp = repo.path().join("scratch-tmp");
+    std::fs::create_dir(&scratch_tmp).expect("create the scratch TMPDIR");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grind"))
+        .arg("beta")
+        .current_dir(repo.path())
+        .without_inherited_repository()
+        .env("TMPDIR", &scratch_tmp)
+        .output()
+        .expect("failed to run grind");
+    let (code, stdout, stderr) = streams(&output);
+
+    assert_eq!(
+        code,
+        Some(ERROR),
+        "a HEAD with nothing on it is a state grind cannot answer from, so \
+         {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("a replay starts from HEAD") && stderr.contains("no commit at HEAD"),
+        "the message must say in grind's own words that HEAD is what has \
+         nothing on it, since the user named a branch and never mentioned \
+         HEAD:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains(&scratch_tmp.display().to_string()),
+        "an internal temporary path is no part of a bad-argument message, and \
+         the directory it names is gone before anyone reads it:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("worktree add"),
+        "resolving HEAD costs nothing, so it has to happen before a scratch \
+         worktree is built rather than inside one:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("note:"),
+        "a repository with nothing to replay from is refused before there is \
+         anything to qualify with a caveat:\n{stderr}"
+    );
+}
+
 /// One of the three build-state words `CLAUDE.md` allows after the hash.
 const BUILD_STATES: [&str; 3] = ["clean", "dirty", "unknown"];
 
