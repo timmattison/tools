@@ -2345,8 +2345,7 @@ enum DisplayRoutine {
 /// muxiavelli panels.
 fn display_routine_for(terminal_type: &TerminalType) -> DisplayRoutine {
     match terminal_type {
-        // Zellij and muxiavelli-Sixel both go through the Sixel path, which the
-        // remote-proxy cursor-sync logic intentionally bypasses.
+        // Zellij and muxiavelli-Sixel both go through the Sixel path.
         TerminalType::Zellij | TerminalType::Muxiavelli(MuxiavelliImageProtocol::Sixel) => {
             DisplayRoutine::Sixel
         }
