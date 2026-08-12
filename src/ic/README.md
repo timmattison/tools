@@ -130,6 +130,14 @@ terminal, and the terminal then wraps it onto more than one row. `ic` measures
 the display width of each header line and counts the rows that the line takes,
 so a wrapped name pays for every row that it occupies.
 
+All three display routines obey that row count. The Kitty protocol and the
+iTerm2 protocol take the size of the image in character cells, so they take the
+count as it is. Sixel takes the size in pixels, and `ic` multiplies the count by
+the height of one character cell. Some terminals also report their own size in
+pixels, and `ic` keeps a margin inside that size. The image then gets the
+smaller of the two, because the margin knows nothing about the header rows and
+the row count knows nothing about the edge of the screen.
+
 ### muxiavelli Panels
 
 Inside a [muxiavelli](https://github.com/timmattison/muxiavelli) panel, the web terminal is ttyd's xterm.js with `@xterm/addon-image`, which renders **Sixel and iTerm2's inline image protocol (IIP) only — not the Kitty graphics protocol**.

@@ -45,10 +45,20 @@ const DEFAULT_SIXEL_HEIGHT_PX: u32 = 600;
 
 /// Horizontal margin factor for Sixel output (95% of terminal width).
 /// Leaves some margin to avoid horizontal overflow.
+///
+/// The margin is one of the two bounds on the size of a Sixel image, and it is
+/// not the bound that keeps the image inside the rows that `ic` gives it. See
+/// [`sixel_pixel_budget`], which takes the smaller of the margin and the budget
+/// of the caller in character cells.
 const SIXEL_HORIZONTAL_MARGIN: f64 = 0.95;
 
 /// Vertical margin factor for Sixel output (90% of terminal height).
 /// Leaves more vertical margin as some terminals have status bars or prompts.
+///
+/// The margin knows nothing about the header rows that `ic` prints above the
+/// image, and it is not the bound that keeps the prompt on the screen. See
+/// [`sixel_pixel_budget`], which takes the smaller of the margin and the budget
+/// of the caller in character cells.
 const SIXEL_VERTICAL_MARGIN: f64 = 0.90;
 
 /// Control sequence introducer. It starts a CSI escape sequence.
@@ -1939,11 +1949,20 @@ fn calculate_sixel_dimensions(
 
 /// Give the size in pixels that a Sixel image can occupy.
 ///
-/// The budget comes from the first source that has an answer. The terminal
-/// reports its size in pixels, and a margin of that size keeps the image off
-/// the edge of the screen. If the terminal reports no pixel size, the budget in
-/// character cells that the caller gives becomes the answer. If the caller
-/// gives no budget, a default size becomes the answer.
+/// Two bounds hold the image, and the image must obey both. The margin bounds
+/// the image by the pixel size that the terminal reports, which keeps the image
+/// off the edge of the screen. The budget of the caller bounds the image by a
+/// count of character cells, which is the size of the terminal less the header
+/// rows and the prompt row, or the `--width` and the `--height` that the user
+/// asks for. The smaller of the two wins on each axis, so the header, the image
+/// and the prompt all fit inside the terminal.
+///
+/// The two bounds come from different sources, and each one can be absent. A
+/// terminal in Zellij or in ttyd reports no pixel size, and the budget of the
+/// caller is then the only bound. An axis of the budget is absent when the user
+/// gives only one of `--width` and `--height`, and the margin is then the only
+/// bound on that axis. With no pixel size and only one axis of the budget there
+/// is nothing to compute a size from, so a default size becomes the answer.
 ///
 /// # Arguments
 /// * `terminal_pixel_size` - The width and the height of the terminal in
@@ -1954,7 +1973,8 @@ fn calculate_sixel_dimensions(
 /// * `cell_height_px` - The height of one character cell in pixels.
 ///
 /// # Returns
-/// The width and the height of the budget in pixels.
+/// The width and the height of the budget in pixels. Each axis is 1 or more, so
+/// a degenerate terminal cannot ask the encoder for an image of no size.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -1967,19 +1987,27 @@ fn sixel_pixel_budget(
     cell_width_px: u32,
     cell_height_px: u32,
 ) -> (u32, u32) {
-    if let Some((px_w, px_h)) = terminal_pixel_size {
-        // Leave some margin to avoid overflow
+    // A count of cells that is absurdly large overflows the product. The
+    // product saturates instead, and a saturated product bounds nothing.
+    let cell_budget_px =
+        |cells: Option<u32>, cell_px: u32| cells.map(|count| count.saturating_mul(cell_px));
+    let cols_px = cell_budget_px(cell_cols, cell_width_px);
+    let rows_px = cell_budget_px(cell_rows, cell_height_px);
+
+    let (width_px, height_px) = if let Some((px_w, px_h)) = terminal_pixel_size {
+        let margin_width_px = (f64::from(px_w) * SIXEL_HORIZONTAL_MARGIN) as u32;
+        let margin_height_px = (f64::from(px_h) * SIXEL_VERTICAL_MARGIN) as u32;
         (
-            (f64::from(px_w) * SIXEL_HORIZONTAL_MARGIN) as u32,
-            (f64::from(px_h) * SIXEL_VERTICAL_MARGIN) as u32,
+            cols_px.map_or(margin_width_px, |budget| margin_width_px.min(budget)),
+            rows_px.map_or(margin_height_px, |budget| margin_height_px.min(budget)),
         )
-    } else if let (Some(cols), Some(rows)) = (cell_cols, cell_rows) {
-        // Fall back to the budget of the caller in character cells
-        (cols * cell_width_px, rows * cell_height_px)
+    } else if let (Some(width_px), Some(height_px)) = (cols_px, rows_px) {
+        (width_px, height_px)
     } else {
-        // Default to reasonable size when no size info available
         (DEFAULT_SIXEL_WIDTH_PX, DEFAULT_SIXEL_HEIGHT_PX)
-    }
+    };
+
+    (width_px.max(1), height_px.max(1))
 }
 
 /// Calculate the number of terminal rows that an image fills.
@@ -2190,13 +2218,18 @@ where
 ///
 /// # Arguments
 /// * `img` - The image to display
-/// * `fallback_cols` - Fallback terminal width in character cells (used if pixel size unavailable)
-/// * `fallback_rows` - Fallback terminal height in character cells (used if pixel size unavailable)
+/// * `budget_cols` - The width that the image can occupy, in character cells.
+///   It is the width of the terminal less the chrome, or the `--width` that the
+///   user asks for. [`sixel_pixel_budget`] holds the image inside it.
+/// * `budget_rows` - The height that the image can occupy, in character cells.
+///   It is the height of the terminal less the header rows and the prompt row,
+///   or the `--height` that the user asks for. [`sixel_pixel_budget`] holds the
+///   image inside it.
 /// * `args` - Command line arguments
 fn display_image_sixel(
     img: &DynamicImage,
-    fallback_cols: Option<u32>,
-    fallback_rows: Option<u32>,
+    budget_cols: Option<u32>,
+    budget_rows: Option<u32>,
     args: &Args,
     no_newline: bool,
 ) -> Result<()> {
@@ -2206,8 +2239,8 @@ fn display_image_sixel(
 
     let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
         get_terminal_pixel_size(),
-        fallback_cols,
-        fallback_rows,
+        budget_cols,
+        budget_rows,
         cell_width_px,
         cell_height_px,
     );
