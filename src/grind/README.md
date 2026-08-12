@@ -67,6 +67,20 @@ $ echo $?
 Errors carry git's own explanation through to you, because that is usually the
 only part of the message that says what actually went wrong.
 
+**Both** revisions are resolved up front, not just the one you typed. A replay
+starts from `HEAD`, so an empty repository or a fresh `git checkout --orphan` has
+nothing to replay — and being told that is worth more than watching a scratch
+worktree get built for a rebase that could never have started:
+
+```console
+$ grind main
+grind: error: a replay starts from HEAD, and there is no commit at HEAD to start from - an empty repository, or a branch nothing has been committed to yet: could not resolve 'HEAD' to a commit: git rev-parse HEAD^{commit} failed:
+HEAD^{commit}
+fatal: ambiguous argument 'HEAD^{commit}': unknown revision or path not in the working tree.
+$ echo $?
+2
+```
+
 ## Usage
 
 ```console
@@ -213,3 +227,19 @@ proved by pointing
 to fail, with a control run on a resolvable branch to show the poison really
 does reach the worktree-building half of `Repo::scratch` rather than being
 quietly ignored.
+
+Three of them are about a right answer surviving something going wrong around it,
+which is where a tool whose answer is a number is most easily robbed of it:
+
+- **A stream nobody is reading.** The pipe's read end is closed *before* the
+  child is spawned, so there is nothing to race — the first byte `grind` writes
+  fails, and the run still has to exit `0`/`1`/`2` rather than `101`. Both
+  streams, so the note and the error message are covered as well as the verdict.
+- **A bare repository**, where `git status` cannot run but `git worktree add` can.
+  The verdict has to come back byte-identical to the one the same fixture gives
+  through its working tree, since the caveat is all that was ever unavailable.
+- **A `HEAD` with no commit on it**, from `git checkout --orphan`. The exit code
+  was never wrong there, so the assertions are about the message: grind's own
+  words, and no scratch path in them. `TMPDIR` is pointed at a directory the test
+  knows the name of, which is what makes a leak assertable rather than merely
+  unlikely.
