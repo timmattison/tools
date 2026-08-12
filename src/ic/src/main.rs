@@ -2234,14 +2234,9 @@ fn detect_remote_transport() -> RemoteTransport {
 /// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
 /// 4. **Neither** → None
 fn detect_remote_transport_inner() -> RemoteTransport {
-    let output = match std::process::Command::new("ps")
-        .args(["-eo", "pid=,ppid=,comm="])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => {
+    let comm_output = match run_ps(&["-eo", "pid=,ppid=,comm="]) {
+        Some(o) => o,
+        None => {
             // Can't check process tree; fall back to env var for ET
             if std::env::var("ET_VERSION").is_ok() {
                 return RemoteTransport::EternalTerminal;
@@ -2250,13 +2245,57 @@ fn detect_remote_transport_inner() -> RemoteTransport {
         }
     };
 
-    let table = String::from_utf8_lossy(&output.stdout);
-    let current_pid = Pid(std::process::id());
-    let in_zellij = std::env::var("ZELLIJ").is_ok();
+    // The argument snapshot is a second `ps` call because the comm snapshot
+    // deliberately treats every token after the PPID as one executable path,
+    // so that a path that holds a space survives. Arguments cannot be read
+    // from that same line without making the path ambiguous.
+    let args_output = run_ps(&["-eo", "pid=,args="]).unwrap_or_default();
+
+    classify_transport(
+        &comm_output,
+        &args_output,
+        Pid(std::process::id()),
+        std::env::var("ZELLIJ")
+            .ok()
+            .map(|_| std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default()),
+        std::env::var("ET_VERSION").is_ok(),
+    )
+}
+
+/// Run `ps` with the given arguments and return its standard output.
+///
+/// Returns `None` when `ps` cannot be run at all.
+fn run_ps(args: &[&str]) -> Option<String> {
+    std::process::Command::new("ps")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Decide the remote transport from two process snapshots and the environment.
+///
+/// This function holds all of the policy and reads nothing from the outside,
+/// so every rule below is testable.
+///
+/// `zellij_session` is `None` when the `ZELLIJ` variable is unset. It is
+/// `Some(name)` inside Zellij, where `name` can be empty if
+/// `ZELLIJ_SESSION_NAME` is unset.
+fn classify_transport(
+    ps_comm_output: &str,
+    ps_args_output: &str,
+    current_pid: Pid,
+    zellij_session: Option<String>,
+    et_version_set: bool,
+) -> RemoteTransport {
+    let _ = ps_args_output;
+    let in_zellij = zellij_session.is_some();
 
     // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
     // shell is definitely under Mosh, so images cannot work.
-    if find_ancestor_process(&table, current_pid, false, "mosh-server") {
+    if find_ancestor_process(ps_comm_output, current_pid, false, "mosh-server") {
         return RemoteTransport::Mosh;
     }
 
@@ -2264,14 +2303,13 @@ fn detect_remote_transport_inner() -> RemoteTransport {
     // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
     // session, Mosh and ET may both be attached — ET viewers can display images
     // while Mosh viewers silently strip the escape sequences.
-    if std::env::var("ET_VERSION").is_ok()
-        || find_ancestor_process(&table, current_pid, in_zellij, "etterminal")
+    if et_version_set || find_ancestor_process(ps_comm_output, current_pid, in_zellij, "etterminal")
     {
         return RemoteTransport::EternalTerminal;
     }
 
     // Mosh via Zellij heuristic (Case 2) — only reached when ET is not present.
-    if find_ancestor_process(&table, current_pid, in_zellij, "mosh-server") {
+    if find_ancestor_process(ps_comm_output, current_pid, in_zellij, "mosh-server") {
         return RemoteTransport::Mosh;
     }
 
@@ -3202,6 +3240,209 @@ not_a_number  1 /bin/bash
         // current PID 400 is not an ancestor of mosh-server via Case 1,
         // and in_zellij=false disables Case 2
         assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
+    }
+
+    // =========================================================================
+    // Tests for classify_transport (the whole transport decision)
+    // =========================================================================
+
+    /// The PID of the process that asks for the transport. It sits under the
+    /// Zellij server of the session named `ic-test`.
+    const CURRENT: Pid = Pid(63481);
+
+    /// A process table that holds two Zellij sessions.
+    ///
+    /// `ic-test` is viewed over SSH. `meshtastic` is viewed over Mosh. The
+    /// Zellij server of each session is reparented to PID 1, which is why the
+    /// chain from `CURRENT` reaches no terminal.
+    ///
+    /// The basename of the server is `zellij`, not `zellij-server`. That is
+    /// what macOS reports, because the server is the same binary started with
+    /// `--server`.
+    const PS_COMM_TWO_SESSIONS: &str = "\
+    1     0 /sbin/launchd
+56659     1 sshd-session
+56665 56659 sshd-session
+56666 56665 -zsh
+57053 56666 /Users/t/.local/bin/zellij
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+32269 31466 /Users/t/.local/bin/zellij";
+
+    const PS_ARGS_TWO_SESSIONS_FULL: &str = "\
+51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
+57053 zellij a ic-test
+32269 zellij a meshtastic";
+
+    #[test]
+    fn another_sessions_mosh_client_does_not_decide_this_session() {
+        // The client of `ic-test` runs under SSH. The Mosh client belongs to
+        // `meshtastic`, so it says nothing about this session.
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::None
+        );
+    }
+
+    #[test]
+    fn mosh_detected_when_the_only_client_of_this_session_is_mosh() {
+        let ps_comm = "\
+    1     0 /sbin/launchd
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+57100 31466 /Users/t/.local/bin/zellij";
+        let ps_args = "\
+51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
+57100 zellij a ic-test";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                ps_args,
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn one_capable_client_wins_over_a_mosh_client_of_the_same_session() {
+        // Zellij sends the output to every attached client. An SSH viewer can
+        // show the image. The Mosh viewer ignores the escape sequences.
+        let ps_comm = "\
+    1     0 /sbin/launchd
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+56665     1 sshd-session
+56666 56665 -zsh
+57053 56666 /Users/t/.local/bin/zellij
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+57100 31466 /Users/t/.local/bin/zellij";
+        let ps_args = "\
+57053 zellij a ic-test
+57100 zellij a ic-test";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                ps_args,
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::None
+        );
+    }
+
+    #[test]
+    fn an_unnamed_zellij_session_keeps_the_careful_answer() {
+        // ZELLIJ_SESSION_NAME is unset, so no client can be tied to this
+        // session. Report Mosh rather than send escape sequences that Mosh
+        // strips.
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                Some(String::new()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_named_client_keeps_the_careful_answer() {
+        // The session name is known, but no client argv carries it. This
+        // happens when Zellij starts with a generated session name.
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                "",
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn outside_zellij_a_mosh_client_of_a_session_is_ignored() {
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                None,
+                false,
+            ),
+            RemoteTransport::None
+        );
+    }
+
+    #[test]
+    fn direct_mosh_ancestry_beats_every_client_rule() {
+        let ps_comm = "\
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+63481 31466 /bin/zsh";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                "57053 zellij a ic-test",
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn eternal_terminal_env_var_beats_a_mosh_client() {
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                Some("ic-test".to_string()),
+                true,
+            ),
+            RemoteTransport::EternalTerminal
+        );
+    }
+
+    #[test]
+    fn an_eternal_terminal_client_of_this_session_wins() {
+        let ps_comm = "\
+    1     0 /sbin/launchd
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+40000     1 /usr/local/bin/etterminal
+40001 40000 -zsh
+57053 40001 /Users/t/.local/bin/zellij";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                "57053 zellij a ic-test",
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::EternalTerminal
+        );
     }
 
     // =========================================================================
