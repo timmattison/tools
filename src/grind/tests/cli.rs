@@ -7,7 +7,7 @@
 //! would pass for a binary that answers every question with the same number.
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use gitscratch::testing::{
     contested_region_repo, equal_hunks_unequal_stops_repo, independent_branches_repo,
@@ -646,6 +646,141 @@ fn quiet_prints_nothing_when_the_run_cannot_answer_at_all() {
     let output = run_raw(&repo, "alpha", &["-q", "nonexistent-branch"]);
 
     assert_silent(&output, ERROR, "error");
+}
+
+/// Which of `grind`'s streams is handed a pipe nobody is reading.
+#[derive(Debug, Clone, Copy)]
+enum Unread {
+    Stdout,
+    Stderr,
+}
+
+/// Run `grind` with one stream pointed at a pipe whose read end is already
+/// closed, and hand back the exit code plus whatever the *other* stream said.
+///
+/// Ordinary rather than contrived: `grind main | head -1`, a pipeline whose
+/// reader exits first, a terminal closed mid-run. Every one of them leaves
+/// `grind` writing into a pipe with nobody on the far end.
+///
+/// Deterministic by construction rather than by timing. The read end is dropped
+/// *before* the child is spawned, so there is no window in which a write could
+/// succeed and nothing to race: the first byte `grind` puts on that stream fails
+/// with `EPIPE`, whichever of its three writes gets there first.
+///
+/// Closing the descriptor outright would look simpler and would test something
+/// else entirely. With fd 1 closed it becomes the lowest free descriptor, so the
+/// first file the run opens - the scratch `TempDir`, a git pipe - lands on it and
+/// the verdict is silently written *into that file* rather than failing.
+///
+/// SIGPIPE is why the failure surfaces as a panic rather than as a signal: Rust's
+/// runtime ignores it at startup, so the write returns `EPIPE` instead of killing
+/// the process, and `println!` turns that into a panic and exit
+/// [`PANICKED`](PANICKED).
+fn grind_into_an_unread_pipe(repo: &Path, args: &[&str], unread: Unread) -> (Option<i32>, String) {
+    let (reader, writer) = std::io::pipe().expect("create a pipe");
+    // Before the child exists, so the stream it is handed has never had a
+    // reader and cannot acquire one.
+    drop(reader);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_grind"));
+    command
+        .args(args)
+        .current_dir(repo)
+        .without_inherited_repository();
+    match unread {
+        Unread::Stdout => {
+            command.stdout(Stdio::from(writer)).stderr(Stdio::piped());
+        }
+        Unread::Stderr => {
+            command.stderr(Stdio::from(writer)).stdout(Stdio::piped());
+        }
+    }
+
+    let output = command.output().expect("failed to run grind");
+    let surviving = match unread {
+        Unread::Stdout => &output.stderr,
+        Unread::Stderr => &output.stdout,
+    };
+
+    (
+        output.status.code(),
+        String::from_utf8_lossy(surviving).trim_end().to_string(),
+    )
+}
+
+/// The exit code a Rust process leaves behind when it unwound out of a panic -
+/// the fourth, undocumented code `grind` must never produce.
+const PANICKED: i32 = 101;
+
+/// The verdict is the one thing `grind` puts on stdout, and stdout is the stream
+/// a pipeline takes away first.
+///
+/// The exit code *is* the answer here, so a reader that closed early must cost
+/// the verdict and nothing else. Losing the answer to a panic would publish a
+/// fourth exit code nothing documents, on the one path a script is most likely
+/// to be reading.
+#[test]
+fn a_verdict_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let repo = equal_hunks_unequal_stops_repo();
+    repo.checkout("one");
+
+    let (code, stderr) = grind_into_an_unread_pipe(repo.path(), &["two"], Unread::Stdout);
+
+    assert_ne!(
+        code,
+        Some(PANICKED),
+        "a broken pipe must not turn the answer into a panic\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay conflicted, so the answer is {CONFLICTS} whether or not \
+         anyone read it\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "a broken pipe is not a bug in grind and must not be reported as \
+         one:\n{stderr}"
+    );
+}
+
+/// Both of stderr's writers, on the two paths that reach them: the note, which
+/// is printed before the verdict, and the failure, which is printed from `main`
+/// after `run` has given up.
+///
+/// Neither is the answer, so neither may be able to take it away. `2>/dev/null`
+/// on a pipeline whose reader has gone, a hook whose log is closed - the caller
+/// has said they do not want the caveat, not that they do not want the exit
+/// code.
+#[test]
+fn a_note_or_a_failure_nobody_is_reading_costs_the_words_and_not_the_answer() {
+    let repo = independent_branches_repo();
+    repo.checkout("alpha");
+    // Untracked rather than modified, so the note has something to report
+    // without the checkout above having anything to refuse.
+    repo.write_file("scratch-notes.txt", "untracked work in progress\n");
+
+    let (clean_code, stdout) = grind_into_an_unread_pipe(repo.path(), &["beta"], Unread::Stderr);
+
+    assert_eq!(
+        clean_code,
+        Some(CLEAN),
+        "a note nobody read must not move the verdict off {CLEAN}\nstdout:\n{stdout}"
+    );
+    assert_eq!(
+        stdout, "grind: clean - replaying HEAD onto beta hit no conflicts",
+        "the run has to carry on past the note it could not print"
+    );
+
+    let (error_code, error_stdout) =
+        grind_into_an_unread_pipe(repo.path(), &["nonexistent-branch"], Unread::Stderr);
+
+    assert_eq!(
+        error_code,
+        Some(ERROR),
+        "a failure it could not print is still a failure, and still \
+         {ERROR}\nstdout:\n{error_stdout}"
+    );
 }
 
 /// Read a file that must come back byte-identical after `grind` has run.
