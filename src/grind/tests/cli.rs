@@ -610,6 +610,43 @@ fn uncommitted_work_gets_a_note_on_stderr_and_leaves_the_answer_alone() {
     );
 }
 
+/// A bare repository is where the cheap pre-flight query turns out to be
+/// *stricter* than the expensive replay it exists to spare you: `git worktree
+/// add --detach HEAD` works against one, so the rebase can be replayed and
+/// measured exactly as usual, while `git status --porcelain` cannot run at all
+/// - there is no working tree to take a status of.
+///
+/// The dirty-tree note is documented as a caveat that qualifies the verdict
+/// without changing it, so a caveat that cannot be computed must cost the
+/// caveat. Failing the run instead trades a right answer - these two branches
+/// genuinely collide - for git's own complaint about a query the user never
+/// asked for, which does not even say what is unsupported.
+///
+/// Asserted against [`EQUAL_HUNKS_VERDICT`], so the claim is the strong one:
+/// the same fixture answers a bare repository with the byte-identical verdict it
+/// gives through its working tree, since a replay never looks at the working
+/// tree in the first place.
+#[test]
+fn a_repository_with_no_working_tree_is_answered_rather_than_refused() {
+    let repo = equal_hunks_unequal_stops_repo();
+    let bare = repo.bare_clone("one");
+
+    let (code, stdout, stderr) = streams(&grind(bare.path(), &["two"]));
+
+    assert_eq!(
+        code,
+        Some(CONFLICTS),
+        "the replay can run in a bare repository, so the answer is {CONFLICTS} \
+         rather than {ERROR}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(stdout, EQUAL_HUNKS_VERDICT, "stderr:\n{stderr}");
+    assert_eq!(
+        stderr, "",
+        "a note that cannot be computed is a note nobody gets, not an error \
+         message about git internals"
+    );
+}
+
 /// Unlike a tool that prints a value, `grind` has no answer to pipe - the
 /// answer *is* the exit code. So a scripted caller asking for quiet wants
 /// silence, not a terser rendering, and gets it on the happy path first.
