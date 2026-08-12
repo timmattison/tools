@@ -71,6 +71,15 @@ const TERMINAL_ROWS: i64 = 24;
 /// The row that the shell prompt returns to below the image.
 const PROMPT_ROWS: i64 = 1;
 
+/// The largest reservation that fits inside the terminal of the tests.
+///
+/// The cursor lands on the first row below the image, so the reservation must
+/// leave that row inside the screen.
+const MAX_RESERVATION_ROWS: i64 = TERMINAL_ROWS - 1;
+
+/// A command line that asks for an image taller than the terminal of the tests.
+const OVERSIZED_ARGS: &[&str] = &["--stdin", "--width", "78", "--height", "50"];
+
 /// The terminal type of a child process that must not look like Kitty.
 const TERM_XTERM_256COLOR: &str = "xterm-256color";
 
@@ -461,7 +470,24 @@ fn run_ic(routine: Routine, extra_args: &[&str]) -> Vec<u8> {
     let mut args: Vec<&str> = vec!["--stdin", "--width", "10", "--height", "5"];
     args.extend_from_slice(extra_args);
 
-    let mut child = ic_command(routine, &args)
+    run_ic_with_args(routine, &args)
+}
+
+/// Run `ic` through one display routine, with the image on stdin and a full
+/// command line, and give back its stdout.
+///
+/// # Arguments
+/// * `routine` - The display routine that `ic` must use.
+/// * `args` - The full command line for `ic`.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the child process does not start, does not accept the image, or
+/// exits with a failure.
+fn run_ic_with_args(routine: Routine, args: &[&str]) -> Vec<u8> {
+    let mut child = ic_command(routine, args)
         .spawn()
         .expect("failed to start ic");
 
@@ -675,4 +701,29 @@ fn no_newline_suppresses_the_cursor_contract_for_kitty() {
 #[test]
 fn no_newline_suppresses_the_cursor_contract_for_iterm2() {
     assert_no_cursor_contract(Routine::Iterm2, &run_ic(Routine::Iterm2, &["--no-newline"]));
+}
+
+/// No routine can ask the terminal to move down more rows than the terminal
+/// has.
+///
+/// An image taller than the screen has no row below it, so no reservation can
+/// keep the contract: CUU stops at the top row and CUD stops at the bottom row,
+/// and the cursor lands on top of the image. A reservation larger than the
+/// screen scrolls the content of the user out of view and gives nothing back
+/// for it. Every routine must therefore bound the scroll to one screen.
+#[test]
+fn the_reservation_never_exceeds_the_height_of_the_terminal() {
+    for routine in [Routine::Sixel, Routine::Kitty, Routine::Iterm2] {
+        let stdout = run_ic_with_args(routine, OVERSIZED_ARGS);
+
+        let save = find(&stdout, SAVE_CURSOR)
+            .unwrap_or_else(|| panic!("{routine:?} must save the cursor before the payload"));
+        let reservation = scan_cursor_movement(&stdout[..save]);
+
+        assert!(
+            reservation.down <= MAX_RESERVATION_ROWS,
+            "{routine:?} reserves {} rows, but the terminal has {TERMINAL_ROWS} rows, so the reservation must ask for {MAX_RESERVATION_ROWS} rows at most",
+            reservation.down
+        );
+    }
 }
