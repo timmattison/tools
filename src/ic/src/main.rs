@@ -2132,6 +2132,11 @@ struct Pid(u32);
 /// 64 levels is generous; real-world process trees rarely exceed 20 levels.
 const MAX_ANCESTOR_DEPTH: usize = 64;
 
+/// The basename of the Zellij client program. The match must be exact, so
+/// that `zellij-server` and a wrapper script such as `my-zellij-wrapper` do
+/// not count as clients.
+const ZELLIJ_PROGRAM_NAME: &str = "zellij";
+
 /// Extracts the basename (filename) from a process comm string.
 ///
 /// On macOS, `ps -eo comm=` returns the full executable path (e.g.,
@@ -2162,8 +2167,32 @@ fn comm_basename(comm: &str) -> &str {
 /// process (`zellij --server /path/.../NAME`) does not match, because the
 /// session name is only a part of its socket path.
 fn zellij_client_pids(ps_args_output: &str, session: &str) -> Vec<Pid> {
-    let _ = (ps_args_output, session);
-    Vec::new()
+    if session.is_empty() {
+        return Vec::new();
+    }
+
+    let mut clients = Vec::new();
+
+    for line in ps_args_output.lines() {
+        let mut parts = line.split_whitespace();
+        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => Pid(p),
+            None => continue,
+        };
+        let Some(program) = parts.next() else {
+            continue;
+        };
+        if comm_basename(program) != ZELLIJ_PROGRAM_NAME {
+            continue;
+        }
+        // The remaining tokens are the arguments of the client. The session
+        // name must be one complete argument.
+        if parts.any(|arg| arg == session) {
+            clients.push(pid);
+        }
+    }
+
+    clients
 }
 
 /// The type of remote transport detected in the process tree.
@@ -2312,7 +2341,7 @@ fn find_ancestor_process(
     // include the target process.
     if in_zellij {
         for (&zellij_pid, comm) in &comm_of {
-            if comm_basename(comm) != "zellij" {
+            if comm_basename(comm) != ZELLIJ_PROGRAM_NAME {
                 continue;
             }
             let mut ancestor = zellij_pid;
