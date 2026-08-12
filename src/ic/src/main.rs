@@ -2290,30 +2290,74 @@ fn classify_transport(
     zellij_session: Option<String>,
     et_version_set: bool,
 ) -> RemoteTransport {
-    let _ = ps_args_output;
-    let in_zellij = zellij_session.is_some();
-
     // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
     // shell is definitely under Mosh, so images cannot work.
-    if find_ancestor_process(ps_comm_output, current_pid, false, "mosh-server") {
+    if find_ancestor_process(ps_comm_output, current_pid, ZellijScan::Off, "mosh-server") {
         return RemoteTransport::Mosh;
     }
+
+    let scan = match &zellij_session {
+        None => ZellijScan::Off,
+        Some(session) => {
+            let clients = zellij_client_pids(ps_args_output, session);
+            if clients.is_empty() {
+                // The session named no client, so the careful answer is the
+                // one that treats every Zellij client on the machine as a
+                // candidate. It can over-report Mosh, which hides an image
+                // that would have worked. The opposite mistake writes escape
+                // sequences that Mosh strips.
+                ZellijScan::EveryClient
+            } else {
+                ZellijScan::Clients(clients)
+            }
+        }
+    };
 
     // ET detected via env var or process tree (including Zellij heuristic).
     // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
     // session, Mosh and ET may both be attached — ET viewers can display images
     // while Mosh viewers silently strip the escape sequences.
-    if et_version_set || find_ancestor_process(ps_comm_output, current_pid, in_zellij, "etterminal")
+    if et_version_set
+        || find_ancestor_process(ps_comm_output, current_pid, scan.clone(), "etterminal")
     {
         return RemoteTransport::EternalTerminal;
     }
 
     // Mosh via Zellij heuristic (Case 2) — only reached when ET is not present.
-    if find_ancestor_process(ps_comm_output, current_pid, in_zellij, "mosh-server") {
+    let mosh = match &scan {
+        // Zellij sends the output of a pane to every attached client. One
+        // client that can show images is enough, so Mosh only blocks when
+        // every client of this session is a Mosh client.
+        ZellijScan::Clients(clients) => clients.iter().all(|&client| {
+            find_ancestor_process(ps_comm_output, client, ZellijScan::Off, "mosh-server")
+        }),
+        _ => find_ancestor_process(ps_comm_output, current_pid, scan.clone(), "mosh-server"),
+    };
+    if mosh {
         return RemoteTransport::Mosh;
     }
 
     RemoteTransport::None
+}
+
+/// Which Zellij clients stand in for the current process during the search.
+///
+/// Zellij daemonizes its server, so the chain from the current process stops
+/// at PID 1 and never reaches a terminal. The client keeps that chain, which
+/// is why the client is searched instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ZellijScan {
+    /// Do not stand in for the current process. Used outside Zellij, and for
+    /// the direct-ancestry question, which must not use the workaround.
+    Off,
+    /// Every process on the machine whose basename is exactly `zellij`.
+    ///
+    /// This is the careful answer for a session whose clients cannot be
+    /// named. It can report a transport that belongs to another session.
+    EveryClient,
+    /// The clients that are attached to this session, found by
+    /// [`zellij_client_pids`].
+    Clients(Vec<Pid>),
 }
 
 /// Determines whether a target process (identified by basename) is an ancestor
@@ -2322,13 +2366,12 @@ fn classify_transport(
 /// This handles two cases:
 /// 1. **Direct ancestry**: The target process is a direct ancestor of `current_pid`.
 /// 2. **Zellij workaround**: Zellij daemonizes (reparents to PID 1), breaking the
-///    direct ancestry. In this case, we check if any process whose basename is
-///    exactly `zellij` (the CLI, not `zellij-server` or other variants) has the
-///    target process as an ancestor.
+///    direct ancestry. In this case, `scan` names the client processes that stand
+///    in for the current process, and the target is searched above each of them.
 fn find_ancestor_process(
     ps_output: &str,
     current_pid: Pid,
-    in_zellij: bool,
+    scan: ZellijScan,
     target_name: &str,
 ) -> bool {
     let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
@@ -2374,27 +2417,32 @@ fn find_ancestor_process(
     }
 
     // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
-    // Find any process whose basename is exactly "zellij" (the CLI binary,
-    // not "zellij-server" or other variants) and check if its ancestors
-    // include the target process.
-    if in_zellij {
-        for (&zellij_pid, comm) in &comm_of {
-            if comm_basename(comm) != ZELLIJ_PROGRAM_NAME {
-                continue;
-            }
-            let mut ancestor = zellij_pid;
-            for _ in 0..MAX_ANCESTOR_DEPTH {
-                match parent_of.get(&ancestor) {
-                    Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
-                        if let Some(pcomm) = comm_of.get(&ppid) {
-                            if comm_basename(pcomm) == target_name {
-                                return true;
-                            }
+    // Search above each client that stands in for the current process.
+    let clients: Vec<Pid> = match scan {
+        ZellijScan::Off => return false,
+        ZellijScan::Clients(clients) => clients,
+        // Any process whose basename is exactly "zellij" (the CLI binary, not
+        // "zellij-server" or other variants).
+        ZellijScan::EveryClient => comm_of
+            .iter()
+            .filter(|(_, comm)| comm_basename(comm) == ZELLIJ_PROGRAM_NAME)
+            .map(|(&pid, _)| pid)
+            .collect(),
+    };
+
+    for client in clients {
+        let mut ancestor = client;
+        for _ in 0..MAX_ANCESTOR_DEPTH {
+            match parent_of.get(&ancestor) {
+                Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
+                    if let Some(pcomm) = comm_of.get(&ppid) {
+                        if comm_basename(pcomm) == target_name {
+                            return true;
                         }
-                        ancestor = ppid;
                     }
-                    _ => break,
+                    ancestor = ppid;
                 }
+                _ => break,
             }
         }
     }
@@ -2402,10 +2450,26 @@ fn find_ancestor_process(
     false
 }
 
+/// Turn the older `in_zellij` flag into a scan. A session whose clients are
+/// not named uses [`ZellijScan::EveryClient`], which is what `in_zellij` meant.
+#[cfg(test)]
+fn scan_for_flag(in_zellij: bool) -> ZellijScan {
+    if in_zellij {
+        ZellijScan::EveryClient
+    } else {
+        ZellijScan::Off
+    }
+}
+
 /// Check if Mosh is in the process tree. Delegates to [`find_ancestor_process`].
 #[cfg(test)]
 fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(ps_output, current_pid, in_zellij, "mosh-server")
+    find_ancestor_process(
+        ps_output,
+        current_pid,
+        scan_for_flag(in_zellij),
+        "mosh-server",
+    )
 }
 
 /// Check if Eternal Terminal is in the process tree. Delegates to [`find_ancestor_process`].
@@ -2413,7 +2477,7 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
 /// because `etterminal` is the direct ancestor of the user's shell.
 #[cfg(test)]
 fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(ps_output, current_pid, in_zellij, "etterminal")
+    find_ancestor_process(ps_output, current_pid, scan_for_flag(in_zellij), "etterminal")
 }
 
 fn print_kitty_image(
