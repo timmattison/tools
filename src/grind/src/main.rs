@@ -132,9 +132,10 @@ fn main() -> ExitCode {
 /// # Errors
 ///
 /// Returns an error if the current directory cannot be read, is not inside a
-/// git repository, does not contain `branch`, if the working tree cannot be
-/// inspected, or if the replay itself failed without leaving a conflict to
-/// measure.
+/// git repository, does not contain `branch`, or if the replay itself failed
+/// without leaving a conflict to measure. Not for a working tree that cannot be
+/// inspected: that only costs the uncommitted-work note, which is a caveat
+/// rather than part of the answer.
 fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
@@ -152,7 +153,18 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     // Before the verdict, and on stderr rather than stdout: a reader has to see
     // the caveat before the sentence it qualifies, and a caller piping stdout
     // somewhere has to get the same bytes whether or not the tree was dirty.
-    if let Some(note) = report.dirty_note(repo.uncommitted_files()?) {
+    //
+    // `unwrap_or_default` rather than `?`, because a caveat that cannot be
+    // computed has to cost the caveat and not the answer. A bare repository is
+    // the case that settles it: `git worktree add --detach HEAD` succeeds
+    // against one, so the replay runs and measures the collision exactly as
+    // usual, while `git status` cannot run at all for want of a working tree.
+    // Propagating that made the cheap pre-flight query *stricter* than the
+    // expensive replay it exists to spare the user - exit 2 and a raw git
+    // complaint about a query they never asked for, in place of a right answer.
+    // A default count is a clean tree, which `Report::dirty_note` already words
+    // as no note at all.
+    if let Some(note) = report.dirty_note(repo.uncommitted_files().unwrap_or_default()) {
         console.note(&note);
     }
 
