@@ -132,19 +132,30 @@ fn main() -> ExitCode {
 /// # Errors
 ///
 /// Returns an error if the current directory cannot be read, is not inside a
-/// git repository, does not contain `branch`, or if the replay itself failed
-/// without leaving a conflict to measure. Not for a working tree that cannot be
-/// inspected: that only costs the uncommitted-work note, which is a caveat
-/// rather than part of the answer.
+/// git repository, has no commit at HEAD to replay, does not contain `branch`,
+/// or if the replay itself failed without leaving a conflict to measure. Not for
+/// a working tree that cannot be inspected: that only costs the uncommitted-work
+/// note, which is a caveat rather than part of the answer.
 fn run(args: &Args, console: &Console) -> Result<ExitCode> {
     let cwd = std::env::current_dir().context("could not determine the current directory")?;
     let repo = Repo::open(&cwd)?;
 
-    // Before any scratch worktree exists. Creating one costs a temporary
-    // directory, a real `git worktree add`, and administrative state in the
-    // developer's repository - all of it wasted if the argument was a typo, and
-    // worse, the failure would arrive looking like a failed simulation instead
-    // of a bad argument.
+    // Both revisions the run depends on, before any scratch worktree exists.
+    // Creating one costs a temporary directory, a real `git worktree add`, and
+    // administrative state in the developer's repository - all of it wasted if a
+    // revision was never going to resolve, and worse, the failure would arrive
+    // looking like a failed simulation instead of a bad state.
+    //
+    // HEAD is the one that is easy to leave out, because it is the only revision
+    // the user does not type. `git worktree add` resolves it eventually, so the
+    // exit code came out right either way - but it came out as
+    // `fatal: invalid reference: HEAD` wrapped around a temporary path that no
+    // longer exists, which tells a developer with an empty repository or a fresh
+    // orphan branch nothing about what is actually wrong.
+    repo.resolve("HEAD").context(
+        "a replay starts from HEAD, and there is no commit at HEAD to start from \
+         - an empty repository, or a branch nothing has been committed to yet",
+    )?;
     repo.resolve(&args.branch)?;
 
     let action = format!("replaying HEAD onto {}", args.branch);
