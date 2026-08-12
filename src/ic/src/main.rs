@@ -144,6 +144,11 @@ struct Args {
     /// Monitor directories for new images and display them automatically
     #[clap(long)]
     monitor: Vec<PathBuf>,
+
+    /// Report whether this session can display an image, then exit. Exit code 0
+    /// means yes. Exit code 1 means no, and the reason goes to stderr
+    #[clap(long)]
+    will_display: bool,
 }
 
 fn main() -> Result<()> {
@@ -151,7 +156,9 @@ fn main() -> Result<()> {
 
     validate_arguments(&args)?;
 
-    if args.stdin {
+    if args.will_display {
+        report_display_readiness()?;
+    } else if args.stdin {
         display_image_from_stdin(&args)?;
     } else if !args.files.is_empty() {
         for file_path in &args.files {
@@ -184,15 +191,22 @@ fn validate_arguments(args: &Args) -> Result<()> {
 }
 
 fn validate_input_modes(args: &Args) -> Result<()> {
-    let input_modes = [args.stdin, !args.files.is_empty(), !args.monitor.is_empty()];
+    let input_modes = [
+        args.stdin,
+        !args.files.is_empty(),
+        !args.monitor.is_empty(),
+        args.will_display,
+    ];
     let input_count = input_modes.iter().filter(|&&x| x).count();
 
     if input_count == 0 {
-        anyhow::bail!("Must specify a file, use --stdin, or use --monitor");
+        anyhow::bail!("Must specify a file, use --stdin, use --monitor, or use --will-display");
     }
 
     if input_count > 1 {
-        anyhow::bail!("Cannot specify multiple input modes (--stdin, file, --monitor)");
+        anyhow::bail!(
+            "Cannot specify multiple input modes (--stdin, file, --monitor, --will-display)"
+        );
     }
 
     Ok(())
@@ -501,6 +515,26 @@ fn validate_terminal_for_graphics(
         anyhow::bail!("{}", error_msg);
     }
     Ok(())
+}
+
+/// Answer `--will-display`: can this session show an image?
+///
+/// The answer is the process exit status. `Ok` exits 0 and prints nothing.
+/// An error exits 1 and prints the reason to stderr, so a script can write
+/// `ic --will-display && ic picture.png` and get a usable message when the
+/// answer is no.
+///
+/// The question goes to [`validate_terminal_for_graphics`], the same gate the
+/// image path runs. Both callers therefore give one answer, and a session that
+/// passes here cannot be refused by the next `ic picture.png`. The gate asks
+/// about the terminal, the multiplexer, and the remote transport. It does not
+/// ask whether stdout is a terminal, so a redirected stdout does not change
+/// the answer.
+fn report_display_readiness() -> Result<()> {
+    let terminal_caps = detect_terminal_capabilities();
+    let transport = detect_remote_transport();
+
+    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
