@@ -452,9 +452,7 @@ fn validate_terminal_for_graphics(
             "Mosh detected. {} display does not work over Mosh.\n\
             Mosh strips the escape sequences needed for image display (Sixel, Kitty, iTerm2).\n\
             \n\
-            To display images, please use one of:\n\
-            • ssh user@host (instead of mosh user@host)\n\
-            • Eternal Terminal (et user@host) - persistent sessions with image support",
+            To display images, reconnect with ssh user@host instead of mosh user@host.",
             feature
         );
     }
