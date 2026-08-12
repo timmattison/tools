@@ -7,17 +7,22 @@
 //! Every fixture lives in its own `TempDir`, so concurrent `cargo test` runs
 //! never share a path.
 
-use tempfile::TempDir;
-
-use gitscratch::testing::{conflicting_repo, TestRepo};
+use gitscratch::testing::{conflicting_repo, not_a_repository, TestRepo};
 use gitscratch::{Repo, Uncommitted};
 
 /// The whole point of opening a repository up front is that "you pointed me at
 /// somewhere that is not a repository" is a different, cheaper answer than "the
 /// simulation failed" - so it has to be said in those words.
+///
+/// The premise arrives through [`not_a_repository`] rather than through a bare
+/// `TempDir`, because a bare one only *assumes* the premise: a developer whose
+/// `TMPDIR` sits inside a git repository would see this test fail on the
+/// `expect_err` below, blaming the pre-flight for accepting a directory that was
+/// a repository all along. The fixture probes instead, and names the offending
+/// path where the mistake actually is.
 #[test]
 fn open_rejects_a_directory_that_is_not_a_git_repository() {
-    let outside = TempDir::new().expect("create a directory outside any repository");
+    let outside = not_a_repository();
 
     let error = Repo::open(outside.path()).expect_err("a bare temp dir is not a git repository");
 
