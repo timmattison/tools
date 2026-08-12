@@ -89,6 +89,10 @@ fn auto_fit_rows(term_height: u32, header: HeaderRows) -> u32 {
         .max(1)
 }
 
+fn header_rows(lines: &[String], _term_width: u32) -> HeaderRows {
+    HeaderRows(u32::try_from(lines.len()).unwrap_or(u32::MAX))
+}
+
 #[derive(Debug, Clone)]
 enum VideoControl {
     Exit,
@@ -4566,5 +4570,85 @@ not_a_number zellij a work
         assert_eq!(auto_fit_rows(2, HeaderRows(1)), 1);
         assert_eq!(auto_fit_rows(1, HeaderRows(2)), 1);
         assert_eq!(auto_fit_rows(0, HeaderRows(0)), 1);
+    }
+
+    // =========================================================================
+    // Tests for header_rows
+    // =========================================================================
+
+    /// The width of the terminal that the header tests use.
+    const TEST_TERMINAL_COLS: u32 = 80;
+
+    /// Make the header lines that `header_rows` takes.
+    fn header_lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| (*line).to_string()).collect()
+    }
+
+    #[test]
+    fn header_rows_gives_one_row_for_a_line_that_fits() {
+        // A short file name stays on the row that `ic` prints it on.
+        let lines = header_lines(&["/tmp/cat.png"]);
+        assert_eq!(header_rows(&lines, TEST_TERMINAL_COLS).0, 1);
+    }
+
+    #[test]
+    fn header_rows_keeps_a_full_row_on_one_row() {
+        // A terminal wraps on the column after the last one, so a line of
+        // exactly the width of the terminal still takes one row.
+        let lines = header_lines(&["a".repeat(80).as_str()]);
+        assert_eq!(header_rows(&lines, TEST_TERMINAL_COLS).0, 1);
+    }
+
+    #[test]
+    fn header_rows_counts_the_rows_of_a_wrapped_line() {
+        // A line wider than the terminal wraps, and each wrapped part takes a
+        // row of the screen away from the image.
+        let one_column_over = header_lines(&["a".repeat(81).as_str()]);
+        assert_eq!(header_rows(&one_column_over, TEST_TERMINAL_COLS).0, 2);
+
+        let two_rows_and_one_column = header_lines(&["a".repeat(161).as_str()]);
+        assert_eq!(
+            header_rows(&two_rows_and_one_column, TEST_TERMINAL_COLS).0,
+            3
+        );
+    }
+
+    #[test]
+    fn header_rows_gives_one_row_to_an_empty_line() {
+        // An empty line still moves the cursor down one row.
+        let lines = header_lines(&[""]);
+        assert_eq!(header_rows(&lines, TEST_TERMINAL_COLS).0, 1);
+    }
+
+    #[test]
+    fn header_rows_adds_the_rows_of_every_line() {
+        // The monitor mode prints an empty line and then a line that can wrap.
+        let lines = header_lines(&["", format!("Found new image: {}", "b".repeat(80)).as_str()]);
+        assert_eq!(header_rows(&lines, TEST_TERMINAL_COLS).0, 3);
+    }
+
+    #[test]
+    fn header_rows_counts_display_columns_not_characters() {
+        // A Japanese character takes two columns, and so does an emoji, so 41
+        // of them fill 82 columns and wrap in a terminal of 80 columns.
+        let short = header_lines(&["日本語"]);
+        assert_eq!(header_rows(&short, TEST_TERMINAL_COLS).0, 1);
+
+        let japanese = header_lines(&["日".repeat(41).as_str()]);
+        assert_eq!(header_rows(&japanese, TEST_TERMINAL_COLS).0, 2);
+
+        let full_row_of_emoji = header_lines(&["🎉".repeat(40).as_str()]);
+        assert_eq!(header_rows(&full_row_of_emoji, TEST_TERMINAL_COLS).0, 1);
+
+        let emoji = header_lines(&["🎉".repeat(41).as_str()]);
+        assert_eq!(header_rows(&emoji, TEST_TERMINAL_COLS).0, 2);
+    }
+
+    #[test]
+    fn header_rows_survives_a_terminal_of_no_width() {
+        // A width of zero must not divide by zero. One column per row gives one
+        // row for each column of the line.
+        let lines = header_lines(&["abc"]);
+        assert_eq!(header_rows(&lines, 0).0, 3);
     }
 }
