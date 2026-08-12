@@ -59,6 +59,36 @@ const SAVE_CURSOR: &str = "\x1b7";
 /// DECRC. It restores the saved position of the cursor.
 const RESTORE_CURSOR: &str = "\x1b8";
 
+/// The row that the shell prompt returns to below an image.
+const PROMPT_ROWS: u32 = 1;
+
+/// The number of rows that `ic` prints above an image.
+///
+/// The auto-fit path must subtract these rows from the height of the terminal.
+/// If it does not, the header rows and the image together fill the screen, and
+/// the terminal must scroll before the prompt can appear.
+#[derive(Debug, Clone, Copy)]
+struct HeaderRows(u32);
+
+/// Give the number of rows that an auto-fit image can occupy.
+///
+/// The image gets the height of the terminal, less the header rows that `ic`
+/// prints above it, less the row that the prompt returns to. The result has a
+/// floor of 1, so a very short terminal still gets an image.
+///
+/// # Arguments
+/// * `term_height` - The height of the terminal in rows.
+/// * `header` - The number of rows that `ic` prints above the image.
+///
+/// # Returns
+/// The number of rows for the image, which is always 1 or more.
+fn auto_fit_rows(term_height: u32, header: HeaderRows) -> u32 {
+    term_height
+        .saturating_sub(header.0)
+        .saturating_sub(PROMPT_ROWS)
+        .max(1)
+}
+
 #[derive(Debug, Clone)]
 enum VideoControl {
     Exit,
@@ -175,8 +205,9 @@ fn main() -> Result<()> {
             if is_video_file(file_path) {
                 display_video_from_file(file_path, &args)?;
             } else if is_image_file(file_path) {
-                println!("{}", file_path.display());
-                display_image_from_file(file_path, &args)?;
+                // The callee prints the file name, so the auto-fit path can
+                // count the row that the name takes.
+                display_image_from_file(file_path, &args, &[file_path.display().to_string()])?;
             } else {
                 // Treat as text file
                 println!("{}", file_path.display());
@@ -327,8 +358,16 @@ fn monitor_directories(directories: &[PathBuf], args: &Args) -> Result<()> {
                             for path in event.paths {
                                 if !recent_files.contains(&path) {
                                     if is_image_file(&path) {
-                                        println!("\nFound new image: {}", path.display());
-                                        match display_image_from_file(&path, args) {
+                                        // The callee prints the two header
+                                        // rows, so the auto-fit path can count
+                                        // them. The first row is empty, which
+                                        // separates this image from the one
+                                        // before it.
+                                        let header = [
+                                            String::new(),
+                                            format!("Found new image: {}", path.display()),
+                                        ];
+                                        match display_image_from_file(&path, args, &header) {
                                             Ok(_) => {
                                                 recent_files.insert(path.clone());
                                             }
@@ -763,7 +802,9 @@ fn process_frame_display(
         move_cursor_home()?;
     }
 
-    display_image(img, args, true)?;
+    // A video frame gets no header, so the image can use the whole terminal
+    // less the row of the prompt.
+    display_image(img, args, true, HeaderRows(0))?;
 
     // Draw progress bar
     if let Some((term_width, term_height)) = current_terminal_size {
@@ -1467,11 +1508,29 @@ fn get_terminal_size() -> Result<(u32, u32)> {
     }
 }
 
-fn display_image_from_file(file_path: &Path, args: &Args) -> Result<()> {
+/// Print a header and then display an image file.
+///
+/// The function prints the header itself and then counts the lines that it
+/// printed. The count and the print can therefore never drift apart, so a
+/// caller cannot print a header and forget to pay for the rows.
+///
+/// # Arguments
+/// * `file_path` - The path of the image file.
+/// * `args` - The command line arguments.
+/// * `header` - The lines to print above the image, one line per element.
+///
+/// # Returns
+/// An error when the file does not open as an image, or when the display fails.
+fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> Result<()> {
+    for line in header {
+        println!("{line}");
+    }
+
     let img = image::open(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    display_image(img, args, args.no_newline)
+    let header_rows = u32::try_from(header.len()).unwrap_or(u32::MAX);
+    display_image(img, args, args.no_newline, HeaderRows(header_rows))
 }
 
 fn display_text_file(file_path: &Path) -> Result<()> {
@@ -1494,10 +1553,28 @@ fn display_image_from_stdin(args: &Args) -> Result<()> {
 
     let img = image::load_from_memory(&buffer).context("Failed to decode image from stdin")?;
 
-    display_image(img, args, args.no_newline)
+    // This path prints no header, so the image can use the whole terminal less
+    // the row of the prompt.
+    display_image(img, args, args.no_newline, HeaderRows(0))
 }
 
-fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()> {
+/// Display an image in the terminal.
+///
+/// # Arguments
+/// * `img` - The image to display.
+/// * `args` - The command line arguments.
+/// * `no_newline` - True when the caller controls the position of the cursor.
+/// * `header` - The number of rows that the caller printed above the image. The
+///   auto-fit path subtracts these rows from the height of the terminal.
+///
+/// # Returns
+/// An error when the terminal cannot show graphics, or when the display fails.
+fn display_image(
+    img: DynamicImage,
+    args: &Args,
+    no_newline: bool,
+    header: HeaderRows,
+) -> Result<()> {
     let terminal_caps = detect_terminal_capabilities();
     let transport = detect_remote_transport();
 
@@ -1511,17 +1588,15 @@ fn display_image(img: DynamicImage, args: &Args, no_newline: bool) -> Result<()>
     } else {
         // Auto-fit to terminal window size
         let (term_width, term_height) = get_terminal_size()?;
-        // Leave some margin for terminal chrome and preserve one line for prompt
+        // Leave some margin for terminal chrome
         let safe_width = if term_width > 4 {
             term_width - 2
         } else {
             term_width
         };
-        let safe_height = if term_height > 2 {
-            term_height - 1
-        } else {
-            term_height
-        };
+        // The header rows and the prompt row come out of the height, so the
+        // header, the image and the prompt fit inside the terminal.
+        let safe_height = auto_fit_rows(term_height, header);
         (Some(safe_width), Some(safe_height))
     };
 
@@ -4167,5 +4242,36 @@ not_a_number zellij a work
         // get_cell_pixel_dimensions divides the terminal pixel height by the row
         // count, so it can give 0. A cell height of 0 counts as 1 pixel.
         assert_eq!(image_rows(100, 0), 100);
+    }
+
+    // =========================================================================
+    // Tests for auto_fit_rows
+    // =========================================================================
+
+    #[test]
+    fn auto_fit_rows_keeps_the_prompt_row_when_there_is_no_header() {
+        // stdin and video frames print no header, so only the prompt row goes.
+        assert_eq!(auto_fit_rows(24, HeaderRows(0)), 23);
+    }
+
+    #[test]
+    fn auto_fit_rows_pays_for_a_one_row_header() {
+        // A file argument prints the file name on one row above the image.
+        assert_eq!(auto_fit_rows(24, HeaderRows(1)), 22);
+    }
+
+    #[test]
+    fn auto_fit_rows_pays_for_a_two_row_header() {
+        // The monitor mode prints an empty row and then the name of the image.
+        assert_eq!(auto_fit_rows(24, HeaderRows(2)), 21);
+    }
+
+    #[test]
+    fn auto_fit_rows_gives_at_least_one_row_in_a_short_terminal() {
+        // A terminal too short for the header and the prompt still gets an
+        // image of one row, instead of an image of zero rows.
+        assert_eq!(auto_fit_rows(2, HeaderRows(1)), 1);
+        assert_eq!(auto_fit_rows(1, HeaderRows(2)), 1);
+        assert_eq!(auto_fit_rows(0, HeaderRows(0)), 1);
     }
 }
