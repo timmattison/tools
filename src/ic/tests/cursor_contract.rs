@@ -9,7 +9,9 @@
 //! sequences, so a change of spelling keeps them alive.
 
 use std::io::Write;
+use std::process;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The escape byte that starts every escape sequence.
 const ESC: u8 = 0x1b;
@@ -39,12 +41,26 @@ const RESTORE_CURSOR: &[u8] = b"\x1b8";
 const TEST_IMAGE: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_image.png"));
 
-/// The search path for the child process. `ic` starts `ps` to look at the
-/// process tree, so the child needs a path.
-const TEST_PATH: &str = "/usr/bin:/bin:/usr/sbin";
-
 /// The terminal type for the child process.
 const TEST_TERM: &str = "xterm-256color";
+
+/// A directory that does not exist, unique to this process.
+///
+/// The `PATH` of the child points here, which keeps `ps` out of reach. The
+/// remote transport detection then finds no process tree to walk, so a test
+/// runner that is itself under a remote transport cannot change the bytes that
+/// `ic` writes. The directory holds the process id and a nanosecond stamp, so
+/// two concurrent runs of this file never name the same directory.
+///
+/// # Returns
+/// The path of a directory that no process creates.
+fn unreachable_path_dir() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("the clock must be after the epoch")
+        .as_nanos();
+    format!("/nonexistent-ic-cursor-contract-{}-{nanos}", process::id())
+}
 
 /// The number of terminal rows that the test image occupies.
 ///
@@ -146,7 +162,7 @@ fn run_ic_sixel() -> Vec<u8> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ic"))
         .args(["--stdin", "--width", "10", "--height", "5"])
         .env_clear()
-        .env("PATH", TEST_PATH)
+        .env("PATH", unreachable_path_dir())
         .env("TERM", TEST_TERM)
         .env("MUXIAVELLI", "1")
         .env("MUXIAVELLI_IMAGE_PROTOCOLS", "sixel")
