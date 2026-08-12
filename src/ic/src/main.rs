@@ -2477,7 +2477,12 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
 /// because `etterminal` is the direct ancestor of the user's shell.
 #[cfg(test)]
 fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(ps_output, current_pid, scan_for_flag(in_zellij), "etterminal")
+    find_ancestor_process(
+        ps_output,
+        current_pid,
+        scan_for_flag(in_zellij),
+        "etterminal",
+    )
 }
 
 fn print_kitty_image(
