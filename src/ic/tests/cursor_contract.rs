@@ -33,6 +33,12 @@ const SIXEL_START: &[u8] = b"\x1bP";
 /// The application program command that opens a Kitty graphics command.
 const KITTY_START: &[u8] = b"\x1b_G";
 
+/// The operating system command that opens an iTerm2 inline image.
+const ITERM2_START: &[u8] = b"\x1b]1337;";
+
+/// The bell that closes an iTerm2 inline image.
+const ITERM2_END: &[u8] = b"\x07";
+
 /// The Kitty graphics key that tells the renderer not to move the cursor.
 const KITTY_NO_CURSOR_MOVE: &str = "C=1";
 
@@ -81,6 +87,8 @@ enum Routine {
     Sixel,
     /// The Kitty graphics routine, which Kitty, WezTerm and Ghostty use.
     Kitty,
+    /// The iTerm2 inline image routine.
+    Iterm2,
 }
 
 impl Routine {
@@ -104,6 +112,7 @@ impl Routine {
                 ("MUXIAVELLI_IMAGE_PROTOCOLS", "sixel"),
             ],
             Routine::Kitty => vec![("TERM", TERM_XTERM_KITTY), ("KITTY_WINDOW_ID", "1")],
+            Routine::Iterm2 => vec![("TERM", TERM_XTERM_256COLOR), ("TERM_PROGRAM", "iTerm.app")],
         }
     }
 
@@ -115,6 +124,7 @@ impl Routine {
         match self {
             Routine::Sixel => SIXEL_START,
             Routine::Kitty => KITTY_START,
+            Routine::Iterm2 => ITERM2_START,
         }
     }
 
@@ -127,6 +137,7 @@ impl Routine {
     fn payload_end(self) -> &'static [u8] {
         match self {
             Routine::Sixel | Routine::Kitty => STRING_TERMINATOR,
+            Routine::Iterm2 => ITERM2_END,
         }
     }
 }
@@ -605,4 +616,12 @@ fn kitty_holds_the_cursor_still_while_it_draws() {
         keys.iter().any(|key| key == KITTY_NO_CURSOR_MOVE),
         "the Kitty key list must carry {KITTY_NO_CURSOR_MOVE}, but it is {keys:?}"
     );
+}
+
+/// The iTerm2 stream must keep the same cursor contract as the other two
+/// routines. It already tells the renderer not to move the cursor with
+/// `doNotMoveCursor=1`, so it owes the caller the movement itself.
+#[test]
+fn iterm2_meets_the_cursor_contract() {
+    assert_cursor_contract(Routine::Iterm2, &run_ic(Routine::Iterm2, &[]));
 }
