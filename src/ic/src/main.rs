@@ -2338,19 +2338,15 @@ fn classify_transport(
 
     let scan = match &zellij_session {
         None => ZellijScan::Off,
-        Some(session) => {
-            let clients = zellij_client_pids(ps_args_output, session);
-            if clients.is_empty() {
-                // The session named no client, so the careful answer is the
-                // one that treats every Zellij client on the machine as a
-                // candidate. It can over-report Mosh, which hides an image
-                // that would have worked. The opposite mistake writes escape
-                // sequences that Mosh strips.
-                ZellijScan::EveryClient
-            } else {
-                ZellijScan::Clients(clients)
-            }
-        }
+        Some(session) => match ClientPids::new(zellij_client_pids(ps_args_output, session)) {
+            Some(clients) => ZellijScan::Clients(clients),
+            // The session named no client, so the careful answer is the one
+            // that treats every Zellij client on the machine as a candidate.
+            // It can over-report Mosh, which hides an image that would have
+            // worked. The opposite mistake writes escape sequences that Mosh
+            // strips.
+            None => ZellijScan::EveryClient,
+        },
     };
 
     // ET detected via env var or process tree (including Zellij heuristic).
@@ -2368,7 +2364,7 @@ fn classify_transport(
         // Zellij sends the output of a pane to every attached client. One
         // client that can show images is enough, so Mosh only blocks when
         // every client of this session is a Mosh client.
-        ZellijScan::Clients(clients) => clients.iter().all(|&client| {
+        ZellijScan::Clients(clients) => clients.as_slice().iter().all(|&client| {
             find_ancestor_process(ps_comm_output, client, &ZellijScan::Off, "mosh-server")
         }),
         ZellijScan::EveryClient => {
@@ -2403,6 +2399,9 @@ mod client_pids {
     impl ClientPids {
         /// Wraps `pids`, or answers `None` when there is no client to wrap.
         pub(crate) fn new(pids: Vec<Pid>) -> Option<Self> {
+            if pids.is_empty() {
+                return None;
+            }
             Some(Self(pids))
         }
 
@@ -2433,10 +2432,11 @@ enum ZellijScan {
     /// The clients that are attached to this session, found by
     /// [`zellij_client_pids`].
     ///
-    /// The list must not be empty. `classify_transport` asks whether *every*
-    /// client is a Mosh client, and an empty list answers yes for no reason.
-    /// A session with no named client uses [`ZellijScan::EveryClient`].
-    Clients(Vec<Pid>),
+    /// [`ClientPids`] holds at least one client, so `classify_transport` can
+    /// ask whether *every* client is a Mosh client and get an answer that a
+    /// client stands behind. A session with no named client cannot arrive
+    /// here at all: it uses [`ZellijScan::EveryClient`].
+    Clients(ClientPids),
 }
 
 /// Determines whether a target process (identified by basename) is an ancestor
@@ -2500,7 +2500,7 @@ fn find_ancestor_process(
     let every_client: Vec<Pid>;
     let clients: &[Pid] = match scan {
         ZellijScan::Off => return false,
-        ZellijScan::Clients(clients) => clients,
+        ZellijScan::Clients(clients) => clients.as_slice(),
         // Any process whose basename is exactly "zellij" (the CLI binary, not
         // "zellij-server" or other variants).
         ZellijScan::EveryClient => {
