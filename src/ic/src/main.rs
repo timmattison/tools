@@ -1641,14 +1641,9 @@ fn display_image(
         DisplayRoutine::Sixel => {
             display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
         }
-        DisplayRoutine::Kitty => display_image_kitty(
-            &img,
-            scaled_width,
-            scaled_height,
-            args,
-            under_remote_proxy,
-            no_newline,
-        ),
+        DisplayRoutine::Kitty => {
+            display_image_kitty(&img, scaled_width, scaled_height, args, no_newline)
+        }
         DisplayRoutine::Iterm2 => display_image_iterm2(
             &img,
             scaled_width,
@@ -1792,7 +1787,6 @@ fn display_image_kitty(
     width: Option<u32>,
     height: Option<u32>,
     args: &Args,
-    under_remote_proxy: bool,
     no_newline: bool,
 ) -> Result<()> {
     // display_width/display_height are in terminal cells (character columns/rows).
@@ -1824,7 +1818,6 @@ fn display_image_kitty(
         display_width,
         display_height,
         no_newline,
-        under_remote_proxy,
     )
 }
 
@@ -1921,6 +1914,135 @@ fn image_rows(height_px: u32, cell_height_px: u32) -> u32 {
     height_px.div_ceil(cell_height_px.max(1)).max(1)
 }
 
+/// Calculate the number of terminal rows that a rendered image fills, for the
+/// protocols that take the size of the image in character cells.
+///
+/// The Kitty graphics protocol and the iTerm2 inline image protocol both take a
+/// width and a height in character cells, and both make their own decision when
+/// one of the two is absent. There are four cases, and each one follows a rule
+/// of the protocols:
+///
+/// * `display_height` is `Some(h)`, with or without a width. Both protocols
+///   scale the image into the rows that `ic` asks for, so the answer is `h`.
+/// * Only `display_width` is `Some(w)`. Both protocols then compute the other
+///   dimension to keep the aspect ratio of the image. The rendered height in
+///   pixels is `img_height_px * (w * cell_width_px) / img_width_px`.
+/// * Neither is given. Both protocols render the image at its own pixel size,
+///   so the answer comes from the pixel height of the image.
+///
+/// # Arguments
+/// * `img_width_px` - The width of the image in pixels.
+/// * `img_height_px` - The height of the image in pixels.
+/// * `display_width` - The width that `ic` asks for, in character cells.
+/// * `display_height` - The height that `ic` asks for, in character cells.
+/// * `cell_width_px` - The width of one character cell in pixels.
+/// * `cell_height_px` - The height of one character cell in pixels.
+///
+/// # Returns
+/// The row count. The result is always 1 or more, so the caller never asks the
+/// terminal for a movement of zero rows, which a terminal reads as one row. An
+/// `img_width_px` of 0 gives no scale factor, so the width-only case falls back
+/// to the pixel height of the image.
+fn image_rows_in_cells(
+    img_width_px: u32,
+    img_height_px: u32,
+    display_width: Option<u32>,
+    display_height: Option<u32>,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> u32 {
+    if let Some(rows) = display_height {
+        return rows.max(1);
+    }
+
+    match display_width {
+        // The arithmetic runs in u64, because a wide image and a tall image
+        // together overflow u32 long before they overflow u64.
+        Some(cols) if img_width_px > 0 => {
+            let rendered_height_px =
+                u64::from(img_height_px) * u64::from(cols) * u64::from(cell_width_px)
+                    / u64::from(img_width_px);
+            image_rows(
+                u32::try_from(rendered_height_px).unwrap_or(u32::MAX),
+                cell_height_px,
+            )
+        }
+        _ => image_rows(img_height_px, cell_height_px),
+    }
+}
+
+/// Where a display routine must leave the cursor after it writes an image.
+///
+/// Sixel gives no contract for the position of the cursor after the string
+/// terminator, and each renderer decides for itself. The Kitty protocol and the
+/// iTerm2 protocol each have a flag that holds the cursor still, but then the
+/// caller must move it. `ic` therefore states the position of the cursor
+/// instead of a guess.
+enum CursorContract {
+    /// The caller puts the cursor where it wants it (`--no-newline`, video
+    /// playback). The routine writes the payload and nothing else.
+    CallerManaged,
+    /// Column 1 of the first row below the image.
+    BelowImage {
+        /// The height of the image in terminal rows.
+        rows: u32,
+    },
+}
+
+/// Write an image payload and keep the promise of a [`CursorContract`].
+///
+/// Every display routine of `ic` owes the caller the same promise: the cursor
+/// ends at column 1 of the first row below the image, unless the caller asked
+/// for no newline. This function holds the one implementation of that promise,
+/// so a new display routine cannot forget it.
+///
+/// [`CursorContract::BelowImage`] writes four parts:
+///
+/// 1. One newline for each row of the image. The reservation makes an image at
+///    the bottom of the screen scroll the terminal instead of run off it.
+/// 2. CUU, which goes back to the top of the reservation.
+/// 3. DECSC, the payload and DECRC. The brackets make sure that cursor motion
+///    inside the payload cannot change the final position of the cursor.
+/// 4. CUD by the row count and a carriage return, which together put the cursor
+///    at column 1 of the first row below the image.
+///
+/// The payload arrives as a closure, because the Kitty routine writes its
+/// payload in more than one chunk and cannot make one string.
+///
+/// # Arguments
+/// * `out` - The stream that takes the bytes.
+/// * `contract` - The promise that the routine must keep.
+/// * `payload` - A closure that writes the image payload to `out`.
+///
+/// # Returns
+/// An error when a write to `out` fails.
+fn write_image_with_cursor_contract<W, F>(
+    out: &mut W,
+    contract: CursorContract,
+    payload: F,
+) -> io::Result<()>
+where
+    W: Write,
+    F: FnOnce(&mut W) -> io::Result<()>,
+{
+    let CursorContract::BelowImage { rows } = contract else {
+        return payload(out);
+    };
+
+    // The row count is always 1 or more, so this never asks the terminal for a
+    // movement of zero rows.
+    for _ in 0..rows {
+        writeln!(out)?;
+    }
+    write!(out, "{CSI}{rows}A")?;
+
+    write!(out, "{SAVE_CURSOR}")?;
+    payload(out)?;
+    write!(out, "{RESTORE_CURSOR}")?;
+
+    write!(out, "{CSI}{rows}B\r")
+}
+
 /// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough).
 ///
 /// # Arguments
@@ -1991,35 +2113,16 @@ fn display_image_sixel(
     // Output the sixel data
     let mut stdout = io::stdout().lock();
 
-    if no_newline {
-        // Video playback puts the cursor where it wants it, so write only the
-        // payload.
-        write!(stdout, "{}", sixel_output)?;
+    let contract = if no_newline {
+        CursorContract::CallerManaged
     } else {
-        // Sixel gives no contract for the position of the cursor after the
-        // string terminator, so state the position instead of a guess of one
-        // newline.
         let (_, cell_height_px) = get_cell_pixel_dimensions();
-        let rows = image_rows(resized_img.height(), cell_height_px);
-
-        // Reserve the rows before the image goes out. An image at the bottom of
-        // the screen then scrolls the terminal instead of running off it. CUU
-        // then goes back to the top of the reservation. image_rows never gives
-        // 0, so this never asks for a movement of zero rows, which a terminal
-        // reads as one row.
-        for _ in 0..rows {
-            writeln!(stdout)?;
+        CursorContract::BelowImage {
+            rows: image_rows(resized_img.height(), cell_height_px),
         }
-        write!(stdout, "{CSI}{rows}A")?;
+    };
 
-        // DECSC and DECRC bracket the payload, so cursor motion inside it
-        // cannot change the final position.
-        write!(stdout, "{SAVE_CURSOR}{}{RESTORE_CURSOR}", sixel_output)?;
-
-        // CUD moves the cursor down by the row count of the image and the
-        // carriage return puts it at column 1.
-        write!(stdout, "{CSI}{rows}B\r")?;
-    }
+    write_image_with_cursor_contract(&mut stdout, contract, |out| write!(out, "{}", sixel_output))?;
 
     stdout.flush().context("Failed to flush output")?;
 
@@ -2697,6 +2800,25 @@ fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) ->
     )
 }
 
+/// Write an image with the Kitty graphics protocol.
+///
+/// The command is `ESC _ G <key>=<value>,... ; <base64 data> ESC \`. A large
+/// image goes out in more than one command, because the protocol limits the
+/// size of one command.
+///
+/// The routine holds the cursor still with `C=1` and then states the position
+/// of the cursor itself through [`write_image_with_cursor_contract`].
+///
+/// # Arguments
+/// * `rgb_data` - The pixels of the image, three bytes for each pixel.
+/// * `img_width` - The width of the image in pixels.
+/// * `img_height` - The height of the image in pixels.
+/// * `display_width` - The width that `ic` asks for, in character cells.
+/// * `display_height` - The height that `ic` asks for, in character cells.
+/// * `no_newline` - True when the caller controls the position of the cursor.
+///
+/// # Returns
+/// An error when a write to stdout fails.
 fn print_kitty_image(
     rgb_data: &[u8],
     img_width: u32,
@@ -2704,66 +2826,48 @@ fn print_kitty_image(
     display_width: Option<u32>,
     display_height: Option<u32>,
     no_newline: bool,
-    under_remote_proxy: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
-
-    // Kitty graphics protocol format:
-    // ESC _ G <key>=<value>,<key>=<value>,... ; <base64_data> ESC \
-    // For large images, we need to chunk the data
 
     let base64_data = BASE64_STANDARD.encode(rgb_data);
     let chunk_size = 4096; // Kitty recommended chunk size
 
-    // Under a remote proxy (e.g. Eternal Terminal), the proxy's virtual terminal
-    // doesn't understand the Kitty graphics protocol, so it can't track cursor
-    // movement caused by image rendering. We synchronize by:
-    //   1. Pre-filling blank lines so the proxy allocates screen space
-    //   2. Moving the cursor back up (both proxy and client process this)
-    //   3. Rendering the image with C=1 (don't move cursor)
-    //   4. Moving the cursor back down with CUD (both process this)
-    // This keeps both terminals' cursor positions in sync.
-    // In video mode (no_newline), skip proxy cursor sync — the caller handles
-    // cursor positioning explicitly with \x1b[row;colH and \x1b[J. The pre-fill
-    // newlines would cause scrolling every frame.
-    let proxy_rows = if under_remote_proxy && !no_newline {
-        let rows = display_height.unwrap_or(1);
-        // Pre-fill: emit newlines to create space in the proxy's screen buffer
-        for _ in 0..rows {
-            writeln!(stdout)?;
-        }
-        // Move cursor back up to where the image should be rendered
-        write!(stdout, "\x1b[{}A", rows)?;
-        rows
+    let contract = if no_newline {
+        CursorContract::CallerManaged
     } else {
-        0
+        let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
+        CursorContract::BelowImage {
+            rows: image_rows_in_cells(
+                img_width,
+                img_height,
+                display_width,
+                display_height,
+                cell_width_px,
+                cell_height_px,
+            ),
+        }
     };
 
-    if base64_data.len() <= chunk_size {
-        // Small image, send in one chunk
-        write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
+    // The key list that opens the first command. `C=1` tells Kitty not to move
+    // the cursor, because this routine states the position of the cursor
+    // itself. In video mode, fixed image and placement ids make each frame
+    // replace the last one in place, which holds the memory of the renderer
+    // flat.
+    let cursor_keys = if no_newline { ",i=1,p=1,C=1" } else { ",C=1" };
+    // The display size, in character cells.
+    let width_key = display_width.map_or_else(String::new, |w| format!(",c={w}"));
+    let height_key = display_height.map_or_else(String::new, |h| format!(",r={h}"));
+    let header =
+        format!("\x1b_Ga=T,f=24,s={img_width},v={img_height}{cursor_keys}{width_key}{height_key}");
 
-        // C=1 tells Kitty not to move the cursor. This routine states the
-        // position of the cursor itself, so the renderer must not move it too.
-        // In video mode, fixed image and placement ids make each frame replace
-        // the last one in place, which holds the memory of the renderer flat.
-        if no_newline {
-            write!(stdout, ",i=1,p=1,C=1")?;
-        } else {
-            write!(stdout, ",C=1")?;
+    write_image_with_cursor_contract(&mut stdout, contract, |out| {
+        if base64_data.len() <= chunk_size {
+            // A small image goes out in one command.
+            return write!(out, "{header};{base64_data}\x1b\\");
         }
 
-        // Add display size if specified (in character cells)
-        if let Some(w) = display_width {
-            write!(stdout, ",c={}", w)?;
-        }
-        if let Some(h) = display_height {
-            write!(stdout, ",r={}", h)?;
-        }
-
-        write!(stdout, ";{}\x1b\\", base64_data)?;
-    } else {
-        // Large image, send in chunks
+        // A large image goes out in more than one command. `m=1` says that more
+        // data follows and `m=0` closes the image.
         let chunks: Vec<&str> = base64_data
             .as_bytes()
             .chunks(chunk_size)
@@ -2772,45 +2876,16 @@ fn print_kitty_image(
 
         for (i, chunk) in chunks.iter().enumerate() {
             if i == 0 {
-                // First chunk
-                write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
-
-                if no_newline {
-                    write!(stdout, ",i=1,p=1,C=1")?;
-                } else {
-                    write!(stdout, ",C=1")?;
-                }
-
-                // Add display size if specified (in character cells)
-                if let Some(w) = display_width {
-                    write!(stdout, ",c={}", w)?;
-                }
-                if let Some(h) = display_height {
-                    write!(stdout, ",r={}", h)?;
-                }
-
-                write!(stdout, ",m=1;{}\x1b\\", chunk)?;
+                write!(out, "{header},m=1;{chunk}\x1b\\")?;
             } else if i == chunks.len() - 1 {
-                // Last chunk
-                write!(stdout, "\x1b_Gm=0;{}\x1b\\", chunk)?;
+                write!(out, "\x1b_Gm=0;{chunk}\x1b\\")?;
             } else {
-                // Middle chunk
-                write!(stdout, "\x1b_Gm=1;{}\x1b\\", chunk)?;
+                write!(out, "\x1b_Gm=1;{chunk}\x1b\\")?;
             }
         }
-    }
 
-    if under_remote_proxy && !no_newline {
-        // Move cursor down past the image area using CUD (Cursor Down).
-        // Both the proxy and local terminal process this identically.
-        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
-        // terminal needs explicit cursor advancement to stay in sync with the
-        // real terminal — without it, subsequent output overwrites the image.
-        write!(stdout, "\x1b[{}B", proxy_rows)?;
-        writeln!(stdout)?;
-    } else if !no_newline {
-        writeln!(stdout)?;
-    }
+        Ok(())
+    })?;
 
     stdout.flush().context("Failed to flush output")?;
     Ok(())
@@ -4243,6 +4318,152 @@ not_a_number zellij a work
         // get_cell_pixel_dimensions divides the terminal pixel height by the row
         // count, so it can give 0. A cell height of 0 counts as 1 pixel.
         assert_eq!(image_rows(100, 0), 100);
+    }
+
+    // =========================================================================
+    // Tests for image_rows_in_cells
+    // =========================================================================
+
+    /// The width of one character cell in the tests below, in pixels.
+    const TEST_CELL_WIDTH_PX: u32 = 10;
+
+    /// The height of one character cell in the tests below, in pixels.
+    const TEST_CELL_HEIGHT_PX: u32 = 20;
+
+    #[test]
+    fn image_rows_in_cells_takes_a_given_height() {
+        // Both protocols scale the image into the rows that ic asks for, so a
+        // given height is the answer, with or without a width.
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                100,
+                Some(10),
+                Some(5),
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            5
+        );
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                100,
+                None,
+                Some(7),
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn image_rows_in_cells_keeps_the_aspect_ratio_of_a_width() {
+        // A width of 10 cells is 100 pixels. The image is twice as wide as it
+        // is tall, so it renders 50 pixels high, which is 3 rows of 20 pixels.
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                50,
+                Some(10),
+                None,
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            3
+        );
+        // A width of 20 cells is 200 pixels, which doubles the image to 200
+        // pixels high, which is 10 rows.
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                100,
+                Some(20),
+                None,
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            10
+        );
+    }
+
+    #[test]
+    fn image_rows_in_cells_falls_back_to_the_pixel_height() {
+        // With no width and no height both protocols render the image at its
+        // own pixel size.
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                100,
+                None,
+                None,
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            5
+        );
+        // A partial row still uses a full row.
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                101,
+                None,
+                None,
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            6
+        );
+    }
+
+    #[test]
+    fn image_rows_in_cells_survives_a_zero_image_width() {
+        // A width of zero pixels gives no scale factor, so the width-only case
+        // falls back to the pixel height of the image.
+        assert_eq!(
+            image_rows_in_cells(
+                0,
+                100,
+                Some(10),
+                None,
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            5
+        );
+    }
+
+    #[test]
+    fn image_rows_in_cells_never_gives_zero() {
+        // A movement of zero rows means one row to a terminal, so the row count
+        // must stay at 1 or more.
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                100,
+                None,
+                Some(0),
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            1
+        );
+        assert_eq!(
+            image_rows_in_cells(100, 0, None, None, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX),
+            1
+        );
+        assert_eq!(
+            image_rows_in_cells(
+                100,
+                1,
+                Some(1),
+                None,
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            1
+        );
     }
 
     // =========================================================================
