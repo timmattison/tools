@@ -7,7 +7,7 @@
 //! Every fixture lives in its own `TempDir`, so concurrent `cargo test` runs
 //! never share a path.
 
-use gitscratch::testing::{conflicting_repo, not_a_repository, TestRepo};
+use gitscratch::testing::{conflicting_repo, nested_conflict_repo, not_a_repository, TestRepo};
 use gitscratch::{Repo, Uncommitted};
 
 /// The whole point of opening a repository up front is that "you pointed me at
@@ -67,6 +67,80 @@ fn scratch_builds_a_worktree_of_the_repository_that_was_opened() {
             .expect("read the scratch worktree's HEAD"),
         fixture.rev_parse("main"),
         "the scratch should be checked out at the opened repository's own 'main'"
+    );
+    assert!(
+        scratch.path().is_dir(),
+        "the scratch worktree should exist on disk at {}",
+        scratch.path().display()
+    );
+}
+
+/// A developer is hardly ever standing in the repository root, so the directory
+/// a tool hands to [`Repo::open`] is usually a subdirectory of one.
+///
+/// `Repo::open` says in as many words that this works, and until now nothing
+/// checked it: every fixture was opened at its own root, so the claim was carried
+/// by a comment. It is the kind of claim that breaks quietly, too - the path the
+/// pre-flight validated is private now, so no test can inspect it, and every
+/// consequence of getting it wrong arrives as an answer that merely looks
+/// smaller or fails somewhere else entirely.
+///
+/// So the assertions are the three things a subdirectory must not change, and
+/// none of them is about the path itself:
+///
+/// - **Where a revision points**, which has nothing to do with the directory the
+///   question was asked from.
+/// - **What counts as uncommitted**, asserted over an edit made *outside* the
+///   subdirectory: a status scoped to the cwd would report a clean tree and the
+///   caveat about work a replay cannot see would go unsaid.
+/// - **That a worktree still comes out**, since [`Repo::scratch`] is the only
+///   route to one and it is the stored subdirectory that git is asked from.
+///
+/// Verified by mutation: making `Repo::open` refuse a non-empty
+/// `rev-parse --show-prefix` fails this test, and scoping `uncommitted_files` to
+/// the cwd with a `-- .` pathspec fails it too, while the rest of the suite stays
+/// green in both cases.
+#[test]
+fn open_from_a_subdirectory_answers_for_the_whole_repository() {
+    let fixture = nested_conflict_repo();
+    let root = Repo::open(fixture.path()).expect("open the fixture repository at its root");
+
+    let nested = fixture.path().join("sub").join("nested");
+    let repo = Repo::open(&nested).expect("a subdirectory of a repository is inside one");
+
+    assert_eq!(
+        repo.resolve("left")
+            .expect("resolve a branch from the subdirectory"),
+        root.resolve("left")
+            .expect("resolve the same branch from the root"),
+        "a branch points where it points; which directory the question was asked \
+         from is no part of the answer"
+    );
+
+    // At the repository root, so the edit sits outside the subdirectory the
+    // question is being asked from.
+    fixture.write_file("shared.txt", "locally edited, never committed\n");
+
+    assert_eq!(
+        repo.uncommitted_files()
+            .expect("count uncommitted files from the subdirectory"),
+        Uncommitted::new(1),
+        "uncommitted work is uncommitted wherever it sits, so a count taken from \
+         a subdirectory has to cover the whole repository"
+    );
+
+    let scratch = repo
+        .scratch("main")
+        .expect("create a scratch worktree from the subdirectory-opened repository");
+
+    assert_eq!(
+        scratch
+            .git()
+            .rev_parse("HEAD")
+            .expect("read the scratch worktree's HEAD"),
+        fixture.rev_parse("main"),
+        "the scratch should be checked out at the opened repository's own 'main', \
+         not at anything the subdirectory implies"
     );
     assert!(
         scratch.path().is_dir(),

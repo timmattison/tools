@@ -56,6 +56,16 @@ pub struct Repo {
 impl Repo {
     /// Open the git repository containing `path`.
     ///
+    /// `path` may be any directory inside the repository, not only its root,
+    /// because the directory a tool is run in - which is the directory it hands
+    /// here - is hardly ever the root. Everything the resulting [`Repo`] answers
+    /// is about the repository rather than about that directory: a revision
+    /// resolves the same, the uncommitted count covers work sitting anywhere in
+    /// the tree, and a conflicted path is named from the repository root.
+    /// `tests/repo.rs` and `grind`'s `tests/cli.rs` pin all three, since the
+    /// validated path never leaves this type and nothing else about a
+    /// subdirectory run is visible from outside.
+    ///
     /// # Errors
     ///
     /// Returns an error if git could not be spawned, or if `path` is not inside
