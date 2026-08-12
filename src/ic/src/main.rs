@@ -3330,6 +3330,42 @@ not_a_number  1 /bin/bash
     }
 
     // =========================================================================
+    // Tests for the Mosh message
+    // =========================================================================
+
+    /// Ask for the Mosh message that `ic` prints when it refuses an image.
+    fn mosh_refusal_message() -> String {
+        let caps = TerminalCapabilities {
+            terminal_type: TerminalType::ITerm2,
+            supports_graphics: true,
+            supports_raw_mode: true,
+        };
+        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, "Image")
+            .expect_err("Mosh must be refused");
+        error.to_string()
+    }
+
+    #[test]
+    fn the_mosh_message_does_not_recommend_eternal_terminal() {
+        // Eternal Terminal drops the session when the laptop sleeps, which is
+        // the reconnect that matters here. Do not send the reader to it.
+        let message = mosh_refusal_message();
+        assert!(
+            !message.contains("Eternal Terminal"),
+            "message still recommends Eternal Terminal: {message}"
+        );
+        assert!(
+            !message.contains("et user@host"),
+            "message still recommends the et command: {message}"
+        );
+    }
+
+    #[test]
+    fn the_mosh_message_still_offers_ssh() {
+        assert!(mosh_refusal_message().contains("ssh user@host"));
+    }
+
+    // =========================================================================
     // Tests for classify_transport (the whole transport decision)
     // =========================================================================
 
