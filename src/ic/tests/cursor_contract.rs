@@ -336,6 +336,36 @@ fn assert_cursor_contract(routine: Routine, stdout: &[u8]) {
     );
 }
 
+/// Check that a byte stream asks for no cursor movement at all.
+///
+/// `--no-newline` must suppress the whole cursor contract, because video
+/// playback puts the cursor where it wants it before every frame. A stream that
+/// moves the cursor on its own scrolls the terminal once per frame.
+///
+/// # Arguments
+/// * `routine` - The display routine that wrote the stream.
+/// * `stdout` - The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the stream asks the terminal to move the cursor.
+fn assert_no_cursor_contract(routine: Routine, stdout: &[u8]) {
+    let payload_end = rfind(stdout, routine.payload_end())
+        .unwrap_or_else(|| panic!("the output of {routine:?} must close its image payload"))
+        + routine.payload_end().len();
+    let after_payload = scan_cursor_movement(&stdout[payload_end..]);
+
+    assert_eq!(
+        (after_payload.down, after_payload.up),
+        (0, 0),
+        "--no-newline must write no cursor movement after the payload"
+    );
+    assert_eq!(
+        scan_cursor_movement(stdout).net(),
+        0,
+        "--no-newline must leave the cursor where the caller put it"
+    );
+}
+
 /// Give the key list of the first Kitty graphics command in a byte stream.
 ///
 /// A Kitty graphics command is `ESC _ G <key list> ; <payload> ESC \`. The key
@@ -624,4 +654,25 @@ fn kitty_holds_the_cursor_still_while_it_draws() {
 #[test]
 fn iterm2_meets_the_cursor_contract() {
     assert_cursor_contract(Routine::Iterm2, &run_ic(Routine::Iterm2, &[]));
+}
+
+/// `--no-newline` must suppress the whole cursor contract of the Kitty routine,
+/// the same way it does for the Sixel routine.
+///
+/// The behavior already held when this test arrived, so a mutation proved that
+/// the test can fail: with the trailing advance moved out of the `no_newline`
+/// gate of `write_image_with_cursor_contract`, the tail asks for 5 rows and the
+/// whole stream nets 5 rows, and both assertions report the failure.
+#[test]
+fn no_newline_suppresses_the_cursor_contract_for_kitty() {
+    assert_no_cursor_contract(Routine::Kitty, &run_ic(Routine::Kitty, &["--no-newline"]));
+}
+
+/// `--no-newline` must suppress the whole cursor contract of the iTerm2
+/// routine, the same way it does for the Sixel routine. The same mutation as
+/// [`no_newline_suppresses_the_cursor_contract_for_kitty`] proved that this
+/// test can fail.
+#[test]
+fn no_newline_suppresses_the_cursor_contract_for_iterm2() {
+    assert_no_cursor_contract(Routine::Iterm2, &run_ic(Routine::Iterm2, &["--no-newline"]));
 }
