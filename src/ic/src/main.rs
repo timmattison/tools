@@ -2144,6 +2144,28 @@ fn comm_basename(comm: &str) -> &str {
         .unwrap_or(comm)
 }
 
+/// Finds the Zellij client processes that are attached to one Zellij session.
+///
+/// Zellij daemonizes its server, so the server reparents to PID 1 and the
+/// chain from the current process to the terminal is broken. The client
+/// process keeps that chain, so the client stands in for the current process
+/// when the transport is detected.
+///
+/// A client must belong to *this* session. A machine can run many Zellij
+/// sessions at the same time, and a client of some other session says nothing
+/// about how this session is viewed.
+///
+/// `ps_args_output` is the output of `ps -eo pid=,args=`. A client is a
+/// process whose argv[0] basename is exactly `zellij` and that has the session
+/// name as a complete argument. The forms `zellij a NAME`, `zellij attach
+/// NAME`, `zellij -s NAME`, and `zellij --session NAME` all match. The server
+/// process (`zellij --server /path/.../NAME`) does not match, because the
+/// session name is only a part of its socket path.
+fn zellij_client_pids(ps_args_output: &str, session: &str) -> Vec<Pid> {
+    let _ = (ps_args_output, session);
+    Vec::new()
+}
+
 /// The type of remote transport detected in the process tree.
 ///
 /// Used to adapt image display behavior for proxies that don't understand
@@ -3151,6 +3173,92 @@ not_a_number  1 /bin/bash
         // current PID 400 is not an ancestor of mosh-server via Case 1,
         // and in_zellij=false disables Case 2
         assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
+    }
+
+    // =========================================================================
+    // Tests for zellij_client_pids (session-scoped client discovery)
+    // =========================================================================
+
+    /// A `ps -eo pid=,args=` table with two Zellij sessions and one server.
+    const PS_ARGS_TWO_SESSIONS: &str = "\
+  51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
+  57053 zellij a ic-test
+  32269 zellij a meshtastic
+  56666 -zsh";
+
+    #[test]
+    fn zellij_client_pids_finds_the_client_of_this_session() {
+        assert_eq!(
+            zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test"),
+            vec![Pid(57053)]
+        );
+    }
+
+    #[test]
+    fn zellij_client_pids_ignores_another_sessions_client() {
+        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
+        assert!(!found.contains(&Pid(32269)));
+    }
+
+    #[test]
+    fn zellij_client_pids_ignores_the_server_of_this_session() {
+        // The server has the session name in its socket path, not as an
+        // argument of its own. It is not a client.
+        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
+        assert!(!found.contains(&Pid(51648)));
+    }
+
+    #[test]
+    fn zellij_client_pids_accepts_every_attach_form() {
+        let ps_args = "\
+  100 zellij a work
+  200 zellij attach work
+  300 zellij -s work
+  400 zellij --session work";
+        assert_eq!(
+            zellij_client_pids(ps_args, "work"),
+            vec![Pid(100), Pid(200), Pid(300), Pid(400)]
+        );
+    }
+
+    #[test]
+    fn zellij_client_pids_requires_a_whole_argument_match() {
+        // "work" must not match the session named "work-tree".
+        let ps_args = "  100 zellij a work-tree";
+        assert!(zellij_client_pids(ps_args, "work").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_requires_an_exact_program_name() {
+        // A wrapper script named "my-zellij-wrapper" is not the Zellij CLI.
+        let ps_args = "\
+  100 /usr/local/bin/my-zellij-wrapper a work
+  200 /usr/local/bin/zellij-server a work";
+        assert!(zellij_client_pids(ps_args, "work").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_is_empty_for_an_unknown_session() {
+        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "no-such-session").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_handles_empty_input() {
+        assert!(zellij_client_pids("", "ic-test").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_skips_malformed_lines() {
+        let ps_args = "\
+not_a_number zellij a work
+  100 zellij a work";
+        assert_eq!(zellij_client_pids(ps_args, "work"), vec![Pid(100)]);
+    }
+
+    #[test]
+    fn zellij_client_pids_ignores_an_empty_session_name() {
+        // ZELLIJ_SESSION_NAME is unset or empty. No client can be identified.
+        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "").is_empty());
     }
 
     // =========================================================================
