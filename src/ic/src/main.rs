@@ -2382,6 +2382,39 @@ fn classify_transport(
     RemoteTransport::None
 }
 
+/// Holds [`ClientPids`] so that its field stays private to this module. In a
+/// single-module program a private tuple field is still reachable from every
+/// other line of the file, and an invariant that the rest of the file can
+/// bypass is a comment, not a guarantee.
+mod client_pids {
+    use super::Pid;
+
+    /// A list of Zellij clients that holds at least one client.
+    ///
+    /// [`ClientPids::new`] is the only way to build one, so the empty case is
+    /// answered once instead of at every call site. The emptiness matters
+    /// because `classify_transport` asks whether *every* client of the session
+    /// is a Mosh client: `all` over an empty list answers yes, so a session
+    /// with no named client would be reported as Mosh for no reason. That
+    /// session belongs to [`super::ZellijScan::EveryClient`] instead.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ClientPids(Vec<Pid>);
+
+    impl ClientPids {
+        /// Wraps `pids`, or answers `None` when there is no client to wrap.
+        pub(crate) fn new(pids: Vec<Pid>) -> Option<Self> {
+            Some(Self(pids))
+        }
+
+        /// The clients, in the order `ps` reported them. Never empty.
+        pub(crate) fn as_slice(&self) -> &[Pid] {
+            &self.0
+        }
+    }
+}
+
+use client_pids::ClientPids;
+
 /// Which Zellij clients stand in for the current process during the search.
 ///
 /// Zellij daemonizes its server, so the chain from the current process stops
@@ -3684,6 +3717,24 @@ not_a_number zellij a work
     fn zellij_client_pids_ignores_an_empty_session_name() {
         // ZELLIJ_SESSION_NAME is unset or empty. No client can be identified.
         assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "").is_empty());
+    }
+
+    // =========================================================================
+    // Tests for ClientPids (the client list that cannot be empty)
+    // =========================================================================
+
+    #[test]
+    fn client_pids_refuses_an_empty_list() {
+        // An empty list would answer "every client is a Mosh client" for no
+        // reason, so it must not be possible to build one.
+        assert!(ClientPids::new(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn client_pids_keeps_a_non_empty_list_in_order() {
+        let clients =
+            ClientPids::new(vec![Pid(57053), Pid(32269)]).expect("a list with clients is accepted");
+        assert_eq!(clients.as_slice(), [Pid(57053), Pid(32269)]);
     }
 
     // =========================================================================
