@@ -162,6 +162,53 @@ impl TestRepo {
         path
     }
 
+    /// A bare clone of this fixture, standing on `head`.
+    ///
+    /// The one repository shape where the cheap questions and the expensive ones
+    /// part company. `git worktree add --detach HEAD` succeeds against a bare
+    /// repository, so a replay can be run in it and measured exactly as usual,
+    /// while `git status` cannot run at all — there is no working tree to take a
+    /// status of. A pre-flight that treats an informational query as fatal
+    /// therefore refuses a question it could have answered, which is a stricter
+    /// failure than the replay it was meant to guard against.
+    ///
+    /// A clone rather than `git init --bare`, so the branches and the conflict
+    /// shape are the fixture's own and the answer can be compared against the
+    /// one the same fixture gives through its working tree. It lives in a
+    /// temporary directory of its own rather than under the source's worktree,
+    /// so it neither dirties the source nor moves the numbers a caller is about
+    /// to assert on.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the temporary directory cannot be created, if either path is
+    /// not valid UTF-8, or if git fails — most likely because `head` does not
+    /// name a branch of this fixture.
+    pub fn bare_clone(&self, head: &str) -> BareRepo {
+        let dir = TempDir::new().expect("create temp dir");
+        let bare = BareRepo { dir };
+
+        self.git(&[
+            "clone",
+            "-q",
+            "--bare",
+            self.dir.path().to_str().expect("utf-8 fixture path"),
+            bare.path().to_str().expect("utf-8 bare clone path"),
+        ]);
+        // A clone copies the source's HEAD, and what makes this shape worth
+        // building is standing somewhere specific.
+        self.git_in(
+            bare.path(),
+            &["symbolic-ref", "HEAD", &format!("refs/heads/{head}")],
+        );
+        // The fixture proves its own premise: a bare HEAD that resolves is the
+        // whole point, so a `head` that names nothing fails here rather than
+        // surfacing later as a replay that could not start.
+        self.git_in(bare.path(), &["rev-parse", "HEAD^{commit}"]);
+
+        bare
+    }
+
     /// A scratch worktree of this fixture, checked out at `at`.
     ///
     /// Deliberately routed through [`Repo::open`] rather than straight at
@@ -182,6 +229,23 @@ impl TestRepo {
             .expect("a fixture is a git repository")
             .scratch(at)
             .expect("create the scratch worktree")
+    }
+}
+
+/// A bare repository — refs and objects, and no working tree at all.
+///
+/// Built by [`TestRepo::bare_clone`], and mirroring [`NotARepo`]'s shape — a
+/// `TempDir` behind a `path()` — so a consumer never has to name `tempfile`'s
+/// types or remember to keep the guard alive for the right reason.
+pub struct BareRepo {
+    dir: TempDir,
+}
+
+impl BareRepo {
+    /// The repository directory, which for a bare repository is the git
+    /// directory itself.
+    pub fn path(&self) -> &Path {
+        self.dir.path()
     }
 }
 
