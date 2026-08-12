@@ -106,6 +106,29 @@ impl Routine {
             Routine::Kitty => vec![("TERM", TERM_XTERM_KITTY), ("KITTY_WINDOW_ID", "1")],
         }
     }
+
+    /// Give the bytes that open the image payload of this routine.
+    ///
+    /// # Returns
+    /// The introducer of the image protocol.
+    fn payload_start(self) -> &'static [u8] {
+        match self {
+            Routine::Sixel => SIXEL_START,
+            Routine::Kitty => KITTY_START,
+        }
+    }
+
+    /// Give the bytes that close the image payload of this routine.
+    ///
+    /// # Returns
+    /// The terminator of the image protocol. The Kitty routine sends a large
+    /// image in more than one command, so the *last* terminator of the stream
+    /// closes the payload.
+    fn payload_end(self) -> &'static [u8] {
+        match self {
+            Routine::Sixel | Routine::Kitty => STRING_TERMINATOR,
+        }
+    }
 }
 
 /// A directory that does not exist, unique to this process.
@@ -129,7 +152,9 @@ fn unreachable_path_dir() -> String {
 /// The number of terminal rows that the test image occupies.
 ///
 /// The test invocation makes a Sixel image of 100 pixels by 100 pixels. One
-/// character cell is 20 pixels high, so the image fills 5 rows.
+/// character cell is 20 pixels high, so the image fills 5 rows. The Kitty
+/// routine and the iTerm2 routine take the size of the image in character
+/// cells, and the same test invocation asks them for 5 rows.
 const EXPECTED_ROWS: i64 = 5;
 
 /// The cursor movement that a byte stream requests, in rows.
@@ -211,6 +236,93 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// Find the last position of a byte pattern in a byte slice.
+///
+/// # Arguments
+/// * `haystack` - The byte slice to search.
+/// * `needle` - The byte pattern to look for.
+///
+/// # Returns
+/// The index of the first byte of the last match, or `None` when there is no
+/// match.
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .rposition(|window| window == needle)
+}
+
+/// Check that a byte stream keeps the cursor contract of `ic`.
+///
+/// The contract has three parts:
+///
+/// 1. The stream reserves the rows of the image before the payload and then
+///    takes them back, so an image at the bottom of the screen scrolls the
+///    terminal instead of running off it.
+/// 2. DECSC comes immediately before the payload and DECRC immediately after
+///    it, so cursor motion inside the payload cannot change the final position
+///    of the cursor.
+/// 3. The bytes after the payload move the cursor down by the row count of the
+///    image and put it at column 1.
+///
+/// # Arguments
+/// * `routine` - The display routine that wrote the stream.
+/// * `stdout` - The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the stream breaks any part of the contract.
+fn assert_cursor_contract(routine: Routine, stdout: &[u8]) {
+    let payload_start = find(stdout, routine.payload_start())
+        .unwrap_or_else(|| panic!("the output of {routine:?} must hold an image payload"));
+    let payload_end = rfind(stdout, routine.payload_end())
+        .unwrap_or_else(|| panic!("the output of {routine:?} must close its image payload"))
+        + routine.payload_end().len();
+
+    // Part 1. The reservation runs from the start of the stream to DECSC.
+    assert!(
+        payload_start >= SAVE_CURSOR.len(),
+        "the stream must save the cursor before the payload"
+    );
+    let save = payload_start - SAVE_CURSOR.len();
+    let reservation = scan_cursor_movement(&stdout[..save]);
+    assert_eq!(
+        reservation.down, EXPECTED_ROWS,
+        "the reservation must ask for {EXPECTED_ROWS} rows before the payload"
+    );
+    assert_eq!(
+        reservation.net(),
+        0,
+        "the reservation must take the rows back, so the image starts at the top of them"
+    );
+
+    // Part 2.
+    assert_eq!(
+        &stdout[save..payload_start],
+        SAVE_CURSOR,
+        "DECSC must come immediately before the payload"
+    );
+    assert!(
+        stdout.len() >= payload_end + RESTORE_CURSOR.len(),
+        "the stream must restore the cursor after the payload"
+    );
+    assert_eq!(
+        &stdout[payload_end..payload_end + RESTORE_CURSOR.len()],
+        RESTORE_CURSOR,
+        "DECRC must come immediately after the payload"
+    );
+
+    // Part 3.
+    let tail = &stdout[payload_end..];
+    assert_eq!(
+        scan_cursor_movement(tail).net(),
+        EXPECTED_ROWS,
+        "the bytes after the payload must move the cursor down {EXPECTED_ROWS} rows"
+    );
+    assert!(
+        tail.ends_with(b"\r") || tail.ends_with(b"\n"),
+        "the stream must end the line, to put the cursor at column 1"
+    );
 }
 
 /// Give the key list of the first Kitty graphics command in a byte stream.
@@ -468,6 +580,15 @@ fn auto_fit_leaves_room_for_the_file_name_and_the_prompt() {
         rows + PROMPT_ROWS <= TERMINAL_ROWS,
         "the file name row and the image take {rows} rows, and the prompt takes {PROMPT_ROWS} more, which is more than the {TERMINAL_ROWS} rows of the terminal"
     );
+}
+
+/// The Kitty stream must keep the same cursor contract as the Sixel stream. It
+/// reserves the rows of the image and takes them back, it brackets the payload
+/// with DECSC and DECRC, and it then moves the cursor down by the row count and
+/// puts it at column 1.
+#[test]
+fn kitty_meets_the_cursor_contract() {
+    assert_cursor_contract(Routine::Kitty, &run_ic(Routine::Kitty, &[]));
 }
 
 /// The Kitty graphics command must carry `C=1`, which tells the renderer not to
