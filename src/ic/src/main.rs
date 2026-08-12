@@ -53,6 +53,12 @@ const SIXEL_VERTICAL_MARGIN: f64 = 0.90;
 /// Control sequence introducer. It starts a CSI escape sequence.
 const CSI: &str = "\x1b[";
 
+/// DECSC. It saves the position of the cursor.
+const SAVE_CURSOR: &str = "\x1b7";
+
+/// DECRC. It restores the saved position of the cursor.
+const RESTORE_CURSOR: &str = "\x1b8";
+
 #[derive(Debug, Clone)]
 enum VideoControl {
     Exit,
@@ -1909,15 +1915,24 @@ fn display_image_sixel(
 
     // Output the sixel data
     let mut stdout = io::stdout().lock();
-    write!(stdout, "{}", sixel_output)?;
 
-    if !no_newline {
+    if no_newline {
+        // Video playback puts the cursor where it wants it, so write only the
+        // payload.
+        write!(stdout, "{}", sixel_output)?;
+    } else {
         // Sixel gives no contract for the position of the cursor after the
         // string terminator, so state the position instead of a guess of one
-        // newline. CUD moves the cursor down by the row count of the image and
-        // the carriage return puts it at column 1.
+        // newline.
         let (_, cell_height_px) = get_cell_pixel_dimensions();
         let rows = image_rows(resized_img.height(), cell_height_px);
+
+        // DECSC and DECRC bracket the payload, so cursor motion inside it
+        // cannot change the final position.
+        write!(stdout, "{SAVE_CURSOR}{}{RESTORE_CURSOR}", sixel_output)?;
+
+        // CUD moves the cursor down by the row count of the image and the
+        // carriage return puts it at column 1.
         write!(stdout, "{CSI}{rows}B\r")?;
     }
 
