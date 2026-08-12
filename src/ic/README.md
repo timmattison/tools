@@ -97,6 +97,33 @@ Kitty support is experimental.
 
 Inside Zellij, `ic` uses Sixel instead, since the Kitty protocol does not pass through Zellij's renderer.
 
+### Where the Cursor Ends
+
+`ic` puts the cursor at column 1 of the first row below the image. It does the
+same thing for all three display routines, and the position does not depend on
+how the renderer moves the cursor.
+
+No inline-image protocol gives a usable contract for the position of the cursor
+after an image. Sixel gives none at all, so each renderer decides for itself.
+The Kitty protocol and the iTerm2 protocol each have a flag that holds the
+cursor still, but then the caller must move it. `ic` therefore states the
+position itself. Each routine writes four parts:
+
+1. One newline for each row of the image. The reservation makes an image at the
+   bottom of the screen scroll the terminal instead of run off it.
+2. CUU, which goes back to the top of the reservation.
+3. DECSC, the image, and DECRC. The brackets make sure that cursor motion inside
+   the image cannot change the final position.
+4. CUD by the row count, and a carriage return.
+
+`-n, --no-newline` suppresses all four parts, and `ic` then writes only the
+image. Video playback uses that mode, because it puts the cursor where it wants
+it before every frame.
+
+The auto-fit size also pays for the rows that `ic` prints above the image. The
+file name row, the image, and the row that the shell prompt returns to together
+fit inside the height of the terminal.
+
 ### muxiavelli Panels
 
 Inside a [muxiavelli](https://github.com/timmattison/muxiavelli) panel, the web terminal is ttyd's xterm.js with `@xterm/addon-image`, which renders **Sixel and iTerm2's inline image protocol (IIP) only — not the Kitty graphics protocol**.
