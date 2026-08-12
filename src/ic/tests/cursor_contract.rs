@@ -41,6 +41,22 @@ const RESTORE_CURSOR: &[u8] = b"\x1b8";
 const TEST_IMAGE: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_image.png"));
 
+/// The path of the image that the tests give to `ic` as an argument.
+///
+/// The file is in the repository and no test writes to it, so two concurrent
+/// runs of this file cannot disturb each other.
+const TEST_IMAGE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_image.png");
+
+/// The number of rows of the terminal that `ic` sees in these tests.
+///
+/// `get_terminal_size` falls back to 80 columns by 24 rows when it cannot read
+/// the size of the terminal. The tests give `ic` a pipe for stdout, so `ic`
+/// always uses this fallback.
+const TERMINAL_ROWS: i64 = 24;
+
+/// The row that the shell prompt returns to below the image.
+const PROMPT_ROWS: i64 = 1;
+
 /// The terminal type for the child process.
 const TEST_TERM: &str = "xterm-256color";
 
@@ -149,23 +165,21 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Run `ic` through the Sixel display routine and give back its stdout.
+/// Make a command that runs `ic` through the Sixel display routine.
 ///
 /// `MUXIAVELLI` selects the Sixel routine. `ZELLIJ` selects the same routine
 /// but it also turns on a process tree heuristic that reads the real process
 /// list of the host, which makes the result depend on the machine.
 ///
 /// # Arguments
-/// * `extra_args` - More command line arguments for `ic`, after the arguments
-///   that fix the size of the image.
+/// * `args` - The full command line for `ic`.
 ///
-/// # Panics
-/// Panics when the child process does not start, does not accept the image, or
-/// exits with a failure.
-fn run_ic_sixel(extra_args: &[&str]) -> Vec<u8> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ic"))
-        .args(["--stdin", "--width", "10", "--height", "5"])
-        .args(extra_args)
+/// # Returns
+/// A command with the environment and the pipes of the tests already set.
+fn ic_sixel_command(args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
+    command
+        .args(args)
         .env_clear()
         .env("PATH", unreachable_path_dir())
         .env("TERM", TEST_TERM)
@@ -173,16 +187,21 @@ fn run_ic_sixel(extra_args: &[&str]) -> Vec<u8> {
         .env("MUXIAVELLI_IMAGE_PROTOCOLS", "sixel")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to start ic");
+        .stderr(Stdio::piped());
+    command
+}
 
-    let mut stdin = child.stdin.take().expect("ic has no stdin pipe");
-    stdin
-        .write_all(TEST_IMAGE)
-        .expect("failed to send the image to ic");
-    drop(stdin);
-
+/// Wait for `ic` to exit and give back its stdout.
+///
+/// # Arguments
+/// * `child` - The child process to wait for.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the wait fails or when `ic` exits with a failure.
+fn wait_for_stdout(child: process::Child) -> Vec<u8> {
     let output = child.wait_with_output().expect("failed to wait for ic");
     assert!(
         output.status.success(),
@@ -192,6 +211,54 @@ fn run_ic_sixel(extra_args: &[&str]) -> Vec<u8> {
     );
 
     output.stdout
+}
+
+/// Run `ic` through the Sixel display routine, with the image on stdin, and
+/// give back its stdout.
+///
+/// # Arguments
+/// * `extra_args` - More command line arguments for `ic`, after the arguments
+///   that fix the size of the image.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the child process does not start, does not accept the image, or
+/// exits with a failure.
+fn run_ic_sixel(extra_args: &[&str]) -> Vec<u8> {
+    let mut args: Vec<&str> = vec!["--stdin", "--width", "10", "--height", "5"];
+    args.extend_from_slice(extra_args);
+
+    let mut child = ic_sixel_command(&args).spawn().expect("failed to start ic");
+
+    let mut stdin = child.stdin.take().expect("ic has no stdin pipe");
+    stdin
+        .write_all(TEST_IMAGE)
+        .expect("failed to send the image to ic");
+    drop(stdin);
+
+    wait_for_stdout(child)
+}
+
+/// Run `ic` on an image file through the Sixel display routine, with no size
+/// arguments, and give back its stdout. The missing size arguments select the
+/// auto-fit path.
+///
+/// # Arguments
+/// * `path` - The path of the image file.
+///
+/// # Returns
+/// The bytes that `ic` wrote to stdout.
+///
+/// # Panics
+/// Panics when the child process does not start or exits with a failure.
+fn run_ic_sixel_auto_fit(path: &str) -> Vec<u8> {
+    let child = ic_sixel_command(&[path])
+        .spawn()
+        .expect("failed to start ic");
+
+    wait_for_stdout(child)
 }
 
 /// The bytes after the Sixel string terminator must move the cursor down by the
@@ -302,5 +369,23 @@ fn sixel_reserves_the_rows_before_it_draws() {
         movement.net(),
         0,
         "the reservation must take the rows back, so the image starts at the top of them"
+    );
+}
+
+/// The file name row, the image and the prompt must fit inside the height of
+/// the terminal. `ic` prints the file name above the image, so the auto-fit
+/// path must pay for that row.
+///
+/// The net movement of the whole stream is the number of rows that the terminal
+/// advances: the header rows plus the image rows, because the reservation and
+/// the cursor-up cancel. The prompt then takes one more row.
+#[test]
+fn auto_fit_leaves_room_for_the_file_name_and_the_prompt() {
+    let stdout = run_ic_sixel_auto_fit(TEST_IMAGE_PATH);
+
+    let rows = scan_cursor_movement(&stdout).net();
+    assert!(
+        rows + PROMPT_ROWS <= TERMINAL_ROWS,
+        "the file name row and the image take {rows} rows, and the prompt takes {PROMPT_ROWS} more, which is more than the {TERMINAL_ROWS} rows of the terminal"
     );
 }
