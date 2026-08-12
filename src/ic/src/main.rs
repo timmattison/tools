@@ -50,6 +50,9 @@ const SIXEL_HORIZONTAL_MARGIN: f64 = 0.95;
 /// Leaves more vertical margin as some terminals have status bars or prompts.
 const SIXEL_VERTICAL_MARGIN: f64 = 0.90;
 
+/// Control sequence introducer. It starts a CSI escape sequence.
+const CSI: &str = "\x1b[";
+
 #[derive(Debug, Clone)]
 enum VideoControl {
     Exit,
@@ -1819,6 +1822,24 @@ fn calculate_sixel_dimensions(
     }
 }
 
+/// Calculate the number of terminal rows that an image fills.
+///
+/// The image height in pixels divides by the height of one character cell, and
+/// the result rounds up, because a partial row still uses a full row.
+///
+/// # Arguments
+/// * `height_px` - The height of the image in pixels.
+/// * `cell_height_px` - The height of one character cell in pixels.
+///
+/// # Returns
+/// The row count. The result is always 1 or more, so the caller never asks the
+/// terminal for a movement of zero rows. A `cell_height_px` of 0 counts as 1,
+/// because `get_cell_pixel_dimensions` divides the terminal pixel height by the
+/// row count and can give 0.
+fn image_rows(height_px: u32, cell_height_px: u32) -> u32 {
+    height_px.div_ceil(cell_height_px.max(1)).max(1)
+}
+
 /// Sixel display for terminals that support Sixel graphics (e.g., Zellij passthrough).
 ///
 /// # Arguments
@@ -1889,9 +1910,17 @@ fn display_image_sixel(
     // Output the sixel data
     let mut stdout = io::stdout().lock();
     write!(stdout, "{}", sixel_output)?;
+
     if !no_newline {
-        writeln!(stdout)?;
+        // Sixel gives no contract for the position of the cursor after the
+        // string terminator, so state the position instead of a guess of one
+        // newline. CUD moves the cursor down by the row count of the image and
+        // the carriage return puts it at column 1.
+        let (_, cell_height_px) = get_cell_pixel_dimensions();
+        let rows = image_rows(resized_img.height(), cell_height_px);
+        write!(stdout, "{CSI}{rows}B\r")?;
     }
+
     stdout.flush().context("Failed to flush output")?;
 
     Ok(())
@@ -4080,5 +4109,38 @@ not_a_number zellij a work
         // The running test binary is a regular file that is guaranteed to exist.
         let real_file = std::env::current_exe().expect("current exe path");
         assert!(ensure_file_exists(&real_file).is_ok());
+    }
+
+    // =========================================================================
+    // Tests for image_rows
+    // =========================================================================
+
+    #[test]
+    fn image_rows_divides_an_exact_multiple() {
+        assert_eq!(image_rows(100, 20), 5);
+        assert_eq!(image_rows(20, 20), 1);
+    }
+
+    #[test]
+    fn image_rows_rounds_up_a_partial_row() {
+        // A partial row still uses a full row.
+        assert_eq!(image_rows(101, 20), 6);
+        assert_eq!(image_rows(21, 20), 2);
+        assert_eq!(image_rows(1, 20), 1);
+    }
+
+    #[test]
+    fn image_rows_never_gives_zero() {
+        // A movement of zero rows means one row to a terminal, so the row count
+        // must stay at 1 or more.
+        assert_eq!(image_rows(0, 20), 1);
+        assert_eq!(image_rows(0, 0), 1);
+    }
+
+    #[test]
+    fn image_rows_survives_a_zero_cell_height() {
+        // get_cell_pixel_dimensions divides the terminal pixel height by the row
+        // count, so it can give 0. A cell height of 0 counts as 1 pixel.
+        assert_eq!(image_rows(100, 0), 100);
     }
 }
