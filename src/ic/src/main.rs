@@ -1580,7 +1580,6 @@ fn display_image(
 
     validate_terminal_for_graphics(&terminal_caps, &transport, "Image")?;
 
-    let under_remote_proxy = transport == RemoteTransport::EternalTerminal;
     // Always use character-based sizing (fit mode), but respect user-specified dimensions if provided
     let (target_width, target_height) = if args.width.is_some() || args.height.is_some() {
         // Use user-specified dimensions but still use character-based sizing
@@ -1634,9 +1633,10 @@ fn display_image(
     // types so a new variant can never silently fall through to the wrong
     // protocol. Use already-detected terminal_caps to avoid redundant env lookups.
     //
-    // The Sixel routine (Zellij and muxiavelli-Sixel) does not need proxy
-    // cursor-sync: those renderers manage their own cursor tracking, so the
-    // image protocol never reaches the remote transport's virtual terminal.
+    // No routine needs a special path for a remote proxy. Every routine holds
+    // the renderer still and then states the position of the cursor itself, so
+    // a remote proxy tracks the cursor with the same newlines, CUU and CUD that
+    // a local terminal does.
     match display_routine_for(&terminal_caps.terminal_type) {
         DisplayRoutine::Sixel => {
             display_image_sixel(&img, scaled_width, scaled_height, args, no_newline)
@@ -1644,14 +1644,9 @@ fn display_image(
         DisplayRoutine::Kitty => {
             display_image_kitty(&img, scaled_width, scaled_height, args, no_newline)
         }
-        DisplayRoutine::Iterm2 => display_image_iterm2(
-            &img,
-            scaled_width,
-            scaled_height,
-            args,
-            under_remote_proxy,
-            no_newline,
-        ),
+        DisplayRoutine::Iterm2 => {
+            display_image_iterm2(&img, scaled_width, scaled_height, args, no_newline)
+        }
     }
 }
 
@@ -2139,7 +2134,6 @@ fn display_image_iterm2(
     width: Option<u32>,
     height: Option<u32>,
     args: &Args,
-    under_remote_proxy: bool,
     no_newline: bool,
 ) -> Result<()> {
     // Calculate aspect-corrected display dimensions in terminal cells, then use them
@@ -2173,10 +2167,11 @@ fn display_image_iterm2(
 
     print_iterm2_image(
         &encoded,
+        img.width(),
+        img.height(),
         display_width,
         display_height,
         no_newline,
-        under_remote_proxy,
     )
 }
 
@@ -2891,68 +2886,62 @@ fn print_kitty_image(
     Ok(())
 }
 
-/// Optimized iTerm2 image printing with reduced protocol overhead
+/// Write an image with the iTerm2 inline image protocol.
+///
+/// The command is `ESC ] 1337 ; File = <arguments> : <base64 data> BEL`.
+///
+/// The routine holds the cursor still with `doNotMoveCursor=1` and then states
+/// the position of the cursor itself through
+/// [`write_image_with_cursor_contract`].
+///
+/// # Arguments
+/// * `base64_data` - The image, in base64.
+/// * `img_width_px` - The width of the image in pixels.
+/// * `img_height_px` - The height of the image in pixels.
+/// * `width` - The width that `ic` asks for, in character cells.
+/// * `height` - The height that `ic` asks for, in character cells.
+/// * `no_newline` - True when the caller controls the position of the cursor.
+///
+/// # Returns
+/// An error when a write to stdout fails.
 fn print_iterm2_image(
     base64_data: &str,
+    img_width_px: u32,
+    img_height_px: u32,
     width: Option<u32>,
     height: Option<u32>,
     no_newline: bool,
-    under_remote_proxy: bool,
 ) -> Result<()> {
     let mut stdout = io::stdout().lock();
 
-    // Under a remote proxy (e.g. Eternal Terminal), the proxy's virtual terminal
-    // doesn't understand the iTerm2 image protocol, so it can't track cursor
-    // movement caused by image rendering. We synchronize by:
-    //   1. Pre-filling blank lines so the proxy allocates screen space
-    //   2. Moving the cursor back up (both proxy and client process this)
-    //   3. Rendering the image with doNotMoveCursor=1
-    //   4. Moving the cursor back down with CUD (both process this)
-    // This keeps both terminals' cursor positions in sync.
-    // In video mode (no_newline), skip proxy cursor sync — the caller handles
-    // cursor positioning explicitly with \x1b[row;colH and \x1b[J.
-    let proxy_rows = if under_remote_proxy && !no_newline {
-        let rows = height.unwrap_or(1);
-        for _ in 0..rows {
-            writeln!(stdout)?;
-        }
-        write!(stdout, "\x1b[{}A", rows)?;
-        rows
+    let contract = if no_newline {
+        CursorContract::CallerManaged
     } else {
-        0
+        let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
+        CursorContract::BelowImage {
+            rows: image_rows_in_cells(
+                img_width_px,
+                img_height_px,
+                width,
+                height,
+                cell_width_px,
+                cell_height_px,
+            ),
+        }
     };
 
-    // iTerm2 inline image protocol
-    // ESC ] 1337 ; File = [arguments] : base64_data BEL
-    write!(stdout, "\x1b]1337;File=inline=1")?;
+    // The width and the height are in character cells, so they carry no `px`
+    // suffix. `doNotMoveCursor=1` tells iTerm2 not to move the cursor, because
+    // this routine states the position of the cursor itself.
+    let width_argument = width.map_or_else(String::new, |w| format!(";width={w}"));
+    let height_argument = height.map_or_else(String::new, |h| format!(";height={h}"));
 
-    // Add width and height in character units (without 'px' suffix)
-    if let Some(w) = width {
-        write!(stdout, ";width={}", w)?;
-    }
-    if let Some(h) = height {
-        write!(stdout, ";height={}", h)?;
-    }
-
-    // Preserve aspect ratio when fitting to terminal
-    write!(stdout, ";preserveAspectRatio=1")?;
-
-    // Don't move cursor after image to prevent scrollback accumulation
-    write!(stdout, ";doNotMoveCursor=1")?;
-
-    write!(stdout, ":{}\x07", base64_data)?;
-
-    if under_remote_proxy && !no_newline {
-        // Move cursor down past the image area using CUD (Cursor Down).
-        // Both the proxy and local terminal process this identically.
-        // NOTE: This intentionally overrides `no_newline`. The proxy's virtual
-        // terminal needs explicit cursor advancement to stay in sync with the
-        // real terminal — without it, subsequent output overwrites the image.
-        write!(stdout, "\x1b[{}B", proxy_rows)?;
-        writeln!(stdout)?;
-    } else if !no_newline {
-        writeln!(stdout)?;
-    }
+    write_image_with_cursor_contract(&mut stdout, contract, |out| {
+        write!(
+            out,
+            "\x1b]1337;File=inline=1{width_argument}{height_argument};preserveAspectRatio=1;doNotMoveCursor=1:{base64_data}\x07"
+        )
+    })?;
 
     stdout.flush().context("Failed to flush output")?;
     Ok(())
