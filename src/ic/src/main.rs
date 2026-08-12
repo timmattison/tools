@@ -1937,6 +1937,51 @@ fn calculate_sixel_dimensions(
     }
 }
 
+/// Give the size in pixels that a Sixel image can occupy.
+///
+/// The budget comes from the first source that has an answer. The terminal
+/// reports its size in pixels, and a margin of that size keeps the image off
+/// the edge of the screen. If the terminal reports no pixel size, the budget in
+/// character cells that the caller gives becomes the answer. If the caller
+/// gives no budget, a default size becomes the answer.
+///
+/// # Arguments
+/// * `terminal_pixel_size` - The width and the height of the terminal in
+///   pixels, when the terminal reports them.
+/// * `cell_cols` - The width of the budget of the caller in character cells.
+/// * `cell_rows` - The height of the budget of the caller in character cells.
+/// * `cell_width_px` - The width of one character cell in pixels.
+/// * `cell_height_px` - The height of one character cell in pixels.
+///
+/// # Returns
+/// The width and the height of the budget in pixels.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "pixel dimensions are always positive and fit in u32"
+)]
+fn sixel_pixel_budget(
+    terminal_pixel_size: Option<(u32, u32)>,
+    cell_cols: Option<u32>,
+    cell_rows: Option<u32>,
+    cell_width_px: u32,
+    cell_height_px: u32,
+) -> (u32, u32) {
+    if let Some((px_w, px_h)) = terminal_pixel_size {
+        // Leave some margin to avoid overflow
+        (
+            (f64::from(px_w) * SIXEL_HORIZONTAL_MARGIN) as u32,
+            (f64::from(px_h) * SIXEL_VERTICAL_MARGIN) as u32,
+        )
+    } else if let (Some(cols), Some(rows)) = (cell_cols, cell_rows) {
+        // Fall back to the budget of the caller in character cells
+        (cols * cell_width_px, rows * cell_height_px)
+    } else {
+        // Default to reasonable size when no size info available
+        (DEFAULT_SIXEL_WIDTH_PX, DEFAULT_SIXEL_HEIGHT_PX)
+    }
+}
+
 /// Calculate the number of terminal rows that an image fills.
 ///
 /// The image height in pixels divides by the height of one character cell, and
@@ -2148,11 +2193,6 @@ where
 /// * `fallback_cols` - Fallback terminal width in character cells (used if pixel size unavailable)
 /// * `fallback_rows` - Fallback terminal height in character cells (used if pixel size unavailable)
 /// * `args` - Command line arguments
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "pixel dimensions are always positive and fit in u32"
-)]
 fn display_image_sixel(
     img: &DynamicImage,
     fallback_cols: Option<u32>,
@@ -2160,24 +2200,17 @@ fn display_image_sixel(
     args: &Args,
     no_newline: bool,
 ) -> Result<()> {
-    // Try to get actual terminal pixel dimensions, with fallbacks
-    let (target_pixel_width, target_pixel_height) =
-        if let Some((px_w, px_h)) = get_terminal_pixel_size() {
-            // Leave some margin to avoid overflow
-            (
-                (px_w as f64 * SIXEL_HORIZONTAL_MARGIN) as u32,
-                (px_h as f64 * SIXEL_VERTICAL_MARGIN) as u32,
-            )
-        } else if let (Some(cols), Some(rows)) = (fallback_cols, fallback_rows) {
-            // Fall back to character cell estimates using typical cell dimensions
-            (
-                cols * ESTIMATED_CELL_WIDTH_PX,
-                rows * ESTIMATED_CELL_HEIGHT_PX,
-            )
-        } else {
-            // Default to reasonable size when no size info available
-            (DEFAULT_SIXEL_WIDTH_PX, DEFAULT_SIXEL_HEIGHT_PX)
-        };
+    // The cell size comes from the terminal when it reports a pixel size, and
+    // from the estimates when it does not.
+    let (cell_width_px, cell_height_px) = get_cell_pixel_dimensions();
+
+    let (target_pixel_width, target_pixel_height) = sixel_pixel_budget(
+        get_terminal_pixel_size(),
+        fallback_cols,
+        fallback_rows,
+        cell_width_px,
+        cell_height_px,
+    );
 
     // Calculate dimensions that preserve aspect ratio
     let (final_width, final_height) = calculate_sixel_dimensions(
@@ -2212,7 +2245,6 @@ fn display_image_sixel(
     let mut stdout = io::stdout().lock();
 
     let contract = CursorContract::below_image(no_newline, || {
-        let (_, cell_height_px) = get_cell_pixel_dimensions();
         image_rows(resized_img.height(), cell_height_px)
     });
 
@@ -3190,6 +3222,179 @@ mod tests {
         // w = 100, h = 100 / infinity = 0, clamped to 1
         let result = calculate_sixel_dimensions(100, 0, 100, 100, true);
         assert_eq!(result.1, 1); // Height should be clamped to 1
+    }
+
+    // =========================================================================
+    // Tests for sixel_pixel_budget
+    // =========================================================================
+
+    /// The width of the terminal in pixels that the budget tests use. Over 80
+    /// columns it gives cells of 12 pixels, because 1000 / 80 is 12.5.
+    const TEST_TERM_WIDTH_PX: u32 = 1000;
+
+    /// The height of the terminal in pixels that the budget tests use. Over 24
+    /// rows it gives cells of 47 pixels, because 1150 / 24 is 47.9.
+    const TEST_TERM_HEIGHT_PX: u32 = 1150;
+
+    /// The width of one character cell of the terminal in the budget tests.
+    const TEST_TERM_CELL_WIDTH_PX: u32 = 12;
+
+    /// The height of one character cell of the terminal in the budget tests.
+    const TEST_TERM_CELL_HEIGHT_PX: u32 = 47;
+
+    /// The width that the margin gives, which is 1000 * 0.95.
+    const TEST_MARGIN_WIDTH_PX: u32 = 950;
+
+    /// The height that the margin gives, which is 1150 * 0.90.
+    const TEST_MARGIN_HEIGHT_PX: u32 = 1035;
+
+    /// Call `sixel_pixel_budget` with the terminal of the budget tests.
+    fn budget_with_cells(cols: Option<u32>, rows: Option<u32>) -> (u32, u32) {
+        sixel_pixel_budget(
+            Some((TEST_TERM_WIDTH_PX, TEST_TERM_HEIGHT_PX)),
+            cols,
+            rows,
+            TEST_TERM_CELL_WIDTH_PX,
+            TEST_TERM_CELL_HEIGHT_PX,
+        )
+    }
+
+    #[test]
+    fn sixel_pixel_budget_holds_the_image_inside_the_row_budget() {
+        // The terminal has 24 rows of 47 pixels, so the margin gives 1035
+        // pixels, which is 23 rows. One header row, 23 image rows and one
+        // prompt row are 25 rows in a terminal of 24. The caller therefore
+        // gives the image 22 rows, which is 1034 pixels, and that budget must
+        // win over the margin.
+        let (_, height) = budget_with_cells(None, Some(22));
+        assert_eq!(height, 1034);
+    }
+
+    #[test]
+    fn sixel_pixel_budget_holds_the_image_inside_the_column_budget() {
+        // The terminal has 80 columns of 12 pixels, so the margin gives 950
+        // pixels. The caller keeps 2 columns for the chrome of the terminal and
+        // gives the image 78 columns, which is 936 pixels.
+        let (width, _) = budget_with_cells(Some(78), None);
+        assert_eq!(width, 936);
+    }
+
+    #[test]
+    fn sixel_pixel_budget_keeps_the_margin_when_the_cell_budget_is_larger() {
+        // The margin keeps the image off the edge of the screen. A cell budget
+        // larger than the screen must not push the image past that edge.
+        assert_eq!(
+            budget_with_cells(Some(200), Some(100)),
+            (TEST_MARGIN_WIDTH_PX, TEST_MARGIN_HEIGHT_PX)
+        );
+    }
+
+    #[test]
+    fn sixel_pixel_budget_keeps_the_margin_on_an_axis_with_no_cell_budget() {
+        // The user gives only --width, so there is no budget for the rows.
+        assert_eq!(
+            budget_with_cells(Some(20), None),
+            (240, TEST_MARGIN_HEIGHT_PX)
+        );
+        // The user gives only --height, so there is no budget for the columns.
+        assert_eq!(
+            budget_with_cells(None, Some(10)),
+            (TEST_MARGIN_WIDTH_PX, 470)
+        );
+        // Neither axis has a budget, so the margin stands on both.
+        assert_eq!(
+            budget_with_cells(None, None),
+            (TEST_MARGIN_WIDTH_PX, TEST_MARGIN_HEIGHT_PX)
+        );
+    }
+
+    #[test]
+    fn sixel_pixel_budget_uses_the_cell_budget_without_a_pixel_size() {
+        // Zellij and ttyd report no pixel size, so the cells give the budget.
+        assert_eq!(
+            sixel_pixel_budget(
+                None,
+                Some(80),
+                Some(24),
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            (800, 480)
+        );
+    }
+
+    #[test]
+    fn sixel_pixel_budget_falls_back_to_the_default_size() {
+        // Without a pixel size and without both axes of the cell budget there
+        // is nothing to compute a size from.
+        let default_size = (DEFAULT_SIXEL_WIDTH_PX, DEFAULT_SIXEL_HEIGHT_PX);
+        assert_eq!(
+            sixel_pixel_budget(
+                None,
+                Some(80),
+                None,
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            default_size
+        );
+        assert_eq!(
+            sixel_pixel_budget(
+                None,
+                None,
+                Some(24),
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            default_size
+        );
+        assert_eq!(
+            sixel_pixel_budget(None, None, None, TEST_CELL_WIDTH_PX, TEST_CELL_HEIGHT_PX),
+            default_size
+        );
+    }
+
+    #[test]
+    fn sixel_pixel_budget_never_gives_an_axis_of_zero() {
+        // A budget of zero pixels asks the encoder for an image of no size, so
+        // each axis keeps a floor of one pixel.
+        assert_eq!(budget_with_cells(Some(0), Some(0)), (1, 1));
+        assert_eq!(
+            sixel_pixel_budget(
+                Some((TEST_TERM_WIDTH_PX, TEST_TERM_HEIGHT_PX)),
+                Some(80),
+                Some(24),
+                0,
+                0
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            sixel_pixel_budget(
+                None,
+                Some(0),
+                Some(0),
+                TEST_CELL_WIDTH_PX,
+                TEST_CELL_HEIGHT_PX
+            ),
+            (1, 1)
+        );
+        // A terminal of one pixel gives a margin of less than one pixel.
+        assert_eq!(sixel_pixel_budget(Some((1, 1)), None, None, 1, 1), (1, 1));
+    }
+
+    #[test]
+    fn sixel_pixel_budget_survives_a_cell_budget_that_overflows() {
+        // A terminal that reports an absurd size must not panic the tool. The
+        // product saturates, so the margin wins.
+        assert_eq!(
+            budget_with_cells(Some(u32::MAX), Some(u32::MAX)),
+            (TEST_MARGIN_WIDTH_PX, TEST_MARGIN_HEIGHT_PX)
+        );
+        assert_eq!(
+            sixel_pixel_budget(None, Some(u32::MAX), Some(u32::MAX), u32::MAX, u32::MAX),
+            (u32::MAX, u32::MAX)
+        );
     }
 
     // =========================================================================
