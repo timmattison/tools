@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 
 use gitscratch::testing::conflicting_repo;
-use gitscratch::{Conflicts, Files, Hunks, NoInheritedRepository, Scratch};
+use gitscratch::{Conflicts, Files, Hunks, NoInheritedRepository, Repo, Scratch};
 
 /// Replay `branch` onto `onto` the way a consumer does: check it out detached
 /// in the scratch worktree, then rebase.
@@ -162,7 +162,7 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
     // Scoped so the scratch is torn down before the refs are re-read: teardown
     // is part of what must not move a branch.
     let conflicts = {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         // `right` onto `left` is the replay that genuinely conflicts, and the
         // replayed range is what `rebase.updateRefs` would rewrite.
@@ -200,7 +200,7 @@ fn works_when_the_branches_are_checked_out_in_other_worktrees() {
     let _left = repo.add_worktree("left");
     let _right = repo.add_worktree("right");
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
     replay(&scratch, "left", "main");
     let conflicts = replay(&scratch, "right", "left");
 
@@ -253,7 +253,7 @@ fn never_disturbs_other_worktrees_whose_directories_are_temporarily_missing() {
     // and does not do, so the drop must have run before anything below is
     // asserted. Do not flatten this block away.
     {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         replay(&scratch, "right", "left");
     }
@@ -434,7 +434,7 @@ fn never_records_a_rerere_preimage_even_when_rerere_is_enabled() {
     // the real repository, so the drop must have run before the cache is
     // inspected. Do not flatten this block away.
     let conflicts = {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         // `right` onto `left` is the replay that genuinely conflicts, and a
         // conflict is the only thing rerere ever has to record.
@@ -569,7 +569,7 @@ fn never_fires_a_hook_from_the_developer_s_repository() {
     // so the drop must have run before the sentinels are inspected. Do not
     // flatten this block away.
     let conflicts = {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         // `right` onto `left` genuinely conflicts, so the rebase halts, resolves
         // and continues - several times more hook-triggering machinery than a
@@ -701,7 +701,7 @@ fn never_touches_the_real_working_tree_or_index() {
     // failure that would eat the developer's work. The drop must have run
     // before anything below is read. Do not flatten this block away.
     let conflicts = {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         // `right` onto `left` genuinely conflicts, so the replay checks out,
         // merges, writes conflict markers and stages them - the full set of
@@ -897,7 +897,7 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
     // Scoped on purpose: `Drop` is the entire subject of this test, so it must
     // have run before anything is asserted. Do not flatten these blocks away.
     {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
 
         // Control: prove the harness really does register a worktree in the
         // real repository while the `Scratch` is alive. Without it, a `Scratch`
@@ -923,7 +923,7 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
     assert_nothing_registered("a clean replay");
 
     {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         // `right` onto `left` genuinely conflicts, so this scratch halts,
         // resolves and continues a rebase before being dropped - it reaches
@@ -951,7 +951,7 @@ fn never_leaves_a_scratch_worktree_registered_in_the_real_repository() {
     assert_nothing_registered("a replay that had to resolve a conflict");
 
     {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         let git = scratch.git();
         git.run(&["checkout", "-q", "--detach", "right"])
             .expect("check out the branch detached in the scratch worktree");
@@ -1041,7 +1041,7 @@ fn replays_without_hanging_or_failing_when_commit_signing_is_enabled() {
     /// test. So this is a local, non-panicking twin. Do not merge the two; the
     /// other tests want the panic.
     fn replay_under_signing(repo: &Path) -> anyhow::Result<Conflicts> {
-        let scratch = Scratch::create(repo, "main")?;
+        let scratch = Repo::open(repo)?.scratch("main")?;
 
         let git = scratch.git();
         git.run(&["checkout", "-q", "--detach", "left"])?;

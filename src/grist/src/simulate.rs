@@ -22,10 +22,10 @@
 //! the ranking on top.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
-use gitscratch::{BranchName, Conflicts, Git, Scratch};
+use gitscratch::{BranchName, Conflicts, Git, Repo, Scratch};
 
 use crate::metrics::OrderingScore;
 use crate::plan::{ordering_count, permutations};
@@ -76,20 +76,34 @@ pub fn orderings_to_simulate(branches: &[BranchName]) -> Result<usize> {
 
 /// Measures what a candidate ordering would cost to carry out for real.
 pub struct Simulator {
-    repo: PathBuf,
+    repo: Repo,
     base: String,
     progress: Option<ProgressListener>,
 }
 
 impl Simulator {
-    /// Simulate against `repo`, landing branches on top of `base`.
-    #[must_use]
-    pub fn new(repo: impl Into<PathBuf>, base: impl Into<String>) -> Self {
-        Self {
-            repo: repo.into(),
+    /// Simulate against the repository containing `repo`, landing branches on
+    /// top of `base`.
+    ///
+    /// Opening the repository is `gitscratch`'s pre-flight, and it happens here,
+    /// in the constructor, rather than at the first replay. That is what makes
+    /// "you are not in a repository" answerable *before* a caller has announced
+    /// a run: left to the first replay, the answer arrives as git's own
+    /// complaint from inside `worktree add`, which names `.git` rather than the
+    /// directory the user pointed at and reads as a simulation that fell over
+    /// rather than a bad argument. A `Simulator` that exists is a `Simulator`
+    /// with somewhere to run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if git could not be spawned, or if `repo` is not inside
+    /// a git repository; the message names the directory.
+    pub fn new(repo: impl AsRef<Path>, base: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            repo: Repo::open(repo.as_ref())?,
             base: base.into(),
             progress: None,
-        }
+        })
     }
 
     /// Report each replay step to `listener` as it happens.
@@ -106,12 +120,6 @@ impl Simulator {
         }
     }
 
-    /// The repository being simulated against.
-    #[must_use]
-    pub fn repo(&self) -> &Path {
-        &self.repo
-    }
-
     /// The base ref that branches land on top of.
     #[must_use]
     pub fn base(&self) -> &str {
@@ -126,7 +134,7 @@ impl Simulator {
     /// created, a branch in `order` does not resolve, or a rebase reaches a
     /// state the resolution loop cannot drive forward.
     pub fn score(&self, order: &[BranchName]) -> Result<OrderingScore> {
-        let scratch = Scratch::create(&self.repo, &self.base)?;
+        let scratch = self.repo.scratch(&self.base)?;
         let mut simulated_main = scratch.git().rev_parse(&self.base)?;
         let mut total = Conflicts::default();
 
@@ -153,7 +161,7 @@ impl Simulator {
     pub fn evaluate(&self, branches: &[BranchName]) -> Result<Vec<OrderingScore>> {
         orderings_to_simulate(branches)?;
 
-        let scratch = Scratch::create(&self.repo, &self.base)?;
+        let scratch = self.repo.scratch(&self.base)?;
         let base_commit = scratch.git().rev_parse(&self.base)?;
 
         let mut memo: HashMap<Vec<BranchName>, (String, Conflicts)> = HashMap::new();

@@ -32,7 +32,11 @@ fn main() -> Result<()> {
     let repo = std::env::current_dir().context("could not determine the current directory")?;
     let branches: Vec<BranchName> = args.branches.iter().map(BranchName::new).collect();
 
-    let mut simulator = Simulator::new(&repo, &args.onto);
+    // Before the announcement below, because a run that cannot start must not be
+    // advertised. Building the simulator runs `gitscratch`'s pre-flight, so
+    // somewhere outside every repository is refused here, by name, rather than
+    // arriving later as git's complaint from inside `worktree add`.
+    let mut simulator = Simulator::new(&repo, &args.onto)?;
     if !args.quiet {
         // Ask the library what the run costs before announcing one: it is the
         // same check `evaluate` makes, so a list grist will not simulate is

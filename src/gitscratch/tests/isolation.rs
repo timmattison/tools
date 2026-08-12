@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use gitscratch::testing::{conflicting_repo, not_a_repository, TestRepo};
-use gitscratch::{Files, Scratch};
+use gitscratch::Files;
 
 /// The test re-executed as the child, by exact name.
 ///
@@ -43,8 +43,9 @@ const ONE_TEST_PASSED: &str = "1 passed";
 /// the fixtures build — and re-executed by the tests below with a leaked git
 /// environment, where it is the assertion. All three spawn sites are covered in
 /// one pass because a leak reaches all three at once: [`TestRepo`]'s builder,
-/// the [`not_a_repository`] probe, and [`Scratch`]'s runner, which is the only
-/// way a `Git` is handed out.
+/// the [`not_a_repository`] probe, and the crate's own `Git` — which
+/// `TestRepo::scratch` reaches twice over, first through `Repo::open`'s
+/// pre-flight and then through the `Scratch` it hands back.
 #[test]
 fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
     let repo = conflicting_repo();
@@ -60,7 +61,7 @@ fn fixtures_and_replays_stay_inside_their_own_temporary_directories() {
         "the fixture's own branch, not whichever one the environment names"
     );
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
     scratch
         .git()
         .run(&["checkout", "-q", "--detach", "right"])

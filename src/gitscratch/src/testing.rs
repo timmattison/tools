@@ -18,6 +18,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use crate::git::NoInheritedRepository;
+use crate::repo::Repo;
+use crate::scratch::Scratch;
 
 /// A throwaway repository that deletes itself when dropped.
 pub struct TestRepo {
@@ -158,6 +160,28 @@ impl TestRepo {
             branch,
         ]);
         path
+    }
+
+    /// A scratch worktree of this fixture, checked out at `at`.
+    ///
+    /// Deliberately routed through [`Repo::open`] rather than straight at
+    /// `Scratch`'s own crate-private constructor, even though this module lives
+    /// inside the crate and could reach either. Two reasons, and the second is
+    /// the important one.
+    /// It spares every consumer the two-step incantation; and it means the
+    /// suites exercise the entrance a real consumer is now obliged to use,
+    /// rather than a shortcut only in-crate code can spell. A door nothing
+    /// knocks on is a door that stops working quietly.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the fixture is somehow not a repository, or if git refuses to
+    /// add the worktree — most likely because `at` does not name a commit.
+    pub fn scratch(&self, at: &str) -> Scratch {
+        Repo::open(self.dir.path())
+            .expect("a fixture is a git repository")
+            .scratch(at)
+            .expect("create the scratch worktree")
     }
 }
 

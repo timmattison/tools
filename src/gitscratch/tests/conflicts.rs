@@ -44,7 +44,7 @@ fn file(name: &str, hunks: usize) -> (String, NonZeroUsize) {
 #[test]
 fn a_replay_that_conflicts_with_nothing_is_clean() {
     let repo = independent_branches_repo();
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
 
     let conflicts = replay(&scratch, "alpha", "beta");
 
@@ -57,7 +57,7 @@ fn a_replay_that_conflicts_with_nothing_is_clean() {
 #[test]
 fn a_replay_that_hits_a_contested_region_is_not_clean() {
     let repo = conflicting_repo();
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
 
     replay(&scratch, "left", "main");
     let conflicts = replay(&scratch, "right", "left");
@@ -74,7 +74,7 @@ fn a_replay_that_hits_a_contested_region_is_not_clean() {
 #[test]
 fn the_breakdown_says_which_file_each_hunk_belonged_to() {
     let repo = equal_hunks_unequal_stops_repo();
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
 
     // `two` splits its two edits across two commits, so the replay halts once
     // per file and each stop contributes to a different name.
@@ -93,7 +93,7 @@ fn the_breakdown_says_which_file_each_hunk_belonged_to() {
 #[test]
 fn a_file_that_conflicts_repeatedly_accumulates_against_its_own_name() {
     let repo = contested_region_repo();
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
 
     // `iterated` rewrites the same region in three separate commits, so every
     // one of them collides with the single edit already on the base.
@@ -133,7 +133,7 @@ fn a_file_that_conflicts_repeatedly_accumulates_against_its_own_name() {
 #[test]
 fn a_conflicted_non_ascii_path_keeps_its_real_name_and_its_real_hunk_count() {
     let repo = multi_byte_names_repo();
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
 
     let conflicts = replay(&scratch, "right-右", "left-左");
 
@@ -169,7 +169,7 @@ fn a_conflicted_non_ascii_path_keeps_its_real_name_and_its_real_hunk_count() {
 #[test]
 fn a_conflicted_path_git_cannot_print_plainly_keeps_its_name_and_its_hunk_count() {
     let repo = awkward_names_repo();
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
 
     let conflicts = replay(&scratch, "right", "left");
 

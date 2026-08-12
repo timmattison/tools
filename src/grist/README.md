@@ -57,6 +57,13 @@ $ for branch in $(grist -q issue-130 issue-120); do echo "next: $branch"; done
 Up to six branches (720 orderings) — past that, waiting for the answer costs
 more than picking one and finding out.
 
+Run it somewhere that is not a git repository and it says so, by name, before it
+starts anything. That refusal is `gitscratch`'s pre-flight, which `grist` now
+reaches through the only door there is to a scratch worktree — so a wrong
+directory reads as the bad argument it is, rather than arriving as git's own
+`not a git repository … .git` from inside `worktree add`, after a run has already
+been announced.
+
 ## The three numbers
 
 | Column | What it counts |
