@@ -23,8 +23,17 @@ const CURSOR_UP_FINAL: u8 = b'A';
 /// The final byte of a CUD (cursor down) sequence.
 const CURSOR_DOWN_FINAL: u8 = b'B';
 
+/// The device control string introducer that opens the Sixel payload.
+const SIXEL_START: &[u8] = b"\x1bP";
+
 /// The string terminator that closes the Sixel payload.
 const STRING_TERMINATOR: &[u8] = b"\x1b\\";
+
+/// DECSC. It saves the position of the cursor.
+const SAVE_CURSOR: &[u8] = b"\x1b7";
+
+/// DECRC. It restores the saved position of the cursor.
+const RESTORE_CURSOR: &[u8] = b"\x1b8";
 
 /// The image that the tests send to `ic` on stdin.
 const TEST_IMAGE: &[u8] = include_bytes!(concat!(
@@ -185,5 +194,38 @@ fn sixel_advances_the_cursor_below_the_image() {
     assert!(
         tail.ends_with(b"\r") || tail.ends_with(b"\n"),
         "the stream must end the line, to put the cursor at column 1"
+    );
+}
+
+/// DECSC must come immediately before the payload and DECRC immediately after
+/// it. The brackets make sure that cursor motion inside the payload cannot
+/// change the final position of the cursor.
+#[test]
+fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
+    let stdout = run_ic_sixel();
+
+    let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
+    let terminator = find(&stdout, STRING_TERMINATOR)
+        .expect("the output must hold a Sixel string terminator");
+
+    assert!(
+        payload_start >= SAVE_CURSOR.len(),
+        "the stream must save the cursor before the payload"
+    );
+    assert_eq!(
+        &stdout[payload_start - SAVE_CURSOR.len()..payload_start],
+        SAVE_CURSOR,
+        "DECSC must come immediately before the payload"
+    );
+
+    let payload_end = terminator + STRING_TERMINATOR.len();
+    assert!(
+        stdout.len() >= payload_end + RESTORE_CURSOR.len(),
+        "the stream must restore the cursor after the payload"
+    );
+    assert_eq!(
+        &stdout[payload_end..payload_end + RESTORE_CURSOR.len()],
+        RESTORE_CURSOR,
+        "DECRC must come immediately after the payload"
     );
 }
