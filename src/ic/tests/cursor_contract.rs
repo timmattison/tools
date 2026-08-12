@@ -229,3 +229,30 @@ fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
         "DECRC must come immediately after the payload"
     );
 }
+
+/// The stream must reserve the rows of the image before it draws. It asks for
+/// the rows and then takes them back, so an image at the bottom of the screen
+/// scrolls the terminal instead of running off it.
+#[test]
+fn sixel_reserves_the_rows_before_it_draws() {
+    let stdout = run_ic_sixel();
+
+    let save = find(&stdout, SAVE_CURSOR).expect("the stream must save the cursor");
+    let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
+    assert!(
+        save < payload_start,
+        "the reservation must come before the payload"
+    );
+
+    let reservation = &stdout[..save];
+    let movement = scan_cursor_movement(reservation);
+    assert_eq!(
+        movement.down, EXPECTED_ROWS,
+        "the reservation must ask for {EXPECTED_ROWS} rows before the payload"
+    );
+    assert_eq!(
+        movement.net(),
+        0,
+        "the reservation must take the rows back, so the image starts at the top of them"
+    );
+}
