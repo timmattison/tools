@@ -19,6 +19,7 @@ libc.workspace = true
 notify.workspace = true
 terminal_size.workspace = true
 termion.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

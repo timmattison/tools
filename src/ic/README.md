@@ -84,7 +84,7 @@ The flag asks the same question the display path asks — the terminal, the mult
 - `--height <HEIGHT>` - Height in characters (defaults to auto-sizing)
 - `--preserve-aspect` - Preserve aspect ratio when resizing (default: true)
 - `--stdin` - Read from stdin instead of file
-- `-n, --no-newline` - Don't output newline after image
+- `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
@@ -96,6 +96,47 @@ This utility uses iTerm2's inline image protocol or the Kitty image protocol. It
 Kitty support is experimental.
 
 Inside Zellij, `ic` uses Sixel instead, since the Kitty protocol does not pass through Zellij's renderer.
+
+### Where the Cursor Ends
+
+`ic` puts the cursor at column 1 of the first row below the image. It does the
+same thing for all three display routines, and the position does not depend on
+how the renderer moves the cursor.
+
+No inline-image protocol gives a usable contract for the position of the cursor
+after an image. Sixel gives none at all, so each renderer decides for itself.
+The Kitty protocol and the iTerm2 protocol each have a flag that holds the
+cursor still, but then the caller must move it. `ic` therefore states the
+position itself. Each routine writes four parts:
+
+1. One newline for each row of the image, bounded by the height of the terminal.
+   The reservation makes an image at the bottom of the screen scroll the
+   terminal instead of run off it. An image taller than the screen cannot have a
+   row below it, because the cursor stops at the edge of the screen. The bound
+   therefore holds the scroll to one screen.
+2. CUU, which goes back to the top of the reservation.
+3. DECSC, the image, and DECRC. The brackets make sure that cursor motion inside
+   the image cannot change the final position.
+4. CUD by the row count, and a carriage return.
+
+`-n, --no-newline` suppresses all four parts, and `ic` then writes only the
+image. Video playback uses that mode, because it puts the cursor where it wants
+it before every frame.
+
+The auto-fit size also pays for the rows that `ic` prints above the image. The
+file name rows, the image, and the row that the shell prompt returns to together
+fit inside the height of the terminal. A long file name is wider than the
+terminal, and the terminal then wraps it onto more than one row. `ic` measures
+the display width of each header line and counts the rows that the line takes,
+so a wrapped name pays for every row that it occupies.
+
+All three display routines obey that row count. The Kitty protocol and the
+iTerm2 protocol take the size of the image in character cells, so they take the
+count as it is. Sixel takes the size in pixels, and `ic` multiplies the count by
+the height of one character cell. Some terminals also report their own size in
+pixels, and `ic` keeps a margin inside that size. The image then gets the
+smaller of the two, because the margin knows nothing about the header rows and
+the row count knows nothing about the edge of the screen.
 
 ### muxiavelli Panels
 
