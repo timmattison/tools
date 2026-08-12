@@ -60,6 +60,23 @@ cat image.png | ./ic --stdin
 curl -s https://example.com/image.jpg | ./ic --stdin
 ```
 
+### Ask whether an image can be displayed here:
+```bash
+ic --will-display && ic image.png
+```
+
+`--will-display` exits with code 0 when this session can show an image, and prints nothing. It exits with code 1 and prints the reason to stderr when it cannot, for example:
+
+```
+$ TERM=linux ic --will-display
+Error: Image display is not supported in this terminal.
+...
+```
+
+The flag asks the same question the display path asks — the terminal, the multiplexer, and the remote transport — so a session that passes cannot be refused by the next `ic image.png`. The flag does not ask whether stdout is a terminal, thus a redirected stdout does not change the answer.
+
+`--will-display` is an input mode of its own. Do not combine it with a file, `--stdin`, or `--monitor`.
+
 ## Command Line Options
 
 - `FILE` - Image file to display (optional if using --stdin)
@@ -68,6 +85,7 @@ curl -s https://example.com/image.jpg | ./ic --stdin
 - `--preserve-aspect` - Preserve aspect ratio when resizing (default: true)
 - `--stdin` - Read from stdin instead of file
 - `-n, --no-newline` - Don't output newline after image
+- `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
 
