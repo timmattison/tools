@@ -36,10 +36,8 @@ const SAVE_CURSOR: &[u8] = b"\x1b7";
 const RESTORE_CURSOR: &[u8] = b"\x1b8";
 
 /// The image that the tests send to `ic` on stdin.
-const TEST_IMAGE: &[u8] = include_bytes!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/test_image.png"
-));
+const TEST_IMAGE: &[u8] =
+    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_image.png"));
 
 /// The search path for the child process. `ic` starts `ps` to look at the
 /// process tree, so the child needs a path.
@@ -182,8 +180,8 @@ fn run_ic_sixel() -> Vec<u8> {
 fn sixel_advances_the_cursor_below_the_image() {
     let stdout = run_ic_sixel();
 
-    let terminator = find(&stdout, STRING_TERMINATOR)
-        .expect("the output must hold a Sixel string terminator");
+    let terminator =
+        find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
     let tail = &stdout[terminator + STRING_TERMINATOR.len()..];
 
     assert_eq!(
@@ -205,8 +203,8 @@ fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
     let stdout = run_ic_sixel();
 
     let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
-    let terminator = find(&stdout, STRING_TERMINATOR)
-        .expect("the output must hold a Sixel string terminator");
+    let terminator =
+        find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
 
     assert!(
         payload_start >= SAVE_CURSOR.len(),
