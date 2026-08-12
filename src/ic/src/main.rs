@@ -2743,12 +2743,13 @@ fn print_kitty_image(
         // Small image, send in one chunk
         write!(stdout, "\x1b_Ga=T,f=24,s={},v={}", img_width, img_height)?;
 
-        // In video mode, use fixed image and placement IDs so each frame replaces
-        // the previous one in-place (zero memory accumulation), and C=1 to prevent
-        // cursor movement that could trigger terminal scrolling.
+        // C=1 tells Kitty not to move the cursor. This routine states the
+        // position of the cursor itself, so the renderer must not move it too.
+        // In video mode, fixed image and placement ids make each frame replace
+        // the last one in place, which holds the memory of the renderer flat.
         if no_newline {
             write!(stdout, ",i=1,p=1,C=1")?;
-        } else if under_remote_proxy {
+        } else {
             write!(stdout, ",C=1")?;
         }
 
@@ -2776,7 +2777,7 @@ fn print_kitty_image(
 
                 if no_newline {
                     write!(stdout, ",i=1,p=1,C=1")?;
-                } else if under_remote_proxy {
+                } else {
                     write!(stdout, ",C=1")?;
                 }
 
