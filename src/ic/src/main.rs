@@ -2245,19 +2245,27 @@ fn detect_remote_transport_inner() -> RemoteTransport {
         }
     };
 
-    // The argument snapshot is a second `ps` call because the comm snapshot
+    let zellij_session = std::env::var("ZELLIJ")
+        .ok()
+        .map(|_| std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default());
+
+    // The argument snapshot is a second `ps` call, because the comm snapshot
     // deliberately treats every token after the PPID as one executable path,
     // so that a path that holds a space survives. Arguments cannot be read
-    // from that same line without making the path ambiguous.
-    let args_output = run_ps(&["-eo", "pid=,args="]).unwrap_or_default();
+    // from that same line without making the path ambiguous. Only a Zellij
+    // session needs the arguments, so a session outside Zellij does not pay
+    // for the second call.
+    let args_output = if zellij_session.is_some() {
+        run_ps(&["-eo", "pid=,args="]).unwrap_or_default()
+    } else {
+        String::new()
+    };
 
     classify_transport(
         &comm_output,
         &args_output,
         Pid(std::process::id()),
-        std::env::var("ZELLIJ")
-            .ok()
-            .map(|_| std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default()),
+        zellij_session,
         std::env::var("ET_VERSION").is_ok(),
     )
 }
@@ -2292,7 +2300,7 @@ fn classify_transport(
 ) -> RemoteTransport {
     // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
     // shell is definitely under Mosh, so images cannot work.
-    if find_ancestor_process(ps_comm_output, current_pid, ZellijScan::Off, "mosh-server") {
+    if find_ancestor_process(ps_comm_output, current_pid, &ZellijScan::Off, "mosh-server") {
         return RemoteTransport::Mosh;
     }
 
@@ -2317,21 +2325,23 @@ fn classify_transport(
     // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
     // session, Mosh and ET may both be attached — ET viewers can display images
     // while Mosh viewers silently strip the escape sequences.
-    if et_version_set
-        || find_ancestor_process(ps_comm_output, current_pid, scan.clone(), "etterminal")
-    {
+    if et_version_set || find_ancestor_process(ps_comm_output, current_pid, &scan, "etterminal") {
         return RemoteTransport::EternalTerminal;
     }
 
     // Mosh via Zellij heuristic (Case 2) — only reached when ET is not present.
     let mosh = match &scan {
+        // The direct walk above already answered this question.
+        ZellijScan::Off => false,
         // Zellij sends the output of a pane to every attached client. One
         // client that can show images is enough, so Mosh only blocks when
         // every client of this session is a Mosh client.
         ZellijScan::Clients(clients) => clients.iter().all(|&client| {
-            find_ancestor_process(ps_comm_output, client, ZellijScan::Off, "mosh-server")
+            find_ancestor_process(ps_comm_output, client, &ZellijScan::Off, "mosh-server")
         }),
-        _ => find_ancestor_process(ps_comm_output, current_pid, scan.clone(), "mosh-server"),
+        ZellijScan::EveryClient => {
+            find_ancestor_process(ps_comm_output, current_pid, &scan, "mosh-server")
+        }
     };
     if mosh {
         return RemoteTransport::Mosh;
@@ -2357,6 +2367,10 @@ enum ZellijScan {
     EveryClient,
     /// The clients that are attached to this session, found by
     /// [`zellij_client_pids`].
+    ///
+    /// The list must not be empty. `classify_transport` asks whether *every*
+    /// client is a Mosh client, and an empty list answers yes for no reason.
+    /// A session with no named client uses [`ZellijScan::EveryClient`].
     Clients(Vec<Pid>),
 }
 
@@ -2371,7 +2385,7 @@ enum ZellijScan {
 fn find_ancestor_process(
     ps_output: &str,
     current_pid: Pid,
-    scan: ZellijScan,
+    scan: &ZellijScan,
     target_name: &str,
 ) -> bool {
     let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
@@ -2418,19 +2432,23 @@ fn find_ancestor_process(
 
     // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
     // Search above each client that stands in for the current process.
-    let clients: Vec<Pid> = match scan {
+    let every_client: Vec<Pid>;
+    let clients: &[Pid] = match scan {
         ZellijScan::Off => return false,
         ZellijScan::Clients(clients) => clients,
         // Any process whose basename is exactly "zellij" (the CLI binary, not
         // "zellij-server" or other variants).
-        ZellijScan::EveryClient => comm_of
-            .iter()
-            .filter(|(_, comm)| comm_basename(comm) == ZELLIJ_PROGRAM_NAME)
-            .map(|(&pid, _)| pid)
-            .collect(),
+        ZellijScan::EveryClient => {
+            every_client = comm_of
+                .iter()
+                .filter(|(_, comm)| comm_basename(comm) == ZELLIJ_PROGRAM_NAME)
+                .map(|(&pid, _)| pid)
+                .collect();
+            &every_client
+        }
     };
 
-    for client in clients {
+    for &client in clients {
         let mut ancestor = client;
         for _ in 0..MAX_ANCESTOR_DEPTH {
             match parent_of.get(&ancestor) {
@@ -2467,7 +2485,7 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
     find_ancestor_process(
         ps_output,
         current_pid,
-        scan_for_flag(in_zellij),
+        &scan_for_flag(in_zellij),
         "mosh-server",
     )
 }
@@ -2480,7 +2498,7 @@ fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) ->
     find_ancestor_process(
         ps_output,
         current_pid,
-        scan_for_flag(in_zellij),
+        &scan_for_flag(in_zellij),
         "etterminal",
     )
 }
