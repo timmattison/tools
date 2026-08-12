@@ -193,7 +193,7 @@ struct Args {
     #[clap(long)]
     stdin: bool,
 
-    /// Don't output newline after image
+    /// Leave the cursor to the caller and write only the image
     #[clap(short, long)]
     no_newline: bool,
 

@@ -84,7 +84,7 @@ The flag asks the same question the display path asks — the terminal, the mult
 - `--height <HEIGHT>` - Height in characters (defaults to auto-sizing)
 - `--preserve-aspect` - Preserve aspect ratio when resizing (default: true)
 - `--stdin` - Read from stdin instead of file
-- `-n, --no-newline` - Don't output newline after image
+- `-n, --no-newline` - Leave the cursor to the caller and write only the image (see [Where the Cursor Ends](#where-the-cursor-ends))
 - `--will-display` - Report whether this session can display an image, then exit (0 = yes, 1 = no with the reason on stderr)
 - `-h, --help` - Print help information
 - `-V, --version` - Print version information
