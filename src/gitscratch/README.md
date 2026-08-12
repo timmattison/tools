@@ -88,7 +88,7 @@ than arriving later disguised as a failed simulation:
 ```rust
 use gitscratch::Repo;
 
-let repo = Repo::open(cwd)?;           // errors if `cwd` is not inside a repository
+let repo = Repo::open(cwd)?;           // any directory *inside* one; errors if there is none
 let onto = repo.resolve("main")?;      // errors naming the revision that did not resolve
 let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + untracked, per file
 
@@ -249,7 +249,33 @@ paragraph shrinks rather than disappears when it lands.
 
 `tests/repo.rs` covers the pre-flight separately, since what it must get right
 is the *cheap rejection*: a directory that is not a repository and a revision
-that does not resolve both have to fail there, by name.
+that does not resolve both have to fail there, by name. The premise for the
+first of those comes from `not_a_repository()` rather than from a bare
+`TempDir`, so a `TMPDIR` that turns out to sit inside a repository is reported
+where the mistake is instead of as the pre-flight accepting a directory it
+should have refused.
+
+It also pins the other half of `Repo::open`'s contract: the directory it is
+handed may be any directory *inside* the repository, which is what every run
+from a subdirectory — that is, nearly every run — depends on. The validated path
+is private, so nothing outside the crate can inspect it and only behaviour can
+be asserted. `nested_conflict_repo()` is opened two levels down and has to
+resolve a revision to the same commit the root-opened `Repo` does, count a file
+edited at the repository *root* as uncommitted, and still hand back a worktree
+standing on the fixture's own `main`. `grind`'s `tests/cli.rs` closes the same
+loop through the binary, where the quiet failure lives: a run started in
+`sub/nested` has to name the two conflicted files `shared.txt` and
+`sub/nested/shared.txt` — the prefix kept, and neither file dropped for sitting
+outside the directory the run began in — and print byte-identically to the same
+run from the root.
+
+Three mutations pin that pair, each failing only the assertion it belongs to
+while the rest of the workspace's suite stays green: making `Repo::open` refuse
+a non-empty `rev-parse --show-prefix`, scoping `uncommitted_files` to the cwd
+with a `-- .` pathspec, and reducing each conflicted path to its last component.
+The last of those is why the fixture is contested in two places at two depths —
+every other fixture's conflicts sit at the repository root, where a
+root-relative name and a cwd-relative one are the same string.
 
 `tests/conflicts.rs` covers the answer rather than the safety of getting it:
 whether a replay conflicted at all, that the per-file breakdown accumulates
@@ -324,6 +350,7 @@ constructor is simply not compiled into one.
 | `equal_hunks_unequal_stops_repo()` | Two branches making the same two edits, packaged as one commit and as two, so they tie on hunks and differ on stops. |
 | `independent_branches_repo()` | Two branches that each add a file of their own, so nothing can conflict. |
 | `conflicting_repo()` | Two branches rewriting the same line, so a replay is guaranteed to conflict and resolve. |
+| `nested_conflict_repo()` | The same collision in `shared.txt` and in `sub/nested/shared.txt`, so a tool can be run from a committed subdirectory two levels down — one conflict inside it, one outside it. |
 | `multi_byte_names_repo()` | Branches `left-左` and `right-右` colliding in `readme.md` and `日本語.txt` — a name git would escape, a hunk count that collapses when it does, and two names whose byte, character and column widths disagree. |
 | `not_a_repository()` | A directory outside every repository, which checks its own premise and says so if `TMPDIR` turns out to sit inside one. |
 

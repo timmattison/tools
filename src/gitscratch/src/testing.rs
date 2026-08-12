@@ -600,6 +600,69 @@ pub fn awkward_names_repo() -> TestRepo {
     repo
 }
 
+/// A conflict in `sub/nested/shared.txt` beside one in `shared.txt`, so a tool
+/// can be run from `sub/nested` — a committed subdirectory, two levels down.
+///
+/// [`Repo::open`] takes whichever directory a tool was run in, which for a
+/// developer is hardly ever the repository root, and every other fixture here is
+/// only ever opened at its own root. The two ways a subdirectory run goes wrong
+/// are both silent, and this shape is built so that each one shows up as a
+/// different wrong answer:
+///
+/// **A name can lose its prefix.** `sub/nested/shared.txt` is how git names the
+/// conflicted file, relative to the repository root, and that has to be what a
+/// breakdown prints no matter which directory the run started in. A reader that
+/// named paths relative to the cwd instead would print `shared.txt` — a real
+/// file, in the wrong place, indistinguishable from the root one at a glance.
+///
+/// **A file can vanish.** `shared.txt` conflicts *outside* the subdirectory the
+/// run started in, so anything that scoped git's answers to the cwd — a
+/// `diff --relative`, a pathspec of `.` — would drop it from the count entirely
+/// and report less work than there is. Both files conflict in the same single
+/// region, so the expected answer is one hunk each and the only thing a failure
+/// can be about is which files were seen and what they were called.
+///
+/// Two levels rather than one because a prefix is a path, not a name: a
+/// single-component subdirectory cannot distinguish a reader that keeps the whole
+/// prefix from one that keeps only its last component.
+///
+/// # Panics
+///
+/// Panics if the repository cannot be built — git missing, the subdirectory not
+/// creatable, or a command failing.
+pub fn nested_conflict_repo() -> TestRepo {
+    const CONTESTED_LINE: usize = 15;
+    /// The conflicted file at the repository root, outside the subdirectory a
+    /// run starts in.
+    const ROOT_FILE: &str = "shared.txt";
+    /// The conflicted file inside it, named with the whole prefix git reports.
+    const NESTED_FILE: &str = "sub/nested/shared.txt";
+
+    let repo = TestRepo::init();
+    std::fs::create_dir_all(repo.path().join("sub").join("nested"))
+        .expect("create the fixture's nested directory");
+
+    let base = numbered_lines(30);
+    repo.commit_files(&[(ROOT_FILE, &base), (NESTED_FILE, &base)], "base");
+
+    // Both branches rewrite the same region of both files with different
+    // content, so each of them collides and the two branches are otherwise
+    // symmetric.
+    for (branch, edit) in [("left", "left-edit"), ("right", "right-edit")] {
+        repo.checkout("main");
+        repo.branch(branch);
+
+        let contested = replace_line(&base, CONTESTED_LINE, edit);
+        repo.commit_files(
+            &[(ROOT_FILE, &contested), (NESTED_FILE, &contested)],
+            &format!("{branch} rewrites both files"),
+        );
+    }
+
+    repo.checkout("main");
+    repo
+}
+
 /// Two branches that both rewrite the same line, so the simulation is
 /// guaranteed to actually conflict and resolve rather than no-op.
 ///
