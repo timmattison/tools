@@ -35,6 +35,13 @@ Three codes rather than two, because "the rebase would conflict" and "I could no
 tell you" are different answers and a script has to be able to act on the
 difference.
 
+Three codes and *only* three, on every path. `grind main | head -1` closes the
+pipe before the verdict is finished, and a Rust program meets that as a write
+error rather than as `SIGPIPE`; the words are what a vanished reader costs, so a
+failed write is discarded instead of becoming a panic and a fourth, undocumented
+exit code. The same goes for the note and the error message when stderr is the
+stream that went away.
+
 `grind` replaces a zsh function of the same name that could not. It ran a bare
 `git rebase "$branch"` and read any non-zero exit as conflicts — so
 `grind nonexistetn-branch` exited 128 and got reported as

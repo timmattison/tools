@@ -1,6 +1,7 @@
 //! `grind` - Git Rebase In aNother Dimension: would rebasing HEAD onto a
 //! branch conflict, and by how much?
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
@@ -61,6 +62,20 @@ struct Args {
 /// it lands on, because which stream is this type's decision to make: the
 /// verdict is the answer and belongs on stdout, while a caveat or a failure
 /// belongs on stderr where it cannot contaminate a pipeline.
+///
+/// Routing the writes through one type is also what makes them unable to
+/// *panic*, which matters more here than in most tools. `println!` and
+/// `eprintln!` panic when the write fails, and a reader that closes early -
+/// `grind main | head -1`, a pipeline whose consumer exits first, a terminal
+/// that went away - makes it fail with `EPIPE`, because Rust ignores `SIGPIPE`
+/// and hands the error back rather than letting the signal end the process. A
+/// panic there unwinds straight past [`main`]'s hand-mapped codes and exits
+/// **101**: a fourth code the README does not publish, produced by the one tool
+/// whose entire contract is that its exit code is the answer. So every write
+/// here goes through `writeln!` with the result deliberately discarded - the
+/// words are what a broken pipe costs, never the answer - and the discarding
+/// lives at the three sites this type already owns rather than being a rule
+/// every future caller has to know.
 struct Console {
     quiet: bool,
 }
@@ -69,14 +84,14 @@ impl Console {
     /// A caveat that qualifies the verdict without changing it.
     fn note(&self, note: &str) {
         if !self.quiet {
-            eprintln!("{note}");
+            let _ = writeln!(std::io::stderr(), "{note}");
         }
     }
 
     /// The answer itself.
     fn verdict(&self, verdict: &str) {
         if !self.quiet {
-            println!("{verdict}");
+            let _ = writeln!(std::io::stdout(), "{verdict}");
         }
     }
 
@@ -86,7 +101,7 @@ impl Console {
             // Alternate formatting so the whole context chain arrives, not just
             // the outermost sentence: git's own stderr is carried in the causes
             // and is usually the only part that says what actually went wrong.
-            eprintln!("{TOOL}: error: {err:#}");
+            let _ = writeln!(std::io::stderr(), "{TOOL}: error: {err:#}");
         }
     }
 }
