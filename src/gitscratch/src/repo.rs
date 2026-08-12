@@ -1,11 +1,10 @@
 //! The questions worth asking *before* a scratch worktree is ever built.
 //!
-//! Creating a [`Scratch`](crate::Scratch) is not free: a temporary directory,
-//! a real `git worktree add`, and administrative state in the developer's
-//! repository that has to be cleaned up afterwards. Paying all of that only to
-//! discover the branch name was a typo is both slow and, worse, misleading —
-//! the failure arrives looking like a failed simulation rather than a bad
-//! argument.
+//! Creating a [`Scratch`] is not free: a temporary directory, a real
+//! `git worktree add`, and administrative state in the developer's repository
+//! that has to be cleaned up afterwards. Paying all of that only to discover the
+//! branch name was a typo is both slow and, worse, misleading — the failure
+//! arrives looking like a failed simulation rather than a bad argument.
 //!
 //! [`Repo`] is the pre-flight: open the repository, resolve the revisions, see
 //! whether the tree is dirty, and only then decide whether a replay is worth
@@ -13,6 +12,14 @@
 //! [`Git`](crate::Git) is deliberately crate-private — nothing outside this
 //! crate may build a git runner rooted at a real repository — so the queries a
 //! caller legitimately needs have to be part of this crate's public door.
+//!
+//! It is also the *only* door. [`Repo::scratch`] is how a [`Scratch`] is built,
+//! because a pre-flight a caller can walk around is not a pre-flight — it is a
+//! suggestion. Handing back the opened path for the caller to pass on itself
+//! would be exactly that: the checked path and an unchecked one would be the
+//! same `&Path`, indistinguishable at the call site, and every consumer would be
+//! free to skip straight to the worktree. So the validated path never leaves
+//! this type, and the worktree comes out of the thing that validated it.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +27,7 @@ use anyhow::{Context, Result};
 
 use crate::git::Git;
 use crate::metrics::Uncommitted;
+use crate::scratch::Scratch;
 
 /// Where hook lookups are pointed while answering a pre-flight question.
 ///
@@ -68,11 +76,21 @@ impl Repo {
         Ok(repo)
     }
 
-    /// The directory the repository was opened at — what
-    /// [`Scratch::create`](crate::Scratch::create) wants.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// Build a scratch worktree of this repository, checked out at `at`.
+    ///
+    /// The only way to obtain a [`Scratch`] from outside this crate, and
+    /// deliberately so: the path this type validated never leaves it, so the
+    /// pre-flight cannot be walked around. See the module documentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the temporary directory cannot be created, if its
+    /// path cannot be spelled for git as UTF-8, or if git refuses to add the
+    /// worktree — most commonly because `at` does not name a commit. "This is
+    /// not a repository" is not among them: [`Repo::open`] has already settled
+    /// that, which is the whole point of arriving here through it.
+    pub fn scratch(&self, at: &str) -> Result<Scratch> {
+        Scratch::create(&self.path, at)
     }
 
     /// Resolve a revision to a full commit id, without creating a scratch

@@ -21,8 +21,9 @@
 //!
 //! Every one of those guarantees is a guard that a second implementation would
 //! silently be missing. So this crate owns them, and it owns them behind a
-//! narrow door: a scratch worktree can only be built through [`Scratch`], and a
-//! [`Scratch`] only hands out a [`Git`] that already carries the whole safety
+//! narrow door: a scratch worktree can only be built through [`Scratch`], a
+//! [`Scratch`] can only be built through [`Repo::scratch`], and a [`Scratch`]
+//! only hands out a [`Git`] that already carries the whole safety
 //! configuration. There is no way to get a worktree from here without also
 //! getting the hardening, which is the point — the tools built on top
 //! (`grist`, and the `grime`/`grind` dry-run reporters) cannot drift apart on
@@ -41,6 +42,15 @@
 //! milliseconds with a clear message instead of masquerading as a failed
 //! simulation. Those queries need the same crate-private [`Git`], which is why
 //! they live here too.
+//!
+//! And "should ask first" is not left to a caller's discretion, because that is
+//! how a pre-flight becomes decorative. [`Repo`] is where the door is: opening
+//! the repository is the *only* way to reach a [`Scratch`], and [`Repo`] never
+//! hands its path back, so there is no unchecked route to a worktree to be
+//! tempted by. Skipping the cheap question is not a shortcut a consumer can take
+//! — `grist` did take it, before the path stopped being reachable, and paid for
+//! it by reporting "not a git repository (or any of the parent directories):
+//! .git" from inside `worktree add` after announcing a run it could not start.
 //!
 //! Fixtures for building throwaway repositories with known conflict shapes live
 //! in `testing`, behind the `testing` feature, so every consumer's test suite

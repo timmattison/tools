@@ -37,7 +37,7 @@ fn never_moves_real_branch_refs_even_when_rebase_update_refs_is_enabled() {
     // Scoped so the scratch is torn down before the refs are re-read: teardown
     // is part of what must not move a branch.
     {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         // `right` onto `left` is the replay that genuinely conflicts, and the
         // replayed range is what `rebase.updateRefs` would rewrite.
@@ -58,7 +58,7 @@ fn works_when_the_branches_are_checked_out_in_other_worktrees() {
     let _left = repo.add_worktree("left");
     let _right = repo.add_worktree("right");
 
-    let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+    let scratch = repo.scratch("main");
     replay(&scratch, "left", "main");
     let conflicts = replay(&scratch, "right", "left");
 
@@ -111,7 +111,7 @@ fn never_disturbs_other_worktrees_whose_directories_are_temporarily_missing() {
     // and does not do, so the drop must have run before anything below is
     // asserted. Do not flatten this block away.
     {
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         replay(&scratch, "left", "main");
         replay(&scratch, "right", "left");
     }

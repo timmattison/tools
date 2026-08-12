@@ -32,18 +32,41 @@ fn open_rejects_a_directory_that_is_not_a_git_repository() {
     );
 }
 
-/// The path a `Repo` was opened at is what a consumer hands to
-/// `Scratch::create`, so it must come back exactly as given.
+/// Opening a repository has to *lead somewhere*, and the somewhere is a scratch
+/// worktree of that same repository.
+///
+/// This used to assert that `Repo::path()` handed back the directory `open` was
+/// given, which was true and worth nothing: the checked path and an unchecked
+/// one were the same `&Path`, so the pre-flight validated something and then
+/// published a value that carried no trace of having been validated. Every
+/// consumer was free to skip it, and `grist` did. `Repo::scratch` is the
+/// replacement, so what is worth pinning is that the worktree it builds really
+/// is a worktree of the repository that was opened - a door that leads to the
+/// wrong room is worse than no door.
+///
+/// `main` is the fixture's branch, so its commit is the discriminator: a scratch
+/// checked out anywhere else, or of anything else, cannot be sitting on it.
 #[test]
-fn open_succeeds_inside_a_repository_and_reports_where_it_was_opened() {
+fn scratch_builds_a_worktree_of_the_repository_that_was_opened() {
     let fixture = conflicting_repo();
 
     let repo = Repo::open(fixture.path()).expect("open the fixture repository");
+    let scratch = repo
+        .scratch("main")
+        .expect("create a scratch worktree of the fixture");
 
     assert_eq!(
-        repo.path(),
-        fixture.path(),
-        "a Repo should report the directory it was opened at"
+        scratch
+            .git()
+            .rev_parse("HEAD")
+            .expect("read the scratch worktree's HEAD"),
+        fixture.rev_parse("main"),
+        "the scratch should be checked out at the opened repository's own 'main'"
+    );
+    assert!(
+        scratch.path().is_dir(),
+        "the scratch worktree should exist on disk at {}",
+        scratch.path().display()
     );
 }
 

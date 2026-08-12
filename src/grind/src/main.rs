@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
-use gitscratch::{Repo, Report, Scratch};
+use gitscratch::{Repo, Report};
 
 /// The tool's own name, on every line it prints and on the report it renders.
 ///
@@ -141,7 +141,7 @@ fn run(args: &Args, console: &Console) -> Result<ExitCode> {
         console.note(&note);
     }
 
-    let scratch = Scratch::create(repo.path(), "HEAD")?;
+    let scratch = repo.scratch("HEAD")?;
     let conflicts = scratch.replay_rebase(&args.branch)?;
 
     console.verdict(&report.render(&conflicts));

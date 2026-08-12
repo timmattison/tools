@@ -338,14 +338,16 @@ fn grind_with_nowhere_to_put_a_scratch(
 /// or not, and the assertion would pass for exactly the binary it is supposed
 /// to catch.
 ///
-/// `TMPDIR` is that discriminator. `Scratch::create` calls `TempDir::new`,
-/// which resolves `TMPDIR`; `Repo` deliberately creates no temporary directory
-/// at all, which is what makes the pre-flight unconditionally cheap. Pointing
+/// `TMPDIR` is that discriminator. Building a scratch worktree - `Repo::scratch`
+/// and, behind it, `Scratch`'s own constructor - calls `TempDir::new`, which
+/// resolves `TMPDIR`. The pre-flight queries beside it (`Repo::open`,
+/// `Repo::resolve`, `Repo::uncommitted_files`) deliberately create no temporary
+/// directory at all, which is what makes them unconditionally cheap. Pointing
 /// `TMPDIR` at a path that does not exist therefore breaks exactly one of the
 /// two - so if resolution still gets its word in, it demonstrably ran first.
 ///
 /// The control half is what makes the first half mean anything: it proves the
-/// poisoned `TMPDIR` really does reach `Scratch::create` rather than being
+/// poisoned `TMPDIR` really does reach the worktree half rather than being
 /// quietly ignored, which would make "no scratch error" vacuously true.
 #[test]
 fn a_branch_that_does_not_resolve_is_refused_before_any_scratch_worktree_exists() {

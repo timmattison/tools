@@ -12,10 +12,11 @@ guarantees instead of each reimplementing a weaker version.
 ## The interface
 
 ```rust
-use gitscratch::Scratch;
+use gitscratch::Repo;
 
+// The pre-flight first — it is also the only route to a worktree. See below.
 // A detached worktree at `main`, in a temp directory, torn down on drop.
-let scratch = Scratch::create(repo_path, "main")?;
+let scratch = Repo::open(repo_path)?.scratch("main")?;
 
 // Check the candidate out detached, then replay it.
 scratch.git().run(&["checkout", "-q", "--detach", "feature"])?;
@@ -52,9 +53,11 @@ one door in, and it floors every entry at one hunk, so hunks are non-zero
 exactly when the set is non-empty — on the replay path and in a hand-built
 fixture alike.
 
-`Scratch` is the only way to get a worktree. It hands out a `Git` that already
-carries the whole safety configuration, so there is no way to get a worktree
-from here without also getting the hardening — which is the point.
+`Scratch` is the only way to get a worktree, and `Repo::scratch` is the only way
+to get a `Scratch`. A `Scratch` hands out a `Git` that already carries the whole
+safety configuration, so there is no way to get a worktree from here without
+also getting the hardening — nor without first having established that the
+directory is a repository at all, which is the pre-flight's job below.
 
 That `Git` offers exactly one way to read a **list of paths** back out of git,
 `nul_separated`, which inserts `-z` and splits stdout on NUL without trimming
@@ -89,7 +92,7 @@ let repo = Repo::open(cwd)?;           // errors if `cwd` is not inside a reposi
 let onto = repo.resolve("main")?;      // errors naming the revision that did not resolve
 let dirty = repo.uncommitted_files()?; // an `Uncommitted`: staged + unstaged + untracked, per file
 
-let scratch = Scratch::create(repo.path(), &onto)?;
+let scratch = repo.scratch(&onto)?;    // the only way to a worktree
 ```
 
 These live here rather than in each consuming tool for the same reason as
@@ -97,6 +100,14 @@ everything else: `Git::new` is crate-private, so a repository-rooted runner can
 only be built from inside this crate. The queries are all reads, which fire no
 hooks, so unlike `Scratch` the pre-flight creates nothing at all — no temporary
 directory, no worktree, nothing to clean up if it rejects.
+
+And it is not optional. `Repo::scratch` is the only public entrance to a
+`Scratch`, so the last line above is not a convenience — it is the only line
+that compiles. `Repo` deliberately does *not* hand its path back: a pre-flight a
+caller can walk around is a suggestion, and handing back the opened directory
+would have made the checked path and an unchecked one the same `&Path`,
+indistinguishable at the call site. The validated path never leaves the type, so
+the worktree comes out of the thing that validated it.
 
 ## The report
 

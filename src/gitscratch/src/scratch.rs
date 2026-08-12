@@ -59,13 +59,21 @@ pub struct Scratch {
 impl Scratch {
     /// Add a detached worktree at `at` in a private temporary directory.
     ///
+    /// Crate-private on purpose, and for the same reason [`Git::new`] is:
+    /// `repo` here is an unvalidated path, so a public entrance would let a
+    /// caller build a worktree of a directory nobody had established was a
+    /// repository - and then meet that fact halfway through a simulation, as
+    /// git's own complaint from inside `worktree add`.
+    /// [`Repo::scratch`](crate::Repo::scratch) is the only way in, so the path
+    /// that arrives here is one [`Repo::open`](crate::Repo::open) has already
+    /// checked.
+    ///
     /// # Errors
     ///
     /// Returns an error if the temporary directory cannot be created, if its
     /// path cannot be spelled for git as UTF-8, or if git refuses to add the
-    /// worktree - most commonly because `repo` is not a repository or `at` does
-    /// not name a commit.
-    pub fn create(repo: &Path, at: &str) -> Result<Self> {
+    /// worktree - most commonly because `at` does not name a commit.
+    pub(crate) fn create(repo: &Path, at: &str) -> Result<Self> {
         let dir = TempDir::new().context("could not create a scratch directory")?;
         let worktree = dir.path().join("worktree");
         let hooks_dir = dir.path().join("hooks");
@@ -415,7 +423,7 @@ fn count_conflict_hunks(path: &Path) -> Result<usize> {
 mod tests {
     use anyhow::Result;
 
-    use super::{Conflicts, NonZeroUsize, Scratch};
+    use super::{Conflicts, NonZeroUsize};
     use crate::metrics::{Hunks, Stops};
     use crate::testing::contested_region_repo;
 
@@ -436,7 +444,7 @@ mod tests {
     /// the refusal.
     fn replay_contested_within(max_rounds: usize) -> Result<Conflicts> {
         let repo = contested_region_repo();
-        let scratch = Scratch::create(repo.path(), "main").expect("create the scratch worktree");
+        let scratch = repo.scratch("main");
         scratch
             .git()
             .run(&["checkout", "-q", "--detach", "iterated"])

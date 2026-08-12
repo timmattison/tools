@@ -197,4 +197,5 @@ branch name is refused *before* any scratch worktree is built. That last one is
 proved by pointing
 `TMPDIR` at a directory that does not exist, so creating a scratch is guaranteed
 to fail, with a control run on a resolvable branch to show the poison really
-does reach `Scratch::create` rather than being quietly ignored.
+does reach the worktree-building half of `Repo::scratch` rather than being
+quietly ignored.
