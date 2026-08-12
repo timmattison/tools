@@ -1927,6 +1927,16 @@ fn display_image_sixel(
         let (_, cell_height_px) = get_cell_pixel_dimensions();
         let rows = image_rows(resized_img.height(), cell_height_px);
 
+        // Reserve the rows before the image goes out. An image at the bottom of
+        // the screen then scrolls the terminal instead of running off it. CUU
+        // then goes back to the top of the reservation. image_rows never gives
+        // 0, so this never asks for a movement of zero rows, which a terminal
+        // reads as one row.
+        for _ in 0..rows {
+            writeln!(stdout)?;
+        }
+        write!(stdout, "{CSI}{rows}A")?;
+
         // DECSC and DECRC bracket the payload, so cursor motion inside it
         // cannot change the final position.
         write!(stdout, "{SAVE_CURSOR}{}{RESTORE_CURSOR}", sixel_output)?;
