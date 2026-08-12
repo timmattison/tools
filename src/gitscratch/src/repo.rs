@@ -114,7 +114,13 @@ impl Repo {
     ///
     /// # Errors
     ///
-    /// Returns an error if git could not be spawned or reported a failure.
+    /// Returns an error if git could not be spawned or reported a failure — a
+    /// bare repository being the ordinary way to reach the latter, since there
+    /// is no working tree to take a status of. A caller wanting the count as a
+    /// *caveat* should treat that as no caveat rather than as fatal
+    /// (`unwrap_or_default`, which [`Uncommitted`] derives for the purpose):
+    /// a replay needs no working tree, so a repository that cannot answer this
+    /// question can still answer the expensive one.
     pub fn uncommitted_files(&self) -> Result<Uncommitted> {
         let records =
             self.git()

@@ -138,6 +138,13 @@ newly created directory is reported as the files in it rather than as one entry.
 A tree with nothing uncommitted says nothing at all; a note printed
 unconditionally would be noise people learn to ignore.
 
+Being a caveat, it also cannot take the answer away. Some repositories have no
+working tree to take a status of — a bare one, where `git status` simply refuses
+— and a replay does not need one, so `grind` runs in a bare repository and
+answers normally; you just do not get the note. A question the tool asked for
+your benefit is not allowed to be the reason it cannot answer the question you
+asked.
+
 ## What it does to your repo
 
 Nothing. Every replay happens in a detached scratch worktree in a temp
