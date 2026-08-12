@@ -155,12 +155,17 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// but it also turns on a process tree heuristic that reads the real process
 /// list of the host, which makes the result depend on the machine.
 ///
+/// # Arguments
+/// * `extra_args` - More command line arguments for `ic`, after the arguments
+///   that fix the size of the image.
+///
 /// # Panics
 /// Panics when the child process does not start, does not accept the image, or
 /// exits with a failure.
-fn run_ic_sixel() -> Vec<u8> {
+fn run_ic_sixel(extra_args: &[&str]) -> Vec<u8> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ic"))
         .args(["--stdin", "--width", "10", "--height", "5"])
+        .args(extra_args)
         .env_clear()
         .env("PATH", unreachable_path_dir())
         .env("TERM", TEST_TERM)
@@ -194,7 +199,7 @@ fn run_ic_sixel() -> Vec<u8> {
 /// ends the line with a carriage return.
 #[test]
 fn sixel_advances_the_cursor_below_the_image() {
-    let stdout = run_ic_sixel();
+    let stdout = run_ic_sixel(&[]);
 
     let terminator =
         find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
@@ -216,7 +221,7 @@ fn sixel_advances_the_cursor_below_the_image() {
 /// change the final position of the cursor.
 #[test]
 fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
-    let stdout = run_ic_sixel();
+    let stdout = run_ic_sixel(&[]);
 
     let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
     let terminator =
@@ -244,12 +249,41 @@ fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
     );
 }
 
+/// `--no-newline` must suppress the whole cursor contract, because video
+/// playback puts the cursor where it wants it before every frame. A stream that
+/// moves the cursor on its own scrolls the terminal once per frame.
+///
+/// The behavior already held when this test arrived, so a mutation proved that
+/// the test can fail: with the advance moved outside the `no_newline` gate, the
+/// tail asks for 5 rows and the whole stream nets 5 rows, and both assertions
+/// below report the failure.
+#[test]
+fn no_newline_suppresses_the_cursor_contract() {
+    let stdout = run_ic_sixel(&["--no-newline"]);
+
+    let terminator =
+        find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
+    let tail = &stdout[terminator + STRING_TERMINATOR.len()..];
+    let after_payload = scan_cursor_movement(tail);
+
+    assert_eq!(
+        (after_payload.down, after_payload.up),
+        (0, 0),
+        "--no-newline must write no cursor movement after the payload"
+    );
+    assert_eq!(
+        scan_cursor_movement(&stdout).net(),
+        0,
+        "--no-newline must leave the cursor where the caller put it"
+    );
+}
+
 /// The stream must reserve the rows of the image before it draws. It asks for
 /// the rows and then takes them back, so an image at the bottom of the screen
 /// scrolls the terminal instead of running off it.
 #[test]
 fn sixel_reserves_the_rows_before_it_draws() {
-    let stdout = run_ic_sixel();
+    let stdout = run_ic_sixel(&[]);
 
     let save = find(&stdout, SAVE_CURSOR).expect("the stream must save the cursor");
     let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
