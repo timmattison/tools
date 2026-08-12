@@ -144,6 +144,11 @@ struct Args {
     /// Monitor directories for new images and display them automatically
     #[clap(long)]
     monitor: Vec<PathBuf>,
+
+    /// Report whether this session can display an image, then exit. Exit code 0
+    /// means yes. Exit code 1 means no, and the reason goes to stderr
+    #[clap(long)]
+    will_display: bool,
 }
 
 fn main() -> Result<()> {
@@ -151,7 +156,9 @@ fn main() -> Result<()> {
 
     validate_arguments(&args)?;
 
-    if args.stdin {
+    if args.will_display {
+        report_display_readiness()?;
+    } else if args.stdin {
         display_image_from_stdin(&args)?;
     } else if !args.files.is_empty() {
         for file_path in &args.files {
@@ -184,15 +191,22 @@ fn validate_arguments(args: &Args) -> Result<()> {
 }
 
 fn validate_input_modes(args: &Args) -> Result<()> {
-    let input_modes = [args.stdin, !args.files.is_empty(), !args.monitor.is_empty()];
+    let input_modes = [
+        args.stdin,
+        !args.files.is_empty(),
+        !args.monitor.is_empty(),
+        args.will_display,
+    ];
     let input_count = input_modes.iter().filter(|&&x| x).count();
 
     if input_count == 0 {
-        anyhow::bail!("Must specify a file, use --stdin, or use --monitor");
+        anyhow::bail!("Must specify a file, use --stdin, use --monitor, or use --will-display");
     }
 
     if input_count > 1 {
-        anyhow::bail!("Cannot specify multiple input modes (--stdin, file, --monitor)");
+        anyhow::bail!(
+            "Cannot specify multiple input modes (--stdin, file, --monitor, --will-display)"
+        );
     }
 
     Ok(())
@@ -452,9 +466,7 @@ fn validate_terminal_for_graphics(
             "Mosh detected. {} display does not work over Mosh.\n\
             Mosh strips the escape sequences needed for image display (Sixel, Kitty, iTerm2).\n\
             \n\
-            To display images, please use one of:\n\
-            • ssh user@host (instead of mosh user@host)\n\
-            • Eternal Terminal (et user@host) - persistent sessions with image support",
+            To display images, reconnect with ssh user@host instead of mosh user@host.",
             feature
         );
     }
@@ -503,6 +515,26 @@ fn validate_terminal_for_graphics(
         anyhow::bail!("{}", error_msg);
     }
     Ok(())
+}
+
+/// Answer `--will-display`: can this session show an image?
+///
+/// The answer is the process exit status. `Ok` exits 0 and prints nothing.
+/// An error exits 1 and prints the reason to stderr, so a script can write
+/// `ic --will-display && ic picture.png` and get a usable message when the
+/// answer is no.
+///
+/// The question goes to [`validate_terminal_for_graphics`], the same gate the
+/// image path runs. Both callers therefore give one answer, and a session that
+/// passes here cannot be refused by the next `ic picture.png`. The gate asks
+/// about the terminal, the multiplexer, and the remote transport. It does not
+/// ask whether stdout is a terminal, so a redirected stdout does not change
+/// the answer.
+fn report_display_readiness() -> Result<()> {
+    let terminal_caps = detect_terminal_capabilities();
+    let transport = detect_remote_transport();
+
+    validate_terminal_for_graphics(&terminal_caps, &transport, "Image")
 }
 
 fn display_video_from_file(file_path: &Path, args: &Args) -> Result<()> {
@@ -2132,6 +2164,11 @@ struct Pid(u32);
 /// 64 levels is generous; real-world process trees rarely exceed 20 levels.
 const MAX_ANCESTOR_DEPTH: usize = 64;
 
+/// The basename of the Zellij client program. The match must be exact, so
+/// that `zellij-server` and a wrapper script such as `my-zellij-wrapper` do
+/// not count as clients.
+const ZELLIJ_PROGRAM_NAME: &str = "zellij";
+
 /// Extracts the basename (filename) from a process comm string.
 ///
 /// On macOS, `ps -eo comm=` returns the full executable path (e.g.,
@@ -2142,6 +2179,52 @@ fn comm_basename(comm: &str) -> &str {
         .file_name()
         .and_then(|f| f.to_str())
         .unwrap_or(comm)
+}
+
+/// Finds the Zellij client processes that are attached to one Zellij session.
+///
+/// Zellij daemonizes its server, so the server reparents to PID 1 and the
+/// chain from the current process to the terminal is broken. The client
+/// process keeps that chain, so the client stands in for the current process
+/// when the transport is detected.
+///
+/// A client must belong to *this* session. A machine can run many Zellij
+/// sessions at the same time, and a client of some other session says nothing
+/// about how this session is viewed.
+///
+/// `ps_args_output` is the output of `ps -eo pid=,args=`. A client is a
+/// process whose argv[0] basename is exactly `zellij` and that has the session
+/// name as a complete argument. The forms `zellij a NAME`, `zellij attach
+/// NAME`, `zellij -s NAME`, and `zellij --session NAME` all match. The server
+/// process (`zellij --server /path/.../NAME`) does not match, because the
+/// session name is only a part of its socket path.
+fn zellij_client_pids(ps_args_output: &str, session: &str) -> Vec<Pid> {
+    if session.is_empty() {
+        return Vec::new();
+    }
+
+    let mut clients = Vec::new();
+
+    for line in ps_args_output.lines() {
+        let mut parts = line.split_whitespace();
+        let pid = match parts.next().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => Pid(p),
+            None => continue,
+        };
+        let Some(program) = parts.next() else {
+            continue;
+        };
+        if comm_basename(program) != ZELLIJ_PROGRAM_NAME {
+            continue;
+        }
+        // The remaining tokens are the arguments of the client. The session
+        // name must be one complete argument.
+        if parts.any(|arg| arg == session) {
+            clients.push(pid);
+        }
+    }
+
+    clients
 }
 
 /// The type of remote transport detected in the process tree.
@@ -2183,14 +2266,9 @@ fn detect_remote_transport() -> RemoteTransport {
 /// 3. **Mosh via Zellij heuristic only** (no ET) → Mosh
 /// 4. **Neither** → None
 fn detect_remote_transport_inner() -> RemoteTransport {
-    let output = match std::process::Command::new("ps")
-        .args(["-eo", "pid=,ppid=,comm="])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => {
+    let comm_output = match run_ps(&["-eo", "pid=,ppid=,comm="]) {
+        Some(o) => o,
+        None => {
             // Can't check process tree; fall back to env var for ET
             if std::env::var("ET_VERSION").is_ok() {
                 return RemoteTransport::EternalTerminal;
@@ -2199,32 +2277,166 @@ fn detect_remote_transport_inner() -> RemoteTransport {
         }
     };
 
-    let table = String::from_utf8_lossy(&output.stdout);
-    let current_pid = Pid(std::process::id());
-    let in_zellij = std::env::var("ZELLIJ").is_ok();
+    let zellij_session = std::env::var("ZELLIJ")
+        .ok()
+        .map(|_| std::env::var("ZELLIJ_SESSION_NAME").unwrap_or_default());
 
+    // The argument snapshot is a second `ps` call, because the comm snapshot
+    // deliberately treats every token after the PPID as one executable path,
+    // so that a path that holds a space survives. Arguments cannot be read
+    // from that same line without making the path ambiguous. Only a Zellij
+    // session needs the arguments, so a session outside Zellij does not pay
+    // for the second call.
+    let args_output = if zellij_session.is_some() {
+        run_ps(&["-eo", "pid=,args="]).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    classify_transport(
+        &comm_output,
+        &args_output,
+        Pid(std::process::id()),
+        zellij_session,
+        std::env::var("ET_VERSION").is_ok(),
+    )
+}
+
+/// Run `ps` with the given arguments and return its standard output.
+///
+/// Returns `None` when `ps` cannot be run at all.
+fn run_ps(args: &[&str]) -> Option<String> {
+    std::process::Command::new("ps")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Decide the remote transport from two process snapshots and the environment.
+///
+/// This function holds all of the policy and reads nothing from the outside,
+/// so every rule below is testable.
+///
+/// `zellij_session` is `None` when the `ZELLIJ` variable is unset. It is
+/// `Some(name)` inside Zellij, where `name` can be empty if
+/// `ZELLIJ_SESSION_NAME` is unset.
+fn classify_transport(
+    ps_comm_output: &str,
+    ps_args_output: &str,
+    current_pid: Pid,
+    zellij_session: Option<String>,
+    et_version_set: bool,
+) -> RemoteTransport {
     // Direct Mosh ancestry (Case 1 only, no Zellij heuristic) — the current
     // shell is definitely under Mosh, so images cannot work.
-    if find_ancestor_process(&table, current_pid, false, "mosh-server") {
+    if find_ancestor_process(ps_comm_output, current_pid, &ZellijScan::Off, "mosh-server") {
         return RemoteTransport::Mosh;
     }
+
+    let scan = match &zellij_session {
+        None => ZellijScan::Off,
+        Some(session) => match ClientPids::new(zellij_client_pids(ps_args_output, session)) {
+            Some(clients) => ZellijScan::Clients(clients),
+            // The session named no client, so the careful answer is the one
+            // that treats every Zellij client on the machine as a candidate.
+            // It can over-report Mosh, which hides an image that would have
+            // worked. The opposite mistake writes escape sequences that Mosh
+            // strips.
+            None => ZellijScan::EveryClient,
+        },
+    };
 
     // ET detected via env var or process tree (including Zellij heuristic).
     // This takes priority over Mosh-via-Zellij because in a multiplexed Zellij
     // session, Mosh and ET may both be attached — ET viewers can display images
     // while Mosh viewers silently strip the escape sequences.
-    if std::env::var("ET_VERSION").is_ok()
-        || find_ancestor_process(&table, current_pid, in_zellij, "etterminal")
-    {
+    if et_version_set || find_ancestor_process(ps_comm_output, current_pid, &scan, "etterminal") {
         return RemoteTransport::EternalTerminal;
     }
 
     // Mosh via Zellij heuristic (Case 2) — only reached when ET is not present.
-    if find_ancestor_process(&table, current_pid, in_zellij, "mosh-server") {
+    let mosh = match &scan {
+        // The direct walk above already answered this question.
+        ZellijScan::Off => false,
+        // Zellij sends the output of a pane to every attached client. One
+        // client that can show images is enough, so Mosh only blocks when
+        // every client of this session is a Mosh client.
+        ZellijScan::Clients(clients) => clients.as_slice().iter().all(|&client| {
+            find_ancestor_process(ps_comm_output, client, &ZellijScan::Off, "mosh-server")
+        }),
+        ZellijScan::EveryClient => {
+            find_ancestor_process(ps_comm_output, current_pid, &scan, "mosh-server")
+        }
+    };
+    if mosh {
         return RemoteTransport::Mosh;
     }
 
     RemoteTransport::None
+}
+
+/// Holds [`ClientPids`] so that its field stays private to this module. In a
+/// single-module program a private tuple field is still reachable from every
+/// other line of the file, and an invariant that the rest of the file can
+/// bypass is a comment, not a guarantee.
+mod client_pids {
+    use super::Pid;
+
+    /// A list of Zellij clients that holds at least one client.
+    ///
+    /// [`ClientPids::new`] is the only way to build one, so the empty case is
+    /// answered once instead of at every call site. The emptiness matters
+    /// because `classify_transport` asks whether *every* client of the session
+    /// is a Mosh client: `all` over an empty list answers yes, so a session
+    /// with no named client would be reported as Mosh for no reason. That
+    /// session belongs to [`super::ZellijScan::EveryClient`] instead.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct ClientPids(Vec<Pid>);
+
+    impl ClientPids {
+        /// Wraps `pids`, or answers `None` when there is no client to wrap.
+        pub(crate) fn new(pids: Vec<Pid>) -> Option<Self> {
+            if pids.is_empty() {
+                return None;
+            }
+            Some(Self(pids))
+        }
+
+        /// The clients, in the order `ps` reported them. Never empty.
+        pub(crate) fn as_slice(&self) -> &[Pid] {
+            &self.0
+        }
+    }
+}
+
+use client_pids::ClientPids;
+
+/// Which Zellij clients stand in for the current process during the search.
+///
+/// Zellij daemonizes its server, so the chain from the current process stops
+/// at PID 1 and never reaches a terminal. The client keeps that chain, which
+/// is why the client is searched instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ZellijScan {
+    /// Do not stand in for the current process. Used outside Zellij, and for
+    /// the direct-ancestry question, which must not use the workaround.
+    Off,
+    /// Every process on the machine whose basename is exactly `zellij`.
+    ///
+    /// This is the careful answer for a session whose clients cannot be
+    /// named. It can report a transport that belongs to another session.
+    EveryClient,
+    /// The clients that are attached to this session, found by
+    /// [`zellij_client_pids`].
+    ///
+    /// [`ClientPids`] holds at least one client, so `classify_transport` can
+    /// ask whether *every* client is a Mosh client and get an answer that a
+    /// client stands behind. A session with no named client cannot arrive
+    /// here at all: it uses [`ZellijScan::EveryClient`].
+    Clients(ClientPids),
 }
 
 /// Determines whether a target process (identified by basename) is an ancestor
@@ -2233,13 +2445,12 @@ fn detect_remote_transport_inner() -> RemoteTransport {
 /// This handles two cases:
 /// 1. **Direct ancestry**: The target process is a direct ancestor of `current_pid`.
 /// 2. **Zellij workaround**: Zellij daemonizes (reparents to PID 1), breaking the
-///    direct ancestry. In this case, we check if any process whose basename is
-///    exactly `zellij` (the CLI, not `zellij-server` or other variants) has the
-///    target process as an ancestor.
+///    direct ancestry. In this case, `scan` names the client processes that stand
+///    in for the current process, and the target is searched above each of them.
 fn find_ancestor_process(
     ps_output: &str,
     current_pid: Pid,
-    in_zellij: bool,
+    scan: &ZellijScan,
     target_name: &str,
 ) -> bool {
     let mut parent_of: HashMap<Pid, Pid> = HashMap::new();
@@ -2285,27 +2496,36 @@ fn find_ancestor_process(
     }
 
     // Case 2: Inside Zellij, which daemonized and broke the ancestry chain.
-    // Find any process whose basename is exactly "zellij" (the CLI binary,
-    // not "zellij-server" or other variants) and check if its ancestors
-    // include the target process.
-    if in_zellij {
-        for (&zellij_pid, comm) in &comm_of {
-            if comm_basename(comm) != "zellij" {
-                continue;
-            }
-            let mut ancestor = zellij_pid;
-            for _ in 0..MAX_ANCESTOR_DEPTH {
-                match parent_of.get(&ancestor) {
-                    Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
-                        if let Some(pcomm) = comm_of.get(&ppid) {
-                            if comm_basename(pcomm) == target_name {
-                                return true;
-                            }
+    // Search above each client that stands in for the current process.
+    let every_client: Vec<Pid>;
+    let clients: &[Pid] = match scan {
+        ZellijScan::Off => return false,
+        ZellijScan::Clients(clients) => clients.as_slice(),
+        // Any process whose basename is exactly "zellij" (the CLI binary, not
+        // "zellij-server" or other variants).
+        ZellijScan::EveryClient => {
+            every_client = comm_of
+                .iter()
+                .filter(|(_, comm)| comm_basename(comm) == ZELLIJ_PROGRAM_NAME)
+                .map(|(&pid, _)| pid)
+                .collect();
+            &every_client
+        }
+    };
+
+    for &client in clients {
+        let mut ancestor = client;
+        for _ in 0..MAX_ANCESTOR_DEPTH {
+            match parent_of.get(&ancestor) {
+                Some(&ppid) if ppid != Pid(0) && ppid != ancestor => {
+                    if let Some(pcomm) = comm_of.get(&ppid) {
+                        if comm_basename(pcomm) == target_name {
+                            return true;
                         }
-                        ancestor = ppid;
                     }
-                    _ => break,
+                    ancestor = ppid;
                 }
+                _ => break,
             }
         }
     }
@@ -2313,10 +2533,26 @@ fn find_ancestor_process(
     false
 }
 
+/// Turn the older `in_zellij` flag into a scan. A session whose clients are
+/// not named uses [`ZellijScan::EveryClient`], which is what `in_zellij` meant.
+#[cfg(test)]
+fn scan_for_flag(in_zellij: bool) -> ZellijScan {
+    if in_zellij {
+        ZellijScan::EveryClient
+    } else {
+        ZellijScan::Off
+    }
+}
+
 /// Check if Mosh is in the process tree. Delegates to [`find_ancestor_process`].
 #[cfg(test)]
 fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(ps_output, current_pid, in_zellij, "mosh-server")
+    find_ancestor_process(
+        ps_output,
+        current_pid,
+        &scan_for_flag(in_zellij),
+        "mosh-server",
+    )
 }
 
 /// Check if Eternal Terminal is in the process tree. Delegates to [`find_ancestor_process`].
@@ -2324,7 +2560,12 @@ fn has_mosh_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) 
 /// because `etterminal` is the direct ancestor of the user's shell.
 #[cfg(test)]
 fn has_et_in_process_tree(ps_output: &str, current_pid: Pid, in_zellij: bool) -> bool {
-    find_ancestor_process(ps_output, current_pid, in_zellij, "etterminal")
+    find_ancestor_process(
+        ps_output,
+        current_pid,
+        &scan_for_flag(in_zellij),
+        "etterminal",
+    )
 }
 
 fn print_kitty_image(
@@ -3151,6 +3392,349 @@ not_a_number  1 /bin/bash
         // current PID 400 is not an ancestor of mosh-server via Case 1,
         // and in_zellij=false disables Case 2
         assert!(!has_mosh_in_process_tree(ps_output, Pid(400), false));
+    }
+
+    // =========================================================================
+    // Tests for the Mosh message
+    // =========================================================================
+
+    /// Ask for the Mosh message that `ic` prints when it refuses an image.
+    fn mosh_refusal_message() -> String {
+        let caps = TerminalCapabilities {
+            terminal_type: TerminalType::ITerm2,
+            supports_graphics: true,
+            supports_raw_mode: true,
+        };
+        let error = validate_terminal_for_graphics(&caps, &RemoteTransport::Mosh, "Image")
+            .expect_err("Mosh must be refused");
+        error.to_string()
+    }
+
+    #[test]
+    fn the_mosh_message_does_not_recommend_eternal_terminal() {
+        // Eternal Terminal drops the session when the laptop sleeps, which is
+        // the reconnect that matters here. Do not send the reader to it.
+        let message = mosh_refusal_message();
+        assert!(
+            !message.contains("Eternal Terminal"),
+            "message still recommends Eternal Terminal: {message}"
+        );
+        assert!(
+            !message.contains("et user@host"),
+            "message still recommends the et command: {message}"
+        );
+    }
+
+    #[test]
+    fn the_mosh_message_still_offers_ssh() {
+        assert!(mosh_refusal_message().contains("ssh user@host"));
+    }
+
+    // =========================================================================
+    // Tests for classify_transport (the whole transport decision)
+    // =========================================================================
+
+    /// The PID of the process that asks for the transport. It sits under the
+    /// Zellij server of the session named `ic-test`.
+    const CURRENT: Pid = Pid(63481);
+
+    /// A process table that holds two Zellij sessions.
+    ///
+    /// `ic-test` is viewed over SSH. `meshtastic` is viewed over Mosh. The
+    /// Zellij server of each session is reparented to PID 1, which is why the
+    /// chain from `CURRENT` reaches no terminal.
+    ///
+    /// The basename of the server is `zellij`, not `zellij-server`. That is
+    /// what macOS reports, because the server is the same binary started with
+    /// `--server`.
+    const PS_COMM_TWO_SESSIONS: &str = "\
+    1     0 /sbin/launchd
+56659     1 sshd-session
+56665 56659 sshd-session
+56666 56665 -zsh
+57053 56666 /Users/t/.local/bin/zellij
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+32269 31466 /Users/t/.local/bin/zellij";
+
+    const PS_ARGS_TWO_SESSIONS_FULL: &str = "\
+51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
+57053 zellij a ic-test
+32269 zellij a meshtastic";
+
+    #[test]
+    fn another_sessions_mosh_client_does_not_decide_this_session() {
+        // The client of `ic-test` runs under SSH. The Mosh client belongs to
+        // `meshtastic`, so it says nothing about this session.
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::None
+        );
+    }
+
+    #[test]
+    fn mosh_detected_when_the_only_client_of_this_session_is_mosh() {
+        let ps_comm = "\
+    1     0 /sbin/launchd
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+57100 31466 /Users/t/.local/bin/zellij";
+        let ps_args = "\
+51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
+57100 zellij a ic-test";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                ps_args,
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn one_capable_client_wins_over_a_mosh_client_of_the_same_session() {
+        // Zellij sends the output to every attached client. An SSH viewer can
+        // show the image. The Mosh viewer ignores the escape sequences.
+        let ps_comm = "\
+    1     0 /sbin/launchd
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+56665     1 sshd-session
+56666 56665 -zsh
+57053 56666 /Users/t/.local/bin/zellij
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+57100 31466 /Users/t/.local/bin/zellij";
+        let ps_args = "\
+57053 zellij a ic-test
+57100 zellij a ic-test";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                ps_args,
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::None
+        );
+    }
+
+    #[test]
+    fn an_unnamed_zellij_session_keeps_the_careful_answer() {
+        // ZELLIJ_SESSION_NAME is unset, so no client can be tied to this
+        // session. Report Mosh rather than send escape sequences that Mosh
+        // strips.
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                Some(String::new()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn a_session_with_no_named_client_keeps_the_careful_answer() {
+        // The session name is known, but no client argv carries it. This
+        // happens when Zellij starts with a generated session name.
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                "",
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn outside_zellij_a_mosh_client_of_a_session_is_ignored() {
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                None,
+                false,
+            ),
+            RemoteTransport::None
+        );
+    }
+
+    #[test]
+    fn direct_mosh_ancestry_beats_every_client_rule() {
+        let ps_comm = "\
+31465     1 /usr/bin/mosh-server
+31466 31465 -zsh
+63481 31466 /bin/zsh";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                "57053 zellij a ic-test",
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::Mosh
+        );
+    }
+
+    #[test]
+    fn eternal_terminal_env_var_beats_a_mosh_client() {
+        assert_eq!(
+            classify_transport(
+                PS_COMM_TWO_SESSIONS,
+                PS_ARGS_TWO_SESSIONS_FULL,
+                CURRENT,
+                Some("ic-test".to_string()),
+                true,
+            ),
+            RemoteTransport::EternalTerminal
+        );
+    }
+
+    #[test]
+    fn an_eternal_terminal_client_of_this_session_wins() {
+        let ps_comm = "\
+    1     0 /sbin/launchd
+51648     1 /Users/t/.local/bin/zellij
+63481 51648 /bin/zsh
+40000     1 /usr/local/bin/etterminal
+40001 40000 -zsh
+57053 40001 /Users/t/.local/bin/zellij";
+        assert_eq!(
+            classify_transport(
+                ps_comm,
+                "57053 zellij a ic-test",
+                CURRENT,
+                Some("ic-test".to_string()),
+                false,
+            ),
+            RemoteTransport::EternalTerminal
+        );
+    }
+
+    // =========================================================================
+    // Tests for zellij_client_pids (session-scoped client discovery)
+    // =========================================================================
+
+    /// A `ps -eo pid=,args=` table with two Zellij sessions and one server.
+    const PS_ARGS_TWO_SESSIONS: &str = "\
+  51648 /Users/t/.local/bin/zellij --server /tmp/zellij-501/contract_version_1/ic-test
+  57053 zellij a ic-test
+  32269 zellij a meshtastic
+  56666 -zsh";
+
+    #[test]
+    fn zellij_client_pids_finds_the_client_of_this_session() {
+        assert_eq!(
+            zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test"),
+            vec![Pid(57053)]
+        );
+    }
+
+    #[test]
+    fn zellij_client_pids_ignores_another_sessions_client() {
+        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
+        assert!(!found.contains(&Pid(32269)));
+    }
+
+    #[test]
+    fn zellij_client_pids_ignores_the_server_of_this_session() {
+        // The server has the session name in its socket path, not as an
+        // argument of its own. It is not a client.
+        let found = zellij_client_pids(PS_ARGS_TWO_SESSIONS, "ic-test");
+        assert!(!found.contains(&Pid(51648)));
+    }
+
+    #[test]
+    fn zellij_client_pids_accepts_every_attach_form() {
+        let ps_args = "\
+  100 zellij a work
+  200 zellij attach work
+  300 zellij -s work
+  400 zellij --session work";
+        assert_eq!(
+            zellij_client_pids(ps_args, "work"),
+            vec![Pid(100), Pid(200), Pid(300), Pid(400)]
+        );
+    }
+
+    #[test]
+    fn zellij_client_pids_requires_a_whole_argument_match() {
+        // "work" must not match the session named "work-tree".
+        let ps_args = "  100 zellij a work-tree";
+        assert!(zellij_client_pids(ps_args, "work").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_requires_an_exact_program_name() {
+        // A wrapper script named "my-zellij-wrapper" is not the Zellij CLI.
+        let ps_args = "\
+  100 /usr/local/bin/my-zellij-wrapper a work
+  200 /usr/local/bin/zellij-server a work";
+        assert!(zellij_client_pids(ps_args, "work").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_is_empty_for_an_unknown_session() {
+        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "no-such-session").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_handles_empty_input() {
+        assert!(zellij_client_pids("", "ic-test").is_empty());
+    }
+
+    #[test]
+    fn zellij_client_pids_skips_malformed_lines() {
+        let ps_args = "\
+not_a_number zellij a work
+  100 zellij a work";
+        assert_eq!(zellij_client_pids(ps_args, "work"), vec![Pid(100)]);
+    }
+
+    #[test]
+    fn zellij_client_pids_ignores_an_empty_session_name() {
+        // ZELLIJ_SESSION_NAME is unset or empty. No client can be identified.
+        assert!(zellij_client_pids(PS_ARGS_TWO_SESSIONS, "").is_empty());
+    }
+
+    // =========================================================================
+    // Tests for ClientPids (the client list that cannot be empty)
+    // =========================================================================
+
+    #[test]
+    fn client_pids_refuses_an_empty_list() {
+        // An empty list would answer "every client is a Mosh client" for no
+        // reason, so it must not be possible to build one.
+        assert!(ClientPids::new(Vec::new()).is_none());
+    }
+
+    #[test]
+    fn client_pids_keeps_a_non_empty_list_in_order() {
+        let clients =
+            ClientPids::new(vec![Pid(57053), Pid(32269)]).expect("a list with clients is accepted");
+        assert_eq!(clients.as_slice(), [Pid(57053), Pid(32269)]);
     }
 
     // =========================================================================
