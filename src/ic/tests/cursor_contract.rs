@@ -638,13 +638,16 @@ fn sixel_reserves_the_rows_before_it_draws() {
     );
 }
 
-/// The file name row, the image and the prompt must fit inside the height of
+/// The file name rows, the image and the prompt must fit inside the height of
 /// the terminal. `ic` prints the file name above the image, so the auto-fit
-/// path must pay for that row.
+/// path must pay for the rows that the name occupies. A name wider than the
+/// terminal wraps onto more than one row, and `ic` pays for every one of them.
 ///
 /// The net movement of the whole stream is the number of rows that the terminal
-/// advances: the header rows plus the image rows, because the reservation and
-/// the cursor-up cancel. The prompt then takes one more row.
+/// advances: the header lines plus the image rows, because the reservation and
+/// the cursor-up cancel. A wrapped row of the header comes from the terminal and
+/// not from the stream, so this count is a lower bound on the rows that the
+/// screen gives to the header. The prompt then takes one more row.
 #[test]
 fn auto_fit_leaves_room_for_the_file_name_and_the_prompt() {
     let stdout = run_ic_sixel_auto_fit(TEST_IMAGE_PATH);
@@ -652,7 +655,7 @@ fn auto_fit_leaves_room_for_the_file_name_and_the_prompt() {
     let rows = scan_cursor_movement(&stdout).net();
     assert!(
         rows + PROMPT_ROWS <= TERMINAL_ROWS,
-        "the file name row and the image take {rows} rows, and the prompt takes {PROMPT_ROWS} more, which is more than the {TERMINAL_ROWS} rows of the terminal"
+        "the file name rows and the image take {rows} rows, and the prompt takes {PROMPT_ROWS} more, which is more than the {TERMINAL_ROWS} rows of the terminal"
     );
 }
 

@@ -19,6 +19,7 @@ use terminal_size::{terminal_size, Height, Width};
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
+use unicode_width::UnicodeWidthStr;
 
 // ============================================================================
 // Constants for Sixel and terminal display calculations
@@ -62,7 +63,11 @@ const RESTORE_CURSOR: &str = "\x1b8";
 /// The row that the shell prompt returns to below an image.
 const PROMPT_ROWS: u32 = 1;
 
-/// The number of rows that `ic` prints above an image.
+/// The number of screen rows that `ic` prints above an image.
+///
+/// The count is a count of rows, not a count of header lines. A line that is
+/// wider than the terminal wraps onto more than one row, and every one of those
+/// rows takes height away from the image. Use [`header_rows`] to get the count.
 ///
 /// The auto-fit path must subtract these rows from the height of the terminal.
 /// If it does not, the header rows and the image together fill the screen, and
@@ -89,8 +94,34 @@ fn auto_fit_rows(term_height: u32, header: HeaderRows) -> u32 {
         .max(1)
 }
 
-fn header_rows(lines: &[String], _term_width: u32) -> HeaderRows {
-    HeaderRows(u32::try_from(lines.len()).unwrap_or(u32::MAX))
+/// Give the number of rows that the header lines occupy on the screen.
+///
+/// A terminal wraps a line that is wider than the screen, so one header line
+/// can take more than one row. A count of the lines is therefore too small, and
+/// the auto-fit height that comes from it is too large. The function measures
+/// the display width of each line, because one character can take two columns,
+/// and it divides that width by the width of the terminal. Each line takes one
+/// row or more, so an empty line still counts.
+///
+/// # Arguments
+/// * `lines` - The header lines, one element per line.
+/// * `term_width` - The width of the terminal in columns. A width of 0 counts
+///   as one column.
+///
+/// # Returns
+/// The number of rows that the lines occupy after the terminal wraps them.
+fn header_rows(lines: &[String], term_width: u32) -> HeaderRows {
+    let columns = usize::try_from(term_width.max(1)).unwrap_or(usize::MAX);
+    let rows: usize = lines
+        .iter()
+        .map(|line| {
+            UnicodeWidthStr::width(line.as_str())
+                .div_ceil(columns)
+                .max(1)
+        })
+        .sum();
+
+    HeaderRows(u32::try_from(rows).unwrap_or(u32::MAX))
 }
 
 #[derive(Debug, Clone)]
@@ -1522,9 +1553,11 @@ fn get_terminal_size() -> Result<(u32, u32)> {
 
 /// Print a header and then display an image file.
 ///
-/// The function prints the header itself and then counts the lines that it
+/// The function prints the header itself and then counts the rows that it
 /// printed. The count and the print can therefore never drift apart, so a
-/// caller cannot print a header and forget to pay for the rows.
+/// caller cannot print a header and forget to pay for the rows. A header line
+/// that is wider than the terminal wraps onto more than one row, so the count
+/// comes from the display width of each line and not from the number of lines.
 ///
 /// # Arguments
 /// * `file_path` - The path of the image file.
@@ -1541,8 +1574,8 @@ fn display_image_from_file(file_path: &Path, args: &Args, header: &[String]) -> 
     let img = image::open(file_path)
         .with_context(|| format!("Failed to open image file: {}", file_path.display()))?;
 
-    let header_rows = u32::try_from(header.len()).unwrap_or(u32::MAX);
-    display_image(img, args, args.no_newline, HeaderRows(header_rows))
+    let term_width = get_terminal_size().map_or(FALLBACK_TERMINAL_COLS, |(cols, _)| cols);
+    display_image(img, args, args.no_newline, header_rows(header, term_width))
 }
 
 fn display_text_file(file_path: &Path) -> Result<()> {
