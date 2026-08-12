@@ -1,8 +1,10 @@
-//! Cursor contract tests for the Sixel display routine of `ic`.
+//! Cursor contract tests for the display routines of `ic`.
 //!
 //! Sixel gives no contract for the position of the cursor after the string
-//! terminator. Each renderer makes its own decision. `ic` must therefore state
-//! where the cursor ends, instead of a guess of one newline.
+//! terminator. Each renderer makes its own decision. The Kitty protocol and the
+//! iTerm2 protocol both have a flag that holds the cursor still, but then the
+//! caller must move it. `ic` must therefore state where the cursor ends, in
+//! every routine, instead of a guess of one newline.
 //!
 //! These tests drive the real binary and look at the bytes it writes. They
 //! measure the cursor movement that the stream *requests*, not the exact escape
@@ -27,6 +29,12 @@ const CURSOR_DOWN_FINAL: u8 = b'B';
 
 /// The device control string introducer that opens the Sixel payload.
 const SIXEL_START: &[u8] = b"\x1bP";
+
+/// The application program command that opens a Kitty graphics command.
+const KITTY_START: &[u8] = b"\x1b_G";
+
+/// The Kitty graphics key that tells the renderer not to move the cursor.
+const KITTY_NO_CURSOR_MOVE: &str = "C=1";
 
 /// The string terminator that closes the Sixel payload.
 const STRING_TERMINATOR: &[u8] = b"\x1b\\";
@@ -57,8 +65,48 @@ const TERMINAL_ROWS: i64 = 24;
 /// The row that the shell prompt returns to below the image.
 const PROMPT_ROWS: i64 = 1;
 
-/// The terminal type for the child process.
-const TEST_TERM: &str = "xterm-256color";
+/// The terminal type of a child process that must not look like Kitty.
+const TERM_XTERM_256COLOR: &str = "xterm-256color";
+
+/// The terminal type that Kitty sets.
+const TERM_XTERM_KITTY: &str = "xterm-kitty";
+
+/// A display routine of `ic` that a test selects.
+///
+/// `ic` picks the routine from the environment, so a test names the routine it
+/// wants and [`Routine::environment`] gives the variables that select it.
+#[derive(Clone, Copy, Debug)]
+enum Routine {
+    /// The Sixel routine, which muxiavelli panels and Zellij use.
+    Sixel,
+    /// The Kitty graphics routine, which Kitty, WezTerm and Ghostty use.
+    Kitty,
+}
+
+impl Routine {
+    /// Give the environment variables that select this routine.
+    ///
+    /// The variables go on top of a cleared environment, so nothing that the
+    /// test runner inherited can change the routine.
+    ///
+    /// `MUXIAVELLI` selects the Sixel routine. `ZELLIJ` selects the same
+    /// routine but it also turns on a process tree heuristic that reads the
+    /// real process list of the host, which makes the result depend on the
+    /// machine.
+    ///
+    /// # Returns
+    /// The name and the value of each variable.
+    fn environment(self) -> Vec<(&'static str, &'static str)> {
+        match self {
+            Routine::Sixel => vec![
+                ("TERM", TERM_XTERM_256COLOR),
+                ("MUXIAVELLI", "1"),
+                ("MUXIAVELLI_IMAGE_PROTOCOLS", "sixel"),
+            ],
+            Routine::Kitty => vec![("TERM", TERM_XTERM_KITTY), ("KITTY_WINDOW_ID", "1")],
+        }
+    }
+}
 
 /// A directory that does not exist, unique to this process.
 ///
@@ -165,29 +213,58 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Make a command that runs `ic` through the Sixel display routine.
+/// Give the key list of the first Kitty graphics command in a byte stream.
 ///
-/// `MUXIAVELLI` selects the Sixel routine. `ZELLIJ` selects the same routine
-/// but it also turns on a process tree heuristic that reads the real process
-/// list of the host, which makes the result depend on the machine.
+/// A Kitty graphics command is `ESC _ G <key list> ; <payload> ESC \`. The key
+/// list is a comma separated list of `<key>=<value>` pairs.
 ///
 /// # Arguments
+/// * `bytes` - The byte stream to read.
+///
+/// # Returns
+/// One entry for each `<key>=<value>` pair of the first graphics command.
+///
+/// # Panics
+/// Panics when the stream holds no Kitty graphics command, or when the command
+/// holds no key list.
+fn kitty_key_list(bytes: &[u8]) -> Vec<String> {
+    let start = find(bytes, KITTY_START).expect("the output must hold a Kitty graphics command")
+        + KITTY_START.len();
+    let tail = &bytes[start..];
+    let end = tail
+        .iter()
+        .position(|byte| *byte == b';')
+        .expect("a Kitty graphics command must close its key list with a semicolon");
+
+    std::str::from_utf8(&tail[..end])
+        .expect("a Kitty key list must be UTF-8")
+        .split(',')
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Make a command that runs `ic` through one display routine.
+///
+/// # Arguments
+/// * `routine` - The display routine that `ic` must use.
 /// * `args` - The full command line for `ic`.
 ///
 /// # Returns
 /// A command with the environment and the pipes of the tests already set.
-fn ic_sixel_command(args: &[&str]) -> Command {
+fn ic_command(routine: Routine, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ic"));
     command
         .args(args)
         .env_clear()
         .env("PATH", unreachable_path_dir())
-        .env("TERM", TEST_TERM)
-        .env("MUXIAVELLI", "1")
-        .env("MUXIAVELLI_IMAGE_PROTOCOLS", "sixel")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    for (name, value) in routine.environment() {
+        command.env(name, value);
+    }
+
     command
 }
 
@@ -213,10 +290,11 @@ fn wait_for_stdout(child: process::Child) -> Vec<u8> {
     output.stdout
 }
 
-/// Run `ic` through the Sixel display routine, with the image on stdin, and
-/// give back its stdout.
+/// Run `ic` through one display routine, with the image on stdin, and give back
+/// its stdout.
 ///
 /// # Arguments
+/// * `routine` - The display routine that `ic` must use.
 /// * `extra_args` - More command line arguments for `ic`, after the arguments
 ///   that fix the size of the image.
 ///
@@ -226,11 +304,13 @@ fn wait_for_stdout(child: process::Child) -> Vec<u8> {
 /// # Panics
 /// Panics when the child process does not start, does not accept the image, or
 /// exits with a failure.
-fn run_ic_sixel(extra_args: &[&str]) -> Vec<u8> {
+fn run_ic(routine: Routine, extra_args: &[&str]) -> Vec<u8> {
     let mut args: Vec<&str> = vec!["--stdin", "--width", "10", "--height", "5"];
     args.extend_from_slice(extra_args);
 
-    let mut child = ic_sixel_command(&args).spawn().expect("failed to start ic");
+    let mut child = ic_command(routine, &args)
+        .spawn()
+        .expect("failed to start ic");
 
     let mut stdin = child.stdin.take().expect("ic has no stdin pipe");
     stdin
@@ -254,7 +334,7 @@ fn run_ic_sixel(extra_args: &[&str]) -> Vec<u8> {
 /// # Panics
 /// Panics when the child process does not start or exits with a failure.
 fn run_ic_sixel_auto_fit(path: &str) -> Vec<u8> {
-    let child = ic_sixel_command(&[path])
+    let child = ic_command(Routine::Sixel, &[path])
         .spawn()
         .expect("failed to start ic");
 
@@ -266,7 +346,7 @@ fn run_ic_sixel_auto_fit(path: &str) -> Vec<u8> {
 /// ends the line with a carriage return.
 #[test]
 fn sixel_advances_the_cursor_below_the_image() {
-    let stdout = run_ic_sixel(&[]);
+    let stdout = run_ic(Routine::Sixel, &[]);
 
     let terminator =
         find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
@@ -288,7 +368,7 @@ fn sixel_advances_the_cursor_below_the_image() {
 /// change the final position of the cursor.
 #[test]
 fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
-    let stdout = run_ic_sixel(&[]);
+    let stdout = run_ic(Routine::Sixel, &[]);
 
     let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
     let terminator =
@@ -326,7 +406,7 @@ fn sixel_brackets_the_payload_against_renderer_cursor_motion() {
 /// below report the failure.
 #[test]
 fn no_newline_suppresses_the_cursor_contract() {
-    let stdout = run_ic_sixel(&["--no-newline"]);
+    let stdout = run_ic(Routine::Sixel, &["--no-newline"]);
 
     let terminator =
         find(&stdout, STRING_TERMINATOR).expect("the output must hold a Sixel string terminator");
@@ -350,7 +430,7 @@ fn no_newline_suppresses_the_cursor_contract() {
 /// scrolls the terminal instead of running off it.
 #[test]
 fn sixel_reserves_the_rows_before_it_draws() {
-    let stdout = run_ic_sixel(&[]);
+    let stdout = run_ic(Routine::Sixel, &[]);
 
     let save = find(&stdout, SAVE_CURSOR).expect("the stream must save the cursor");
     let payload_start = find(&stdout, SIXEL_START).expect("the output must hold a Sixel payload");
@@ -387,5 +467,21 @@ fn auto_fit_leaves_room_for_the_file_name_and_the_prompt() {
     assert!(
         rows + PROMPT_ROWS <= TERMINAL_ROWS,
         "the file name row and the image take {rows} rows, and the prompt takes {PROMPT_ROWS} more, which is more than the {TERMINAL_ROWS} rows of the terminal"
+    );
+}
+
+/// The Kitty graphics command must carry `C=1`, which tells the renderer not to
+/// move the cursor.
+///
+/// The routine states the position of the cursor itself. A renderer that also
+/// moves the cursor doubles the movement, so the routine must hold it still.
+#[test]
+fn kitty_holds_the_cursor_still_while_it_draws() {
+    let stdout = run_ic(Routine::Kitty, &[]);
+
+    let keys = kitty_key_list(&stdout);
+    assert!(
+        keys.iter().any(|key| key == KITTY_NO_CURSOR_MOVE),
+        "the Kitty key list must carry {KITTY_NO_CURSOR_MOVE}, but it is {keys:?}"
     );
 }
