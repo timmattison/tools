@@ -784,8 +784,7 @@ enum Unread {
 ///
 /// SIGPIPE is why the failure surfaces as a panic rather than as a signal: Rust's
 /// runtime ignores it at startup, so the write returns `EPIPE` instead of killing
-/// the process, and `println!` turns that into a panic and exit
-/// [`PANICKED`](PANICKED).
+/// the process, and `println!` turns that into a panic and exit `PANICKED`.
 fn grind_into_an_unread_pipe(repo: &Path, args: &[&str], unread: Unread) -> (Option<i32>, String) {
     let (reader, writer) = std::io::pipe().expect("create a pipe");
     // Before the child exists, so the stream it is handed has never had a
