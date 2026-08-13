@@ -214,10 +214,48 @@ where
 ///   it renders only to a terminal, so a pipe removes the carriage-return
 ///   redraws that would otherwise arrive as unreadable status rows.
 fn run_push(args: &[String], workdir: &Path) -> PushOutcome {
-    let _ = (args, workdir, Command::new("git"), Stdio::null());
+    let result = Command::new("git")
+        .args(args)
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output();
+
+    let output = match result {
+        Ok(output) => output,
+        // git is missing, or not executable. Rare, and worth saying plainly:
+        // every other failure here is git's own words, and this one would
+        // otherwise arrive as an empty message.
+        Err(error) => {
+            return PushOutcome {
+                success: false,
+                output: format!("cannot run git: {error}"),
+            }
+        }
+    };
+
+    // stderr first: `git push` reports what it did — `To <remote>`, the ref
+    // updates, and every rejection — on stderr, and writes to stdout only under
+    // flags gsw does not pass. Leading with it puts the useful lines in the
+    // three rows a status message gets.
+    let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stdout));
+    // Carriage returns are how a progress meter redraws in place. Capturing
+    // both streams already suppresses it, so this is for anything else that
+    // emits CRLF: left in, a stray `\r` would send the cursor to column zero
+    // mid-row and scramble the frame under it.
+    let mut text = text.replace('\r', "");
+
+    let success = output.status.success();
+    if !success && text.trim().is_empty() {
+        // A failure with nothing to show would render as a blank row, which
+        // reads as success. The exit status is all git left us.
+        text = format!("git push failed ({})", output.status);
+    }
+
     PushOutcome {
-        success: true,
-        output: String::new(),
+        success,
+        output: text,
     }
 }
 
