@@ -25,7 +25,7 @@ use crossterm::terminal::{
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::push::PushUi;
+use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
 use crate::{
@@ -784,14 +784,14 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_push: |args: Vec<String>| {
+            start_push: |command: PushCommand| {
                 // No work tree means nothing to push from. `RepoHandle` rejects
                 // a bare repository at discovery, so watch mode never gets here
                 // without one — this is the type's `Option` being honored, not
                 // a case the user can reach.
                 if let Some(workdir) = workdir.clone() {
                     let tx = push_tx.clone();
-                    crate::push::spawn(args, workdir, move |outcome| {
+                    crate::push::spawn(command, workdir, move |outcome| {
                         let _ = tx.send(Event::PushFinished(outcome));
                     });
                 }
@@ -946,10 +946,11 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush> {
     clock: Clock,
     /// Map the freshest displayed age to the decay-tick interval (`None` = off).
     next_tick: Tick,
-    /// Start a confirmed push, given the `git` arguments the confirmation
-    /// described. Production spawns a thread that runs the push and sends the
-    /// outcome back as [`Event::PushFinished`]; tests record the arguments and
-    /// decide for themselves when — or whether — the outcome arrives.
+    /// Start a confirmed push, given the [`PushCommand`] the confirmation
+    /// described — the `git` arguments and the branch they were written for.
+    /// Production spawns a thread that runs the push and sends the outcome back
+    /// as [`Event::PushFinished`]; tests record the command and decide for
+    /// themselves when — or whether — the outcome arrives.
     start_push: StartPush,
 }
 
@@ -995,7 +996,7 @@ fn absorb<StartPush>(
     start_push: &mut StartPush,
 ) -> Flow
 where
-    StartPush: FnMut(Vec<String>),
+    StartPush: FnMut(PushCommand),
 {
     match event {
         Event::Quit => return Flow::Quit,
@@ -1011,8 +1012,8 @@ where
         // `confirm` yields the arguments only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
-            if let Some(args) = ui.confirm() {
-                start_push(args);
+            if let Some(command) = ui.confirm() {
+                start_push(command);
             }
         }
         Event::PushCancelled => ui.cancel(),
@@ -1098,7 +1099,7 @@ where
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
-    StartPush: FnMut(Vec<String>),
+    StartPush: FnMut(PushCommand),
 {
     let mut freshest = initial_freshest;
     // Everything the push feature puts on screen, plus the input mode that goes
@@ -2700,7 +2701,7 @@ mod tests {
                 // A decay tick on the same cadence, so the loop always wakes:
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2739,7 +2740,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2785,7 +2786,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2833,7 +2834,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2877,7 +2878,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2918,7 +2919,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2961,7 +2962,7 @@ mod tests {
                 // Tiny interval so the tick fires fast; the cadence-vs-age
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3004,7 +3005,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3048,7 +3049,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3098,7 +3099,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || now,
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3156,7 +3157,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3236,7 +3237,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3320,7 +3321,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3385,7 +3386,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3457,7 +3458,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3528,7 +3529,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3579,7 +3580,7 @@ mod tests {
                 },
                 clock: || base,
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3643,7 +3644,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         );
 
@@ -3731,7 +3732,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         );
 
@@ -3843,7 +3844,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
-                start_push: |_args: Vec<String>| {},
+                start_push: |_command: PushCommand| {},
             },
         );
 
@@ -3977,7 +3978,7 @@ mod push_loop_tests {
     #[derive(Default)]
     struct Seen {
         collects: usize,
-        pushes: Vec<Vec<String>>,
+        pushes: Vec<PushCommand>,
         frame_heights: Vec<usize>,
     }
 
@@ -4016,7 +4017,7 @@ mod push_loop_tests {
                 paint: |_output: &str| Ok(()),
                 clock: move || base,
                 next_tick: timer_off,
-                start_push: |args: Vec<String>| seen.borrow_mut().pushes.push(args),
+                start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
             },
         )
         .expect("loop");
@@ -4072,15 +4073,16 @@ mod push_loop_tests {
             key(KeyCode::Char('y')),
             Event::Quit,
         ]);
-        assert_eq!(
-            seen.pushes,
-            vec![vec![
-                "push".to_string(),
-                "-u".to_string(),
-                "origin".to_string(),
-                "gsw-push".to_string(),
-            ]],
-        );
+        let [command] = seen.pushes.as_slice() else {
+            panic!(
+                "one confirmed push must reach the runner, got {:?}",
+                seen.pushes
+            );
+        };
+        assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
+        // The branch travels with the arguments all the way through the loop:
+        // the runner checks it against the checkout before git sees it.
+        assert_eq!(command.branch(), "gsw-push");
     }
 
     #[test]
@@ -4233,7 +4235,7 @@ mod push_loop_tests {
                     paint: |_output: &str| Ok(()),
                     clock: move || base,
                     next_tick: timer_off,
-                    start_push: |args: Vec<String>| seen.borrow_mut().pushes.push(args),
+                    start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
                 },
             )
             .expect("loop");

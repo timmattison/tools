@@ -77,6 +77,50 @@ enum PushPlan {
     },
 }
 
+/// A confirmed push: the branch the confirmation named, and the `git`
+/// arguments that carry it out.
+///
+/// The two are one value because they are one sentence — push *this branch*,
+/// *this way* — and the arguments alone do not say which branch. An
+/// [`PushPlan::Update`] runs a bare `git push`, which git resolves against
+/// whatever HEAD points at when the child process starts. That is not
+/// necessarily what HEAD pointed at when the question went on screen: the
+/// answer arrives whenever the user presses `y`, and a checkout in another pane
+/// fits in between. Carrying the branch alongside the arguments is what lets
+/// [`run_push`] confirm the repository is still on that branch, microseconds
+/// before git reads it.
+///
+/// Built only by [`prompt_for`], so a command nobody confirmed cannot be
+/// assembled somewhere else and handed to the runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PushCommand {
+    /// The branch the confirmation named, as [`crate::repo::branch_name`]
+    /// reports it.
+    branch: String,
+    /// Arguments to pass to `git`, not including the program name.
+    args: Vec<String>,
+}
+
+impl PushCommand {
+    /// The command that pushes `branch` by running `git <args>`.
+    fn new(branch: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            branch: branch.into(),
+            args,
+        }
+    }
+
+    /// The branch the confirmation named.
+    pub(crate) fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// The arguments to pass to `git`, not including the program name.
+    pub(crate) fn args(&self) -> &[String] {
+        &self.args
+    }
+}
+
 /// What the watch loop does when the user presses `p`.
 ///
 /// This is the whole interface [`prompt_for`] hands back, and it is deliberately
@@ -88,7 +132,9 @@ enum PushPlan {
 /// [`PushPrompt::Confirm`] carries the command with the question, so the
 /// arguments cannot be requested for a push that must never run. The invariant
 /// is structural: there is no way to hold a `Confirm` without holding the exact
-/// argument list the confirmation described.
+/// [`PushCommand`] the confirmation described — the argument list *and* the
+/// branch it was written for, which is what the runner re-checks before it
+/// pushes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PushPrompt {
     /// Ask before running the push.
@@ -100,8 +146,8 @@ pub(crate) enum PushPrompt {
         /// colors this case differently, so a create can never be mistaken for
         /// a routine update at a glance.
         creates_remote_branch: bool,
-        /// Arguments to pass to `git`, not including the program name.
-        args: Vec<String>,
+        /// The branch and the arguments this question described.
+        command: PushCommand,
         /// What to show once this push succeeds. Composed here, with the
         /// question, so the two sentences describe the same act — a push
         /// confirmed as a create reports itself as a create.
@@ -147,7 +193,10 @@ pub(crate) fn prompt_for(
                 creates_remote_branch: true,
                 // `-u` records the new remote branch as the upstream, so the
                 // push after this one is a plain update.
-                args: vec!["push".to_string(), "-u".to_string(), remote, branch],
+                command: PushCommand::new(
+                    branch.clone(),
+                    vec!["push".to_string(), "-u".to_string(), remote, branch],
+                ),
                 success_message,
             }
         }
@@ -159,7 +208,10 @@ pub(crate) fn prompt_for(
                 // Bare `push`: git reads the remote and the refspec out of the
                 // branch config, so a branch tracking something other than the
                 // repository's default remote still goes to the right place.
-                args: vec!["push".to_string()],
+                // Which branch's config it reads is decided by HEAD at exec
+                // time, which is why the command carries the branch this
+                // question was written for.
+                command: PushCommand::new(branch, vec!["push".to_string()]),
                 success_message: format!("Pushed {commits} {unit} to {target}"),
             }
         }
@@ -186,11 +238,11 @@ pub(crate) fn prompt_for(
 /// down the loop's own channel, so it re-enters the loop the same way every
 /// other event does — no shared state, and the outcome is applied between
 /// frames rather than during one.
-pub(crate) fn spawn<F>(args: Vec<String>, workdir: PathBuf, on_finish: F)
+pub(crate) fn spawn<F>(command: PushCommand, workdir: PathBuf, on_finish: F)
 where
     F: FnOnce(PushOutcome) + Send + 'static,
 {
-    std::thread::spawn(move || on_finish(run_push(&args, &workdir)));
+    std::thread::spawn(move || on_finish(run_push(&command, &workdir)));
 }
 
 /// Run `git push` to completion and describe how it went.
@@ -211,9 +263,9 @@ where
 /// - **Both streams are captured**, which also suppresses git's progress meter:
 ///   it renders only to a terminal, so a pipe removes the carriage-return
 ///   redraws that would otherwise arrive as unreadable status rows.
-fn run_push(args: &[String], workdir: &Path) -> PushOutcome {
+fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
     let result = Command::new("git")
-        .args(args)
+        .args(command.args())
         .current_dir(workdir)
         .stdin(Stdio::null())
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -298,7 +350,7 @@ enum State {
     Asking {
         question: String,
         creates_remote_branch: bool,
-        args: Vec<String>,
+        command: PushCommand,
         success_message: String,
     },
     /// `git push` is running.
@@ -333,12 +385,12 @@ impl PushUi {
             PushPrompt::Confirm {
                 question,
                 creates_remote_branch,
-                args,
+                command,
                 success_message,
             } => State::Asking {
                 question,
                 creates_remote_branch,
-                args,
+                command,
                 success_message,
             },
             PushPrompt::Refuse { message } => State::Status {
@@ -348,15 +400,15 @@ impl PushUi {
         };
     }
 
-    /// Handle `y`: start the push, returning the arguments to run, or `None`
-    /// when no confirmation was on screen to accept.
+    /// Handle `y`: start the push, returning the [`PushCommand`] to run, or
+    /// `None` when no confirmation was on screen to accept.
     ///
-    /// Moving to [`State::Running`] as it hands the arguments over is what makes
+    /// Moving to [`State::Running`] as it hands the command over is what makes
     /// a second `y` — one that raced the mode change — return `None` rather than
     /// start an overlapping push.
-    pub(crate) fn confirm(&mut self) -> Option<Vec<String>> {
+    pub(crate) fn confirm(&mut self) -> Option<PushCommand> {
         let State::Asking {
-            args,
+            command,
             success_message,
             ..
         } = std::mem::replace(&mut self.state, State::Idle)
@@ -364,7 +416,7 @@ impl PushUi {
             return None;
         };
         self.state = State::Running { success_message };
-        Some(args)
+        Some(command)
     }
 
     /// Handle `n`: drop the confirmation. The prompt disappearing is the whole
@@ -568,9 +620,9 @@ mod tests {
 
     /// The command a confirmable prompt carries. Panics on a refusal, so a test
     /// that expected a push and got a message fails on the line that asked.
-    fn args(prompt: &PushPrompt) -> &[String] {
+    fn command(prompt: &PushPrompt) -> &PushCommand {
         match prompt {
-            PushPrompt::Confirm { args, .. } => args,
+            PushPrompt::Confirm { command, .. } => command,
             PushPrompt::Refuse { message } => {
                 panic!("expected a confirmable prompt, got a refusal: {message}")
             }
@@ -591,7 +643,7 @@ mod tests {
             },
         );
         assert_eq!(
-            args(&prompt_for("gsw-push", Some("origin"), None)),
+            command(&prompt_for("gsw-push", Some("origin"), None)).args(),
             ["push", "-u", "origin", "gsw-push"],
         );
     }
@@ -610,7 +662,7 @@ mod tests {
             },
         );
         assert_eq!(
-            args(&prompt_for("gsw-push", Some("origin"), Some(&up))),
+            command(&prompt_for("gsw-push", Some("origin"), Some(&up))).args(),
             ["push"]
         );
     }
@@ -695,7 +747,7 @@ mod tests {
         // A repository whose only remote is not named `origin`. The plan must
         // carry that name through to the command rather than assuming `origin`.
         assert_eq!(
-            args(&prompt_for("gsw-push", Some("fork"), None)),
+            command(&prompt_for("gsw-push", Some("fork"), None)).args(),
             ["push", "-u", "fork", "gsw-push"],
         );
     }
@@ -752,12 +804,27 @@ mod tests {
 
     #[test]
     fn the_confirmation_carries_the_command_it_describes() {
-        // The question and the argument list travel together, so what runs on
-        // `y` is what the sentence promised.
-        let PushPrompt::Confirm { args, .. } = prompt_for("gsw-push", Some("origin"), None) else {
+        // The question, the argument list, and the branch the question named
+        // travel together, so what runs on `y` is what the sentence promised —
+        // and the runner can still tell whether the repository moved under it.
+        let PushPrompt::Confirm { command, .. } = prompt_for("gsw-push", Some("origin"), None)
+        else {
             panic!("an untracked branch with a remote must be confirmable");
         };
-        assert_eq!(args, ["push", "-u", "origin", "gsw-push"]);
+        assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
+        assert_eq!(command.branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_bare_push_still_names_the_branch_it_was_confirmed_for() {
+        // The argument list for an update says nothing about which branch it
+        // pushes — git resolves that from HEAD when it runs. The command has to
+        // carry the branch anyway, or nothing downstream can tell that the
+        // checkout changed between the question and the answer.
+        let up = upstream("origin/gsw-push", 3, 0);
+        let prompt = prompt_for("gsw-push", Some("origin"), Some(&up));
+        assert_eq!(command(&prompt).args(), ["push"]);
+        assert_eq!(command(&prompt).branch(), "gsw-push");
     }
 
     #[test]
@@ -912,14 +979,12 @@ mod ui_tests {
     #[test]
     fn confirming_hands_back_the_command_and_switches_to_pushing() {
         let mut ui = asking();
+        let command = ui.confirm().expect("a question on screen must confirm");
+        assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
         assert_eq!(
-            ui.confirm(),
-            Some(vec![
-                "push".to_string(),
-                "-u".to_string(),
-                "origin".to_string(),
-                "gsw-push".to_string(),
-            ]),
+            command.branch(),
+            "gsw-push",
+            "the branch the question named must reach the runner",
         );
         assert_eq!(ui.mode(), InputMode::Pushing);
         assert_eq!(ui.rows(), 1, "the running push stays on screen");
@@ -1182,6 +1247,15 @@ mod run_tests {
         (origin, clone)
     }
 
+    /// The command a confirmation shown on `feature` would have carried.
+    ///
+    /// Every fixture here is checked out on `feature`, so this is what the
+    /// confirmation named — and the runner refuses anything whose branch no
+    /// longer matches the checkout.
+    fn confirmed(args: &[&str]) -> PushCommand {
+        PushCommand::new("feature", args.iter().map(|s| (*s).to_string()).collect())
+    }
+
     /// Whether `origin` has a `feature` branch, read from the origin itself.
     fn origin_has_feature(origin: &Path) -> bool {
         Command::new("git")
@@ -1204,11 +1278,10 @@ mod run_tests {
             "the fixture must start without the branch",
         );
 
-        let args: Vec<String> = ["push", "-u", "origin", "feature"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-        let outcome = run_push(&args, clone.path());
+        let outcome = run_push(
+            &confirmed(&["push", "-u", "origin", "feature"]),
+            clone.path(),
+        );
 
         assert!(outcome.success, "push failed: {}", outcome.output);
         assert!(
@@ -1238,7 +1311,7 @@ mod run_tests {
         std::fs::write(p.join("feature.txt"), "more work\n").expect("write feature.txt");
         git(p, &["commit", "-q", "-am", "more work"]);
 
-        let outcome = run_push(&["push".to_string()], p);
+        let outcome = run_push(&confirmed(&["push"]), p);
         assert!(outcome.success, "push failed: {}", outcome.output);
 
         let subject = Command::new("git")
@@ -1264,7 +1337,7 @@ mod run_tests {
         git(p, &["push", "-q", "-u", "origin", "feature"]);
         git(p, &["commit", "-q", "--amend", "-m", "rewritten"]);
 
-        let outcome = run_push(&["push".to_string()], p);
+        let outcome = run_push(&confirmed(&["push"]), p);
         assert!(!outcome.success, "a diverged push must fail");
         assert!(
             outcome.output.contains("rejected"),
@@ -1276,12 +1349,10 @@ mod run_tests {
     #[test]
     fn a_push_to_a_remote_that_does_not_exist_reports_it() {
         let (_origin, clone) = clone_with_feature_branch();
-        let args: Vec<String> = ["push", "no-such-remote", "feature"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-
-        let outcome = run_push(&args, clone.path());
+        let outcome = run_push(
+            &confirmed(&["push", "no-such-remote", "feature"]),
+            clone.path(),
+        );
         assert!(!outcome.success, "pushing to a missing remote must fail");
         assert!(
             !outcome.output.trim().is_empty(),
@@ -1295,12 +1366,7 @@ mod run_tests {
         // unsuccessful outcome never arrives with an empty message, because a
         // blank status row reads as success.
         let (_origin, clone) = clone_with_feature_branch();
-        let args: Vec<String> = ["push", "--no-such-flag"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-
-        let outcome = run_push(&args, clone.path());
+        let outcome = run_push(&confirmed(&["push", "--no-such-flag"]), clone.path());
         assert!(!outcome.success);
         assert!(!failure_lines(&outcome.output).is_empty());
         assert!(!outcome.output.trim().is_empty());
@@ -1312,12 +1378,10 @@ mod run_tests {
         // would read the same keystrokes the event reader is reading, behind a
         // question gsw did not draw. It must fail fast instead of waiting.
         let (_origin, clone) = clone_with_feature_branch();
-        let args: Vec<String> = ["push", "https://user@127.0.0.1:1/nope.git", "feature"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
-
-        let outcome = run_push(&args, clone.path());
+        let outcome = run_push(
+            &confirmed(&["push", "https://user@127.0.0.1:1/nope.git", "feature"]),
+            clone.path(),
+        );
         assert!(
             !outcome.success,
             "an unreachable authenticated remote must fail"
@@ -1329,6 +1393,118 @@ mod run_tests {
         );
     }
 
+    /// The commit `refs/heads/<branch>` points at in the repository at `dir`,
+    /// or `""` when there is no such branch. Compared before and after a push
+    /// to say whether anything was actually sent.
+    fn tip(dir: &Path, branch: &str) -> String {
+        let output = Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .current_dir(dir)
+            .output()
+            .expect("invoke git");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn an_update_whose_branch_changed_since_the_confirmation_is_not_pushed() {
+        // The window the confirmation opens: `p` resolves the command while
+        // `feature` is checked out, `y` arrives seconds later, and a checkout in
+        // another pane lands in between. A bare `git push` names no branch, so
+        // git would resolve it against the *new* HEAD and send a branch the
+        // question never mentioned. Nothing may be pushed in that case.
+        let (origin, clone) = clone_with_feature_branch();
+        let p = clone.path();
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+        // A second branch that also tracks the origin, so a mis-resolved bare
+        // push would succeed rather than being stopped by something else.
+        git(p, &["checkout", "-q", "-b", "other", "main"]);
+        std::fs::write(p.join("other.txt"), "other work\n").expect("write other.txt");
+        git(p, &["add", "other.txt"]);
+        git(p, &["commit", "-q", "-m", "other work"]);
+        git(p, &["push", "-q", "-u", "origin", "other"]);
+        std::fs::write(p.join("other.txt"), "more other work\n").expect("write other.txt");
+        git(p, &["commit", "-q", "-am", "more other work"]);
+
+        // Confirmed on `feature`, which is what the question named…
+        let command = PushCommand::new("feature", vec!["push".to_string()]);
+        // …but `other` is what is checked out when the answer arrives.
+        let before_other = tip(origin.path(), "other");
+        let before_feature = tip(origin.path(), "feature");
+
+        let outcome = run_push(&command, p);
+
+        assert!(
+            !outcome.success,
+            "a push whose branch changed must not report success: {}",
+            outcome.output,
+        );
+        assert_eq!(
+            tip(origin.path(), "other"),
+            before_other,
+            "the branch that was checked out at exec time must not be pushed",
+        );
+        assert_eq!(
+            tip(origin.path(), "feature"),
+            before_feature,
+            "nothing at all may be pushed once the checkout no longer matches",
+        );
+        assert!(
+            outcome.output.contains("branch changed"),
+            "the outcome must say the branch changed, got {:?}",
+            outcome.output,
+        );
+        assert!(
+            outcome.output.contains("press p again"),
+            "the outcome must say how to retry, got {:?}",
+            outcome.output,
+        );
+    }
+
+    #[test]
+    fn a_create_whose_branch_changed_since_the_confirmation_is_not_pushed() {
+        // A create names its branch in the arguments, so it would still push the
+        // right ref — but the check is one rule, not a per-variant exception: a
+        // confirmation is an answer about the repository as it stood, and gsw
+        // asks again rather than acting on a repository that moved.
+        let (origin, clone) = clone_with_feature_branch();
+        let p = clone.path();
+        let command = PushCommand::new(
+            "feature",
+            ["push", "-u", "origin", "feature"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        );
+        git(p, &["checkout", "-q", "main"]);
+
+        let outcome = run_push(&command, p);
+
+        assert!(
+            !outcome.success,
+            "a create whose branch changed must not report success: {}",
+            outcome.output,
+        );
+        assert!(
+            !origin_has_feature(origin.path()),
+            "the confirmed branch must not reach the remote after the checkout changed",
+        );
+        assert!(
+            outcome.output.contains("branch changed"),
+            "the outcome must say the branch changed, got {:?}",
+            outcome.output,
+        );
+        assert!(
+            outcome.output.contains("press p again"),
+            "the outcome must say how to retry, got {:?}",
+            outcome.output,
+        );
+    }
+
     #[test]
     fn spawn_delivers_the_outcome_off_the_calling_thread() {
         // The loop learns a push finished only through this callback, so a
@@ -1336,14 +1512,14 @@ mod run_tests {
         // in the pushing mode forever.
         let (origin, clone) = clone_with_feature_branch();
         let (tx, rx) = std::sync::mpsc::channel();
-        let args: Vec<String> = ["push", "-u", "origin", "feature"]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
 
-        spawn(args, clone.path().to_path_buf(), move |outcome| {
-            let _ = tx.send(outcome);
-        });
+        spawn(
+            confirmed(&["push", "-u", "origin", "feature"]),
+            clone.path().to_path_buf(),
+            move |outcome| {
+                let _ = tx.send(outcome);
+            },
+        );
 
         let outcome = rx
             .recv_timeout(std::time::Duration::from_secs(60))
