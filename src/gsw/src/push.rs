@@ -6,6 +6,8 @@
 //! and what an outcome means — lives here as pure, terminal-free code so it can
 //! be tested without a network or a pty. Only [`spawn`] touches a process.
 
+use colored::Colorize;
+
 use crate::render::{truncate_right, Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
 use crate::watch::InputMode;
@@ -229,45 +231,198 @@ impl PushUi {
     /// What keys mean right now.
     pub(crate) fn mode(&self) -> InputMode {
         let _ = &self.state;
-        InputMode::Normal
+        match self.state {
+            State::Asking { .. } => InputMode::Confirm,
+            State::Running { .. } => InputMode::Pushing,
+            State::Idle | State::Status { .. } => InputMode::Normal,
+        }
     }
 
     /// Handle `p`: work out what a push would do and either ask or explain.
+    ///
+    /// Replaces whatever was on screen, so pressing `p` with a stale error up
+    /// asks the new question instead of stacking a row under the old one.
     pub(crate) fn request(&mut self, snapshot: &Snapshot) {
-        let _ = snapshot;
+        self.state = match prompt_for(
+            &snapshot.branch,
+            snapshot.push_remote.as_deref(),
+            snapshot.upstream.as_ref(),
+        ) {
+            PushPrompt::Confirm {
+                question,
+                creates_remote_branch,
+                args,
+                success_message,
+            } => State::Asking {
+                question,
+                creates_remote_branch,
+                args,
+                success_message,
+            },
+            PushPrompt::Refuse { message } => State::Status {
+                lines: vec![message],
+                failed: false,
+            },
+        };
     }
 
     /// Handle `y`: start the push, returning the arguments to run, or `None`
     /// when no confirmation was on screen to accept.
+    ///
+    /// Moving to [`State::Running`] as it hands the arguments over is what makes
+    /// a second `y` — one that raced the mode change — return `None` rather than
+    /// start an overlapping push.
     pub(crate) fn confirm(&mut self) -> Option<Vec<String>> {
-        None
+        let State::Asking {
+            args,
+            success_message,
+            ..
+        } = std::mem::replace(&mut self.state, State::Idle)
+        else {
+            return None;
+        };
+        self.state = State::Running { success_message };
+        Some(args)
     }
 
     /// Handle `n`: drop the confirmation. The prompt disappearing is the whole
     /// feedback — a "cancelled" notice would itself need dismissing.
-    pub(crate) fn cancel(&mut self) {}
+    pub(crate) fn cancel(&mut self) {
+        if matches!(self.state, State::Asking { .. }) {
+            self.state = State::Idle;
+        }
+    }
 
     /// Handle a finished push: replace the running notice with the outcome.
+    ///
+    /// On success the wording comes from the plan that was confirmed, not from
+    /// git's output, so a create reports itself as a create. On failure it is
+    /// git's own words — a gsw paraphrase of a push error would drop exactly
+    /// the detail the user needs.
     pub(crate) fn finished(&mut self, outcome: PushOutcome) {
-        let _ = outcome;
+        let success_message = match std::mem::replace(&mut self.state, State::Idle) {
+            State::Running { success_message } => success_message,
+            // A finish with no push running: nothing to report against, so
+            // leave the screen as it is rather than inventing a message.
+            other => {
+                self.state = other;
+                return;
+            }
+        };
+
+        let lines = if outcome.success {
+            vec![success_message]
+        } else {
+            failure_lines(&outcome.output)
+        };
+        self.state = State::Status {
+            lines,
+            failed: !outcome.success,
+        };
     }
 
     /// Handle a key with no other meaning: clear a status message if one is up.
     /// Leaves a question or a running push alone — neither is the user's to
     /// dismiss by pressing an unrelated key.
-    pub(crate) fn dismiss(&mut self) {}
+    pub(crate) fn dismiss(&mut self) {
+        if matches!(self.state, State::Status { .. }) {
+            self.state = State::Idle;
+        }
+    }
 
     /// How many rows the overlay needs under the frame, so the caller can
     /// render the frame that much shorter and nothing falls off the bottom.
     pub(crate) fn rows(&self) -> usize {
-        0
+        match &self.state {
+            State::Idle => 0,
+            State::Asking { .. } | State::Running { .. } => 1,
+            State::Status { lines, .. } => lines.len(),
+        }
     }
 
     /// The overlay itself: [`PushUi::rows`] lines, none wider than `width`.
+    ///
+    /// Truncation is by display column and UTF-8 safe, because gsw's standing
+    /// contract is that nothing it prints ever wraps — a folded line would push
+    /// the frame's bottom row off the pane it was measured to fit.
     pub(crate) fn overlay(&self, width: usize) -> String {
-        let _ = (width, truncate_right, MAX_STATUS_ROWS, HINT_PREFIX);
-        String::new()
+        let lines: Vec<String> = match &self.state {
+            State::Idle => return String::new(),
+            State::Asking {
+                question,
+                creates_remote_branch,
+                ..
+            } => {
+                let line = truncate_right(&format!("{question}  {CONFIRM_HINT}"), width);
+                // Yellow marks the push that puts something new on a shared
+                // remote. The wording says so too — the color is what carries
+                // it in the half second before the words are read.
+                vec![if *creates_remote_branch {
+                    line.yellow().to_string()
+                } else {
+                    line
+                }]
+            }
+            State::Running { .. } => vec![truncate_right(RUNNING_NOTICE, width)],
+            State::Status { lines, failed } => lines
+                .iter()
+                .map(|line| {
+                    let line = truncate_right(line, width);
+                    if *failed {
+                        line.red().to_string()
+                    } else {
+                        line
+                    }
+                })
+                .collect(),
+        };
+        lines.join("\n")
     }
+}
+
+/// The key hint shown with every confirmation.
+///
+/// Spelled out rather than the usual `[y/N]`. That convention's capital letter
+/// means "this is what Enter gives you", and Enter *confirms* here — so `[y/N]`
+/// would promise that the key people reach for by reflex is the safe one, on
+/// the one prompt in gsw that writes to a shared remote.
+const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
+
+/// What a running push says while the network round trip is in flight.
+const RUNNING_NOTICE: &str = "Pushing…";
+
+/// What a failed push says when git said nothing gsw could show.
+const SILENT_FAILURE: &str = "git push failed";
+
+/// Pick the lines of a failed push's output worth the rows they cost.
+///
+/// git leads with the useful part — `To <remote>`, `! [rejected] …`,
+/// `error: failed to push …` — and follows with `hint:` advice that repeats in
+/// every rejection. So the hints are dropped first, and only if that leaves
+/// nothing are they let back in: a message the user cannot read beats a blank
+/// row that reads as success.
+fn failure_lines(output: &str) -> Vec<String> {
+    let meaningful = |line: &&str| !line.trim().is_empty();
+    let mut lines: Vec<String> = output
+        .lines()
+        .filter(meaningful)
+        .filter(|line| !line.trim_start().starts_with(HINT_PREFIX))
+        .take(MAX_STATUS_ROWS)
+        .map(|line| line.trim_end().to_string())
+        .collect();
+
+    if lines.is_empty() {
+        lines = output
+            .lines()
+            .filter(meaningful)
+            .take(MAX_STATUS_ROWS)
+            .map(|line| line.trim_end().to_string())
+            .collect();
+    }
+    if lines.is_empty() {
+        lines.push(SILENT_FAILURE.to_string());
+    }
+    lines
 }
 
 impl PushPlan {
@@ -624,8 +779,12 @@ mod ui_tests {
             overlay.contains("Create new remote branch origin/gsw-push?"),
             "the question must be on screen, got {overlay:?}",
         );
+        // Spelled out rather than the usual `[y/N]`, because a capital `N` is
+        // the convention for "Enter means no" and Enter confirms here. A hint
+        // that lies about the riskiest key on the prompt is worse than a long
+        // one.
         assert!(
-            overlay.contains("[y/N]"),
+            overlay.contains(CONFIRM_HINT),
             "the overlay owns the key hint, got {overlay:?}",
         );
     }
@@ -642,7 +801,7 @@ mod ui_tests {
             .overlay(80)
             .contains("origin/gsw-push is already up to date"));
         assert!(
-            !ui.overlay(80).contains("[y/N]"),
+            !ui.overlay(80).contains(CONFIRM_HINT),
             "a refusal must not offer keys that do nothing",
         );
     }
