@@ -299,8 +299,22 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
 /// remote added in another pane takes effect on the next refresh rather than at
 /// the next restart.
 pub fn push_remote(repo: &gix::Repository) -> Option<String> {
-    let _ = repo;
-    None
+    use gix::bstr::ByteSlice;
+
+    let names: Vec<String> = repo
+        .remote_names()
+        .iter()
+        .filter_map(|name| name.to_str().ok().map(str::to_owned))
+        .collect();
+
+    // The config snapshot borrows the repository, so the picked name is cloned
+    // out before it is dropped at the end of this scope.
+    let config = repo.config_snapshot();
+    let push_default = config
+        .string("remote.pushDefault")
+        .and_then(|value| value.to_str().ok().map(str::to_owned));
+
+    pick_push_remote(&names, push_default.as_deref())
 }
 
 /// Pure core of [`push_remote`]: pick the remote from the names the repository
@@ -321,9 +335,18 @@ pub fn push_remote(repo: &gix::Repository) -> Option<String> {
 ///    `pushDefault` is a genuine ambiguity, and guessing would publish a branch
 ///    to a remote the user never named.
 fn pick_push_remote(names: &[String], push_default: Option<&str>) -> Option<String> {
-    let _ = (names, push_default);
-    None
+    if let Some(configured) = push_default {
+        return Some(configured.to_string());
+    }
+    match names {
+        [only] => Some(only.clone()),
+        _ => names.iter().find(|name| *name == ORIGIN).cloned(),
+    }
 }
+
+/// The remote name every git tool assumes when a repository has several and the
+/// user has expressed no preference.
+const ORIGIN: &str = "origin";
 
 /// The in-progress git operation gsw should surface in the header, or `None`
 /// for a clean tree or an out-of-scope operation.
