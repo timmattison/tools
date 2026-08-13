@@ -607,6 +607,8 @@ enum Event {
     PushConfirmed,
     /// The user declined the push at the prompt (`n`, Esc, or `q`).
     PushCancelled,
+    /// A push that was running has finished, either way.
+    PushFinished(crate::push::PushOutcome),
     /// A key press with no other meaning. Clears a status message if one is on
     /// screen and does nothing otherwise, which is what keeps a push error up
     /// until the user has actually looked at the screen.
@@ -774,6 +776,7 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
+            start_push: |_args: Vec<String>| {},
         },
     )
 }
@@ -911,7 +914,7 @@ struct SnapshotCache {
 /// these to the real git collect, render, terminal-size query, painter, and
 /// clock; tests inject counters and a controllable clock to assert which hooks
 /// ran — and with what age offset — without a TTY or real time.
-struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
+struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush> {
     /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
     /// Render a snapshot at the given dimensions and timing.
@@ -924,6 +927,11 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
     clock: Clock,
     /// Map the freshest displayed age to the decay-tick interval (`None` = off).
     next_tick: Tick,
+    /// Start a confirmed push, given the `git` arguments the confirmation
+    /// described. Production spawns a thread that runs the push and sends the
+    /// outcome back as [`Event::PushFinished`]; tests record the arguments and
+    /// decide for themselves when — or whether — the outcome arrives.
+    start_push: StartPush,
 }
 
 /// The render loop's terminal-free core: wait for a filesystem event, a resize,
@@ -975,14 +983,14 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
 /// (but visibly aging) frame until the user quits. That is the right failure for
 /// a monitor — a wrong-but-labeled-old screen beats no screen.
-fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
+fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
     mut cache: SnapshotCache,
     initial_freshest: Option<Duration>,
     mut schedule: WalkSchedule,
-    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick>,
+    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>,
 ) -> Result<()>
 where
     Collect: FnMut() -> Result<Snapshot>,
@@ -991,6 +999,7 @@ where
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
+    StartPush: FnMut(Vec<String>),
 {
     let mut freshest = initial_freshest;
     loop {
@@ -2444,7 +2453,7 @@ mod tests {
     /// before the loop runs, so they drain immediately and never actually wait
     /// out the window — only the final disconnect costs nothing — which makes
     /// these tests deterministic regardless of the exact value here.
-    const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
+    pub(super) const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
 
     /// No timed refresh: the loop under test is purely event-driven, so a walk
     /// can only come from a filesystem change. Every test that predates the
@@ -2456,13 +2465,13 @@ mod tests {
     /// A `next_tick` that always disables the timer, so the loop blocks purely
     /// on channel events. The event-driven tests use this to stay independent
     /// of the decay-timer behavior, which has its own dedicated tests.
-    fn timer_off(_freshest: Option<Duration>) -> Option<Duration> {
+    pub(super) fn timer_off(_freshest: Option<Duration>) -> Option<Duration> {
         None
     }
 
     /// Build a [`Render`] with the given frame and no freshest age — enough for
     /// the event-driven loop tests, which don't exercise the cadence.
-    fn frame(output: &str) -> Render {
+    pub(super) fn frame(output: &str) -> Render {
         Render {
             output: output.to_string(),
             freshest_age: None,
@@ -2486,7 +2495,7 @@ mod tests {
     }
 
     /// Dimensions used by loop tests that don't exercise resize.
-    const TEST_DIMS: Dimensions = Dimensions {
+    pub(super) const TEST_DIMS: Dimensions = Dimensions {
         width: 80,
         height: 24,
     };
@@ -2552,6 +2561,7 @@ mod tests {
                 // A decay tick on the same cadence, so the loop always wakes:
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2590,6 +2600,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2635,6 +2646,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2682,6 +2694,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2725,6 +2738,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2765,6 +2779,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2807,6 +2822,7 @@ mod tests {
                 // Tiny interval so the tick fires fast; the cadence-vs-age
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2849,6 +2865,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2892,6 +2909,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2941,6 +2959,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -2998,6 +3017,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -3077,6 +3097,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -3160,6 +3181,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -3224,6 +3246,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -3295,6 +3318,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -3365,6 +3389,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -3415,6 +3440,7 @@ mod tests {
                 },
                 clock: || base,
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         )
         .expect("loop");
@@ -3478,6 +3504,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         );
 
@@ -3565,6 +3592,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         );
 
@@ -3676,6 +3704,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_args: Vec<String>| {},
             },
         );
 
@@ -3765,5 +3794,295 @@ mod tests {
             watch.height, 50,
             "watch height must come from terminal_size with no chrome reserved",
         );
+    }
+}
+
+#[cfg(test)]
+mod push_loop_tests {
+    use super::tests::{frame, timer_off, TEST_DEBOUNCE, TEST_DIMS};
+    use super::*;
+    use crate::push::PushOutcome;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::cell::RefCell;
+
+    /// A snapshot on an untracked `gsw-push` with `origin` available, so the
+    /// push feature has something real to plan.
+    fn pushable_snapshot() -> Snapshot {
+        Snapshot {
+            branch: "gsw-push".into(),
+            base: "main".into(),
+            commits_ahead: 2,
+            commits_behind: 0,
+            files: Vec::new(),
+            log: Vec::new(),
+            upstream: None,
+            operation: None,
+            push_remote: Some("origin".into()),
+        }
+    }
+
+    fn cache_at(collected_at: Instant) -> SnapshotCache {
+        SnapshotCache {
+            snapshot: pushable_snapshot(),
+            collected_at,
+            dims: TEST_DIMS,
+        }
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// What one loop run observed. The loop takes its hooks by value, so the
+    /// counters live behind `RefCell` and are read after it returns.
+    #[derive(Default)]
+    struct Seen {
+        collects: usize,
+        pushes: Vec<Vec<String>>,
+        frame_heights: Vec<usize>,
+    }
+
+    /// Run the loop over a pre-loaded event queue and report what it did.
+    ///
+    /// Every event is queued before the loop starts, so the first wake takes one
+    /// and the debounce drain absorbs the rest — the whole sequence is applied
+    /// against one render, which is exactly the state the assertions are about.
+    /// The queue must end with [`Event::Quit`] or the loop blocks.
+    fn run_loop(events: Vec<Event>) -> (String, Seen) {
+        let (tx, rx) = mpsc::channel();
+        for event in events {
+            tx.send(event).expect("queue event");
+        }
+        let seen = RefCell::new(Seen::default());
+        let mut displayed = String::new();
+        let base = Instant::now();
+
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            cache_at(base),
+            None,
+            no_timed_refresh_for_push(),
+            LoopHooks {
+                collect: || {
+                    seen.borrow_mut().collects += 1;
+                    Ok(pushable_snapshot())
+                },
+                render: |_snap: &Snapshot, dims: Dimensions, _timing: FrameTiming| {
+                    seen.borrow_mut().frame_heights.push(dims.height);
+                    frame("FRAME")
+                },
+                dimensions: || TEST_DIMS,
+                paint: |_output: &str| Ok(()),
+                clock: move || base,
+                next_tick: timer_off,
+                start_push: |args: Vec<String>| seen.borrow_mut().pushes.push(args),
+            },
+        )
+        .expect("loop");
+
+        (displayed, seen.into_inner())
+    }
+
+    /// Purely event-driven: no timed refresh, so any walk came from an event.
+    fn no_timed_refresh_for_push() -> WalkSchedule {
+        WalkSchedule::unscheduled()
+    }
+
+    #[test]
+    fn pressing_p_puts_the_question_under_the_frame() {
+        // The key has to reach the overlay through the loop, not just through
+        // the classifier: the frame and the question are painted together.
+        let (displayed, _) = run_loop(vec![key(KeyCode::Char('p')), Event::Quit]);
+        assert!(displayed.starts_with("FRAME"), "got {displayed:?}");
+        assert!(
+            displayed.contains("Create new remote branch origin/gsw-push?"),
+            "the question must be painted under the frame, got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_starts_the_push_the_question_described() {
+        // `p` then `y` must run the command the confirmation named — the whole
+        // safety property of asking first.
+        let (_, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.pushes,
+            vec![vec![
+                "push".to_string(),
+                "-u".to_string(),
+                "origin".to_string(),
+                "gsw-push".to_string(),
+            ]],
+        );
+    }
+
+    #[test]
+    fn a_lone_y_pushes_nothing() {
+        // Without a question on screen, `y` is an ordinary key. It must never
+        // reach the push.
+        let (_, seen) = run_loop(vec![key(KeyCode::Char('y')), Event::Quit]);
+        assert!(seen.pushes.is_empty(), "y alone must not push");
+    }
+
+    #[test]
+    fn cancelling_takes_the_question_off_the_screen_and_pushes_nothing() {
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('n')),
+            Event::Quit,
+        ]);
+        assert!(seen.pushes.is_empty(), "n must not push");
+        assert_eq!(displayed, "FRAME", "the question must be gone");
+    }
+
+    #[test]
+    fn a_successful_push_walks_git_again() {
+        // The push moved the upstream, so the header's arrows and tracking
+        // segment are stale the moment it lands. Only a walk fixes them.
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: true,
+                output: String::new(),
+            }),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.collects, 1,
+            "a successful push must re-walk so the header matches what happened",
+        );
+        assert!(
+            displayed.contains("Created origin/gsw-push"),
+            "got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn a_failed_push_shows_the_error_and_does_not_walk() {
+        // Nothing changed in the repository, so a walk would cost a status
+        // traversal to redraw the identical frame.
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            }),
+            Event::Quit,
+        ]);
+        assert_eq!(seen.collects, 0, "a failed push changed nothing to re-read");
+        assert!(
+            displayed.contains("error: failed to push some refs"),
+            "got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn the_frame_is_rendered_shorter_while_the_overlay_is_up() {
+        // The overlay is painted under a frame that was measured to fill the
+        // pane. Without giving the rows back, the frame's bottom row — the file
+        // list — falls off the screen.
+        let (_, seen) = run_loop(vec![key(KeyCode::Char('p')), Event::Quit]);
+        assert_eq!(
+            seen.frame_heights,
+            vec![TEST_DIMS.height - 1],
+            "one overlay row must cost the frame one row",
+        );
+    }
+
+    #[test]
+    fn a_three_row_error_costs_the_frame_three_rows() {
+        let (_, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "error: one\nerror: two\nerror: three\nerror: four\n".to_string(),
+            }),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.frame_heights.last().copied(),
+            Some(TEST_DIMS.height - 3),
+        );
+    }
+
+    #[test]
+    fn the_frame_goes_back_to_full_height_once_the_status_is_dismissed() {
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            }),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        assert_eq!(displayed, "FRAME", "the dismissed error must leave nothing");
+        assert_eq!(
+            seen.frame_heights.last().copied(),
+            Some(TEST_DIMS.height),
+            "the rows must come back",
+        );
+    }
+
+    #[test]
+    fn quitting_still_works_with_a_question_on_screen() {
+        // Ctrl-C during a confirmation must end the loop rather than being read
+        // as an answer.
+        //
+        // Run on a thread with a deadline, because the failure mode here is a
+        // loop that never ends: with no timed refresh and no decay tick, a
+        // Ctrl-C the loop does not act on leaves it blocked in `recv` forever.
+        // Asserting inline would hang the whole suite instead of failing.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (tx, rx) = mpsc::channel();
+            tx.send(key(KeyCode::Char('p'))).expect("queue p");
+            tx.send(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )))
+            .expect("queue ctrl-c");
+            let seen = RefCell::new(Seen::default());
+            let mut displayed = String::new();
+            let base = Instant::now();
+
+            event_loop(
+                &rx,
+                TEST_DEBOUNCE,
+                &mut displayed,
+                cache_at(base),
+                None,
+                no_timed_refresh_for_push(),
+                LoopHooks {
+                    collect: || Ok(pushable_snapshot()),
+                    render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                        frame("FRAME")
+                    },
+                    dimensions: || TEST_DIMS,
+                    paint: |_output: &str| Ok(()),
+                    clock: move || base,
+                    next_tick: timer_off,
+                    start_push: |args: Vec<String>| seen.borrow_mut().pushes.push(args),
+                },
+            )
+            .expect("loop");
+
+            let _ = done_tx.send(seen.into_inner().pushes);
+        });
+
+        let pushes = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Ctrl-C must end the loop rather than leave it blocked");
+        assert!(pushes.is_empty(), "ctrl-c must not push");
     }
 }
