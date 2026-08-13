@@ -3942,6 +3942,7 @@ mod push_loop_tests {
     use super::tests::{frame, timer_off, TEST_DEBOUNCE, TEST_DIMS};
     use super::*;
     use crate::push::PushOutcome;
+    use crate::render::strip_ansi;
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::cell::RefCell;
 
@@ -3962,10 +3963,14 @@ mod push_loop_tests {
     }
 
     fn cache_at(collected_at: Instant) -> SnapshotCache {
+        cache_in(collected_at, TEST_DIMS)
+    }
+
+    fn cache_in(collected_at: Instant, dims: Dimensions) -> SnapshotCache {
         SnapshotCache {
             snapshot: pushable_snapshot(),
             collected_at,
-            dims: TEST_DIMS,
+            dims,
         }
     }
 
@@ -3989,6 +3994,32 @@ mod push_loop_tests {
     /// against one render, which is exactly the state the assertions are about.
     /// The queue must end with [`Event::Quit`] or the loop blocks.
     fn run_loop(events: Vec<Event>) -> (String, Seen) {
+        run_loop_with(events, TEST_DIMS, |_frame_dims| "FRAME".to_string())
+    }
+
+    /// Run the loop in a pane of the given size, with a frame that really fills
+    /// the rows it was given.
+    ///
+    /// [`run_loop`]'s canned one-line frame cannot show an overflow: what lands
+    /// in the pane is the frame's rows plus the overlay's, so a test about how
+    /// many rows are painted needs a render hook that emits as many rows as it
+    /// was asked for — which is what the production renderer does.
+    fn run_loop_in_pane(events: Vec<Event>, dims: Dimensions) -> (String, Seen) {
+        run_loop_with(events, dims, |frame_dims| {
+            (1..=frame_dims.height)
+                .map(|row| format!("ROW{row}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    /// The shared body: pre-load the queue, run the loop against `dims`, and
+    /// report the last painted screen plus what the hooks saw.
+    fn run_loop_with(
+        events: Vec<Event>,
+        dims: Dimensions,
+        render_frame: fn(Dimensions) -> String,
+    ) -> (String, Seen) {
         let (tx, rx) = mpsc::channel();
         for event in events {
             tx.send(event).expect("queue event");
@@ -4001,7 +4032,7 @@ mod push_loop_tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            cache_at(base),
+            cache_in(base, dims),
             None,
             no_timed_refresh_for_push(),
             LoopHooks {
@@ -4009,11 +4040,11 @@ mod push_loop_tests {
                     seen.borrow_mut().collects += 1;
                     Ok(pushable_snapshot())
                 },
-                render: |_snap: &Snapshot, dims: Dimensions, _timing: FrameTiming| {
-                    seen.borrow_mut().frame_heights.push(dims.height);
-                    frame("FRAME")
+                render: |_snap: &Snapshot, frame_dims: Dimensions, _timing: FrameTiming| {
+                    seen.borrow_mut().frame_heights.push(frame_dims.height);
+                    frame(&render_frame(frame_dims))
                 },
-                dimensions: || TEST_DIMS,
+                dimensions: move || dims,
                 paint: |_output: &str| Ok(()),
                 clock: move || base,
                 next_tick: timer_off,
@@ -4174,6 +4205,69 @@ mod push_loop_tests {
         assert_eq!(
             seen.frame_heights.last().copied(),
             Some(TEST_DIMS.height - 3),
+        );
+    }
+
+    /// A pane exactly as tall as the tallest status message gsw can show. That
+    /// is where the frame and the overlay start competing for the same rows,
+    /// and the only size at which an unclamped overlay is visible as an
+    /// overflow rather than as a very short frame.
+    const SHORT_PANE: Dimensions = Dimensions {
+        width: 80,
+        height: 3,
+    };
+
+    /// The events that put a three-row push error on screen.
+    fn a_three_row_failure() -> Vec<Event> {
+        vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "To /tmp/origin\n\
+                         ! [rejected] gsw-push -> gsw-push (fetch first)\n\
+                         error: failed to push some refs\n"
+                    .to_string(),
+            }),
+            Event::Quit,
+        ]
+    }
+
+    #[test]
+    fn the_overlay_never_overflows_a_pane_shorter_than_the_message() {
+        // gsw paints into an alternate screen it cleared and laid out to fill
+        // exactly. One row too many scrolls the pane, which is the same
+        // never-wrap contract the overlay's width truncation exists to hold.
+        let (displayed, seen) = run_loop_in_pane(a_three_row_failure(), SHORT_PANE);
+        // The failure path colors its rows red, and `colored`'s override is
+        // process-global across this test binary, so count visible rows rather
+        // than assume some other test left color off.
+        let painted = strip_ansi(&displayed);
+        assert!(
+            painted.lines().count() <= SHORT_PANE.height,
+            "painted {} rows into a {}-row pane: {painted:?}",
+            painted.lines().count(),
+            SHORT_PANE.height,
+        );
+        assert!(
+            matches!(seen.frame_heights.last().copied(), Some(rows) if rows >= 1),
+            "the frame must keep a row of its own, got {:?}",
+            seen.frame_heights,
+        );
+    }
+
+    #[test]
+    fn an_overlay_that_does_not_fit_drops_its_last_lines() {
+        // git leads with the part worth reading — `To <remote>`, then the
+        // rejection — so a message that has to lose rows loses them off the
+        // bottom.
+        let (displayed, _) = run_loop_in_pane(a_three_row_failure(), SHORT_PANE);
+        let painted = strip_ansi(&displayed);
+        assert!(painted.contains("To /tmp/origin"), "got {painted:?}");
+        assert!(painted.contains("! [rejected]"), "got {painted:?}");
+        assert!(
+            !painted.contains("error: failed to push some refs"),
+            "the tail must be the part that is dropped, got {painted:?}",
         );
     }
 
