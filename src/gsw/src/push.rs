@@ -6,8 +6,23 @@
 //! and what an outcome means — lives here as pure, terminal-free code so it can
 //! be tested without a network or a pty. Only [`spawn`] touches a process.
 
-use crate::render::UpstreamStatus;
+use crate::render::{truncate_right, Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
+use crate::watch::InputMode;
+
+/// Most rows a status message is allowed to occupy under the frame.
+///
+/// A rejected push can produce a dozen lines of hints, and the frame below is
+/// what the user is actually watching. Three rows is enough for git's
+/// `To <remote>` / `! [rejected] …` / `error: failed to push …` triple, which
+/// is the part that says what went wrong.
+const MAX_STATUS_ROWS: usize = 3;
+
+/// Git's prefix for advice lines. They follow the real error and explain
+/// general remedies, so they are the first thing to drop when the message has
+/// to fit in [`MAX_STATUS_ROWS`]. A lexical prefix is the right matcher here:
+/// this is git's own output convention, not a syntactic property of anything.
+const HINT_PREFIX: &str = "hint:";
 
 /// What pressing `p` will actually do, resolved from the snapshot *before* the
 /// confirmation appears — so the prompt describes the command that will run
@@ -82,6 +97,10 @@ pub(crate) enum PushPrompt {
         creates_remote_branch: bool,
         /// Arguments to pass to `git`, not including the program name.
         args: Vec<String>,
+        /// What to show once this push succeeds. Composed here, with the
+        /// question, so the two sentences describe the same act — a push
+        /// confirmed as a create reports itself as a create.
+        success_message: String,
     },
     /// Run nothing and show this instead. Not an error: the common cause is a
     /// branch that is already fully pushed.
@@ -108,6 +127,14 @@ pub(crate) fn prompt_for(
     upstream: Option<&UpstreamStatus>,
 ) -> PushPrompt {
     let plan = PushPlan::resolve(branch, remote, upstream);
+    let success_message = match &plan {
+        PushPlan::Create { remote, branch } => format!("Created {remote}/{branch}"),
+        PushPlan::Update { target, commits } => {
+            let unit = if *commits == 1 { "commit" } else { "commits" };
+            format!("Pushed {commits} {unit} to {target}")
+        }
+        _ => String::new(),
+    };
     let question = match &plan {
         // Named as the act it is. A branch that nobody on the remote has seen
         // appearing there is not the same event as an existing branch moving
@@ -141,6 +168,105 @@ pub(crate) fn prompt_for(
         question,
         creates_remote_branch: matches!(plan, PushPlan::Create { .. }),
         args: plan.command_args(),
+        success_message,
+    }
+}
+
+/// How a finished `git push` came out.
+///
+/// `output` is git's own stdout and stderr, kept whole: choosing which of it to
+/// show is [`PushUi`]'s job, and a runner that pre-digested it would decide the
+/// wording from a place with no idea how many rows are free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PushOutcome {
+    /// Whether `git push` exited zero.
+    pub success: bool,
+    /// Everything git wrote, both streams, in the order they were captured.
+    pub output: String,
+}
+
+/// Everything the push feature puts on screen, and the input mode that goes
+/// with it.
+///
+/// Watch mode holds one of these and asks it three questions — what mode are we
+/// in, how many rows do you need, and what do they say. It never learns whether
+/// a prompt or an error is up, so the states below can grow without the render
+/// loop growing a branch for each one.
+pub(crate) struct PushUi {
+    state: State,
+}
+
+/// What the push feature is currently doing. Private: the loop drives this
+/// through [`PushUi`]'s methods and reads it only through
+/// [`PushUi::mode`]/[`PushUi::rows`]/[`PushUi::overlay`].
+enum State {
+    /// Nothing on screen and nothing pending.
+    Idle,
+    /// A message under the frame, staying until the user presses a key.
+    Status {
+        /// Lines to show, already trimmed to [`MAX_STATUS_ROWS`].
+        lines: Vec<String>,
+        /// Whether this reports a failure, which the display colors red.
+        failed: bool,
+    },
+    /// A confirmation is on screen, waiting for an answer.
+    Asking {
+        question: String,
+        creates_remote_branch: bool,
+        args: Vec<String>,
+        success_message: String,
+    },
+    /// `git push` is running.
+    Running { success_message: String },
+}
+
+impl PushUi {
+    /// A UI with nothing on screen.
+    pub(crate) fn new() -> Self {
+        Self { state: State::Idle }
+    }
+
+    /// What keys mean right now.
+    pub(crate) fn mode(&self) -> InputMode {
+        let _ = &self.state;
+        InputMode::Normal
+    }
+
+    /// Handle `p`: work out what a push would do and either ask or explain.
+    pub(crate) fn request(&mut self, snapshot: &Snapshot) {
+        let _ = snapshot;
+    }
+
+    /// Handle `y`: start the push, returning the arguments to run, or `None`
+    /// when no confirmation was on screen to accept.
+    pub(crate) fn confirm(&mut self) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Handle `n`: drop the confirmation. The prompt disappearing is the whole
+    /// feedback — a "cancelled" notice would itself need dismissing.
+    pub(crate) fn cancel(&mut self) {}
+
+    /// Handle a finished push: replace the running notice with the outcome.
+    pub(crate) fn finished(&mut self, outcome: PushOutcome) {
+        let _ = outcome;
+    }
+
+    /// Handle a key with no other meaning: clear a status message if one is up.
+    /// Leaves a question or a running push alone — neither is the user's to
+    /// dismiss by pressing an unrelated key.
+    pub(crate) fn dismiss(&mut self) {}
+
+    /// How many rows the overlay needs under the frame, so the caller can
+    /// render the frame that much shorter and nothing falls off the bottom.
+    pub(crate) fn rows(&self) -> usize {
+        0
+    }
+
+    /// The overlay itself: [`PushUi::rows`] lines, none wider than `width`.
+    pub(crate) fn overlay(&self, width: usize) -> String {
+        let _ = (width, truncate_right, MAX_STATUS_ROWS, HINT_PREFIX);
+        String::new()
     }
 }
 
@@ -439,5 +565,337 @@ mod tests {
                 message: "no remote to push to".to_string(),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use crate::render::Snapshot;
+
+    /// A snapshot on `gsw-push` with `origin` available and the given tracking
+    /// status. Only the four fields the push feature reads matter here.
+    fn snapshot(upstream: Option<UpstreamStatus>) -> Snapshot {
+        Snapshot {
+            branch: "gsw-push".to_string(),
+            base: "main".to_string(),
+            commits_ahead: 0,
+            commits_behind: 0,
+            files: Vec::new(),
+            log: Vec::new(),
+            upstream,
+            operation: None,
+            push_remote: Some("origin".to_string()),
+        }
+    }
+
+    fn tracked(ahead: u32) -> Option<UpstreamStatus> {
+        Some(UpstreamStatus {
+            name: "origin/gsw-push".to_string(),
+            ahead,
+            behind: 0,
+        })
+    }
+
+    /// A UI with the confirmation already on screen for an untracked branch.
+    fn asking() -> PushUi {
+        let mut ui = PushUi::new();
+        ui.request(&snapshot(None));
+        ui
+    }
+
+    #[test]
+    fn a_fresh_ui_shows_nothing_and_leaves_the_keys_alone() {
+        let ui = PushUi::new();
+        assert_eq!(ui.mode(), InputMode::Normal);
+        assert_eq!(ui.rows(), 0);
+        assert_eq!(ui.overlay(80), "");
+    }
+
+    #[test]
+    fn requesting_a_push_asks_the_question_and_takes_the_keys() {
+        // `p` on a pushable branch must put the question on screen AND switch
+        // the key table, or `y` would be read as an ordinary key.
+        let ui = asking();
+        assert_eq!(ui.mode(), InputMode::Confirm);
+        assert_eq!(ui.rows(), 1);
+        let overlay = ui.overlay(80);
+        assert!(
+            overlay.contains("Create new remote branch origin/gsw-push?"),
+            "the question must be on screen, got {overlay:?}",
+        );
+        assert!(
+            overlay.contains("[y/N]"),
+            "the overlay owns the key hint, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn requesting_a_push_with_nothing_to_push_explains_instead_of_asking() {
+        // The refusal is a message, not a question: the keys must stay normal,
+        // so `y` does not answer a prompt that is not there.
+        let mut ui = PushUi::new();
+        ui.request(&snapshot(tracked(0)));
+        assert_eq!(ui.mode(), InputMode::Normal);
+        assert_eq!(ui.rows(), 1);
+        assert!(ui
+            .overlay(80)
+            .contains("origin/gsw-push is already up to date"));
+        assert!(
+            !ui.overlay(80).contains("[y/N]"),
+            "a refusal must not offer keys that do nothing",
+        );
+    }
+
+    #[test]
+    fn confirming_hands_back_the_command_and_switches_to_pushing() {
+        let mut ui = asking();
+        assert_eq!(
+            ui.confirm(),
+            Some(vec![
+                "push".to_string(),
+                "-u".to_string(),
+                "origin".to_string(),
+                "gsw-push".to_string(),
+            ]),
+        );
+        assert_eq!(ui.mode(), InputMode::Pushing);
+        assert_eq!(ui.rows(), 1, "the running push stays on screen");
+    }
+
+    #[test]
+    fn confirming_with_no_question_up_runs_nothing() {
+        // Belt and braces against a stray PushConfirmed: with no confirmation
+        // on screen there is no command to run, and inventing one would push
+        // without asking.
+        let mut ui = PushUi::new();
+        assert_eq!(ui.confirm(), None);
+        assert_eq!(ui.mode(), InputMode::Normal);
+    }
+
+    #[test]
+    fn confirming_twice_runs_the_push_once() {
+        // The second `y` arrives after the mode has already moved to Pushing.
+        // It must not produce a second command.
+        let mut ui = asking();
+        assert!(ui.confirm().is_some());
+        assert_eq!(ui.confirm(), None, "a second confirm must not push again");
+    }
+
+    #[test]
+    fn cancelling_clears_the_question_without_a_notice() {
+        let mut ui = asking();
+        ui.cancel();
+        assert_eq!(ui.mode(), InputMode::Normal);
+        assert_eq!(ui.rows(), 0, "a cancelled prompt leaves nothing behind");
+    }
+
+    #[test]
+    fn a_successful_push_reports_what_it_did() {
+        // The wording comes from the plan, so a create reports itself as a
+        // create rather than as a generic success.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: true,
+            output: "To /tmp/origin\n * [new branch] gsw-push -> gsw-push\n".to_string(),
+        });
+        assert_eq!(ui.mode(), InputMode::Normal);
+        assert!(ui.overlay(80).contains("Created origin/gsw-push"));
+    }
+
+    #[test]
+    fn a_successful_update_counts_what_it_pushed() {
+        let mut ui = PushUi::new();
+        ui.request(&snapshot(tracked(3)));
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: true,
+            output: String::new(),
+        });
+        assert!(ui
+            .overlay(80)
+            .contains("Pushed 3 commits to origin/gsw-push"));
+    }
+
+    #[test]
+    fn a_failed_push_shows_what_git_said() {
+        // The whole point of the feature's error path: git's own words, not a
+        // gsw paraphrase.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: false,
+            output: "To /tmp/origin\n ! [rejected] gsw-push -> gsw-push (fetch first)\n\
+                     error: failed to push some refs to '/tmp/origin'\n"
+                .to_string(),
+        });
+        assert_eq!(ui.mode(), InputMode::Normal);
+        let overlay = ui.overlay(120);
+        assert!(overlay.contains("! [rejected]"), "got {overlay:?}");
+        assert!(
+            overlay.contains("error: failed to push some refs"),
+            "got {overlay:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_push_drops_the_hints_before_the_error() {
+        // git follows a rejection with several `hint:` lines. They must not
+        // crowd out the error itself when only three rows are free.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: false,
+            output: "To /tmp/origin\n\
+                     hint: Updates were rejected because the tip is behind\n\
+                     hint: its remote counterpart. Integrate the changes\n\
+                     hint: before pushing again.\n\
+                     ! [rejected] gsw-push -> gsw-push (fetch first)\n\
+                     error: failed to push some refs\n"
+                .to_string(),
+        });
+        let overlay = ui.overlay(120);
+        assert!(
+            !overlay.contains("hint:"),
+            "hints must not survive, got {overlay:?}"
+        );
+        assert!(overlay.contains("! [rejected]"), "got {overlay:?}");
+        assert!(
+            overlay.contains("error: failed to push some refs"),
+            "got {overlay:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_push_never_takes_more_than_three_rows() {
+        // The frame below is what the user is watching. A wall of git output
+        // must not push it off the screen.
+        let mut ui = asking();
+        ui.confirm();
+        let output = (1..=20)
+            .map(|n| format!("error: line {n}\n"))
+            .collect::<String>();
+        ui.finished(PushOutcome {
+            success: false,
+            output,
+        });
+        assert_eq!(ui.rows(), MAX_STATUS_ROWS);
+        assert_eq!(ui.overlay(80).lines().count(), MAX_STATUS_ROWS);
+    }
+
+    #[test]
+    fn a_failed_push_that_said_nothing_still_says_something() {
+        // A push that fails with no output at all must not leave a blank row
+        // that reads as success.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: false,
+            output: "   \n\n".to_string(),
+        });
+        assert_eq!(ui.rows(), 1);
+        assert!(
+            !ui.overlay(80).trim().is_empty(),
+            "a failure must always say that it failed",
+        );
+    }
+
+    #[test]
+    fn a_status_stays_until_a_key_arrives() {
+        // Tim's requirement: an error must survive every decay tick and
+        // repaint, and go away only when the user has pressed something.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: false,
+            output: "error: failed to push some refs\n".to_string(),
+        });
+        assert_eq!(ui.rows(), 1);
+        ui.dismiss();
+        assert_eq!(ui.rows(), 0, "a key press clears the message");
+        assert_eq!(ui.overlay(80), "");
+    }
+
+    #[test]
+    fn dismissing_leaves_a_question_and_a_running_push_alone() {
+        // `dismiss` is what an unrelated key does. It must not answer a
+        // question or hide a push that is still running.
+        let mut ui = asking();
+        ui.dismiss();
+        assert_eq!(ui.mode(), InputMode::Confirm, "a stray key must not cancel");
+
+        ui.confirm();
+        ui.dismiss();
+        assert_eq!(
+            ui.mode(),
+            InputMode::Pushing,
+            "a stray key must not hide a running push",
+        );
+    }
+
+    #[test]
+    fn a_running_push_says_so() {
+        let mut ui = asking();
+        ui.confirm();
+        let overlay = ui.overlay(80);
+        assert!(
+            overlay.to_lowercase().contains("push"),
+            "the running notice must name what is happening, got {overlay:?}",
+        );
+    }
+
+    #[test]
+    fn the_overlay_never_exceeds_the_width_it_is_given() {
+        // gsw's standing contract: nothing it prints wraps. A long remote name
+        // or a long git error must be truncated, not folded onto a new row.
+        let mut ui = PushUi::new();
+        let mut snap = snapshot(None);
+        snap.branch = "a-branch-name-long-enough-to-need-truncating-on-a-narrow-pane".to_string();
+        ui.request(&snap);
+        for width in [10, 20, 40] {
+            let overlay = ui.overlay(width);
+            for line in overlay.lines() {
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(line) <= width,
+                    "line {line:?} exceeds width {width}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_overlay_truncates_multibyte_text_without_panicking() {
+        // Branch names can hold multi-byte characters, and byte-slicing one at
+        // a narrow width is a panic in the middle of the alternate screen.
+        let mut ui = PushUi::new();
+        let mut snap = snapshot(None);
+        snap.branch = "日本語のブランチ名-🎉-café".to_string();
+        ui.request(&snap);
+        for width in 1..40 {
+            let overlay = ui.overlay(width);
+            for line in overlay.lines() {
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(line) <= width,
+                    "line {line:?} exceeds width {width}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_request_replaces_a_stale_status() {
+        // Pressing `p` while an old error is on screen must ask the new
+        // question, not stack a second row under the first.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: false,
+            output: "error: failed to push some refs\n".to_string(),
+        });
+        ui.request(&snapshot(None));
+        assert_eq!(ui.mode(), InputMode::Confirm);
+        assert_eq!(ui.rows(), 1);
+        assert!(!ui.overlay(120).contains("error:"));
     }
 }

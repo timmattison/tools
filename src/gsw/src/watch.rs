@@ -620,7 +620,7 @@ enum Event {
 /// is total: every mode answers every key, and a mode added later cannot
 /// silently inherit another's bindings.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum InputMode {
+pub(crate) enum InputMode {
     /// Nothing is being asked. The monitor's ordinary keys apply.
     Normal,
     /// A push confirmation is on screen and is waiting for an answer.

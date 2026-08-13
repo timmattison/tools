@@ -998,7 +998,7 @@ fn pad_right(s: &str, width: usize) -> String {
 
 /// Truncate `s` from the right to fit within `max_width` display columns,
 /// suffixing with `…` when truncation happens. UTF-8 safe.
-fn truncate_right(s: &str, max_width: usize) -> String {
+pub(crate) fn truncate_right(s: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(s) <= max_width {
         return s.to_string();
     }
