@@ -176,7 +176,7 @@ In `render_with_offset`, immediately after pushing the header line and **before*
 ```rust
 lines.push(header_line);
 if let Some(op) = &snapshot.operation {
-    lines.push(render_operation_line(op));
+    lines.push(render_operation_line(op, opts.terminal_width));
 }
 lines.push(render_separator(opts.terminal_width));
 ```
@@ -185,9 +185,12 @@ lines.push(render_separator(opts.terminal_width));
 `⚠ merge` label as `.yellow().bold()` (the same warning convention as the
 existing "behind" segment), and the `· {n} conflict[s] to resolve` clause — the
 space separating it from the label included — as `.red().bold()` to flag the
-pending action. Like the header, the line is free text and is **not**
-width-truncated. `NO_COLOR` / non-TTY handling falls out of the `colored` crate
-exactly as today (the global override is already set in `main`).
+pending action. Like every other row gsw prints, the line is cut to the
+terminal width so it can't wrap and shift every row below it. The label is
+truncated to the width first and the conflict clause takes whatever columns
+are left, dropped whole when none remain — the label outranks the clause.
+`NO_COLOR` / non-TTY handling falls out of the `colored` crate exactly as
+today (the global override is already set in `main`).
 
 ### Layout budget (`src/gsw/src/main.rs`, `render_frame`)
 
