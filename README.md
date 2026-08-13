@@ -430,6 +430,26 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
+  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, and `p` pushes the
+    current branch. Ctrl-C quits from anywhere, including while a push is in flight.
+  - `p` always asks first, and the question names the branch, the remote, and how much is going —
+    so what you confirm is what runs. A branch that is **not on the remote yet** gets a different,
+    yellow confirmation (`Create new remote branch origin/my-branch?`) rather than the routine
+    `Push 3 commits to origin/my-branch?`, because creating a branch on a shared remote is not the
+    same act as moving one that is already there. Answer with `y`/Enter or `n`/Esc. A branch that
+    is already fully pushed says so instead of asking.
+    - An untracked branch is published with `git push -u`, so the upstream is recorded and the
+      header's tracking segment appears; a tracked one runs a bare `git push` and lets git supply
+      the remote and refspec. The remote for a new branch is `remote.pushDefault` if set, else the
+      only remote whatever it is called, else `origin` — and gsw refuses rather than guess when a
+      repository has several remotes and none of them settles it. `p` never force-pushes.
+    - The push runs off the render thread, so the countdown, the ages, and resizes keep working
+      while it is in flight, and a second `p` cannot start an overlapping push. git's own error
+      text is shown under the frame in red (up to three rows, `hint:` advice dropped first) and
+      stays there until you press a key. A push that succeeds re-walks the repository immediately,
+      so the ahead/behind arrows match what just happened. git can never prompt for credentials at
+      the terminal — it would be reading the same keystrokes gsw is — so an authenticated remote
+      that needs a password fails fast and says so; credential helpers and a GUI askpass still work.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —

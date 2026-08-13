@@ -39,7 +39,10 @@ mod watch;
                   re-walks the repository every --refresh-interval seconds, with the \
                   separator under the header showing how stale the screen is and how long \
                   until the next refresh; with `--one-shot` (or when its output is piped) \
-                  it renders once and exits."
+                  it renders once and exits.\n\n\
+                  Watch-mode keys: q or Ctrl-C quits, r refreshes now, and p pushes the current \
+                  branch after a confirmation that names what it will do — a branch not yet on \
+                  the remote is confirmed as creating one. p never force-pushes."
 )]
 struct Cli {
     /// Render once and exit instead of entering the live watch loop. This is
