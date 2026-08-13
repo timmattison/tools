@@ -124,12 +124,22 @@ impl RepoHandle {
     }
 }
 
-/// The short current-branch name (e.g. `main`), or `"HEAD"` when detached —
-/// matching what `git rev-parse --abbrev-ref HEAD` prints.
+/// What [`branch_name`] reports when HEAD is detached, matching what
+/// `git rev-parse --abbrev-ref HEAD` prints.
+///
+/// Usable as a sentinel — "this is not a branch" — because git rejects `HEAD`
+/// as a branch name (`git branch HEAD` fails), so no real branch can ever carry
+/// it. Named rather than spelled inline at each site so the two readers
+/// ([`branch_name`] and the push planner, which must refuse to push a detached
+/// HEAD) are tied to one definition instead of two matching string literals.
+pub const DETACHED_HEAD: &str = "HEAD";
+
+/// The short current-branch name (e.g. `main`), or [`DETACHED_HEAD`] when
+/// detached — matching what `git rev-parse --abbrev-ref HEAD` prints.
 pub fn branch_name(repo: &gix::Repository) -> String {
     match repo.head_name() {
         Ok(Some(full)) => full.shorten().to_string(),
-        _ => "HEAD".to_string(),
+        _ => DETACHED_HEAD.to_string(),
     }
 }
 

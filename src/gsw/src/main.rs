@@ -17,6 +17,7 @@ use crate::snapshot::build_snapshot;
 mod age;
 mod bar;
 mod git;
+mod push;
 mod render;
 mod repo;
 mod snapshot;
