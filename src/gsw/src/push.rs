@@ -107,9 +107,40 @@ pub(crate) fn prompt_for(
     remote: Option<&str>,
     upstream: Option<&UpstreamStatus>,
 ) -> PushPrompt {
-    let _ = PushPlan::resolve(branch, remote, upstream);
-    PushPrompt::Refuse {
-        message: String::new(),
+    let plan = PushPlan::resolve(branch, remote, upstream);
+    let question = match &plan {
+        // Named as the act it is. A branch that nobody on the remote has seen
+        // appearing there is not the same event as an existing branch moving
+        // forward, and the sentence has to be the thing that says so — the user
+        // reads it in the half second before pressing `y`.
+        PushPlan::Create { remote, branch } => {
+            format!("Create new remote branch {remote}/{branch}?")
+        }
+        PushPlan::Update { target, commits } => {
+            let unit = if *commits == 1 { "commit" } else { "commits" };
+            format!("Push {commits} {unit} to {target}?")
+        }
+        PushPlan::UpToDate { target } => {
+            return PushPrompt::Refuse {
+                message: format!("{target} is already up to date"),
+            }
+        }
+        PushPlan::Detached => {
+            return PushPrompt::Refuse {
+                message: format!("{DETACHED_HEAD} is detached — check out a branch to push"),
+            }
+        }
+        PushPlan::NoRemote => {
+            return PushPrompt::Refuse {
+                message: "no remote to push to".to_string(),
+            }
+        }
+    };
+
+    PushPrompt::Confirm {
+        question,
+        creates_remote_branch: matches!(plan, PushPlan::Create { .. }),
+        args: plan.command_args(),
     }
 }
 
