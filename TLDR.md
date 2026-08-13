@@ -25,7 +25,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `goup` | Updates Go dependencies across all `go.mod` files in a repo. |
 | `gr8` | Displays GitHub API rate limit info, color-coded, via the GitHub CLI. |
 | `grist` | Ranks the orders you could squash-merge a set of branches in, cheapest conflicts first, by replaying each one in a throwaway worktree. |
-| `gsw` | Git Status Watch — compact status dashboard that watches on a TTY (refresh clock in the separator) and renders once when piped. |
+| `gsw` | Git Status Watch — compact status dashboard that watches on a TTY (refresh clock in the separator) and renders once when piped; a merge or rebase in progress gets its own row, `⚠ merge` / `⚠ rebase 1/2 · 1 conflict to resolve`. |
 | `hexfind` | Searches for a hex string in a binary file and shows a hex dump with offsets. |
 | `htmlboard` | Pretty-prints HTML on the clipboard and puts it back. |
 | `ic` | Fast terminal image/video display utility (an `imgcat` alternative; video needs ffmpeg). |
