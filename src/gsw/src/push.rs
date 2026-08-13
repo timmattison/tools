@@ -131,49 +131,47 @@ pub(crate) fn prompt_for(
     remote: Option<&str>,
     upstream: Option<&UpstreamStatus>,
 ) -> PushPrompt {
-    let plan = PushPlan::resolve(branch, remote, upstream);
-    let success_message = match &plan {
-        PushPlan::Create { remote, branch } => format!("Created {remote}/{branch}"),
-        PushPlan::Update { target, commits } => {
-            let unit = if *commits == 1 { "commit" } else { "commits" };
-            format!("Pushed {commits} {unit} to {target}")
-        }
-        _ => String::new(),
-    };
-    let question = match &plan {
+    // One match, so a plan's wording and the command that carries it out are
+    // written side by side. The variants that never push return here, which is
+    // why no later step has to describe a push it can never be asked for.
+    match PushPlan::resolve(branch, remote, upstream) {
         // Named as the act it is. A branch that nobody on the remote has seen
         // appearing there is not the same event as an existing branch moving
         // forward, and the sentence has to be the thing that says so — the user
         // reads it in the half second before pressing `y`.
         PushPlan::Create { remote, branch } => {
-            format!("Create new remote branch {remote}/{branch}?")
+            let question = format!("Create new remote branch {remote}/{branch}?");
+            let success_message = format!("Created {remote}/{branch}");
+            PushPrompt::Confirm {
+                question,
+                creates_remote_branch: true,
+                // `-u` records the new remote branch as the upstream, so the
+                // push after this one is a plain update.
+                args: vec!["push".to_string(), "-u".to_string(), remote, branch],
+                success_message,
+            }
         }
         PushPlan::Update { target, commits } => {
-            let unit = if *commits == 1 { "commit" } else { "commits" };
-            format!("Push {commits} {unit} to {target}?")
-        }
-        PushPlan::UpToDate { target } => {
-            return PushPrompt::Refuse {
-                message: format!("{target} is already up to date"),
+            let unit = if commits == 1 { "commit" } else { "commits" };
+            PushPrompt::Confirm {
+                question: format!("Push {commits} {unit} to {target}?"),
+                creates_remote_branch: false,
+                // Bare `push`: git reads the remote and the refspec out of the
+                // branch config, so a branch tracking something other than the
+                // repository's default remote still goes to the right place.
+                args: vec!["push".to_string()],
+                success_message: format!("Pushed {commits} {unit} to {target}"),
             }
         }
-        PushPlan::Detached => {
-            return PushPrompt::Refuse {
-                message: format!("{DETACHED_HEAD} is detached — check out a branch to push"),
-            }
-        }
-        PushPlan::NoRemote => {
-            return PushPrompt::Refuse {
-                message: "no remote to push to".to_string(),
-            }
-        }
-    };
-
-    PushPrompt::Confirm {
-        question,
-        creates_remote_branch: matches!(plan, PushPlan::Create { .. }),
-        args: plan.command_args(),
-        success_message,
+        PushPlan::UpToDate { target } => PushPrompt::Refuse {
+            message: format!("{target} is already up to date"),
+        },
+        PushPlan::Detached => PushPrompt::Refuse {
+            message: format!("{DETACHED_HEAD} is detached — check out a branch to push"),
+        },
+        PushPlan::NoRemote => PushPrompt::Refuse {
+            message: "no remote to push to".to_string(),
+        },
     }
 }
 
@@ -545,29 +543,6 @@ impl PushPlan {
             },
         }
     }
-
-    /// The arguments to pass to `git`, not including the program name.
-    ///
-    /// # Panics
-    ///
-    /// Panics on any variant that describes a push which must never run.
-    /// Unreachable in practice: [`prompt_for`] is the only caller and it calls
-    /// this only for the two variants that do push.
-    fn command_args(&self) -> Vec<String> {
-        match self {
-            // Bare `push`: git reads the remote and the refspec out of the
-            // branch config, so a branch tracking something other than the
-            // repository's default remote still goes to the right place.
-            Self::Update { .. } => vec!["push".to_string()],
-            Self::Create { remote, branch } => vec![
-                "push".to_string(),
-                "-u".to_string(),
-                remote.clone(),
-                branch.clone(),
-            ],
-            other => unreachable!("gsw never runs a push for {other:?}"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -591,21 +566,34 @@ mod tests {
         }
     }
 
+    /// The command a confirmable prompt carries. Panics on a refusal, so a test
+    /// that expected a push and got a message fails on the line that asked.
+    fn args(prompt: &PushPrompt) -> &[String] {
+        match prompt {
+            PushPrompt::Confirm { args, .. } => args,
+            PushPrompt::Refuse { message } => {
+                panic!("expected a confirmable prompt, got a refusal: {message}")
+            }
+        }
+    }
+
     #[test]
     fn a_branch_with_no_upstream_creates_it_on_the_remote() {
         // The common case in this workflow: a fresh worktree branch that has
         // never been pushed. The push must create the remote branch and record
         // it as the upstream, so the header's tracking segment appears and the
         // next push is a plain update.
-        let plan = PushPlan::resolve("gsw-push", Some("origin"), None);
         assert_eq!(
-            plan,
+            PushPlan::resolve("gsw-push", Some("origin"), None),
             PushPlan::Create {
                 remote: "origin".to_string(),
                 branch: "gsw-push".to_string(),
             },
         );
-        assert_eq!(plan.command_args(), ["push", "-u", "origin", "gsw-push"]);
+        assert_eq!(
+            args(&prompt_for("gsw-push", Some("origin"), None)),
+            ["push", "-u", "origin", "gsw-push"],
+        );
     }
 
     #[test]
@@ -614,15 +602,17 @@ mod tests {
         // A bare `git push` uses them, which keeps gsw from re-deriving a
         // refspec git would only override.
         let up = upstream("origin/gsw-push", 3, 0);
-        let plan = PushPlan::resolve("gsw-push", Some("origin"), Some(&up));
         assert_eq!(
-            plan,
+            PushPlan::resolve("gsw-push", Some("origin"), Some(&up)),
             PushPlan::Update {
                 target: "origin/gsw-push".to_string(),
                 commits: 3,
             },
         );
-        assert_eq!(plan.command_args(), ["push"]);
+        assert_eq!(
+            args(&prompt_for("gsw-push", Some("origin"), Some(&up))),
+            ["push"]
+        );
     }
 
     #[test]
@@ -704,8 +694,10 @@ mod tests {
     fn the_create_plan_uses_the_remote_it_was_given() {
         // A repository whose only remote is not named `origin`. The plan must
         // carry that name through to the command rather than assuming `origin`.
-        let plan = PushPlan::resolve("gsw-push", Some("fork"), None);
-        assert_eq!(plan.command_args(), ["push", "-u", "fork", "gsw-push"]);
+        assert_eq!(
+            args(&prompt_for("gsw-push", Some("fork"), None)),
+            ["push", "-u", "fork", "gsw-push"],
+        );
     }
 
     #[test]
