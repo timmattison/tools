@@ -1267,16 +1267,27 @@ fn classify_input(key: KeyEvent, mode: InputMode) -> Option<Event> {
         return None;
     }
 
-    let _ = mode;
-    if code == KeyCode::Char('q')
-        || (modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c'))
-    {
-        Some(Event::Quit)
-    } else if code == KeyCode::Char('r') {
-        Some(Event::ForceRefresh)
-    } else {
-        None
+    // Checked before the mode table so no mode can trap the user mid-push.
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        return Some(Event::Quit);
     }
+
+    let event = match mode {
+        InputMode::Normal | InputMode::Pushing => match code {
+            KeyCode::Char('q') => Event::Quit,
+            KeyCode::Char('r') => Event::ForceRefresh,
+            // The one key the two modes disagree on: a push already running
+            // makes a second request meaningless rather than harmless.
+            KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
+            _ => Event::Dismiss,
+        },
+        InputMode::Confirm => match code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::PushConfirmed,
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
+            _ => Event::Dismiss,
+        },
+    };
+    Some(event)
 }
 
 /// Spawn the crossterm event-reader thread. It blocks on `event::read`, routes
