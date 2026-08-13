@@ -1465,6 +1465,131 @@ mod run_tests {
         );
     }
 
+    /// What the push child's *descendants* can reach, which is where a terminal
+    /// prompt actually comes from: the ssh transport, a credential helper, anything
+    /// git execs. Unix-only because `/dev/tty` is — Windows has no such device and
+    /// nothing to deny access to.
+    #[cfg(unix)]
+    mod terminal_tests {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// What the fake ssh below writes when it *could* open the controlling
+        /// terminal — the failure this test exists to catch.
+        const TTY_OPENED: &str = "opened";
+
+        /// What the fake ssh writes when `/dev/tty` was unopenable, which is the
+        /// only outcome that keeps a transport from painting a prompt over gsw's
+        /// frame and racing it for the user's keystrokes.
+        const TTY_REFUSED: &str = "refused";
+
+        /// Whether the *test process* can open the controlling terminal.
+        ///
+        /// The assertion below is only worth making when there is a terminal for
+        /// the child to be denied. A `cargo test` started from a script, a CI
+        /// runner, or this repository's own pre-commit hook has no controlling
+        /// terminal at all, and `/dev/tty` is then unopenable for every process in
+        /// the tree whether or not the push child is detached — so the test would
+        /// pass while exercising nothing. It skips rather than bank a vacancy as a
+        /// green.
+        fn test_process_can_open_the_terminal() -> bool {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .is_ok()
+        }
+
+        #[test]
+        fn the_push_child_cannot_open_the_controlling_terminal() {
+            // `GIT_TERMINAL_PROMPT=0` governs git's *own* prompts. The ssh
+            // transport is a separate program, and OpenSSH's `read_passphrase()`
+            // opens `/dev/tty` directly — a closed stdin and a captured stderr
+            // never reach it. So a passphrase-protected key with no agent, or an
+            // unknown host key, would paint a prompt gsw cannot see over the
+            // alternate screen and read the keystrokes the event thread is waiting
+            // for, with no timeout to end it. Nothing in the process tree may be
+            // able to open the terminal.
+            if !test_process_can_open_the_terminal() {
+                eprintln!(
+                    "skipped: this test process has no controlling terminal, so /dev/tty is \
+                 unopenable for every child regardless — the assertion would hold vacuously",
+                );
+                return;
+            }
+
+            let (_origin, clone) = clone_with_feature_branch();
+            let p = clone.path();
+
+            // Its own tempdir: two copies of this test run at once under a parallel
+            // `cargo test`, and a shared script or record path would have them
+            // overwrite each other's answer.
+            let probe = tempfile::tempdir().expect("tempdir");
+            let record = probe.path().join("tty-probe");
+            let fake_ssh = probe.path().join("fake-ssh");
+            // The subshell is deliberate: a failed `exec` redirection exits the
+            // shell it runs in, so the probe has to be a shell of its own for the
+            // `else` branch to be reachable.
+            std::fs::write(
+                &fake_ssh,
+                format!(
+                    "#!/bin/sh\n\
+                 if ( exec 3<>/dev/tty ) 2>/dev/null; then\n\
+                 \tprintf '{TTY_OPENED}' > '{record}'\n\
+                 else\n\
+                 \tprintf '{TTY_REFUSED}' > '{record}'\n\
+                 fi\n\
+                 exit 1\n",
+                    record = record.display(),
+                ),
+            )
+            .expect("write the fake ssh");
+            std::fs::set_permissions(
+                &fake_ssh,
+                std::fs::Permissions::from_mode(FAKE_SSH_EXECUTABLE_MODE),
+            )
+            .expect("make the fake ssh executable");
+
+            // `core.sshCommand` rather than `GIT_SSH_COMMAND`: the environment is
+            // process-global and this binary runs many git commands concurrently,
+            // so an env var would reach every other test's push. The config entry
+            // reaches this repository only. Nothing leaves the machine either —
+            // the fake ssh replaces the transport before any socket is opened.
+            git(
+                p,
+                &[
+                    "config",
+                    "core.sshCommand",
+                    fake_ssh.to_str().expect("utf-8 tempdir path"),
+                ],
+            );
+            git(
+                p,
+                &["remote", "add", "tty-probe", "ssh://127.0.0.1/nope.git"],
+            );
+
+            let outcome = run_push(&confirmed(&["push", "tty-probe", "feature"]), p);
+            assert!(
+                !outcome.success,
+                "the fake ssh connects to nothing, so the push must fail: {}",
+                outcome.output,
+            );
+
+            let recorded = std::fs::read_to_string(&record)
+                .expect("git never ran the ssh transport, so the probe proved nothing");
+            assert_eq!(
+                recorded.trim(),
+                TTY_REFUSED,
+                "the push child's own children can still open the controlling terminal, \
+             so ssh can prompt over gsw's frame and steal its keystrokes",
+            );
+        }
+
+        /// `rwxr-xr-x` — git has to be able to execute the fake ssh it is pointed
+        /// at, and a file written by `std::fs::write` is not executable.
+        const FAKE_SSH_EXECUTABLE_MODE: u32 = 0o755;
+    }
+
     /// The commit `refs/heads/<branch>` points at in the repository at `dir`,
     /// or `""` when there is no such branch. Compared before and after a push
     /// to say whether anything was actually sent.
