@@ -587,11 +587,46 @@ enum Event {
     FsChanged,
     /// The terminal was resized — repaint at the new dimensions.
     Resize,
+    /// A key was pressed. Deliberately **unclassified**: what a key means
+    /// depends on whether a confirmation is on screen, and only the loop knows
+    /// that. Sending the raw key and classifying it in the loop is what makes
+    /// the mode and the key arrive in the same order the user pressed them —
+    /// were the reader thread to classify against a shared mode flag instead,
+    /// a fast `p` then `y` could be read while the flag still said
+    /// [`InputMode::Normal`], and the `y` would be silently dropped.
+    Key(KeyEvent),
     /// The user asked to quit (`q` or Ctrl-C).
     Quit,
     /// The user asked to force an immediate refresh (`r`), bypassing the
     /// throttle cooldown.
     ForceRefresh,
+    /// The user asked to push (`p`) — show the confirmation, or say why there
+    /// is nothing to confirm.
+    PushRequested,
+    /// The user confirmed the push at the prompt (`y` or Enter).
+    PushConfirmed,
+    /// The user declined the push at the prompt (`n`, Esc, or `q`).
+    PushCancelled,
+    /// A key press with no other meaning. Clears a status message if one is on
+    /// screen and does nothing otherwise, which is what keeps a push error up
+    /// until the user has actually looked at the screen.
+    Dismiss,
+}
+
+/// What keys mean right now.
+///
+/// The loop owns this, because the loop is the only place that knows what is on
+/// screen. It is an input *mode* rather than a set of booleans so the key table
+/// is total: every mode answers every key, and a mode added later cannot
+/// silently inherit another's bindings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum InputMode {
+    /// Nothing is being asked. The monitor's ordinary keys apply.
+    Normal,
+    /// A push confirmation is on screen and is waiting for an answer.
+    Confirm,
+    /// A push is running. `p` is inert here, so two pushes cannot overlap.
+    Pushing,
 }
 
 /// The git work one watch-mode refresh performs: re-open the repository so
@@ -995,6 +1030,8 @@ where
                     saw_force = true;
                     false
                 }
+                // Push input is not wired into the loop yet.
+                Ok(_) => false,
                 Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
@@ -1012,6 +1049,8 @@ where
                     saw_force = true;
                     false
                 }
+                // Push input is not wired into the loop yet.
+                Ok(_) => false,
                 Err(_) => break,
             },
         };
@@ -1029,6 +1068,8 @@ where
                     Ok(Event::FsChanged) => saw_fs = true,
                     Ok(Event::Resize) => saw_resize = true,
                     Ok(Event::ForceRefresh) => saw_force = true,
+                    // Push input is not wired into the loop yet.
+                    Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
                         quitting = true;
@@ -1177,54 +1218,77 @@ fn current_dimensions(width_offset: usize) -> Dimensions {
 
 /// The pure, unit-testable core of [`spawn_event_reader`]: map one crossterm
 /// terminal event to the [`Event`] the watch loop should react to, or `None`
-/// when the event is irrelevant. Keeping the key→event decision here —
-/// terminal-free and side-effect-free — lets it be tested without a pty while
-/// the reader thread stays a thin `event::read` → `classify_input` → `tx.send`
-/// loop.
+/// when the event is irrelevant.
 ///
-/// - A key *release* is ignored (kitty/Windows report them; only a press acts).
-/// - `q`, or Ctrl-C, requests a [`Event::Quit`].
-/// - `r` forces an immediate refresh ([`Event::ForceRefresh`]), bypassing the
-///   throttle cooldown.
+/// Deliberately does **not** decide what a key means. Key semantics depend on
+/// the loop's [`InputMode`], which this thread cannot read without racing the
+/// loop that writes it, so a key is forwarded whole and classified by
+/// [`classify_input`] once it has arrived somewhere the mode is known.
+///
+/// - A key press becomes [`Event::Key`], carrying the key untouched.
 /// - A terminal resize becomes [`Event::Resize`].
 /// - Everything else is ignored.
-fn classify_input(event: CtEvent) -> Option<Event> {
+fn forward_input(event: CtEvent) -> Option<Event> {
     match event {
-        CtEvent::Key(KeyEvent {
-            code,
-            modifiers,
-            kind,
-            ..
-        }) => {
-            if kind == KeyEventKind::Release {
-                // Ignore key releases (kitty/Windows report them); only a press acts.
-                None
-            } else if code == KeyCode::Char('q')
-                || (modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c'))
-            {
-                Some(Event::Quit)
-            } else if code == KeyCode::Char('r') {
-                Some(Event::ForceRefresh)
-            } else {
-                None
-            }
-        }
+        CtEvent::Key(key) => Some(Event::Key(key)),
         CtEvent::Resize(_, _) => Some(Event::Resize),
         _ => None,
     }
 }
 
+/// What one key press means in `mode`, or `None` when it means nothing at all.
+///
+/// Pure and terminal-free, so the whole key table is testable without a pty:
+/// a test builds a [`KeyEvent`] and a mode and reads back the [`Event`].
+///
+/// - A key *release* is ignored in every mode (kitty/Windows report them; only
+///   a press acts).
+/// - **Ctrl-C quits from every mode**, including mid-push. A monitor that
+///   cannot be quit while it waits on the network is a monitor that has to be
+///   killed from another pane.
+/// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push.
+/// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
+///   Nothing else acts — with a question on screen, `q` is the answer "no",
+///   not "quit", and `r` is not a refresh. That is why the mode exists.
+/// - [`InputMode::Pushing`]: `q` quits and `r` refreshes, but `p` is inert, so
+///   an impatient second press cannot start an overlapping push.
+/// - Every other press is [`Event::Dismiss`], which clears a status message and
+///   otherwise does nothing.
+fn classify_input(key: KeyEvent, mode: InputMode) -> Option<Event> {
+    let KeyEvent {
+        code,
+        modifiers,
+        kind,
+        ..
+    } = key;
+
+    if kind == KeyEventKind::Release {
+        // Ignore key releases (kitty/Windows report them); only a press acts.
+        return None;
+    }
+
+    let _ = mode;
+    if code == KeyCode::Char('q')
+        || (modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c'))
+    {
+        Some(Event::Quit)
+    } else if code == KeyCode::Char('r') {
+        Some(Event::ForceRefresh)
+    } else {
+        None
+    }
+}
+
 /// Spawn the crossterm event-reader thread. It blocks on `event::read`, routes
-/// each event through [`classify_input`] (which maps `q`/Ctrl-C to
-/// [`Event::Quit`], `r` to [`Event::ForceRefresh`], and terminal resizes to
-/// [`Event::Resize`]), forwards any resulting [`Event`], and exits when the
-/// receiver is gone or reading fails.
+/// each event through [`forward_input`] (which passes key presses through whole
+/// and maps terminal resizes to [`Event::Resize`]), forwards any resulting
+/// [`Event`], and exits when the receiver is gone or reading fails.
 fn spawn_event_reader(tx: Sender<Event>) {
     thread::spawn(move || {
         // Loop until reading fails (terminal closed) — the `while let` exits on
         // `Err` — or a forwarded send fails because the receiver is gone.
         while let Ok(ct_event) = event::read() {
-            if let Some(event) = classify_input(ct_event) {
+            if let Some(event) = forward_input(ct_event) {
                 if tx.send(event).is_err() {
                     break;
                 }
@@ -2111,49 +2175,161 @@ mod tests {
         );
     }
 
+    /// One key press, with no modifiers.
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     #[test]
     fn classify_input_maps_the_r_key_to_force_refresh() {
         // Pressing `r` is the manual-refresh escape hatch: the input classifier
         // must turn an `r` key PRESS into Event::ForceRefresh.
-        let r_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-        assert!(matches!(classify_input(r_press), Some(Event::ForceRefresh)));
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('r')), InputMode::Normal),
+            Some(Event::ForceRefresh),
+        ));
     }
 
     #[test]
     fn classify_input_handles_keys_and_ignores_releases() {
         // Regression guard for the rest of the classifier's contract once `r`
         // joined it: a key RELEASE is dropped (kitty/Windows emit them and only
-        // a press should act), `q` and Ctrl-C still quit, a resize still maps to
-        // a repaint, and an unrelated key is ignored.
+        // a press should act), and `q` and Ctrl-C still quit.
 
         // A key release — even of a key we act on — is ignored.
-        let r_release = CtEvent::Key(KeyEvent {
+        let r_release = KeyEvent {
             kind: KeyEventKind::Release,
-            ..KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)
-        });
+            ..press(KeyCode::Char('r'))
+        };
         assert!(
-            classify_input(r_release).is_none(),
+            classify_input(r_release, InputMode::Normal).is_none(),
             "a key release must be ignored — only a press acts",
         );
 
         // `q` and Ctrl-C both request a quit.
-        let q_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(matches!(classify_input(q_press), Some(Event::Quit)));
-        let ctrl_c = CtEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(classify_input(ctrl_c), Some(Event::Quit)));
-
-        // A resize becomes a repaint at the new dimensions.
         assert!(matches!(
-            classify_input(CtEvent::Resize(80, 24)),
-            Some(Event::Resize)
+            classify_input(press(KeyCode::Char('q')), InputMode::Normal),
+            Some(Event::Quit),
+        ));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            classify_input(ctrl_c, InputMode::Normal),
+            Some(Event::Quit),
         ));
 
-        // An unrelated key press is ignored.
-        let x_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        // An unrelated key press acts on nothing, but is not silence: it clears
+        // a status message that may be on screen.
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('x')), InputMode::Normal),
+            Some(Event::Dismiss),
+        ));
+    }
+
+    #[test]
+    fn the_reader_forwards_key_presses_whole_and_maps_resizes() {
+        // The reader thread cannot know the mode, so it must not decide
+        // anything about a key. A resize means the same thing in every mode, so
+        // it is classified here.
+        let key = press(KeyCode::Char('p'));
         assert!(
-            classify_input(x_press).is_none(),
-            "an unrelated key must be ignored",
+            matches!(forward_input(CtEvent::Key(key)), Some(Event::Key(sent)) if sent == key),
+            "a key must reach the loop untouched",
         );
+        assert!(matches!(
+            forward_input(CtEvent::Resize(80, 24)),
+            Some(Event::Resize),
+        ));
+    }
+
+    #[test]
+    fn p_asks_to_push_only_when_nothing_else_is_happening() {
+        // The new key. It opens the confirmation from the normal mode, and is
+        // inert while a push is already running — an impatient second press
+        // must not start an overlapping push.
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('p')), InputMode::Normal),
+            Some(Event::PushRequested),
+        ));
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('p')), InputMode::Pushing),
+            Some(Event::Dismiss),
+        ));
+    }
+
+    #[test]
+    fn the_confirmation_accepts_y_and_enter() {
+        for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
+            assert!(
+                matches!(
+                    classify_input(press(code), InputMode::Confirm),
+                    Some(Event::PushConfirmed),
+                ),
+                "{code:?} must confirm the push",
+            );
+        }
+    }
+
+    #[test]
+    fn the_confirmation_is_cancelled_by_n_esc_and_q() {
+        // `q` cancels rather than quits while a question is on screen: the safe
+        // reading of "get me out of here" is backing out of the push, not
+        // ending the session with a prompt still up.
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('N'),
+            KeyCode::Char('q'),
+            KeyCode::Esc,
+        ] {
+            assert!(
+                matches!(
+                    classify_input(press(code), InputMode::Confirm),
+                    Some(Event::PushCancelled),
+                ),
+                "{code:?} must cancel the push",
+            );
+        }
+    }
+
+    #[test]
+    fn the_confirmation_ignores_the_ordinary_keys() {
+        // With a question on screen, `r` must not refresh and `p` must not
+        // re-ask. Anything that is not an answer does nothing.
+        for code in [KeyCode::Char('r'), KeyCode::Char('p'), KeyCode::Char('x')] {
+            assert!(
+                matches!(
+                    classify_input(press(code), InputMode::Confirm),
+                    Some(Event::Dismiss),
+                ),
+                "{code:?} must not act while the confirmation is up",
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_every_mode() {
+        // A monitor that cannot be quit while it waits on the network is one
+        // that has to be killed from another pane.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        for mode in [InputMode::Normal, InputMode::Confirm, InputMode::Pushing] {
+            assert!(
+                matches!(classify_input(ctrl_c, mode), Some(Event::Quit)),
+                "Ctrl-C must quit from {mode:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn q_and_r_still_work_while_a_push_runs() {
+        // The push runs off this thread, so the monitor stays live underneath
+        // it: quitting and refreshing keep working.
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('q')), InputMode::Pushing),
+            Some(Event::Quit),
+        ));
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('r')), InputMode::Pushing),
+            Some(Event::ForceRefresh),
+        ));
     }
 
     #[test]
