@@ -15,7 +15,7 @@ use colored::Colorize;
 
 use crate::render::{truncate_right, Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
-use crate::watch::InputMode;
+use crate::watch::{Dimensions, InputMode};
 
 /// Most rows a status message is allowed to occupy under the frame.
 ///
@@ -23,6 +23,10 @@ use crate::watch::InputMode;
 /// what the user is actually watching. Three rows is enough for git's
 /// `To <remote>` / `! [rejected] …` / `error: failed to push …` triple, which
 /// is the part that says what went wrong.
+///
+/// A ceiling, not a promise: a pane with fewer than four rows cannot spare
+/// three and still show a frame, so [`PushUi::overlay`] clips the message
+/// further. This is the most the user will ever see, not the least.
 const MAX_STATUS_ROWS: usize = 3;
 
 /// Git's prefix for advice lines. They follow the real error and explain
@@ -333,8 +337,9 @@ fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
 
     // stderr first: `git push` reports what it did — `To <remote>`, the ref
     // updates, and every rejection — on stderr, and writes to stdout only under
-    // flags gsw does not pass. Leading with it puts the useful lines in the
-    // three rows a status message gets.
+    // flags gsw does not pass. Leading with it puts the useful lines at the
+    // head, which is the part a status message has room for — at most
+    // [`MAX_STATUS_ROWS`], and fewer on a short pane.
     let mut text = String::from_utf8_lossy(&output.stderr).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stdout));
     // Carriage returns are how a progress meter redraws in place. Capturing
@@ -450,23 +455,24 @@ pub(crate) struct PushOutcome {
 /// Everything the push feature puts on screen, and the input mode that goes
 /// with it.
 ///
-/// Watch mode holds one of these and asks it three questions — what mode are we
-/// in, how many rows do you need, and what do they say. It never learns whether
-/// a prompt or an error is up, so the states below can grow without the render
-/// loop growing a branch for each one.
+/// Watch mode holds one of these and asks it two questions — what mode are we
+/// in, and what does the pane show. It never learns whether a prompt or an
+/// error is up, so the states below can grow without the render loop growing a
+/// branch for each one.
 pub(crate) struct PushUi {
     state: State,
 }
 
 /// What the push feature is currently doing. Private: the loop drives this
 /// through [`PushUi`]'s methods and reads it only through
-/// [`PushUi::mode`]/[`PushUi::rows`]/[`PushUi::overlay`].
+/// [`PushUi::mode`]/[`PushUi::overlay`].
 enum State {
     /// Nothing on screen and nothing pending.
     Idle,
     /// A message under the frame, staying until the user presses a key.
     Status {
-        /// Lines to show, already trimmed to [`MAX_STATUS_ROWS`].
+        /// Lines to show, already trimmed to [`MAX_STATUS_ROWS`]. How many of
+        /// them a given pane has room for is [`PushUi::overlay`]'s call.
         lines: Vec<String>,
         /// Whether this reports a failure, which the display colors red.
         failed: bool,
@@ -589,24 +595,26 @@ impl PushUi {
         }
     }
 
-    /// How many rows the overlay needs under the frame, so the caller can
-    /// render the frame that much shorter and nothing falls off the bottom.
-    pub(crate) fn rows(&self) -> usize {
-        match &self.state {
-            State::Idle => 0,
-            State::Asking { .. } | State::Running { .. } => 1,
-            State::Status { lines, .. } => lines.len(),
-        }
-    }
-
-    /// The overlay itself: [`PushUi::rows`] lines, none wider than `width`.
+    /// What the push feature shows in a pane of `dims`: the lines that fit
+    /// there, and — as [`Overlay::rows`] — how many rows the frame must give up
+    /// to make room for them.
     ///
-    /// Truncation is by display column and UTF-8 safe, because gsw's standing
-    /// contract is that nothing it prints ever wraps — a folded line would push
-    /// the frame's bottom row off the pane it was measured to fit.
-    pub(crate) fn overlay(&self, width: usize) -> String {
+    /// Both come out of this one call because a row count and a body computed
+    /// apart can disagree, and either direction of disagreement is a bug: a
+    /// count larger than the text leaves a blank strip between the frame and
+    /// the message, a count smaller than it paints past the bottom of the pane.
+    ///
+    /// Two clamps, one contract. gsw's standing rule is that nothing it paints
+    /// ever wraps or scrolls the pane it was measured to fill, so each line is
+    /// truncated to `dims.width` by display column (UTF-8 safe), and the
+    /// overlay as a whole is capped at one row short of `dims.height`. The
+    /// frame therefore always keeps a row of its own, and a message too tall
+    /// for what is left loses its last lines — [`failure_lines`] puts git's
+    /// most useful output first, so the head is the part worth keeping.
+    pub(crate) fn overlay(&self, dims: Dimensions) -> Overlay {
+        let width = dims.width;
         let lines: Vec<String> = match &self.state {
-            State::Idle => return String::new(),
+            State::Idle => Vec::new(),
             State::Asking {
                 question,
                 creates_remote_branch,
@@ -635,7 +643,41 @@ impl PushUi {
                 })
                 .collect(),
         };
-        lines.join("\n")
+        // The frame never gives up its last row. A pane painted entirely by the
+        // push feature would leave the user watching an error with nothing
+        // under it to say which repository it belongs to — and the frame is
+        // what watch mode is for.
+        Overlay {
+            lines: lines
+                .into_iter()
+                .take(dims.height.saturating_sub(1))
+                .collect(),
+        }
+    }
+}
+
+/// What the push feature paints under the frame, sized for one particular pane.
+///
+/// Built only by [`PushUi::overlay`], which is what makes the row count and the
+/// text impossible to disagree about: they are the same `Vec` — one measured,
+/// the other joined.
+pub(crate) struct Overlay {
+    /// Painted lines, each already truncated to the pane's width, and at most
+    /// one fewer of them than the pane has rows.
+    lines: Vec<String>,
+}
+
+impl Overlay {
+    /// How many rows the frame must give up. Always at least one short of the
+    /// pane, so the frame keeps a row whatever the overlay wanted to say.
+    pub(crate) fn rows(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// The text to paint under the frame: exactly [`Overlay::rows`] lines, and
+    /// empty when there are none.
+    pub(crate) fn text(&self) -> String {
+        self.lines.join("\n")
     }
 }
 
@@ -1050,6 +1092,15 @@ mod ui_tests {
         unicode_width::UnicodeWidthStr::width(visible.as_str())
     }
 
+    /// A pane `width` columns wide with more rows than any overlay can want, so
+    /// a test about wording or row count is not also a test about clipping.
+    fn tall_pane(width: usize) -> Dimensions {
+        Dimensions {
+            width,
+            height: MAX_STATUS_ROWS + 10,
+        }
+    }
+
     /// A UI with the confirmation already on screen for an untracked branch.
     fn asking() -> PushUi {
         let mut ui = PushUi::new();
@@ -1061,8 +1112,8 @@ mod ui_tests {
     fn a_fresh_ui_shows_nothing_and_leaves_the_keys_alone() {
         let ui = PushUi::new();
         assert_eq!(ui.mode(), InputMode::Normal);
-        assert_eq!(ui.rows(), 0);
-        assert_eq!(ui.overlay(80), "");
+        assert_eq!(ui.overlay(tall_pane(80)).rows(), 0);
+        assert_eq!(ui.overlay(tall_pane(80)).text(), "");
     }
 
     #[test]
@@ -1071,8 +1122,8 @@ mod ui_tests {
         // the key table, or `y` would be read as an ordinary key.
         let ui = asking();
         assert_eq!(ui.mode(), InputMode::Confirm);
-        assert_eq!(ui.rows(), 1);
-        let overlay = ui.overlay(80);
+        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
+        let overlay = ui.overlay(tall_pane(80)).text();
         assert!(
             overlay.contains("Create new remote branch origin/gsw-push?"),
             "the question must be on screen, got {overlay:?}",
@@ -1094,12 +1145,13 @@ mod ui_tests {
         let mut ui = PushUi::new();
         ui.request(&snapshot(tracked(0)));
         assert_eq!(ui.mode(), InputMode::Normal);
-        assert_eq!(ui.rows(), 1);
+        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
         assert!(ui
-            .overlay(80)
+            .overlay(tall_pane(80))
+            .text()
             .contains("origin/gsw-push is already up to date"));
         assert!(
-            !ui.overlay(80).contains(CONFIRM_HINT),
+            !ui.overlay(tall_pane(80)).text().contains(CONFIRM_HINT),
             "a refusal must not offer keys that do nothing",
         );
     }
@@ -1115,7 +1167,11 @@ mod ui_tests {
             "the branch the question named must reach the runner",
         );
         assert_eq!(ui.mode(), InputMode::Pushing);
-        assert_eq!(ui.rows(), 1, "the running push stays on screen");
+        assert_eq!(
+            ui.overlay(tall_pane(80)).rows(),
+            1,
+            "the running push stays on screen"
+        );
     }
 
     #[test]
@@ -1142,7 +1198,11 @@ mod ui_tests {
         let mut ui = asking();
         ui.cancel();
         assert_eq!(ui.mode(), InputMode::Normal);
-        assert_eq!(ui.rows(), 0, "a cancelled prompt leaves nothing behind");
+        assert_eq!(
+            ui.overlay(tall_pane(80)).rows(),
+            0,
+            "a cancelled prompt leaves nothing behind"
+        );
     }
 
     #[test]
@@ -1156,7 +1216,10 @@ mod ui_tests {
             output: "To /tmp/origin\n * [new branch] gsw-push -> gsw-push\n".to_string(),
         });
         assert_eq!(ui.mode(), InputMode::Normal);
-        assert!(ui.overlay(80).contains("Created origin/gsw-push"));
+        assert!(ui
+            .overlay(tall_pane(80))
+            .text()
+            .contains("Created origin/gsw-push"));
     }
 
     #[test]
@@ -1169,7 +1232,8 @@ mod ui_tests {
             output: String::new(),
         });
         assert!(ui
-            .overlay(80)
+            .overlay(tall_pane(80))
+            .text()
             .contains("Pushed 3 commits to origin/gsw-push"));
     }
 
@@ -1186,7 +1250,7 @@ mod ui_tests {
                 .to_string(),
         });
         assert_eq!(ui.mode(), InputMode::Normal);
-        let overlay = ui.overlay(120);
+        let overlay = ui.overlay(tall_pane(120)).text();
         assert!(overlay.contains("! [rejected]"), "got {overlay:?}");
         assert!(
             overlay.contains("error: failed to push some refs"),
@@ -1210,7 +1274,7 @@ mod ui_tests {
                      error: failed to push some refs\n"
                 .to_string(),
         });
-        let overlay = ui.overlay(120);
+        let overlay = ui.overlay(tall_pane(120)).text();
         assert!(
             !overlay.contains("hint:"),
             "hints must not survive, got {overlay:?}"
@@ -1235,8 +1299,80 @@ mod ui_tests {
             success: false,
             output,
         });
-        assert_eq!(ui.rows(), MAX_STATUS_ROWS);
-        assert_eq!(ui.overlay(80).lines().count(), MAX_STATUS_ROWS);
+        assert_eq!(ui.overlay(tall_pane(80)).rows(), MAX_STATUS_ROWS);
+        assert_eq!(
+            ui.overlay(tall_pane(80)).text().lines().count(),
+            MAX_STATUS_ROWS
+        );
+    }
+
+    #[test]
+    fn a_message_taller_than_the_pane_keeps_the_rows_the_frame_can_spare() {
+        // Three rows of error in a three-row pane: the frame is laid out to
+        // fill the pane exactly, so every row the overlay takes is a row the
+        // frame gave up, and the last one is not the frame's to give.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: false,
+            output: "To /tmp/origin\n\
+                     ! [rejected] gsw-push -> gsw-push (fetch first)\n\
+                     error: failed to push some refs\n"
+                .to_string(),
+        });
+        let overlay = ui.overlay(Dimensions {
+            width: 80,
+            height: 3,
+        });
+        assert_eq!(overlay.rows(), 2, "the frame keeps the third row");
+        // git leads with the part worth reading, so the tail is what goes.
+        let text = overlay.text();
+        assert!(text.contains("To /tmp/origin"), "got {text:?}");
+        assert!(
+            !text.contains("error: failed to push some refs"),
+            "the last line is the one to drop, got {text:?}",
+        );
+    }
+
+    #[test]
+    fn a_one_row_pane_is_all_frame() {
+        // Nothing is left to overlay onto, and a pane showing only a question
+        // with no frame under it is not watch mode.
+        let ui = asking();
+        let overlay = ui.overlay(Dimensions {
+            width: 80,
+            height: 1,
+        });
+        assert_eq!(overlay.rows(), 0);
+        assert_eq!(overlay.text(), "");
+    }
+
+    #[test]
+    fn the_row_count_always_matches_the_text() {
+        // The whole reason these are one call: a count that disagrees with the
+        // text either leaves a blank strip under the frame or paints past the
+        // bottom of the pane.
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(PushOutcome {
+            success: false,
+            output: (1..=20)
+                .map(|n| format!("error: line {n}\n"))
+                .collect::<String>(),
+        });
+        for height in 0..8 {
+            let overlay = ui.overlay(Dimensions { width: 80, height });
+            let painted = if overlay.text().is_empty() {
+                0
+            } else {
+                overlay.text().lines().count()
+            };
+            assert_eq!(painted, overlay.rows(), "disagreed in a {height}-row pane");
+            assert!(
+                overlay.rows() < height.max(1),
+                "the frame lost its last row in a {height}-row pane",
+            );
+        }
     }
 
     #[test]
@@ -1249,9 +1385,9 @@ mod ui_tests {
             success: false,
             output: "   \n\n".to_string(),
         });
-        assert_eq!(ui.rows(), 1);
+        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
         assert!(
-            !ui.overlay(80).trim().is_empty(),
+            !ui.overlay(tall_pane(80)).text().trim().is_empty(),
             "a failure must always say that it failed",
         );
     }
@@ -1266,10 +1402,14 @@ mod ui_tests {
             success: false,
             output: "error: failed to push some refs\n".to_string(),
         });
-        assert_eq!(ui.rows(), 1);
+        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
         ui.dismiss();
-        assert_eq!(ui.rows(), 0, "a key press clears the message");
-        assert_eq!(ui.overlay(80), "");
+        assert_eq!(
+            ui.overlay(tall_pane(80)).rows(),
+            0,
+            "a key press clears the message"
+        );
+        assert_eq!(ui.overlay(tall_pane(80)).text(), "");
     }
 
     #[test]
@@ -1293,7 +1433,7 @@ mod ui_tests {
     fn a_running_push_says_so() {
         let mut ui = asking();
         ui.confirm();
-        let overlay = ui.overlay(80);
+        let overlay = ui.overlay(tall_pane(80)).text();
         assert!(
             overlay.to_lowercase().contains("push"),
             "the running notice must name what is happening, got {overlay:?}",
@@ -1309,7 +1449,7 @@ mod ui_tests {
         snap.branch = "a-branch-name-long-enough-to-need-truncating-on-a-narrow-pane".to_string();
         ui.request(&snap);
         for width in [10, 20, 40] {
-            let overlay = ui.overlay(width);
+            let overlay = ui.overlay(tall_pane(width)).text();
             for line in overlay.lines() {
                 assert!(
                     visible_width(line) <= width,
@@ -1328,7 +1468,7 @@ mod ui_tests {
         snap.branch = "日本語のブランチ名-🎉-café".to_string();
         ui.request(&snap);
         for width in 1..40 {
-            let overlay = ui.overlay(width);
+            let overlay = ui.overlay(tall_pane(width)).text();
             for line in overlay.lines() {
                 assert!(
                     visible_width(line) <= width,
@@ -1350,8 +1490,8 @@ mod ui_tests {
         });
         ui.request(&snapshot(None));
         assert_eq!(ui.mode(), InputMode::Confirm);
-        assert_eq!(ui.rows(), 1);
-        assert!(!ui.overlay(120).contains("error:"));
+        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
+        assert!(!ui.overlay(tall_pane(120)).text().contains("error:"));
     }
 }
 

@@ -1234,12 +1234,16 @@ where
         if walk_now || saw_resize {
             cache.dims = (hooks.dimensions)();
         }
-        // Rows the push overlay will take under the frame. The frame is
-        // rendered that much shorter, because it is laid out to fill the pane
-        // exactly — appending to a full-height frame would push its bottom row,
-        // the file list, off the screen.
+        // What the push overlay will paint under the frame, and how many rows
+        // that costs — resolved together, against the pane both have to share.
+        // The frame is rendered that much shorter, because it is laid out to
+        // fill the pane exactly: appending to a full-height frame would push
+        // its bottom row, the file list, off the screen. The overlay never
+        // takes the pane's last row, so this subtraction always leaves the
+        // frame at least one; the `max` only covers a degenerate zero-row pane.
+        let overlay = ui.overlay(cache.dims);
         let frame_dims = Dimensions {
-            height: cache.dims.height.saturating_sub(ui.rows()).max(1),
+            height: cache.dims.height.saturating_sub(overlay.rows()).max(1),
             ..cache.dims
         };
 
@@ -1308,7 +1312,7 @@ where
         // are compared as one string, so a frame that did not change but an
         // overlay that did still repaints — and neither can repaint alone and
         // leave the other stale.
-        let output = compose(render.output, &ui.overlay(cache.dims.width));
+        let output = compose(render.output, &overlay.text());
         if should_repaint(&output, displayed) {
             (hooks.paint)(&output)?;
             *displayed = output;

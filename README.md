@@ -448,7 +448,8 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       repository has several remotes and none of them settles it. `p` never force-pushes.
     - The push runs off the render thread, so the countdown, the ages, and resizes keep working
       while it is in flight, and a second `p` cannot start an overlapping push. git's own error
-      text is shown under the frame in red (up to three rows, `hint:` advice dropped first) and
+      text is shown under the frame in red (up to three rows, `hint:` advice dropped first, and
+    fewer rows still on a pane too short to spare three — the frame always keeps a row) and
       stays there until you press a key. A push that succeeds re-walks the repository immediately,
       so the ahead/behind arrows match what just happened. Nothing the push runs can prompt at the
       terminal — it would be reading the same keystrokes gsw is. The push gets a session of its own
