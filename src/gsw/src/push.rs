@@ -596,13 +596,17 @@ impl PushUi {
     }
 
     /// What the push feature shows in a pane of `dims`: the lines that fit
-    /// there, and — as [`Overlay::rows`] — how many rows the frame must give up
-    /// to make room for them.
+    /// there, how many rows the frame must give up to make room for them
+    /// ([`Overlay::rows`]), and how many rows the frame keeps
+    /// ([`Overlay::frame_rows`]).
     ///
-    /// Both come out of this one call because a row count and a body computed
-    /// apart can disagree, and either direction of disagreement is a bug: a
-    /// count larger than the text leaves a blank strip between the frame and
-    /// the message, a count smaller than it paints past the bottom of the pane.
+    /// All three come out of this one call because they are one decision — how
+    /// to divide `dims.height` between the frame and the message — and a
+    /// decision split across two modules is a decision that can disagree with
+    /// itself. A row count larger than the text leaves a blank strip between
+    /// the frame and the message; a count smaller than it paints past the
+    /// bottom of the pane; a frame height that does not match what is left over
+    /// scrolls the screen gsw was measured to fill exactly.
     ///
     /// Two clamps, one contract. gsw's standing rule is that nothing it paints
     /// ever wraps or scrolls the pane it was measured to fill, so each line is
@@ -647,31 +651,68 @@ impl PushUi {
         // push feature would leave the user watching an error with nothing
         // under it to say which repository it belongs to — and the frame is
         // what watch mode is for.
-        Overlay {
-            lines: lines
-                .into_iter()
-                .take(dims.height.saturating_sub(1))
-                .collect(),
-        }
+        let lines: Vec<String> = lines
+            .into_iter()
+            .take(dims.height.saturating_sub(1))
+            .collect();
+        // The frame gets what the overlay did not take. The clamp at one covers
+        // only a degenerate zero-row pane: the take above already leaves a row
+        // for the frame in every pane that has one, so this floor never fights
+        // the line above it for a row a real terminal reported.
+        let frame_rows = dims.height.saturating_sub(lines.len()).max(1);
+        Overlay { lines, frame_rows }
     }
 }
 
-/// What the push feature paints under the frame, sized for one particular pane.
+/// What the push feature paints under the frame, sized for one particular pane
+/// — and, with it, how tall the frame above it must be rendered.
 ///
 /// Built only by [`PushUi::overlay`], which is what makes the row count and the
 /// text impossible to disagree about: they are the same `Vec` — one measured,
 /// the other joined.
+///
+/// The frame's height is carried here for the same reason. The pane is divided
+/// once, and both halves of that division are read off the same value, so the
+/// caller cannot re-derive one of them and land somewhere else. It used to
+/// subtract [`Overlay::rows`] from the pane height itself, in another module —
+/// two expressions that had to agree by inspection, about arithmetic that has
+/// already produced two review findings.
 pub(crate) struct Overlay {
     /// Painted lines, each already truncated to the pane's width, and at most
     /// one fewer of them than the pane has rows.
     lines: Vec<String>,
+    /// Rows left for the frame, which is the pane's height less the lines
+    /// above, floored at one.
+    frame_rows: usize,
 }
 
 impl Overlay {
     /// How many rows the frame must give up. Always at least one short of the
     /// pane, so the frame keeps a row whatever the overlay wanted to say.
+    ///
+    /// Test-only, and that is the point of the refactor that made it so. The
+    /// watch loop used to read this and subtract it from the pane height
+    /// itself; it now asks for [`Overlay::frame_rows`] and gets the answer this
+    /// type already worked out. Nothing outside the tests needs the count on
+    /// its own any more, and a production caller that took it would be holding
+    /// half of a division it could complete differently. The tests still
+    /// measure it, because it is the number both halves of the split are made
+    /// of.
+    #[cfg(test)]
     pub(crate) fn rows(&self) -> usize {
         self.lines.len()
+    }
+
+    /// How many rows the frame is rendered with under this overlay.
+    ///
+    /// The frame is laid out to fill exactly the height it is given, so this is
+    /// the number that keeps the two together inside the pane: appending the
+    /// overlay to a full-height frame would push the frame's bottom row off the
+    /// screen. Never zero — a pane with nothing but a message in it is not
+    /// watch mode, so the frame keeps a row even when the pane reports none to
+    /// share.
+    pub(crate) fn frame_rows(&self) -> usize {
+        self.frame_rows
     }
 
     /// The text to paint under the frame: exactly [`Overlay::rows`] lines, and

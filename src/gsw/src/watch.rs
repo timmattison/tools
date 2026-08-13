@@ -1234,16 +1234,18 @@ where
         if walk_now || saw_resize {
             cache.dims = (hooks.dimensions)();
         }
-        // What the push overlay will paint under the frame, and how many rows
-        // that costs — resolved together, against the pane both have to share.
-        // The frame is rendered that much shorter, because it is laid out to
-        // fill the pane exactly: appending to a full-height frame would push
-        // its bottom row, the file list, off the screen. The overlay never
-        // takes the pane's last row, so this subtraction always leaves the
-        // frame at least one; the `max` only covers a degenerate zero-row pane.
+        // What the push overlay will paint under the frame, and how tall the
+        // frame is left — one call, because they are one division of the pane
+        // both have to share. The frame is rendered shorter by exactly what the
+        // overlay took, because it is laid out to fill the pane exactly:
+        // appending to a full-height frame would push its bottom row, the file
+        // list, off the screen. The arithmetic deliberately lives in
+        // `PushUi::overlay` rather than here — a subtraction repeated in the
+        // caller is a second opinion about the same rows, and this loop must
+        // not be able to hold one.
         let overlay = ui.overlay(cache.dims);
         let frame_dims = Dimensions {
-            height: cache.dims.height.saturating_sub(overlay.rows()).max(1),
+            height: overlay.frame_rows(),
             ..cache.dims
         };
 
