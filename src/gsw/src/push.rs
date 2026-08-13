@@ -4,7 +4,9 @@
 //! `gix` cannot push, so the push itself is a `git` child process. Everything
 //! that *decides* — which remote, which arguments, what the confirmation says,
 //! and what an outcome means — lives here as pure, terminal-free code so it can
-//! be tested without a network or a pty. Only [`spawn`] touches a process.
+//! be tested without a network or a pty. Only [`run_push`], the blocking half of
+//! [`spawn`], starts a process: the push itself, and the read of HEAD that
+//! checks the repository is still on the branch the confirmation named.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -238,6 +240,10 @@ pub(crate) fn prompt_for(
 /// down the loop's own channel, so it re-enters the loop the same way every
 /// other event does — no shared state, and the outcome is applied between
 /// frames rather than during one.
+///
+/// Takes the whole [`PushCommand`] by value, so the branch the confirmation
+/// named crosses onto the thread with the arguments and [`run_push`] can still
+/// refuse a repository that moved on in the meantime.
 pub(crate) fn spawn<F>(command: PushCommand, workdir: PathBuf, on_finish: F)
 where
     F: FnOnce(PushOutcome) + Send + 'static,
@@ -245,10 +251,24 @@ where
     std::thread::spawn(move || on_finish(run_push(&command, &workdir)));
 }
 
+/// What a refused push tells the user to do. Pressing `p` again re-resolves the
+/// plan against the branch that is checked out now, so the next question
+/// describes the repository as it actually stands — which is the whole remedy.
+const RETRY_ADVICE: &str = "press p again";
+
 /// Run `git push` to completion and describe how it went.
 ///
 /// The blocking half of [`spawn`], separated so it can be tested against a real
 /// repository without a thread or a channel in the way.
+///
+/// **The branch is checked first.** A confirmation describes the repository as
+/// it stood when `p` was pressed, and the answer arrives whenever the user
+/// presses `y` — long enough for a checkout in another pane to land in between.
+/// So the branch [`PushCommand`] carries is compared against the one checked out
+/// *now*, and a mismatch refuses the push instead of running it against a
+/// repository the question never described. The gap between that read and git's
+/// own is microseconds rather than seconds; nothing here can close it entirely,
+/// short of a lock git does not offer.
 ///
 /// Two things are forced on the child, and both matter because gsw is holding
 /// the alternate screen in raw mode:
@@ -264,6 +284,21 @@ where
 ///   it renders only to a terminal, so a pipe removes the carriage-return
 ///   redraws that would otherwise arrive as unreadable status rows.
 fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
+    // `None` means git could not be run at all, which the push below reports in
+    // git's own terms. Refusing here instead would blame a branch change that
+    // did not happen — and a git that cannot start cannot push either.
+    if let Some(current) = current_branch(workdir) {
+        if current != command.branch() {
+            return PushOutcome {
+                success: false,
+                output: format!(
+                    "branch changed from {} to {current} since the confirmation — {RETRY_ADVICE}",
+                    command.branch(),
+                ),
+            };
+        }
+    }
+
     let result = Command::new("git")
         .args(command.args())
         .current_dir(workdir)
@@ -307,6 +342,40 @@ fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
         success,
         output: text,
     }
+}
+
+/// The branch checked out in `workdir` right now, or [`DETACHED_HEAD`] when
+/// there is none. `None` only when `git` could not be run at all.
+///
+/// Asked of `git` rather than of `gix`, for two reasons. It is the same
+/// question, put to the same program, from the same working directory, a
+/// moment before that program resolves HEAD for the push itself — so the answer
+/// cannot disagree with git's for a reason gsw would have to model, the way a
+/// second implementation of HEAD resolution eventually would. And it keeps the
+/// runner taking nothing but a [`PushCommand`] and a path: a `gix::Repository`
+/// is not `Send`, so a handle for this could not simply be carried onto the
+/// push thread, and the tests here would have to build one instead of pointing
+/// at a directory.
+///
+/// A detached HEAD reports as [`DETACHED_HEAD`], matching
+/// [`crate::repo::branch_name`] and the header gsw draws. git refuses `HEAD` as
+/// a branch name, so it can never equal a branch a confirmation named — a
+/// detached checkout always reads as a change.
+fn current_branch(workdir: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .current_dir(workdir)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+
+    // Detached HEAD is a non-zero exit with nothing on stdout; both spellings
+    // of "no branch here" collapse to the sentinel.
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || name.is_empty() {
+        return Some(DETACHED_HEAD.to_string());
+    }
+    Some(name)
 }
 
 /// How a finished `git push` came out.
@@ -565,7 +634,10 @@ impl PushPlan {
     /// `remote` is only consulted for [`PushPlan::Create`]. An
     /// [`PushPlan::Update`] runs a bare `git push` and lets git read the remote
     /// out of the branch config, so a branch tracking a remote other than the
-    /// repository's default still pushes to the right place.
+    /// repository's default still pushes to the right place. *Which* branch's
+    /// config git reads is decided by HEAD when the child runs, so the branch
+    /// resolved here travels with the arguments in a [`PushCommand`] and
+    /// [`run_push`] refuses the push if the checkout has moved by then.
     fn resolve(branch: &str, remote: Option<&str>, upstream: Option<&UpstreamStatus>) -> Self {
         // Checked before the upstream, so a tracking status left over from
         // before the checkout cannot make a detached HEAD look pushable.
@@ -1501,6 +1573,31 @@ mod run_tests {
         assert!(
             outcome.output.contains("press p again"),
             "the outcome must say how to retry, got {:?}",
+            outcome.output,
+        );
+    }
+
+    #[test]
+    fn a_detached_head_after_the_confirmation_is_not_pushed() {
+        // The other way the checkout can move: `git rebase`, `git bisect`, or a
+        // plain `git checkout <sha>` in another pane leaves no branch at all.
+        // `HEAD` is not a name git accepts for a branch, so it can never match
+        // the one the confirmation named.
+        let (origin, clone) = clone_with_feature_branch();
+        let p = clone.path();
+        let command = confirmed(&["push", "-u", "origin", "feature"]);
+        git(p, &["checkout", "-q", "--detach"]);
+
+        let outcome = run_push(&command, p);
+
+        assert!(!outcome.success, "got {:?}", outcome.output);
+        assert!(
+            !origin_has_feature(origin.path()),
+            "a detached checkout must stop the push like any other change",
+        );
+        assert!(
+            outcome.output.contains(DETACHED_HEAD),
+            "the outcome must name what HEAD is now, got {:?}",
             outcome.output,
         );
     }

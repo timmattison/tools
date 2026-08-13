@@ -1009,7 +1009,7 @@ where
             }
         }
         Event::PushRequested => ui.request(snapshot),
-        // `confirm` yields the arguments only once, so a second `y` that raced
+        // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
             if let Some(command) = ui.confirm() {

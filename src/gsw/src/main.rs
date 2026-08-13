@@ -42,7 +42,9 @@ mod watch;
                   it renders once and exits.\n\n\
                   Watch-mode keys: q or Ctrl-C quits, r refreshes now, and p pushes the current \
                   branch after a confirmation that names what it will do — a branch not yet on \
-                  the remote is confirmed as creating one. p never force-pushes."
+                  the remote is confirmed as creating one. A push whose branch stopped being \
+                  checked out between the question and the answer is refused, not redirected. \
+                  p never force-pushes."
 )]
 struct Cli {
     /// Render once and exit instead of entering the live watch loop. This is

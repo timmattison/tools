@@ -433,7 +433,10 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
   - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, and `p` pushes the
     current branch. Ctrl-C quits from anywhere, including while a push is in flight.
   - `p` always asks first, and the question names the branch, the remote, and how much is going —
-    so what you confirm is what runs. A branch that is **not on the remote yet** gets a different,
+    so what you confirm is what runs. If the checkout moves in another pane between the question
+    and your answer, the push is refused rather than redirected at the branch that is there now:
+    gsw says the branch changed and you press `p` again for a question about the new one.
+    A branch that is **not on the remote yet** gets a different,
     yellow confirmation (`Create new remote branch origin/my-branch?`) rather than the routine
     `Push 3 commits to origin/my-branch?`, because creating a branch on a shared remote is not the
     same act as moving one that is already there. Answer with `y`/Enter or `n`/Esc. A branch that
