@@ -4030,6 +4030,28 @@ mod push_loop_tests {
     }
 
     #[test]
+    fn composing_does_not_double_the_frames_trailing_newline() {
+        // A real gsw frame ends with a newline. Joining with another one would
+        // leave a blank row between the frame and the overlay — and the frame
+        // was already rendered one row shorter to make room, so the overlay
+        // would be pushed off the pane it was measured to fit.
+        assert_eq!(compose("a\nb\n".to_string(), "note"), "a\nb\nnote");
+    }
+
+    #[test]
+    fn composing_separates_a_frame_that_has_no_trailing_newline() {
+        assert_eq!(compose("a\nb".to_string(), "note"), "a\nb\nnote");
+    }
+
+    #[test]
+    fn composing_an_empty_overlay_returns_the_frame_untouched() {
+        // Every frame gsw painted before the push feature existed must still be
+        // painted byte for byte, trailing newline and all.
+        assert_eq!(compose("a\nb\n".to_string(), ""), "a\nb\n");
+        assert_eq!(compose("a\nb".to_string(), ""), "a\nb");
+    }
+
+    #[test]
     fn pressing_p_puts_the_question_under_the_frame() {
         // The key has to reach the overlay through the loop, not just through
         // the classifier: the frame and the question are painted together.
