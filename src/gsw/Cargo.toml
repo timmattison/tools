@@ -16,10 +16,12 @@ colored.workspace = true
 crossterm.workspace = true
 gix.workspace = true
 ignore.workspace = true
-libc.workspace = true
 notify.workspace = true
 terminal_size.workspace = true
 unicode-width.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
