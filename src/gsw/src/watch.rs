@@ -25,6 +25,7 @@ use crossterm::terminal::{
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::push::{PushCommand, PushUi};
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
 use crate::{
@@ -587,11 +588,48 @@ enum Event {
     FsChanged,
     /// The terminal was resized — repaint at the new dimensions.
     Resize,
+    /// A key was pressed. Deliberately **unclassified**: what a key means
+    /// depends on whether a confirmation is on screen, and only the loop knows
+    /// that. Sending the raw key and classifying it in the loop is what makes
+    /// the mode and the key arrive in the same order the user pressed them —
+    /// were the reader thread to classify against a shared mode flag instead,
+    /// a fast `p` then `y` could be read while the flag still said
+    /// [`InputMode::Normal`], and the `y` would be silently dropped.
+    Key(KeyEvent),
     /// The user asked to quit (`q` or Ctrl-C).
     Quit,
     /// The user asked to force an immediate refresh (`r`), bypassing the
     /// throttle cooldown.
     ForceRefresh,
+    /// The user asked to push (`p`) — show the confirmation, or say why there
+    /// is nothing to confirm.
+    PushRequested,
+    /// The user confirmed the push at the prompt (`y` or Enter).
+    PushConfirmed,
+    /// The user declined the push at the prompt (`n`, Esc, or `q`).
+    PushCancelled,
+    /// A push that was running has finished, either way.
+    PushFinished(crate::push::PushOutcome),
+    /// A key press with no other meaning. Clears a status message if one is on
+    /// screen and does nothing otherwise, which is what keeps a push error up
+    /// until the user has actually looked at the screen.
+    Dismiss,
+}
+
+/// What keys mean right now.
+///
+/// The loop owns this, because the loop is the only place that knows what is on
+/// screen. It is an input *mode* rather than a set of booleans so the key table
+/// is total: every mode answers every key, and a mode added later cannot
+/// silently inherit another's bindings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InputMode {
+    /// Nothing is being asked. The monitor's ordinary keys apply.
+    Normal,
+    /// A push confirmation is on screen and is waiting for an answer.
+    Confirm,
+    /// A push is running. `p` is inert here, so two pushes cannot overlap.
+    Pushing,
 }
 
 /// The git work one watch-mode refresh performs: re-open the repository so
@@ -713,6 +751,13 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx.clone());
 
+    // A push runs `git` with the work tree as its cwd, so the path is captured
+    // before the handle is borrowed for the rest of watch mode. The push thread
+    // reports back on the loop's own channel, so its outcome re-enters the loop
+    // exactly like a filesystem event — applied between frames, never during one.
+    let workdir = handle.repo().workdir().map(Path::to_path_buf);
+    let push_tx = tx.clone();
+
     // The one ignore matcher both threads share: the watcher callback reads it
     // per event, and every `walk` below rebuilds it from disk so a `.gitignore`
     // edited in another pane takes effect without a restart.
@@ -739,6 +784,18 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
+            start_push: |command: PushCommand| {
+                // No work tree means nothing to push from. `RepoHandle` rejects
+                // a bare repository at discovery, so watch mode never gets here
+                // without one — this is the type's `Option` being honored, not
+                // a case the user can reach.
+                if let Some(workdir) = workdir.clone() {
+                    let tx = push_tx.clone();
+                    crate::push::spawn(command, workdir, move |outcome| {
+                        let _ = tx.send(Event::PushFinished(outcome));
+                    });
+                }
+            },
         },
     )
 }
@@ -876,7 +933,7 @@ struct SnapshotCache {
 /// these to the real git collect, render, terminal-size query, painter, and
 /// clock; tests inject counters and a controllable clock to assert which hooks
 /// ran — and with what age offset — without a TTY or real time.
-struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
+struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush> {
     /// Walk the repo into a fresh [`Snapshot`] (the expensive git work).
     collect: Collect,
     /// Render a snapshot at the given dimensions and timing.
@@ -889,6 +946,102 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
     clock: Clock,
     /// Map the freshest displayed age to the decay-tick interval (`None` = off).
     next_tick: Tick,
+    /// Start a confirmed push, given the [`PushCommand`] the confirmation
+    /// described — the `git` arguments and the branch they were written for.
+    /// Production spawns a thread that runs the push and sends the outcome back
+    /// as [`Event::PushFinished`]; tests record the command and decide for
+    /// themselves when — or whether — the outcome arrives.
+    start_push: StartPush,
+}
+
+/// The triggers one wake collected, before the render decides what to do with
+/// them. A burst can carry several at once, and they are not exclusive: a walk
+/// forced by `r` and a resize can arrive together.
+#[derive(Default)]
+struct Pending {
+    /// A relevant filesystem path changed.
+    fs: bool,
+    /// The terminal was resized.
+    resize: bool,
+    /// A walk was demanded outright, bypassing the cooldown.
+    force: bool,
+}
+
+/// Whether the loop keeps running after an event.
+#[derive(PartialEq, Eq, Debug)]
+enum Flow {
+    /// Carry on to the render.
+    Continue,
+    /// End watch mode.
+    Quit,
+}
+
+/// Fold one received [`Event`] into the loop's pending state.
+///
+/// Extracted because the loop receives events at three points — the timed wait,
+/// the untimed wait, and the debounce drain — and a routing rule written three
+/// times is a rule that will be updated twice. Every event goes through here,
+/// so a variant added later cannot be handled in two of the three places.
+///
+/// A key arrives unclassified and is resolved here against `ui`'s *current*
+/// mode, which is what makes a burst read correctly: within one drain, the `p`
+/// ahead of a `y` has already switched the mode by the time the `y` is looked
+/// at. It then recurses exactly once — [`classify_input`] never returns
+/// [`Event::Key`], so there is no second hop.
+///
+/// The exception worth naming is a `p` that switches nothing. Nothing renders
+/// between two keys of one drain, so a rule the render path applies is applied
+/// after the second key has already been classified — which is why `dims` is
+/// threaded down to [`PushUi::request`]: a pane with no row to draw the
+/// question in raises no question, the mode does not move, and the `y` or Enter
+/// behind that `p` is read as the ordinary key it is. `dims` is the pane the
+/// last render measured, which is the pane the user was looking at when they
+/// pressed the key — the loop re-measures after this drain, not during it.
+fn absorb<StartPush>(
+    event: Event,
+    pending: &mut Pending,
+    ui: &mut PushUi,
+    snapshot: &Snapshot,
+    dims: Dimensions,
+    start_push: &mut StartPush,
+) -> Flow
+where
+    StartPush: FnMut(PushCommand),
+{
+    match event {
+        Event::Quit => return Flow::Quit,
+        Event::FsChanged => pending.fs = true,
+        Event::Resize => pending.resize = true,
+        Event::ForceRefresh => pending.force = true,
+        Event::Key(key) => {
+            if let Some(action) = classify_input(key, ui.mode()) {
+                return absorb(action, pending, ui, snapshot, dims, start_push);
+            }
+        }
+        Event::PushRequested => ui.request(snapshot, dims),
+        // `confirm` yields the command only once, so a second `y` that raced
+        // the mode change starts nothing.
+        Event::PushConfirmed => {
+            if let Some(command) = ui.confirm() {
+                start_push(command);
+            }
+        }
+        Event::PushCancelled => ui.cancel(),
+        Event::Dismiss => ui.dismiss(),
+        Event::PushFinished(outcome) => {
+            let succeeded = outcome.success;
+            ui.finished(outcome);
+            // A successful push moved the upstream, so the header's arrows and
+            // tracking segment are stale the moment it lands — walk now rather
+            // than leaving a wrong count on screen until the next refresh. A
+            // failure changed nothing in the repository, so walking would only
+            // pay for a status traversal to redraw the identical frame.
+            if succeeded {
+                pending.force = true;
+            }
+        }
+    }
+    Flow::Continue
 }
 
 /// The render loop's terminal-free core: wait for a filesystem event, a resize,
@@ -940,14 +1093,14 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick> {
 /// to zero. The accepted cost: a repository deleted for good leaves a frozen
 /// (but visibly aging) frame until the user quits. That is the right failure for
 /// a monitor — a wrong-but-labeled-old screen beats no screen.
-fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick>(
+fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
     mut cache: SnapshotCache,
     initial_freshest: Option<Duration>,
     mut schedule: WalkSchedule,
-    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick>,
+    mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>,
 ) -> Result<()>
 where
     Collect: FnMut() -> Result<Snapshot>,
@@ -956,17 +1109,20 @@ where
     Paint: FnMut(&str) -> Result<()>,
     Clock: Fn() -> Instant,
     Tick: Fn(Option<Duration>) -> Option<Duration>,
+    StartPush: FnMut(PushCommand),
 {
     let mut freshest = initial_freshest;
+    // Everything the push feature puts on screen, plus the input mode that goes
+    // with it. Owned here because this is the only place that knows what is
+    // displayed — see [`Event::Key`] for why the reader thread must not.
+    let mut ui = PushUi::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
         // Track *which* triggers arrived so the render below can route them: a
         // filesystem change walks git, a resize re-renders the cache at the new
         // size, a bare timeout is a decay tick.
-        let mut saw_fs = false;
-        let mut saw_resize = false;
-        let mut saw_force = false;
+        let mut pending = Pending::default();
         // Wait window: the soonest of the decay-tick cadence, the next walk this
         // schedule owes (a timed refresh, or a walk deferred during a cooldown),
         // and — while a countdown is on screen — the cadence that countdown
@@ -982,34 +1138,36 @@ where
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
-                Ok(Event::Quit) => break,
-                Ok(Event::FsChanged) => {
-                    saw_fs = true;
-                    false
-                }
-                Ok(Event::Resize) => {
-                    saw_resize = true;
-                    false
-                }
-                Ok(Event::ForceRefresh) => {
-                    saw_force = true;
+                Ok(event) => {
+                    if absorb(
+                        event,
+                        &mut pending,
+                        &mut ui,
+                        &cache.snapshot,
+                        cache.dims,
+                        &mut hooks.start_push,
+                    ) == Flow::Quit
+                    {
+                        break;
+                    }
                     false
                 }
                 Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
             None => match rx.recv() {
-                Ok(Event::Quit) => break,
-                Ok(Event::FsChanged) => {
-                    saw_fs = true;
-                    false
-                }
-                Ok(Event::Resize) => {
-                    saw_resize = true;
-                    false
-                }
-                Ok(Event::ForceRefresh) => {
-                    saw_force = true;
+                Ok(event) => {
+                    if absorb(
+                        event,
+                        &mut pending,
+                        &mut ui,
+                        &cache.snapshot,
+                        cache.dims,
+                        &mut hooks.start_push,
+                    ) == Flow::Quit
+                    {
+                        break;
+                    }
                     false
                 }
                 Err(_) => break,
@@ -1022,13 +1180,25 @@ where
         if !woke_for_timeout {
             loop {
                 match rx.recv_timeout(debounce) {
-                    Ok(Event::Quit) => {
-                        quitting = true;
-                        break;
+                    Ok(event) => {
+                        if absorb(
+                            event,
+                            &mut pending,
+                            &mut ui,
+                            &cache.snapshot,
+                            cache.dims,
+                            &mut hooks.start_push,
+                        ) == Flow::Quit
+                        {
+                            // Unlike the first wake, a quit that arrives inside
+                            // the drain still paints: the events ahead of it in
+                            // this burst have already been applied, and the
+                            // user should see the screen they asked for before
+                            // it goes away.
+                            quitting = true;
+                            break;
+                        }
                     }
-                    Ok(Event::FsChanged) => saw_fs = true,
-                    Ok(Event::Resize) => saw_resize = true,
-                    Ok(Event::ForceRefresh) => saw_force = true,
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
                         quitting = true;
@@ -1037,6 +1207,7 @@ where
                 }
             }
         }
+        let (saw_fs, saw_resize, saw_force) = (pending.fs, pending.resize, pending.force);
 
         // Read the clock once for this wake: the throttle decision, a walk's
         // start, and any age offset all key off the same instant.
@@ -1070,8 +1241,40 @@ where
             false
         };
 
-        let render = if walk_now {
+        // Re-measure the pane before rendering, on the same two triggers as
+        // before: a walk and a resize. Hoisted out of the branches so the frame
+        // height below is computed from dimensions that are already current.
+        if walk_now || saw_resize {
             cache.dims = (hooks.dimensions)();
+        }
+        // What the push overlay will paint under the frame, and how tall the
+        // frame is left — one call, because they are one division of the pane
+        // both have to share. The frame is rendered shorter by exactly what the
+        // overlay took, because it is laid out to fill the pane exactly:
+        // appending to a full-height frame would push its bottom row, the file
+        // list, off the screen. The arithmetic deliberately lives in
+        // `PushUi::overlay` rather than here — a subtraction repeated in the
+        // caller is a second opinion about the same rows, and this loop must
+        // not be able to hold one.
+        //
+        // The call can also change what the keys mean, which is why it takes
+        // `&mut ui`: a question whose row a resize took away is cancelled here
+        // rather than left answerable by an Enter nobody was asked for. That is
+        // the backstop only. A `p` pressed in a pane that was already too short
+        // raises no question in the first place — `absorb` settles that with
+        // `cache.dims`, because no render runs between two keys of one burst —
+        // so what this catches is the pane that shrank under a question that
+        // did fit when it was asked. It runs after this wake's events have been
+        // absorbed and before the next wake reads one, so the key a user
+        // presses in reaction to what this paints is classified against the
+        // mode this pane actually showed them.
+        let overlay = ui.overlay(cache.dims);
+        let frame_dims = Dimensions {
+            height: overlay.frame_rows(),
+            ..cache.dims
+        };
+
+        let render = if walk_now {
             let collected = (hooks.collect)();
             // Measure the walk's wall-clock cost around collect and feed it to
             // the throttle, which arms the next cooldown (= 100·cost) from it.
@@ -1090,7 +1293,7 @@ where
                     cache.snapshot = snapshot;
                     (hooks.render)(
                         &cache.snapshot,
-                        cache.dims,
+                        frame_dims,
                         timing(Duration::ZERO, &schedule, now),
                     )
                 }
@@ -1109,17 +1312,16 @@ where
                     let age_offset = now.saturating_duration_since(cache.collected_at);
                     (hooks.render)(
                         &cache.snapshot,
-                        cache.dims,
+                        frame_dims,
                         timing(age_offset, &schedule, now),
                     )
                 }
             }
         } else if saw_resize {
-            cache.dims = (hooks.dimensions)();
             let age_offset = now.saturating_duration_since(cache.collected_at);
             (hooks.render)(
                 &cache.snapshot,
-                cache.dims,
+                frame_dims,
                 timing(age_offset, &schedule, now),
             )
         } else {
@@ -1128,14 +1330,19 @@ where
             let age_offset = now.saturating_duration_since(cache.collected_at);
             (hooks.render)(
                 &cache.snapshot,
-                cache.dims,
+                frame_dims,
                 timing(age_offset, &schedule, now),
             )
         };
 
-        if should_repaint(&render.output, displayed) {
-            (hooks.paint)(&render.output)?;
-            *displayed = render.output;
+        // The painted screen is the frame with the push overlay under it. They
+        // are compared as one string, so a frame that did not change but an
+        // overlay that did still repaints — and neither can repaint alone and
+        // leave the other stale.
+        let output = compose(render.output, &overlay.text());
+        if should_repaint(&output, displayed) {
+            (hooks.paint)(&output)?;
+            *displayed = output;
         }
         freshest = render.freshest_age;
 
@@ -1144,6 +1351,20 @@ where
         }
     }
     Ok(())
+}
+
+/// Join a frame and the push overlay into the one string that gets painted.
+///
+/// An empty overlay returns the frame untouched, byte for byte. That is what
+/// keeps every frame gsw painted before the push feature existed identical to
+/// what it paints now — including the trailing-newline handling, which is the
+/// frame's business and not this function's.
+fn compose(frame: String, overlay: &str) -> String {
+    if overlay.is_empty() {
+        return frame;
+    }
+    let separator = if frame.ends_with('\n') { "" } else { "\n" };
+    format!("{frame}{separator}{overlay}")
 }
 
 /// Paint `output` into the alternate screen, replacing whatever frame is there.
@@ -1177,54 +1398,88 @@ fn current_dimensions(width_offset: usize) -> Dimensions {
 
 /// The pure, unit-testable core of [`spawn_event_reader`]: map one crossterm
 /// terminal event to the [`Event`] the watch loop should react to, or `None`
-/// when the event is irrelevant. Keeping the key→event decision here —
-/// terminal-free and side-effect-free — lets it be tested without a pty while
-/// the reader thread stays a thin `event::read` → `classify_input` → `tx.send`
-/// loop.
+/// when the event is irrelevant.
 ///
-/// - A key *release* is ignored (kitty/Windows report them; only a press acts).
-/// - `q`, or Ctrl-C, requests a [`Event::Quit`].
-/// - `r` forces an immediate refresh ([`Event::ForceRefresh`]), bypassing the
-///   throttle cooldown.
+/// Deliberately does **not** decide what a key means. Key semantics depend on
+/// the loop's [`InputMode`], which this thread cannot read without racing the
+/// loop that writes it, so a key is forwarded whole and classified by
+/// [`classify_input`] once it has arrived somewhere the mode is known.
+///
+/// - A key press becomes [`Event::Key`], carrying the key untouched.
 /// - A terminal resize becomes [`Event::Resize`].
 /// - Everything else is ignored.
-fn classify_input(event: CtEvent) -> Option<Event> {
+fn forward_input(event: CtEvent) -> Option<Event> {
     match event {
-        CtEvent::Key(KeyEvent {
-            code,
-            modifiers,
-            kind,
-            ..
-        }) => {
-            if kind == KeyEventKind::Release {
-                // Ignore key releases (kitty/Windows report them); only a press acts.
-                None
-            } else if code == KeyCode::Char('q')
-                || (modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c'))
-            {
-                Some(Event::Quit)
-            } else if code == KeyCode::Char('r') {
-                Some(Event::ForceRefresh)
-            } else {
-                None
-            }
-        }
+        CtEvent::Key(key) => Some(Event::Key(key)),
         CtEvent::Resize(_, _) => Some(Event::Resize),
         _ => None,
     }
 }
 
+/// What one key press means in `mode`, or `None` when it means nothing at all.
+///
+/// Pure and terminal-free, so the whole key table is testable without a pty:
+/// a test builds a [`KeyEvent`] and a mode and reads back the [`Event`].
+///
+/// - A key *release* is ignored in every mode (kitty/Windows report them; only
+///   a press acts).
+/// - **Ctrl-C quits from every mode**, including mid-push. A monitor that
+///   cannot be quit while it waits on the network is a monitor that has to be
+///   killed from another pane.
+/// - [`InputMode::Normal`]: `q` quits, `r` forces a refresh, `p` asks to push.
+/// - [`InputMode::Confirm`]: `y` and Enter push, `n`, Esc, and `q` cancel.
+///   Nothing else acts — with a question on screen, `q` is the answer "no",
+///   not "quit", and `r` is not a refresh. That is why the mode exists.
+/// - [`InputMode::Pushing`]: `q` quits and `r` refreshes, but `p` is inert, so
+///   an impatient second press cannot start an overlapping push.
+/// - Every other press is [`Event::Dismiss`], which clears a status message and
+///   otherwise does nothing.
+fn classify_input(key: KeyEvent, mode: InputMode) -> Option<Event> {
+    let KeyEvent {
+        code,
+        modifiers,
+        kind,
+        ..
+    } = key;
+
+    if kind == KeyEventKind::Release {
+        // Ignore key releases (kitty/Windows report them); only a press acts.
+        return None;
+    }
+
+    // Checked before the mode table so no mode can trap the user mid-push.
+    if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+        return Some(Event::Quit);
+    }
+
+    let event = match mode {
+        InputMode::Normal | InputMode::Pushing => match code {
+            KeyCode::Char('q') => Event::Quit,
+            KeyCode::Char('r') => Event::ForceRefresh,
+            // The one key the two modes disagree on: a push already running
+            // makes a second request meaningless rather than harmless.
+            KeyCode::Char('p') if mode == InputMode::Normal => Event::PushRequested,
+            _ => Event::Dismiss,
+        },
+        InputMode::Confirm => match code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Event::PushConfirmed,
+            KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => Event::PushCancelled,
+            _ => Event::Dismiss,
+        },
+    };
+    Some(event)
+}
+
 /// Spawn the crossterm event-reader thread. It blocks on `event::read`, routes
-/// each event through [`classify_input`] (which maps `q`/Ctrl-C to
-/// [`Event::Quit`], `r` to [`Event::ForceRefresh`], and terminal resizes to
-/// [`Event::Resize`]), forwards any resulting [`Event`], and exits when the
-/// receiver is gone or reading fails.
+/// each event through [`forward_input`] (which passes key presses through whole
+/// and maps terminal resizes to [`Event::Resize`]), forwards any resulting
+/// [`Event`], and exits when the receiver is gone or reading fails.
 fn spawn_event_reader(tx: Sender<Event>) {
     thread::spawn(move || {
         // Loop until reading fails (terminal closed) — the `while let` exits on
         // `Err` — or a forwarded send fails because the receiver is gone.
         while let Ok(ct_event) = event::read() {
-            if let Some(event) = classify_input(ct_event) {
+            if let Some(event) = forward_input(ct_event) {
                 if tx.send(event).is_err() {
                     break;
                 }
@@ -2111,49 +2366,161 @@ mod tests {
         );
     }
 
+    /// One key press, with no modifiers.
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     #[test]
     fn classify_input_maps_the_r_key_to_force_refresh() {
         // Pressing `r` is the manual-refresh escape hatch: the input classifier
         // must turn an `r` key PRESS into Event::ForceRefresh.
-        let r_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-        assert!(matches!(classify_input(r_press), Some(Event::ForceRefresh)));
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('r')), InputMode::Normal),
+            Some(Event::ForceRefresh),
+        ));
     }
 
     #[test]
     fn classify_input_handles_keys_and_ignores_releases() {
         // Regression guard for the rest of the classifier's contract once `r`
         // joined it: a key RELEASE is dropped (kitty/Windows emit them and only
-        // a press should act), `q` and Ctrl-C still quit, a resize still maps to
-        // a repaint, and an unrelated key is ignored.
+        // a press should act), and `q` and Ctrl-C still quit.
 
         // A key release — even of a key we act on — is ignored.
-        let r_release = CtEvent::Key(KeyEvent {
+        let r_release = KeyEvent {
             kind: KeyEventKind::Release,
-            ..KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)
-        });
+            ..press(KeyCode::Char('r'))
+        };
         assert!(
-            classify_input(r_release).is_none(),
+            classify_input(r_release, InputMode::Normal).is_none(),
             "a key release must be ignored — only a press acts",
         );
 
         // `q` and Ctrl-C both request a quit.
-        let q_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(matches!(classify_input(q_press), Some(Event::Quit)));
-        let ctrl_c = CtEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(classify_input(ctrl_c), Some(Event::Quit)));
-
-        // A resize becomes a repaint at the new dimensions.
         assert!(matches!(
-            classify_input(CtEvent::Resize(80, 24)),
-            Some(Event::Resize)
+            classify_input(press(KeyCode::Char('q')), InputMode::Normal),
+            Some(Event::Quit),
+        ));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            classify_input(ctrl_c, InputMode::Normal),
+            Some(Event::Quit),
         ));
 
-        // An unrelated key press is ignored.
-        let x_press = CtEvent::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        // An unrelated key press acts on nothing, but is not silence: it clears
+        // a status message that may be on screen.
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('x')), InputMode::Normal),
+            Some(Event::Dismiss),
+        ));
+    }
+
+    #[test]
+    fn the_reader_forwards_key_presses_whole_and_maps_resizes() {
+        // The reader thread cannot know the mode, so it must not decide
+        // anything about a key. A resize means the same thing in every mode, so
+        // it is classified here.
+        let key = press(KeyCode::Char('p'));
         assert!(
-            classify_input(x_press).is_none(),
-            "an unrelated key must be ignored",
+            matches!(forward_input(CtEvent::Key(key)), Some(Event::Key(sent)) if sent == key),
+            "a key must reach the loop untouched",
         );
+        assert!(matches!(
+            forward_input(CtEvent::Resize(80, 24)),
+            Some(Event::Resize),
+        ));
+    }
+
+    #[test]
+    fn p_asks_to_push_only_when_nothing_else_is_happening() {
+        // The new key. It opens the confirmation from the normal mode, and is
+        // inert while a push is already running — an impatient second press
+        // must not start an overlapping push.
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('p')), InputMode::Normal),
+            Some(Event::PushRequested),
+        ));
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('p')), InputMode::Pushing),
+            Some(Event::Dismiss),
+        ));
+    }
+
+    #[test]
+    fn the_confirmation_accepts_y_and_enter() {
+        for code in [KeyCode::Char('y'), KeyCode::Char('Y'), KeyCode::Enter] {
+            assert!(
+                matches!(
+                    classify_input(press(code), InputMode::Confirm),
+                    Some(Event::PushConfirmed),
+                ),
+                "{code:?} must confirm the push",
+            );
+        }
+    }
+
+    #[test]
+    fn the_confirmation_is_cancelled_by_n_esc_and_q() {
+        // `q` cancels rather than quits while a question is on screen: the safe
+        // reading of "get me out of here" is backing out of the push, not
+        // ending the session with a prompt still up.
+        for code in [
+            KeyCode::Char('n'),
+            KeyCode::Char('N'),
+            KeyCode::Char('q'),
+            KeyCode::Esc,
+        ] {
+            assert!(
+                matches!(
+                    classify_input(press(code), InputMode::Confirm),
+                    Some(Event::PushCancelled),
+                ),
+                "{code:?} must cancel the push",
+            );
+        }
+    }
+
+    #[test]
+    fn the_confirmation_ignores_the_ordinary_keys() {
+        // With a question on screen, `r` must not refresh and `p` must not
+        // re-ask. Anything that is not an answer does nothing.
+        for code in [KeyCode::Char('r'), KeyCode::Char('p'), KeyCode::Char('x')] {
+            assert!(
+                matches!(
+                    classify_input(press(code), InputMode::Confirm),
+                    Some(Event::Dismiss),
+                ),
+                "{code:?} must not act while the confirmation is up",
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_every_mode() {
+        // A monitor that cannot be quit while it waits on the network is one
+        // that has to be killed from another pane.
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        for mode in [InputMode::Normal, InputMode::Confirm, InputMode::Pushing] {
+            assert!(
+                matches!(classify_input(ctrl_c, mode), Some(Event::Quit)),
+                "Ctrl-C must quit from {mode:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn q_and_r_still_work_while_a_push_runs() {
+        // The push runs off this thread, so the monitor stays live underneath
+        // it: quitting and refreshing keep working.
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('q')), InputMode::Pushing),
+            Some(Event::Quit),
+        ));
+        assert!(matches!(
+            classify_input(press(KeyCode::Char('r')), InputMode::Pushing),
+            Some(Event::ForceRefresh),
+        ));
     }
 
     #[test]
@@ -2257,7 +2624,7 @@ mod tests {
     /// before the loop runs, so they drain immediately and never actually wait
     /// out the window — only the final disconnect costs nothing — which makes
     /// these tests deterministic regardless of the exact value here.
-    const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
+    pub(super) const TEST_DEBOUNCE: Duration = Duration::from_millis(20);
 
     /// No timed refresh: the loop under test is purely event-driven, so a walk
     /// can only come from a filesystem change. Every test that predates the
@@ -2269,13 +2636,13 @@ mod tests {
     /// A `next_tick` that always disables the timer, so the loop blocks purely
     /// on channel events. The event-driven tests use this to stay independent
     /// of the decay-timer behavior, which has its own dedicated tests.
-    fn timer_off(_freshest: Option<Duration>) -> Option<Duration> {
+    pub(super) fn timer_off(_freshest: Option<Duration>) -> Option<Duration> {
         None
     }
 
     /// Build a [`Render`] with the given frame and no freshest age — enough for
     /// the event-driven loop tests, which don't exercise the cadence.
-    fn frame(output: &str) -> Render {
+    pub(super) fn frame(output: &str) -> Render {
         Render {
             output: output.to_string(),
             freshest_age: None,
@@ -2294,11 +2661,12 @@ mod tests {
             log: Vec::new(),
             upstream: None,
             operation: None,
+            push_remote: None,
         }
     }
 
     /// Dimensions used by loop tests that don't exercise resize.
-    const TEST_DIMS: Dimensions = Dimensions {
+    pub(super) const TEST_DIMS: Dimensions = Dimensions {
         width: 80,
         height: 24,
     };
@@ -2364,6 +2732,7 @@ mod tests {
                 // A decay tick on the same cadence, so the loop always wakes:
                 // the test must fail when no walk is scheduled, not block.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2402,6 +2771,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2447,6 +2817,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: stepping_clock(base, Duration::from_secs(60)),
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2494,6 +2865,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2537,6 +2909,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2577,6 +2950,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2619,6 +2993,7 @@ mod tests {
                 // Tiny interval so the tick fires fast; the cadence-vs-age
                 // mapping is covered by the next_tick tests.
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2661,6 +3036,7 @@ mod tests {
                 },
                 clock: || now,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2704,6 +3080,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2753,6 +3130,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || now,
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2810,6 +3188,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2889,6 +3268,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -2972,6 +3352,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3036,6 +3417,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || base,
                 next_tick: |_freshest| Some(Duration::from_millis(5)),
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3107,6 +3489,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3177,6 +3560,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3227,6 +3611,7 @@ mod tests {
                 },
                 clock: || base,
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         )
         .expect("loop");
@@ -3290,6 +3675,7 @@ mod tests {
                 paint: |_output: &str| Ok(()),
                 clock: || clock_at,
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         );
 
@@ -3377,6 +3763,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         );
 
@@ -3488,6 +3875,7 @@ mod tests {
                     times[i.min(times.len() - 1)]
                 },
                 next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
             },
         );
 
@@ -3577,5 +3965,441 @@ mod tests {
             watch.height, 50,
             "watch height must come from terminal_size with no chrome reserved",
         );
+    }
+}
+
+#[cfg(test)]
+mod push_loop_tests {
+    use super::tests::{frame, timer_off, TEST_DEBOUNCE, TEST_DIMS};
+    use super::*;
+    use crate::push::PushOutcome;
+    use crate::render::strip_ansi;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use std::cell::RefCell;
+
+    /// A snapshot on an untracked `gsw-push` with `origin` available, so the
+    /// push feature has something real to plan.
+    fn pushable_snapshot() -> Snapshot {
+        Snapshot {
+            branch: "gsw-push".into(),
+            base: "main".into(),
+            commits_ahead: 2,
+            commits_behind: 0,
+            files: Vec::new(),
+            log: Vec::new(),
+            upstream: None,
+            operation: None,
+            push_remote: Some("origin".into()),
+        }
+    }
+
+    fn cache_at(collected_at: Instant) -> SnapshotCache {
+        cache_in(collected_at, TEST_DIMS)
+    }
+
+    fn cache_in(collected_at: Instant, dims: Dimensions) -> SnapshotCache {
+        SnapshotCache {
+            snapshot: pushable_snapshot(),
+            collected_at,
+            dims,
+        }
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// What one loop run observed. The loop takes its hooks by value, so the
+    /// counters live behind `RefCell` and are read after it returns.
+    #[derive(Default)]
+    struct Seen {
+        collects: usize,
+        pushes: Vec<PushCommand>,
+        frame_heights: Vec<usize>,
+    }
+
+    /// Run the loop over a pre-loaded event queue and report what it did.
+    ///
+    /// Every event is queued before the loop starts, so the first wake takes one
+    /// and the debounce drain absorbs the rest — the whole sequence is applied
+    /// against one render, which is exactly the state the assertions are about.
+    /// The queue must end with [`Event::Quit`] or the loop blocks.
+    fn run_loop(events: Vec<Event>) -> (String, Seen) {
+        run_loop_with(events, TEST_DIMS, |_frame_dims| "FRAME".to_string())
+    }
+
+    /// Run the loop in a pane of the given size, with a frame that really fills
+    /// the rows it was given.
+    ///
+    /// [`run_loop`]'s canned one-line frame cannot show an overflow: what lands
+    /// in the pane is the frame's rows plus the overlay's, so a test about how
+    /// many rows are painted needs a render hook that emits as many rows as it
+    /// was asked for — which is what the production renderer does.
+    fn run_loop_in_pane(events: Vec<Event>, dims: Dimensions) -> (String, Seen) {
+        run_loop_with(events, dims, |frame_dims| {
+            (1..=frame_dims.height)
+                .map(|row| format!("ROW{row}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
+    /// The shared body: pre-load the queue, run the loop against `dims`, and
+    /// report the last painted screen plus what the hooks saw.
+    fn run_loop_with(
+        events: Vec<Event>,
+        dims: Dimensions,
+        render_frame: fn(Dimensions) -> String,
+    ) -> (String, Seen) {
+        let (tx, rx) = mpsc::channel();
+        for event in events {
+            tx.send(event).expect("queue event");
+        }
+        let seen = RefCell::new(Seen::default());
+        let mut displayed = String::new();
+        let base = Instant::now();
+
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            cache_in(base, dims),
+            None,
+            no_timed_refresh_for_push(),
+            LoopHooks {
+                collect: || {
+                    seen.borrow_mut().collects += 1;
+                    Ok(pushable_snapshot())
+                },
+                render: |_snap: &Snapshot, frame_dims: Dimensions, _timing: FrameTiming| {
+                    seen.borrow_mut().frame_heights.push(frame_dims.height);
+                    frame(&render_frame(frame_dims))
+                },
+                dimensions: move || dims,
+                paint: |_output: &str| Ok(()),
+                clock: move || base,
+                next_tick: timer_off,
+                start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
+            },
+        )
+        .expect("loop");
+
+        (displayed, seen.into_inner())
+    }
+
+    /// Purely event-driven: no timed refresh, so any walk came from an event.
+    fn no_timed_refresh_for_push() -> WalkSchedule {
+        WalkSchedule::unscheduled()
+    }
+
+    #[test]
+    fn composing_does_not_double_the_frames_trailing_newline() {
+        // A real gsw frame ends with a newline. Joining with another one would
+        // leave a blank row between the frame and the overlay — and the frame
+        // was already rendered one row shorter to make room, so the overlay
+        // would be pushed off the pane it was measured to fit.
+        assert_eq!(compose("a\nb\n".to_string(), "note"), "a\nb\nnote");
+    }
+
+    #[test]
+    fn composing_separates_a_frame_that_has_no_trailing_newline() {
+        assert_eq!(compose("a\nb".to_string(), "note"), "a\nb\nnote");
+    }
+
+    #[test]
+    fn composing_an_empty_overlay_returns_the_frame_untouched() {
+        // Every frame gsw painted before the push feature existed must still be
+        // painted byte for byte, trailing newline and all.
+        assert_eq!(compose("a\nb\n".to_string(), ""), "a\nb\n");
+        assert_eq!(compose("a\nb".to_string(), ""), "a\nb");
+    }
+
+    #[test]
+    fn pressing_p_puts_the_question_under_the_frame() {
+        // The key has to reach the overlay through the loop, not just through
+        // the classifier: the frame and the question are painted together.
+        let (displayed, _) = run_loop(vec![key(KeyCode::Char('p')), Event::Quit]);
+        assert!(displayed.starts_with("FRAME"), "got {displayed:?}");
+        assert!(
+            displayed.contains("Create new remote branch origin/gsw-push?"),
+            "the question must be painted under the frame, got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn confirming_starts_the_push_the_question_described() {
+        // `p` then `y` must run the command the confirmation named — the whole
+        // safety property of asking first.
+        let (_, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::Quit,
+        ]);
+        let [command] = seen.pushes.as_slice() else {
+            panic!(
+                "one confirmed push must reach the runner, got {:?}",
+                seen.pushes
+            );
+        };
+        assert_eq!(command.args(), ["push", "-u", "origin", "gsw-push"]);
+        // The branch travels with the arguments all the way through the loop:
+        // the runner checks it against the checkout before git sees it.
+        assert_eq!(command.branch(), "gsw-push");
+    }
+
+    #[test]
+    fn a_lone_y_pushes_nothing() {
+        // Without a question on screen, `y` is an ordinary key. It must never
+        // reach the push.
+        let (_, seen) = run_loop(vec![key(KeyCode::Char('y')), Event::Quit]);
+        assert!(seen.pushes.is_empty(), "y alone must not push");
+    }
+
+    #[test]
+    fn cancelling_takes_the_question_off_the_screen_and_pushes_nothing() {
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('n')),
+            Event::Quit,
+        ]);
+        assert!(seen.pushes.is_empty(), "n must not push");
+        assert_eq!(displayed, "FRAME", "the question must be gone");
+    }
+
+    #[test]
+    fn a_successful_push_walks_git_again() {
+        // The push moved the upstream, so the header's arrows and tracking
+        // segment are stale the moment it lands. Only a walk fixes them.
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: true,
+                output: String::new(),
+            }),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.collects, 1,
+            "a successful push must re-walk so the header matches what happened",
+        );
+        assert!(
+            displayed.contains("Created origin/gsw-push"),
+            "got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn a_failed_push_shows_the_error_and_does_not_walk() {
+        // Nothing changed in the repository, so a walk would cost a status
+        // traversal to redraw the identical frame.
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            }),
+            Event::Quit,
+        ]);
+        assert_eq!(seen.collects, 0, "a failed push changed nothing to re-read");
+        assert!(
+            displayed.contains("error: failed to push some refs"),
+            "got {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn the_frame_is_rendered_shorter_while_the_overlay_is_up() {
+        // The overlay is painted under a frame that was measured to fill the
+        // pane. Without giving the rows back, the frame's bottom row — the file
+        // list — falls off the screen.
+        let (_, seen) = run_loop(vec![key(KeyCode::Char('p')), Event::Quit]);
+        assert_eq!(
+            seen.frame_heights,
+            vec![TEST_DIMS.height - 1],
+            "one overlay row must cost the frame one row",
+        );
+    }
+
+    #[test]
+    fn a_three_row_error_costs_the_frame_three_rows() {
+        let (_, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "error: one\nerror: two\nerror: three\nerror: four\n".to_string(),
+            }),
+            Event::Quit,
+        ]);
+        assert_eq!(
+            seen.frame_heights.last().copied(),
+            Some(TEST_DIMS.height - 3),
+        );
+    }
+
+    /// A pane exactly as tall as the tallest status message gsw can show. That
+    /// is where the frame and the overlay start competing for the same rows,
+    /// and the only size at which an unclamped overlay is visible as an
+    /// overflow rather than as a very short frame.
+    const SHORT_PANE: Dimensions = Dimensions {
+        width: 80,
+        height: 3,
+    };
+
+    /// The events that put a three-row push error on screen.
+    fn a_three_row_failure() -> Vec<Event> {
+        vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "To /tmp/origin\n\
+                         ! [rejected] gsw-push -> gsw-push (fetch first)\n\
+                         error: failed to push some refs\n"
+                    .to_string(),
+            }),
+            Event::Quit,
+        ]
+    }
+
+    #[test]
+    fn the_overlay_never_overflows_a_pane_shorter_than_the_message() {
+        // gsw paints into an alternate screen it cleared and laid out to fill
+        // exactly. One row too many scrolls the pane, which is the same
+        // never-wrap contract the overlay's width truncation exists to hold.
+        let (displayed, seen) = run_loop_in_pane(a_three_row_failure(), SHORT_PANE);
+        // The failure path colors its rows red, and `colored`'s override is
+        // process-global across this test binary, so count visible rows rather
+        // than assume some other test left color off.
+        let painted = strip_ansi(&displayed);
+        assert!(
+            painted.lines().count() <= SHORT_PANE.height,
+            "painted {} rows into a {}-row pane: {painted:?}",
+            painted.lines().count(),
+            SHORT_PANE.height,
+        );
+        assert!(
+            matches!(seen.frame_heights.last().copied(), Some(rows) if rows >= 1),
+            "the frame must keep a row of its own, got {:?}",
+            seen.frame_heights,
+        );
+    }
+
+    /// A pane with nothing to spare: the frame keeps the only row there is, so
+    /// the push feature has nowhere to put a question.
+    const NO_ROOM_PANE: Dimensions = Dimensions {
+        width: 80,
+        height: 1,
+    };
+
+    #[test]
+    fn a_push_never_starts_from_a_question_the_pane_never_painted() {
+        // Key autorepeat, a paste, or a fast double-tap delivers `p` and the
+        // answer to it inside one debounce window, and every key in a window is
+        // classified before the loop renders again. Nothing in between can
+        // notice that the question was never drawn, so the pane has to be
+        // consulted when the question is raised rather than when it is painted.
+        // Enter is the key this is really about: it is what a user presses out
+        // of reflex at a frame that did not change.
+        for confirm in [KeyCode::Char('y'), KeyCode::Enter] {
+            let (_, seen) = run_loop_in_pane(
+                vec![key(KeyCode::Char('p')), key(confirm), Event::Quit],
+                NO_ROOM_PANE,
+            );
+            assert!(
+                seen.pushes.is_empty(),
+                "{confirm:?} started a push from a question the pane never painted: {:?}",
+                seen.pushes,
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlay_that_does_not_fit_drops_its_last_lines() {
+        // git leads with the part worth reading — `To <remote>`, then the
+        // rejection — so a message that has to lose rows loses them off the
+        // bottom.
+        let (displayed, _) = run_loop_in_pane(a_three_row_failure(), SHORT_PANE);
+        let painted = strip_ansi(&displayed);
+        assert!(painted.contains("To /tmp/origin"), "got {painted:?}");
+        assert!(painted.contains("! [rejected]"), "got {painted:?}");
+        assert!(
+            !painted.contains("error: failed to push some refs"),
+            "the tail must be the part that is dropped, got {painted:?}",
+        );
+    }
+
+    #[test]
+    fn the_frame_goes_back_to_full_height_once_the_status_is_dismissed() {
+        let (displayed, seen) = run_loop(vec![
+            key(KeyCode::Char('p')),
+            key(KeyCode::Char('y')),
+            Event::PushFinished(PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            }),
+            key(KeyCode::Char('x')),
+            Event::Quit,
+        ]);
+        assert_eq!(displayed, "FRAME", "the dismissed error must leave nothing");
+        assert_eq!(
+            seen.frame_heights.last().copied(),
+            Some(TEST_DIMS.height),
+            "the rows must come back",
+        );
+    }
+
+    #[test]
+    fn quitting_still_works_with_a_question_on_screen() {
+        // Ctrl-C during a confirmation must end the loop rather than being read
+        // as an answer.
+        //
+        // Run on a thread with a deadline, because the failure mode here is a
+        // loop that never ends: with no timed refresh and no decay tick, a
+        // Ctrl-C the loop does not act on leaves it blocked in `recv` forever.
+        // Asserting inline would hang the whole suite instead of failing.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (tx, rx) = mpsc::channel();
+            tx.send(key(KeyCode::Char('p'))).expect("queue p");
+            tx.send(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )))
+            .expect("queue ctrl-c");
+            let seen = RefCell::new(Seen::default());
+            let mut displayed = String::new();
+            let base = Instant::now();
+
+            event_loop(
+                &rx,
+                TEST_DEBOUNCE,
+                &mut displayed,
+                cache_at(base),
+                None,
+                no_timed_refresh_for_push(),
+                LoopHooks {
+                    collect: || Ok(pushable_snapshot()),
+                    render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
+                        frame("FRAME")
+                    },
+                    dimensions: || TEST_DIMS,
+                    paint: |_output: &str| Ok(()),
+                    clock: move || base,
+                    next_tick: timer_off,
+                    start_push: |command: PushCommand| seen.borrow_mut().pushes.push(command),
+                },
+            )
+            .expect("loop");
+
+            let _ = done_tx.send(seen.into_inner().pushes);
+        });
+
+        let pushes = done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Ctrl-C must end the loop rather than leave it blocked");
+        assert!(pushes.is_empty(), "ctrl-c must not push");
     }
 }

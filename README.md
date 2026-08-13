@@ -430,6 +430,39 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     gsw purely event-driven. On a repository where a status walk is expensive, the 1% duty-cycle
     budget pushes the timed refresh out past the interval, and the countdown shows the longer wait
     rather than promising one it will not keep.
+  - Watch-mode keys: `q` or Ctrl-C quits, `r` forces an immediate refresh, and `p` pushes the
+    current branch. Ctrl-C quits from anywhere, including while a push is in flight.
+  - `p` always asks first, and the question names the branch, the remote, and how much is going —
+    so what you confirm is what runs. If the checkout moves in another pane between the question
+    and your answer, the push is refused rather than redirected at the branch that is there now:
+    gsw says the branch changed and you press `p` again for a question about the new one.
+    A branch that is **not on the remote yet** gets a different,
+    yellow confirmation (`Create new remote branch origin/my-branch?`) rather than the routine
+    `Push 3 commits to origin/my-branch?`, because creating a branch on a shared remote is not the
+    same act as moving one that is already there. Answer with `y`/Enter or `n`/Esc. A branch that
+    is already fully pushed says so instead of asking. In a pane too short to draw the question in
+    — one row, all of which the frame keeps — `p` asks nothing at all rather than asking invisibly,
+    and the keys go on meaning what they mean everywhere else, so Enter can never confirm something
+    you were not shown; make the pane taller and press `p` again. A pane resized down to that size
+    with a question already up drops the question for the same reason.
+    - An untracked branch is published with `git push -u`, so the upstream is recorded and the
+      header's tracking segment appears; a tracked one runs a bare `git push` and lets git supply
+      the remote and refspec. The remote for a new branch is `remote.pushDefault` if set, else the
+      only remote whatever it is called, else `origin` — and gsw refuses rather than guess when a
+      repository has several remotes and none of them settles it. `p` never force-pushes.
+    - The push runs off the render thread, so the countdown, the ages, and resizes keep working
+      while it is in flight, and a second `p` cannot start an overlapping push. git's own error
+      text is shown under the frame in red (up to three rows, `hint:` advice dropped first, and
+      fewer rows still on a pane too short to spare three — the frame always keeps a row) and
+      stays there until you press a key. A push that succeeds re-walks the repository immediately,
+      so the ahead/behind arrows match what just happened. Nothing the push runs can prompt at the
+      terminal — it would be reading the same keystrokes gsw is. The push is started detached from
+      the terminal — its own session on Unix, no inherited console on Windows — so nothing in its
+      process tree can reach the keyboard gsw is reading, not git, not ssh, and not anything below
+      them: an HTTPS remote that wants a password, a passphrase-protected key with no agent, and an
+      unknown host key all fail fast and say so under the frame instead of hanging behind a
+      question gsw never drew. Credential helpers and a GUI askpass still work — neither needs the
+      terminal.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —

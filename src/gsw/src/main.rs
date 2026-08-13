@@ -17,6 +17,7 @@ use crate::snapshot::build_snapshot;
 mod age;
 mod bar;
 mod git;
+mod push;
 mod render;
 mod repo;
 mod snapshot;
@@ -38,7 +39,12 @@ mod watch;
                   re-walks the repository every --refresh-interval seconds, with the \
                   separator under the header showing how stale the screen is and how long \
                   until the next refresh; with `--one-shot` (or when its output is piped) \
-                  it renders once and exits."
+                  it renders once and exits.\n\n\
+                  Watch-mode keys: q or Ctrl-C quits, r refreshes now, and p pushes the current \
+                  branch after a confirmation that names what it will do — a branch not yet on \
+                  the remote is confirmed as creating one. A push whose branch stopped being \
+                  checked out between the question and the answer is refused, not redirected. \
+                  p never force-pushes."
 )]
 struct Cli {
     /// Render once and exit instead of entering the live watch loop. This is
@@ -481,6 +487,7 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
     snapshot.log = fetch_log(repo, cfg.log_lines);
 
     snapshot.upstream = repo::upstream_status(repo);
+    snapshot.push_remote = repo::push_remote(repo);
 
     // Surface an in-progress merge/rebase. The conflict count comes for free
     // from the status walk already done — every unmerged path is a
@@ -782,6 +789,7 @@ mod tests {
             log: Vec::new(),
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
+            push_remote: None,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -837,6 +845,7 @@ mod tests {
             log,
             upstream: None,
             operation: None,
+            push_remote: None,
         }
     }
 
@@ -958,6 +967,7 @@ mod tests {
             }],
             upstream: None,
             operation: None,
+            push_remote: None,
         };
         let cfg = RenderConfig {
             base: None,
