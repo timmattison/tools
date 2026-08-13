@@ -477,7 +477,10 @@ enum State {
         /// Whether this reports a failure, which the display colors red.
         failed: bool,
     },
-    /// A confirmation is on screen, waiting for an answer.
+    /// A confirmation is on screen, waiting for an answer. "On screen" is the
+    /// load-bearing half: [`PushUi::overlay`] leaves this state when it finds a
+    /// pane with no row to draw the question in, so the mode below can never
+    /// promise a question the user was not shown.
     Asking {
         question: String,
         creates_remote_branch: bool,
@@ -495,6 +498,10 @@ impl PushUi {
     }
 
     /// What keys mean right now.
+    ///
+    /// [`InputMode::Confirm`] is only ever reported while the question is
+    /// actually painted, which is why a render can move this back to
+    /// [`InputMode::Normal`] with no key pressed: see [`PushUi::overlay`].
     pub(crate) fn mode(&self) -> InputMode {
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
@@ -615,7 +622,20 @@ impl PushUi {
     /// frame therefore always keeps a row of its own, and a message too tall
     /// for what is left loses its last lines — [`failure_lines`] puts git's
     /// most useful output first, so the head is the part worth keeping.
-    pub(crate) fn overlay(&self, dims: Dimensions) -> Overlay {
+    ///
+    /// That second clamp is why this takes `&mut self`. In a pane with no row
+    /// to spare it cuts a status down to nothing, which costs the user a
+    /// message and no more. It would cut a *confirmation* down to nothing too —
+    /// and a confirmation is not only text. [`PushUi::mode`] would go on
+    /// reporting [`InputMode::Confirm`], so Enter would go on meaning push: the
+    /// user presses `p`, sees a frame that did not change, presses Enter out of
+    /// reflex, and gsw pushes to a shared remote having asked nothing. A
+    /// question the user cannot see must not be answerable, so a question this
+    /// pane cannot draw is cancelled here, exactly as `n` cancels one. The keys
+    /// go back to normal in the same breath as the question leaves the screen,
+    /// because on this prompt they are the same fact. Nothing is lost but the
+    /// question: `p` in a pane with a row to spare asks it again.
+    pub(crate) fn overlay(&mut self, dims: Dimensions) -> Overlay {
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
             State::Idle => Vec::new(),
@@ -655,6 +675,13 @@ impl PushUi {
             .into_iter()
             .take(dims.height.saturating_sub(1))
             .collect();
+        // Nothing survived the clamp. For a status that is the end of it, but a
+        // question that is not on screen must not still be answerable — the
+        // keys and the question go together, so the question goes. `cancel`
+        // does nothing in the states where there is no question to drop.
+        if lines.is_empty() {
+            self.cancel();
+        }
         // The frame gets what the overlay did not take. The clamp at one covers
         // only a degenerate zero-row pane: the take above already leaves a row
         // for the frame in every pane that has one, so this floor never fights
@@ -728,6 +755,11 @@ impl Overlay {
 /// means "this is what Enter gives you", and Enter *confirms* here — so `[y/N]`
 /// would promise that the key people reach for by reflex is the safe one, on
 /// the one prompt in gsw that writes to a shared remote.
+///
+/// The same reasoning is why a question this hint cannot be drawn with is
+/// cancelled rather than left pending (see [`PushUi::overlay`]). What makes
+/// Enter safe to bind to a push is that the user is looking at the sentence
+/// saying so. Off the screen, the binding keeps the risk and loses the sentence.
 const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
 
 /// What a running push says while the network round trip is in flight.
@@ -1151,7 +1183,7 @@ mod ui_tests {
 
     #[test]
     fn a_fresh_ui_shows_nothing_and_leaves_the_keys_alone() {
-        let ui = PushUi::new();
+        let mut ui = PushUi::new();
         assert_eq!(ui.mode(), InputMode::Normal);
         assert_eq!(ui.overlay(tall_pane(80)).rows(), 0);
         assert_eq!(ui.overlay(tall_pane(80)).text(), "");
@@ -1161,7 +1193,7 @@ mod ui_tests {
     fn requesting_a_push_asks_the_question_and_takes_the_keys() {
         // `p` on a pushable branch must put the question on screen AND switch
         // the key table, or `y` would be read as an ordinary key.
-        let ui = asking();
+        let mut ui = asking();
         assert_eq!(ui.mode(), InputMode::Confirm);
         assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
         let overlay = ui.overlay(tall_pane(80)).text();
@@ -1379,13 +1411,39 @@ mod ui_tests {
     fn a_one_row_pane_is_all_frame() {
         // Nothing is left to overlay onto, and a pane showing only a question
         // with no frame under it is not watch mode.
-        let ui = asking();
+        let mut ui = asking();
         let overlay = ui.overlay(Dimensions {
             width: 80,
             height: 1,
         });
         assert_eq!(overlay.rows(), 0);
         assert_eq!(overlay.text(), "");
+    }
+
+    #[test]
+    fn a_question_the_pane_cannot_show_cannot_be_answered() {
+        // What the user sees in a one-row pane after pressing `p` is a frame
+        // that did not change, because there is no row left to draw the
+        // question in. If the keys still meant "push", the Enter they press out
+        // of reflex would push to a shared remote having asked nothing. So the
+        // question goes when its row does, and the keys go with it.
+        let mut ui = asking();
+        assert_eq!(ui.mode(), InputMode::Confirm, "the question was raised");
+        let overlay = ui.overlay(Dimensions {
+            width: 80,
+            height: 1,
+        });
+        assert_eq!(overlay.text(), "", "the pane had no row to ask in");
+        assert_eq!(
+            ui.mode(),
+            InputMode::Normal,
+            "a question that was never drawn must not leave the keys meaning push",
+        );
+        assert_eq!(
+            ui.confirm(),
+            None,
+            "Enter must not start a push nobody was asked about",
+        );
     }
 
     #[test]
@@ -1517,8 +1575,14 @@ mod ui_tests {
         // at the first pair and hide the rest behind a fix.
         let mut broken: Vec<String> = Vec::new();
 
-        for (name, ui) in every_state() {
-            for height in 0..=SWEEP_MAX_HEIGHT {
+        // Every pane gets its own freshly built states, rather than one
+        // `PushUi` being carried across the whole range of heights. `overlay`
+        // can change the state it was asked about — a question the pane cannot
+        // draw is cancelled there — so a carried instance would be idle by the
+        // second pane, and each state would be swept exactly once instead of
+        // nine times.
+        for height in 0..=SWEEP_MAX_HEIGHT {
+            for (name, mut ui) in every_state() {
                 let overlay = ui.overlay(Dimensions {
                     width: SWEEP_WIDTH,
                     height,

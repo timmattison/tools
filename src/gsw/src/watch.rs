@@ -1243,6 +1243,14 @@ where
         // `PushUi::overlay` rather than here — a subtraction repeated in the
         // caller is a second opinion about the same rows, and this loop must
         // not be able to hold one.
+        //
+        // The call can also change what the keys mean, which is why it takes
+        // `&mut ui`: a pane with no row to spare for a confirmation cancels the
+        // confirmation rather than leaving a question nobody can see answerable
+        // by Enter. It runs after this wake's events have been absorbed and
+        // before the next wake reads one, so the key a user presses in reaction
+        // to what this paints is classified against the mode this pane actually
+        // showed them.
         let overlay = ui.overlay(cache.dims);
         let frame_dims = Dimensions {
             height: overlay.frame_rows(),
