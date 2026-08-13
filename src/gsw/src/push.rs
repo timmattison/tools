@@ -70,8 +70,30 @@ impl PushPlan {
         remote: Option<&str>,
         upstream: Option<&UpstreamStatus>,
     ) -> Option<Self> {
-        let _ = (branch, remote, upstream, DETACHED_HEAD);
-        None
+        // Checked before the upstream, so a tracking status left over from
+        // before the checkout cannot make a detached HEAD look pushable.
+        if branch == DETACHED_HEAD {
+            return None;
+        }
+
+        match upstream {
+            // Level with the upstream, or behind it only: `git push` would
+            // report "Everything up-to-date". Say so without the round trip.
+            Some(up) if up.ahead == 0 => Some(Self::UpToDate {
+                target: up.name.clone(),
+            }),
+            // Ahead — including ahead *and* behind. A diverged branch is very
+            // likely rejected as a non-fast-forward, and that rejection is what
+            // the user needs to read. gsw does not pre-empt git's decision.
+            Some(up) => Some(Self::Update {
+                target: up.name.clone(),
+                commits: up.ahead,
+            }),
+            None => remote.map(|remote| Self::Create {
+                remote: remote.to_string(),
+                branch: branch.to_string(),
+            }),
+        }
     }
 
     /// The arguments to pass to `git`, not including the program name.
@@ -81,8 +103,21 @@ impl PushPlan {
     /// Panics on [`PushPlan::UpToDate`], which describes a push that must never
     /// run. Callers prompt only for the other two variants.
     pub(crate) fn command_args(&self) -> Vec<String> {
-        let _ = self;
-        Vec::new()
+        match self {
+            // Bare `push`: git reads the remote and the refspec out of the
+            // branch config, so a branch tracking something other than the
+            // repository's default remote still goes to the right place.
+            Self::Update { .. } => vec!["push".to_string()],
+            Self::Create { remote, branch } => vec![
+                "push".to_string(),
+                "-u".to_string(),
+                remote.clone(),
+                branch.clone(),
+            ],
+            Self::UpToDate { target } => {
+                unreachable!("gsw never runs a push for an up-to-date branch ({target})")
+            }
+        }
     }
 }
 
