@@ -482,6 +482,7 @@ pub(crate) fn collect_snapshot(repo: &gix::Repository, cfg: &RenderConfig) -> Re
     snapshot.log = fetch_log(repo, cfg.log_lines);
 
     snapshot.upstream = repo::upstream_status(repo);
+    snapshot.push_remote = repo::push_remote(repo);
 
     // Surface an in-progress merge/rebase. The conflict count comes for free
     // from the status walk already done — every unmerged path is a
@@ -783,6 +784,7 @@ mod tests {
             log: Vec::new(),
             upstream: None,
             operation: Some(Operation::Merge { conflicts: 1 }),
+            push_remote: None,
         };
         let frame = render_frame(&snap, &cfg, dims, FrameTiming::at_walk(None));
         let lines = frame.output.lines().count();
@@ -838,6 +840,7 @@ mod tests {
             log,
             upstream: None,
             operation: None,
+            push_remote: None,
         }
     }
 
@@ -959,6 +962,7 @@ mod tests {
             }],
             upstream: None,
             operation: None,
+            push_remote: None,
         };
         let cfg = RenderConfig {
             base: None,

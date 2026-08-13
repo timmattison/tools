@@ -288,6 +288,43 @@ pub fn upstream_status(repo: &gix::Repository) -> Option<UpstreamStatus> {
     })
 }
 
+/// The remote to publish a branch that has no upstream to, or `None` when the
+/// repository gives no unambiguous answer.
+///
+/// Only consulted for a branch with no upstream. A branch that already tracks
+/// something is pushed with a bare `git push`, which reads the remote out of
+/// the branch config — so this never has to second-guess a tracking branch.
+///
+/// Read fresh on every walk, like every other configuration gsw renders: a
+/// remote added in another pane takes effect on the next refresh rather than at
+/// the next restart.
+pub fn push_remote(repo: &gix::Repository) -> Option<String> {
+    let _ = repo;
+    None
+}
+
+/// Pure core of [`push_remote`]: pick the remote from the names the repository
+/// has and whatever `remote.pushDefault` says.
+///
+/// The rules, in order:
+///
+/// 1. **`remote.pushDefault` wins outright**, and is taken verbatim — even when
+///    it names no configured remote. That setting exists precisely so the user
+///    can override the default, and git itself is the authority on whether the
+///    name resolves. Second-guessing it here would mean pushing somewhere the
+///    user did not configure. A bogus value fails in `git push`, where the error
+///    says what is actually wrong.
+/// 2. **Exactly one remote** is the answer whatever it is called, so a
+///    repository whose only remote is `fork` is not told there is no remote.
+/// 3. **`origin` among several**, matching what every other tool assumes.
+/// 4. Otherwise `None`. Several remotes, none named `origin`, and no
+///    `pushDefault` is a genuine ambiguity, and guessing would publish a branch
+///    to a remote the user never named.
+fn pick_push_remote(names: &[String], push_default: Option<&str>) -> Option<String> {
+    let _ = (names, push_default);
+    None
+}
+
 /// The in-progress git operation gsw should surface in the header, or `None`
 /// for a clean tree or an out-of-scope operation.
 ///
@@ -1545,5 +1582,137 @@ mod tests {
         git_allowing_failure(p, &["cherry-pick", "feature~1"]);
         let repo = open_at(p).unwrap();
         assert_eq!(super::operation_state(&repo, 1), None);
+    }
+}
+
+#[cfg(test)]
+mod push_remote_tests {
+    use super::{pick_push_remote, push_remote, RepoHandle};
+    use crate::testrepo::{git, init_repo, init_repo_with_upstream};
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn the_only_remote_is_the_answer_whatever_it_is_called() {
+        // A repo whose single remote is `fork` must not be told it has no
+        // remote just because the name is not `origin`.
+        assert_eq!(
+            pick_push_remote(&names(&["fork"]), None),
+            Some("fork".to_string()),
+        );
+    }
+
+    #[test]
+    fn origin_wins_among_several_remotes() {
+        assert_eq!(
+            pick_push_remote(&names(&["upstream", "origin", "fork"]), None),
+            Some("origin".to_string()),
+        );
+    }
+
+    #[test]
+    fn several_remotes_without_origin_are_ambiguous() {
+        // Guessing here would publish a branch to a remote the user never
+        // named. Refusing sends them to `git push` with their own choice.
+        assert_eq!(pick_push_remote(&names(&["upstream", "fork"]), None), None);
+    }
+
+    #[test]
+    fn no_remote_at_all_has_no_answer() {
+        assert_eq!(pick_push_remote(&[], None), None);
+    }
+
+    #[test]
+    fn push_default_overrides_origin() {
+        // The setting exists to override the default. Ignoring it would push to
+        // `origin` while the user's own config says otherwise.
+        assert_eq!(
+            pick_push_remote(&names(&["origin", "upstream"]), Some("upstream")),
+            Some("upstream".to_string()),
+        );
+    }
+
+    #[test]
+    fn push_default_resolves_an_otherwise_ambiguous_repository() {
+        assert_eq!(
+            pick_push_remote(&names(&["alpha", "beta"]), Some("beta")),
+            Some("beta".to_string()),
+        );
+    }
+
+    #[test]
+    fn push_default_is_taken_verbatim_even_when_it_names_nothing() {
+        // git is the authority on whether the name resolves. Falling back to
+        // `origin` here would push somewhere the user did not configure, and
+        // the fallback would be invisible. `git push` reports the real error.
+        assert_eq!(
+            pick_push_remote(&names(&["origin"]), Some("typo")),
+            Some("typo".to_string()),
+        );
+    }
+
+    #[test]
+    fn a_clone_reports_its_origin() {
+        // The end-to-end read, against a repository that really has a remote.
+        let (_origin, clone) = init_repo_with_upstream();
+        let handle = RepoHandle::discover(clone.path()).expect("clone is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), Some("origin".to_string()));
+    }
+
+    #[test]
+    fn a_repository_with_no_remote_reports_none() {
+        let dir = init_repo();
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), None);
+    }
+
+    #[test]
+    fn a_repository_reports_its_only_remote_by_name() {
+        let dir = init_repo();
+        git(
+            dir.path(),
+            &["remote", "add", "fork", "https://example.invalid/x.git"],
+        );
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), Some("fork".to_string()));
+    }
+
+    #[test]
+    fn a_repository_reads_its_own_push_default() {
+        // The config read, end to end: `remote.pushDefault` must reach the
+        // answer, not just the pure picker.
+        let dir = init_repo();
+        git(
+            dir.path(),
+            &["remote", "add", "origin", "https://example.invalid/a.git"],
+        );
+        git(
+            dir.path(),
+            &["remote", "add", "fork", "https://example.invalid/b.git"],
+        );
+        git(dir.path(), &["config", "remote.pushDefault", "fork"]);
+        let handle = RepoHandle::discover(dir.path()).expect("fixture is a worktree repo");
+        assert_eq!(push_remote(handle.repo()), Some("fork".to_string()));
+    }
+
+    #[test]
+    fn a_walk_puts_the_remote_on_the_snapshot() {
+        // The field has to arrive where the push prompt reads it, not merely
+        // exist on the repository.
+        let (_origin, clone) = init_repo_with_upstream();
+        let handle = RepoHandle::discover(clone.path()).expect("clone is a worktree repo");
+        let cfg = crate::RenderConfig {
+            base: None,
+            max_files: None,
+            bar_width: 20,
+            log_lines: 0,
+            truecolor: false,
+            width_offset: 0,
+            refresh_interval: None,
+        };
+        let snapshot = crate::collect_snapshot(handle.repo(), &cfg).expect("walk the clone");
+        assert_eq!(snapshot.push_remote, Some("origin".to_string()));
     }
 }

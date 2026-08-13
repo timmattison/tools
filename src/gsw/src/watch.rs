@@ -2294,6 +2294,7 @@ mod tests {
             log: Vec::new(),
             upstream: None,
             operation: None,
+            push_remote: None,
         }
     }
 

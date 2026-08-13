@@ -30,6 +30,12 @@ pub struct Snapshot {
     /// Upstream tracking branch status (ahead/behind). `None` when the
     /// current branch has no configured upstream.
     pub upstream: Option<UpstreamStatus>,
+    /// The remote a branch with no upstream would be published to, or `None`
+    /// when the repository offers no unambiguous answer. Never rendered — it is
+    /// what watch mode's push prompt names, and it rides on the snapshot so
+    /// every walk re-reads it from the freshly re-opened handle, exactly like
+    /// [`Snapshot::upstream`]. See `repo::push_remote`.
+    pub push_remote: Option<String>,
     /// In-progress git operation (merge/rebase), or `None` for a clean tree.
     pub operation: Option<Operation>,
 }
@@ -1281,6 +1287,7 @@ mod tests {
             log: vec![],
             upstream: None,
             operation: None,
+            push_remote: None,
         }
     }
 
