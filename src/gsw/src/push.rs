@@ -270,16 +270,26 @@ const RETRY_ADVICE: &str = "press p again";
 /// own is microseconds rather than seconds; nothing here can close it entirely,
 /// short of a lock git does not offer.
 ///
-/// Two things are forced on the child, and both matter because gsw is holding
-/// the alternate screen in raw mode:
+/// Three things are forced on the child, and all of them matter because gsw is
+/// holding the alternate screen in raw mode:
 ///
-/// - **stdin is closed** and **`GIT_TERMINAL_PROMPT=0`**, so git can never ask
-///   for a username or a passphrase. Left able to prompt, it would read from the
-///   same terminal the event-reader thread is reading, and the two would fight
-///   over the user's keystrokes with a question on screen that gsw did not draw.
-///   Disabled, git fails immediately and says why, which lands in the status
-///   rows like any other error. Credential helpers and a GUI `SSH_ASKPASS` are
-///   untouched — only prompting *at the terminal* is refused.
+/// - **The child gets no controlling terminal** ([`detach_from_terminal`]), so
+///   `/dev/tty` cannot be opened by it or by anything it runs. This is the part
+///   that actually holds the guarantee, because a terminal prompt usually comes
+///   from a *descendant*: OpenSSH's `read_passphrase()` opens `/dev/tty`
+///   directly for a passphrase or an unknown host key, so a closed stdin and a
+///   captured stderr never reach it, and it has no read timeout — the push
+///   would hang behind a question gsw never drew while the two processes split
+///   the user's keystrokes. With no terminal to open, ssh falls back to
+///   `SSH_ASKPASS`, and with no `DISPLAY` it fails immediately and says so. The
+///   same is true of every other descendant, credential helpers included, which
+///   is why this is done to the process rather than to one transport.
+/// - **stdin is closed** and **`GIT_TERMINAL_PROMPT=0`**, which is git's own
+///   half of the same rule: git asks for HTTP usernames and passwords itself,
+///   and this refuses those before the detachment has to. Disabled, git fails
+///   immediately and says why, which lands in the status rows like any other
+///   error. Credential helpers and a GUI `SSH_ASKPASS` are untouched — they do
+///   not need the terminal, and only prompting *at the terminal* is refused.
 /// - **Both streams are captured**, which also suppresses git's progress meter:
 ///   it renders only to a terminal, so a pipe removes the carriage-return
 ///   redraws that would otherwise arrive as unreadable status rows.
@@ -299,12 +309,14 @@ fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
         }
     }
 
-    let result = Command::new("git")
+    let mut child = Command::new("git");
+    child
         .args(command.args())
         .current_dir(workdir)
         .stdin(Stdio::null())
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output();
+        .env("GIT_TERMINAL_PROMPT", "0");
+    detach_from_terminal(&mut child);
+    let result = child.output();
 
     let output = match result {
         Ok(output) => output,
@@ -343,6 +355,50 @@ fn run_push(command: &PushCommand, workdir: &Path) -> PushOutcome {
         output: text,
     }
 }
+
+/// Arrange for `command`'s child to run with no controlling terminal, so
+/// nothing in its process tree can open `/dev/tty`.
+///
+/// The Unix half asks for a new session before the exec. A session leader has
+/// no controlling terminal until it deliberately acquires one, and no program
+/// git runs does that — so `open("/dev/tty")` returns `ENXIO` for the child,
+/// for ssh, and for every credential helper below them. That is what a prompt
+/// needs: it is the one path to the terminal that a closed stdin and captured
+/// output streams do not cover, because it bypasses the descriptors entirely.
+/// Refused it, OpenSSH sets `use_askpass` and either runs `SSH_ASKPASS` (a GUI
+/// prompt, which is fine — it does not touch the pane gsw is drawing on) or
+/// gives up at once with a message that reaches the status rows.
+///
+/// The Windows half is a no-op, and honestly so: there is no `/dev/tty` and no
+/// session to leave. `GIT_TERMINAL_PROMPT=0` and the closed stdin are the whole
+/// defense there.
+#[cfg(unix)]
+fn detach_from_terminal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the closure runs in the forked child, between `fork` and `exec`,
+    // where only async-signal-safe functions may be called. `setsid` is one
+    // (POSIX.1-2017, "Signal Concepts"); it is a bare syscall that allocates
+    // nothing and takes no lock the parent's other threads could be holding.
+    unsafe {
+        command.pre_exec(|| {
+            // The return value is deliberately dropped. `setsid` fails with
+            // EPERM when the caller is already a process group leader, which
+            // means a new session was not available — harmless, and not worth
+            // failing a push over: the terminal defenses below it still stand,
+            // and returning an error here would abort the exec and report a
+            // push failure to a user who has done nothing wrong. There is no
+            // other failure mode.
+            let _ = libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+/// See the Unix half above: Windows has no controlling terminal to leave and no
+/// `/dev/tty` to deny, so there is nothing to arrange.
+#[cfg(not(unix))]
+fn detach_from_terminal(_command: &mut Command) {}
 
 /// The branch checked out in `workdir` right now, or [`DETACHED_HEAD`] when
 /// there is none. `None` only when `git` could not be run at all.

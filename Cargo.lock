@@ -3502,6 +3502,7 @@ dependencies = [
  "crossterm",
  "gix",
  "ignore",
+ "libc",
  "notify",
  "tempfile",
  "terminal_size",
