@@ -315,7 +315,6 @@ impl PushUi {
 
     /// What keys mean right now.
     pub(crate) fn mode(&self) -> InputMode {
-        let _ = &self.state;
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
             State::Running { .. } => InputMode::Pushing,
