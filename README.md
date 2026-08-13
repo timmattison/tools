@@ -409,6 +409,16 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     `COLUMNS` and preserves colors under watch wrappers. Nothing it prints ever wraps: the age
     column is fixed-width by contract, and the header shrinks to fit by dropping the tracking
     ref's name and shortening the branch from the middle.
+  - A merge or rebase in progress adds one row between the header and the separator: `⚠ merge`,
+    or `⚠ rebase 1/2` where `1/2` is git's own step progress. Either label picks up
+    `· 1 conflict to resolve` (`· 2 conflicts to resolve`) while the working tree still has
+    unmerged paths, and shows alone when it has none — a rebase stopped for `edit` or `reword`,
+    say. When git's step-counter files are missing or unreadable the counts are dropped and the
+    row reads just `⚠ rebase`, so the rebase is still surfaced. Interactive rebases and
+    apply-backend rebases (`git rebase --apply`) all report as a rebase; cherry-pick, revert,
+    bisect, and plain `git am` deliberately get no indicator. The row is cut to the terminal
+    width rather than wrapped, and the label outranks the conflict clause for the columns
+    available.
   - Under the live watch, the separator under the header carries a refresh
     clock — `──── last refresh: 3m2s ago, next refresh: 15s ─────` — so you can tell at a glance
     whether the screen is still live. Filesystem changes refresh it immediately; with nothing
