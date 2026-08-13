@@ -25,6 +25,7 @@ use crossterm::terminal::{
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use crate::push::PushUi;
 use crate::render::Snapshot;
 use crate::repo::RepoHandle;
 use crate::{
@@ -750,6 +751,13 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
     let (tx, rx) = mpsc::channel();
     spawn_event_reader(tx.clone());
 
+    // A push runs `git` with the work tree as its cwd, so the path is captured
+    // before the handle is borrowed for the rest of watch mode. The push thread
+    // reports back on the loop's own channel, so its outcome re-enters the loop
+    // exactly like a filesystem event — applied between frames, never during one.
+    let workdir = handle.repo().workdir().map(Path::to_path_buf);
+    let push_tx = tx.clone();
+
     // The one ignore matcher both threads share: the watcher callback reads it
     // per event, and every `walk` below rebuilds it from disk so a `.gitignore`
     // edited in another pane takes effect without a restart.
@@ -776,7 +784,18 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
             paint: |output: &str| paint_output(output),
             clock: Instant::now,
             next_tick: |freshest: Option<Duration>| freshest.and_then(next_tick),
-            start_push: |_args: Vec<String>| {},
+            start_push: |args: Vec<String>| {
+                // No work tree means nothing to push from. `RepoHandle` rejects
+                // a bare repository at discovery, so watch mode never gets here
+                // without one — this is the type's `Option` being honored, not
+                // a case the user can reach.
+                if let Some(workdir) = workdir.clone() {
+                    let tx = push_tx.clone();
+                    crate::push::spawn(args, workdir, move |outcome| {
+                        let _ = tx.send(Event::PushFinished(outcome));
+                    });
+                }
+            },
         },
     )
 }
@@ -934,6 +953,86 @@ struct LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush> {
     start_push: StartPush,
 }
 
+/// The triggers one wake collected, before the render decides what to do with
+/// them. A burst can carry several at once, and they are not exclusive: a walk
+/// forced by `r` and a resize can arrive together.
+#[derive(Default)]
+struct Pending {
+    /// A relevant filesystem path changed.
+    fs: bool,
+    /// The terminal was resized.
+    resize: bool,
+    /// A walk was demanded outright, bypassing the cooldown.
+    force: bool,
+}
+
+/// Whether the loop keeps running after an event.
+#[derive(PartialEq, Eq, Debug)]
+enum Flow {
+    /// Carry on to the render.
+    Continue,
+    /// End watch mode.
+    Quit,
+}
+
+/// Fold one received [`Event`] into the loop's pending state.
+///
+/// Extracted because the loop receives events at three points — the timed wait,
+/// the untimed wait, and the debounce drain — and a routing rule written three
+/// times is a rule that will be updated twice. Every event goes through here,
+/// so a variant added later cannot be handled in two of the three places.
+///
+/// A key arrives unclassified and is resolved here against `ui`'s *current*
+/// mode, which is what makes a burst read correctly: within one drain, the `p`
+/// ahead of a `y` has already switched the mode by the time the `y` is looked
+/// at. It then recurses exactly once — [`classify_input`] never returns
+/// [`Event::Key`], so there is no second hop.
+fn absorb<StartPush>(
+    event: Event,
+    pending: &mut Pending,
+    ui: &mut PushUi,
+    snapshot: &Snapshot,
+    start_push: &mut StartPush,
+) -> Flow
+where
+    StartPush: FnMut(Vec<String>),
+{
+    match event {
+        Event::Quit => return Flow::Quit,
+        Event::FsChanged => pending.fs = true,
+        Event::Resize => pending.resize = true,
+        Event::ForceRefresh => pending.force = true,
+        Event::Key(key) => {
+            if let Some(action) = classify_input(key, ui.mode()) {
+                return absorb(action, pending, ui, snapshot, start_push);
+            }
+        }
+        Event::PushRequested => ui.request(snapshot),
+        // `confirm` yields the arguments only once, so a second `y` that raced
+        // the mode change starts nothing.
+        Event::PushConfirmed => {
+            if let Some(args) = ui.confirm() {
+                start_push(args);
+            }
+        }
+        Event::PushCancelled => ui.cancel(),
+        Event::Dismiss => ui.dismiss(),
+        Event::PushFinished(outcome) => {
+            let succeeded = outcome.success;
+            ui.finished(outcome);
+            // A successful push moved the upstream, so the header's arrows and
+            // tracking segment are stale the moment it lands — walk now rather
+            // than leaving a wrong count on screen until the next refresh. A
+            // failure changed nothing in the repository, so walking would only
+            // pay for a status traversal to redraw the identical frame.
+            if succeeded {
+                pending.force = true;
+            }
+        }
+    }
+    Flow::Continue
+}
+
 /// The render loop's terminal-free core: wait for a filesystem event, a resize,
 /// or a timeout, then update the screen. A filesystem change walks git, and so
 /// does a timeout at which [`WalkSchedule`] owes a walk — a timed refresh, or a
@@ -1002,15 +1101,17 @@ where
     StartPush: FnMut(Vec<String>),
 {
     let mut freshest = initial_freshest;
+    // Everything the push feature puts on screen, plus the input mode that goes
+    // with it. Owned here because this is the only place that knows what is
+    // displayed — see [`Event::Key`] for why the reader thread must not.
+    let mut ui = PushUi::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
         // Track *which* triggers arrived so the render below can route them: a
         // filesystem change walks git, a resize re-renders the cache at the new
         // size, a bare timeout is a decay tick.
-        let mut saw_fs = false;
-        let mut saw_resize = false;
-        let mut saw_force = false;
+        let mut pending = Pending::default();
         // Wait window: the soonest of the decay-tick cadence, the next walk this
         // schedule owes (a timed refresh, or a walk deferred during a cooldown),
         // and — while a countdown is on screen — the cadence that countdown
@@ -1026,40 +1127,36 @@ where
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
-                Ok(Event::Quit) => break,
-                Ok(Event::FsChanged) => {
-                    saw_fs = true;
+                Ok(event) => {
+                    if absorb(
+                        event,
+                        &mut pending,
+                        &mut ui,
+                        &cache.snapshot,
+                        &mut hooks.start_push,
+                    ) == Flow::Quit
+                    {
+                        break;
+                    }
                     false
                 }
-                Ok(Event::Resize) => {
-                    saw_resize = true;
-                    false
-                }
-                Ok(Event::ForceRefresh) => {
-                    saw_force = true;
-                    false
-                }
-                // Push input is not wired into the loop yet.
-                Ok(_) => false,
                 Err(RecvTimeoutError::Timeout) => true,
                 Err(RecvTimeoutError::Disconnected) => break,
             },
             None => match rx.recv() {
-                Ok(Event::Quit) => break,
-                Ok(Event::FsChanged) => {
-                    saw_fs = true;
+                Ok(event) => {
+                    if absorb(
+                        event,
+                        &mut pending,
+                        &mut ui,
+                        &cache.snapshot,
+                        &mut hooks.start_push,
+                    ) == Flow::Quit
+                    {
+                        break;
+                    }
                     false
                 }
-                Ok(Event::Resize) => {
-                    saw_resize = true;
-                    false
-                }
-                Ok(Event::ForceRefresh) => {
-                    saw_force = true;
-                    false
-                }
-                // Push input is not wired into the loop yet.
-                Ok(_) => false,
                 Err(_) => break,
             },
         };
@@ -1070,15 +1167,24 @@ where
         if !woke_for_timeout {
             loop {
                 match rx.recv_timeout(debounce) {
-                    Ok(Event::Quit) => {
-                        quitting = true;
-                        break;
+                    Ok(event) => {
+                        if absorb(
+                            event,
+                            &mut pending,
+                            &mut ui,
+                            &cache.snapshot,
+                            &mut hooks.start_push,
+                        ) == Flow::Quit
+                        {
+                            // Unlike the first wake, a quit that arrives inside
+                            // the drain still paints: the events ahead of it in
+                            // this burst have already been applied, and the
+                            // user should see the screen they asked for before
+                            // it goes away.
+                            quitting = true;
+                            break;
+                        }
                     }
-                    Ok(Event::FsChanged) => saw_fs = true,
-                    Ok(Event::Resize) => saw_resize = true,
-                    Ok(Event::ForceRefresh) => saw_force = true,
-                    // Push input is not wired into the loop yet.
-                    Ok(_) => {}
                     Err(RecvTimeoutError::Timeout) => break,
                     Err(RecvTimeoutError::Disconnected) => {
                         quitting = true;
@@ -1087,6 +1193,7 @@ where
                 }
             }
         }
+        let (saw_fs, saw_resize, saw_force) = (pending.fs, pending.resize, pending.force);
 
         // Read the clock once for this wake: the throttle decision, a walk's
         // start, and any age offset all key off the same instant.
@@ -1120,8 +1227,22 @@ where
             false
         };
 
-        let render = if walk_now {
+        // Re-measure the pane before rendering, on the same two triggers as
+        // before: a walk and a resize. Hoisted out of the branches so the frame
+        // height below is computed from dimensions that are already current.
+        if walk_now || saw_resize {
             cache.dims = (hooks.dimensions)();
+        }
+        // Rows the push overlay will take under the frame. The frame is
+        // rendered that much shorter, because it is laid out to fill the pane
+        // exactly — appending to a full-height frame would push its bottom row,
+        // the file list, off the screen.
+        let frame_dims = Dimensions {
+            height: cache.dims.height.saturating_sub(ui.rows()).max(1),
+            ..cache.dims
+        };
+
+        let render = if walk_now {
             let collected = (hooks.collect)();
             // Measure the walk's wall-clock cost around collect and feed it to
             // the throttle, which arms the next cooldown (= 100·cost) from it.
@@ -1140,7 +1261,7 @@ where
                     cache.snapshot = snapshot;
                     (hooks.render)(
                         &cache.snapshot,
-                        cache.dims,
+                        frame_dims,
                         timing(Duration::ZERO, &schedule, now),
                     )
                 }
@@ -1159,17 +1280,16 @@ where
                     let age_offset = now.saturating_duration_since(cache.collected_at);
                     (hooks.render)(
                         &cache.snapshot,
-                        cache.dims,
+                        frame_dims,
                         timing(age_offset, &schedule, now),
                     )
                 }
             }
         } else if saw_resize {
-            cache.dims = (hooks.dimensions)();
             let age_offset = now.saturating_duration_since(cache.collected_at);
             (hooks.render)(
                 &cache.snapshot,
-                cache.dims,
+                frame_dims,
                 timing(age_offset, &schedule, now),
             )
         } else {
@@ -1178,14 +1298,19 @@ where
             let age_offset = now.saturating_duration_since(cache.collected_at);
             (hooks.render)(
                 &cache.snapshot,
-                cache.dims,
+                frame_dims,
                 timing(age_offset, &schedule, now),
             )
         };
 
-        if should_repaint(&render.output, displayed) {
-            (hooks.paint)(&render.output)?;
-            *displayed = render.output;
+        // The painted screen is the frame with the push overlay under it. They
+        // are compared as one string, so a frame that did not change but an
+        // overlay that did still repaints — and neither can repaint alone and
+        // leave the other stale.
+        let output = compose(render.output, &ui.overlay(cache.dims.width));
+        if should_repaint(&output, displayed) {
+            (hooks.paint)(&output)?;
+            *displayed = output;
         }
         freshest = render.freshest_age;
 
@@ -1194,6 +1319,20 @@ where
         }
     }
     Ok(())
+}
+
+/// Join a frame and the push overlay into the one string that gets painted.
+///
+/// An empty overlay returns the frame untouched, byte for byte. That is what
+/// keeps every frame gsw painted before the push feature existed identical to
+/// what it paints now — including the trailing-newline handling, which is the
+/// frame's business and not this function's.
+fn compose(frame: String, overlay: &str) -> String {
+    if overlay.is_empty() {
+        return frame;
+    }
+    let separator = if frame.ends_with('\n') { "" } else { "\n" };
+    format!("{frame}{separator}{overlay}")
 }
 
 /// Paint `output` into the alternate screen, replacing whatever frame is there.
