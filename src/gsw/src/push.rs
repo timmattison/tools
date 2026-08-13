@@ -514,7 +514,7 @@ impl PushUi {
     ///
     /// Replaces whatever was on screen, so pressing `p` with a stale error up
     /// asks the new question instead of stacking a row under the old one.
-    pub(crate) fn request(&mut self, snapshot: &Snapshot) {
+    pub(crate) fn request(&mut self, snapshot: &Snapshot, _dims: Dimensions) {
         self.state = match prompt_for(
             &snapshot.branch,
             snapshot.push_remote.as_deref(),
@@ -1177,7 +1177,7 @@ mod ui_tests {
     /// A UI with the confirmation already on screen for an untracked branch.
     fn asking() -> PushUi {
         let mut ui = PushUi::new();
-        ui.request(&snapshot(None));
+        ui.request(&snapshot(None), tall_pane(80));
         ui
     }
 
@@ -1216,7 +1216,7 @@ mod ui_tests {
         // The refusal is a message, not a question: the keys must stay normal,
         // so `y` does not answer a prompt that is not there.
         let mut ui = PushUi::new();
-        ui.request(&snapshot(tracked(0)));
+        ui.request(&snapshot(tracked(0)), tall_pane(80));
         assert_eq!(ui.mode(), InputMode::Normal);
         assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
         assert!(ui
@@ -1298,7 +1298,7 @@ mod ui_tests {
     #[test]
     fn a_successful_update_counts_what_it_pushed() {
         let mut ui = PushUi::new();
-        ui.request(&snapshot(tracked(3)));
+        ui.request(&snapshot(tracked(3)), tall_pane(80));
         ui.confirm();
         ui.finished(PushOutcome {
             success: true,
@@ -1447,6 +1447,33 @@ mod ui_tests {
     }
 
     #[test]
+    fn a_pane_with_no_room_for_the_question_is_never_asked_it() {
+        // The cancel above runs at render time, and there is no render between
+        // the `p` and the `y` of one burst of keys. So the pane has to be
+        // consulted where the question is raised: a `p` in a pane with no row
+        // to spare leaves the keys alone, and there is no question for a later
+        // key to answer.
+        let mut ui = PushUi::new();
+        ui.request(
+            &snapshot(None),
+            Dimensions {
+                width: 80,
+                height: 1,
+            },
+        );
+        assert_eq!(
+            ui.mode(),
+            InputMode::Normal,
+            "a question the pane cannot hold must not switch the key table",
+        );
+        assert_eq!(
+            ui.confirm(),
+            None,
+            "there must be no question waiting for a `y` that never saw one",
+        );
+    }
+
+    #[test]
     fn the_row_count_always_matches_the_text() {
         // The whole reason these are one call: a count that disagrees with the
         // text either leaves a blank strip under the frame or paints past the
@@ -1522,12 +1549,12 @@ mod ui_tests {
         };
         let refusing = {
             let mut ui = PushUi::new();
-            ui.request(&snapshot(tracked(0)));
+            ui.request(&snapshot(tracked(0)), tall_pane(80));
             ui
         };
         let asking_to_update = {
             let mut ui = PushUi::new();
-            ui.request(&snapshot(tracked(3)));
+            ui.request(&snapshot(tracked(3)), tall_pane(80));
             ui
         };
         let running = {
@@ -1718,7 +1745,7 @@ mod ui_tests {
         let mut ui = PushUi::new();
         let mut snap = snapshot(None);
         snap.branch = "a-branch-name-long-enough-to-need-truncating-on-a-narrow-pane".to_string();
-        ui.request(&snap);
+        ui.request(&snap, tall_pane(80));
         for width in [10, 20, 40] {
             let overlay = ui.overlay(tall_pane(width)).text();
             for line in overlay.lines() {
@@ -1737,7 +1764,7 @@ mod ui_tests {
         let mut ui = PushUi::new();
         let mut snap = snapshot(None);
         snap.branch = "日本語のブランチ名-🎉-café".to_string();
-        ui.request(&snap);
+        ui.request(&snap, tall_pane(80));
         for width in 1..40 {
             let overlay = ui.overlay(tall_pane(width)).text();
             for line in overlay.lines() {
@@ -1759,7 +1786,7 @@ mod ui_tests {
             success: false,
             output: "error: failed to push some refs\n".to_string(),
         });
-        ui.request(&snapshot(None));
+        ui.request(&snapshot(None), tall_pane(80));
         assert_eq!(ui.mode(), InputMode::Confirm);
         assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
         assert!(!ui.overlay(tall_pane(120)).text().contains("error:"));

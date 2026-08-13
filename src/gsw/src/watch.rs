@@ -993,6 +993,7 @@ fn absorb<StartPush>(
     pending: &mut Pending,
     ui: &mut PushUi,
     snapshot: &Snapshot,
+    dims: Dimensions,
     start_push: &mut StartPush,
 ) -> Flow
 where
@@ -1005,10 +1006,10 @@ where
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
             if let Some(action) = classify_input(key, ui.mode()) {
-                return absorb(action, pending, ui, snapshot, start_push);
+                return absorb(action, pending, ui, snapshot, dims, start_push);
             }
         }
-        Event::PushRequested => ui.request(snapshot),
+        Event::PushRequested => ui.request(snapshot, dims),
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
@@ -1134,6 +1135,7 @@ where
                         &mut pending,
                         &mut ui,
                         &cache.snapshot,
+                        cache.dims,
                         &mut hooks.start_push,
                     ) == Flow::Quit
                     {
@@ -1151,6 +1153,7 @@ where
                         &mut pending,
                         &mut ui,
                         &cache.snapshot,
+                        cache.dims,
                         &mut hooks.start_push,
                     ) == Flow::Quit
                     {
@@ -1174,6 +1177,7 @@ where
                             &mut pending,
                             &mut ui,
                             &cache.snapshot,
+                            cache.dims,
                             &mut hooks.start_push,
                         ) == Flow::Quit
                         {
@@ -4268,6 +4272,35 @@ mod push_loop_tests {
             "the frame must keep a row of its own, got {:?}",
             seen.frame_heights,
         );
+    }
+
+    /// A pane with nothing to spare: the frame keeps the only row there is, so
+    /// the push feature has nowhere to put a question.
+    const NO_ROOM_PANE: Dimensions = Dimensions {
+        width: 80,
+        height: 1,
+    };
+
+    #[test]
+    fn a_push_never_starts_from_a_question_the_pane_never_painted() {
+        // Key autorepeat, a paste, or a fast double-tap delivers `p` and the
+        // answer to it inside one debounce window, and every key in a window is
+        // classified before the loop renders again. Nothing in between can
+        // notice that the question was never drawn, so the pane has to be
+        // consulted when the question is raised rather than when it is painted.
+        // Enter is the key this is really about: it is what a user presses out
+        // of reflex at a frame that did not change.
+        for confirm in [KeyCode::Char('y'), KeyCode::Enter] {
+            let (_, seen) = run_loop_in_pane(
+                vec![key(KeyCode::Char('p')), key(confirm), Event::Quit],
+                NO_ROOM_PANE,
+            );
+            assert!(
+                seen.pushes.is_empty(),
+                "{confirm:?} started a push from a question the pane never painted: {:?}",
+                seen.pushes,
+            );
+        }
     }
 
     #[test]
