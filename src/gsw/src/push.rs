@@ -1416,6 +1416,172 @@ mod ui_tests {
         }
     }
 
+    /// A rejection as git writes one: several lines, more than a short pane can
+    /// hold. The status states are only worth sweeping against a message that
+    /// wants more rows than it can have.
+    const REJECTION: &str = "To /tmp/origin\n\
+                             ! [rejected] gsw-push -> gsw-push (fetch first)\n\
+                             error: failed to push some refs to '/tmp/origin'\n";
+
+    /// Wide enough that no line is truncated, so the sweep below measures rows
+    /// and nothing else.
+    const SWEEP_WIDTH: usize = 80;
+
+    /// The tallest pane the sweep tries. Comfortably past [`MAX_STATUS_ROWS`],
+    /// so the sweep covers panes that are short, panes that are exactly full,
+    /// and panes with room to spare.
+    const SWEEP_MAX_HEIGHT: usize = 8;
+
+    /// A UI reporting the outcome of a push it asked about and ran.
+    fn reporting(outcome: PushOutcome) -> PushUi {
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(outcome);
+        ui
+    }
+
+    /// One `PushUi` in each state the push feature can hold, plus the two ways
+    /// it comes back to rest, each with a name the sweep can report.
+    ///
+    /// Built through `request`, `confirm`, `finished`, `cancel` and `dismiss` —
+    /// the same calls the watch loop makes — rather than by assembling a
+    /// `State` directly. A state built by hand could be one the loop can never
+    /// reach, and an invariant that holds only for unreachable states holds
+    /// nothing.
+    fn every_state() -> Vec<(&'static str, PushUi)> {
+        let cancelled = {
+            let mut ui = asking();
+            ui.cancel();
+            ui
+        };
+        let dismissed = {
+            let mut ui = reporting(PushOutcome {
+                success: false,
+                output: REJECTION.to_string(),
+            });
+            ui.dismiss();
+            ui
+        };
+        let refusing = {
+            let mut ui = PushUi::new();
+            ui.request(&snapshot(tracked(0)));
+            ui
+        };
+        let asking_to_update = {
+            let mut ui = PushUi::new();
+            ui.request(&snapshot(tracked(3)));
+            ui
+        };
+        let running = {
+            let mut ui = asking();
+            ui.confirm();
+            ui
+        };
+        vec![
+            ("idle", PushUi::new()),
+            ("asking to create a remote branch", asking()),
+            ("asking to update a remote branch", asking_to_update),
+            ("running a push", running),
+            (
+                "reporting a successful push",
+                reporting(PushOutcome {
+                    success: true,
+                    output: String::new(),
+                }),
+            ),
+            (
+                "reporting a failed push",
+                reporting(PushOutcome {
+                    success: false,
+                    output: REJECTION.to_string(),
+                }),
+            ),
+            ("refusing a branch with nothing to push", refusing),
+            ("a cancelled question", cancelled),
+            ("a dismissed status", dismissed),
+        ]
+    }
+
+    #[test]
+    fn the_row_split_holds_in_every_state_and_every_small_pane() {
+        // This arithmetic has now produced two separate review findings — an
+        // overlay that took more rows than the pane had, and a question that
+        // vanished on a one-row pane while the keys still meant "push". Both
+        // hid in a state and a pane size nobody spot-checked. So every state
+        // the feature can reach is swept against every pane from zero rows to
+        // eight, and all four rules are checked on each pair, rather than one
+        // rule being sampled at one size.
+        //
+        // Every broken pair is collected and reported together. A guard for a
+        // recurring class of defect must say how far the damage goes, not stop
+        // at the first pair and hide the rest behind a fix.
+        let mut broken: Vec<String> = Vec::new();
+
+        for (name, ui) in every_state() {
+            for height in 0..=SWEEP_MAX_HEIGHT {
+                let overlay = ui.overlay(Dimensions {
+                    width: SWEEP_WIDTH,
+                    height,
+                });
+
+                // The count and the body must be the same rows. A count larger
+                // than the text leaves a blank strip under the frame; a count
+                // smaller than it paints past the bottom of the pane.
+                let text = overlay.text();
+                let painted = if text.is_empty() {
+                    0
+                } else {
+                    text.lines().count()
+                };
+                if painted != overlay.rows() {
+                    broken.push(format!(
+                        "{name} in a {height}-row pane: rows() says {} but the text has \
+                         {painted} lines",
+                        overlay.rows(),
+                    ));
+                }
+
+                // The frame never loses its last row. A pane holding only a
+                // message says nothing about which repository it belongs to,
+                // and the repository is what watch mode is for.
+                if overlay.frame_rows() == 0 {
+                    broken.push(format!(
+                        "{name} in a {height}-row pane: the frame was left no rows at all",
+                    ));
+                }
+
+                // The two together must fit. The frame fills exactly the height
+                // it is given, so one row too many scrolls the alternate screen
+                // — the failure the last review found.
+                if overlay.rows() + overlay.frame_rows() > height.max(1) {
+                    broken.push(format!(
+                        "{name} in a {height}-row pane: {} overlay rows and {} frame rows \
+                         overflow it",
+                        overlay.rows(),
+                        overlay.frame_rows(),
+                    ));
+                }
+
+                // Whenever the keys mean "push", the question has to be on
+                // screen. A confirmation the user cannot read is a push they
+                // did not agree to.
+                if ui.mode() == InputMode::Confirm && overlay.rows() == 0 {
+                    broken.push(format!(
+                        "{name} in a {height}-row pane: the keys mean push, but the question \
+                         is not on screen",
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            broken.is_empty(),
+            "{} state/pane pairs broke the row split:\n{}",
+            broken.len(),
+            broken.join("\n"),
+        );
+    }
+
     #[test]
     fn a_failed_push_that_said_nothing_still_says_something() {
         // A push that fails with no output at all must not leave a blank row
