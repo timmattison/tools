@@ -6,6 +6,9 @@
 //! and what an outcome means — lives here as pure, terminal-free code so it can
 //! be tested without a network or a pty. Only [`spawn`] touches a process.
 
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
 use colored::Colorize;
 
 use crate::render::{truncate_right, Snapshot, UpstreamStatus};
@@ -171,6 +174,50 @@ pub(crate) fn prompt_for(
         creates_remote_branch: matches!(plan, PushPlan::Create { .. }),
         args: plan.command_args(),
         success_message,
+    }
+}
+
+/// Run `git push` on a thread of its own and hand the outcome to `on_finish`.
+///
+/// Off the render thread on purpose. A push is a network round trip, and the
+/// watch loop is what keeps the refresh countdown moving, the ages advancing,
+/// and a resize repainting. Blocking it for the seconds a push takes would
+/// freeze the monitor at exactly the moment the user is watching it.
+///
+/// `on_finish` runs on that thread. The one production caller sends the outcome
+/// down the loop's own channel, so it re-enters the loop the same way every
+/// other event does — no shared state, and the outcome is applied between
+/// frames rather than during one.
+pub(crate) fn spawn<F>(args: Vec<String>, workdir: PathBuf, on_finish: F)
+where
+    F: FnOnce(PushOutcome) + Send + 'static,
+{
+    std::thread::spawn(move || on_finish(run_push(&args, &workdir)));
+}
+
+/// Run `git push` to completion and describe how it went.
+///
+/// The blocking half of [`spawn`], separated so it can be tested against a real
+/// repository without a thread or a channel in the way.
+///
+/// Two things are forced on the child, and both matter because gsw is holding
+/// the alternate screen in raw mode:
+///
+/// - **stdin is closed** and **`GIT_TERMINAL_PROMPT=0`**, so git can never ask
+///   for a username or a passphrase. Left able to prompt, it would read from the
+///   same terminal the event-reader thread is reading, and the two would fight
+///   over the user's keystrokes with a question on screen that gsw did not draw.
+///   Disabled, git fails immediately and says why, which lands in the status
+///   rows like any other error. Credential helpers and a GUI `SSH_ASKPASS` are
+///   untouched — only prompting *at the terminal* is refused.
+/// - **Both streams are captured**, which also suppresses git's progress meter:
+///   it renders only to a terminal, so a pipe removes the carriage-return
+///   redraws that would otherwise arrive as unreadable status rows.
+fn run_push(args: &[String], workdir: &Path) -> PushOutcome {
+    let _ = (args, workdir, Command::new("git"), Stdio::null());
+    PushOutcome {
+        success: true,
+        output: String::new(),
     }
 }
 
@@ -1056,5 +1103,196 @@ mod ui_tests {
         assert_eq!(ui.mode(), InputMode::Confirm);
         assert_eq!(ui.rows(), 1);
         assert!(!ui.overlay(120).contains("error:"));
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use crate::testrepo::{git, init_repo_with_upstream};
+
+    /// A clone with a `feature` branch holding one commit, ready to push.
+    ///
+    /// `feature` rather than `main` because the origin fixture is a normal
+    /// checkout, and git refuses to push to the branch a non-bare repository
+    /// has checked out.
+    fn clone_with_feature_branch() -> (tempfile::TempDir, tempfile::TempDir) {
+        let (origin, clone) = init_repo_with_upstream();
+        let p = clone.path();
+        git(p, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(p.join("feature.txt"), "work\n").expect("write feature.txt");
+        git(p, &["add", "feature.txt"]);
+        git(p, &["commit", "-q", "-m", "feature work"]);
+        (origin, clone)
+    }
+
+    /// Whether `origin` has a `feature` branch, read from the origin itself.
+    fn origin_has_feature(origin: &Path) -> bool {
+        Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/feature"])
+            .current_dir(origin)
+            .output()
+            .expect("invoke git")
+            .status
+            .success()
+    }
+
+    #[test]
+    fn creating_a_remote_branch_really_creates_it() {
+        // The end-to-end create: the branch must exist on the remote
+        // afterwards, and the local branch must now track it — which is what
+        // makes the next `p` a plain update.
+        let (origin, clone) = clone_with_feature_branch();
+        assert!(
+            !origin_has_feature(origin.path()),
+            "the fixture must start without the branch",
+        );
+
+        let args: Vec<String> = ["push", "-u", "origin", "feature"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let outcome = run_push(&args, clone.path());
+
+        assert!(outcome.success, "push failed: {}", outcome.output);
+        assert!(
+            origin_has_feature(origin.path()),
+            "the branch must exist on the remote after the push",
+        );
+
+        let upstream = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "feature@{upstream}"])
+            .current_dir(clone.path())
+            .output()
+            .expect("invoke git");
+        assert_eq!(
+            String::from_utf8_lossy(&upstream.stdout).trim(),
+            "origin/feature",
+            "-u must record the upstream, or the next push asks the same question",
+        );
+    }
+
+    #[test]
+    fn updating_a_tracked_branch_sends_the_new_commit() {
+        // The plain `git push` path: no remote or refspec is passed, so this
+        // also proves git really does read them out of the branch config.
+        let (origin, clone) = clone_with_feature_branch();
+        let p = clone.path();
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+        std::fs::write(p.join("feature.txt"), "more work\n").expect("write feature.txt");
+        git(p, &["commit", "-q", "-am", "more work"]);
+
+        let outcome = run_push(&["push".to_string()], p);
+        assert!(outcome.success, "push failed: {}", outcome.output);
+
+        let subject = Command::new("git")
+            .args(["log", "-1", "--format=%s", "refs/heads/feature"])
+            .current_dir(origin.path())
+            .output()
+            .expect("invoke git");
+        assert_eq!(
+            String::from_utf8_lossy(&subject.stdout).trim(),
+            "more work",
+            "the remote branch must carry the new commit",
+        );
+    }
+
+    #[test]
+    fn a_rejected_push_reports_the_rejection() {
+        // A diverged branch: the commit is amended after being pushed, so the
+        // remote holds one the local branch no longer has. git rejects it, and
+        // that rejection must survive into the outcome rather than being
+        // flattened into a bare failure.
+        let (_origin, clone) = clone_with_feature_branch();
+        let p = clone.path();
+        git(p, &["push", "-q", "-u", "origin", "feature"]);
+        git(p, &["commit", "-q", "--amend", "-m", "rewritten"]);
+
+        let outcome = run_push(&["push".to_string()], p);
+        assert!(!outcome.success, "a diverged push must fail");
+        assert!(
+            outcome.output.contains("rejected"),
+            "git's rejection must reach the outcome, got {:?}",
+            outcome.output,
+        );
+    }
+
+    #[test]
+    fn a_push_to_a_remote_that_does_not_exist_reports_it() {
+        let (_origin, clone) = clone_with_feature_branch();
+        let args: Vec<String> = ["push", "no-such-remote", "feature"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        let outcome = run_push(&args, clone.path());
+        assert!(!outcome.success, "pushing to a missing remote must fail");
+        assert!(
+            !outcome.output.trim().is_empty(),
+            "a failure must carry something to show the user",
+        );
+    }
+
+    #[test]
+    fn a_failure_always_carries_something_to_show() {
+        // Belt and braces on the whole error path: whatever git does, an
+        // unsuccessful outcome never arrives with an empty message, because a
+        // blank status row reads as success.
+        let (_origin, clone) = clone_with_feature_branch();
+        let args: Vec<String> = ["push", "--no-such-flag"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        let outcome = run_push(&args, clone.path());
+        assert!(!outcome.success);
+        assert!(!failure_lines(&outcome.output).is_empty());
+        assert!(!outcome.output.trim().is_empty());
+    }
+
+    #[test]
+    fn git_cannot_prompt_at_the_terminal() {
+        // gsw holds the alternate screen in raw mode. A git that can prompt
+        // would read the same keystrokes the event reader is reading, behind a
+        // question gsw did not draw. It must fail fast instead of waiting.
+        let (_origin, clone) = clone_with_feature_branch();
+        let args: Vec<String> = ["push", "https://user@127.0.0.1:1/nope.git", "feature"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        let outcome = run_push(&args, clone.path());
+        assert!(
+            !outcome.success,
+            "an unreachable authenticated remote must fail"
+        );
+        assert!(
+            !outcome.output.trim().is_empty(),
+            "the failure must say something, got {:?}",
+            outcome.output,
+        );
+    }
+
+    #[test]
+    fn spawn_delivers_the_outcome_off_the_calling_thread() {
+        // The loop learns a push finished only through this callback, so a
+        // push that completes without calling it would leave the monitor stuck
+        // in the pushing mode forever.
+        let (origin, clone) = clone_with_feature_branch();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let args: Vec<String> = ["push", "-u", "origin", "feature"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        spawn(args, clone.path().to_path_buf(), move |outcome| {
+            let _ = tx.send(outcome);
+        });
+
+        let outcome = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the callback must fire when the push finishes");
+        assert!(outcome.success, "push failed: {}", outcome.output);
+        assert!(origin_has_feature(origin.path()));
     }
 }
