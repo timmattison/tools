@@ -478,9 +478,10 @@ enum State {
         failed: bool,
     },
     /// A confirmation is on screen, waiting for an answer. "On screen" is the
-    /// load-bearing half: [`PushUi::overlay`] leaves this state when it finds a
-    /// pane with no row to draw the question in, so the mode below can never
-    /// promise a question the user was not shown.
+    /// load-bearing half, and two rules keep it true: [`PushUi::request`] does
+    /// not enter this state in a pane with no row to draw the question in, and
+    /// [`PushUi::overlay`] leaves it when a resize takes that row away. So the
+    /// mode below can never promise a question the user was not shown.
     Asking {
         question: String,
         creates_remote_branch: bool,
@@ -500,8 +501,10 @@ impl PushUi {
     /// What keys mean right now.
     ///
     /// [`InputMode::Confirm`] is only ever reported while the question is
-    /// actually painted, which is why a render can move this back to
-    /// [`InputMode::Normal`] with no key pressed: see [`PushUi::overlay`].
+    /// actually painted. [`PushUi::request`] holds that up front, by not asking
+    /// a question the pane cannot show; [`PushUi::overlay`] holds it afterwards,
+    /// for a pane resized down while the question is up — which is why a render
+    /// can move this back to [`InputMode::Normal`] with no key pressed.
     pub(crate) fn mode(&self) -> InputMode {
         match self.state {
             State::Asking { .. } => InputMode::Confirm,
@@ -514,12 +517,35 @@ impl PushUi {
     ///
     /// Replaces whatever was on screen, so pressing `p` with a stale error up
     /// asks the new question instead of stacking a row under the old one.
-    pub(crate) fn request(&mut self, snapshot: &Snapshot, _dims: Dimensions) {
+    ///
+    /// A question is only ever raised in a pane that has a row to draw it in.
+    /// `dims` is the pane that is decided against, through
+    /// [`Overlay::rows_to_spare`] — the same rule the render path divides the
+    /// pane with, so the two cannot reach different answers about the same row.
+    /// A pane with nothing to spare is left [`State::Idle`]: nothing on screen,
+    /// and [`InputMode::Normal`], so the `y` or Enter behind the `p` is an
+    /// ordinary key. There is deliberately no "the pane is too short" notice —
+    /// a pane with no row for a one-line question has no row for a one-line
+    /// status either, and an explanation that cannot be drawn explains nothing.
+    ///
+    /// Declining the question *here* is what closes the burst. The watch loop
+    /// drains events until the channel has been quiet for a debounce interval,
+    /// and classifies each one against the mode as it stands mid-drain, so a
+    /// `p` and the Enter behind it — key autorepeat, a paste, a fast
+    /// double-tap — are read back to back with no render in between. Any rule
+    /// applied at render time is applied after the answer has already been
+    /// classified. [`PushUi::overlay`] still drops a question it cannot draw,
+    /// but that now covers only the pane resized down while a question is
+    /// already up: the render path is the only thing that sees the new size.
+    pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions) {
         self.state = match prompt_for(
             &snapshot.branch,
             snapshot.push_remote.as_deref(),
             snapshot.upstream.as_ref(),
         ) {
+            // Nowhere to put the question, so it is not asked. Idle rather than
+            // a message: see above.
+            PushPrompt::Confirm { .. } if Overlay::rows_to_spare(dims) == 0 => State::Idle,
             PushPrompt::Confirm {
                 question,
                 creates_remote_branch,
@@ -628,13 +654,22 @@ impl PushUi {
     /// message and no more. It would cut a *confirmation* down to nothing too —
     /// and a confirmation is not only text. [`PushUi::mode`] would go on
     /// reporting [`InputMode::Confirm`], so Enter would go on meaning push: the
-    /// user presses `p`, sees a frame that did not change, presses Enter out of
-    /// reflex, and gsw pushes to a shared remote having asked nothing. A
-    /// question the user cannot see must not be answerable, so a question this
-    /// pane cannot draw is cancelled here, exactly as `n` cancels one. The keys
-    /// go back to normal in the same breath as the question leaves the screen,
-    /// because on this prompt they are the same fact. Nothing is lost but the
-    /// question: `p` in a pane with a row to spare asks it again.
+    /// user presses Enter out of reflex at a frame that did not change, and gsw
+    /// pushes to a shared remote having asked nothing. A question the user
+    /// cannot see must not be answerable, so a question this pane cannot draw
+    /// is cancelled here, exactly as `n` cancels one. The keys go back to
+    /// normal in the same breath as the question leaves the screen, because on
+    /// this prompt they are the same fact.
+    ///
+    /// This is the backstop, not the rule. [`PushUi::request`] refuses to raise
+    /// a question a pane has no row for, using [`Overlay::rows_to_spare`] as
+    /// this does, and that is what covers a `p` pressed in a pane that is
+    /// already too short — it has to, because the watch loop can classify a
+    /// whole burst of keys with no render between them. What is left for the
+    /// cancel here is the pane that *shrinks* with a question already up: it
+    /// fitted when it was asked, a resize took its row, and this is the only
+    /// place that sees the new size. Nothing is lost but the question either
+    /// way: `p` in a pane with a row to spare asks it again.
     pub(crate) fn overlay(&mut self, dims: Dimensions) -> Overlay {
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
@@ -673,7 +708,7 @@ impl PushUi {
         // what watch mode is for.
         let lines: Vec<String> = lines
             .into_iter()
-            .take(dims.height.saturating_sub(1))
+            .take(Overlay::rows_to_spare(dims))
             .collect();
         // Nothing survived the clamp. For a status that is the end of it, but a
         // question that is not on screen must not still be answerable — the
@@ -714,6 +749,20 @@ pub(crate) struct Overlay {
 }
 
 impl Overlay {
+    /// How many rows an overlay may take in a pane of `dims`: every row but the
+    /// one the frame keeps.
+    ///
+    /// The single place that rule is written down. [`PushUi::overlay`] clamps
+    /// its lines to it, and [`PushUi::request`] asks it whether a question can
+    /// be shown at all before raising one — two decisions about the same row,
+    /// and exactly the pair that must not drift. Spelled out in both places,
+    /// one of them would eventually go on offering a question the other refuses
+    /// to draw, which is the defect this whole type exists to make
+    /// unrepresentable.
+    fn rows_to_spare(dims: Dimensions) -> usize {
+        dims.height.saturating_sub(1)
+    }
+
     /// How many rows the frame must give up. Always at least one short of the
     /// pane, so the frame keeps a row whatever the overlay wanted to say.
     ///
@@ -756,10 +805,11 @@ impl Overlay {
 /// would promise that the key people reach for by reflex is the safe one, on
 /// the one prompt in gsw that writes to a shared remote.
 ///
-/// The same reasoning is why a question this hint cannot be drawn with is
-/// cancelled rather than left pending (see [`PushUi::overlay`]). What makes
-/// Enter safe to bind to a push is that the user is looking at the sentence
-/// saying so. Off the screen, the binding keeps the risk and loses the sentence.
+/// The same reasoning is why a question this hint cannot be drawn with is never
+/// raised (see [`PushUi::request`], and [`PushUi::overlay`] for the pane that
+/// shrinks under one). What makes Enter safe to bind to a push is that the user
+/// is looking at the sentence saying so. Off the screen, the binding keeps the
+/// risk and loses the sentence.
 const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
 
 /// What a running push says while the network round trip is in flight.

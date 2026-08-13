@@ -440,9 +440,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     yellow confirmation (`Create new remote branch origin/my-branch?`) rather than the routine
     `Push 3 commits to origin/my-branch?`, because creating a branch on a shared remote is not the
     same act as moving one that is already there. Answer with `y`/Enter or `n`/Esc. A branch that
-    is already fully pushed says so instead of asking. A pane too short to draw the question in —
-    one row, all of which the frame keeps — cancels the question instead of asking invisibly, so
-    Enter can never confirm something you were not shown; make the pane taller and press `p` again.
+    is already fully pushed says so instead of asking. In a pane too short to draw the question in
+    — one row, all of which the frame keeps — `p` asks nothing at all rather than asking invisibly,
+    and the keys go on meaning what they mean everywhere else, so Enter can never confirm something
+    you were not shown; make the pane taller and press `p` again. A pane resized down to that size
+    with a question already up drops the question for the same reason.
     - An untracked branch is published with `git push -u`, so the upstream is recorded and the
       header's tracking segment appears; a tracked one runs a bare `git push` and lets git supply
       the remote and refspec. The remote for a new branch is `remote.pushDefault` if set, else the

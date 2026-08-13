@@ -988,6 +988,15 @@ enum Flow {
 /// ahead of a `y` has already switched the mode by the time the `y` is looked
 /// at. It then recurses exactly once — [`classify_input`] never returns
 /// [`Event::Key`], so there is no second hop.
+///
+/// The exception worth naming is a `p` that switches nothing. Nothing renders
+/// between two keys of one drain, so a rule the render path applies is applied
+/// after the second key has already been classified — which is why `dims` is
+/// threaded down to [`PushUi::request`]: a pane with no row to draw the
+/// question in raises no question, the mode does not move, and the `y` or Enter
+/// behind that `p` is read as the ordinary key it is. `dims` is the pane the
+/// last render measured, which is the pane the user was looking at when they
+/// pressed the key — the loop re-measures after this drain, not during it.
 fn absorb<StartPush>(
     event: Event,
     pending: &mut Pending,
@@ -1249,12 +1258,16 @@ where
         // not be able to hold one.
         //
         // The call can also change what the keys mean, which is why it takes
-        // `&mut ui`: a pane with no row to spare for a confirmation cancels the
-        // confirmation rather than leaving a question nobody can see answerable
-        // by Enter. It runs after this wake's events have been absorbed and
-        // before the next wake reads one, so the key a user presses in reaction
-        // to what this paints is classified against the mode this pane actually
-        // showed them.
+        // `&mut ui`: a question whose row a resize took away is cancelled here
+        // rather than left answerable by an Enter nobody was asked for. That is
+        // the backstop only. A `p` pressed in a pane that was already too short
+        // raises no question in the first place — `absorb` settles that with
+        // `cache.dims`, because no render runs between two keys of one burst —
+        // so what this catches is the pane that shrank under a question that
+        // did fit when it was asked. It runs after this wake's events have been
+        // absorbed and before the next wake reads one, so the key a user
+        // presses in reaction to what this paints is classified against the
+        // mode this pane actually showed them.
         let overlay = ui.overlay(cache.dims);
         let frame_dims = Dimensions {
             height: overlay.frame_rows(),
