@@ -456,10 +456,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     fewer rows still on a pane too short to spare three — the frame always keeps a row) and
       stays there until you press a key. A push that succeeds re-walks the repository immediately,
       so the ahead/behind arrows match what just happened. Nothing the push runs can prompt at the
-      terminal — it would be reading the same keystrokes gsw is. The push gets a session of its own
-      with no controlling terminal, so `/dev/tty` is unopenable for git, for ssh, and for anything
-      below them: an HTTPS remote that wants a password, a passphrase-protected key with no agent,
-      and an unknown host key all fail fast and say so under the frame instead of hanging behind a
+      terminal — it would be reading the same keystrokes gsw is. The push is started detached from
+      the terminal — its own session on Unix, no inherited console on Windows — so nothing in its
+      process tree can reach the keyboard gsw is reading, not git, not ssh, and not anything below
+      them: an HTTPS remote that wants a password, a passphrase-protected key with no agent, and an
+      unknown host key all fail fast and say so under the frame instead of hanging behind a
       question gsw never drew. Credential helpers and a GUI askpass still work — neither needs the
       terminal.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`

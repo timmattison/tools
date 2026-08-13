@@ -1284,6 +1284,11 @@ mod tests {
         );
     }
 
+    // Unix-only because the symlink it stages is: `std::os::unix::fs::symlink`
+    // does not exist on Windows, so an ungated test breaks the build for that
+    // target rather than failing there — which is how it hid until the crate was
+    // first checked against `x86_64-pc-windows-msvc`.
+    #[cfg(unix)]
     #[test]
     fn status_staged_typechange_file_to_symlink() {
         // Replace a tracked regular file with a symlink and stage it; git/gix
