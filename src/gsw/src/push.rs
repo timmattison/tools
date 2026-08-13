@@ -837,6 +837,33 @@ mod ui_tests {
         })
     }
 
+    /// The display width of `line` in terminal columns, ignoring ANSI escapes.
+    ///
+    /// The escapes have to be stripped rather than assumed absent.
+    /// `colored` decides whether to emit them from process-global state that
+    /// other tests in this binary toggle (`colored::control::set_override`), so
+    /// a raw `UnicodeWidthStr::width` counts escape bytes as columns in some
+    /// runs and not others — the assertion would pass or fail depending on test
+    /// order. Columns on screen are also the thing under test: the overlay
+    /// colors *after* truncating, so the escapes cost the user nothing.
+    fn visible_width(line: &str) -> usize {
+        let mut visible = String::new();
+        let mut chars = line.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                // A CSI sequence runs until a letter terminates it.
+                for tail in chars.by_ref() {
+                    if tail.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            } else {
+                visible.push(c);
+            }
+        }
+        unicode_width::UnicodeWidthStr::width(visible.as_str())
+    }
+
     /// A UI with the confirmation already on screen for an untracked branch.
     fn asking() -> PushUi {
         let mut ui = PushUi::new();
@@ -1101,7 +1128,7 @@ mod ui_tests {
             let overlay = ui.overlay(width);
             for line in overlay.lines() {
                 assert!(
-                    unicode_width::UnicodeWidthStr::width(line) <= width,
+                    visible_width(line) <= width,
                     "line {line:?} exceeds width {width}",
                 );
             }
@@ -1120,7 +1147,7 @@ mod ui_tests {
             let overlay = ui.overlay(width);
             for line in overlay.lines() {
                 assert!(
-                    unicode_width::UnicodeWidthStr::width(line) <= width,
+                    visible_width(line) <= width,
                     "line {line:?} exceeds width {width}",
                 );
             }
