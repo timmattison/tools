@@ -105,9 +105,16 @@ pub fn parse_db(text: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// Parse the output of `arp -a -n` into neighbours.
+/// Parse the output of `arp -a -n` into neighbours, one for each address.
+///
+/// macOS prints a separate line for every interface that reaches a host, so a
+/// machine on three networks lists each neighbour three times. Keying on the
+/// address collapses those repeats while keeping two addresses that share one
+/// hardware address, which is how a router with several addresses appears.
 #[must_use]
 pub fn parse_arp_table(text: &str) -> Vec<Neighbour> {
+    let mut seen = HashSet::new();
+
     text.lines()
         .filter_map(|line| {
             // `? (192.168.0.1) at 70:a7:41:66:7c:39 on en0 ifscope [ethernet]`
@@ -124,6 +131,10 @@ pub fn parse_arp_table(text: &str) -> Vec<Neighbour> {
             // behind broadcast or multicast, so probing them is wasted work.
             let first_octet = u8::from_str_radix(mac.split(':').next()?, 16).ok()?;
             if first_octet & 1 == 1 {
+                return None;
+            }
+
+            if !seen.insert(ip) {
                 return None;
             }
 
