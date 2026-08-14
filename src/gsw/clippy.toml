@@ -3,8 +3,15 @@
 # changes what an unrelated test sees, which makes failures that appear and
 # disappear between runs. `testcolor::with_forced_ansi` holds the one lock on
 # that global state and puts the override back, so it is the only entrance.
-# These two entries make the bypass fail the build instead of failing a test
+# These entries make the bypass fail the build instead of failing a test
 # once a week.
+#
+# The override arrives in two spellings. The two free functions in
+# `colored::control` are the usual one, but each of them only forwards to a
+# method on the `SHOULD_COLORIZE` singleton, and that method is public too. A
+# ban on the free functions alone therefore leaves the singleton open, and one
+# call through it changes the same global state. All four spellings are banned
+# for that reason.
 #
 # This file sits beside gsw's Cargo.toml, so the ban covers the gsw crate only.
 # Other crates in the workspace, such as seescc, call the same API in
@@ -12,4 +19,6 @@
 disallowed-methods = [
     { path = "colored::control::set_override", reason = "call testcolor::with_forced_ansi instead; it holds the one lock on this process-global override" },
     { path = "colored::control::unset_override", reason = "testcolor::with_forced_ansi puts the override back on its own, on the panic path as well" },
+    { path = "colored::control::ShouldColorize::set_override", reason = "the singleton reaches the same global state as the free function; call testcolor::with_forced_ansi instead" },
+    { path = "colored::control::ShouldColorize::unset_override", reason = "the singleton reaches the same global state as the free function; testcolor::with_forced_ansi puts the override back on its own" },
 ]
