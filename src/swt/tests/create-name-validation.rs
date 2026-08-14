@@ -16,6 +16,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// directory and would put the branch and the checkout somewhere unrelated.
 const TRAVERSING_NAME: &str = "../evil";
 
+/// Names that look like options. Each is a name swt refuses, and the refusal is
+/// swt's own — a hyphen-leading argument must not be read as a flag on the way
+/// in, or the user is told the argument was "unexpected" instead of being told
+/// which rule it broke.
+const OPTION_LOOKING_NAMES: [&str; 3] = ["-b", "-rf", "--force"];
+
 /// The rule quoted back to the user, verbatim, when a name is refused.
 const WORKTREE_NAME_RULE: &str =
     "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
@@ -66,4 +72,46 @@ fn create_rejects_a_traversing_name_before_touching_git() {
         format!("Invalid worktree name {TRAVERSING_NAME:?} — {WORKTREE_NAME_RULE}.\n"),
         "the rejection should name the input and quote the rule verbatim"
     );
+}
+
+/// A name that starts with a hyphen is still a name. It is refused for breaking
+/// the naming rule — by swt, with swt's message and swt's status — and never
+/// mistaken for an option `swt` does not have.
+#[test]
+fn create_rejects_option_looking_names_with_its_own_message() {
+    for name in OPTION_LOOKING_NAMES {
+        let output = swt_in_scratch_dir(&["create", name]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`swt create {name}` should exit 1, stderr was: {stderr}"
+        );
+        assert_eq!(
+            stderr,
+            format!("Invalid worktree name {name:?} — {WORKTREE_NAME_RULE}.\n"),
+            "`swt create {name}` should be refused by swt's own name check"
+        );
+    }
+}
+
+/// Letting a hyphen-leading name through must not cost the subcommands their
+/// help: `--help` after a subcommand still prints that subcommand's usage.
+#[test]
+fn subcommand_help_still_prints_usage() {
+    for command in ["create", "merge"] {
+        let output = swt_in_scratch_dir(&[command, "--help"]);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "`swt {command} --help` should exit 0, stdout was: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("Usage: swt {command}")),
+            "`swt {command} --help` should print its usage line, stdout was: {stdout}"
+        );
+    }
 }
