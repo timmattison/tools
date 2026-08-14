@@ -38,8 +38,20 @@ const TAIL_BUDGET: u64 = 64 * 1024;
 /// );
 /// ```
 #[must_use]
-pub fn encode_directory(_directory: &Path) -> String {
-    String::new()
+pub fn encode_directory(directory: &Path) -> String {
+    // Mapping character by character keeps this safe for any directory name:
+    // a multi-byte character is one `char`, never a byte to be indexed into.
+    directory
+        .to_string_lossy()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 /// Reads the working directory a transcript records for itself.
@@ -48,7 +60,17 @@ pub fn encode_directory(_directory: &Path) -> String {
 /// the first line with a non-empty one wins. Returns `None` when the transcript
 /// records no directory at all.
 #[must_use]
-pub fn recorded_directory(_contents: &str) -> Option<String> {
+pub fn recorded_directory(contents: &str) -> Option<String> {
+    for line in contents.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(directory) = record.get("cwd").and_then(serde_json::Value::as_str) {
+            if !directory.is_empty() {
+                return Some(directory.to_string());
+            }
+        }
+    }
     None
 }
 
@@ -57,7 +79,17 @@ pub fn recorded_directory(_contents: &str) -> Option<String> {
 /// The last record wins rather than the first, because a resumed session's early
 /// records were written by whatever release ran it before.
 #[must_use]
-pub fn recorded_version(_contents: &str) -> Option<ClaudeVersion> {
+pub fn recorded_version(contents: &str) -> Option<ClaudeVersion> {
+    for line in contents.lines().rev() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if let Some(version) = record.get("version").and_then(serde_json::Value::as_str) {
+            if let Some(parsed) = ClaudeVersion::parse(version) {
+                return Some(parsed);
+            }
+        }
+    }
     None
 }
 
@@ -81,9 +113,83 @@ impl ProjectTranscripts {
     }
 }
 
+/// Reads up to `budget` bytes from the start of `path`.
+///
+/// The read is capped because a transcript grows without bound and only its
+/// opening records are needed. A line cut in half by the cap parses as nothing
+/// and is skipped by both readers above.
+fn read_head(path: &Path, budget: usize) -> Option<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buffer = vec![0_u8; budget];
+    let filled = file.read(&mut buffer).ok()?;
+    buffer.truncate(filled);
+    Some(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+/// Reads up to `budget` bytes from the end of `path`.
+fn read_tail(path: &Path, budget: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length > budget {
+        file.seek(SeekFrom::Start(length - budget)).ok()?;
+    }
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).ok()?;
+    Some(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+/// Reads one transcript, if it belongs to `directory`.
+///
+/// Returns `None` when the file does not name a session, cannot be read, or
+/// records a directory other than `directory`. A transcript that records no
+/// directory at all is kept: absence is not a contradiction, and a session too
+/// young to have recorded one is exactly the session most worth reporting.
+fn read_transcript(path: &Path, directory: &Path) -> Option<Transcript> {
+    let id = SessionId::parse(path.file_stem()?.to_str()?)?;
+
+    let modified_epoch_secs = std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+
+    let head = read_head(path, HEAD_BUDGET)?;
+    if let Some(recorded) = recorded_directory(&head) {
+        if Path::new(&recorded) != directory {
+            return None;
+        }
+    }
+
+    // The release is read from the end, because a resumed transcript's opening
+    // records name whichever release ran it before.
+    let version = read_tail(path, TAIL_BUDGET)
+        .and_then(|tail| recorded_version(&tail))
+        .or_else(|| recorded_version(&head));
+
+    Some(Transcript {
+        id,
+        version,
+        modified_epoch_secs,
+    })
+}
+
 impl Transcripts for ProjectTranscripts {
-    fn for_directory(&self, _directory: &Path) -> Vec<Transcript> {
-        Vec::new()
+    fn for_directory(&self, directory: &Path) -> Vec<Transcript> {
+        let folder = self.projects_root.join(encode_directory(directory));
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .filter_map(|entry| read_transcript(&entry.path(), directory))
+            .collect()
     }
 }
 
@@ -94,7 +200,32 @@ impl Transcripts for ProjectTranscripts {
 /// module is what lets it be tested without a live process table.
 #[must_use]
 pub fn gather_processes() -> Vec<ProcessFact> {
-    Vec::new()
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::everything(),
+    );
+
+    system
+        .processes()
+        .iter()
+        .map(|(pid, process)| ProcessFact {
+            pid: pid.as_u32(),
+            accounting_name: process.name().to_string_lossy().into_owned(),
+            exe: process.exe().map(Path::to_path_buf),
+            argv: process
+                .cmd()
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect(),
+            cwd: process.cwd().map(Path::to_path_buf),
+            uptime_secs: process.run_time(),
+            start_time_epoch_secs: process.start_time(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
