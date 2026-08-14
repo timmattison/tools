@@ -57,7 +57,7 @@ pub fn format_uptime(seconds: u64) -> String {
 /// first, and the process identifier settles the rest so that two runs over an
 /// unchanged machine agree.
 #[must_use]
-pub fn build(facts: &[ProcessFact], _registry: &dyn Registry) -> Vec<SessionReport> {
+pub fn build(facts: &[ProcessFact], registry: &dyn Registry) -> Vec<SessionReport> {
     let mut rows: Vec<SessionReport> = facts
         .iter()
         .filter(|fact| classify(fact) == Role::Session)
@@ -65,7 +65,7 @@ pub fn build(facts: &[ProcessFact], _registry: &dyn Registry) -> Vec<SessionRepo
             pid: fact.pid,
             version: version_of(fact),
             directory: fact.cwd.clone(),
-            session: None,
+            session: registry.session_of(fact),
             uptime_secs: fact.uptime_secs,
         })
         .collect();

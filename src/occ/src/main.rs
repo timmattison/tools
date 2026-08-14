@@ -138,8 +138,7 @@ fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
         println!(
             "{}",
             format!(
-                "{unnamed} {} no session in ~/.claude/sessions and {} named here.",
-                plural(unnamed, "session recorded", "sessions recorded"),
+                "{unnamed} of these sessions wrote no record in ~/.claude/sessions and {} named here.",
                 plural(unnamed, "is not", "are not")
             )
             .dimmed()
