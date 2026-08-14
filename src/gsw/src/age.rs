@@ -126,15 +126,16 @@ pub fn age_fade_factor(age: Duration) -> f32 {
     (secs / end).clamp(0.0, 1.0)
 }
 
-/// Linearly interpolate `base` toward a dark floor by `factor` in `[0,1]`.
+/// Multiply the brightness of `base` by `scale`, clamped to `[0.0, 1.0]`.
 ///
-/// `factor = 0` returns `base` unchanged; `factor = 1` returns
-/// `base * FADE_FLOOR` (rounded). Out-of-range factors are clamped.
-pub fn fade_rgb(base: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
-    let f = factor.clamp(0.0, 1.0);
-    let scale = 1.0 - f * (1.0 - FADE_FLOOR);
-    // The cast is bounded: `scale` is in [FADE_FLOOR, 1.0] and `c` is u8, so
-    // the product is in [0, 255]; the explicit clamp is belt-and-braces.
+/// `scale = 1.0` returns `base` unchanged; `scale = 0.0` returns black. The one
+/// place a color is dimmed, so every fade in gsw rounds and clamps the same way
+/// — the commit-log ramp, which stops at [`FADE_FLOOR`], and the push status
+/// message, which goes all the way to black.
+pub fn scale_rgb(base: (u8, u8, u8), scale: f32) -> (u8, u8, u8) {
+    let scale = scale.clamp(0.0, 1.0);
+    // The cast is bounded: `scale` is in [0.0, 1.0] and `c` is u8, so the
+    // product is in [0, 255]; the explicit clamp is belt-and-braces.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -142,6 +143,15 @@ pub fn fade_rgb(base: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
     )]
     let scl = |c: u8| (f32::from(c) * scale).round().clamp(0.0, 255.0) as u8;
     (scl(base.0), scl(base.1), scl(base.2))
+}
+
+/// Linearly interpolate `base` toward a dark floor by `factor` in `[0,1]`.
+///
+/// `factor = 0` returns `base` unchanged; `factor = 1` returns
+/// `base * FADE_FLOOR` (rounded). Out-of-range factors are clamped.
+pub fn fade_rgb(base: (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
+    let f = factor.clamp(0.0, 1.0);
+    scale_rgb(base, 1.0 - f * (1.0 - FADE_FLOOR))
 }
 
 #[cfg(test)]
