@@ -168,3 +168,90 @@ fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use occ::{ClaudeVersion, Session, SessionId, SessionReport};
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, PoisonError};
+
+    /// Whether escape sequences are emitted is one setting for the whole
+    /// process, so a test that forces them on holds this lock while it runs.
+    static COLOR: Mutex<()> = Mutex::new(());
+
+    /// The width a line occupies on screen, which is what a reader sees.
+    ///
+    /// Escape sequences move no cursor and occupy no column, so they do not
+    /// count. A table whose rows disagree here has a ragged right edge.
+    fn visible_width(line: &str) -> usize {
+        let mut width = 0;
+        let mut characters = line.chars();
+        while let Some(character) = characters.next() {
+            if character != '\u{1b}' {
+                width += 1;
+                continue;
+            }
+            // Skip the whole sequence: the `[` that opens it, its parameters,
+            // and the letter that ends it.
+            if characters.next() == Some('[') {
+                for parameter in characters.by_ref() {
+                    if !matches!(parameter, '0'..='9' | ';' | ':' | '?') {
+                        break;
+                    }
+                }
+            }
+        }
+        width
+    }
+
+    fn session_id(text: &str) -> SessionId {
+        SessionId::parse(text).expect("test id should parse")
+    }
+
+    fn row(pid: u32, release: &str, session: Session) -> SessionReport {
+        SessionReport {
+            pid,
+            version: ClaudeVersion::parse(release),
+            directory: Some(PathBuf::from("/work")),
+            session,
+            uptime_secs: 3_600,
+        }
+    }
+
+    #[test]
+    fn the_colored_table_keeps_a_straight_right_edge() {
+        // Each row here is colored differently: the oldest release red and
+        // bold, the middle one yellow, the newest green, one session id plain
+        // and another dimmed. The escape sequences that carry those colors are
+        // all of different lengths, and no reader sees any of them.
+        let rows = [
+            row(
+                1,
+                "2.1.196",
+                Session::Named(session_id("d3b0d921-f0a1-41fc-b309-c11aa30c1173")),
+            ),
+            row(
+                2,
+                "2.1.200",
+                Session::Matched(session_id("ed84c8c7-0117-4670-936c-98e0f0d2c80b")),
+            ),
+            row(3, "2.1.204", Session::Unknown),
+        ];
+
+        let _held = COLOR.lock().unwrap_or_else(PoisonError::into_inner);
+        colored::control::set_override(true);
+        let mut table = render(&rows);
+        colored::control::unset_override();
+        table.force_no_tty().enforce_styling().set_width(120);
+        let rendered = table.to_string();
+
+        let widths: BTreeSet<usize> = rendered.lines().map(visible_width).collect();
+        assert_eq!(
+            widths.len(),
+            1,
+            "every line must occupy the same width, found {widths:?} in:\n{rendered}"
+        );
+    }
+}
