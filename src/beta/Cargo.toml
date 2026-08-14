@@ -22,7 +22,7 @@ image = "0.25"             # Image generation for video export
 imageproc = "0.25.0"         # Image processing for video export
 ab_glyph = "0.2"           # Font rendering for video export (replaces rusttype)
 vte = "0.15.0"               # VT100/ANSI terminal emulator
-signal-hook = "0.3"        # Signal handling for graceful termination
+signal-hook.workspace = true # Signal handling for graceful termination
 
 [lints]
 workspace = true
