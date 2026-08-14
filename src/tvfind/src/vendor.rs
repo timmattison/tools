@@ -122,7 +122,9 @@ mod tests {
 
     #[test]
     fn recognises_a_television_brand_that_opens_the_registered_name() {
-        assert!(is_television_brand("TCL King Electrical Appliances(Huizhou)Co."));
+        assert!(is_television_brand(
+            "TCL King Electrical Appliances(Huizhou)Co."
+        ));
         assert!(is_television_brand("Hisense Visual Technology"));
         assert!(is_television_brand("Vizio"));
     }

@@ -369,7 +369,10 @@ mod tests {
 
     #[test]
     fn sees_no_application_in_a_not_found_response() {
-        assert!(!dial_app_installed("<html><body>404</body></html>", "Netflix"));
+        assert!(!dial_app_installed(
+            "<html><body>404</body></html>",
+            "Netflix"
+        ));
         assert!(!dial_app_installed("", "Netflix"));
     }
 
