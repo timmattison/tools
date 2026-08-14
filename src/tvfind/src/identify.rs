@@ -239,6 +239,30 @@ mod tests {
         assert!(parse_roku_device_info(ip(), "<html><body>404</body></html>").is_none());
     }
 
+    /// A Roku streaming player answers ECP with the same document a TV does.
+    /// Only `is-tv` separates the two.
+    const ROKU_STREAMING_STICK: &str = r"<device-info>
+<udn>1e9c2c85-7a4f-5a1e-9b3f-84d4c9b0f2a1</udn>
+<vendor-name>Roku</vendor-name>
+<model-name>Roku Express</model-name>
+<is-tv>false</is-tv>
+<is-stick>true</is-stick>
+<friendly-device-name>Roku Express</friendly-device-name>
+<software-version>15.2.4</software-version>
+</device-info>";
+
+    #[test]
+    fn rejects_a_roku_streaming_player_that_is_not_a_television() {
+        assert!(parse_roku_device_info(ip(), ROKU_STREAMING_STICK).is_none());
+    }
+
+    #[test]
+    fn rejects_a_roku_device_that_declares_no_is_tv_field() {
+        let xml = ROKU_DEVICE_INFO.replace("<is-tv>true</is-tv>\n", "");
+
+        assert!(parse_roku_device_info(ip(), &xml).is_none());
+    }
+
     /// Verbatim `/ssdp/device-desc.xml` from a TCL Google TV.
     const GOOGLE_TV_DESC: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
