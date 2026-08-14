@@ -1,19 +1,10 @@
 //! Assembling the answer: one row per running session, oldest release first.
 
 use crate::process::{classify, version_of, ProcessFact, Role};
-use crate::session::{attribute, Session, Transcript};
+use crate::registry::Registry;
+use crate::session::SessionId;
 use crate::ClaudeVersion;
-use std::path::{Path, PathBuf};
-
-/// Where recorded transcripts are read from.
-///
-/// The report is assembled against this trait rather than against the
-/// filesystem so that every ordering and attribution rule can be tested with
-/// transcripts that would be laborious to lay down on disk.
-pub trait Transcripts {
-    /// Every transcript recorded for `directory`.
-    fn for_directory(&self, directory: &Path) -> Vec<Transcript>;
-}
+use std::path::PathBuf;
 
 /// One running Claude Code session.
 #[derive(Debug, Clone)]
@@ -24,8 +15,8 @@ pub struct SessionReport {
     pub version: Option<ClaudeVersion>,
     /// The directory the session works in, when it could be read.
     pub directory: Option<PathBuf>,
-    /// The session the process belongs to.
-    pub session: Session,
+    /// The session the process recorded for itself, when it recorded one.
+    pub session: Option<SessionId>,
     /// Seconds the session has been open.
     pub uptime_secs: u64,
 }
@@ -66,46 +57,16 @@ pub fn format_uptime(seconds: u64) -> String {
 /// first, and the process identifier settles the rest so that two runs over an
 /// unchanged machine agree.
 #[must_use]
-pub fn build(facts: &[ProcessFact], transcripts: &dyn Transcripts) -> Vec<SessionReport> {
-    let sessions: Vec<(&ProcessFact, Option<ClaudeVersion>)> = facts
+pub fn build(facts: &[ProcessFact], _registry: &dyn Registry) -> Vec<SessionReport> {
+    let mut rows: Vec<SessionReport> = facts
         .iter()
         .filter(|fact| classify(fact) == Role::Session)
-        .map(|fact| (fact, version_of(fact)))
-        .collect();
-
-    // A session competes for a transcript only with the sessions sharing its
-    // directory and its release, so the peer count is taken over that pair.
-    let peers_of = |directory: Option<&Path>, version: Option<&ClaudeVersion>| -> usize {
-        sessions
-            .iter()
-            .filter(|(other, other_version)| {
-                other.cwd.as_deref() == directory && other_version.as_ref() == version
-            })
-            .count()
-    };
-
-    let mut rows: Vec<SessionReport> = sessions
-        .iter()
-        .map(|(fact, version)| {
-            let candidates = fact
-                .cwd
-                .as_deref()
-                .map(|directory| transcripts.for_directory(directory))
-                .unwrap_or_default();
-            let session = attribute(
-                &fact.argv,
-                version.as_ref(),
-                fact.start_time_epoch_secs,
-                &candidates,
-                peers_of(fact.cwd.as_deref(), version.as_ref()),
-            );
-            SessionReport {
-                pid: fact.pid,
-                version: version.clone(),
-                directory: fact.cwd.clone(),
-                session,
-                uptime_secs: fact.uptime_secs,
-            }
+        .map(|fact| SessionReport {
+            pid: fact.pid,
+            version: version_of(fact),
+            directory: fact.cwd.clone(),
+            session: None,
+            uptime_secs: fact.uptime_secs,
         })
         .collect();
 
@@ -127,38 +88,38 @@ pub fn build(facts: &[ProcessFact], transcripts: &dyn Transcripts) -> Vec<Sessio
 
 #[cfg(test)]
 mod tests {
-    use super::{build, format_uptime, SessionReport, Transcripts};
-    use crate::session::{Session, SessionId, Transcript};
-    use crate::{ClaudeVersion, ProcessFact};
+    use super::{build, format_uptime, SessionReport};
+    use crate::registry::Registry;
+    use crate::session::SessionId;
+    use crate::ProcessFact;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     const SESSION_A: &str = "d3b0d921-f0a1-41fc-b309-c11aa30c1173";
     const SESSION_B: &str = "ed84c8c7-0117-4670-936c-98e0f0d2c80b";
     const VERSIONED_ROOT: &str = "/Users/u/.local/share/claude/versions";
 
-    /// Transcripts held in memory, keyed by directory.
+    /// Registered sessions held in memory, keyed by process identifier.
+    ///
+    /// Whether a file really belongs to the process it is named for is decided
+    /// in [`crate::registry`] and tested there. What this fake stands in for is
+    /// the answer, so that the rules here are testable without a filesystem.
     #[derive(Default)]
-    struct FakeTranscripts(HashMap<PathBuf, Vec<Transcript>>);
+    struct FakeRegistry(HashMap<u32, SessionId>);
 
-    impl FakeTranscripts {
-        fn with(mut self, directory: &str, transcripts: Vec<Transcript>) -> Self {
-            self.0.insert(PathBuf::from(directory), transcripts);
+    impl FakeRegistry {
+        fn with(mut self, pid: u32, session: &str) -> Self {
+            self.0.insert(
+                pid,
+                SessionId::parse(session).expect("test id should parse"),
+            );
             self
         }
     }
 
-    impl Transcripts for FakeTranscripts {
-        fn for_directory(&self, directory: &Path) -> Vec<Transcript> {
-            self.0.get(directory).cloned().unwrap_or_default()
-        }
-    }
-
-    fn transcript(session: &str, release: &str, created: u64) -> Transcript {
-        Transcript {
-            id: SessionId::parse(session).expect("test id should parse"),
-            version: ClaudeVersion::parse(release),
-            created_epoch_secs: created,
+    impl Registry for FakeRegistry {
+        fn session_of(&self, process: &ProcessFact) -> Option<SessionId> {
+            self.0.get(&process.pid).cloned()
         }
     }
 
@@ -182,6 +143,12 @@ mod tests {
                     .as_ref()
                     .map_or_else(|| "?".to_string(), |v| v.as_str().to_string())
             })
+            .collect()
+    }
+
+    fn named(rows: &[SessionReport]) -> Vec<Option<String>> {
+        rows.iter()
+            .map(|row| row.session.as_ref().map(SessionId::to_string))
             .collect()
     }
 
@@ -211,7 +178,7 @@ mod tests {
         tool.argv = vec!["ugrep".to_string(), "-G".to_string()];
 
         let facts = [session_fact(1, "2.1.232", "/work", 10), daemon, tool];
-        let rows = build(&facts, &FakeTranscripts::default());
+        let rows = build(&facts, &FakeRegistry::default());
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pid, 1);
@@ -225,7 +192,7 @@ mod tests {
             session_fact(3, "2.1.204", "/c", 10),
             session_fact(4, "2.1.196", "/d", 10),
         ];
-        let rows = build(&facts, &FakeTranscripts::default());
+        let rows = build(&facts, &FakeRegistry::default());
         assert_eq!(releases(&rows), ["2.1.99", "2.1.196", "2.1.204", "2.1.232"]);
     }
 
@@ -237,7 +204,7 @@ mod tests {
         unknown.exe = Some(PathBuf::from("/Users/u/.local/bin/claude"));
 
         let facts = [unknown, session_fact(1, "2.1.232", "/b", 10)];
-        let rows = build(&facts, &FakeTranscripts::default());
+        let rows = build(&facts, &FakeRegistry::default());
 
         assert_eq!(releases(&rows), ["2.1.232", "?"]);
     }
@@ -249,94 +216,66 @@ mod tests {
             session_fact(2, "2.1.204", "/b", 9_000),
             session_fact(3, "2.1.204", "/c", 500),
         ];
-        let rows = build(&facts, &FakeTranscripts::default());
+        let rows = build(&facts, &FakeRegistry::default());
         assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), [2, 3, 1]);
     }
 
     #[test]
-    fn a_lone_session_in_a_directory_is_attributed() {
+    fn a_session_is_named_by_what_it_recorded() {
         let facts = [session_fact(1, "2.1.205", "/work", 10)];
-        let transcripts =
-            FakeTranscripts::default().with("/work", vec![transcript(SESSION_A, "2.1.205", 5_000)]);
+        let registry = FakeRegistry::default().with(1, SESSION_A);
 
-        let rows = build(&facts, &transcripts);
+        let rows = build(&facts, &registry);
 
-        assert_eq!(
-            rows[0].session,
-            Session::Matched(SessionId::parse(SESSION_A).expect("id"))
-        );
+        assert_eq!(named(&rows), [Some(SESSION_A.to_string())]);
     }
 
     #[test]
-    fn sessions_of_one_release_in_one_directory_stay_ambiguous() {
-        // The real shape this guards: several sessions of the same release in
-        // one worktree. Neither may be given the other's id.
+    fn sessions_sharing_a_directory_and_a_release_are_each_named() {
+        // The shape that defeats every attempt to reconstruct this: several
+        // sessions of one release in one worktree. Each one recorded its own
+        // identity, so nothing has to be worked out from the outside.
         let facts = [
             session_fact(1, "2.1.202", "/work", 10),
             session_fact(2, "2.1.202", "/work", 20),
         ];
-        let transcripts = FakeTranscripts::default().with(
-            "/work",
-            vec![
-                transcript(SESSION_A, "2.1.202", 5_000),
-                transcript(SESSION_B, "2.1.202", 5_000),
-            ],
+        let registry = FakeRegistry::default()
+            .with(1, SESSION_A)
+            .with(2, SESSION_B);
+
+        let rows = build(&facts, &registry);
+
+        // Row order is by uptime, so the longer-open process 2 comes first.
+        assert_eq!(
+            named(&rows),
+            [Some(SESSION_B.to_string()), Some(SESSION_A.to_string())]
         );
-
-        let rows = build(&facts, &transcripts);
-
-        for row in &rows {
-            assert_eq!(
-                row.session,
-                Session::Ambiguous {
-                    candidates: 2,
-                    peers: 2
-                }
-            );
-        }
     }
 
     #[test]
-    fn a_release_separates_two_sessions_sharing_a_directory() {
-        // Two sessions in one directory, on different releases: each is pinned
-        // to its own transcript, so both are attributed.
-        let facts = [
-            session_fact(1, "2.1.202", "/work", 10),
-            session_fact(2, "2.1.218", "/work", 20),
-        ];
-        let transcripts = FakeTranscripts::default().with(
-            "/work",
-            vec![
-                transcript(SESSION_A, "2.1.202", 5_000),
-                transcript(SESSION_B, "2.1.218", 5_000),
-            ],
-        );
+    fn a_session_that_recorded_nothing_is_named_by_nothing() {
+        // Seven of 126 live sessions on a real machine had no record. A blank
+        // is the whole answer: a guess in its place is wrong more often than
+        // it is right, and nothing in the output would say which.
+        let facts = [session_fact(1, "2.1.205", "/work", 10)];
 
-        let rows = build(&facts, &transcripts);
-        let attributed: Vec<&Session> = rows.iter().map(|row| &row.session).collect();
+        let rows = build(&facts, &FakeRegistry::default());
 
-        assert_eq!(
-            attributed,
-            [
-                &Session::Matched(SessionId::parse(SESSION_A).expect("id")),
-                &Session::Matched(SessionId::parse(SESSION_B).expect("id")),
-            ]
-        );
+        assert_eq!(named(&rows), [None]);
     }
 
     #[test]
     fn a_session_without_a_readable_directory_is_still_reported() {
-        // The directory is what attribution needs, not what the session is. A
-        // session that will not give up its directory still has a release, a
+        // A session that will not give up its directory still has a release, a
         // process identifier, and an uptime worth reporting.
         let mut hidden = session_fact(7, "2.1.196", "/work", 42);
         hidden.cwd = None;
 
-        let rows = build(&[hidden], &FakeTranscripts::default());
+        let rows = build(&[hidden], &FakeRegistry::default().with(7, SESSION_A));
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pid, 7);
         assert_eq!(rows[0].directory, None);
-        assert_eq!(rows[0].session, Session::Unknown);
+        assert_eq!(named(&rows), [Some(SESSION_A.to_string())]);
     }
 }

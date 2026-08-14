@@ -8,8 +8,8 @@ use colored::Colorize;
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
 use occ::process::Role;
 use occ::report::SessionReport;
-use occ::session::Session;
-use occ::{build, classify, format_uptime, gather_processes, ProjectTranscripts};
+use occ::session::SessionId;
+use occ::{build, classify, format_uptime, gather_processes, SessionRegistry};
 
 /// Shown when a value could not be read.
 const ABSENT: &str = "—";
@@ -27,8 +27,8 @@ fn main() -> Result<()> {
 
     let facts = gather_processes();
     let home = dirs::home_dir().context("cannot find the home directory")?;
-    let transcripts = ProjectTranscripts::for_home(&home);
-    let sessions = build(&facts, &transcripts);
+    let registry = SessionRegistry::for_home(&home);
+    let sessions = build(&facts, &registry);
 
     // Counted so the footer can say what was left out. A tool that quietly drops
     // processes it cannot read would report a clean machine that is not clean.
@@ -92,7 +92,7 @@ fn render(sessions: &[SessionReport]) -> Table {
             Cell::new(row.pid),
             release,
             Cell::new(format_uptime(row.uptime_secs)),
-            render_session(&row.session),
+            render_session(row.session.as_ref()),
             directory,
         ]);
     }
@@ -104,22 +104,14 @@ fn absent() -> Cell {
     Cell::new(ABSENT).add_attribute(Attribute::Dim)
 }
 
-/// Renders the session cell, marking anything that was inferred.
+/// Renders the session cell.
 ///
-/// An inferred id is dimmed and an unresolved one says why, so a reader is never
-/// shown a firm-looking id that `occ` only guessed at.
-fn render_session(session: &Session) -> Cell {
-    match session {
-        Session::Named(id) => Cell::new(id),
-        Session::Matched(id) => Cell::new(id).add_attribute(Attribute::Dim),
-        Session::Likely { id, of } => {
-            Cell::new(format!("{id} (newest of {of})")).add_attribute(Attribute::Dim)
-        }
-        Session::Ambiguous { candidates, peers } => {
-            Cell::new(format!("? {candidates} of {peers}")).add_attribute(Attribute::Dim)
-        }
-        Session::Unknown => absent(),
-    }
+/// Every id here was recorded by the session itself, so none of them is
+/// qualified. A session that recorded nothing is left blank rather than guessed
+/// at: a guess is wrong more often than it is right, and nothing in a table of
+/// identifiers would say which one it was.
+fn render_session(session: Option<&SessionId>) -> Cell {
+    session.map_or_else(absent, Cell::new)
 }
 
 /// Chooses the singular or the plural form for `count`.
@@ -133,14 +125,7 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
 
 /// Prints the counts and the legend below the table.
 fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
-    let inferred = sessions
-        .iter()
-        .filter(|row| matches!(row.session, Session::Matched(_) | Session::Likely { .. }))
-        .count();
-    let unresolved = sessions
-        .iter()
-        .filter(|row| matches!(row.session, Session::Ambiguous { .. } | Session::Unknown))
-        .count();
+    let unnamed = sessions.iter().filter(|row| row.session.is_none()).count();
 
     println!();
     println!(
@@ -149,13 +134,13 @@ fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
         plural(sessions.len(), "session", "sessions")
     );
 
-    if inferred > 0 || unresolved > 0 {
+    if unnamed > 0 {
         println!(
             "{}",
             format!(
-                "A session id is dimmed when it was matched by directory and release rather than \
-                 read from the command line ({inferred} here). \"? N of M\" means N transcripts \
-                 fit M competing sessions, so none can be named ({unresolved} unresolved)."
+                "{unnamed} {} no session in ~/.claude/sessions and {} named here.",
+                plural(unnamed, "session recorded", "sessions recorded"),
+                plural(unnamed, "is not", "are not")
             )
             .dimmed()
         );
@@ -186,7 +171,7 @@ fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
 #[cfg(test)]
 mod tests {
     use super::render;
-    use occ::{ClaudeVersion, Session, SessionId, SessionReport};
+    use occ::{ClaudeVersion, SessionId, SessionReport};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
     use std::sync::{Mutex, PoisonError};
@@ -224,7 +209,7 @@ mod tests {
         SessionId::parse(text).expect("test id should parse")
     }
 
-    fn row(pid: u32, release: &str, session: Session) -> SessionReport {
+    fn row(pid: u32, release: &str, session: Option<SessionId>) -> SessionReport {
         SessionReport {
             pid,
             version: ClaudeVersion::parse(release),
@@ -237,21 +222,21 @@ mod tests {
     #[test]
     fn the_colored_table_keeps_a_straight_right_edge() {
         // Each row here is colored differently: the oldest release red and
-        // bold, the middle one yellow, the newest green, one session id plain
-        // and another dimmed. The escape sequences that carry those colors are
-        // all of different lengths, and no reader sees any of them.
+        // bold, the middle one yellow, the newest green, and a dimmed cell for
+        // the session that recorded none. The escape sequences that carry those
+        // colors are all of different lengths, and no reader sees any of them.
         let rows = [
             row(
                 1,
                 "2.1.196",
-                Session::Named(session_id("d3b0d921-f0a1-41fc-b309-c11aa30c1173")),
+                Some(session_id("d3b0d921-f0a1-41fc-b309-c11aa30c1173")),
             ),
             row(
                 2,
                 "2.1.200",
-                Session::Matched(session_id("ed84c8c7-0117-4670-936c-98e0f0d2c80b")),
+                Some(session_id("ed84c8c7-0117-4670-936c-98e0f0d2c80b")),
             ),
-            row(3, "2.1.204", Session::Unknown),
+            row(3, "2.1.204", None),
         ];
 
         let _held = COLOR.lock().unwrap_or_else(PoisonError::into_inner);
