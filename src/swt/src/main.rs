@@ -41,16 +41,24 @@ struct Cli {
 /// The commands `swt` accepts. Each takes exactly one argument, and neither is
 /// optional: there is nothing sensible to create without a name, and nothing to
 /// merge without a worktree.
+///
+/// Both arguments take hyphen-leading values. Neither command has options of its
+/// own beyond `--help`, so an argument that looks like a flag is a name or a
+/// path that starts with `-`, and the command that owns it has a better answer
+/// than "unexpected argument": `create` quotes the naming rule the input broke,
+/// and `merge` reports that no such worktree exists.
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Verify HEAD is green, create a worktree on a new branch, and print its path.
     Create {
         /// Name for the new worktree and its branch.
+        #[arg(allow_hyphen_values = true)]
         name: String,
     },
     /// Verify the subagent is green, merge it into the parent, and clean up.
     Merge {
         /// Path to the subagent worktree to merge back.
+        #[arg(allow_hyphen_values = true)]
         worktree_path: PathBuf,
     },
 }
