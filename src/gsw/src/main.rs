@@ -277,11 +277,19 @@ fn main() -> Result<()> {
     );
 
     if cli.no_color {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
         colored::control::set_override(false);
     } else if should_force_colors(stdout_is_tty, columns_env.is_some(), no_color_env) {
         // A watch-like wrapper (e.g. viddy) is rendering our output inside
         // its own TTY-backed UI. The colored crate would otherwise strip
         // colors because our stdout is a pipe.
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
         colored::control::set_override(true);
     }
 

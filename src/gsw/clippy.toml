@@ -1,0 +1,15 @@
+# The `colored` crate's override is process-global, and `cargo test` runs the
+# tests of one binary on many threads. A test that sets the override directly
+# changes what an unrelated test sees, which makes failures that appear and
+# disappear between runs. `testcolor::with_forced_ansi` holds the one lock on
+# that global state and puts the override back, so it is the only entrance.
+# These two entries make the bypass fail the build instead of failing a test
+# once a week.
+#
+# This file sits beside gsw's Cargo.toml, so the ban covers the gsw crate only.
+# Other crates in the workspace, such as seescc, call the same API in
+# production and must keep it.
+disallowed-methods = [
+    { path = "colored::control::set_override", reason = "call testcolor::with_forced_ansi instead; it holds the one lock on this process-global override" },
+    { path = "colored::control::unset_override", reason = "testcolor::with_forced_ansi puts the override back on its own, on the panic path as well" },
+]
