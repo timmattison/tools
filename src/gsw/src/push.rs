@@ -1412,6 +1412,7 @@ mod tests {
 mod ui_tests {
     use super::*;
     use crate::render::Snapshot;
+    use crate::testcolor::{self, max_red_channel, TRUECOLOR_FG};
 
     /// A snapshot on `gsw-push` with `origin` available and the given tracking
     /// status. Only the four fields the push feature reads matter here.
@@ -2153,7 +2154,21 @@ mod ui_tests {
     /// A UI holding the message a finished update push leaves behind, posted at
     /// `at`. The state every test below about ageing starts from.
     fn pushed_at(at: Instant) -> PushUi {
-        let mut ui = PushUi::new(false);
+        pushed_with(false, at)
+    }
+
+    /// The same message, on a UI built for a terminal whose color depth is
+    /// `truecolor`.
+    ///
+    /// The color depth is a parameter because it is the value under test. A
+    /// `PushUi` keeps the depth [`PushUi::new`] receives, and gives it to the
+    /// fade at the one point in [`PushUi::overlay`] that colors a row. A test
+    /// that proves the depth arrives there must therefore choose it here: this
+    /// function is the only route from the test suite to `PushUi::new(true)`.
+    /// [`pushed_at`] keeps the 8-color default, which is what every other test
+    /// about ageing reads.
+    fn pushed_with(truecolor: bool, at: Instant) -> PushUi {
+        let mut ui = PushUi::new(truecolor);
         ui.request(&snapshot(tracked(3)), tall_pane(80), at);
         ui.confirm();
         ui.finished(
@@ -2347,6 +2362,91 @@ mod ui_tests {
     /// Stand-in row for the styling tests, which are about the color a status
     /// row is drawn in and not about what it says.
     const TEXT: &str = "Pushed 3 commits to origin/gsw-push (5s ago)";
+
+    #[test]
+    fn the_status_message_fades_in_24_bit_color_only_where_the_terminal_takes_it() {
+        // The two tests above read a typed `ColoredString` from
+        // `colorize_status`, and the comment on the first one says why: the
+        // `colored` crate decides from process-global state whether it writes
+        // escape bytes at all. That reason holds for those tests, which supply
+        // the color depth themselves. It does not hold for this one. Here the
+        // color depth is the subject — the question is whether the value
+        // `PushUi::new` received arrives at the one call in `PushUi::overlay`
+        // that colors a row — and the painted bytes are the only place that
+        // answer appears. `testcolor::with_forced_ansi` makes those bytes
+        // stable: it holds the one lock on that global state for both halves of
+        // the comparison.
+        //
+        // Both halves are necessary. The first half alone passes if any other
+        // part of the row writes a 24-bit color. The second half is what shows
+        // that the color depth is the thing that decides.
+        //
+        // The age is half of `STATUS_LIFETIME` for two reasons. The message is
+        // still on screen at that age, well before it expires and leaves an
+        // empty overlay that satisfies the second half for the wrong reason.
+        // And the age is at `COARSE_FADE_AT`, so the 8-color half paints a dim
+        // row and writes an escape sequence of its own. The second half
+        // therefore proves that the row carries no 24-bit color, not merely
+        // that it carries no escapes.
+        let start = t0();
+        let age = STATUS_LIFETIME / 2;
+
+        let (deep, coarse) = testcolor::with_forced_ansi(|| {
+            let deep = pushed_with(true, start)
+                .overlay(tall_pane(80), start + age)
+                .text();
+            let coarse = pushed_with(false, start)
+                .overlay(tall_pane(80), start + age)
+                .text();
+            (deep, coarse)
+        });
+
+        assert!(
+            deep.contains(TRUECOLOR_FG),
+            "a truecolor terminal must get the 24-bit fade, got {deep:?}",
+        );
+        assert!(
+            !coarse.contains(TRUECOLOR_FG),
+            "an 8-color terminal must get no 24-bit color, got {coarse:?}",
+        );
+    }
+
+    #[test]
+    fn the_status_message_is_painted_darker_the_later_the_overlay_is_drawn() {
+        // The age the fade uses comes out of the UI, and `PushUi::overlay` is
+        // what takes it out. The two fade tests above miss a call that passes a
+        // constant age instead, because they call `colorize_status` directly
+        // and hand it the age themselves. This test reads the brightness of a
+        // row the overlay painted, at two ages, which is what the watch loop
+        // does on every repaint.
+        //
+        // The exception recorded in the test above applies here for the same
+        // reason: the brightness is in the escape bytes, so the row must carry
+        // real ones, and `testcolor::with_forced_ansi` is what makes it do so.
+        //
+        // One cadence before the end of `STATUS_LIFETIME` is the oldest age at
+        // which the message is still on screen, so the two ages are the largest
+        // difference in brightness the overlay can show.
+        let start = t0();
+        let old = STATUS_LIFETIME - STATUS_CADENCE;
+
+        let (fresh, aged) = testcolor::with_forced_ansi(|| {
+            let fresh = pushed_with(true, start)
+                .overlay(tall_pane(80), start)
+                .text();
+            let aged = pushed_with(true, start)
+                .overlay(tall_pane(80), start + old)
+                .text();
+            (fresh, aged)
+        });
+
+        let fresh_max = max_red_channel(&fresh);
+        let aged_max = max_red_channel(&aged);
+        assert!(
+            aged_max < fresh_max,
+            "an older message must be painted darker: fresh={fresh_max} aged={aged_max}",
+        );
+    }
 
     #[test]
     fn an_ageing_message_wakes_the_loop_every_second() {

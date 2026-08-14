@@ -1256,16 +1256,7 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Serializes any test that toggles `colored::control::set_override` —
-    /// the override is process-global, so concurrent toggles race and
-    /// cause intermittent failures. Tests that need ANSI bytes (rather
-    /// than typed `ColoredString::fgcolor` inspection) hold this for the
-    /// duration of their body.
-    ///
-    /// `.unwrap_or_else(|p| p.into_inner())` handles a poisoned mutex
-    /// from a previous panicking test so it doesn't cascade-fail the
-    /// rest of the suite.
-    static COLORED_OVERRIDE_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::testcolor::{self, max_red_channel, TRUECOLOR_FG};
 
     fn opts() -> RenderOptions {
         RenderOptions {
@@ -2153,18 +2144,16 @@ mod tests {
         // empty cells to its right. Paint a matching dim background under
         // just the partial cell to bridge that gap.
         //
-        // Force `colored` on so the test inspects the actual ANSI we would
-        // emit on a real terminal; without this the crate strips all codes
-        // in non-TTY test runs.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
-        let with_partial = colorize_bar("█████▍", &e, 0.0, false);
-        let all_full = colorize_bar("██████", &e, 0.0, false);
-        let all_empty = colorize_bar("░░░░░░", &e, 0.0, false);
-        colored::control::unset_override();
+        // `with_forced_ansi` makes `colored` emit codes, so the test inspects
+        // the actual ANSI of a real terminal. Without it the crate removes all
+        // codes in a non-TTY test run.
+        let (with_partial, all_full, all_empty) = testcolor::with_forced_ansi(|| {
+            let e = entry("foo.rs", FileStatus::Modified, true, 9, 1);
+            let with_partial = colorize_bar("█████▍", &e, 0.0, false);
+            let all_full = colorize_bar("██████", &e, 0.0, false);
+            let all_empty = colorize_bar("░░░░░░", &e, 0.0, false);
+            (with_partial, all_full, all_empty)
+        });
 
         assert!(
             with_partial.contains("\x1b[48"),
@@ -2553,9 +2542,9 @@ mod tests {
     fn stale_age_renders_differently_from_aging() {
         // AgeDim has four buckets; if Stale and Aging both render `.dimmed()`
         // the bucket distinction is invisible to the user. Compare the Style
-        // bitsets on the returned ColoredStrings directly — avoids touching
-        // `colored::control::set_override`, which is process-global and would
-        // race with other tests in parallel.
+        // bitsets on the returned ColoredStrings directly. This test needs no
+        // ANSI bytes, so it does not force the process-global `colored`
+        // override and does not wait for the lock in `testcolor`.
         use colored::Styles;
         let aging = colorize_age("12h0m", Some(Duration::from_secs(2 * 3600)), 0.0, false);
         let stale = colorize_age("12h0m", Some(Duration::from_secs(2 * 86400)), 0.0, false);
@@ -3184,35 +3173,29 @@ mod tests {
 
     #[test]
     fn file_row_renders_with_truecolor_when_enabled() {
-        // Force the colored crate to actually emit ANSI in the test process so
-        // we can detect the truecolor codes from the rendered output.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
-        let mut o = opts();
-        o.truecolor = true;
-        let out = render(&snap, &o);
-        colored::control::unset_override();
+        // `with_forced_ansi` makes the `colored` crate emit ANSI in the test
+        // process, so the test finds the truecolor codes in the output.
+        let out = testcolor::with_forced_ansi(|| {
+            let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+            let mut o = opts();
+            o.truecolor = true;
+            render(&snap, &o)
+        });
         // Truecolor foreground sequences start with `\x1b[38;2;`.
         assert!(
-            out.contains("\x1b[38;2;"),
+            out.contains(TRUECOLOR_FG),
             "rendered file row should contain a truecolor ANSI sequence when truecolor=true",
         );
     }
 
     #[test]
     fn file_row_no_truecolor_in_8_color_mode() {
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
-        let out = render(&snap, &opts());
-        colored::control::unset_override();
+        let out = testcolor::with_forced_ansi(|| {
+            let snap = snap_with(vec![entry("src/foo.rs", FileStatus::Modified, false, 5, 2)]);
+            render(&snap, &opts())
+        });
         assert!(
-            !out.contains("\x1b[38;2;"),
+            !out.contains(TRUECOLOR_FG),
             "8-color mode must not emit any truecolor sequences for file rows",
         );
     }
@@ -3221,48 +3204,23 @@ mod tests {
     fn file_row_darkens_with_mtime_under_truecolor() {
         // End-to-end: an older file's row should contain a darker (lower-channel)
         // truecolor sequence than a fresher row of the same status.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut fresh_entry = entry("src/foo.rs", FileStatus::Modified, false, 5, 2);
-        fresh_entry.age = Some(Duration::from_secs(0));
-        let mut aged_entry = entry("src/bar.rs", FileStatus::Modified, false, 5, 2);
-        aged_entry.age = Some(Duration::from_secs(60 * 60));
+        let (fresh_out, aged_out) = testcolor::with_forced_ansi(|| {
+            let mut fresh_entry = entry("src/foo.rs", FileStatus::Modified, false, 5, 2);
+            fresh_entry.age = Some(Duration::from_secs(0));
+            let mut aged_entry = entry("src/bar.rs", FileStatus::Modified, false, 5, 2);
+            aged_entry.age = Some(Duration::from_secs(60 * 60));
 
-        let fresh_snap = snap_with(vec![fresh_entry]);
-        let aged_snap = snap_with(vec![aged_entry]);
-        let mut o = opts();
-        o.truecolor = true;
-        let fresh_out = render(&fresh_snap, &o);
-        let aged_out = render(&aged_snap, &o);
-        colored::control::unset_override();
+            let fresh_snap = snap_with(vec![fresh_entry]);
+            let aged_snap = snap_with(vec![aged_entry]);
+            let mut o = opts();
+            o.truecolor = true;
+            let fresh_out = render(&fresh_snap, &o);
+            let aged_out = render(&aged_snap, &o);
+            (fresh_out, aged_out)
+        });
 
-        let max_r = |s: &str| {
-            // Extract the largest r-channel from any 38;2;r;g;b foreground sequence.
-            let mut best: Option<u8> = None;
-            let bytes = s.as_bytes();
-            let needle = b"\x1b[38;2;";
-            let mut i = 0;
-            while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-                let start = i + pos + needle.len();
-                // Read r digits.
-                let mut j = start;
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j > start {
-                    if let Ok(r) = std::str::from_utf8(&bytes[start..j]).unwrap().parse::<u8>() {
-                        best = Some(best.map_or(r, |b| b.max(r)));
-                    }
-                }
-                i = j;
-            }
-            best.expect("at least one truecolor sequence")
-        };
-
-        let fresh_max = max_r(&fresh_out);
-        let aged_max = max_r(&aged_out);
+        let fresh_max = max_red_channel(&fresh_out);
+        let aged_max = max_red_channel(&aged_out);
         assert!(
             aged_max < fresh_max,
             "aged row's brightest channel should be lower than fresh row's: fresh={fresh_max} aged={aged_max}",
@@ -3274,17 +3232,14 @@ mod tests {
         // Deleted file (age=None) should produce only sequences with channels
         // at or below the FADE_FLOOR fraction of their base.
         use crate::age::FADE_FLOOR;
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
-        e.age = None;
-        let snap = snap_with(vec![e]);
-        let mut o = opts();
-        o.truecolor = true;
-        let out = render(&snap, &o);
-        colored::control::unset_override();
+        let out = testcolor::with_forced_ansi(|| {
+            let mut e = entry("deleted.rs", FileStatus::Deleted, true, 0, 5);
+            e.age = None;
+            let snap = snap_with(vec![e]);
+            let mut o = opts();
+            o.truecolor = true;
+            render(&snap, &o)
+        });
 
         // The brightest channel allowed at the floor is `255 × FADE_FLOOR`
         // (a base channel of 255 hits the highest floor). Use that as the
@@ -3298,33 +3253,13 @@ mod tests {
         )]
         let upper = ((255.0_f32 * FADE_FLOOR).round() as u8).saturating_add(2);
 
-        // Parse every r-channel and assert all are <= upper.
-        let bytes = out.as_bytes();
-        let needle = b"\x1b[38;2;";
-        let mut i = 0;
-        let mut saw_any = false;
-        while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-            let start = i + pos + needle.len();
-            let mut j = start;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > start {
-                let r: u8 = std::str::from_utf8(&bytes[start..j])
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                assert!(
-                    r <= upper,
-                    "every channel on a no-age row should sit at or below the floor (got {r}, upper {upper})",
-                );
-                saw_any = true;
-            }
-            i = j;
-        }
+        // The brightest r-channel bounds every r-channel, so one comparison
+        // covers them all. `max_red_channel` panics when the row carries no
+        // truecolor sequence, which also proves that the row was painted.
+        let brightest = max_red_channel(&out);
         assert!(
-            saw_any,
-            "should have emitted at least one truecolor sequence"
+            brightest <= upper,
+            "every channel on a no-age row should sit at or below the floor (brightest {brightest}, upper {upper})",
         );
     }
 
@@ -3444,15 +3379,13 @@ mod tests {
         // marker in one fg sequence + one reset — not pay 3× the ANSI overhead
         // by re-emitting the sequence for every char of "bin". Holds for both
         // 8-color and truecolor paths.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
-        e.binary = true;
-        let out_ansi = colorize_bar("bin", &e, 0.0, false);
-        let out_tc = colorize_bar("bin", &e, 0.0, true);
-        colored::control::unset_override();
+        let (out_ansi, out_tc) = testcolor::with_forced_ansi(|| {
+            let mut e = entry("assets/logo.png", FileStatus::Modified, true, 0, 0);
+            e.binary = true;
+            let out_ansi = colorize_bar("bin", &e, 0.0, false);
+            let out_tc = colorize_bar("bin", &e, 0.0, true);
+            (out_ansi, out_tc)
+        });
         assert_eq!(
             out_ansi.matches("\x1b[").count(),
             2,
@@ -3495,24 +3428,21 @@ mod tests {
 
     #[test]
     fn behind_segment_is_yellow_and_sits_before_the_suffix() {
-        // The behind segment is warning-colored (yellow + bold). Force
-        // `colored` on so the rendered header carries the real ANSI we'd
-        // emit on a terminal, then assert: (1) a yellow SGR appears, (2) the
+        // The behind segment is warning-colored (yellow + bold).
+        // `with_forced_ansi` makes the rendered header carry the real ANSI of
+        // a terminal. The test then asserts: (1) a yellow SGR appears, (2) the
         // plain text is `…ahead of main, 87 behind • ↑2 ↓0 …` with the
         // segment wedged between the base name and the upstream field.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut snap = snap_with(vec![]);
-        snap.commits_behind = 87;
-        snap.upstream = Some(UpstreamStatus {
-            name: "origin/gsv".into(),
-            ahead: 2,
-            behind: 0,
+        let rendered = testcolor::with_forced_ansi(|| {
+            let mut snap = snap_with(vec![]);
+            snap.commits_behind = 87;
+            snap.upstream = Some(UpstreamStatus {
+                name: "origin/gsv".into(),
+                ahead: 2,
+                behind: 0,
+            });
+            render(&snap, &opts())
         });
-        let rendered = render(&snap, &opts());
-        colored::control::unset_override();
 
         let header_line = rendered.lines().next().unwrap_or("");
         assert!(
@@ -3564,26 +3494,24 @@ mod tests {
         // formatted age and no fade color byte changes. One-shot mode and the
         // seed walk render at ZERO and rely on this exactness.
         //
-        // Force `colored` on under the shared override guard so the
-        // comparison exercises the actual ANSI bytes and a concurrent test
-        // toggling the process-global override can't flip it between our two
-        // render calls and make identical frames compare unequal.
-        let _guard = COLORED_OVERRIDE_GUARD
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        colored::control::set_override(true);
-        let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
-        snap.files[0].age = Some(Duration::from_secs(20));
-        snap.log = vec![LogEntry {
-            hash: "abc1234".into(),
-            subject: "test".into(),
-            age: Some(Duration::from_secs(100)),
-        }];
-        let mut o = opts();
-        o.log_lines = 5;
-        let with_offset = render_with_offset(&snap, &o, Duration::ZERO);
-        let baseline = render(&snap, &o);
-        colored::control::unset_override();
+        // `with_forced_ansi` holds the one shared lock on the process-global
+        // override, so the comparison sees the actual ANSI bytes and no
+        // concurrent test changes the override between the two render calls
+        // and makes identical frames compare unequal.
+        let (with_offset, baseline) = testcolor::with_forced_ansi(|| {
+            let mut snap = snap_with(vec![entry("a.rs", FileStatus::Modified, true, 1, 0)]);
+            snap.files[0].age = Some(Duration::from_secs(20));
+            snap.log = vec![LogEntry {
+                hash: "abc1234".into(),
+                subject: "test".into(),
+                age: Some(Duration::from_secs(100)),
+            }];
+            let mut o = opts();
+            o.log_lines = 5;
+            let with_offset = render_with_offset(&snap, &o, Duration::ZERO);
+            let baseline = render(&snap, &o);
+            (with_offset, baseline)
+        });
         assert_eq!(with_offset, baseline);
     }
 }
