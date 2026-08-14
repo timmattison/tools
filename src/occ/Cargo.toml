@@ -1,0 +1,31 @@
+[package]
+name = "occ"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Old Claude Code: list running Claude Code sessions, oldest version first"
+
+[[bin]]
+name = "occ"
+path = "src/main.rs"
+
+[lib]
+name = "occ"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+buildinfo.workspace = true
+clap.workspace = true
+colored.workspace = true
+comfy-table.workspace = true
+dirs.workspace = true
+serde_json.workspace = true
+sysinfo.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
