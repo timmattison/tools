@@ -92,10 +92,20 @@ fn xml_tag(xml: &str, tag: &str) -> String {
 
 /// Parse a Roku ECP `/query/device-info` response.
 ///
-/// Returns `None` when the payload is not a Roku device-info document.
+/// Roku's streaming players — the Express, the Streaming Stick, the Streambar —
+/// answer ECP with the same document a Roku TV does, so the vendor string alone
+/// cannot tell a television from a set-top box. Roku settles it in the document:
+/// only a television reports `<is-tv>true</is-tv>`.
+///
+/// Returns `None` when the payload is not a Roku device-info document, or when
+/// it describes a Roku device that is not a television.
 #[must_use]
 pub fn parse_roku_device_info(ip: Ipv4Addr, xml: &str) -> Option<Tv> {
     if !xml.contains("<device-info>") {
+        return None;
+    }
+
+    if !xml_tag(xml, "is-tv").eq_ignore_ascii_case("true") {
         return None;
     }
 
