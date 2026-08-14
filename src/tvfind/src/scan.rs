@@ -146,6 +146,24 @@ mod tests {
         mock.assert_async().await;
     }
 
+    /// `/apps/Netflix` as a TCL Google TV answers it.
+    const NETFLIX_DIAL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<service xmlns="urn:dial-multiscreen-org:schemas:dial">
+  <name>Netflix</name>
+  <options allowStop="true"/>
+  <state>stopped</state>
+</service>"#;
+
+    /// Answer the DIAL screen test the way a device with a display does.
+    async fn mock_a_screen(server: &mut mockito::Server) -> mockito::Mock {
+        server
+            .mock("GET", "/apps/Netflix")
+            .with_status(200)
+            .with_body(NETFLIX_DIAL)
+            .create_async()
+            .await
+    }
+
     #[tokio::test]
     async fn fetches_and_identifies_a_google_tv() {
         let mut server = mockito::Server::new_async().await;
@@ -161,6 +179,7 @@ mod tests {
             .with_body(r#"{"name":"Living Room","cast_build_revision":"3.72.446070"}"#)
             .create_async()
             .await;
+        let _screen = mock_a_screen(&mut server).await;
 
         let tv = fetch_google_tv(&Client::new(), &server.url(), ip())
             .await
@@ -187,6 +206,7 @@ mod tests {
             .with_status(500)
             .create_async()
             .await;
+        let _screen = mock_a_screen(&mut server).await;
 
         let tv = fetch_google_tv(&Client::new(), &server.url(), ip())
             .await
@@ -196,5 +216,70 @@ mod tests {
         eureka.assert_async().await;
         assert_eq!(tv.vendor, "TCL");
         assert_eq!(tv.name, "Living Room");
+    }
+
+    #[tokio::test]
+    async fn treats_a_cast_device_with_no_video_application_as_no_tv() {
+        // A speaker with Chromecast built-in publishes the same UPnP document a
+        // TV does. Only its refusal to run a video app separates the two.
+        let mut server = mockito::Server::new_async().await;
+        let _desc = server
+            .mock("GET", "/ssdp/device-desc.xml")
+            .with_status(200)
+            .with_body(GOOGLE_TV_DESC.replace("Smart TV Pro", "Google Home").as_str())
+            .create_async()
+            .await;
+        let _eureka = server
+            .mock("GET", "/setup/eureka_info")
+            .with_status(200)
+            .with_body(r#"{"name":"Kitchen speaker"}"#)
+            .create_async()
+            .await;
+        let _no_apps = server
+            .mock("GET", mockito::Matcher::Regex(r"^/apps/.*$".to_owned()))
+            .with_status(404)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        assert!(fetch_google_tv(&Client::new(), &server.url(), ip())
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn asks_a_second_video_application_when_the_first_is_absent() {
+        // Not every set carries Netflix, so one refusal must not end the test.
+        let mut server = mockito::Server::new_async().await;
+        let _desc = server
+            .mock("GET", "/ssdp/device-desc.xml")
+            .with_status(200)
+            .with_body(GOOGLE_TV_DESC)
+            .create_async()
+            .await;
+        let _eureka = server
+            .mock("GET", "/setup/eureka_info")
+            .with_status(404)
+            .create_async()
+            .await;
+        let netflix = server
+            .mock("GET", "/apps/Netflix")
+            .with_status(404)
+            .create_async()
+            .await;
+        let youtube = server
+            .mock("GET", "/apps/YouTube")
+            .with_status(200)
+            .with_body(NETFLIX_DIAL.replace("Netflix", "YouTube").as_str())
+            .create_async()
+            .await;
+
+        let tv = fetch_google_tv(&Client::new(), &server.url(), ip())
+            .await
+            .expect("a second video app should still prove a screen");
+
+        netflix.assert_async().await;
+        youtube.assert_async().await;
+        assert_eq!(tv.vendor, "TCL");
     }
 }
