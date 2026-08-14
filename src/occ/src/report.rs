@@ -154,11 +154,11 @@ mod tests {
         }
     }
 
-    fn transcript(session: &str, release: &str, modified: u64) -> Transcript {
+    fn transcript(session: &str, release: &str, created: u64) -> Transcript {
         Transcript {
             id: SessionId::parse(session).expect("test id should parse"),
             version: ClaudeVersion::parse(release),
-            modified_epoch_secs: modified,
+            created_epoch_secs: created,
         }
     }
 

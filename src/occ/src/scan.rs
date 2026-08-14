@@ -151,9 +151,14 @@ fn read_tail(path: &Path, budget: u64) -> Option<String> {
 fn read_transcript(path: &Path, directory: &Path) -> Option<Transcript> {
     let id = SessionId::parse(path.file_stem()?.to_str()?)?;
 
-    let modified_epoch_secs = std::fs::metadata(path)
-        .ok()?
-        .modified()
+    // Creation time is what ties a transcript to a process. Where a filesystem
+    // does not record it, modification time stands in: it is never earlier than
+    // creation, so the substitution can only keep a candidate that creation time
+    // would have removed, never remove a true one.
+    let metadata = std::fs::metadata(path).ok()?;
+    let created_epoch_secs = metadata
+        .created()
+        .or_else(|_| metadata.modified())
         .ok()?
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -175,7 +180,7 @@ fn read_transcript(path: &Path, directory: &Path) -> Option<Transcript> {
     Some(Transcript {
         id,
         version,
-        modified_epoch_secs,
+        created_epoch_secs,
     })
 }
 
@@ -206,7 +211,71 @@ impl Transcripts for ProjectTranscripts {
 /// Returns `None` when the name cannot be read, which is the normal answer for
 /// another account's process.
 #[must_use]
-pub fn accounting_name(_pid: u32) -> Option<String> {
+pub fn accounting_name(pid: u32) -> Option<String> {
+    read_accounting_name(pid)
+}
+
+/// Reads the accounting name from the kernel's process information.
+///
+/// `pbi_name` is preferred over `pbi_comm` because the kernel truncates `pbi_comm`
+/// at sixteen characters, and the longer field carries the same value untruncated.
+#[cfg(target_os = "macos")]
+fn read_accounting_name(pid: u32) -> Option<String> {
+    // A process identifier is signed at this interface, and identifiers that do
+    // not fit are not identifiers this tool can ask about.
+    let pid = i32::try_from(pid).ok()?;
+
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let wanted = std::mem::size_of::<libc::proc_bsdinfo>();
+
+    // SAFETY: `proc_pidinfo` writes at most `wanted` bytes into the buffer, and
+    // `wanted` is that buffer's own size. The call is read-only with respect to
+    // the target process and reports how many bytes it filled, which is checked
+    // below before the buffer is read.
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast::<libc::c_void>(),
+            i32::try_from(wanted).ok()?,
+        )
+    };
+    if usize::try_from(filled).ok()? != wanted {
+        return None;
+    }
+
+    // SAFETY: the call above reported that it filled the whole structure.
+    let info = unsafe { info.assume_init() };
+
+    read_c_name(&info.pbi_name).or_else(|| read_c_name(&info.pbi_comm))
+}
+
+/// Reads a NUL-terminated name out of a fixed-size kernel field.
+#[cfg(target_os = "macos")]
+fn read_c_name(field: &[libc::c_char]) -> Option<String> {
+    let bytes: Vec<u8> = field
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| byte.unsigned_abs())
+        .collect();
+    if bytes.is_empty() {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Reads the accounting name from `/proc/<pid>/comm`.
+#[cfg(target_os = "linux")]
+fn read_accounting_name(pid: u32) -> Option<String> {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = name.trim_end_matches('\n').to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Reports that no accounting name is available on this platform.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_accounting_name(_pid: u32) -> Option<String> {
     None
 }
 
@@ -231,7 +300,12 @@ pub fn gather_processes() -> Vec<ProcessFact> {
         .iter()
         .map(|(pid, process)| ProcessFact {
             pid: pid.as_u32(),
-            accounting_name: process.name().to_string_lossy().into_owned(),
+            // The kernel's name is preferred over the one `sysinfo` reports,
+            // which is the basename of `argv[0]` and says `claude` for every
+            // release. Falling back to it keeps a name available on platforms
+            // where the kernel's is not readable.
+            accounting_name: accounting_name(pid.as_u32())
+                .unwrap_or_else(|| process.name().to_string_lossy().into_owned()),
             exe: process.exe().map(Path::to_path_buf),
             argv: process
                 .cmd()

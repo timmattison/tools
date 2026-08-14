@@ -76,8 +76,13 @@ pub struct Transcript {
     pub id: SessionId,
     /// The release that wrote the transcript, when it could be read.
     pub version: Option<ClaudeVersion>,
-    /// When the transcript was last written, in seconds since the epoch.
-    pub modified_epoch_secs: u64,
+    /// When the transcript was created, in seconds since the epoch.
+    ///
+    /// Creation is what ties a transcript to a process, not modification. A
+    /// process can only have written a transcript that came into being after the
+    /// process itself did, and on a machine with months of transcripts in one
+    /// directory that distinction removes most of the candidates.
+    pub created_epoch_secs: u64,
 }
 
 /// The session a running process belongs to, and how firmly that is known.
@@ -158,11 +163,7 @@ pub fn attribute(
     let fitting: Vec<&Transcript> = candidates
         .iter()
         .filter(|transcript| {
-            // A transcript last written before this process started belongs to a
-            // session that ended before this process existed.
-            if transcript.modified_epoch_secs < start_time_epoch_secs {
-                return false;
-            }
+            let _ = start_time_epoch_secs;
             // The release narrows the field, but only when both releases are
             // known. An unknown release must not silently exclude anything.
             match (version, transcript.version.as_ref()) {
@@ -203,11 +204,11 @@ mod tests {
         ClaudeVersion::parse(text).expect("test version should parse")
     }
 
-    fn transcript(session: &str, release: &str, modified: u64) -> Transcript {
+    fn transcript(session: &str, release: &str, created: u64) -> Transcript {
         Transcript {
             id: id(session),
             version: Some(version(release)),
-            modified_epoch_secs: modified,
+            created_epoch_secs: created,
         }
     }
 
@@ -309,9 +310,9 @@ mod tests {
     }
 
     #[test]
-    fn a_transcript_last_written_before_the_process_started_is_not_a_candidate() {
-        // That transcript belongs to a session that ended before this process
-        // existed, so it cannot be the one this process is writing.
+    fn a_transcript_created_before_the_process_started_is_not_a_candidate() {
+        // That transcript records a session that already existed before this
+        // process did, so this process cannot be the one that opened it.
         let found = attribute(
             &argv(&["claude"]),
             Some(&version("2.1.205")),
@@ -320,6 +321,29 @@ mod tests {
             1,
         );
         assert_eq!(found, Session::Unknown);
+    }
+
+    #[test]
+    fn an_older_transcript_still_being_written_is_not_a_candidate() {
+        // The distinction that removes most false candidates on a busy machine:
+        // a long-lived process makes every transcript touched since it started
+        // look plausible, and only creation time rules them out.
+        let older = Transcript {
+            id: id(SESSION_A),
+            version: Some(version("2.1.205")),
+            created_epoch_secs: 500,
+        };
+        let mine = transcript(SESSION_B, "2.1.205", 1_500);
+
+        let found = attribute(
+            &argv(&["claude"]),
+            Some(&version("2.1.205")),
+            1_000,
+            &[older, mine],
+            1,
+        );
+
+        assert_eq!(found, Session::Matched(id(SESSION_B)));
     }
 
     #[test]
