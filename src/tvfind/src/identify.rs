@@ -131,6 +131,13 @@ pub fn parse_roku_device_info(ip: Ipv4Addr, xml: &str) -> Option<Tv> {
     })
 }
 
+/// Whether a DIAL `/apps/<app>` document reports that the device offers `app`.
+#[must_use]
+pub fn dial_app_installed(xml: &str, app: &str) -> bool {
+    let _ = (xml, app);
+    todo!("no screen test exists yet")
+}
+
 /// Parse a Google TV UPnP description, enriched with `/setup/eureka_info`.
 ///
 /// `eureka_json` is best-effort: the UPnP document alone is enough to identify
@@ -341,6 +348,33 @@ mod tests {
     #[test]
     fn rejects_a_payload_that_names_no_manufacturer() {
         assert!(parse_google_tv(google_ip(), "<html><body>404</body></html>", None).is_none());
+    }
+
+    /// Verbatim `/apps/Netflix` response from a TCL Google TV.
+    const NETFLIX_DIAL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<service xmlns="urn:dial-multiscreen-org:schemas:dial">
+  <name>Netflix</name>
+  <options allowStop="true"/>
+  <state>stopped</state>
+  <port>9080</port><capabilities>websocket</capabilities>
+</service>"#;
+
+    #[test]
+    fn sees_a_video_application_a_cast_device_offers() {
+        assert!(dial_app_installed(NETFLIX_DIAL, "Netflix"));
+    }
+
+    #[test]
+    fn sees_no_application_in_a_not_found_response() {
+        assert!(!dial_app_installed("<html><body>404</body></html>", "Netflix"));
+        assert!(!dial_app_installed("", "Netflix"));
+    }
+
+    #[test]
+    fn does_not_credit_a_device_with_an_application_it_did_not_name() {
+        // A DIAL server that lacks the app answers 404, but a body naming some
+        // other app must never be read as this one.
+        assert!(!dial_app_installed(NETFLIX_DIAL, "YouTube"));
     }
 
     #[test]
