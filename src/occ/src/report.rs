@@ -41,8 +41,20 @@ pub struct SessionReport {
 /// assert_eq!(format_uptime(3_930), "1h 5m");
 /// ```
 #[must_use]
-pub fn format_uptime(_seconds: u64) -> String {
-    String::new()
+pub fn format_uptime(seconds: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    if seconds >= DAY {
+        format!("{}d {}h", seconds / DAY, (seconds % DAY) / HOUR)
+    } else if seconds >= HOUR {
+        format!("{}h {}m", seconds / HOUR, (seconds % HOUR) / MINUTE)
+    } else if seconds >= MINUTE {
+        format!("{}m {}s", seconds / MINUTE, seconds % MINUTE)
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// Builds the report: every running session, oldest release first.
@@ -54,8 +66,63 @@ pub fn format_uptime(_seconds: u64) -> String {
 /// first, and the process identifier settles the rest so that two runs over an
 /// unchanged machine agree.
 #[must_use]
-pub fn build(_facts: &[ProcessFact], _transcripts: &dyn Transcripts) -> Vec<SessionReport> {
-    Vec::new()
+pub fn build(facts: &[ProcessFact], transcripts: &dyn Transcripts) -> Vec<SessionReport> {
+    let sessions: Vec<(&ProcessFact, Option<ClaudeVersion>)> = facts
+        .iter()
+        .filter(|fact| classify(fact) == Role::Session)
+        .map(|fact| (fact, version_of(fact)))
+        .collect();
+
+    // A session competes for a transcript only with the sessions sharing its
+    // directory and its release, so the peer count is taken over that pair.
+    let peers_of = |directory: Option<&Path>, version: Option<&ClaudeVersion>| -> usize {
+        sessions
+            .iter()
+            .filter(|(other, other_version)| {
+                other.cwd.as_deref() == directory && other_version.as_ref() == version
+            })
+            .count()
+    };
+
+    let mut rows: Vec<SessionReport> = sessions
+        .iter()
+        .map(|(fact, version)| {
+            let candidates = fact
+                .cwd
+                .as_deref()
+                .map(|directory| transcripts.for_directory(directory))
+                .unwrap_or_default();
+            let session = attribute(
+                &fact.argv,
+                version.as_ref(),
+                fact.start_time_epoch_secs,
+                &candidates,
+                peers_of(fact.cwd.as_deref(), version.as_ref()),
+            );
+            SessionReport {
+                pid: fact.pid,
+                version: version.clone(),
+                directory: fact.cwd.clone(),
+                session,
+                uptime_secs: fact.uptime_secs,
+            }
+        })
+        .collect();
+
+    rows.sort_by(|left, right| {
+        // `None` is the unreadable release, and it sorts last: an unknown
+        // release must never be presented as the oldest one on the machine.
+        let by_release = match (left.version.as_ref(), right.version.as_ref()) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        by_release
+            .then_with(|| right.uptime_secs.cmp(&left.uptime_secs))
+            .then_with(|| left.pid.cmp(&right.pid))
+    });
+    rows
 }
 
 #[cfg(test)]
