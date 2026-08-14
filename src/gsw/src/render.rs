@@ -1256,7 +1256,7 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 mod tests {
     use super::*;
 
-    use crate::testcolor::{self, max_red_channel};
+    use crate::testcolor::{self, max_red_channel, TRUECOLOR_FG};
 
     fn opts() -> RenderOptions {
         RenderOptions {
@@ -3183,7 +3183,7 @@ mod tests {
         });
         // Truecolor foreground sequences start with `\x1b[38;2;`.
         assert!(
-            out.contains("\x1b[38;2;"),
+            out.contains(TRUECOLOR_FG),
             "rendered file row should contain a truecolor ANSI sequence when truecolor=true",
         );
     }
@@ -3195,7 +3195,7 @@ mod tests {
             render(&snap, &opts())
         });
         assert!(
-            !out.contains("\x1b[38;2;"),
+            !out.contains(TRUECOLOR_FG),
             "8-color mode must not emit any truecolor sequences for file rows",
         );
     }
@@ -3253,33 +3253,13 @@ mod tests {
         )]
         let upper = ((255.0_f32 * FADE_FLOOR).round() as u8).saturating_add(2);
 
-        // Parse every r-channel and assert all are <= upper.
-        let bytes = out.as_bytes();
-        let needle = b"\x1b[38;2;";
-        let mut i = 0;
-        let mut saw_any = false;
-        while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-            let start = i + pos + needle.len();
-            let mut j = start;
-            while j < bytes.len() && bytes[j].is_ascii_digit() {
-                j += 1;
-            }
-            if j > start {
-                let r: u8 = std::str::from_utf8(&bytes[start..j])
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                assert!(
-                    r <= upper,
-                    "every channel on a no-age row should sit at or below the floor (got {r}, upper {upper})",
-                );
-                saw_any = true;
-            }
-            i = j;
-        }
+        // The brightest r-channel bounds every r-channel, so one comparison
+        // covers them all. `max_red_channel` panics when the row carries no
+        // truecolor sequence, which also proves that the row was painted.
+        let brightest = max_red_channel(&out);
         assert!(
-            saw_any,
-            "should have emitted at least one truecolor sequence"
+            brightest <= upper,
+            "every channel on a no-age row should sit at or below the floor (brightest {brightest}, upper {upper})",
         );
     }
 
