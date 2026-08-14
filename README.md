@@ -259,6 +259,13 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       selection, custom port ranges, and can include privileged ports. Useful for development servers, testing 
       environments, and service configuration.
     - To install: `cargo install --git https://github.com/timmattison/tools freeport`
+- tvfind
+    - Finds smart TVs on your network and reports vendor, model, room name and firmware version. Queries each host
+      directly on the two ports TV firmware answers on — Roku ECP (8060) and Chromecast built-in (8008) — rather than
+      relying on SSDP or mDNS, which access points routinely filter between radios. Filter to one brand with
+      `--vendor tcl`. When nmap is installed it also cross-checks the ARP table against the OUI database to flag
+      televisions that are powered off and therefore answering nothing.
+    - To install: `cargo install --git https://github.com/timmattison/tools tvfind`
 - wl
     - Shows which process is listening on a given port. Useful for identifying what program is using a specific port
       on your system. Supports verbose output to show detailed socket information.
