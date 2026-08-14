@@ -151,10 +151,16 @@ impl LockGuard {
     /// `path` must be a lock file this process just created with `O_EXCL`;
     /// registering somebody else's would authorize deleting it.
     fn hold(path: PathBuf) -> Self {
-        held_locks().insert(path.clone());
-        // There is now something a signal would orphan, and this is the more
-        // expensive of the two: a leaked lock blocks the whole repository.
+        // Armed before the registration, never after: the other order leaves an
+        // instant in which the registry names a lock and no thread is reading the
+        // signals that would release it. Arming early is free — a signal arriving
+        // before the insert finds nothing at risk and keeps its default
+        // disposition.
         arm_signal_teardown();
+        // Past this insert there is something a signal would orphan, and this is
+        // the more expensive of the two: a leaked lock blocks the whole
+        // repository.
+        held_locks().insert(path.clone());
         Self { path }
     }
 }

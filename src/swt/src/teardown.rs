@@ -29,10 +29,13 @@
 //! [`TERMINATION_SIGNALS`] mean teardown first and then an exit with the
 //! conventional 128 + signal status. Three properties of that are load-bearing:
 //!
-//! - **It is scoped.** [`arm_signal_teardown`] is called when a responsibility is
-//!   taken, never before, and a signal arriving with nothing at risk is handed
-//!   straight back to the default handler — so `swt` never makes a signal mean
-//!   something new in a window where there is nothing to protect.
+//! - **It is scoped.** [`arm_signal_teardown`] is called only in the act of
+//!   taking a responsibility — never at startup, and never for its own sake — and
+//!   a signal arriving with nothing at risk is handed straight back to the
+//!   default handler, so `swt` never makes a signal mean something new in a
+//!   window where there is nothing to protect. Within that act the arming comes
+//!   *first* and the state that records the responsibility second, so the two can
+//!   never disagree in the direction that matters.
 //! - **It runs on a thread, not in a handler.** Teardown takes mutexes and spawns
 //!   git, none of which is async-signal-safe. A dedicated thread reading the
 //!   signals turns them into ordinary code, which is what makes the work legal.
@@ -153,12 +156,17 @@ fn handle_signal(signal: c_int) {
 
 /// Installs `swt`'s signal teardown, once per process.
 ///
-/// Called the moment a responsibility is taken — an unverified worktree, a lock
-/// file — and never before, so an interruption arriving while `swt` owns nothing
-/// keeps its default disposition rather than being routed through machinery with
-/// nothing to do. It stays installed afterwards, which costs nothing: a signal
-/// arriving once everything has been given up is handed back to the default
-/// handler by [`handle_signal`].
+/// Called only where a responsibility is taken — an unverified worktree, a lock
+/// file — and never at startup, so an interruption arriving while `swt` owns
+/// nothing keeps its default disposition rather than being routed through
+/// machinery with nothing to do. It stays installed afterwards, which costs
+/// nothing: a signal arriving once everything has been given up is handed back to
+/// the default handler by [`handle_signal`].
+///
+/// Every caller arms *before* it records what it took, which is free in exactly
+/// the same way — a signal landing in the gap sees nothing at risk — and closes
+/// the gap that the other order would open, where the registries name something
+/// orphanable and no thread is reading the signals yet.
 ///
 /// Best effort by design. If the signals cannot be registered, or the thread
 /// that reads them cannot be spawned, the run continues under the default
@@ -305,14 +313,19 @@ impl Drop for WorktreeHold {
 /// worktree directory that would be removed, and `branch` the branch checked out
 /// in it.
 pub fn hold_unverified_worktree(root: &Path, path: &Path, branch: &str) -> WorktreeHold {
+    // Armed before the registry is written, never after: the other order leaves
+    // an instant in which `swt` owns a worktree and nobody is reading the signals
+    // that would tear it down. Arming early costs nothing — a signal arriving in
+    // that instant finds nothing at risk and keeps its default disposition,
+    // exactly as it would have a moment earlier.
+    arm_signal_teardown();
+    // Past this store there is something to orphan, so from here a signal means
+    // something other than "die where you stand".
     *unverified_worktree() = Some(UnverifiedWorktree {
         root: root.to_path_buf(),
         path: path.to_path_buf(),
         branch: branch.to_string(),
     });
-    // There is now something to orphan, so this is the moment a signal starts
-    // meaning something other than "die where you stand".
-    arm_signal_teardown();
     WorktreeHold { _private: () }
 }
 
