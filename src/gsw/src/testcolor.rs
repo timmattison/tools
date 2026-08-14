@@ -1,5 +1,10 @@
-//! Test-only control of the `colored` crate's global override: one lock, one
-//! entrance.
+//! Test-only support for the ANSI escape codes the `colored` crate writes.
+//!
+//! The module has two jobs. It controls whether the `colored` crate writes
+//! escape codes at all, through one lock and one entrance. And it reads the
+//! codes that the crate wrote, through [`max_red_channel`]. A test that forces
+//! the codes on almost always goes on to read a color out of them, so the
+//! reader belongs beside the lock.
 //!
 //! Some tests must see real ANSI bytes. The `colored` crate emits no escape
 //! codes when it writes to something that is not a terminal, and a test run is
@@ -74,6 +79,46 @@ impl Drop for Restore {
     fn drop(&mut self) {
         colored::control::unset_override();
     }
+}
+
+/// The start of a 24-bit foreground SGR sequence. The red, green, and blue
+/// values follow it.
+pub(crate) const TRUECOLOR_FG: &str = "\x1b[38;2;";
+
+/// The largest red channel of any 24-bit foreground sequence in `text`.
+///
+/// The fade scales all three channels by one factor, so one channel reports the
+/// brightness of the whole row.
+///
+/// The scan finds every [`TRUECOLOR_FG`] prefix in `text` and reads the digits
+/// that follow it. A malformed sequence contributes nothing and breaks nothing:
+/// a prefix with no digits after it, and a red value above 255, both fail to
+/// parse and the scan drops them. The cursor moves past the prefix on every
+/// turn, even when the digits are absent, so the scan always ends.
+///
+/// # Panics
+///
+/// Panics when `text` carries no 24-bit foreground sequence. A caller paints a
+/// truecolor row on purpose, so an absent sequence is a failure of the test
+/// rather than an empty result.
+pub(crate) fn max_red_channel(text: &str) -> u8 {
+    let bytes = text.as_bytes();
+    let needle = TRUECOLOR_FG.as_bytes();
+    let mut best: Option<u8> = None;
+    let mut at = 0;
+    while let Some(found) = bytes[at..].windows(needle.len()).position(|w| w == needle) {
+        let start = at + found + needle.len();
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let digits = std::str::from_utf8(&bytes[start..end]).expect("ASCII digits are valid UTF-8");
+        if let Ok(red) = digits.parse::<u8>() {
+            best = Some(best.map_or(red, |seen: u8| seen.max(red)));
+        }
+        at = end;
+    }
+    best.expect("a truecolor row must carry a 24-bit foreground sequence")
 }
 
 #[cfg(test)]

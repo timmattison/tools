@@ -1412,7 +1412,7 @@ mod tests {
 mod ui_tests {
     use super::*;
     use crate::render::Snapshot;
-    use crate::testcolor;
+    use crate::testcolor::{self, max_red_channel, TRUECOLOR_FG};
 
     /// A snapshot on `gsw-push` with `origin` available and the given tracking
     /// status. Only the four fields the push feature reads matter here.
@@ -2363,10 +2363,6 @@ mod ui_tests {
     /// row is drawn in and not about what it says.
     const TEXT: &str = "Pushed 3 commits to origin/gsw-push (5s ago)";
 
-    /// The start of a 24-bit foreground SGR sequence. The red, green, and blue
-    /// values follow it.
-    const TRUECOLOR_FG: &str = "\x1b[38;2;";
-
     #[test]
     fn the_status_message_fades_in_24_bit_color_only_where_the_terminal_takes_it() {
         // The two tests above read a typed `ColoredString` from
@@ -2450,47 +2446,6 @@ mod ui_tests {
             aged_max < fresh_max,
             "an older message must be painted darker: fresh={fresh_max} aged={aged_max}",
         );
-    }
-
-    /// The largest red channel of any 24-bit foreground sequence in `text`.
-    ///
-    /// The fade scales all three channels by one factor, so one channel reports
-    /// the brightness of the whole row.
-    ///
-    /// This copies the `max_r` closure in `render.rs`, which reads the same
-    /// bytes for the same purpose. The original is a closure inside the body of
-    /// one test. To share it, `render.rs` must open its whole test module to
-    /// this one, which gives every test module a route into every other one for
-    /// the sake of twenty lines. A copy keeps each module's test helpers its
-    /// own.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `text` carries no 24-bit foreground sequence. A caller here
-    /// paints a truecolor row on purpose, so an absent sequence is a failure of
-    /// the test rather than an empty result.
-    fn max_red_channel(text: &str) -> u8 {
-        let bytes = text.as_bytes();
-        let needle = TRUECOLOR_FG.as_bytes();
-        let mut best: Option<u8> = None;
-        let mut at = 0;
-        while let Some(found) = bytes[at..].windows(needle.len()).position(|w| w == needle) {
-            let start = at + found + needle.len();
-            let mut end = start;
-            while end < bytes.len() && bytes[end].is_ascii_digit() {
-                end += 1;
-            }
-            if let Ok(red) = std::str::from_utf8(&bytes[start..end])
-                .expect("ASCII digits are valid UTF-8")
-                .parse::<u8>()
-            {
-                best = Some(best.map_or(red, |seen: u8| seen.max(red)));
-            }
-            // `end` is past the needle even when it read no digits, so the scan
-            // always moves on.
-            at = end;
-        }
-        best.expect("a truecolor row must carry a 24-bit foreground sequence")
     }
 
     #[test]

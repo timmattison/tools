@@ -1256,7 +1256,7 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 mod tests {
     use super::*;
 
-    use crate::testcolor;
+    use crate::testcolor::{self, max_red_channel};
 
     fn opts() -> RenderOptions {
         RenderOptions {
@@ -3219,31 +3219,8 @@ mod tests {
             (fresh_out, aged_out)
         });
 
-        let max_r = |s: &str| {
-            // Extract the largest r-channel from any 38;2;r;g;b foreground sequence.
-            let mut best: Option<u8> = None;
-            let bytes = s.as_bytes();
-            let needle = b"\x1b[38;2;";
-            let mut i = 0;
-            while let Some(pos) = bytes[i..].windows(needle.len()).position(|w| w == needle) {
-                let start = i + pos + needle.len();
-                // Read r digits.
-                let mut j = start;
-                while j < bytes.len() && bytes[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j > start {
-                    if let Ok(r) = std::str::from_utf8(&bytes[start..j]).unwrap().parse::<u8>() {
-                        best = Some(best.map_or(r, |b| b.max(r)));
-                    }
-                }
-                i = j;
-            }
-            best.expect("at least one truecolor sequence")
-        };
-
-        let fresh_max = max_r(&fresh_out);
-        let aged_max = max_r(&aged_out);
+        let fresh_max = max_red_channel(&fresh_out);
+        let aged_max = max_red_channel(&aged_out);
         assert!(
             aged_max < fresh_max,
             "aged row's brightest channel should be lower than fresh row's: fresh={fresh_max} aged={aged_max}",
