@@ -103,21 +103,26 @@ fn now_millis() -> u128 {
 /// would put a character in the token that is not a base-36 digit.
 const PID_BITS: u32 = 32;
 
-/// A token that distinguishes one `swt create` invocation from every other,
-/// minted once per run and spelled in base 36.
+/// A token that distinguishes one `swt` run from every other, minted once per
+/// run and spelled in base 36.
 ///
 /// It is built from *both* the process id and the clock, and needs both. The
 /// clock alone — which is all the original spelled — collides whenever an
 /// orchestrator fans two runs out inside the same millisecond, which is exactly
 /// the situation `swt` exists to serve. The pid alone repeats as soon as the
 /// operating system recycles it.
+///
+/// Two things key on this: the worktree and branch names below, and the owner
+/// token [`crate::lock`] writes into a lock file so a stale-lock reap can tell a
+/// corpse from its successor. Both are asking the same question — is this the
+/// same run, or a different one — so both get the same answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UniqueToken(String);
+pub(crate) struct UniqueToken(String);
 
 impl UniqueToken {
     /// Mints the token for *this* invocation, from this process's id and the
     /// current time.
-    fn mint() -> Self {
+    pub(crate) fn mint() -> Self {
         Self::from_parts(std::process::id(), now_millis())
     }
 

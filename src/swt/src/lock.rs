@@ -1,7 +1,8 @@
 //! lock — the file that stops two `swt merge` runs interleaving in one
 //! repository, and the guarantee that it is always let go of again.
 //!
-//! Two things are load-bearing here and neither is obvious from the outside.
+//! Three things are load-bearing here and none of them is obvious from the
+//! outside.
 //!
 //! **Where the lock lives.** It is `swt.lock` inside the git directory *shared*
 //! by every worktree of the repository, which is what `git rev-parse
@@ -19,18 +20,31 @@
 //! A process-global registry of the locks *this* process created is what makes
 //! that last one safe — a path that is not in the registry belongs to somebody
 //! else, and removing it would hand two merges the same repository.
+//!
+//! **That a reap only ever removes the file it judged.** A lock older than the
+//! staleness window is presumed abandoned, and deleting it is the one place
+//! `swt` removes a file it did not create. The verdict comes from an mtime,
+//! which names no particular file, so every lock carries its creator's
+//! [`UniqueToken`] and [`reap_corpse`] confirms that token is still there
+//! immediately before the unlink: a corpse cleared and replaced by a live
+//! successor in the meantime is left alone rather than deleted out from under
+//! its holder. Two adjacent syscalls still separate that confirmation from the
+//! unlink, which no portable filesystem call closes; what the token removes is
+//! the far wider window that used to run from the staleness verdict all the way
+//! to the delete.
 
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::create::UniqueToken;
 use crate::git::git_must;
 use crate::teardown::arm_signal_teardown;
 
@@ -240,6 +254,49 @@ fn interpose_before_reap() {
     });
 }
 
+/// Reads the token whoever created a lock file wrote into it.
+///
+/// `None` means no owner could be established at all: the file has gone, or it
+/// cannot be read. A `None` never matches anything, not even another `None`, so
+/// a lock this process cannot identify is waited out rather than removed.
+///
+/// An *empty* answer is a real identity rather than a missing one. It is what
+/// every lock an older `swt` created carries, and it matches itself, so an
+/// abandoned old-format lock — or one whose token was lost to a failed write —
+/// is still reaped instead of blocking the repository forever.
+fn lock_owner(lock_path: &Path) -> Option<Vec<u8>> {
+    fs::read(lock_path).ok()
+}
+
+/// Removes a lock judged stale, but only while the file at that path is still
+/// the one that was judged.
+///
+/// `owner` is the token read *before* the staleness verdict; the file's token is
+/// read once more here and the unlink happens only if the two agree. Returns
+/// whether the path was freed, so a refused reap falls through to the ordinary
+/// backoff rather than spinning on a lock it will keep declining to remove.
+fn reap_corpse(lock_path: &Path, owner: Option<&[u8]>) -> bool {
+    interpose_before_reap();
+    // A lock whose owner could not be read is never removed. An mtime says
+    // nothing about *which* file it belongs to, and this is the one place `swt`
+    // deletes a file it did not create, so an unidentifiable one is left for the
+    // wait to time out on and report.
+    let Some(owner) = owner else {
+        return false;
+    };
+    if lock_owner(lock_path).as_deref() != Some(owner) {
+        // Somebody stood a different lock up in the corpse's place between the
+        // staleness verdict and here. It is not a corpse; go back to waiting.
+        return false;
+    }
+    match fs::remove_file(lock_path) {
+        Ok(()) => true,
+        // Already gone: another waiter reaped the same corpse. The path is free
+        // either way, which is all this answer is asked about.
+        Err(err) => err.kind() == ErrorKind::NotFound,
+    }
+}
+
 /// Resolves the lock file that serializes merges for a repository.
 ///
 /// `repo_root` is any worktree root of the repository. Returns the absolute path
@@ -284,13 +341,21 @@ fn locked<T>(
             .create_new(true)
             .open(lock_path)
         {
-            Ok(_file) => {
+            Ok(mut file) => {
                 // The lock is the file's *existence*, not the open handle, so
-                // the handle is dropped immediately: keeping it would only add
-                // a second thing to get right on the release path, and a
-                // process that dies still leaves the file behind either way —
-                // which is what the staleness reap below is for.
+                // the handle is let go as soon as the owner token is in it:
+                // keeping it would only add a second thing to get right on the
+                // release path, and a process that dies still leaves the file
+                // behind either way — which is what the staleness reap below is
+                // for, and what the token in it makes safe.
                 let _guard = LockGuard::hold(lock_path.to_path_buf());
+                // Deliberately after the guard, and deliberately best effort. A
+                // token that could not be written costs this lock only its name
+                // in somebody's future reap — it still excludes, and it reads
+                // back as the old format, which is reapable. Failing out here
+                // instead would leak the lock and block the repository.
+                let _ = file.write_all(UniqueToken::mint().to_string().as_bytes());
+                drop(file);
                 return Ok(f());
             }
             // Somebody else holds it. Fall through and wait.
@@ -304,6 +369,12 @@ fn locked<T>(
         // Reap a lock old enough to be a corpse rather than a merge in
         // progress. A lock that vanishes under the stat is simply retried:
         // whoever held it has just let go.
+        //
+        // The owner is read *first*, ahead of the staleness verdict, and
+        // confirmed again inside the reap. Reading it afterwards would defeat
+        // the whole check — a successor's token would be compared against
+        // itself and match.
+        let owner = lock_owner(lock_path);
         if let Ok(metadata) = fs::metadata(lock_path) {
             let abandoned = metadata
                 .modified()
@@ -313,9 +384,10 @@ fn locked<T>(
                 // reaping a live lock hands two merges the same repository.
                 .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
                 .is_some_and(|age| age > timings.stale_after);
-            if abandoned {
-                interpose_before_reap();
-                let _ = fs::remove_file(lock_path);
+            // Only a freed path skips the backoff: a reap that was refused
+            // because the lock changed underneath it has something live to wait
+            // on, not a corpse to clear.
+            if abandoned && reap_corpse(lock_path, owner.as_deref()) {
                 continue;
             }
         }
@@ -333,7 +405,8 @@ fn locked<T>(
 /// The lock is released when `f` returns, when it panics, and — via
 /// [`release_all_held_locks`] — when the process exits from inside the region.
 /// Contention is waited out with a one-second backoff for up to ten minutes; a
-/// lock older than an hour is presumed abandoned and reaped. Giving up writes
+/// lock older than an hour is presumed abandoned and reaped, but only while it
+/// is still demonstrably the same lock that was judged. Giving up writes
 /// [`TIMEOUT_MESSAGE`] to stderr and exits, which is safe because it happens
 /// while holding nothing.
 ///
@@ -398,18 +471,22 @@ mod tests {
     /// second acquisition running unserialized would visibly interleave.
     const HOLD: Duration = Duration::from_millis(150);
 
-    /// Timings for a test about the staleness reap: a window a backdated
-    /// fixture is already well past, so the reap happens on the first pass, and
-    /// a wait short enough to fail fast when it does not.
+    /// Timings for a test about the staleness reap.
+    ///
+    /// The staleness window is deliberately *longer* than the wait: a lock
+    /// stood up while a test runs has to stay a live lock for the rest of it,
+    /// and a window shorter than the wait would let it age into a corpse and be
+    /// reaped for a reason the test is not about.
     const REAPING: LockTimings = LockTimings {
-        stale_after: Duration::from_millis(100),
+        stale_after: Duration::from_secs(1),
         wait_at_most: TEST_TIMEOUT,
         retry_every: TEST_BACKOFF,
     };
 
-    /// How far back a fixture corpse's mtime is set — comfortably past
-    /// [`REAPING`]'s window, so nothing about the reap depends on timing.
-    const ABANDONED_FOR: Duration = Duration::from_secs(1);
+    /// How far back a fixture corpse's mtime is set — far past [`REAPING`]'s
+    /// window, so it is reaped on the first pass and nothing about these tests
+    /// depends on how long they take to run.
+    const ABANDONED_FOR: Duration = Duration::from_secs(60);
 
     /// The token a fixture corpse carries, and the token a *different* run's
     /// lock carries. Two acquisitions are distinguishable exactly when the
