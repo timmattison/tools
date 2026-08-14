@@ -239,6 +239,34 @@ mod tests {
         assert_eq!(neighbours.len(), 3);
     }
 
+    /// One host reachable over three interfaces, as macOS `arp` prints it.
+    const MULTI_INTERFACE_ARP: &str =
+        "? (192.168.0.1) at 70:a7:41:66:7c:39 on en0 ifscope [ethernet]
+? (192.168.0.1) at 70:a7:41:66:7c:39 on en8 ifscope [ethernet]
+? (192.168.0.1) at 70:a7:41:66:7c:39 on en1 ifscope [ethernet]
+? (192.168.0.2) at 70:a7:41:66:7c:39 on en8 ifscope [ethernet]
+";
+
+    #[test]
+    fn reports_a_host_once_however_many_interfaces_reach_it() {
+        let neighbours = parse_arp_table(MULTI_INTERFACE_ARP);
+
+        let first = neighbours
+            .iter()
+            .filter(|n| n.ip == Ipv4Addr::new(192, 168, 0, 1))
+            .count();
+        assert_eq!(first, 1, "one address must yield one neighbour");
+    }
+
+    #[test]
+    fn keeps_two_addresses_that_share_one_hardware_address() {
+        // A router answers for several addresses off one interface. Each is a
+        // separate neighbour, so deduplication must key on the address.
+        let neighbours = parse_arp_table(MULTI_INTERFACE_ARP);
+
+        assert_eq!(neighbours.len(), 2);
+    }
+
     /// The OUI database entries the candidate fixture depends on.
     fn candidate_db() -> HashMap<String, String> {
         parse_db(
