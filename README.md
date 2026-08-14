@@ -2022,3 +2022,45 @@ zth /Volumes/Backup > suspects.txt
 less suspects.txt
 tr '\n' '\0' < suspects.txt | xargs -0 rm --
 ```
+
+## occ (old Claude Code)
+
+List the Claude Code sessions running on this machine, oldest release first, with the process id, the release, how long the session has been open, the session id, and the working directory.
+
+A Claude Code session keeps running the release it started on. Upgrades land in the background and change nothing for a session already open, so a machine that upgrades often accumulates sessions spread across many releases. Left alone they are easy to miss: a session opened six weeks ago looks exactly like one opened this morning, and a terminal tab or a detached multiplexer pane can hold one for months. `occ` puts the oldest ones at the top, which is where the ones worth closing are.
+
+### Basic Usage
+
+```bash
+occ
+```
+
+### Options
+
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+### How it reads the release
+
+Each Claude Code release installs as a single executable named for its version, such as `~/.local/share/claude/versions/2.1.232`. macOS records the basename of the executed file as the process accounting name, so a running session reports its own release through the kernel, and `occ` reads it there.
+
+Nothing else on the machine answers the question correctly. The executable path of a running session resolves through the `claude` launcher, which is a link to whichever release is installed *now* — read the release from that path and a session running a four-month-old release is reported as running today's. The accounting name is recorded when the process starts and never changes afterwards, so it also survives an upgrade that deletes the old release file. A session running a release that no longer exists on disk is exactly the session this tool exists to find, and it is still named correctly.
+
+### How it identifies the session
+
+Claude Code writes one transcript per session, under `~/.claude/projects`. A session process does not hold that transcript open and does not publish its own session id, so for most processes the link has to be reconstructed. `occ` reconstructs it in four steps, and says which one it used:
+
+1. **Named.** The command line carries the id, as `--session-id` or `--resume` does. The id is shown plainly. Where a forked session carries both, `--session-id` wins: it names the session actually running, while `--resume` names the transcript it was forked from.
+2. **Matched.** Exactly one transcript fits the process, and no other process competes for it. A transcript fits when it records the same working directory, records the same release, and was created after the process started. The id is dimmed.
+3. **Newest of several.** One process fits several transcripts. Clearing a session starts a new transcript without starting a new process, so one process legitimately owns several, and with nothing else competing the newest is the one it is writing now. The id is dimmed and labelled `newest of N`.
+4. **Unresolved.** Several processes compete for the same transcripts. `occ` prints `? N of M` — N transcripts fitting M processes — and names none of them.
+
+Step 4 is the point of the design. Working directory alone is not enough to tell sessions apart: one worktree on the machine this was built against held twenty-three running sessions across twelve releases. Pairing the directory with the release removes most of that, and creation time removes most of the rest, but where two sessions remain genuinely indistinguishable `occ` says so. Printing one session's id against another session's process would be the worst failure available here, because nothing in the output would say it had happened.
+
+The folder name under `~/.claude/projects` encodes the working directory by replacing every character outside `[A-Za-z0-9-]` with `-`, which is lossy: `/work/a.b` and `/work/a-b` share one folder. `occ` uses the folder only to find candidates and then confirms each one against the working directory the transcript records inside itself, so a session is never given a neighbour's id.
+
+### What it leaves out, and says so
+
+- **Support processes.** The background daemon, pty hosts, and spares run the same executable but are not sessions. They are counted in the footer, not listed.
+- **Spawned tools.** A tool a session starts, such as a search, can still be holding the Claude Code executable at the moment the process table is sampled. It reports its own name in `argv[0]`, which is how `occ` tells it apart from a session.
+- **Other accounts' sessions.** They appear in the process table but give up no arguments, no working directory, and no start time without privileges `occ` does not ask for. They are counted in the footer. Reporting a clean machine while sixty unreadable sessions run on it would be worse than saying they cannot be read.

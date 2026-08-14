@@ -108,6 +108,15 @@ fn render_session(session: &Session) -> String {
     }
 }
 
+/// Chooses the singular or the plural form for `count`.
+fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
+    if count == 1 {
+        singular
+    } else {
+        plural
+    }
+}
+
 /// Prints the counts and the legend below the table.
 fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
     let inferred = sessions
@@ -121,9 +130,9 @@ fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
 
     println!();
     println!(
-        "{} {} session(s).",
+        "{} running {}.",
         sessions.len().to_string().bold(),
-        if sessions.len() == 1 { "running" } else { "running" }
+        plural(sessions.len(), "session", "sessions")
     );
 
     if inferred > 0 || unresolved > 0 {
@@ -140,14 +149,20 @@ fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
     if support > 0 {
         println!(
             "{}",
-            format!("{support} Claude Code support process(es) not shown.").dimmed()
+            format!(
+                "{support} Claude Code support {} not shown.",
+                plural(support, "process", "processes")
+            )
+            .dimmed()
         );
     }
     if unreadable > 0 {
         println!(
             "{}",
             format!(
-                "{unreadable} Claude Code process(es) belong to another account and cannot be read."
+                "{unreadable} Claude Code {} {} to another account and cannot be read.",
+                plural(unreadable, "process", "processes"),
+                plural(unreadable, "belongs", "belong")
             )
             .dimmed()
         );

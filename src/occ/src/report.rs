@@ -202,7 +202,11 @@ mod tests {
         // A support process and a spawned tool both run a Claude Code image and
         // must not appear as sessions.
         let mut daemon = session_fact(2, "2.1.232", "/work", 10);
-        daemon.argv = vec!["claude".to_string(), "daemon".to_string(), "run".to_string()];
+        daemon.argv = vec![
+            "claude".to_string(),
+            "daemon".to_string(),
+            "run".to_string(),
+        ];
         let mut tool = session_fact(3, "2.1.232", "/work", 10);
         tool.argv = vec!["ugrep".to_string(), "-G".to_string()];
 
@@ -252,8 +256,8 @@ mod tests {
     #[test]
     fn a_lone_session_in_a_directory_is_attributed() {
         let facts = [session_fact(1, "2.1.205", "/work", 10)];
-        let transcripts = FakeTranscripts::default()
-            .with("/work", vec![transcript(SESSION_A, "2.1.205", 5_000)]);
+        let transcripts =
+            FakeTranscripts::default().with("/work", vec![transcript(SESSION_A, "2.1.205", 5_000)]);
 
         let rows = build(&facts, &transcripts);
 

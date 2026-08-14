@@ -138,7 +138,9 @@ mod tests {
     fn rejects_names_that_are_not_versions() {
         // The accounting name of a process spawned by Claude Code is an
         // ordinary program name, and must not be mistaken for a version.
-        for name in ["ugrep", "claude", "", "2.1.", ".1.2", "2..1", "2.1.x", "v2.1.2", "+2.1.2"] {
+        for name in [
+            "ugrep", "claude", "", "2.1.", ".1.2", "2..1", "2.1.x", "v2.1.2", "+2.1.2",
+        ] {
             assert!(
                 ClaudeVersion::parse(name).is_none(),
                 "{name:?} must not parse as a version"

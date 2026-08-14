@@ -225,7 +225,11 @@ mod tests {
 
     #[test]
     fn a_bare_session_is_a_session() {
-        let observed = fact("2.1.220", BUNDLED, &["claude", "--dangerously-skip-permissions"]);
+        let observed = fact(
+            "2.1.220",
+            BUNDLED,
+            &["claude", "--dangerously-skip-permissions"],
+        );
         assert_eq!(classify(&observed), Role::Session);
     }
 
@@ -234,7 +238,11 @@ mod tests {
         let observed = fact(
             "2.1.197",
             VERSIONED,
-            &[VERSIONED, "--session-id", "ed84c8c7-0117-4670-936c-98e0f0d2c80b"],
+            &[
+                VERSIONED,
+                "--session-id",
+                "ed84c8c7-0117-4670-936c-98e0f0d2c80b",
+            ],
         );
         assert_eq!(classify(&observed), Role::Session);
     }
@@ -255,7 +263,11 @@ mod tests {
     #[test]
     fn a_spare_named_in_its_own_argv_zero_is_support() {
         // Claude Code writes a descriptive argv[0] for these.
-        let observed = fact("2.1.232", VERSIONED, &["claude bg-spare", "--bg-spare", "/tmp/s.sock"]);
+        let observed = fact(
+            "2.1.232",
+            VERSIONED,
+            &["claude bg-spare", "--bg-spare", "/tmp/s.sock"],
+        );
         assert_eq!(classify(&observed), Role::Support("bg-spare".to_string()));
     }
 
@@ -263,8 +275,15 @@ mod tests {
     fn a_pty_host_flagged_only_by_its_arguments_is_support() {
         // This one announces the plain name `claude`; only the flag separates it
         // from a session.
-        let observed = fact("claude", BUNDLED, &["claude", "--bg-pty-host", "/tmp/p.sock"]);
-        assert_eq!(classify(&observed), Role::Support("bg-pty-host".to_string()));
+        let observed = fact(
+            "claude",
+            BUNDLED,
+            &["claude", "--bg-pty-host", "/tmp/p.sock"],
+        );
+        assert_eq!(
+            classify(&observed),
+            Role::Support("bg-pty-host".to_string())
+        );
     }
 
     #[test]
@@ -283,7 +302,11 @@ mod tests {
         // process table with an image but no arguments, no directory, and no
         // start time. Treating that emptiness as "not a session" would let `occ`
         // report a clean machine while old sessions run on it.
-        let mut observed = fact("2.1.220", "/Users/other/.local/share/claude/versions/2.1.220", &[]);
+        let mut observed = fact(
+            "2.1.220",
+            "/Users/other/.local/share/claude/versions/2.1.220",
+            &[],
+        );
         observed.cwd = None;
         observed.start_time_epoch_secs = 0;
         observed.uptime_secs = 0;

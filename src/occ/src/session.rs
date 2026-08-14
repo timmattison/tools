@@ -245,7 +245,12 @@ mod tests {
 
     #[test]
     fn rejects_anything_that_is_not_a_uuid() {
-        for text in ["", "not-a-session", "d3b0d921f0a141fcb309c11aa30c1173", "../etc/passwd"] {
+        for text in [
+            "",
+            "not-a-session",
+            "d3b0d921f0a141fcb309c11aa30c1173",
+            "../etc/passwd",
+        ] {
             assert!(SessionId::parse(text).is_none(), "{text:?} must not parse");
         }
     }
@@ -288,8 +293,14 @@ mod tests {
     #[test]
     fn a_bare_resume_names_no_session() {
         // `--resume` with nothing after it opens a picker.
-        assert_eq!(session_id_from_arguments(&argv(&["claude", "--resume"])), None);
-        assert_eq!(session_id_from_arguments(&argv(&["claude", "--continue"])), None);
+        assert_eq!(
+            session_id_from_arguments(&argv(&["claude", "--resume"])),
+            None
+        );
+        assert_eq!(
+            session_id_from_arguments(&argv(&["claude", "--continue"])),
+            None
+        );
     }
 
     #[test]
@@ -413,7 +424,13 @@ mod tests {
             &candidates,
             2,
         );
-        assert_eq!(found, Session::Ambiguous { candidates: 2, peers: 2 });
+        assert_eq!(
+            found,
+            Session::Ambiguous {
+                candidates: 2,
+                peers: 2
+            }
+        );
     }
 
     #[test]
@@ -428,7 +445,13 @@ mod tests {
             &[transcript(SESSION_A, "2.1.210", 2_000)],
             3,
         );
-        assert_eq!(found, Session::Ambiguous { candidates: 1, peers: 3 });
+        assert_eq!(
+            found,
+            Session::Ambiguous {
+                candidates: 1,
+                peers: 3
+            }
+        );
     }
 
     #[test]

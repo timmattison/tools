@@ -352,9 +352,7 @@ mod tests {
 
         /// Writes `contents` as `<session>.jsonl` in the folder for `directory`.
         fn write(&self, directory: &str, session: &str, contents: &str) {
-            let folder = self
-                .projects()
-                .join(encode_directory(Path::new(directory)));
+            let folder = self.projects().join(encode_directory(Path::new(directory)));
             std::fs::create_dir_all(&folder).expect("transcript folder");
             std::fs::write(folder.join(format!("{session}.jsonl")), contents)
                 .expect("transcript file");
@@ -378,7 +376,9 @@ mod tests {
         );
         // A dot and an underscore encode the same way a separator does.
         assert_eq!(
-            encode_directory(Path::new("/Volumes/code/tim.mattison.org-worktrees/issue-131")),
+            encode_directory(Path::new(
+                "/Volumes/code/tim.mattison.org-worktrees/issue-131"
+            )),
             "-Volumes-code-tim-mattison-org-worktrees-issue-131"
         );
         assert_eq!(
@@ -391,7 +391,10 @@ mod tests {
     fn encodes_multi_byte_characters_without_panicking() {
         // A directory name is arbitrary text. Encoding must not index into the
         // middle of a multi-byte character.
-        assert_eq!(encode_directory(Path::new("/code/日本語/café")), "-code-----caf-");
+        assert_eq!(
+            encode_directory(Path::new("/code/日本語/café")),
+            "-code-----caf-"
+        );
     }
 
     #[test]
@@ -401,7 +404,10 @@ mod tests {
             "{\"type\":\"summary\",\"cwd\":null}\n",
             line("/work/here", "2.1.232")
         );
-        assert_eq!(recorded_directory(&contents), Some("/work/here".to_string()));
+        assert_eq!(
+            recorded_directory(&contents),
+            Some("/work/here".to_string())
+        );
     }
 
     #[test]
@@ -469,7 +475,9 @@ mod tests {
     fn ignores_files_that_do_not_name_a_session() {
         let fixture = Fixture::new();
         fixture.write("/work", SESSION_A, &line("/work", "2.1.205"));
-        let folder = fixture.projects().join(encode_directory(Path::new("/work")));
+        let folder = fixture
+            .projects()
+            .join(encode_directory(Path::new("/work")));
         std::fs::write(folder.join("notes.txt"), "ignore me").expect("stray file");
         std::fs::write(folder.join("not-a-session.jsonl"), "{}").expect("stray transcript");
 
