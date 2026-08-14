@@ -353,7 +353,7 @@ mod tests {
     use pulldown_cmark::{Event, Parser, Tag};
     use tempfile::TempDir;
 
-    use super::{Git, HARNESS_EMAIL, HARNESS_NAME};
+    use super::{Git, HARNESS_EMAIL, HARNESS_NAME, INHERITED_ATTRIBUTION};
     use crate::testing::TestRepo;
 
     /// Exactly the invocation `stopped_commit_is_already_in_head` makes to find
@@ -871,28 +871,18 @@ mod tests {
         }
     }
 
-    /// The identity git hands a child through the environment instead of
-    /// through configuration. git sets all six for every hook it runs, and sets
-    /// the author trio again for each commit that rebase, cherry-pick, or am
-    /// replays. Named here rather than beside the runner because the runner no
-    /// longer removes them as a set: it pins the four name and email variables
-    /// to the harness by hand and drops the two dates. This list is what a
-    /// failure has to report, which is a different job.
-    const INHERITED_IDENTITY_VARS: [&str; 6] = [
-        "GIT_AUTHOR_NAME",
-        "GIT_AUTHOR_EMAIL",
-        "GIT_AUTHOR_DATE",
-        "GIT_COMMITTER_NAME",
-        "GIT_COMMITTER_EMAIL",
-        "GIT_COMMITTER_DATE",
-    ];
-
     /// The identity variables this process holds, named and valued, for a
     /// failure message. Reports their absence just as plainly: a mismatch with
     /// nothing inherited means something other than the environment outranked
     /// the pin, and that is a different bug worth saying out loud.
+    ///
+    /// Reads [`INHERITED_ATTRIBUTION`] rather than a list of its own, so the
+    /// diagnosis names the variables the runner actually acts on. A second copy
+    /// here would go stale the first time that list changed, and it would go
+    /// stale silently: the message would simply stop mentioning the variable
+    /// that caused the failure it is trying to explain.
     fn inherited_identity() -> String {
-        let held: Vec<String> = INHERITED_IDENTITY_VARS
+        let held: Vec<String> = INHERITED_ATTRIBUTION
             .iter()
             .filter_map(|name| {
                 std::env::var(name)
@@ -1016,26 +1006,68 @@ mod tests {
     /// repository they were committing to, which is the one thing this crate
     /// exists to keep it away from.
     ///
-    /// Both halves are asserted together, in one test, so this binary's
-    /// environment is only ever mutated in one place; the mutation is what the
-    /// guard is being asked to survive, and after the guard exists it cannot
-    /// reach the sibling test above either.
+    /// Both halves are asserted together, in one test, because they are one
+    /// leak arriving by one route.
+    ///
+    /// The environment belongs to a re-executed child of this test binary, for
+    /// the same reason [`the_pinned_identity_survives_a_hook_environment`]
+    /// re-executes: `std::env::set_var` mutates a process-wide global while the
+    /// rest of the suite is running in sibling threads, so the mutation this
+    /// test needs would reach every other test in the binary and every
+    /// concurrent run of it.
     #[test]
     fn ignores_an_inherited_git_environment_naming_another_identity_or_repository() {
+        if std::env::var_os(REDIRECTED_CHILD_MARKER).is_some() {
+            assert_the_inherited_environment_is_ignored();
+            return;
+        }
+
         // Stands in for the developer's real repository - the place a leaked
-        // environment would redirect the replay to.
+        // environment would redirect the replay to. It is built here, in the
+        // parent, and outlives the child because the parent blocks on it.
         let elsewhere = TempDir::new().expect("create the stand-in for a real repository");
-        let elsewhere_git_dir = elsewhere.path().join("their-repo.git");
-        let elsewhere_index = elsewhere.path().join("their-index");
 
-        std::env::set_var("GIT_AUTHOR_NAME", "A Developer");
-        std::env::set_var("GIT_AUTHOR_EMAIL", "developer@example.com");
-        std::env::set_var("GIT_COMMITTER_NAME", "A Developer");
-        std::env::set_var("GIT_COMMITTER_EMAIL", "developer@example.com");
-        std::env::set_var("GIT_DIR", &elsewhere_git_dir);
-        std::env::set_var("GIT_WORK_TREE", elsewhere.path());
-        std::env::set_var("GIT_INDEX_FILE", &elsewhere_index);
+        let mut child = std::process::Command::new(
+            std::env::current_exe().expect("path of the running test binary"),
+        );
+        child
+            .args([REDIRECTED_TEST_PATH, "--exact", "--nocapture"])
+            .env(REDIRECTED_CHILD_MARKER, "1")
+            .env("GIT_AUTHOR_NAME", "A Developer")
+            .env("GIT_AUTHOR_EMAIL", "developer@example.com")
+            .env("GIT_COMMITTER_NAME", "A Developer")
+            .env("GIT_COMMITTER_EMAIL", "developer@example.com")
+            .env("GIT_DIR", elsewhere.path().join("their-repo.git"))
+            .env("GIT_WORK_TREE", elsewhere.path())
+            .env("GIT_INDEX_FILE", elsewhere.path().join(THEIR_INDEX));
 
+        let output = child.output().expect("re-run this test binary");
+
+        assert!(
+            output.status.success(),
+            "an inherited git environment reached the runner:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Marks the re-executed child half of
+    /// [`ignores_an_inherited_git_environment_naming_another_identity_or_repository`].
+    const REDIRECTED_CHILD_MARKER: &str = "GITSCRATCH_REDIRECTED_ENVIRONMENT_CHILD";
+
+    /// libtest's exact filter for the one test the child half runs.
+    const REDIRECTED_TEST_PATH: &str =
+        "git::tests::ignores_an_inherited_git_environment_naming_another_identity_or_repository";
+
+    /// The index file the inherited `GIT_INDEX_FILE` names. Spelled once
+    /// because the parent sets it and the child asserts against it, and a
+    /// second spelling that drifted would leave the child looking for a name
+    /// nothing ever sets - which passes.
+    const THEIR_INDEX: &str = "their-index";
+
+    /// The child half: run under an environment naming another identity and
+    /// another repository, and pin that neither reached git.
+    fn assert_the_inherited_environment_is_ignored() {
         let here = TempDir::new().expect("create the scratch stand-in");
         let git = Git::new(here.path(), "");
         git.run(&["init", "-q", "-b", "main"])
@@ -1071,7 +1103,7 @@ mod tests {
             .run(&["rev-parse", "--git-path", "index"])
             .expect("ask git which index it would write");
         assert!(
-            !index.contains("their-index"),
+            !index.contains(THEIR_INDEX),
             "an inherited GIT_INDEX_FILE must not become the index a replay stages into: {index}"
         );
     }

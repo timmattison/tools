@@ -146,11 +146,18 @@ The unit tests in `src/git.rs` pin what needs no repository built around it.
 Some are about the code itself. **The `user.name`/`user.email` identity**, the
 last row above, is read back through `git var GIT_AUTHOR_IDENT` rather than by
 committing into a fixture, by
-`commits_under_the_crate_s_own_identity_not_a_consuming_tool_s`. **The inherited
-git environment, shed** is asserted by
+`commits_under_the_crate_s_own_identity_not_a_consuming_tool_s`, which reads it
+in an environment carrying nothing of its own — the way the suite runs from a
+shell. `the_pinned_identity_survives_a_hook_environment` reads it again under
+the environment a git hook hands down, where `GIT_AUTHOR_NAME` and its siblings
+outrank every `-c` the harness pins. **The inherited git environment, shed** is
+asserted by
 `ignores_an_inherited_git_environment_naming_another_identity_or_repository`,
-which sets a developer's name and another repository's `GIT_DIR` and
-`GIT_INDEX_FILE` in the test process and watches neither reach git. **The UTF-8
+which adds another repository's `GIT_DIR` and `GIT_INDEX_FILE` to that
+environment and watches neither reach git. Both of those last two run in a
+re-executed child of the test binary rather than in it: the environment is
+process-wide, and mutating it in place would reach every sibling test and every
+concurrent run of the suite. **The UTF-8
 refusal in `Git::paths`** —
 `refuses_a_path_that_is_not_valid_utf_8_rather_than_replacing_the_byte` — covers
 the one loss the `-z` round trip cannot undo: a byte that is not UTF-8 has no
