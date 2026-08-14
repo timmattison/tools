@@ -2022,3 +2022,40 @@ zth /Volumes/Backup > suspects.txt
 less suspects.txt
 tr '\n' '\0' < suspects.txt | xargs -0 rm --
 ```
+
+## occ (old Claude Code)
+
+List the Claude Code sessions running on this machine, oldest release first, with the process id, the release, how long the session has been open, the session id, and the working directory.
+
+A Claude Code session keeps running the release it started on. Upgrades land in the background and change nothing for a session already open, so a machine that upgrades often accumulates sessions spread across many releases. Left alone they are easy to miss: a session opened six weeks ago looks exactly like one opened this morning, and a terminal tab or a detached multiplexer pane can hold one for months. `occ` puts the oldest ones at the top, which is where the ones worth closing are.
+
+### Basic Usage
+
+```bash
+occ
+```
+
+### Options
+
+- `-V`, `--version`: Print the version, the git hash, and whether the build was clean.
+- `-h`, `--help`: Print the usage.
+
+### How it reads the release
+
+Each Claude Code release installs as a single executable named for its version, such as `~/.local/share/claude/versions/2.1.232`. macOS records the basename of the executed file as the process accounting name, so a running session reports its own release through the kernel, and `occ` reads it there.
+
+Nothing else on the machine answers the question correctly. The executable path of a running session resolves through the `claude` launcher, which is a link to whichever release is installed *now* — read the release from that path and a session running a four-month-old release is reported as running today's. The accounting name is recorded when the process starts and never changes afterwards, so it also survives an upgrade that deletes the old release file. A session running a release that no longer exists on disk is exactly the session this tool exists to find, and it is still named correctly.
+
+### How it identifies the session
+
+A live session writes `~/.claude/sessions/<pid>.json` and keeps it current. The record names the session, so `occ` reads the answer rather than working it out. `claude agents --json` prints these same records. `occ` reads the files instead, because that command costs a subprocess on every run and drops the `version` field, which is the one fact this tool exists to report.
+
+A record is believed only when it is about the process asking. The file is named for a process identifier, and an identifier is reused once the process holding it dies, so a file can outlive the session it describes. Two checks reject such a file: the identifier recorded inside it must be the one asked about, and the recorded start must agree with the process's own start. Measured across 119 live sessions, a session registered itself between one and nine seconds after its process started, and `occ` allows two minutes.
+
+A session that wrote no record is left blank and counted in the footer. Seven of 126 sessions on the machine this was built against had no record. A blank is the whole answer there, because the alternative was measured: reconstructing the link from the transcripts under `~/.claude/projects` — by working directory, release, and creation time — named the wrong session for 25 of those 126 and refused to name 70 more. Printing one session's id against another session's process is the worst failure available here, because nothing in the output would say it had happened.
+
+### What it leaves out, and says so
+
+- **Support processes.** The background daemon, pty hosts, and spares run the same executable but are not sessions. They are counted in the footer, not listed.
+- **Spawned tools.** A tool a session starts, such as a search, can still be holding the Claude Code executable at the moment the process table is sampled. It reports its own name in `argv[0]`, which is how `occ` tells it apart from a session.
+- **Other accounts' sessions.** They appear in the process table but give up no arguments, no working directory, and no start time without privileges `occ` does not ask for. They are counted in the footer. Reporting a clean machine while sixty unreadable sessions run on it would be worse than saying they cannot be read.
