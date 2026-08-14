@@ -224,8 +224,8 @@ fn should_force_colors(stdout_is_tty: bool, columns_env_present: bool, no_color_
 ///
 /// We trust the `COLORTERM` env var (the de facto signal) — the canonical
 /// values are `truecolor` and `24bit`. Anything else, including a missing
-/// var, is treated as "no truecolor" and the renderer falls back to the
-/// eight-color path. Comparison is case-insensitive.
+/// var, is treated as "no truecolor" and the fades fall back to their
+/// non-truecolor styling. Comparison is case-insensitive.
 fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
     matches!(
         colorterm_env.map(str::to_ascii_lowercase).as_deref(),
@@ -237,8 +237,8 @@ fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
 ///
 /// Priority, highest first:
 ///   1. `--no-color` or `NO_COLOR` → false (kills all color)
-///   2. `--no-truecolor` → false (force the 8-color path)
-///   3. `--truecolor` → true (force the gradient regardless of detection)
+///   2. `--no-truecolor` → false (force the fades off)
+///   3. `--truecolor` → true (force the fades on regardless of detection)
 ///   4. otherwise, auto-detect via `COLORTERM`
 fn effective_truecolor(
     cli_no_color: bool,
