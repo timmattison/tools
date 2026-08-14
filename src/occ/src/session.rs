@@ -38,8 +38,22 @@ impl SessionId {
     /// assert!(SessionId::parse("not-a-session").is_none());
     /// ```
     #[must_use]
-    pub fn parse(_text: &str) -> Option<Self> {
-        None
+    pub fn parse(text: &str) -> Option<Self> {
+        /// Hyphen positions in a canonical UUID, and its total length.
+        const HYPHEN_POSITIONS: [usize; 4] = [8, 13, 18, 23];
+        const UUID_LEN: usize = 36;
+
+        if text.len() != UUID_LEN {
+            return None;
+        }
+        let well_formed = text.bytes().enumerate().all(|(index, byte)| {
+            if HYPHEN_POSITIONS.contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+        well_formed.then(|| Self(text.to_string()))
     }
 
     /// The id as text.
@@ -93,8 +107,35 @@ pub enum Session {
 /// the session actually running. A `--resume` may name either an id or a
 /// transcript path.
 #[must_use]
-pub fn session_id_from_arguments(_argv: &[String]) -> Option<SessionId> {
-    None
+pub fn session_id_from_arguments(argv: &[String]) -> Option<SessionId> {
+    /// Reads the value of `flag`, accepting both `--flag value` and
+    /// `--flag=value`.
+    fn value_of<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+        let prefix = format!("{flag}=");
+        for (index, argument) in argv.iter().enumerate() {
+            if let Some(inline) = argument.strip_prefix(&prefix) {
+                return Some(inline);
+            }
+            if argument == flag {
+                return argv.get(index + 1).map(String::as_str);
+            }
+        }
+        None
+    }
+
+    /// Reads an id given either directly or as a transcript path.
+    fn as_session_id(value: &str) -> Option<SessionId> {
+        SessionId::parse(value).or_else(|| {
+            let file = std::path::Path::new(value).file_name()?.to_str()?;
+            SessionId::parse(file.strip_suffix(".jsonl")?)
+        })
+    }
+
+    // `--session-id` first: a forked session carries both flags, and only this
+    // one names the session that is actually running.
+    value_of(argv, "--session-id")
+        .and_then(as_session_id)
+        .or_else(|| value_of(argv, "--resume").and_then(as_session_id))
 }
 
 /// Attributes a session to one process.
@@ -104,13 +145,41 @@ pub fn session_id_from_arguments(_argv: &[String]) -> Option<SessionId> {
 /// directory and release, this one included.
 #[must_use]
 pub fn attribute(
-    _argv: &[String],
-    _version: Option<&ClaudeVersion>,
-    _start_time_epoch_secs: u64,
-    _candidates: &[Transcript],
-    _peers: usize,
+    argv: &[String],
+    version: Option<&ClaudeVersion>,
+    start_time_epoch_secs: u64,
+    candidates: &[Transcript],
+    peers: usize,
 ) -> Session {
-    Session::Unknown
+    if let Some(named) = session_id_from_arguments(argv) {
+        return Session::Named(named);
+    }
+
+    let fitting: Vec<&Transcript> = candidates
+        .iter()
+        .filter(|transcript| {
+            // A transcript last written before this process started belongs to a
+            // session that ended before this process existed.
+            if transcript.modified_epoch_secs < start_time_epoch_secs {
+                return false;
+            }
+            // The release narrows the field, but only when both releases are
+            // known. An unknown release must not silently exclude anything.
+            match (version, transcript.version.as_ref()) {
+                (Some(running), Some(recorded)) => running == recorded,
+                _ => true,
+            }
+        })
+        .collect();
+
+    match (fitting.as_slice(), peers) {
+        ([], _) => Session::Unknown,
+        ([only], 1) => Session::Matched(only.id.clone()),
+        _ => Session::Ambiguous {
+            candidates: fitting.len(),
+            peers,
+        },
+    }
 }
 
 #[cfg(test)]
