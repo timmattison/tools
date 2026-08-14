@@ -163,7 +163,11 @@ pub fn attribute(
     let fitting: Vec<&Transcript> = candidates
         .iter()
         .filter(|transcript| {
-            let _ = start_time_epoch_secs;
+            // A transcript that existed before this process did records a
+            // session this process cannot have opened.
+            if transcript.created_epoch_secs < start_time_epoch_secs {
+                return false;
+            }
             // The release narrows the field, but only when both releases are
             // known. An unknown release must not silently exclude anything.
             match (version, transcript.version.as_ref()) {
