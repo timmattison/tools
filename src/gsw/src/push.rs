@@ -10,8 +10,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use colored::Colorize;
+use colored::{ColoredString, Colorize};
 
 use crate::render::{truncate_right, Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
@@ -509,6 +510,13 @@ pub(crate) struct PushOutcome {
 /// branch for each one.
 pub(crate) struct PushUi {
     state: State,
+    /// Whether the terminal takes 24-bit color, as [`crate::RenderConfig`]
+    /// resolved it from the CLI flags and `COLORTERM`. Carried here because the
+    /// status message fades, and a fade
+    /// is a gradient: the same flag the commit-log ramp is gated on gates this,
+    /// so a terminal that would print the escape sequences as text gets the
+    /// coarse fallback instead.
+    truecolor: bool,
 }
 
 /// What the push feature is currently doing. Private: the loop drives this
@@ -541,9 +549,27 @@ enum State {
 }
 
 impl PushUi {
-    /// A UI with nothing on screen.
-    pub(crate) fn new() -> Self {
-        Self { state: State::Idle }
+    /// A UI with nothing on screen, drawing on a terminal that takes 24-bit
+    /// color when `truecolor` says so.
+    pub(crate) fn new(truecolor: bool) -> Self {
+        Self {
+            state: State::Idle,
+            truecolor,
+        }
+    }
+
+    /// How long until what this paints changes on its own, or `None` when
+    /// nothing on screen moves with the passage of time.
+    ///
+    /// The watch loop folds this into the same wait window as the decay tick
+    /// and the refresh countdown, so a message that ages has a deadline of its
+    /// own rather than relying on some other source to wake the loop. That
+    /// matters most where no other source exists: `--refresh-interval 0` on a
+    /// repository whose newest commit is hours old leaves the loop blocked on
+    /// the channel indefinitely, and a message that expires only when something
+    /// else happens does not expire.
+    pub(crate) fn next_tick(&self) -> Option<Duration> {
+        None
     }
 
     /// What keys mean right now.
@@ -585,7 +611,8 @@ impl PushUi {
     /// classified. [`PushUi::overlay`] still drops a question it cannot draw,
     /// but that now covers only the pane resized down while a question is
     /// already up: the render path is the only thing that sees the new size.
-    pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions) {
+    pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions, now: Instant) {
+        let _ = now;
         self.state = match prompt_for(
             &snapshot.branch,
             snapshot.push_remote.as_deref(),
@@ -645,7 +672,8 @@ impl PushUi {
     /// git's output, so a create reports itself as a create. On failure it is
     /// git's own words — a gsw paraphrase of a push error would drop exactly
     /// the detail the user needs.
-    pub(crate) fn finished(&mut self, outcome: PushOutcome) {
+    pub(crate) fn finished(&mut self, outcome: PushOutcome, now: Instant) {
+        let _ = now;
         let success_message = match std::mem::replace(&mut self.state, State::Idle) {
             State::Running { success_message } => success_message,
             // A finish with no push running: nothing to report against, so
@@ -718,7 +746,8 @@ impl PushUi {
     /// fitted when it was asked, a resize took its row, and this is the only
     /// place that sees the new size. Nothing is lost but the question either
     /// way: `p` in a pane with a row to spare asks it again.
-    pub(crate) fn overlay(&mut self, dims: Dimensions) -> Overlay {
+    pub(crate) fn overlay(&mut self, dims: Dimensions, now: Instant) -> Overlay {
+        let _ = now;
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
             State::Idle => Vec::new(),
@@ -862,6 +891,27 @@ const CONFIRM_HINT: &str = "[y/Enter = push, n/Esc = cancel]";
 
 /// What a running push says while the network round trip is in flight.
 const RUNNING_NOTICE: &str = "Pushing…";
+
+/// How long a status message gsw wrote itself stays under the frame.
+///
+/// It is also the length of the fade, so the message reaches black exactly as
+/// it is removed and nothing ever blinks out at full brightness.
+const STATUS_LIFETIME: Duration = Duration::from_secs(60);
+
+/// How often such a message has to be repainted for its age text and its fade
+/// to move.
+///
+/// One second, because that is the resolution of the age text — `5s ago`, then
+/// `6s ago` — and a fade redrawn more often than the words beside it would cost
+/// repaints nobody can read. The same cadence, for the same reason, as the
+/// decay tick that advances the commit ages in the frame above.
+const STATUS_CADENCE: Duration = Duration::from_secs(1);
+
+/// Color one row of an ageing status message, `elapsed` after it was posted.
+fn colorize_status(line: &str, elapsed: Duration, truecolor: bool) -> ColoredString {
+    let _ = (elapsed, truecolor);
+    line.normal()
+}
 
 /// What a failed push says when git said nothing gsw could show.
 const SILENT_FAILURE: &str = "git push failed";
@@ -1263,6 +1313,20 @@ mod ui_tests {
         unicode_width::UnicodeWidthStr::width(visible.as_str())
     }
 
+    /// The instant every test starts from.
+    ///
+    /// `Instant` has no constructor, so the origin is read from the real clock
+    /// once and every later moment is derived by adding to it. Nothing here
+    /// waits for real time to pass: a test that wants a minute-old message adds
+    /// a minute to this and hands the result to [`PushUi::overlay`].
+    ///
+    /// Read fresh on each call rather than cached in a `static`, so no test can
+    /// leave a mutated origin behind for the next one — the value is only ever
+    /// compared against instants derived from the same call.
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
     /// A pane `width` columns wide with more rows than any overlay can want, so
     /// a test about wording or row count is not also a test about clipping.
     fn tall_pane(width: usize) -> Dimensions {
@@ -1274,17 +1338,17 @@ mod ui_tests {
 
     /// A UI with the confirmation already on screen for an untracked branch.
     fn asking() -> PushUi {
-        let mut ui = PushUi::new();
-        ui.request(&snapshot(None), tall_pane(80));
+        let mut ui = PushUi::new(false);
+        ui.request(&snapshot(None), tall_pane(80), t0());
         ui
     }
 
     #[test]
     fn a_fresh_ui_shows_nothing_and_leaves_the_keys_alone() {
-        let mut ui = PushUi::new();
+        let mut ui = PushUi::new(false);
         assert_eq!(ui.mode(), InputMode::Normal);
-        assert_eq!(ui.overlay(tall_pane(80)).rows(), 0);
-        assert_eq!(ui.overlay(tall_pane(80)).text(), "");
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 0);
+        assert_eq!(ui.overlay(tall_pane(80), t0()).text(), "");
     }
 
     #[test]
@@ -1293,8 +1357,8 @@ mod ui_tests {
         // the key table, or `y` would be read as an ordinary key.
         let mut ui = asking();
         assert_eq!(ui.mode(), InputMode::Confirm);
-        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
-        let overlay = ui.overlay(tall_pane(80)).text();
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
+        let overlay = ui.overlay(tall_pane(80), t0()).text();
         assert!(
             overlay.contains("Create new remote branch origin/gsw-push?"),
             "the question must be on screen, got {overlay:?}",
@@ -1313,16 +1377,18 @@ mod ui_tests {
     fn requesting_a_push_with_nothing_to_push_explains_instead_of_asking() {
         // The refusal is a message, not a question: the keys must stay normal,
         // so `y` does not answer a prompt that is not there.
-        let mut ui = PushUi::new();
-        ui.request(&snapshot(tracked(0)), tall_pane(80));
+        let mut ui = PushUi::new(false);
+        ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
         assert_eq!(ui.mode(), InputMode::Normal);
-        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(ui
-            .overlay(tall_pane(80))
+            .overlay(tall_pane(80), t0())
             .text()
             .contains("origin/gsw-push is already up to date"));
         assert!(
-            !ui.overlay(tall_pane(80)).text().contains(CONFIRM_HINT),
+            !ui.overlay(tall_pane(80), t0())
+                .text()
+                .contains(CONFIRM_HINT),
             "a refusal must not offer keys that do nothing",
         );
     }
@@ -1339,7 +1405,7 @@ mod ui_tests {
         );
         assert_eq!(ui.mode(), InputMode::Pushing);
         assert_eq!(
-            ui.overlay(tall_pane(80)).rows(),
+            ui.overlay(tall_pane(80), t0()).rows(),
             1,
             "the running push stays on screen"
         );
@@ -1350,7 +1416,7 @@ mod ui_tests {
         // Belt and braces against a stray PushConfirmed: with no confirmation
         // on screen there is no command to run, and inventing one would push
         // without asking.
-        let mut ui = PushUi::new();
+        let mut ui = PushUi::new(false);
         assert_eq!(ui.confirm(), None);
         assert_eq!(ui.mode(), InputMode::Normal);
     }
@@ -1370,7 +1436,7 @@ mod ui_tests {
         ui.cancel();
         assert_eq!(ui.mode(), InputMode::Normal);
         assert_eq!(
-            ui.overlay(tall_pane(80)).rows(),
+            ui.overlay(tall_pane(80), t0()).rows(),
             0,
             "a cancelled prompt leaves nothing behind"
         );
@@ -1382,28 +1448,34 @@ mod ui_tests {
         // create rather than as a generic success.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: true,
-            output: "To /tmp/origin\n * [new branch] gsw-push -> gsw-push\n".to_string(),
-        });
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: "To /tmp/origin\n * [new branch] gsw-push -> gsw-push\n".to_string(),
+            },
+            t0(),
+        );
         assert_eq!(ui.mode(), InputMode::Normal);
         assert!(ui
-            .overlay(tall_pane(80))
+            .overlay(tall_pane(80), t0())
             .text()
             .contains("Created origin/gsw-push"));
     }
 
     #[test]
     fn a_successful_update_counts_what_it_pushed() {
-        let mut ui = PushUi::new();
-        ui.request(&snapshot(tracked(3)), tall_pane(80));
+        let mut ui = PushUi::new(false);
+        ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: true,
-            output: String::new(),
-        });
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            t0(),
+        );
         assert!(ui
-            .overlay(tall_pane(80))
+            .overlay(tall_pane(80), t0())
             .text()
             .contains("Pushed 3 commits to origin/gsw-push"));
     }
@@ -1414,14 +1486,17 @@ mod ui_tests {
         // gsw paraphrase.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: false,
-            output: "To /tmp/origin\n ! [rejected] gsw-push -> gsw-push (fetch first)\n\
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "To /tmp/origin\n ! [rejected] gsw-push -> gsw-push (fetch first)\n\
                      error: failed to push some refs to '/tmp/origin'\n"
-                .to_string(),
-        });
+                    .to_string(),
+            },
+            t0(),
+        );
         assert_eq!(ui.mode(), InputMode::Normal);
-        let overlay = ui.overlay(tall_pane(120)).text();
+        let overlay = ui.overlay(tall_pane(120), t0()).text();
         assert!(overlay.contains("! [rejected]"), "got {overlay:?}");
         assert!(
             overlay.contains("error: failed to push some refs"),
@@ -1435,17 +1510,20 @@ mod ui_tests {
         // crowd out the error itself when only three rows are free.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: false,
-            output: "To /tmp/origin\n\
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "To /tmp/origin\n\
                      hint: Updates were rejected because the tip is behind\n\
                      hint: its remote counterpart. Integrate the changes\n\
                      hint: before pushing again.\n\
                      ! [rejected] gsw-push -> gsw-push (fetch first)\n\
                      error: failed to push some refs\n"
-                .to_string(),
-        });
-        let overlay = ui.overlay(tall_pane(120)).text();
+                    .to_string(),
+            },
+            t0(),
+        );
+        let overlay = ui.overlay(tall_pane(120), t0()).text();
         assert!(
             !overlay.contains("hint:"),
             "hints must not survive, got {overlay:?}"
@@ -1466,13 +1544,16 @@ mod ui_tests {
         let output = (1..=20)
             .map(|n| format!("error: line {n}\n"))
             .collect::<String>();
-        ui.finished(PushOutcome {
-            success: false,
-            output,
-        });
-        assert_eq!(ui.overlay(tall_pane(80)).rows(), MAX_STATUS_ROWS);
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output,
+            },
+            t0(),
+        );
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), MAX_STATUS_ROWS);
         assert_eq!(
-            ui.overlay(tall_pane(80)).text().lines().count(),
+            ui.overlay(tall_pane(80), t0()).text().lines().count(),
             MAX_STATUS_ROWS
         );
     }
@@ -1484,17 +1565,23 @@ mod ui_tests {
         // frame gave up, and the last one is not the frame's to give.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: false,
-            output: "To /tmp/origin\n\
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "To /tmp/origin\n\
                      ! [rejected] gsw-push -> gsw-push (fetch first)\n\
                      error: failed to push some refs\n"
-                .to_string(),
-        });
-        let overlay = ui.overlay(Dimensions {
-            width: 80,
-            height: 3,
-        });
+                    .to_string(),
+            },
+            t0(),
+        );
+        let overlay = ui.overlay(
+            Dimensions {
+                width: 80,
+                height: 3,
+            },
+            t0(),
+        );
         assert_eq!(overlay.rows(), 2, "the frame keeps the third row");
         // git leads with the part worth reading, so the tail is what goes.
         let text = overlay.text();
@@ -1510,10 +1597,13 @@ mod ui_tests {
         // Nothing is left to overlay onto, and a pane showing only a question
         // with no frame under it is not watch mode.
         let mut ui = asking();
-        let overlay = ui.overlay(Dimensions {
-            width: 80,
-            height: 1,
-        });
+        let overlay = ui.overlay(
+            Dimensions {
+                width: 80,
+                height: 1,
+            },
+            t0(),
+        );
         assert_eq!(overlay.rows(), 0);
         assert_eq!(overlay.text(), "");
     }
@@ -1527,10 +1617,13 @@ mod ui_tests {
         // question goes when its row does, and the keys go with it.
         let mut ui = asking();
         assert_eq!(ui.mode(), InputMode::Confirm, "the question was raised");
-        let overlay = ui.overlay(Dimensions {
-            width: 80,
-            height: 1,
-        });
+        let overlay = ui.overlay(
+            Dimensions {
+                width: 80,
+                height: 1,
+            },
+            t0(),
+        );
         assert_eq!(overlay.text(), "", "the pane had no row to ask in");
         assert_eq!(
             ui.mode(),
@@ -1551,13 +1644,14 @@ mod ui_tests {
         // consulted where the question is raised: a `p` in a pane with no row
         // to spare leaves the keys alone, and there is no question for a later
         // key to answer.
-        let mut ui = PushUi::new();
+        let mut ui = PushUi::new(false);
         ui.request(
             &snapshot(None),
             Dimensions {
                 width: 80,
                 height: 1,
             },
+            t0(),
         );
         assert_eq!(
             ui.mode(),
@@ -1578,14 +1672,17 @@ mod ui_tests {
         // bottom of the pane.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: false,
-            output: (1..=20)
-                .map(|n| format!("error: line {n}\n"))
-                .collect::<String>(),
-        });
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: (1..=20)
+                    .map(|n| format!("error: line {n}\n"))
+                    .collect::<String>(),
+            },
+            t0(),
+        );
         for height in 0..8 {
-            let overlay = ui.overlay(Dimensions { width: 80, height });
+            let overlay = ui.overlay(Dimensions { width: 80, height }, t0());
             let painted = if overlay.text().is_empty() {
                 0
             } else {
@@ -1619,7 +1716,7 @@ mod ui_tests {
     fn reporting(outcome: PushOutcome) -> PushUi {
         let mut ui = asking();
         ui.confirm();
-        ui.finished(outcome);
+        ui.finished(outcome, t0());
         ui
     }
 
@@ -1646,13 +1743,13 @@ mod ui_tests {
             ui
         };
         let refusing = {
-            let mut ui = PushUi::new();
-            ui.request(&snapshot(tracked(0)), tall_pane(80));
+            let mut ui = PushUi::new(false);
+            ui.request(&snapshot(tracked(0)), tall_pane(80), t0());
             ui
         };
         let asking_to_update = {
-            let mut ui = PushUi::new();
-            ui.request(&snapshot(tracked(3)), tall_pane(80));
+            let mut ui = PushUi::new(false);
+            ui.request(&snapshot(tracked(3)), tall_pane(80), t0());
             ui
         };
         let running = {
@@ -1661,7 +1758,7 @@ mod ui_tests {
             ui
         };
         vec![
-            ("idle", PushUi::new()),
+            ("idle", PushUi::new(false)),
             ("asking to create a remote branch", asking()),
             ("asking to update a remote branch", asking_to_update),
             ("running a push", running),
@@ -1708,10 +1805,13 @@ mod ui_tests {
         // nine times.
         for height in 0..=SWEEP_MAX_HEIGHT {
             for (name, mut ui) in every_state() {
-                let overlay = ui.overlay(Dimensions {
-                    width: SWEEP_WIDTH,
-                    height,
-                });
+                let overlay = ui.overlay(
+                    Dimensions {
+                        width: SWEEP_WIDTH,
+                        height,
+                    },
+                    t0(),
+                );
 
                 // The count and the body must be the same rows. A count larger
                 // than the text leaves a blank strip under the frame; a count
@@ -1777,13 +1877,16 @@ mod ui_tests {
         // that reads as success.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: false,
-            output: "   \n\n".to_string(),
-        });
-        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "   \n\n".to_string(),
+            },
+            t0(),
+        );
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         assert!(
-            !ui.overlay(tall_pane(80)).text().trim().is_empty(),
+            !ui.overlay(tall_pane(80), t0()).text().trim().is_empty(),
             "a failure must always say that it failed",
         );
     }
@@ -1794,18 +1897,21 @@ mod ui_tests {
         // repaint, and go away only when the user has pressed something.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: false,
-            output: "error: failed to push some refs\n".to_string(),
-        });
-        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            t0(),
+        );
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
         ui.dismiss();
         assert_eq!(
-            ui.overlay(tall_pane(80)).rows(),
+            ui.overlay(tall_pane(80), t0()).rows(),
             0,
             "a key press clears the message"
         );
-        assert_eq!(ui.overlay(tall_pane(80)).text(), "");
+        assert_eq!(ui.overlay(tall_pane(80), t0()).text(), "");
     }
 
     #[test]
@@ -1829,7 +1935,7 @@ mod ui_tests {
     fn a_running_push_says_so() {
         let mut ui = asking();
         ui.confirm();
-        let overlay = ui.overlay(tall_pane(80)).text();
+        let overlay = ui.overlay(tall_pane(80), t0()).text();
         assert!(
             overlay.to_lowercase().contains("push"),
             "the running notice must name what is happening, got {overlay:?}",
@@ -1840,12 +1946,12 @@ mod ui_tests {
     fn the_overlay_never_exceeds_the_width_it_is_given() {
         // gsw's standing contract: nothing it prints wraps. A long remote name
         // or a long git error must be truncated, not folded onto a new row.
-        let mut ui = PushUi::new();
+        let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "a-branch-name-long-enough-to-need-truncating-on-a-narrow-pane".to_string();
-        ui.request(&snap, tall_pane(80));
+        ui.request(&snap, tall_pane(80), t0());
         for width in [10, 20, 40] {
-            let overlay = ui.overlay(tall_pane(width)).text();
+            let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
                 assert!(
                     visible_width(line) <= width,
@@ -1859,12 +1965,12 @@ mod ui_tests {
     fn the_overlay_truncates_multibyte_text_without_panicking() {
         // Branch names can hold multi-byte characters, and byte-slicing one at
         // a narrow width is a panic in the middle of the alternate screen.
-        let mut ui = PushUi::new();
+        let mut ui = PushUi::new(false);
         let mut snap = snapshot(None);
         snap.branch = "日本語のブランチ名-🎉-café".to_string();
-        ui.request(&snap, tall_pane(80));
+        ui.request(&snap, tall_pane(80), t0());
         for width in 1..40 {
-            let overlay = ui.overlay(tall_pane(width)).text();
+            let overlay = ui.overlay(tall_pane(width), t0()).text();
             for line in overlay.lines() {
                 assert!(
                     visible_width(line) <= width,
@@ -1880,14 +1986,292 @@ mod ui_tests {
         // question, not stack a second row under the first.
         let mut ui = asking();
         ui.confirm();
-        ui.finished(PushOutcome {
-            success: false,
-            output: "error: failed to push some refs\n".to_string(),
-        });
-        ui.request(&snapshot(None), tall_pane(80));
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            t0(),
+        );
+        ui.request(&snapshot(None), tall_pane(80), t0());
         assert_eq!(ui.mode(), InputMode::Confirm);
-        assert_eq!(ui.overlay(tall_pane(80)).rows(), 1);
-        assert!(!ui.overlay(tall_pane(120)).text().contains("error:"));
+        assert_eq!(ui.overlay(tall_pane(80), t0()).rows(), 1);
+        assert!(!ui.overlay(tall_pane(120), t0()).text().contains("error:"));
+    }
+
+    /// A UI holding the message a finished update push leaves behind, posted at
+    /// `at`. The state every test below about ageing starts from.
+    fn pushed_at(at: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request(&snapshot(tracked(3)), tall_pane(80), at);
+        ui.confirm();
+        ui.finished(
+            PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            at,
+        );
+        ui
+    }
+
+    #[test]
+    fn a_successful_push_says_how_long_ago_it_happened() {
+        // A monitor's rows all say when. "Pushed 3 commits" on its own stops
+        // being news the moment the user looks away, and nothing on screen
+        // tells them whether they are reading something from five seconds ago
+        // or from before lunch.
+        let start = t0();
+        let mut ui = pushed_at(start);
+
+        let fresh = ui.overlay(tall_pane(80), start).text();
+        assert!(
+            fresh.contains("Pushed 3 commits to origin/gsw-push"),
+            "the message itself must survive the age being added, got {fresh:?}",
+        );
+        assert!(
+            fresh.contains("(0s ago)"),
+            "a message just posted must say so, got {fresh:?}",
+        );
+
+        let later = ui
+            .overlay(tall_pane(80), start + Duration::from_secs(5))
+            .text();
+        assert!(
+            later.contains("Pushed 3 commits to origin/gsw-push"),
+            "got {later:?}",
+        );
+        assert!(
+            later.contains("(5s ago)"),
+            "the age must advance with the clock, got {later:?}",
+        );
+    }
+
+    #[test]
+    fn a_successful_push_takes_itself_off_the_screen() {
+        // The complaint this feature answers: the message stayed until a key
+        // was pressed, which on a monitor nobody is typing at means forever.
+        let start = t0();
+        let mut ui = pushed_at(start);
+
+        assert_eq!(
+            ui.overlay(tall_pane(80), start + STATUS_LIFETIME - STATUS_CADENCE)
+                .rows(),
+            1,
+            "the message must last its whole lifetime",
+        );
+
+        let expired = ui.overlay(tall_pane(80), start + STATUS_LIFETIME);
+        assert_eq!(expired.rows(), 0, "the message must remove itself");
+        assert_eq!(expired.text(), "");
+        assert_eq!(
+            expired.frame_rows(),
+            tall_pane(80).height,
+            "the row it was using must go back to the frame",
+        );
+        assert_eq!(ui.mode(), InputMode::Normal);
+    }
+
+    #[test]
+    fn a_refused_push_also_says_when_and_also_goes_away() {
+        // A refusal describes the repository as it stood when `p` was pressed,
+        // so it goes stale exactly the way a success does — and it costs the
+        // frame the same row until it does.
+        let start = t0();
+        let mut ui = PushUi::new(false);
+        ui.request(&snapshot(tracked(0)), tall_pane(80), start);
+
+        let text = ui
+            .overlay(tall_pane(80), start + Duration::from_secs(7))
+            .text();
+        assert!(
+            text.contains("origin/gsw-push is already up to date"),
+            "got {text:?}",
+        );
+        assert!(text.contains("(7s ago)"), "got {text:?}");
+
+        assert_eq!(
+            ui.overlay(tall_pane(80), start + STATUS_LIFETIME).rows(),
+            0,
+            "a refusal must expire like any other message gsw wrote",
+        );
+    }
+
+    #[test]
+    fn a_failed_push_stays_however_long_it_takes() {
+        // The one message gsw must not remove by itself. git's error text is
+        // what the user has to read and act on, and a remedy that expires
+        // while they are looking at another pane is worse than a row spent.
+        let start = t0();
+        let mut ui = asking();
+        ui.confirm();
+        ui.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            start,
+        );
+
+        let hours_later = ui.overlay(tall_pane(80), start + Duration::from_secs(3 * 60 * 60));
+        assert_eq!(hours_later.rows(), 1, "an error must not expire");
+        assert!(
+            hours_later
+                .text()
+                .contains("error: failed to push some refs"),
+            "got {:?}",
+            hours_later.text(),
+        );
+        assert!(
+            !hours_later.text().contains("ago"),
+            "an error that never expires has no countdown to report, got {:?}",
+            hours_later.text(),
+        );
+
+        ui.dismiss();
+        assert_eq!(
+            ui.overlay(tall_pane(80), start).rows(),
+            0,
+            "a key press is still what clears it",
+        );
+    }
+
+    #[test]
+    fn an_ageing_message_darkens_all_the_way_to_black() {
+        // The fade is the other half of the age text: a message on its way out
+        // should look like it, and be gone rather than dark by the end.
+        //
+        // Asserted on the typed color rather than on the escape bytes, because
+        // whether `colored` emits any is process-global state other tests in
+        // this binary toggle.
+        let brightness = |elapsed: Duration| match colorize_status(TEXT, elapsed, true).fgcolor {
+            Some(colored::Color::TrueColor { r, g, b }) => {
+                u32::from(r) + u32::from(g) + u32::from(b)
+            }
+            other => panic!("a fading row must carry a truecolor foreground, got {other:?}"),
+        };
+
+        assert!(
+            brightness(Duration::ZERO) > 0,
+            "a message just posted is drawn at full brightness",
+        );
+        assert_eq!(
+            brightness(STATUS_LIFETIME),
+            0,
+            "the fade must reach black exactly as the message is removed",
+        );
+
+        // Monotone the whole way down, so no repaint ever brightens a message
+        // that is on its way out.
+        let mut previous = brightness(Duration::ZERO);
+        for second in 1..=STATUS_LIFETIME.as_secs() {
+            let now = brightness(Duration::from_secs(second));
+            assert!(
+                now <= previous,
+                "the fade brightened at {second}s: {previous} then {now}",
+            );
+            previous = now;
+        }
+    }
+
+    #[test]
+    fn an_ageing_message_dims_once_where_there_is_no_truecolor() {
+        // The 8-color fallback the commit-log gradient already has. Two steps
+        // is all there is to spend, so the message is drawn plain while the
+        // news is current and dim for the rest of its life.
+        use colored::Styles;
+        let fresh = colorize_status(TEXT, Duration::ZERO, false);
+        assert!(
+            !fresh.style.contains(Styles::Dimmed) && fresh.fgcolor.is_none(),
+            "a message just posted is drawn exactly as it was before",
+        );
+        assert!(
+            colorize_status(TEXT, STATUS_LIFETIME - STATUS_CADENCE, false)
+                .style
+                .contains(Styles::Dimmed),
+            "an old message must be dimmed even with no gradient to fade along",
+        );
+    }
+
+    /// Stand-in row for the styling tests, which are about the color a status
+    /// row is drawn in and not about what it says.
+    const TEXT: &str = "Pushed 3 commits to origin/gsw-push (5s ago)";
+
+    #[test]
+    fn an_ageing_message_wakes_the_loop_every_second() {
+        // The loop sleeps until the soonest deadline any source imposes, and
+        // with `--refresh-interval 0` on a repository whose newest commit is
+        // hours old there is no other source at all. Without a deadline of its
+        // own the message would age only when something else happened to
+        // happen, and expire only when the user pressed a key — which is what
+        // it is here to stop doing.
+        let start = t0();
+        let mut ui = pushed_at(start);
+        ui.overlay(tall_pane(80), start);
+        assert_eq!(ui.next_tick(), Some(STATUS_CADENCE));
+
+        // And it stops asking once there is nothing left to move.
+        ui.overlay(tall_pane(80), start + STATUS_LIFETIME);
+        assert_eq!(
+            ui.next_tick(),
+            None,
+            "an expired message must not go on waking the loop",
+        );
+    }
+
+    #[test]
+    fn nothing_that_does_not_age_asks_the_loop_to_wake() {
+        // A wake-up costs a repaint of the whole pane, so only a message that
+        // actually changes with the clock may ask for one.
+        let start = t0();
+
+        assert_eq!(PushUi::new(false).next_tick(), None, "an idle UI");
+        assert_eq!(
+            asking().next_tick(),
+            None,
+            "a question waiting for an answer"
+        );
+
+        let mut running = asking();
+        running.confirm();
+        assert_eq!(running.next_tick(), None, "a push in flight");
+
+        let mut failed = asking();
+        failed.confirm();
+        failed.finished(
+            PushOutcome {
+                success: false,
+                output: "error: failed to push some refs\n".to_string(),
+            },
+            start,
+        );
+        assert_eq!(failed.next_tick(), None, "an error that never expires");
+    }
+
+    #[test]
+    fn the_age_is_part_of_what_the_pane_has_to_fit() {
+        // The age is appended before the row is truncated, not after, or a
+        // narrow pane gets a row that wraps — and a wrapped row scrolls the
+        // alternate screen gsw was measured to fill exactly.
+        let start = t0();
+        let mut ui = pushed_at(start);
+        for width in 1..60 {
+            let text = ui
+                .overlay(
+                    Dimensions {
+                        width,
+                        height: MAX_STATUS_ROWS + 10,
+                    },
+                    start + Duration::from_secs(42),
+                )
+                .text();
+            for line in text.lines() {
+                assert!(
+                    visible_width(line) <= width,
+                    "line {line:?} exceeds width {width}",
+                );
+            }
+        }
     }
 }
 

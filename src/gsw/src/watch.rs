@@ -775,6 +775,7 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
         cache,
         initial_freshest,
         schedule,
+        PushUi::new(cfg.truecolor),
         LoopHooks {
             collect: || walk(&mut handle, &ignore, cfg),
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
@@ -983,6 +984,12 @@ enum Flow {
 /// times is a rule that will be updated twice. Every event goes through here,
 /// so a variant added later cannot be handled in two of the three places.
 ///
+/// `clock` is the loop's injected clock, and it is passed rather than an
+/// instant so it is read only by the two events that need one: a self-expiring
+/// status message counts its age from the moment the news arrived, and no other
+/// event has a moment to record. Reading it up front instead would put a clock
+/// call on every filesystem event in a burst, for the two that use it.
+///
 /// A key arrives unclassified and is resolved here against `ui`'s *current*
 /// mode, which is what makes a burst read correctly: within one drain, the `p`
 /// ahead of a `y` has already switched the mode by the time the `y` is looked
@@ -997,15 +1004,17 @@ enum Flow {
 /// behind that `p` is read as the ordinary key it is. `dims` is the pane the
 /// last render measured, which is the pane the user was looking at when they
 /// pressed the key — the loop re-measures after this drain, not during it.
-fn absorb<StartPush>(
+fn absorb<Clock, StartPush>(
     event: Event,
     pending: &mut Pending,
     ui: &mut PushUi,
     snapshot: &Snapshot,
     dims: Dimensions,
+    clock: &Clock,
     start_push: &mut StartPush,
 ) -> Flow
 where
+    Clock: Fn() -> Instant,
     StartPush: FnMut(PushCommand),
 {
     match event {
@@ -1015,10 +1024,10 @@ where
         Event::ForceRefresh => pending.force = true,
         Event::Key(key) => {
             if let Some(action) = classify_input(key, ui.mode()) {
-                return absorb(action, pending, ui, snapshot, dims, start_push);
+                return absorb(action, pending, ui, snapshot, dims, clock, start_push);
             }
         }
-        Event::PushRequested => ui.request(snapshot, dims),
+        Event::PushRequested => ui.request(snapshot, dims, clock()),
         // `confirm` yields the command only once, so a second `y` that raced
         // the mode change starts nothing.
         Event::PushConfirmed => {
@@ -1030,7 +1039,7 @@ where
         Event::Dismiss => ui.dismiss(),
         Event::PushFinished(outcome) => {
             let succeeded = outcome.success;
-            ui.finished(outcome);
+            ui.finished(outcome, clock());
             // A successful push moved the upstream, so the header's arrows and
             // tracking segment are stale the moment it lands — walk now rather
             // than leaving a wrong count on screen until the next refresh. A
@@ -1056,10 +1065,17 @@ where
 ///
 /// No timer needs a thread of its own: every deadline is folded into the
 /// `recv_timeout` window by [`wait_window`], so a timeout *is* the tick, and the
-/// window is recomputed after every render. Three sources feed it — the decay
-/// cadence from `next_tick` (in `hooks`), the walk the schedule owes, and, while
-/// a countdown is on screen, [`CLOCK_CADENCE`]. With all three absent the loop
+/// window is recomputed after every render. Four sources feed it — the decay
+/// cadence from `next_tick` (in `hooks`), the walk the schedule owes, while
+/// a countdown is on screen [`CLOCK_CADENCE`], and, while a status message is
+/// ageing under the frame, [`PushUi::next_tick`]. With all four absent the loop
 /// blocks indefinitely on events.
+///
+/// `ui` is everything the push feature puts on screen, plus the input mode that
+/// goes with it. It is taken by value rather than built here because it carries
+/// the terminal's color depth, which is the caller's to resolve — and owned for
+/// the rest of the loop because this is the only place that knows what is
+/// displayed (see [`Event::Key`] for why the reader thread must not).
 ///
 /// `hooks` bundles the side effects (collect, render, terminal-size query, paint,
 /// clock, tick cadence) so the loop is one function testable without a TTY or
@@ -1100,6 +1116,7 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>(
     mut cache: SnapshotCache,
     initial_freshest: Option<Duration>,
     mut schedule: WalkSchedule,
+    mut ui: PushUi,
     mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>,
 ) -> Result<()>
 where
@@ -1112,10 +1129,6 @@ where
     StartPush: FnMut(PushCommand),
 {
     let mut freshest = initial_freshest;
-    // Everything the push feature puts on screen, plus the input mode that goes
-    // with it. Owned here because this is the only place that knows what is
-    // displayed — see [`Event::Key`] for why the reader thread must not.
-    let mut ui = PushUi::new();
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -1135,6 +1148,7 @@ where
             (hooks.next_tick)(freshest),
             walk_wait,
             schedule.interval.map(|_| CLOCK_CADENCE),
+            ui.next_tick(),
         ]);
         let woke_for_timeout = match wait {
             Some(interval) => match rx.recv_timeout(interval) {
@@ -1145,6 +1159,7 @@ where
                         &mut ui,
                         &cache.snapshot,
                         cache.dims,
+                        &hooks.clock,
                         &mut hooks.start_push,
                     ) == Flow::Quit
                     {
@@ -1163,6 +1178,7 @@ where
                         &mut ui,
                         &cache.snapshot,
                         cache.dims,
+                        &hooks.clock,
                         &mut hooks.start_push,
                     ) == Flow::Quit
                     {
@@ -1187,6 +1203,7 @@ where
                             &mut ui,
                             &cache.snapshot,
                             cache.dims,
+                            &hooks.clock,
                             &mut hooks.start_push,
                         ) == Flow::Quit
                         {
@@ -1268,7 +1285,7 @@ where
         // absorbed and before the next wake reads one, so the key a user
         // presses in reaction to what this paints is classified against the
         // mode this pane actually showed them.
-        let overlay = ui.overlay(cache.dims);
+        let overlay = ui.overlay(cache.dims, now);
         let frame_dims = Dimensions {
             height: overlay.frame_rows(),
             ..cache.dims
@@ -2714,6 +2731,7 @@ mod tests {
             seeded_cache(base),
             Some(Duration::ZERO),
             WalkSchedule::new(Some(interval), base, Duration::ZERO),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2760,6 +2778,7 @@ mod tests {
             seeded_cache(collected_at),
             Some(Duration::ZERO),
             WalkSchedule::new(Some(Duration::from_secs(60)), collected_at, Duration::ZERO),
+            PushUi::new(false),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
@@ -2803,6 +2822,7 @@ mod tests {
             seeded_cache(base),
             Some(Duration::ZERO),
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2852,6 +2872,7 @@ mod tests {
             seeded_cache(now),
             None,
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2894,6 +2915,7 @@ mod tests {
             seeded_cache(now),
             None,
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2937,6 +2959,7 @@ mod tests {
             seeded_cache(now),
             None,
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2976,6 +2999,7 @@ mod tests {
             seeded_cache(now),
             Some(Duration::ZERO),
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
@@ -3022,6 +3046,7 @@ mod tests {
             seeded_cache(now),
             Some(Duration::from_secs(30)),
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
@@ -3065,6 +3090,7 @@ mod tests {
             seeded_cache(collected_at),
             Some(Duration::ZERO),
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3117,6 +3143,7 @@ mod tests {
             seeded_cache(now),
             None,
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3169,6 +3196,7 @@ mod tests {
             seeded_cache(base),
             Some(Duration::ZERO),
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
@@ -3244,6 +3272,7 @@ mod tests {
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3318,6 +3347,7 @@ mod tests {
             seeded_cache(base),
             Some(Duration::ZERO),
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3389,6 +3419,7 @@ mod tests {
             seeded_cache(base),
             Some(Duration::ZERO),
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3461,6 +3492,7 @@ mod tests {
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3533,6 +3565,7 @@ mod tests {
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3594,6 +3627,7 @@ mod tests {
             seeded_cache(base),
             None, // decay timer off: isolate the forced walk from tick behavior
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3658,6 +3692,7 @@ mod tests {
             cache,
             None, // decay timer off: isolate the failed walk from tick behavior
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3739,6 +3774,7 @@ mod tests {
             seeded_cache(base),
             None, // decay timer off: isolate the throttle from tick behavior
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3830,6 +3866,7 @@ mod tests {
             cache,
             None, // decay timer off: isolate recovery from tick behavior
             no_timed_refresh(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -4009,6 +4046,22 @@ mod push_loop_tests {
         Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    /// A [`PushUi`] holding the message a push that succeeded at `at` leaves
+    /// behind — the state the loop has to take back off the screen by itself.
+    fn pushed_ui(at: Instant) -> PushUi {
+        let mut ui = PushUi::new(false);
+        ui.request(&pushable_snapshot(), TEST_DIMS, at);
+        ui.confirm();
+        ui.finished(
+            crate::push::PushOutcome {
+                success: true,
+                output: String::new(),
+            },
+            at,
+        );
+        ui
+    }
+
     /// What one loop run observed. The loop takes its hooks by value, so the
     /// counters live behind `RefCell` and are read after it returns.
     #[derive(Default)]
@@ -4066,6 +4119,7 @@ mod push_loop_tests {
             cache_in(base, dims),
             None,
             no_timed_refresh_for_push(),
+            PushUi::new(false),
             LoopHooks {
                 collect: || {
                     seen.borrow_mut().collects += 1;
@@ -4090,6 +4144,99 @@ mod push_loop_tests {
     /// Purely event-driven: no timed refresh, so any walk came from an event.
     fn no_timed_refresh_for_push() -> WalkSchedule {
         WalkSchedule::unscheduled()
+    }
+
+    /// Longer than any status message lives, so a clock jump of this size is
+    /// past the point one has to be off the screen. Deliberately not the push
+    /// module's own constant: this test is about the loop waking itself, and
+    /// borrowing the exact lifetime would tie it to a number it does not care
+    /// about.
+    const PAST_ANY_LIFETIME: Duration = Duration::from_secs(600);
+
+    /// How long the rescue quit waits before it ends a loop that should have
+    /// ended on its own. Generous enough that a slow machine cannot trip it,
+    /// and short enough to keep the suite quick — it only elapses when the
+    /// test is already failing.
+    const RESCUE_AFTER: Duration = Duration::from_secs(3);
+
+    #[test]
+    fn the_loop_wakes_itself_to_take_an_expired_message_off_the_screen() {
+        // A status message expires against the clock, and on a quiet
+        // repository nothing else is due to wake the loop: no filesystem
+        // event, no timed refresh under `--refresh-interval 0`, and no decay
+        // tick once the newest commit is past the fade. Without a deadline of
+        // its own the message would come off the screen only when something
+        // unrelated happened — which is the "stays forever" this feature
+        // exists to answer.
+        let (tx, rx) = mpsc::channel();
+        // One event, so the first frame is painted straight away rather than a
+        // cadence later. After it the queue is empty and only a timeout can
+        // wake the loop again.
+        tx.send(Event::Resize).expect("queue the first wake");
+
+        // A quit from outside, long after the loop should have acted on its
+        // own, so a missing deadline fails this test instead of hanging it.
+        let rescue = tx.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(RESCUE_AFTER);
+            let _ = rescue.send(Event::Quit);
+        });
+
+        let base = Instant::now();
+        let jumped = std::cell::Cell::new(false);
+        let painted = RefCell::new(Vec::<String>::new());
+        let mut displayed = String::new();
+
+        event_loop(
+            &rx,
+            TEST_DEBOUNCE,
+            &mut displayed,
+            cache_at(base),
+            None, // decay timer off: the message is the only thing that ages
+            no_timed_refresh_for_push(),
+            pushed_ui(base),
+            LoopHooks {
+                collect: || Ok(pushable_snapshot()),
+                render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("FRAME"),
+                dimensions: || TEST_DIMS,
+                paint: |output: &str| {
+                    painted.borrow_mut().push(output.to_string());
+                    // Every paint moves the clock past the message's lifetime,
+                    // so the wake after the first one finds it expired.
+                    jumped.set(true);
+                    if painted.borrow().len() >= 2 {
+                        let _ = tx.send(Event::Quit);
+                    }
+                    Ok(())
+                },
+                clock: || {
+                    if jumped.get() {
+                        base + PAST_ANY_LIFETIME
+                    } else {
+                        base
+                    }
+                },
+                next_tick: timer_off,
+                start_push: |_command: PushCommand| {},
+            },
+        )
+        .expect("loop");
+
+        let painted = painted.into_inner();
+        assert!(
+            painted[0].contains("Created origin/gsw-push"),
+            "the first frame must carry the message, got {:?}",
+            painted[0],
+        );
+        assert_eq!(
+            painted.len(),
+            2,
+            "the loop must wake itself once more to clear the message, painted {painted:?}",
+        );
+        assert_eq!(
+            painted[1], "FRAME",
+            "the expired message must leave the frame exactly as it was before it",
+        );
     }
 
     #[test]
@@ -4380,6 +4527,7 @@ mod push_loop_tests {
                 cache_at(base),
                 None,
                 no_timed_refresh_for_push(),
+                PushUi::new(false),
                 LoopHooks {
                     collect: || Ok(pushable_snapshot()),
                     render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
