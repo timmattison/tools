@@ -93,6 +93,19 @@ pub enum Session {
     /// Exactly one live transcript matches this process, and no other process
     /// competes for it.
     Matched(SessionId),
+    /// One process fits several transcripts, and this is the newest of them.
+    ///
+    /// A session that is cleared starts a new transcript without starting a new
+    /// process, so one process legitimately owns several. With no other process
+    /// competing, the newest is the one it is writing now. The count travels
+    /// with the id so the reader is told this is the newest of several rather
+    /// than the only one.
+    Likely {
+        /// The newest transcript that fits.
+        id: SessionId,
+        /// How many transcripts fit in total.
+        of: usize,
+    },
     /// More than one transcript or more than one process fits, and nothing on
     /// the machine separates them.
     Ambiguous {
@@ -351,7 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn two_transcripts_of_one_release_stay_ambiguous() {
+    fn a_lone_process_owning_several_transcripts_reports_the_newest() {
+        // A cleared session starts a new transcript under the same process, so
+        // one process owns several. With nothing else competing, the newest is
+        // the one it is writing now.
         let candidates = [
             transcript(SESSION_A, "2.1.202", 2_000),
             transcript(SESSION_B, "2.1.202", 3_000),
@@ -363,7 +379,32 @@ mod tests {
             &candidates,
             1,
         );
-        assert_eq!(found, Session::Ambiguous { candidates: 2, peers: 1 });
+        assert_eq!(
+            found,
+            Session::Likely {
+                id: id(SESSION_B),
+                of: 2
+            }
+        );
+    }
+
+    #[test]
+    fn several_processes_sharing_transcripts_stay_ambiguous() {
+        // With more than one process competing, the newest transcript belongs to
+        // whichever of them wrote last, and nothing here says which. A guess
+        // would report one session's id against another session's process.
+        let candidates = [
+            transcript(SESSION_A, "2.1.202", 2_000),
+            transcript(SESSION_B, "2.1.202", 3_000),
+        ];
+        let found = attribute(
+            &argv(&["claude"]),
+            Some(&version("2.1.202")),
+            1_000,
+            &candidates,
+            2,
+        );
+        assert_eq!(found, Session::Ambiguous { candidates: 2, peers: 2 });
     }
 
     #[test]
@@ -390,12 +431,18 @@ mod tests {
     #[test]
     fn an_unreadable_release_does_not_narrow_the_candidates() {
         // With no release to match on, every live transcript in the directory
-        // stays a candidate rather than one being picked arbitrarily.
+        // stays a candidate rather than being excluded.
         let candidates = [
             transcript(SESSION_A, "2.1.202", 2_000),
-            transcript(SESSION_B, "2.1.218", 2_000),
+            transcript(SESSION_B, "2.1.218", 3_000),
         ];
         let found = attribute(&argv(&["claude"]), None, 1_000, &candidates, 1);
-        assert_eq!(found, Session::Ambiguous { candidates: 2, peers: 1 });
+        assert_eq!(
+            found,
+            Session::Likely {
+                id: id(SESSION_B),
+                of: 2
+            }
+        );
     }
 }
