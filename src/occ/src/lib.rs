@@ -13,9 +13,11 @@
 //! classification and attribution rules are testable without a running session.
 
 pub mod process;
+pub mod report;
 pub mod session;
 pub mod version;
 
 pub use process::{classify, version_of, ProcessFact, Role};
+pub use report::{build, format_uptime, SessionReport, Transcripts};
 pub use session::{attribute, session_id_from_arguments, Session, SessionId, Transcript};
 pub use version::ClaudeVersion;
