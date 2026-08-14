@@ -86,14 +86,18 @@ struct Cli {
     #[arg(long)]
     no_log: bool,
 
-    /// Force the 24-bit truecolor commit-log gradient on, regardless of
-    /// what `COLORTERM` says. Useful when a wrapper (cargo run, viddy)
-    /// strips the env var or your terminal doesn't export it.
+    /// Force the 24-bit truecolor fades on, regardless of what `COLORTERM`
+    /// says. The fades are the commit-log gradient, the recency fade on the
+    /// file rows, and the fade on the push status message. This flag helps
+    /// when a wrapper (cargo run, viddy) removes the env var, or when your
+    /// terminal does not export it.
     #[arg(long, conflicts_with = "no_truecolor")]
     truecolor: bool,
 
-    /// Force the 24-bit truecolor commit-log gradient off, falling back
-    /// to the 8-color path even on a terminal that supports truecolor.
+    /// Force the 24-bit truecolor fades off, even on a terminal that
+    /// supports truecolor. The commit-log gradient and the recency fade on
+    /// the file rows then use the 8-color path. The push status message
+    /// dims once at the half-way mark instead of a smooth fade.
     #[arg(long, conflicts_with = "truecolor")]
     no_truecolor: bool,
 
@@ -220,8 +224,8 @@ fn should_force_colors(stdout_is_tty: bool, columns_env_present: bool, no_color_
 ///
 /// We trust the `COLORTERM` env var (the de facto signal) — the canonical
 /// values are `truecolor` and `24bit`. Anything else, including a missing
-/// var, is treated as "no truecolor" and the renderer falls back to the
-/// eight-color path. Comparison is case-insensitive.
+/// var, is treated as "no truecolor" and the fades fall back to their
+/// non-truecolor styling. Comparison is case-insensitive.
 fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
     matches!(
         colorterm_env.map(str::to_ascii_lowercase).as_deref(),
@@ -233,8 +237,8 @@ fn truecolor_supported(colorterm_env: Option<&str>) -> bool {
 ///
 /// Priority, highest first:
 ///   1. `--no-color` or `NO_COLOR` → false (kills all color)
-///   2. `--no-truecolor` → false (force the 8-color path)
-///   3. `--truecolor` → true (force the gradient regardless of detection)
+///   2. `--no-truecolor` → false (force the fades off)
+///   3. `--truecolor` → true (force the fades on regardless of detection)
 ///   4. otherwise, auto-detect via `COLORTERM`
 fn effective_truecolor(
     cli_no_color: bool,
@@ -349,7 +353,9 @@ pub(crate) struct RenderConfig {
     pub bar_width: usize,
     /// Recent-commit rows to request; `0` when `--no-log` suppressed the section.
     pub log_lines: usize,
-    /// Whether the 24-bit truecolor commit-log gradient is in effect.
+    /// Whether the 24-bit truecolor fades are in effect. The fades are the
+    /// commit-log gradient, the recency fade on the file rows, and the fade
+    /// on the push status message.
     pub truecolor: bool,
     /// Columns to subtract from the detected width (`--width-offset`).
     pub width_offset: usize,
@@ -1252,5 +1258,39 @@ mod tests {
             false,
             Some("xterm-256color")
         ));
+    }
+
+    #[test]
+    fn truecolor_flag_help_names_every_fade_the_flag_controls() {
+        // The two flags gate three fades, not one: the commit-log gradient,
+        // the recency fade on the file rows, and the fade on the push status
+        // message. Help text that names only the gradient sends the user who
+        // wants the other two off hunting for a flag that does not exist.
+        use clap::CommandFactory;
+
+        const EFFECTS: [&str; 3] = ["commit-log gradient", "file rows", "push status message"];
+
+        let cmd = Cli::command();
+        for id in ["truecolor", "no_truecolor"] {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .unwrap_or_else(|| panic!("clap must expose an argument with the id `{id}`"));
+            let raw = arg
+                .get_long_help()
+                .or_else(|| arg.get_help())
+                .unwrap_or_else(|| panic!("the argument `{id}` must carry help text"))
+                .to_string();
+            // Collapse the source's line wrapping so a phrase split across two
+            // doc-comment lines still matches.
+            let help = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+            for effect in EFFECTS {
+                assert!(
+                    help.contains(effect),
+                    "the help for `{id}` must name the `{effect}` fade the flag controls, \
+                     but it reads: {help}",
+                );
+            }
+        }
     }
 }
