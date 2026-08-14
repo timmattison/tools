@@ -20,6 +20,8 @@
 //! that last one safe — a path that is not in the registry belongs to somebody
 //! else, and removing it would hand two merges the same repository.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind};
@@ -207,6 +209,37 @@ impl LockFailure {
     }
 }
 
+// Test-only interposition point inside the stale-lock reap, sitting between
+// the verdict that a lock is a corpse and the removal that acts on that
+// verdict.
+//
+// The interleaving the reap has to survive — a corpse cleared and replaced by a
+// live successor's lock in the gap between two adjacent syscalls — cannot be
+// produced by sleeping and hoping, and a probabilistic test of it would be a
+// flake that blocks unrelated commits. A test installs a closure here instead
+// and stands the successor's lock up at exactly the wrong moment.
+//
+// Thread local rather than process global so two tests running concurrently in
+// one binary cannot see each other's interposer, and `#[cfg(test)]` so the
+// shipped binary carries neither the slot nor a branch on it.
+#[cfg(test)]
+thread_local! {
+    static REAP_INTERPOSER: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+}
+
+/// Runs the test interposer, if this thread installed one.
+///
+/// Compiles to an empty function outside tests, where there is nothing to
+/// install it.
+fn interpose_before_reap() {
+    #[cfg(test)]
+    REAP_INTERPOSER.with(|slot| {
+        if let Some(interposer) = slot.borrow_mut().as_mut() {
+            interposer();
+        }
+    });
+}
+
 /// Resolves the lock file that serializes merges for a repository.
 ///
 /// `repo_root` is any worktree root of the repository. Returns the absolute path
@@ -281,6 +314,7 @@ fn locked<T>(
                 .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
                 .is_some_and(|age| age > timings.stale_after);
             if abandoned {
+                interpose_before_reap();
                 let _ = fs::remove_file(lock_path);
                 continue;
             }
@@ -330,8 +364,9 @@ pub fn with_parent_lock<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
 
 #[cfg(test)]
 mod tests {
-    use super::{locked, LockFailure, LockTimings, LOCK_FILE};
-    use std::fs::File;
+    use super::{locked, LockFailure, LockTimings, LOCK_FILE, REAP_INTERPOSER};
+    use std::fs::{self, File};
+    use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -363,6 +398,28 @@ mod tests {
     /// second acquisition running unserialized would visibly interleave.
     const HOLD: Duration = Duration::from_millis(150);
 
+    /// Timings for a test about the staleness reap: a window a backdated
+    /// fixture is already well past, so the reap happens on the first pass, and
+    /// a wait short enough to fail fast when it does not.
+    const REAPING: LockTimings = LockTimings {
+        stale_after: Duration::from_millis(100),
+        wait_at_most: TEST_TIMEOUT,
+        retry_every: TEST_BACKOFF,
+    };
+
+    /// How far back a fixture corpse's mtime is set — comfortably past
+    /// [`REAPING`]'s window, so nothing about the reap depends on timing.
+    const ABANDONED_FOR: Duration = Duration::from_secs(1);
+
+    /// The token a fixture corpse carries, and the token a *different* run's
+    /// lock carries. Two acquisitions are distinguishable exactly when the
+    /// tokens in their lock files differ, so these must never be equal.
+    const CORPSE_OWNER: &[u8] = b"corpse-run-token";
+    const SUCCESSOR_OWNER: &[u8] = b"successor-run-token";
+
+    /// What an older `swt` left in the lock file it created: nothing at all.
+    const NO_OWNER: &[u8] = b"";
+
     /// A private directory for one test's lock file.
     ///
     /// Every path comes from a fresh [`TempDir`], never a fixed name: two copies
@@ -375,14 +432,28 @@ mod tests {
             .expect("lock fixture temp dir")
     }
 
-    /// Creates a lock file and backdates its mtime by `age`, standing in for one
-    /// a run that died left behind.
-    fn aged_lock(path: &Path, age: Duration) {
-        let file = File::create(path).expect("lock fixture");
+    /// Creates a lock file carrying `owner` and backdates its mtime by `age`,
+    /// standing in for one a run that died left behind.
+    ///
+    /// The write comes first and the backdating last, because writing is itself
+    /// what sets an mtime: the other order would leave the fixture brand new.
+    fn aged_lock(path: &Path, owner: &[u8], age: Duration) {
+        let mut file = File::create(path).expect("lock fixture");
+        file.write_all(owner).expect("the lock fixture's owner");
         let when = SystemTime::now()
             .checked_sub(age)
             .expect("backdated mtime is after the epoch");
         file.set_modified(when).expect("backdate the lock fixture");
+    }
+
+    /// Runs `body` with `interposer` installed at the reap's interleaving
+    /// point, then clears the slot so a later test on this thread cannot
+    /// inherit it.
+    fn with_reap_interposer<T>(interposer: impl FnMut() + 'static, body: impl FnOnce() -> T) -> T {
+        REAP_INTERPOSER.with(|slot| *slot.borrow_mut() = Some(Box::new(interposer)));
+        let outcome = body();
+        REAP_INTERPOSER.with(|slot| *slot.borrow_mut() = None);
+        outcome
     }
 
     #[test]
@@ -450,17 +521,118 @@ mod tests {
     fn a_lock_older_than_the_staleness_window_is_reaped() {
         let dir = lock_dir();
         let lock = dir.path().join(LOCK_FILE);
-        aged_lock(&lock, Duration::from_secs(1));
+        aged_lock(&lock, CORPSE_OWNER, ABANDONED_FOR);
 
-        let timings = LockTimings {
-            stale_after: Duration::from_millis(100),
-            wait_at_most: TEST_TIMEOUT,
-            retry_every: TEST_BACKOFF,
-        };
-        let ran = locked(&lock, timings, || true).expect("a stale lock must be reaped");
+        let ran = locked(&lock, REAPING, || true).expect("a stale lock must be reaped");
 
         assert!(ran, "the region never ran");
         assert!(!lock.exists(), "the lock outlived its region");
+    }
+
+    // The reap can only tell a corpse from a successor if the lock file says
+    // who created it, so every acquisition writes its own token in.
+    #[test]
+    fn the_lock_file_names_the_run_holding_it() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+
+        let owner = locked(&lock, FAST, || fs::read(&lock).expect("read the held lock"))
+            .expect("an uncontended lock must be acquired");
+
+        assert!(
+            !owner.is_empty(),
+            "the lock file names no owner, so a reap cannot tell a corpse from a successor"
+        );
+    }
+
+    // The race the owner token exists for. A corpse is judged stale, somebody
+    // clears it, and a competitor wins the `O_EXCL` race for the freed path —
+    // all before this run's unlink. Removing by path alone deletes that
+    // successor's brand new, entirely legitimate lock and then takes the lock,
+    // putting two merges inside one repository.
+    #[test]
+    fn a_corpse_replaced_by_a_live_lock_before_the_unlink_is_not_reaped() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        aged_lock(&lock, CORPSE_OWNER, ABANDONED_FOR);
+
+        // The interleaving, made deterministic rather than raced for: the
+        // successor's lock is stood up at exactly the point where the reap has
+        // decided to delete and has not yet done so.
+        let successor_lock = lock.clone();
+        let mut already_replaced = false;
+        let result = with_reap_interposer(
+            move || {
+                if already_replaced {
+                    return;
+                }
+                already_replaced = true;
+                fs::remove_file(&successor_lock).expect("clear the corpse");
+                fs::write(&successor_lock, SUCCESSOR_OWNER).expect("the successor's lock");
+            },
+            || locked(&lock, REAPING, || "the region ran"),
+        );
+
+        assert!(
+            matches!(result, Err(LockFailure::TimedOut)),
+            "a live successor's lock was reaped and its region entered anyway, got {result:?}"
+        );
+        assert_eq!(
+            fs::read(&lock).ok().as_deref(),
+            Some(SUCCESSOR_OWNER),
+            "the successor's lock at {} was deleted out from under it",
+            lock.display()
+        );
+    }
+
+    // An older `swt` wrote nothing into the lock file it created, and one of
+    // those left behind by a dead run still has to be reapable: "names no
+    // owner" is an identity like any other, and it matches itself. Otherwise
+    // upgrading `swt` would strand every repository holding an old corpse until
+    // somebody deleted it by hand.
+    #[test]
+    fn a_corpse_from_an_older_swt_that_names_no_owner_is_still_reaped() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        aged_lock(&lock, NO_OWNER, ABANDONED_FOR);
+
+        let ran = locked(&lock, REAPING, || true).expect("an old-format corpse must be reaped");
+
+        assert!(ran, "the region never ran");
+        assert!(!lock.exists(), "the lock outlived its region");
+    }
+
+    // Never remove a file whose owner cannot be established at all. Such a lock
+    // is waited out and reported instead — bounded by the timeout, so it is a
+    // report rather than a deadlock — rather than deleted on the strength of an
+    // mtime that says nothing about which file it belongs to.
+    #[cfg(unix)]
+    #[test]
+    fn a_corpse_whose_owner_cannot_be_read_is_reported_rather_than_reaped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        aged_lock(&lock, CORPSE_OWNER, ABANDONED_FOR);
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000))
+            .expect("make the lock fixture unreadable");
+        if fs::read(&lock).is_ok() {
+            // Root reads a mode 0 file regardless, which would make this an
+            // ordinary readable corpse and pin nothing at all.
+            return;
+        }
+
+        let result = locked(&lock, REAPING, || "the region ran");
+
+        assert!(
+            matches!(result, Err(LockFailure::TimedOut)),
+            "a lock whose owner could not be read was reaped anyway, got {result:?}"
+        );
+        assert!(
+            lock.exists(),
+            "an unidentifiable lock at {} was removed",
+            lock.display()
+        );
     }
 
     // Real mutual exclusion, not merely a file that appears and disappears: the
