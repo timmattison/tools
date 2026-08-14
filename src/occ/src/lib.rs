@@ -14,8 +14,11 @@
 
 pub mod process;
 pub mod report;
+pub mod scan;
 pub mod session;
 pub mod version;
+
+pub use scan::{gather_processes, ProjectTranscripts};
 
 pub use process::{classify, version_of, ProcessFact, Role};
 pub use report::{build, format_uptime, SessionReport, Transcripts};
