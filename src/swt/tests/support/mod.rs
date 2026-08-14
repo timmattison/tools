@@ -15,15 +15,19 @@
 //!   and where two concurrent runs of the same test collide on it.
 //!   [`TestRepo::siblings`] is that parent directory, and it is inside the
 //!   `TempDir`.
-//! - **Inherited git environment is scrubbed.** git exports `GIT_DIR`,
-//!   `GIT_WORK_TREE` and `GIT_INDEX_FILE` into a hook's environment, and this
-//!   repo's own pre-commit hook runs `cargo test`. If those leak through, a
-//!   fixture's `git init`/`add`/`commit` targets *this* repository despite the
-//!   working directory — which has happened here before. [`git_command`] and
-//!   [`swt_command`] scrub them, and [`TestRepo::new`] additionally refuses to
-//!   build a fixture at all while they are set, because the tests that call
-//!   `swt`'s git functions *in process* inherit this process's environment and
-//!   cannot be protected from the outside.
+//! - **The host is scrubbed out of every child the suite spawns.** git exports
+//!   `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` into a hook's environment,
+//!   and this repo's own pre-commit hook runs `cargo test`. If those leak
+//!   through, a fixture's `git init`/`add`/`commit` targets *this* repository
+//!   despite the working directory — which has happened here before. The host's
+//!   global and system gitconfig is a quieter version of the same problem: it
+//!   decides hooks paths, aliases and credential helpers for a suite that is
+//!   supposed to depend on nothing but its own fixture. [`sandboxed`] removes
+//!   both, at the one place [`git_command`] and [`swt_command`] share, and
+//!   [`TestRepo::new`] additionally refuses to build a fixture at all while the
+//!   git location variables are set, because the tests that call `swt`'s git
+//!   functions *in process* inherit this process's environment and cannot be
+//!   protected from the outside.
 //! - **Every name is process-unique.** Two copies of this test binary run
 //!   concurrently in this repo — the pre-commit hook's `cargo test` racing a
 //!   manual one — so every worktree path and branch name is keyed on
@@ -109,18 +113,36 @@ pub fn assert_git_env_is_sandboxed() {
     }
 }
 
-/// A git invocation in `dir` with the host's config and any hook-exported git
-/// location scrubbed. The single place the isolation rules are applied.
-pub fn git_command(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
+/// Applies the isolation rules to a child the suite is about to spawn, whether
+/// that child is a fixture's git or the real `swt` binary.
+///
+/// The single place the rules live, so the two entrances that build children
+/// ([`git_command`] and [`swt_command`]) cannot drift apart — a rule applied at
+/// only one of them leaves half the suite reading the host's git configuration
+/// while the harness reads as sandboxed. Two rules:
+///
+/// - **The host's global and system config is replaced with an empty file.**
+///   Otherwise `core.hooksPath`, `pull.rebase`, aliases, advice settings and
+///   credential helpers from the developer's or CI machine's gitconfig decide
+///   what the child does. A fixture pins [`FIXTURE_CONFIG`] locally, which
+///   covers those four keys and nothing else.
+/// - **Any git location the ambient environment exported is removed**, so the
+///   child acts on its working directory and nothing else.
+fn sandboxed(cmd: &mut Command) -> &mut Command {
+    cmd.stdin(Stdio::null())
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_SYSTEM", "/dev/null");
     for var in INHERITED_GIT_ENV {
         cmd.env_remove(var);
     }
+    cmd
+}
+
+/// A git invocation in `dir`, sandboxed from the host by [`sandboxed`] exactly
+/// as every spawn of the binary under test is.
+pub fn git_command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    sandboxed(&mut cmd).args(args).current_dir(dir);
     cmd
 }
 
@@ -339,15 +361,13 @@ pub fn exiting_check(status: i32) -> String {
 
 /// Builds a [`Command`] that runs the real `swt` binary in `cwd`.
 ///
-/// The single, mandatory entrance for spawning `swt`: stdin is nulled so an
-/// unexpected prompt cannot hang the suite, and the inherited git location
-/// environment is scrubbed so the child's git acts on `cwd` and nothing else.
+/// The single, mandatory entrance for spawning `swt`. It is sandboxed by
+/// [`sandboxed`], so the binary under test gets the same treatment a fixture's
+/// own git gets: an empty global and system git config, no inherited git
+/// location, and a nulled stdin so an unexpected prompt cannot hang the suite.
 pub fn swt_command(cwd: &Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_swt"));
-    cmd.current_dir(cwd).stdin(Stdio::null());
-    for var in INHERITED_GIT_ENV {
-        cmd.env_remove(var);
-    }
+    sandboxed(&mut cmd).current_dir(cwd);
     cmd
 }
 
@@ -357,4 +377,20 @@ pub fn run_swt(cwd: &Path, args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("failed to run swt")
+}
+
+/// Runs the real `swt` binary in an empty directory of its own, outside any
+/// repository, and captures its status, stdout and stderr.
+///
+/// For the invocations that must fail *before* git is ever reached — a bad
+/// worktree name, a command line that does not parse. There is nothing here for
+/// git to act on, so a pass is evidence the refusal came first rather than
+/// after `swt` had already gone looking for a repository. The directory is
+/// removed when the run returns, and its path is symlink-resolved for the same
+/// reason [`TestRepo::new`]'s is: on macOS `$TMPDIR` is a symlink, so every path
+/// the child reports back is already resolved.
+pub fn run_swt_outside_a_repository(args: &[&str]) -> Output {
+    let dir = TempDir::new().expect("scratch temp dir for a repository-free swt run");
+    let canonical = fs::canonicalize(dir.path()).expect("canonical scratch temp dir");
+    run_swt(&canonical, args)
 }

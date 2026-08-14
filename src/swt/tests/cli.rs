@@ -4,21 +4,22 @@
 //! caller can depend on before any git runs are pinned here: a version string
 //! that identifies the exact build, and a usage error — never a silent success —
 //! for every invocation that does not name a command and its one argument.
+//!
+//! Nothing here can reach git: every case is a clap usage error or `--version`.
+//! It still spawns through the shared harness, because "this file happens to be
+//! safe" is a property of today's argument parsing, not a rule, and one file
+//! spawning the binary its own way is how the sandbox drifts apart again.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use regex::Regex;
 
+mod support;
+
+use support::run_swt_outside_a_repository;
+
 /// Conventional shell exit status for a command line usage error.
 const USAGE_EXIT_STATUS: i32 = 2;
-
-/// Runs the freshly built `swt` binary with `args` and captures its output.
-fn swt(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_swt"))
-        .args(args)
-        .output()
-        .expect("failed to run swt")
-}
 
 /// Asserts that `output` is a usage error: exit status 2 and an explanation on
 /// stderr, so a caller that got its arguments wrong hears about it.
@@ -39,7 +40,7 @@ fn assert_usage_error(output: &Output, invocation: &str) {
 /// a bug report names an exact binary.
 #[test]
 fn version_reports_the_build_it_came_from() {
-    let output = swt(&["--version"]);
+    let output = run_swt_outside_a_repository(&["--version"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(
@@ -58,7 +59,7 @@ fn version_reports_the_build_it_came_from() {
 /// With no command at all the user learns both commands rather than nothing.
 #[test]
 fn bare_invocation_is_a_usage_error_naming_both_commands() {
-    let output = swt(&[]);
+    let output = run_swt_outside_a_repository(&[]);
 
     assert_usage_error(&output, "swt");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -71,18 +72,18 @@ fn bare_invocation_is_a_usage_error_naming_both_commands() {
 /// `create` names a worktree; without one there is nothing to create.
 #[test]
 fn create_without_a_name_is_a_usage_error() {
-    assert_usage_error(&swt(&["create"]), "swt create");
+    assert_usage_error(&run_swt_outside_a_repository(&["create"]), "swt create");
 }
 
 /// `merge` names a worktree path; without one there is nothing to merge.
 #[test]
 fn merge_without_a_worktree_path_is_a_usage_error() {
-    assert_usage_error(&swt(&["merge"]), "swt merge");
+    assert_usage_error(&run_swt_outside_a_repository(&["merge"]), "swt merge");
 }
 
 /// An unrecognized command must fail loudly rather than be treated as one of
 /// the real ones.
 #[test]
 fn unknown_command_is_a_usage_error() {
-    assert_usage_error(&swt(&["bogus"]), "swt bogus");
+    assert_usage_error(&run_swt_outside_a_repository(&["bogus"]), "swt bogus");
 }

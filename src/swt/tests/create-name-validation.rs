@@ -6,11 +6,17 @@
 //! failing status, and that it stops it *early*. The test deliberately runs
 //! outside any repository swt could act on, so a pass proves the rejection
 //! happened before the first git call rather than after it.
+//!
+//! That claim is only worth as much as the sandbox under it. It goes through
+//! [`support::run_swt_outside_a_repository`] like every other spawn in the
+//! suite, so should validation ever be reordered to run *after* a git call, the
+//! stray git runs against an empty scratch directory and fails the test —
+//! rather than picking up an inherited `GIT_DIR` and operating on the real
+//! checkout while this test still passes.
 
-use std::fs;
-use std::path::PathBuf;
-use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod support;
+
+use support::run_swt_outside_a_repository;
 
 /// A name that must never reach git: it traverses out of the worktree parent
 /// directory and would put the branch and the checkout somewhere unrelated.
@@ -26,40 +32,11 @@ const OPTION_LOOKING_NAMES: [&str; 3] = ["-b", "-rf", "--force"];
 const WORKTREE_NAME_RULE: &str =
     "allowed: letters, digits, '.', '_' and '-'; must not start with '-', and must not be '.' or '..'";
 
-/// Creates an empty directory no concurrent test run can also be using, so this
-/// test's working directory is entirely its own.
-fn unique_scratch_dir() -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after the epoch")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "swt-create-name-validation-{}-{nanos}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).expect("scratch directory should be creatable");
-    dir
-}
-
-/// Runs the freshly built `swt` binary with `args` from a directory of its own.
-fn swt_in_scratch_dir(args: &[&str]) -> Output {
-    let dir = unique_scratch_dir();
-    let output = Command::new(env!("CARGO_BIN_EXE_swt"))
-        .args(args)
-        .current_dir(&dir)
-        .output()
-        .expect("failed to run swt");
-    // Best effort: a leaked empty directory is harmless, a panic that hides the
-    // assertion below is not.
-    let _ = fs::remove_dir_all(&dir);
-    output
-}
-
 /// A name that would escape the worktree parent directory is refused outright,
 /// naming both the offending input and the rule it broke.
 #[test]
 fn create_rejects_a_traversing_name_before_touching_git() {
-    let output = swt_in_scratch_dir(&["create", TRAVERSING_NAME]);
+    let output = run_swt_outside_a_repository(&["create", TRAVERSING_NAME]);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     assert_eq!(
@@ -80,7 +57,7 @@ fn create_rejects_a_traversing_name_before_touching_git() {
 #[test]
 fn create_rejects_option_looking_names_with_its_own_message() {
     for name in OPTION_LOOKING_NAMES {
-        let output = swt_in_scratch_dir(&["create", name]);
+        let output = run_swt_outside_a_repository(&["create", name]);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         assert_eq!(
@@ -101,7 +78,7 @@ fn create_rejects_option_looking_names_with_its_own_message() {
 #[test]
 fn subcommand_help_still_prints_usage() {
     for command in ["create", "merge"] {
-        let output = swt_in_scratch_dir(&[command, "--help"]);
+        let output = run_swt_outside_a_repository(&[command, "--help"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         assert_eq!(
