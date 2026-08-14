@@ -132,10 +132,13 @@ pub fn parse_roku_device_info(ip: Ipv4Addr, xml: &str) -> Option<Tv> {
 }
 
 /// Whether a DIAL `/apps/<app>` document reports that the device offers `app`.
+///
+/// A DIAL server answers 404 for an application it does not carry, so reaching
+/// this function at all is most of the answer. The name is compared anyway, so
+/// that a courtesy page or a redirect cannot be read as an installed app.
 #[must_use]
 pub fn dial_app_installed(xml: &str, app: &str) -> bool {
-    let _ = (xml, app);
-    todo!("no screen test exists yet")
+    xml.contains("<service") && xml_tag(xml, "name") == app
 }
 
 /// Parse a Google TV UPnP description, enriched with `/setup/eureka_info`.

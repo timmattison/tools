@@ -12,7 +12,7 @@ use reqwest::Client;
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 
-use crate::identify::{parse_google_tv, parse_roku_device_info, Tv};
+use crate::identify::{dial_app_installed, parse_google_tv, parse_roku_device_info, Tv};
 
 /// Roku External Control Protocol.
 pub const ROKU_ECP_PORT: u16 = 8060;
@@ -20,6 +20,17 @@ pub const ROKU_ECP_PORT: u16 = 8060;
 pub const GOOGLETV_CAST_PORT: u16 = 8008;
 /// Ports probed on every host, in the order they are reported.
 pub const PROBE_PORTS: &[u16] = &[ROKU_ECP_PORT, GOOGLETV_CAST_PORT];
+
+/// DIAL applications that need a display to be of any use.
+///
+/// Every device with Chromecast built-in answers on [`GOOGLETV_CAST_PORT`] and
+/// publishes a manufacturer, a speaker as readily as a television. None of the
+/// UPnP document, `/setup/eureka_info`, or `?options=detail` carries a
+/// device-type field, so the screen has to be proved another way: a DIAL server
+/// only lists an application the device can actually run, and none of these
+/// runs without a display. Asking for two rather than one keeps a set that
+/// carries neither Netflix nor YouTube from being missed for the wrong reason.
+pub const SCREEN_APPS: &[&str] = &["Netflix", "YouTube"];
 
 /// How long to wait for a TCP handshake before treating a host as closed.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -51,7 +62,25 @@ pub async fn fetch_roku(client: &Client, base_url: &str, ip: Ipv4Addr) -> Option
     parse_roku_device_info(ip, &xml)
 }
 
+/// Whether the DIAL server at `base_url` offers any of [`SCREEN_APPS`].
+///
+/// Asking stops at the first application the device confirms.
+async fn has_screen(client: &Client, base_url: &str) -> bool {
+    for app in SCREEN_APPS {
+        let Some(body) = get_text(client, &format!("{base_url}/apps/{app}")).await else {
+            continue;
+        };
+        if dial_app_installed(&body, app) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Fetch and parse a Google TV UPnP description from `base_url`.
+///
+/// The device must also pass the DIAL screen test, because every speaker with
+/// Chromecast built-in publishes the same UPnP document a television does.
 ///
 /// `base_url` is the scheme and authority only, e.g. `http://192.168.1.165:8008`.
 pub async fn fetch_google_tv(client: &Client, base_url: &str, ip: Ipv4Addr) -> Option<Tv> {
@@ -59,7 +88,8 @@ pub async fn fetch_google_tv(client: &Client, base_url: &str, ip: Ipv4Addr) -> O
     // The cast endpoint only supplies a nicer name, so its failure is survivable.
     let eureka = get_text(client, &format!("{base_url}/setup/eureka_info")).await;
 
-    parse_google_tv(ip, &desc, eureka.as_deref())
+    let tv = parse_google_tv(ip, &desc, eureka.as_deref())?;
+    has_screen(client, base_url).await.then_some(tv)
 }
 
 #[cfg(test)]
