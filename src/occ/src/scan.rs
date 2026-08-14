@@ -193,6 +193,23 @@ impl Transcripts for ProjectTranscripts {
     }
 }
 
+/// Reads the kernel accounting name of a process.
+///
+/// This is the basename of the file the process actually executed, recorded
+/// when it started. For Claude Code it is the release number, and it is the only
+/// reliable source of that number: the executable path of a running session
+/// resolves through the `claude` launcher, which is a link to whichever release
+/// is installed *now*. Reading the release from that path would report the
+/// newest release for a session running a release from months ago — the exact
+/// claim this tool exists to make, made backwards.
+///
+/// Returns `None` when the name cannot be read, which is the normal answer for
+/// another account's process.
+#[must_use]
+pub fn accounting_name(_pid: u32) -> Option<String> {
+    None
+}
+
 /// Reads every process on the machine.
 ///
 /// Returns all of them, not only the Claude Code ones: deciding what a process
@@ -231,7 +248,7 @@ pub fn gather_processes() -> Vec<ProcessFact> {
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_directory, gather_processes, recorded_directory, recorded_version,
+        accounting_name, encode_directory, gather_processes, recorded_directory, recorded_version,
         ProjectTranscripts,
     };
     use crate::report::Transcripts;
@@ -393,6 +410,50 @@ mod tests {
         let fixture = Fixture::new();
         let found = fixture.transcripts().for_directory(Path::new("/nowhere"));
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn reads_the_accounting_name_of_this_process() {
+        // The accounting name is the basename of the executed file, truncated by
+        // the kernel. Checking it against this test binary's own path is a
+        // ground truth available on any machine.
+        let executable = std::env::current_exe().expect("current executable");
+        let basename = executable
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("executable basename");
+
+        let found = accounting_name(std::process::id()).expect("own accounting name");
+
+        assert!(!found.is_empty(), "the accounting name should not be empty");
+        assert!(
+            basename.starts_with(&found),
+            "accounting name {found:?} should be a prefix of the executable name {basename:?}"
+        );
+    }
+
+    #[test]
+    fn the_accounting_name_of_a_process_that_is_not_running_is_absent() {
+        // Process identifier 0 is never an ordinary process to be read.
+        assert_eq!(accounting_name(0), None);
+    }
+
+    #[test]
+    fn the_gathered_release_does_not_come_from_the_launcher_link() {
+        // The regression this guards: the executable path of a session resolves
+        // through the `claude` launcher link, so reading the release from it
+        // reports the installed release rather than the running one. The
+        // accounting name of this test process is not the launcher's name, and
+        // that is what the gathered facts must carry.
+        let mine = std::process::id();
+        let gathered = gather_processes();
+        let fact = gathered
+            .iter()
+            .find(|fact| fact.pid == mine)
+            .expect("this process should be gathered");
+
+        let expected = accounting_name(mine).expect("own accounting name");
+        assert_eq!(fact.accounting_name, expected);
     }
 
     #[test]

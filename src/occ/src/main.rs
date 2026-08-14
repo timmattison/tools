@@ -1,39 +1,154 @@
-//! Temporary probe: dump the process facts sysinfo exposes on this platform.
+//! `occ` — "old Claude Code": list the Claude Code sessions running on this
+//! machine, oldest release first.
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use anyhow::{Context, Result};
+use buildinfo::version_string;
+use clap::Parser;
+use colored::Colorize;
+use comfy_table::{Cell, ContentArrangement, Table};
+use occ::process::Role;
+use occ::report::SessionReport;
+use occ::session::Session;
+use occ::{build, classify, format_uptime, gather_processes, ProjectTranscripts};
 
-fn main() {
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything(),
-    );
+/// Shown when a value could not be read.
+const ABSENT: &str = "—";
 
-    let mut shown = 0;
-    for (pid, process) in system.processes() {
-        let name = process.name().to_string_lossy().to_string();
-        let looks_versioned = name.split('.').count() == 3
-            && name.split('.').all(|part| part.parse::<u64>().is_ok());
-        if !looks_versioned || process.start_time() == 0 {
-            continue;
-        }
-        println!("pid={pid}");
-        println!("  name(p_comm) = {name}");
-        println!("  exe          = {:?}", process.exe());
-        println!("  cwd          = {:?}", process.cwd());
-        println!("  start_time   = {}", process.start_time());
-        println!("  run_time     = {}", process.run_time());
-        let argv: Vec<String> = process
-            .cmd()
-            .iter()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        println!("  argv[0..3]   = {:?}", &argv[..argv.len().min(3)]);
-        shown += 1;
-        if shown >= 4 {
-            break;
+#[derive(Parser)]
+#[command(
+    name = "occ",
+    version = version_string!(),
+    about = "Old Claude Code: list running Claude Code sessions, oldest release first"
+)]
+struct Cli {}
+
+fn main() -> Result<()> {
+    let Cli {} = Cli::parse();
+
+    let facts = gather_processes();
+    let home = dirs::home_dir().context("cannot find the home directory")?;
+    let transcripts = ProjectTranscripts::for_home(&home);
+    let sessions = build(&facts, &transcripts);
+
+    // Counted so the footer can say what was left out. A tool that quietly drops
+    // processes it cannot read would report a clean machine that is not clean.
+    let mut support = 0_usize;
+    let mut unreadable = 0_usize;
+    for fact in &facts {
+        match classify(fact) {
+            Role::Support(_) => support += 1,
+            Role::Unreadable => unreadable += 1,
+            _ => {}
         }
     }
-    println!("total versioned-name processes seen: {}", shown);
+
+    if sessions.is_empty() {
+        println!("No Claude Code sessions are running.");
+    } else {
+        println!("{}", render(&sessions));
+    }
+    print_footer(&sessions, support, unreadable);
+    Ok(())
+}
+
+/// Builds the table of sessions.
+fn render(sessions: &[SessionReport]) -> Table {
+    // The releases at the two ends of the report drive the colouring, so a
+    // reader can see at a glance which sessions have fallen behind.
+    let oldest = sessions.first().and_then(|row| row.version.as_ref());
+    let newest = sessions
+        .iter()
+        .filter_map(|row| row.version.as_ref())
+        .next_back();
+
+    let mut table = Table::new();
+    table
+        .load_preset(comfy_table::presets::UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(["PID", "RELEASE", "OPEN FOR", "SESSION", "DIRECTORY"]);
+
+    for row in sessions {
+        let release = match row.version.as_ref() {
+            None => ABSENT.dimmed().to_string(),
+            Some(version) if Some(version) == oldest && oldest != newest => {
+                version.as_str().red().bold().to_string()
+            }
+            Some(version) if Some(version) == newest => version.as_str().green().to_string(),
+            Some(version) => version.as_str().yellow().to_string(),
+        };
+        let directory = row
+            .directory
+            .as_ref()
+            .map_or_else(|| ABSENT.dimmed().to_string(), |d| d.display().to_string());
+
+        table.add_row([
+            Cell::new(row.pid.to_string()),
+            Cell::new(release),
+            Cell::new(format_uptime(row.uptime_secs)),
+            Cell::new(render_session(&row.session)),
+            Cell::new(directory),
+        ]);
+    }
+    table
+}
+
+/// Renders the session cell, marking anything that was inferred.
+///
+/// An inferred id is dimmed and an unresolved one says why, so a reader is never
+/// shown a firm-looking id that `occ` only guessed at.
+fn render_session(session: &Session) -> String {
+    match session {
+        Session::Named(id) => id.to_string(),
+        Session::Matched(id) => id.to_string().dimmed().to_string(),
+        Session::Ambiguous { candidates, peers } => {
+            format!("? {candidates} of {peers}").dimmed().to_string()
+        }
+        Session::Unknown => ABSENT.dimmed().to_string(),
+    }
+}
+
+/// Prints the counts and the legend below the table.
+fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
+    let inferred = sessions
+        .iter()
+        .filter(|row| matches!(row.session, Session::Matched(_)))
+        .count();
+    let unresolved = sessions
+        .iter()
+        .filter(|row| matches!(row.session, Session::Ambiguous { .. } | Session::Unknown))
+        .count();
+
+    println!();
+    println!(
+        "{} {} session(s).",
+        sessions.len().to_string().bold(),
+        if sessions.len() == 1 { "running" } else { "running" }
+    );
+
+    if inferred > 0 || unresolved > 0 {
+        println!(
+            "{}",
+            format!(
+                "A session id is dimmed when it was matched by directory and release rather than \
+                 read from the command line ({inferred} here). \"? N of M\" means N transcripts \
+                 fit M competing sessions, so none can be named ({unresolved} unresolved)."
+            )
+            .dimmed()
+        );
+    }
+    if support > 0 {
+        println!(
+            "{}",
+            format!("{support} Claude Code support process(es) not shown.").dimmed()
+        );
+    }
+    if unreadable > 0 {
+        println!(
+            "{}",
+            format!(
+                "{unreadable} Claude Code process(es) belong to another account and cannot be read."
+            )
+            .dimmed()
+        );
+    }
 }
