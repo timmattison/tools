@@ -60,7 +60,7 @@ fn main() -> Result<()> {
 /// table would bend by three columns on that row. A color the table applies
 /// itself lands after the measurement and moves nothing.
 fn render(sessions: &[SessionReport]) -> Table {
-    // The releases at the two ends of the report drive the colouring, so a
+    // The releases at the two ends of the report drive the coloring, so a
     // reader can see at a glance which sessions have fallen behind.
     let oldest = sessions.first().and_then(|row| row.version.as_ref());
     let newest = sessions
