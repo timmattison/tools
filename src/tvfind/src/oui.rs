@@ -56,7 +56,7 @@ pub fn unresponsive_candidates(
         .filter(|neighbour| !identified.contains(&neighbour.ip))
         .filter_map(|neighbour| {
             let vendor = db.get(&mac_prefix(&neighbour.mac)?)?;
-            crate::vendor::matches(vendor, vendor_filter).then(|| Candidate {
+            crate::vendor::wanted_as_television(vendor, vendor_filter).then(|| Candidate {
                 ip: neighbour.ip,
                 mac: neighbour.mac,
                 vendor: vendor.clone(),

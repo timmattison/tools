@@ -32,19 +32,88 @@ pub fn matches(vendor: &str, filter: &str) -> bool {
         .any(|factory| vendor.contains(factory))
 }
 
+/// Manufacturers that build televisions, and the contract factories that build
+/// their panels.
+///
+/// An OUI lookup names the company an address block is registered to, and
+/// nothing more, so this list is what turns "some device" into "a device from a
+/// company that makes televisions". Entries are matched as whole words, which
+/// is what separates `LG Electronics` from `LG Innotek` — a supplier of camera
+/// and radio modules to other makers — and `Vizio` from `Viziontech`.
+///
+/// General-purpose contract manufacturers such as Compal and Wistron are
+/// deliberately absent. They build far more laptops than televisions, so their
+/// blocks would report mostly non-televisions.
+const TELEVISION_BRANDS: &[&str] = &[
+    "amtran",
+    "changhong",
+    "funai",
+    "hisense",
+    "hitachi",
+    "hui zhou gaoshengda",
+    "konka",
+    "lg electronics",
+    "panasonic",
+    "philips",
+    "roku",
+    "samsung",
+    "sceptre",
+    "sharp",
+    "skyworth",
+    "sony",
+    "tcl",
+    "top victory",
+    "toshiba",
+    "tp vision",
+    "vizio",
+];
+
+/// Split a name into lowercase alphanumeric words.
+///
+/// The registry punctuates inconsistently — `Appliances(Huizhou)Co.` has no
+/// space at all — so every non-alphanumeric character divides a word.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether `phrase` appears in `name` as a run of whole words.
+fn contains_phrase(name: &[String], phrase: &str) -> bool {
+    let phrase = words(phrase);
+    if phrase.is_empty() || phrase.len() > name.len() {
+        return false;
+    }
+    name.windows(phrase.len()).any(|window| window == phrase)
+}
+
 /// Whether `vendor` names a manufacturer that builds televisions.
+///
+/// The brand is matched anywhere in the registered name, because the registry
+/// routinely leads with a city or a parent company — `Huizhou TCL
+/// Communication Electron`, `Sichuan Changhong Electric`.
 #[must_use]
 pub fn is_television_brand(vendor: &str) -> bool {
-    let _ = vendor;
-    todo!("no television brand list exists yet")
+    let name = words(vendor);
+    TELEVISION_BRANDS
+        .iter()
+        .any(|brand| contains_phrase(&name, brand))
 }
 
 /// Whether a neighbour registered to `vendor` is worth reporting as a possible
 /// television, given the user's `filter`.
+///
+/// A filter is the user's own judgement and is obeyed as given. Without one,
+/// only a television brand qualifies — otherwise every neighbour in the ARP
+/// table would be reported, which says nothing about televisions at all.
 #[must_use]
 pub fn wanted_as_television(vendor: &str, filter: &str) -> bool {
-    let _ = (vendor, filter);
-    todo!("no television brand list exists yet")
+    if filter.trim().is_empty() {
+        is_television_brand(vendor)
+    } else {
+        matches(vendor, filter)
+    }
 }
 
 #[cfg(test)]
