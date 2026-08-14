@@ -86,14 +86,18 @@ struct Cli {
     #[arg(long)]
     no_log: bool,
 
-    /// Force the 24-bit truecolor commit-log gradient on, regardless of
-    /// what `COLORTERM` says. Useful when a wrapper (cargo run, viddy)
-    /// strips the env var or your terminal doesn't export it.
+    /// Force the 24-bit truecolor fades on, regardless of what `COLORTERM`
+    /// says. The fades are the commit-log gradient, the recency fade on the
+    /// file rows, and the fade on the push status message. This flag helps
+    /// when a wrapper (cargo run, viddy) removes the env var, or when your
+    /// terminal does not export it.
     #[arg(long, conflicts_with = "no_truecolor")]
     truecolor: bool,
 
-    /// Force the 24-bit truecolor commit-log gradient off, falling back
-    /// to the 8-color path even on a terminal that supports truecolor.
+    /// Force the 24-bit truecolor fades off, even on a terminal that
+    /// supports truecolor. The commit-log gradient and the recency fade on
+    /// the file rows then use the 8-color path. The push status message
+    /// dims once at the half-way mark instead of a smooth fade.
     #[arg(long, conflicts_with = "truecolor")]
     no_truecolor: bool,
 
