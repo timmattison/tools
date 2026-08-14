@@ -13,6 +13,7 @@
 //! classification and attribution rules are testable without a running session.
 
 pub mod process;
+pub mod registry;
 pub mod report;
 pub mod scan;
 pub mod session;
