@@ -130,6 +130,8 @@ pub fn gather_processes() -> Vec<ProcessFact> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::read_c_name;
     use super::{accounting_name, gather_processes};
 
     #[test]
@@ -150,6 +152,25 @@ mod tests {
             basename.starts_with(&found),
             "accounting name {found:?} should be a prefix of the executable name {basename:?}"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_kernel_name_keeps_its_non_ascii_bytes() {
+        // The kernel field holds the bytes of the name, and `libc::c_char` is a
+        // signed type on this platform, so every byte above 0x7F arrives as a
+        // negative number. The name must be read back from those bit patterns.
+        // A magnitude reads a different name: the absolute value of 0xC3 is
+        // 0x3D and the absolute value of 0xA9 is 0x57, so "café" becomes
+        // "caf=W". Both of those are printable ASCII, so the UTF-8 check that
+        // follows accepts the wrong name and reports no error.
+        let name = "café";
+        let mut field: [libc::c_char; 16] = [0; 16];
+        for (slot, byte) in field.iter_mut().zip(name.as_bytes()) {
+            *slot = byte.cast_signed();
+        }
+
+        assert_eq!(read_c_name(&field), Some(name.to_owned()));
     }
 
     #[test]
