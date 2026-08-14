@@ -222,6 +222,9 @@ mod tests {
     const VERSIONED: &str = "/Users/u/.local/share/claude/versions/2.1.232";
     const BUNDLED: &str = "/Users/u/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude";
     const LAUNCHER: &str = "/Users/u/.local/bin/claude";
+    /// The same versioned release file, installed under an account name that
+    /// holds a space.
+    const SPACED_VERSIONED: &str = "/Users/My Name/.local/share/claude/versions/2.1.232";
 
     #[test]
     fn a_bare_session_is_a_session() {
@@ -243,6 +246,20 @@ mod tests {
                 "--session-id",
                 "ed84c8c7-0117-4670-936c-98e0f0d2c80b",
             ],
+        );
+        assert_eq!(classify(&observed), Role::Session);
+    }
+
+    #[test]
+    fn a_session_installed_under_a_path_with_a_space_is_a_session() {
+        // A home directory named for a person can hold a space, which puts a
+        // space inside argv[0] as well. The second word there is part of the
+        // path and names no job at all, so reading it as a subcommand would
+        // drop a live session out of the report and count it in the footer.
+        let observed = fact(
+            "2.1.232",
+            SPACED_VERSIONED,
+            &[SPACED_VERSIONED, "--dangerously-skip-permissions"],
         );
         assert_eq!(classify(&observed), Role::Session);
     }
