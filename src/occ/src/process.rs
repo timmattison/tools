@@ -99,19 +99,33 @@ fn is_claude_image(path: &Path) -> bool {
             .is_some_and(|parent| parent == "versions")
 }
 
-/// Returns the first word of `argv[0]`.
+/// Returns the program name `argv[0]` announces.
 ///
 /// Claude Code writes a descriptive `argv[0]` for its support processes, such as
-/// `claude bg-spare`, so the announced program name is the first word only.
+/// `claude bg-spare`, where the program name is the first word only. Everywhere
+/// else `argv[0]` is the whole image path, and a path can hold a space of its
+/// own, so it is read entire unless a support subcommand follows the first word.
 fn announced_program(argv: &[String]) -> Option<&str> {
-    argv.first()?.split_whitespace().next()
+    let announcement = argv.first()?;
+    if announced_subcommand(argv).is_some() {
+        return announcement.split_whitespace().next();
+    }
+    Some(announcement.as_str())
 }
 
 /// Returns the subcommand a support process announces inside its `argv[0]`.
+///
+/// A second word counts only when it is a subcommand this module already knows,
+/// because an image path that holds a space has a second word as well: a claude
+/// installed under `/Users/My Name/...` announces one. Reading that word as a
+/// job would call a live session a support process and drop it from the report,
+/// which is the silent under-report `Role::Unreadable` exists to prevent.
 fn announced_subcommand(argv: &[String]) -> Option<&str> {
     let mut words = argv.first()?.split_whitespace();
     words.next()?;
-    words.next()
+    words
+        .next()
+        .filter(|word| SUPPORT_SUBCOMMANDS.contains(word))
 }
 
 /// Decides what a process is.
