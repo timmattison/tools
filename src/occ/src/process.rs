@@ -127,8 +127,50 @@ fn announced_subcommand(argv: &[String]) -> Option<&str> {
 /// assert_eq!(classify(&session), Role::Session);
 /// ```
 #[must_use]
-pub fn classify(_fact: &ProcessFact) -> Role {
-    Role::Unrelated
+pub fn classify(fact: &ProcessFact) -> Role {
+    // The image is the first gate. Without a Claude Code image the process is
+    // nothing to do with Claude Code, whatever it calls itself.
+    if !fact.exe.as_deref().is_some_and(is_claude_image) {
+        return Role::Unrelated;
+    }
+
+    // A support process may announce its job inside argv[0], as `claude
+    // bg-spare` does, and this reading must come before the session test
+    // because its first word is the ordinary program name.
+    if let Some(subcommand) = announced_subcommand(&fact.argv) {
+        return Role::Support(subcommand.to_string());
+    }
+
+    // A pty host announces the plain name and is separated from a session only
+    // by a flag, so the whole argument vector has to be read.
+    for argument in &fact.argv {
+        if let Some(flag) = SUPPORT_FLAGS.iter().find(|f| *f == argument) {
+            return Role::Support(flag.trim_start_matches('-').to_string());
+        }
+    }
+
+    // The image is Claude Code's but the announced program is not, which is how
+    // a tool spawned to serve a session looks while it holds that image.
+    let announced = announced_program(&fact.argv);
+    let announces_claude = announced.is_some_and(|program| {
+        Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "claude" || ClaudeVersion::parse(name).is_some())
+    });
+    if !announces_claude {
+        return Role::SpawnedTool;
+    }
+
+    // A subcommand in the first argument names support. Anything else there is
+    // a prompt, a slash command, or a flag, and all of those are sessions.
+    if let Some(first) = fact.argv.get(1) {
+        if SUPPORT_SUBCOMMANDS.contains(&first.as_str()) {
+            return Role::Support(first.clone());
+        }
+    }
+
+    Role::Session
 }
 
 /// Returns the Claude Code release a process runs.
@@ -139,8 +181,11 @@ pub fn classify(_fact: &ProcessFact) -> Role {
 /// accounting name still names the release the process is running — which is
 /// exactly the stale session this tool exists to surface.
 #[must_use]
-pub fn version_of(_fact: &ProcessFact) -> Option<ClaudeVersion> {
-    None
+pub fn version_of(fact: &ProcessFact) -> Option<ClaudeVersion> {
+    ClaudeVersion::parse(&fact.accounting_name).or_else(|| {
+        let name = fact.exe.as_deref()?.file_name()?.to_str()?;
+        ClaudeVersion::parse(name)
+    })
 }
 
 #[cfg(test)]
