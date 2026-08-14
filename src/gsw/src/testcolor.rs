@@ -54,7 +54,26 @@ pub(crate) fn with_forced_ansi<T>(body: impl FnOnce() -> T) -> T {
 /// would deadlock. Such a test calls `force` instead and holds the lock itself.
 /// No other caller has a reason to use this function.
 fn force<T>(body: impl FnOnce() -> T) -> T {
+    colored::control::set_override(true);
+    // Build the guard before the body runs. A call to
+    // `colored::control::unset_override()` after `body()` runs only when `body`
+    // returns; a panic in `body` unwinds past it and leaves the override on for
+    // every later test. A guard restores the override on both paths, because
+    // unwinding drops it.
+    let _restore = Restore;
     body()
+}
+
+/// Puts the `colored` crate's global override back when it goes out of scope.
+///
+/// A test body panics as its normal way to fail, so the restore must survive a
+/// panic. Only a `Drop` implementation does that.
+struct Restore;
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        colored::control::unset_override();
+    }
 }
 
 #[cfg(test)]
