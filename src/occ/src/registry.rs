@@ -68,9 +68,34 @@ impl Registry for SessionRegistry {
 /// Reads the session out of one registry file.
 ///
 /// Returns `None` unless the file is about this process and names a session.
+/// Every check here fails closed, because naming the wrong session is the worst
+/// answer available: nothing in the output would say the name is wrong.
 #[must_use]
-fn session_in(_contents: &str, _pid: u32, _start_time_epoch_secs: u64) -> Option<SessionId> {
-    None
+fn session_in(contents: &str, pid: u32, start_time_epoch_secs: u64) -> Option<SessionId> {
+    /// Milliseconds in a second, the unit the recorded start is written in.
+    const MILLIS: u64 = 1_000;
+
+    let record: serde_json::Value = serde_json::from_str(contents).ok()?;
+
+    // The name of the file is not evidence. A file that records another
+    // process is about another process, whatever it is called.
+    if record.get("pid").and_then(serde_json::Value::as_u64)? != u64::from(pid) {
+        return None;
+    }
+
+    let started = record
+        .get("startedAt")
+        .and_then(serde_json::Value::as_u64)?
+        / MILLIS;
+    if started.abs_diff(start_time_epoch_secs) > REGISTRATION_WINDOW_SECS {
+        return None;
+    }
+
+    SessionId::parse(
+        record
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)?,
+    )
 }
 
 #[cfg(test)]
