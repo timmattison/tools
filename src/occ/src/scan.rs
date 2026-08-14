@@ -61,12 +61,20 @@ fn read_accounting_name(pid: u32) -> Option<String> {
 }
 
 /// Reads a NUL-terminated name out of a fixed-size kernel field.
+///
+/// The field carries the bytes of the name, and `libc::c_char` is signed on this
+/// platform, so a byte above 0x7F arrives as a negative number. Each element is
+/// therefore reinterpreted, not converted: a numeric conversion would fold such
+/// a byte to a different value, and the folded value is printable ASCII, so the
+/// UTF-8 check below would accept the wrong name and report no error.
+///
+/// Returns `None` when the field is empty or the bytes are not UTF-8.
 #[cfg(target_os = "macos")]
 fn read_c_name(field: &[libc::c_char]) -> Option<String> {
     let bytes: Vec<u8> = field
         .iter()
         .take_while(|byte| **byte != 0)
-        .map(|byte| byte.unsigned_abs())
+        .map(|byte| byte.cast_unsigned())
         .collect();
     if bytes.is_empty() {
         return None;
