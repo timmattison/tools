@@ -169,11 +169,6 @@ mod tests {
     use occ::{ClaudeVersion, SessionId, SessionReport};
     use std::collections::BTreeSet;
     use std::path::PathBuf;
-    use std::sync::{Mutex, PoisonError};
-
-    /// Whether escape sequences are emitted is one setting for the whole
-    /// process, so a test that forces them on holds this lock while it runs.
-    static COLOR: Mutex<()> = Mutex::new(());
 
     /// The text a reader sees, with every escape sequence removed.
     ///
@@ -234,10 +229,7 @@ mod tests {
             row(3, "2.1.204", None),
         ];
 
-        let _held = COLOR.lock().unwrap_or_else(PoisonError::into_inner);
-        colored::control::set_override(true);
         let mut table = render(&rows);
-        colored::control::unset_override();
         table.force_no_tty().set_width(120);
 
         let plain = table.to_string();
