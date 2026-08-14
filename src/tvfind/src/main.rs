@@ -74,6 +74,12 @@ fn host_count(hosts: usize) -> String {
     format!("{hosts} host{plural}")
 }
 
+/// Heading for the powered-off report.
+fn powered_off_heading(vendor_filter: &str) -> String {
+    let _ = vendor_filter;
+    String::new()
+}
+
 /// Probe every host on both TV ports and identify whatever answers.
 async fn find_tvs(hosts: &[Ipv4Addr], vendor_filter: &str) -> Vec<Tv> {
     let client = Client::new();
@@ -175,7 +181,27 @@ fn oui_database() -> Option<std::collections::HashMap<String, String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::host_count;
+    use super::{host_count, powered_off_heading};
+
+    #[test]
+    fn says_what_an_unfiltered_candidate_actually_has_in_common_with_a_tv() {
+        // The evidence is the address block, not the device. Saying more than
+        // that is what put a router and a speaker under a "probably a TV" list.
+        let heading = powered_off_heading("");
+
+        assert!(
+            heading.contains("television maker"),
+            "the heading must name the evidence, got {heading:?}"
+        );
+        assert!(!heading.contains("Probably a TV"));
+    }
+
+    #[test]
+    fn names_the_filter_the_user_gave_in_the_heading() {
+        let heading = powered_off_heading("tcl");
+
+        assert!(heading.contains("tcl"), "got {heading:?}");
+    }
 
     #[test]
     fn describes_a_single_host_in_the_singular() {
