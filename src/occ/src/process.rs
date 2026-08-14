@@ -54,6 +54,13 @@ pub enum Role {
     /// A process that holds a Claude Code image but is not Claude Code, such as
     /// a tool spawned to serve a session.
     SpawnedTool,
+    /// A Claude Code process this user is not allowed to read.
+    ///
+    /// Another account's processes are visible in the process table but give up
+    /// no arguments, no working directory, and no start time. Such a process is
+    /// counted and reported as unreadable rather than dropped, because dropping
+    /// it would let `occ` report "no old sessions" on a machine that has them.
+    Unreadable,
     /// A process unrelated to Claude Code.
     Unrelated,
 }
@@ -262,6 +269,19 @@ mod tests {
         // that is not a session at all.
         let observed = fact("2.1.232", VERSIONED, &["ugrep", "-G", "--ignore-files"]);
         assert_eq!(classify(&observed), Role::SpawnedTool);
+    }
+
+    #[test]
+    fn another_users_session_is_reported_as_unreadable() {
+        // Observed on a live machine: a second account's sessions appear in the
+        // process table with an image but no arguments, no directory, and no
+        // start time. Treating that emptiness as "not a session" would let `occ`
+        // report a clean machine while old sessions run on it.
+        let mut observed = fact("2.1.220", "/Users/other/.local/share/claude/versions/2.1.220", &[]);
+        observed.cwd = None;
+        observed.start_time_epoch_secs = 0;
+        observed.uptime_secs = 0;
+        assert_eq!(classify(&observed), Role::Unreadable);
     }
 
     #[test]
