@@ -87,7 +87,7 @@ fn reports_running_sessions_oldest_release_first() {
         session(100, "2.1.196", "/work/one", &["claude"]),
     ];
 
-    let rows = build(&facts, &machine.registry());
+    let rows = build(&facts, &machine.registry()).sessions;
 
     assert_eq!(releases(&rows), ["2.1.196", "2.1.232"]);
     assert_eq!(rows[0].pid, 100);
@@ -105,7 +105,7 @@ fn names_each_session_from_the_record_it_wrote() {
         session(200, "2.1.232", "/work/two", &["claude"]),
     ];
 
-    let rows = build(&facts, &machine.registry());
+    let rows = build(&facts, &machine.registry()).sessions;
 
     assert_eq!(
         named(&rows),
@@ -128,7 +128,7 @@ fn sessions_sharing_a_directory_and_a_release_are_each_named() {
         session(102, "2.1.204", "/work", &["claude"]),
     ];
 
-    let rows = build(&facts, &machine.registry());
+    let rows = build(&facts, &machine.registry()).sessions;
 
     assert_eq!(
         named(&rows),
@@ -150,7 +150,7 @@ fn a_record_left_by_a_dead_process_names_nothing() {
 
     let facts = [session(100, "2.1.196", "/work", &["claude"])];
 
-    let rows = build(&facts, &machine.registry());
+    let rows = build(&facts, &machine.registry()).sessions;
 
     assert_eq!(rows.len(), 1);
     assert_eq!(named(&rows), [None]);
@@ -164,7 +164,7 @@ fn a_session_that_recorded_nothing_is_still_reported() {
 
     let facts = [session(100, "2.1.196", "/work", &["claude"])];
 
-    let rows = build(&facts, &machine.registry());
+    let rows = build(&facts, &machine.registry()).sessions;
 
     assert_eq!(rows.len(), 1);
     assert_eq!(releases(&rows), ["2.1.196"]);
@@ -188,7 +188,7 @@ fn support_processes_and_spawned_tools_are_left_out() {
         session(103, "2.1.196", "/work/one", &["ugrep", "-G"]),
     ];
 
-    let rows = build(&facts, &machine.registry());
+    let rows = build(&facts, &machine.registry()).sessions;
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].pid, 100);

@@ -6,10 +6,9 @@ use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
 use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
-use occ::process::Role;
-use occ::report::SessionReport;
+use occ::report::{Report, SessionReport};
 use occ::session::SessionId;
-use occ::{build, classify, format_uptime, gather_processes, SessionRegistry};
+use occ::{build, format_uptime, gather_processes, SessionRegistry};
 
 /// Shown when a value could not be read.
 const ABSENT: &str = "—";
@@ -28,26 +27,14 @@ fn main() -> Result<()> {
     let facts = gather_processes();
     let home = dirs::home_dir().context("cannot find the home directory")?;
     let registry = SessionRegistry::for_home(&home);
-    let sessions = build(&facts, &registry);
+    let report = build(&facts, &registry);
 
-    // Counted so the footer can say what was left out. A tool that quietly drops
-    // processes it cannot read would report a clean machine that is not clean.
-    let mut support = 0_usize;
-    let mut unreadable = 0_usize;
-    for fact in &facts {
-        match classify(fact) {
-            Role::Support(_) => support += 1,
-            Role::Unreadable => unreadable += 1,
-            _ => {}
-        }
-    }
-
-    if sessions.is_empty() {
+    if report.sessions.is_empty() {
         println!("No Claude Code sessions are running.");
     } else {
-        println!("{}", render(&sessions));
+        println!("{}", render(&report.sessions));
     }
-    print_footer(&sessions, support, unreadable);
+    print_footer(&report);
     Ok(())
 }
 
@@ -124,7 +111,16 @@ fn plural<'a>(count: usize, singular: &'a str, plural: &'a str) -> &'a str {
 }
 
 /// Prints the counts and the legend below the table.
-fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
+///
+/// The footer says what the table left out. A tool that quietly drops processes
+/// it cannot read would report a clean machine that is not clean, so every
+/// count [`build`] collected is printed here.
+fn print_footer(report: &Report) {
+    let Report {
+        ref sessions,
+        support,
+        unreadable,
+    } = *report;
     let unnamed = sessions.iter().filter(|row| row.session.is_none()).count();
 
     println!();

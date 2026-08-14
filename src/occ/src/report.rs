@@ -1,4 +1,5 @@
-//! Assembling the answer: one row per running session, oldest release first.
+//! Assembling the answer: one row per running session, oldest release first,
+//! and a count of every Claude Code process the rows leave out.
 
 use crate::process::{classify, version_of, ProcessFact, Role};
 use crate::registry::Registry;
@@ -19,6 +20,22 @@ pub struct SessionReport {
     pub session: Option<SessionId>,
     /// Seconds the session has been open.
     pub uptime_secs: u64,
+}
+
+/// Everything one run has to say about a machine.
+///
+/// The rows are the sessions to show. The counts are the Claude Code processes
+/// the rows deliberately leave out, and they are reported so the footer can say
+/// what was left out. A tool that quietly drops processes it cannot read would
+/// report a clean machine that is not clean.
+#[derive(Debug, Clone)]
+pub struct Report {
+    /// Every running session, oldest release first.
+    pub sessions: Vec<SessionReport>,
+    /// Processes Claude Code runs for its own account.
+    pub support: usize,
+    /// Claude Code processes another account owns, which this user cannot read.
+    pub unreadable: usize,
 }
 
 /// Renders a duration as the two largest units that carry information.
@@ -48,7 +65,8 @@ pub fn format_uptime(seconds: u64) -> String {
     }
 }
 
-/// Builds the report: every running session, oldest release first.
+/// Builds the report: every running session, oldest release first, and a count
+/// of what the rows leave out.
 ///
 /// Sessions are ordered by release, oldest first, because a session left on an
 /// old release is the one worth acting on. A session whose release could not be
@@ -56,21 +74,35 @@ pub fn format_uptime(seconds: u64) -> String {
 /// impersonates the oldest one. Within a release the longest-open session comes
 /// first, and the process identifier settles the rest so that two runs over an
 /// unchanged machine agree.
+///
+/// The support and unreadable counts come from the same pass that selects the
+/// rows. One pass decides what each process is, so the counts and the rows can
+/// never disagree about a process, and the caller learns everything about the
+/// machine from one value.
 #[must_use]
-pub fn build(facts: &[ProcessFact], registry: &dyn Registry) -> Vec<SessionReport> {
-    let mut rows: Vec<SessionReport> = facts
-        .iter()
-        .filter(|fact| classify(fact) == Role::Session)
-        .map(|fact| SessionReport {
-            pid: fact.pid,
-            version: version_of(fact),
-            directory: fact.cwd.clone(),
-            session: registry.session_of(fact),
-            uptime_secs: fact.uptime_secs,
-        })
-        .collect();
+pub fn build(facts: &[ProcessFact], registry: &dyn Registry) -> Report {
+    let mut report = Report {
+        sessions: Vec::new(),
+        support: 0,
+        unreadable: 0,
+    };
 
-    rows.sort_by(|left, right| {
+    for fact in facts {
+        match classify(fact) {
+            Role::Session => report.sessions.push(SessionReport {
+                pid: fact.pid,
+                version: version_of(fact),
+                directory: fact.cwd.clone(),
+                session: registry.session_of(fact),
+                uptime_secs: fact.uptime_secs,
+            }),
+            Role::Support(_) => report.support += 1,
+            Role::Unreadable => report.unreadable += 1,
+            Role::SpawnedTool | Role::Unrelated => {}
+        }
+    }
+
+    report.sessions.sort_by(|left, right| {
         // `None` is the unreadable release, and it sorts last: an unknown
         // release must never be presented as the oldest one on the machine.
         let by_release = match (left.version.as_ref(), right.version.as_ref()) {
@@ -83,7 +115,7 @@ pub fn build(facts: &[ProcessFact], registry: &dyn Registry) -> Vec<SessionRepor
             .then_with(|| right.uptime_secs.cmp(&left.uptime_secs))
             .then_with(|| left.pid.cmp(&right.pid))
     });
-    rows
+    report
 }
 
 #[cfg(test)]
@@ -178,10 +210,62 @@ mod tests {
         tool.argv = vec!["ugrep".to_string(), "-G".to_string()];
 
         let facts = [session_fact(1, "2.1.232", "/work", 10), daemon, tool];
-        let rows = build(&facts, &FakeRegistry::default());
+        let rows = build(&facts, &FakeRegistry::default()).sessions;
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pid, 1);
+    }
+
+    #[test]
+    fn counts_what_it_leaves_out() {
+        // The footer says what the table does not show, so the count of every
+        // kind left out is part of the answer. A machine reported as clean while
+        // sixty processes of another account run on it is the failure this
+        // prevents.
+        let mut daemon = session_fact(3, "2.1.232", "/work", 10);
+        daemon.argv = vec![
+            "claude".to_string(),
+            "daemon".to_string(),
+            "run".to_string(),
+        ];
+        let mut pty_host = session_fact(4, "2.1.232", "/work", 10);
+        pty_host.argv = vec!["claude".to_string(), "--bg-pty-host".to_string()];
+        let mut other_account = session_fact(5, "2.1.232", "/work", 10);
+        other_account.argv = Vec::new();
+        let mut tool = session_fact(6, "2.1.232", "/work", 10);
+        tool.argv = vec!["ugrep".to_string(), "-G".to_string()];
+        let mut unrelated = session_fact(7, "2.1.232", "/work", 10);
+        unrelated.exe = Some(PathBuf::from("/usr/bin/vim"));
+
+        let facts = [
+            session_fact(1, "2.1.196", "/work", 10),
+            session_fact(2, "2.1.232", "/work", 10),
+            daemon,
+            pty_host,
+            other_account,
+            tool,
+            unrelated,
+        ];
+        let report = build(&facts, &FakeRegistry::default());
+
+        assert_eq!(report.sessions.len(), 2);
+        assert_eq!(report.support, 2);
+        assert_eq!(report.unreadable, 1);
+    }
+
+    #[test]
+    fn counts_nothing_when_nothing_is_left_out() {
+        // A machine that runs sessions and nothing else must report no support
+        // process and no unreadable one, so the footer stays silent.
+        let facts = [
+            session_fact(1, "2.1.196", "/a", 10),
+            session_fact(2, "2.1.232", "/b", 10),
+        ];
+        let report = build(&facts, &FakeRegistry::default());
+
+        assert_eq!(report.sessions.len(), 2);
+        assert_eq!(report.support, 0);
+        assert_eq!(report.unreadable, 0);
     }
 
     #[test]
@@ -192,7 +276,7 @@ mod tests {
             session_fact(3, "2.1.204", "/c", 10),
             session_fact(4, "2.1.196", "/d", 10),
         ];
-        let rows = build(&facts, &FakeRegistry::default());
+        let rows = build(&facts, &FakeRegistry::default()).sessions;
         assert_eq!(releases(&rows), ["2.1.99", "2.1.196", "2.1.204", "2.1.232"]);
     }
 
@@ -204,7 +288,7 @@ mod tests {
         unknown.exe = Some(PathBuf::from("/Users/u/.local/bin/claude"));
 
         let facts = [unknown, session_fact(1, "2.1.232", "/b", 10)];
-        let rows = build(&facts, &FakeRegistry::default());
+        let rows = build(&facts, &FakeRegistry::default()).sessions;
 
         assert_eq!(releases(&rows), ["2.1.232", "?"]);
     }
@@ -216,7 +300,7 @@ mod tests {
             session_fact(2, "2.1.204", "/b", 9_000),
             session_fact(3, "2.1.204", "/c", 500),
         ];
-        let rows = build(&facts, &FakeRegistry::default());
+        let rows = build(&facts, &FakeRegistry::default()).sessions;
         assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), [2, 3, 1]);
     }
 
@@ -225,7 +309,7 @@ mod tests {
         let facts = [session_fact(1, "2.1.205", "/work", 10)];
         let registry = FakeRegistry::default().with(1, SESSION_A);
 
-        let rows = build(&facts, &registry);
+        let rows = build(&facts, &registry).sessions;
 
         assert_eq!(named(&rows), [Some(SESSION_A.to_string())]);
     }
@@ -243,7 +327,7 @@ mod tests {
             .with(1, SESSION_A)
             .with(2, SESSION_B);
 
-        let rows = build(&facts, &registry);
+        let rows = build(&facts, &registry).sessions;
 
         // Row order is by uptime, so the longer-open process 2 comes first.
         assert_eq!(
@@ -259,7 +343,7 @@ mod tests {
         // it is right, and nothing in the output would say which.
         let facts = [session_fact(1, "2.1.205", "/work", 10)];
 
-        let rows = build(&facts, &FakeRegistry::default());
+        let rows = build(&facts, &FakeRegistry::default()).sessions;
 
         assert_eq!(named(&rows), [None]);
     }
@@ -271,7 +355,7 @@ mod tests {
         let mut hidden = session_fact(7, "2.1.196", "/work", 42);
         hidden.cwd = None;
 
-        let rows = build(&[hidden], &FakeRegistry::default().with(7, SESSION_A));
+        let rows = build(&[hidden], &FakeRegistry::default().with(7, SESSION_A)).sessions;
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].pid, 7);
