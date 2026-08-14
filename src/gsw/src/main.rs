@@ -1253,4 +1253,38 @@ mod tests {
             Some("xterm-256color")
         ));
     }
+
+    #[test]
+    fn truecolor_flag_help_names_every_fade_the_flag_controls() {
+        // The two flags gate three fades, not one: the commit-log gradient,
+        // the recency fade on the file rows, and the fade on the push status
+        // message. Help text that names only the gradient sends the user who
+        // wants the other two off hunting for a flag that does not exist.
+        use clap::CommandFactory;
+
+        const EFFECTS: [&str; 3] = ["commit-log gradient", "file rows", "push status message"];
+
+        let cmd = Cli::command();
+        for id in ["truecolor", "no_truecolor"] {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .unwrap_or_else(|| panic!("clap must expose an argument with the id `{id}`"));
+            let raw = arg
+                .get_long_help()
+                .or_else(|| arg.get_help())
+                .unwrap_or_else(|| panic!("the argument `{id}` must carry help text"))
+                .to_string();
+            // Collapse the source's line wrapping so a phrase split across two
+            // doc-comment lines still matches.
+            let help = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+            for effect in EFFECTS {
+                assert!(
+                    help.contains(effect),
+                    "the help for `{id}` must name the `{effect}` fade the flag controls, \
+                     but it reads: {help}",
+                );
+            }
+        }
+    }
 }
