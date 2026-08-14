@@ -256,7 +256,11 @@ mod tests {
         let _desc = server
             .mock("GET", "/ssdp/device-desc.xml")
             .with_status(200)
-            .with_body(GOOGLE_TV_DESC.replace("Smart TV Pro", "Google Home").as_str())
+            .with_body(
+                GOOGLE_TV_DESC
+                    .replace("Smart TV Pro", "Google Home")
+                    .as_str(),
+            )
             .create_async()
             .await;
         let _eureka = server
