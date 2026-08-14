@@ -353,7 +353,9 @@ pub(crate) struct RenderConfig {
     pub bar_width: usize,
     /// Recent-commit rows to request; `0` when `--no-log` suppressed the section.
     pub log_lines: usize,
-    /// Whether the 24-bit truecolor commit-log gradient is in effect.
+    /// Whether the 24-bit truecolor fades are in effect. The fades are the
+    /// commit-log gradient, the recency fade on the file rows, and the fade
+    /// on the push status message.
     pub truecolor: bool,
     /// Columns to subtract from the detected width (`--width-offset`).
     pub width_offset: usize,

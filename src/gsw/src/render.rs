@@ -116,9 +116,10 @@ pub struct RenderOptions {
     pub max_files: Option<usize>,
     /// Maximum recent-commit rows to render. 0 disables the log section.
     pub log_lines: usize,
-    /// When true, the commit-log rows fade from a bright base color toward
-    /// a dark floor as commits age, using 24-bit (truecolor) ANSI. When
-    /// false, log rows use the same 8-color/dim styling as everything else.
+    /// When true, the commit-log rows and the file rows fade from a bright
+    /// base color toward a dark floor as they age. The fade uses 24-bit
+    /// (truecolor) ANSI. When false, both use the same 8-color/dim styling
+    /// as everything else.
     pub truecolor: bool,
     /// Live-refresh clock printed inside the post-header separator, or `None`
     /// to leave that rule blank. One-shot mode passes `None`: a render that
