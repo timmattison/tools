@@ -12,6 +12,8 @@
 //! applied to those facts is a pure function over [`ProcessFact`] values, so the
 //! classification and attribution rules are testable without a running session.
 
+pub mod process;
 pub mod version;
 
+pub use process::{classify, version_of, ProcessFact, Role};
 pub use version::ClaudeVersion;
