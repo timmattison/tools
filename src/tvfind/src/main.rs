@@ -75,9 +75,19 @@ fn host_count(hosts: usize) -> String {
 }
 
 /// Heading for the powered-off report.
+///
+/// An OUI lookup identifies the company a hardware address block belongs to,
+/// and nothing more, so the heading names that evidence rather than asserting
+/// the device is a television.
 fn powered_off_heading(vendor_filter: &str) -> String {
-    let _ = vendor_filter;
-    String::new()
+    let filter = vendor_filter.trim();
+    let registrant = if filter.is_empty() {
+        "a television maker".to_owned()
+    } else {
+        format!("a vendor that matches \"{filter}\"")
+    };
+
+    format!("\nRegistered to {registrant}, but answered no probe (powered off?):\n")
 }
 
 /// Probe every host on both TV ports and identify whatever answers.
@@ -156,7 +166,7 @@ fn report_powered_off(tvs: &[Tv], vendor_filter: &str) {
         return;
     }
 
-    println!("\nProbably a TV but answering nothing (powered off?):\n");
+    println!("{}", powered_off_heading(vendor_filter));
     for candidate in candidates {
         println!(
             "  {:<16} {:<19} {}",
