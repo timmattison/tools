@@ -455,7 +455,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       text is shown under the frame in red (up to three rows, `hint:` advice dropped first, and
       fewer rows still on a pane too short to spare three — the frame always keeps a row) and
       stays there until you press a key. A push that succeeds re-walks the repository immediately,
-      so the ahead/behind arrows match what just happened.
+      so the ahead/behind arrows match what just happened. Nothing the push runs can prompt at the
+      terminal — it would be reading the same keystrokes gsw is. The push is started detached from
+      the terminal — its own session on Unix, no inherited console on Windows — so nothing in its
+      process tree can reach the keyboard gsw is reading, not git, not ssh, and not anything below
+      them: an HTTPS remote that wants a password, a passphrase-protected key with no agent, and an
+      unknown host key all fail fast and say so under the frame instead of hanging behind a
+      question gsw never drew. Credential helpers and a GUI askpass still work — neither needs the
+      terminal.
     - Everything gsw says itself goes away on its own: `Pushed 3 commits to origin/my-branch
       (12s ago)` counts up in place, fades toward black as it goes, and takes itself off the
       screen after a minute — the frame gets the row back with no key pressed. Refusals
@@ -464,14 +471,7 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       exception and does not expire**: it is something to read and act on, so it waits for a key
       the way it always has. The fade is the 24-bit gradient the commit log uses, under the same
       `--truecolor`/`--no-truecolor` control; without truecolor the message simply dims halfway
-      through its life instead. Nothing the push runs can prompt at the
-      terminal — it would be reading the same keystrokes gsw is. The push is started detached from
-      the terminal — its own session on Unix, no inherited console on Windows — so nothing in its
-      process tree can reach the keyboard gsw is reading, not git, not ssh, and not anything below
-      them: an HTTPS remote that wants a password, a passphrase-protected key with no agent, and an
-      unknown host key all fail fast and say so under the frame instead of hanging behind a
-      question gsw never drew. Credential helpers and a GUI askpass still work — neither needs the
-      terminal.
+      through its life instead.
   - To install: `cargo install --git https://github.com/timmattison/tools gsw`
 - seescc (sccache stats viewer)
   - Self-refreshing terminal viewer for [sccache](https://github.com/mozilla/sccache) statistics —
