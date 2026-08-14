@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::Parser;
 use colored::Colorize;
-use comfy_table::{Cell, ContentArrangement, Table};
+use comfy_table::{Attribute, Cell, Color, ContentArrangement, Table};
 use occ::process::Role;
 use occ::report::SessionReport;
 use occ::session::Session;
@@ -52,6 +52,13 @@ fn main() -> Result<()> {
 }
 
 /// Builds the table of sessions.
+///
+/// Every color here is set on the [`Cell`], never written into the text of the
+/// cell. The table measures the text to find its column widths, and an escape
+/// sequence written into that text is measured with it: a red and bold release
+/// would take three more columns than a yellow one, and the right edge of the
+/// table would bend by three columns on that row. A color the table applies
+/// itself lands after the measurement and moves nothing.
 fn render(sessions: &[SessionReport]) -> Table {
     // The releases at the two ends of the report drive the colouring, so a
     // reader can see at a glance which sessions have fallen behind.
@@ -69,42 +76,49 @@ fn render(sessions: &[SessionReport]) -> Table {
 
     for row in sessions {
         let release = match row.version.as_ref() {
-            None => ABSENT.dimmed().to_string(),
-            Some(version) if Some(version) == oldest && oldest != newest => {
-                version.as_str().red().bold().to_string()
-            }
-            Some(version) if Some(version) == newest => version.as_str().green().to_string(),
-            Some(version) => version.as_str().yellow().to_string(),
+            None => absent(),
+            Some(version) if Some(version) == oldest && oldest != newest => Cell::new(version)
+                .fg(Color::Red)
+                .add_attribute(Attribute::Bold),
+            Some(version) if Some(version) == newest => Cell::new(version).fg(Color::Green),
+            Some(version) => Cell::new(version).fg(Color::Yellow),
         };
         let directory = row
             .directory
             .as_ref()
-            .map_or_else(|| ABSENT.dimmed().to_string(), |d| d.display().to_string());
+            .map_or_else(absent, |path| Cell::new(path.display()));
 
         table.add_row([
-            Cell::new(row.pid.to_string()),
-            Cell::new(release),
+            Cell::new(row.pid),
+            release,
             Cell::new(format_uptime(row.uptime_secs)),
-            Cell::new(render_session(&row.session)),
-            Cell::new(directory),
+            render_session(&row.session),
+            directory,
         ]);
     }
     table
+}
+
+/// The cell shown in place of a value that could not be read.
+fn absent() -> Cell {
+    Cell::new(ABSENT).add_attribute(Attribute::Dim)
 }
 
 /// Renders the session cell, marking anything that was inferred.
 ///
 /// An inferred id is dimmed and an unresolved one says why, so a reader is never
 /// shown a firm-looking id that `occ` only guessed at.
-fn render_session(session: &Session) -> String {
+fn render_session(session: &Session) -> Cell {
     match session {
-        Session::Named(id) => id.to_string(),
-        Session::Matched(id) => id.to_string().dimmed().to_string(),
-        Session::Likely { id, of } => format!("{id} (newest of {of})").dimmed().to_string(),
-        Session::Ambiguous { candidates, peers } => {
-            format!("? {candidates} of {peers}").dimmed().to_string()
+        Session::Named(id) => Cell::new(id),
+        Session::Matched(id) => Cell::new(id).add_attribute(Attribute::Dim),
+        Session::Likely { id, of } => {
+            Cell::new(format!("{id} (newest of {of})")).add_attribute(Attribute::Dim)
         }
-        Session::Unknown => ABSENT.dimmed().to_string(),
+        Session::Ambiguous { candidates, peers } => {
+            Cell::new(format!("? {candidates} of {peers}")).add_attribute(Attribute::Dim)
+        }
+        Session::Unknown => absent(),
     }
 }
 
@@ -181,16 +195,16 @@ mod tests {
     /// process, so a test that forces them on holds this lock while it runs.
     static COLOR: Mutex<()> = Mutex::new(());
 
-    /// The width a line occupies on screen, which is what a reader sees.
+    /// The text a reader sees, with every escape sequence removed.
     ///
-    /// Escape sequences move no cursor and occupy no column, so they do not
-    /// count. A table whose rows disagree here has a ragged right edge.
-    fn visible_width(line: &str) -> usize {
-        let mut width = 0;
-        let mut characters = line.chars();
+    /// An escape sequence moves no cursor and occupies no column, so it is not
+    /// part of the picture the table draws.
+    fn visible(text: &str) -> String {
+        let mut seen = String::new();
+        let mut characters = text.chars();
         while let Some(character) = characters.next() {
             if character != '\u{1b}' {
-                width += 1;
+                seen.push(character);
                 continue;
             }
             // Skip the whole sequence: the `[` that opens it, its parameters,
@@ -203,7 +217,7 @@ mod tests {
                 }
             }
         }
-        width
+        seen
     }
 
     fn session_id(text: &str) -> SessionId {
@@ -244,14 +258,28 @@ mod tests {
         colored::control::set_override(true);
         let mut table = render(&rows);
         colored::control::unset_override();
-        table.force_no_tty().enforce_styling().set_width(120);
-        let rendered = table.to_string();
+        table.force_no_tty().set_width(120);
 
-        let widths: BTreeSet<usize> = rendered.lines().map(visible_width).collect();
+        let plain = table.to_string();
+        let colored = table.enforce_styling().to_string();
+
+        // The colors are there to be seen. Without this the table could satisfy
+        // every rule below by having no color at all.
+        assert_ne!(colored, plain, "the table must still color its cells");
+
+        let widths: BTreeSet<usize> = colored
+            .lines()
+            .map(|line| visible(line).chars().count())
+            .collect();
         assert_eq!(
             widths.len(),
             1,
-            "every line must occupy the same width, found {widths:?} in:\n{rendered}"
+            "every line must occupy the same width, found {widths:?} in:\n{colored}"
+        );
+        assert_eq!(
+            visible(&colored),
+            plain,
+            "coloring a cell must not move anything"
         );
     }
 }
