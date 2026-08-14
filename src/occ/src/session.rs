@@ -193,6 +193,15 @@ pub fn attribute(
     match (fitting.as_slice(), peers) {
         ([], _) => Session::Unknown,
         ([only], 1) => Session::Matched(only.id.clone()),
+        // One process, several transcripts: it wrote them all, and the newest is
+        // the one it is writing now.
+        (several, 1) => several
+            .iter()
+            .max_by_key(|transcript| transcript.created_epoch_secs)
+            .map_or(Session::Unknown, |newest| Session::Likely {
+                id: newest.id.clone(),
+                of: several.len(),
+            }),
         _ => Session::Ambiguous {
             candidates: fitting.len(),
             peers,

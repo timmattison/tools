@@ -100,6 +100,7 @@ fn render_session(session: &Session) -> String {
     match session {
         Session::Named(id) => id.to_string(),
         Session::Matched(id) => id.to_string().dimmed().to_string(),
+        Session::Likely { id, of } => format!("{id} (newest of {of})").dimmed().to_string(),
         Session::Ambiguous { candidates, peers } => {
             format!("? {candidates} of {peers}").dimmed().to_string()
         }
@@ -111,7 +112,7 @@ fn render_session(session: &Session) -> String {
 fn print_footer(sessions: &[SessionReport], support: usize, unreadable: usize) {
     let inferred = sessions
         .iter()
-        .filter(|row| matches!(row.session, Session::Matched(_)))
+        .filter(|row| matches!(row.session, Session::Matched(_) | Session::Likely { .. }))
         .count();
     let unresolved = sessions
         .iter()
