@@ -141,6 +141,12 @@ pub fn classify(fact: &ProcessFact) -> Role {
         return Role::Unrelated;
     }
 
+    // An empty argument vector on a Claude Code image is the shape another
+    // account's process presents: the image is readable but nothing else is.
+    if fact.argv.is_empty() {
+        return Role::Unreadable;
+    }
+
     // A support process may announce its job inside argv[0], as `claude
     // bg-spare` does, and this reading must come before the session test
     // because its first word is the ordinary program name.
