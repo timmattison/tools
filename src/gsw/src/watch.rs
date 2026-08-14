@@ -772,10 +772,12 @@ pub(crate) fn run(mut handle: RepoHandle, cfg: &RenderConfig) -> Result<()> {
         &rx,
         DEBOUNCE,
         &mut displayed,
-        cache,
-        initial_freshest,
-        schedule,
-        PushUi::new(cfg.truecolor),
+        LoopStart {
+            cache,
+            freshest: initial_freshest,
+            schedule,
+            ui: PushUi::new(cfg.truecolor),
+        },
         LoopHooks {
             collect: || walk(&mut handle, &ignore, cfg),
             render: |snap: &Snapshot, dims: Dimensions, timing: FrameTiming| {
@@ -927,6 +929,31 @@ struct SnapshotCache {
     /// The dimensions `snapshot` was last rendered at, so a resize can re-render
     /// the cached snapshot at the new size without collecting.
     dims: Dimensions,
+}
+
+/// Everything the watch loop starts from — as opposed to [`LoopHooks`], which
+/// is everything it drives.
+///
+/// Bundled for the same reason the hooks are: four values that are all "where
+/// this run begins" read better as one argument than as four, and the next one
+/// added goes here rather than onto the loop's signature. Each is built by the
+/// caller because each is anchored to the seed walk that filled it — the cache
+/// to the snapshot it collected, the freshest age to the frame that snapshot
+/// rendered, the schedule to the cost that walk measured, and the push UI to
+/// the terminal's color depth, which is resolved from the CLI and nowhere else.
+struct LoopStart {
+    /// The snapshot a re-render can use without walking git again.
+    cache: SnapshotCache,
+    /// The freshest displayed age of the frame already painted, which seeds
+    /// the decay-tick cadence for the loop's first wait.
+    freshest: Option<Duration>,
+    /// The walk schedule, already anchored to the seed walk.
+    schedule: WalkSchedule,
+    /// Everything the push feature puts on screen, plus the input mode that
+    /// goes with it. Owned by the loop for the rest of the run, because the
+    /// loop is the only place that knows what is displayed — see
+    /// [`Event::Key`] for why the reader thread must not.
+    ui: PushUi,
 }
 
 /// The side-effecting hooks the watch loop drives, bundled so the loop stays one
@@ -1113,10 +1140,7 @@ fn event_loop<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>(
     rx: &Receiver<Event>,
     debounce: Duration,
     displayed: &mut String,
-    mut cache: SnapshotCache,
-    initial_freshest: Option<Duration>,
-    mut schedule: WalkSchedule,
-    mut ui: PushUi,
+    start: LoopStart,
     mut hooks: LoopHooks<Collect, RenderFn, Dims, Paint, Clock, Tick, StartPush>,
 ) -> Result<()>
 where
@@ -1128,7 +1152,12 @@ where
     Tick: Fn(Option<Duration>) -> Option<Duration>,
     StartPush: FnMut(PushCommand),
 {
-    let mut freshest = initial_freshest;
+    let LoopStart {
+        mut cache,
+        mut freshest,
+        mut schedule,
+        mut ui,
+    } = start;
     loop {
         // Wait for the first event, or — when the decay timer is enabled — wake
         // after `interval` of quiet for a tick.
@@ -2728,10 +2757,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            Some(Duration::ZERO),
-            WalkSchedule::new(Some(interval), base, Duration::ZERO),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: Some(Duration::ZERO),
+                schedule: WalkSchedule::new(Some(interval), base, Duration::ZERO),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2775,10 +2806,16 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(collected_at),
-            Some(Duration::ZERO),
-            WalkSchedule::new(Some(Duration::from_secs(60)), collected_at, Duration::ZERO),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(collected_at),
+                freshest: Some(Duration::ZERO),
+                schedule: WalkSchedule::new(
+                    Some(Duration::from_secs(60)),
+                    collected_at,
+                    Duration::ZERO,
+                ),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
@@ -2819,10 +2856,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            Some(Duration::ZERO),
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: Some(Duration::ZERO),
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2869,10 +2908,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(now),
-            None,
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(now),
+                freshest: None,
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2912,10 +2953,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(now),
-            None,
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(now),
+                freshest: None,
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2956,10 +2999,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(now),
-            None,
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(now),
+                freshest: None,
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -2996,10 +3041,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(now),
-            Some(Duration::ZERO),
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(now),
+                freshest: Some(Duration::ZERO),
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
@@ -3043,10 +3090,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(now),
-            Some(Duration::from_secs(30)),
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(now),
+                freshest: Some(Duration::from_secs(30)),
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {
@@ -3087,10 +3136,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(collected_at),
-            Some(Duration::ZERO),
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(collected_at),
+                freshest: Some(Duration::ZERO),
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3140,10 +3191,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(now),
-            None,
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(now),
+                freshest: None,
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3193,10 +3246,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            Some(Duration::ZERO),
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: Some(Duration::ZERO),
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || Ok(empty_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, timing: FrameTiming| {
@@ -3269,10 +3324,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            None, // decay timer off: isolate the throttle from tick behavior
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: None, // decay timer off: isolate the throttle from tick behavior
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3344,10 +3401,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            Some(Duration::ZERO),
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: Some(Duration::ZERO),
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3416,10 +3475,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            Some(Duration::ZERO),
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: Some(Duration::ZERO),
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3489,10 +3550,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            None, // decay timer off: isolate the throttle from tick behavior
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: None, // decay timer off: isolate the throttle from tick behavior
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3562,10 +3625,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            None, // decay timer off: isolate the throttle from tick behavior
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: None, // decay timer off: isolate the throttle from tick behavior
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3624,10 +3689,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            None, // decay timer off: isolate the forced walk from tick behavior
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: None, // decay timer off: isolate the forced walk from tick behavior
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3689,10 +3756,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            cache,
-            None, // decay timer off: isolate the failed walk from tick behavior
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache,
+                freshest: None, // decay timer off: isolate the failed walk from tick behavior
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3771,10 +3840,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            seeded_cache(base),
-            None, // decay timer off: isolate the throttle from tick behavior
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache: seeded_cache(base),
+                freshest: None, // decay timer off: isolate the throttle from tick behavior
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -3863,10 +3934,12 @@ mod tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            cache,
-            None, // decay timer off: isolate recovery from tick behavior
-            no_timed_refresh(),
-            PushUi::new(false),
+            LoopStart {
+                cache,
+                freshest: None, // decay timer off: isolate recovery from tick behavior
+                schedule: no_timed_refresh(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     collects += 1;
@@ -4116,10 +4189,12 @@ mod push_loop_tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            cache_in(base, dims),
-            None,
-            no_timed_refresh_for_push(),
-            PushUi::new(false),
+            LoopStart {
+                cache: cache_in(base, dims),
+                freshest: None,
+                schedule: no_timed_refresh_for_push(),
+                ui: PushUi::new(false),
+            },
             LoopHooks {
                 collect: || {
                     seen.borrow_mut().collects += 1;
@@ -4191,10 +4266,12 @@ mod push_loop_tests {
             &rx,
             TEST_DEBOUNCE,
             &mut displayed,
-            cache_at(base),
-            None, // decay timer off: the message is the only thing that ages
-            no_timed_refresh_for_push(),
-            pushed_ui(base),
+            LoopStart {
+                cache: cache_at(base),
+                freshest: None, // decay timer off: the message is the only thing that ages
+                schedule: no_timed_refresh_for_push(),
+                ui: pushed_ui(base),
+            },
             LoopHooks {
                 collect: || Ok(pushable_snapshot()),
                 render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| frame("FRAME"),
@@ -4524,10 +4601,12 @@ mod push_loop_tests {
                 &rx,
                 TEST_DEBOUNCE,
                 &mut displayed,
-                cache_at(base),
-                None,
-                no_timed_refresh_for_push(),
-                PushUi::new(false),
+                LoopStart {
+                    cache: cache_at(base),
+                    freshest: None,
+                    schedule: no_timed_refresh_for_push(),
+                    ui: PushUi::new(false),
+                },
                 LoopHooks {
                     collect: || Ok(pushable_snapshot()),
                     render: |_snap: &Snapshot, _dims: Dimensions, _timing: FrameTiming| {

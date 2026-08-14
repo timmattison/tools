@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use colored::{ColoredString, Colorize};
 
+use crate::age::{format_age_detailed, scale_rgb};
 use crate::render::{truncate_right, Snapshot, UpstreamStatus};
 use crate::repo::DETACHED_HEAD;
 use crate::watch::{Dimensions, InputMode};
@@ -525,13 +526,13 @@ pub(crate) struct PushUi {
 enum State {
     /// Nothing on screen and nothing pending.
     Idle,
-    /// A message under the frame, staying until the user presses a key.
+    /// A message under the frame.
     Status {
         /// Lines to show, already trimmed to [`MAX_STATUS_ROWS`]. How many of
         /// them a given pane has room for is [`PushUi::overlay`]'s call.
         lines: Vec<String>,
-        /// Whether this reports a failure, which the display colors red.
-        failed: bool,
+        /// How long this message stays, and how it is drawn while it does.
+        life: Life,
     },
     /// A confirmation is on screen, waiting for an answer. "On screen" is the
     /// load-bearing half, and two rules keep it true: [`PushUi::request`] does
@@ -546,6 +547,51 @@ enum State {
     },
     /// `git push` is running.
     Running { success_message: String },
+}
+
+/// How long a [`State::Status`] message stays under the frame, and how it is
+/// drawn while it does.
+///
+/// The split is between what gsw said and what git said, and it is one decision
+/// rather than two because the two halves are the same fact. Everything gsw
+/// composes itself — a push that worked, a push it would not run — is a
+/// *report*: the user pressed a key, the answer came back, and a monitor that
+/// holds it on screen for the rest of the session is spending a row on news.
+/// git's error text is a *remedy*: the user has to read it and act on it, so
+/// gsw must not take it away while they are looking at another pane.
+///
+/// The age and the fade ride on this enum rather than on a flag beside it,
+/// because a message that goes away on its own has to say how old it is — or it
+/// is a sentence that quietly stops being true — and a message that stays has
+/// no countdown to report. There is no third combination to represent.
+enum Life {
+    /// Stays until the user presses a key. git's own words about a push that
+    /// failed, drawn red, and the one message gsw will not remove by itself.
+    UntilDismissed,
+    /// Says how long ago it was posted, fades toward black across
+    /// [`STATUS_LIFETIME`], and then takes itself off the screen.
+    Fading {
+        /// When the message was posted, against the watch loop's injected
+        /// clock — the same clock [`PushUi::overlay`] is later given.
+        posted_at: Instant,
+    },
+}
+
+impl Life {
+    /// How long ago a fading message was posted, as of `now`, or `None` for one
+    /// that does not age.
+    ///
+    /// Saturating on purpose. `now` is read when the overlay is drawn and
+    /// `posted_at` when the news arrived, which is earlier in every path
+    /// through the loop — but a clock a test drives backwards, or a future
+    /// caller that renders with a stale instant, would otherwise underflow
+    /// rather than report the zero age it plainly has.
+    fn elapsed(&self, now: Instant) -> Option<Duration> {
+        match self {
+            Self::UntilDismissed => None,
+            Self::Fading { posted_at } => Some(now.saturating_duration_since(*posted_at)),
+        }
+    }
 }
 
 impl PushUi {
@@ -568,8 +614,20 @@ impl PushUi {
     /// repository whose newest commit is hours old leaves the loop blocked on
     /// the channel indefinitely, and a message that expires only when something
     /// else happens does not expire.
+    ///
+    /// A question, a push in flight, and an error that never expires all say
+    /// `None`: none of them changes with the clock, and a wake-up costs a
+    /// repaint of the whole pane.
     pub(crate) fn next_tick(&self) -> Option<Duration> {
-        None
+        match &self.state {
+            State::Status {
+                life: Life::Fading { .. },
+                ..
+            } => Some(STATUS_CADENCE),
+            State::Idle | State::Status { .. } | State::Asking { .. } | State::Running { .. } => {
+                None
+            }
+        }
     }
 
     /// What keys mean right now.
@@ -612,7 +670,6 @@ impl PushUi {
     /// but that now covers only the pane resized down while a question is
     /// already up: the render path is the only thing that sees the new size.
     pub(crate) fn request(&mut self, snapshot: &Snapshot, dims: Dimensions, now: Instant) {
-        let _ = now;
         self.state = match prompt_for(
             &snapshot.branch,
             snapshot.push_remote.as_deref(),
@@ -632,9 +689,12 @@ impl PushUi {
                 command,
                 success_message,
             },
+            // A refusal describes the repository as it stood when `p` was
+            // pressed, so it goes stale exactly the way a success does — and
+            // costs the frame the same row until it does.
             PushPrompt::Refuse { message } => State::Status {
                 lines: vec![message],
-                failed: false,
+                life: Life::Fading { posted_at: now },
             },
         };
     }
@@ -658,6 +718,25 @@ impl PushUi {
         Some(command)
     }
 
+    /// Drop a message that has outlived [`STATUS_LIFETIME`].
+    ///
+    /// The counterpart to [`PushUi::dismiss`], and deliberately the only other
+    /// way a status leaves the screen: one of them is the user saying they have
+    /// read it and the other is the clock saying they have had the chance to.
+    /// Everything else on screen — a question, a push in flight, git's error
+    /// text — is left exactly where it is.
+    fn expire(&mut self, now: Instant) {
+        let State::Status { life, .. } = &self.state else {
+            return;
+        };
+        if life
+            .elapsed(now)
+            .is_some_and(|elapsed| elapsed >= STATUS_LIFETIME)
+        {
+            self.state = State::Idle;
+        }
+    }
+
     /// Handle `n`: drop the confirmation. The prompt disappearing is the whole
     /// feedback — a "cancelled" notice would itself need dismissing.
     pub(crate) fn cancel(&mut self) {
@@ -672,8 +751,11 @@ impl PushUi {
     /// git's output, so a create reports itself as a create. On failure it is
     /// git's own words — a gsw paraphrase of a push error would drop exactly
     /// the detail the user needs.
+    ///
+    /// The same split decides how long the message stays: `now` starts the
+    /// countdown on a success, and a failure gets no countdown at all. See
+    /// [`Life`] for why those are one decision.
     pub(crate) fn finished(&mut self, outcome: PushOutcome, now: Instant) {
-        let _ = now;
         let success_message = match std::mem::replace(&mut self.state, State::Idle) {
             State::Running { success_message } => success_message,
             // A finish with no push running: nothing to report against, so
@@ -684,15 +766,12 @@ impl PushUi {
             }
         };
 
-        let lines = if outcome.success {
-            vec![success_message]
+        let (lines, life) = if outcome.success {
+            (vec![success_message], Life::Fading { posted_at: now })
         } else {
-            failure_lines(&outcome.output)
+            (failure_lines(&outcome.output), Life::UntilDismissed)
         };
-        self.state = State::Status {
-            lines,
-            failed: !outcome.success,
-        };
+        self.state = State::Status { lines, life };
     }
 
     /// Handle a key with no other meaning: clear a status message if one is up.
@@ -746,8 +825,16 @@ impl PushUi {
     /// fitted when it was asked, a resize took its row, and this is the only
     /// place that sees the new size. Nothing is lost but the question either
     /// way: `p` in a pane with a row to spare asks it again.
+    ///
+    /// A message that has outlived [`STATUS_LIFETIME`] is dropped here rather
+    /// than by a key or a timer of its own, for the same reason the question
+    /// above is: this is the one place that runs on every frame, so expiring
+    /// the message and giving its row back to the frame happen in the same
+    /// breath. Which is also why the loop is given [`PushUi::next_tick`] — a
+    /// message can only expire on a frame that is drawn, so there has to be a
+    /// frame drawn.
     pub(crate) fn overlay(&mut self, dims: Dimensions, now: Instant) -> Overlay {
-        let _ = now;
+        self.expire(now);
         let width = dims.width;
         let lines: Vec<String> = match &self.state {
             State::Idle => Vec::new(),
@@ -767,17 +854,33 @@ impl PushUi {
                 }]
             }
             State::Running { .. } => vec![truncate_right(RUNNING_NOTICE, width)],
-            State::Status { lines, failed } => lines
-                .iter()
-                .map(|line| {
-                    let line = truncate_right(line, width);
-                    if *failed {
-                        line.red().to_string()
-                    } else {
-                        line
-                    }
-                })
-                .collect(),
+            State::Status { lines, life } => {
+                let elapsed = life.elapsed(now);
+                // The age goes on the last row, which for every message that
+                // has one is the only row: a success and a refusal are one
+                // sentence each, and git's several-line error text is the one
+                // kind that never ages.
+                let last = lines.len().saturating_sub(1);
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(row, line)| match elapsed {
+                        // Appended *before* the truncation, so the age is part
+                        // of what the pane has to fit rather than something
+                        // added to a row already measured against its width.
+                        Some(elapsed) => {
+                            let line = if row == last {
+                                format!("{line} ({} ago)", format_age_detailed(elapsed))
+                            } else {
+                                line.clone()
+                            };
+                            colorize_status(&truncate_right(&line, width), elapsed, self.truecolor)
+                                .to_string()
+                        }
+                        None => truncate_right(line, width).red().to_string(),
+                    })
+                    .collect()
+            }
         };
         // The frame never gives up its last row. A pane painted entirely by the
         // push feature would leave the user watching an error with nothing
@@ -907,10 +1010,58 @@ const STATUS_LIFETIME: Duration = Duration::from_secs(60);
 /// decay tick that advances the commit ages in the frame above.
 const STATUS_CADENCE: Duration = Duration::from_secs(1);
 
+/// The color an ageing status message is drawn in at age zero, on a terminal
+/// that takes 24-bit color.
+///
+/// A light neutral gray rather than white: it is what an unstyled row already
+/// looks like on the dark terminals gsw draws for, so the message starts where
+/// it used to start and only then begins to leave.
+const STATUS_RGB: (u8, u8, u8) = (208, 208, 208);
+
+/// Fraction of [`STATUS_LIFETIME`] an ageing message keeps full brightness for
+/// when there is no truecolor to fade along.
+///
+/// Without a gradient the fade has exactly two steps, so the step goes at the
+/// half-way mark: full brightness while the news is current, dim for the rest,
+/// gone at the end. Coarse, and honest about it — the alternative is a message
+/// that hangs at full brightness and then vanishes.
+const COARSE_FADE_AT: f32 = 0.5;
+
 /// Color one row of an ageing status message, `elapsed` after it was posted.
+///
+/// The fade runs the whole length of [`STATUS_LIFETIME`] and ends at black, so
+/// the row reaches the background exactly as it is removed — a message on its
+/// way out looks like one, and nothing ever blinks out at full brightness. It
+/// is the same shape as the commit-log gradient above it, with one difference
+/// that follows from what the two are for: the log fades to a floor, because a
+/// commit that has stopped being fresh is still a commit worth reading, and
+/// this fades past it, because a status message that has stopped being fresh is
+/// leaving.
+///
+/// Returns a [`ColoredString`] rather than a `String` so tests can read the
+/// color off the value. `colored` decides whether to emit escapes at all from
+/// process-global state, which other tests in this binary toggle.
 fn colorize_status(line: &str, elapsed: Duration, truecolor: bool) -> ColoredString {
-    let _ = (elapsed, truecolor);
-    line.normal()
+    // Cast is exact for the values involved: `STATUS_LIFETIME` is a small
+    // constant and `elapsed` is clamped to it by the division below.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "seconds counts here are far below f32's exact-integer range"
+    )]
+    let spent = (elapsed.as_secs_f32() / STATUS_LIFETIME.as_secs_f32()).clamp(0.0, 1.0);
+
+    if truecolor {
+        let (r, g, b) = scale_rgb(STATUS_RGB, 1.0 - spent);
+        return line.truecolor(r, g, b);
+    }
+    // No gradient to fade along: one step, at the half-way mark. `normal()`
+    // leaves the row exactly as it was drawn before this feature — `colored`
+    // emits nothing at all for a string with no color and no style.
+    if spent >= COARSE_FADE_AT {
+        line.dimmed()
+    } else {
+        line.normal()
+    }
 }
 
 /// What a failed push says when git said nothing gsw could show.
