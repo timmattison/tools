@@ -332,6 +332,27 @@ mod tests {
     }
 
     #[test]
+    fn reports_only_television_brands_when_no_vendor_filter_was_given() {
+        let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &HashSet::new(), "");
+
+        assert!(
+            !found.iter().any(|c| c.vendor.contains("Ubiquiti")),
+            "a router is not a television"
+        );
+        assert!(
+            !found.iter().any(|c| c.vendor.contains("Sonos")),
+            "a speaker is not a television"
+        );
+    }
+
+    #[test]
+    fn still_reports_a_television_brand_when_no_vendor_filter_was_given() {
+        let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &HashSet::new(), "");
+
+        assert_eq!(found.len(), 2, "both TCL-family MACs must survive");
+    }
+
+    #[test]
     fn names_the_vendor_the_prefix_is_registered_to() {
         let found = unresponsive_candidates(CANDIDATE_ARP, &candidate_db(), &HashSet::new(), "tcl");
         let tcl_king = found
