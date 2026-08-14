@@ -2048,16 +2048,11 @@ Nothing else on the machine answers the question correctly. The executable path 
 
 ### How it identifies the session
 
-Claude Code writes one transcript per session, under `~/.claude/projects`. A session process does not hold that transcript open and does not publish its own session id, so for most processes the link has to be reconstructed. `occ` reconstructs it in four steps, and says which one it used:
+A live session writes `~/.claude/sessions/<pid>.json` and keeps it current. The record names the session, so `occ` reads the answer rather than working it out. `claude agents --json` prints these same records. `occ` reads the files instead, because that command costs a subprocess on every run and drops the `version` field, which is the one fact this tool exists to report.
 
-1. **Named.** The command line carries the id, as `--session-id` or `--resume` does. The id is shown plainly. Where a forked session carries both, `--session-id` wins: it names the session actually running, while `--resume` names the transcript it was forked from.
-2. **Matched.** Exactly one transcript fits the process, and no other process competes for it. A transcript fits when it records the same working directory, records the same release, and was created after the process started. The id is dimmed.
-3. **Newest of several.** One process fits several transcripts. Clearing a session starts a new transcript without starting a new process, so one process legitimately owns several, and with nothing else competing the newest is the one it is writing now. The id is dimmed and labelled `newest of N`.
-4. **Unresolved.** Several processes compete for the same transcripts. `occ` prints `? N of M` — N transcripts fitting M processes — and names none of them.
+A record is believed only when it is about the process asking. The file is named for a process identifier, and an identifier is reused once the process holding it dies, so a file can outlive the session it describes. Two checks reject such a file: the identifier recorded inside it must be the one asked about, and the recorded start must agree with the process's own start. Measured across 119 live sessions, a session registered itself between one and nine seconds after its process started, and `occ` allows two minutes.
 
-Step 4 is the point of the design. Working directory alone is not enough to tell sessions apart: one worktree on the machine this was built against held twenty-three running sessions across twelve releases. Pairing the directory with the release removes most of that, and creation time removes most of the rest, but where two sessions remain genuinely indistinguishable `occ` says so. Printing one session's id against another session's process would be the worst failure available here, because nothing in the output would say it had happened.
-
-The folder name under `~/.claude/projects` encodes the working directory by replacing every character outside `[A-Za-z0-9-]` with `-`, which is lossy: `/work/a.b` and `/work/a-b` share one folder. `occ` uses the folder only to find candidates and then confirms each one against the working directory the transcript records inside itself, so a session is never given a neighbour's id.
+A session that wrote no record is left blank and counted in the footer. Seven of 126 sessions on the machine this was built against had no record. A blank is the whole answer there, because the alternative was measured: reconstructing the link from the transcripts under `~/.claude/projects` — by working directory, release, and creation time — named the wrong session for 25 of those 126 and refused to name 70 more. Printing one session's id against another session's process is the worst failure available here, because nothing in the output would say it had happened.
 
 ### What it leaves out, and says so
 
