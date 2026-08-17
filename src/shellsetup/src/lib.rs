@@ -214,6 +214,20 @@ impl ShellIntegration {
     /// 2. Finds the appropriate config file
     /// 3. Checks for existing installation
     /// 4. Either installs fresh, upgrades old installation, or updates existing
+    ///
+    /// # Errors
+    ///
+    /// - [`ShellSetupError::NoHomeDir`] when the home directory cannot be determined,
+    ///   so there is no config file to locate.
+    /// - [`ShellSetupError::UnsupportedShell`] when `$SHELL` names something other than
+    ///   bash or zsh. The error carries the block to add by hand.
+    /// - [`ShellSetupError::YadmAmbiguousConfig`] when the config file is yadm-managed
+    ///   with alternates this library cannot choose between, so writing anywhere would
+    ///   either be discarded on the next render or edit the wrong template.
+    /// - [`ShellSetupError::ReadError`] when an existing config file cannot be read
+    ///   while checking for a previous installation.
+    /// - [`ShellSetupError::WriteError`] when the config file cannot be opened for
+    ///   append or written back after the block is replaced or upgraded.
     pub fn setup(&self) -> Result<()> {
         let home = dirs::home_dir().ok_or(ShellSetupError::NoHomeDir)?;
 
@@ -1333,7 +1347,7 @@ function prmv() { OLD_PRCP; }
 
         assert_eq!(
             resolve_config_target(&rc),
-            ConfigTarget::YadmTemplate(template.clone())
+            ConfigTarget::YadmTemplate(template)
         );
 
         fs::remove_dir_all(&dir).ok();

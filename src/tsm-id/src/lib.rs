@@ -51,6 +51,15 @@ impl SessionId {
     /// The input must be exactly 32 characters long and consist solely of
     /// lowercase hex characters (`0-9`, `a-f`). Uppercase hex is rejected
     /// to keep the canonical representation unambiguous.
+    ///
+    /// # Errors
+    ///
+    /// - [`SessionIdError::WrongLength`] when `s` is not exactly 32 characters,
+    ///   reporting both the expected and the actual count.
+    /// - [`SessionIdError::UppercaseHex`] when `s` is the right length but holds an
+    ///   `A`-`F`, naming the offending character.
+    /// - [`SessionIdError::NonHexCharacter`] when `s` holds any other character
+    ///   outside `[0-9a-f]`, naming the offending character.
     pub fn from_hex(s: &str) -> Result<Self, SessionIdError> {
         let actual = s.chars().count();
         if actual != SESSION_ID_HEX_LEN {
