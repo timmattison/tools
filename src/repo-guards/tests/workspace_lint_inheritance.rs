@@ -268,6 +268,47 @@ fn excluded_members_are_not_audited() {
     );
 }
 
+/// A glob written in `workspace.exclude` must not remove anything, because
+/// cargo does not glob-expand `exclude` — it prefix-matches the entries as
+/// *literal* paths.
+///
+/// Verified against cargo itself: a workspace whose root declares
+/// `members = ["crates/*"]` and `exclude = ["crates/b*"]` still lists
+/// `crates/bad` in `cargo metadata --no-deps`, because no directory is
+/// literally named `crates/b*`. So `crates/bad` is a member, cargo builds it,
+/// and the guard must audit it.
+///
+/// A guard that glob-expanded `exclude` instead would audit strictly *fewer*
+/// crates than cargo builds, and the crate that slipped out could omit the
+/// stanza forever while the guard kept reporting clean. That is the false-green
+/// direction this module refuses everywhere else — it is why a *member* pattern
+/// matching nothing is a hard error — and it must not sneak back in through
+/// `exclude`.
+#[test]
+fn a_glob_in_exclude_does_not_shrink_the_audited_set() {
+    let ws = synthetic_workspace("[\"crates/*\"]");
+    write_member(ws.path(), "good", COMPLIANT);
+    write_member(ws.path(), "bad", CLIPPY_ONLY);
+    write_root_manifest(
+        ws.path(),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\nexclude = [\"crates/b*\"]\n",
+    );
+
+    let report = audit_fixture(&ws);
+
+    assert_eq!(
+        report.members_examined(),
+        2,
+        "cargo treats `crates/b*` literally, so both crates are still members; got:\n{report}"
+    );
+    assert_eq!(
+        offenders(&report),
+        vec![PathBuf::from("crates/bad/Cargo.toml")],
+        "a glob in `exclude` excludes nothing, so the non-compliant member must \
+         still be flagged; got:\n{report}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Display: the message has to be usable without opening the source
 // ---------------------------------------------------------------------------
