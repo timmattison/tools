@@ -227,6 +227,45 @@ mod tests {
         assert_eq!(detached.display_branch(), "HEAD@abc1234");
     }
 
+    /// A detached HEAD is normally hex ASCII, but `display_branch` must never
+    /// panic on a head that carries multi-byte characters, and must count the
+    /// short hash in characters rather than bytes.
+    #[test]
+    fn test_worktree_display_branch_counts_characters_not_bytes() {
+        let japanese = Worktree {
+            path: PathBuf::from("/repo"),
+            head: "日本語テスト".to_string(),
+            branch: None,
+        };
+        assert_eq!(
+            japanese.display_branch(),
+            "HEAD@日本語テスト",
+            "6 characters is shorter than the 7-character short hash, so all of it shows"
+        );
+
+        let emoji = Worktree {
+            path: PathBuf::from("/repo"),
+            head: "🎉🎊🎁🎈🎂🎃🎄🎆".to_string(),
+            branch: None,
+        };
+        assert_eq!(
+            emoji.display_branch(),
+            "HEAD@🎉🎊🎁🎈🎂🎃🎄",
+            "8 characters truncates to the first 7 characters, not the first 7 bytes"
+        );
+
+        let mixed = Worktree {
+            path: PathBuf::from("/repo"),
+            head: "café1234".to_string(),
+            branch: None,
+        };
+        assert_eq!(
+            mixed.display_branch(),
+            "HEAD@café123",
+            "the accented character costs two bytes but only one character"
+        );
+    }
+
     #[test]
     fn test_parse_main_worktree_is_the_first_block() {
         // Git lists the main worktree first, whatever the paths sort like.
