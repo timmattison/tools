@@ -85,18 +85,25 @@ macro_rules! error {
 #[allow(clippy::struct_excessive_bools)] // CLI flags are naturally bool-heavy
 struct Cli {
     /// Go to the next worktree (wraps around).
-    #[arg(short = 'f', long, conflicts_with_all = ["prev", "target", "shell_setup"])]
+    #[arg(short = 'f', long, conflicts_with_all = ["prev", "main", "target", "shell_setup"])]
     forward: bool,
 
     /// Go to the previous worktree (wraps around).
-    #[arg(short = 'p', long, conflicts_with_all = ["forward", "target", "shell_setup"])]
+    #[arg(short = 'p', long, conflicts_with_all = ["forward", "main", "target", "shell_setup"])]
     prev: bool,
+
+    /// Go to the main worktree.
+    ///
+    /// The main worktree is the one on branch `main`, or the one on branch `master` when
+    /// no worktree is on `main`. The branch name must match exactly.
+    #[arg(short = 'm', long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target", "shell_setup"])]
+    main: bool,
 
     /// Worktree to switch to (directory name, branch name, or branch substring).
     ///
     /// Matches in order: exact directory name, exact branch name, then case-insensitive
     /// substring on branch names. If multiple branches match, lists them and exits.
-    #[arg(conflicts_with_all = ["forward", "prev", "shell_setup"], verbatim_doc_comment)]
+    #[arg(conflicts_with_all = ["forward", "prev", "main", "shell_setup"], verbatim_doc_comment)]
     target: Option<String>,
 
     /// Add shell integration to your shell config. Adds these commands:
@@ -105,7 +112,7 @@ struct Cli {
     ///   wtf          - Next worktree (forward)
     ///   wtb          - Previous worktree (back)
     ///   wtm          - Main worktree
-    #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target"])]
+    #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "main", "target"])]
     shell_setup: bool,
 
     /// Suppress error messages.
@@ -313,6 +320,13 @@ fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
         1 => WorktreeMatch::Single(matches[0]),
         _ => WorktreeMatch::Multiple(matches),
     }
+}
+
+/// Finds the main worktree.
+///
+/// Not implemented yet.
+fn find_main_worktree(_worktrees: &[Worktree]) -> Option<usize> {
+    None
 }
 
 /// Displays the list of worktrees with the current one highlighted.
@@ -829,8 +843,107 @@ mod tests {
         assert_eq!(worktrees[0].branch, Some("main".to_string()));
     }
 
+    /// Builds a worktree fixture at `path` checked out on `branch`.
+    ///
+    /// Pass `None` as the branch for a detached HEAD.
+    fn worktree_on(path: &str, branch: Option<&str>) -> Worktree {
+        Worktree {
+            path: PathBuf::from(path),
+            head: "abc1234567890".to_string(),
+            branch: branch.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_find_main_worktree_picks_main() {
+        let worktrees = vec![
+            worktree_on("/repo", Some("main")),
+            worktree_on("/repo-wt/wt1", Some("feature")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(0));
+    }
+
+    #[test]
+    fn test_find_main_worktree_falls_back_to_master() {
+        // A repository that never renamed master still has a main worktree.
+        let worktrees = vec![
+            worktree_on("/repo-wt/wt1", Some("feature")),
+            worktree_on("/repo", Some("master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_prefers_main_over_master() {
+        // Both branches exist. main wins, whatever the order of the list.
+        let worktrees = vec![
+            worktree_on("/repo-wt/old", Some("master")),
+            worktree_on("/repo", Some("main")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_ignores_substring_branches() {
+        // The branch name must match exactly. A branch that merely contains
+        // "main" must not capture the main worktree of a master repository.
+        let worktrees = vec![
+            worktree_on("/repo-wt/wt1", Some("wt-main-master")),
+            worktree_on("/repo", Some("master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_ignores_detached_head() {
+        let worktrees = vec![
+            worktree_on("/repo-wt/wt1", None),
+            worktree_on("/repo", Some("master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_none_without_main_or_master() {
+        let worktrees = vec![
+            worktree_on("/repo", Some("trunk")),
+            worktree_on("/repo-wt/wt1", Some("wt-main-master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), None);
+    }
+
+    #[test]
+    fn test_main_flag_parses() {
+        let long = Cli::try_parse_from(["cwt", "--main"]).expect("--main must parse");
+        assert!(long.main);
+
+        let short = Cli::try_parse_from(["cwt", "-m"]).expect("-m must parse");
+        assert!(short.main);
+
+        let absent = Cli::try_parse_from(["cwt"]).expect("no arguments must parse");
+        assert!(!absent.main);
+    }
+
+    #[test]
+    fn test_main_flag_conflicts_with_other_modes() {
+        // --main selects a worktree, so it cannot combine with the other selectors.
+        for args in [
+            vec!["cwt", "--main", "feature"],
+            vec!["cwt", "--main", "-f"],
+            vec!["cwt", "--main", "-p"],
+            vec!["cwt", "--main", "--shell-setup"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "{args:?} must be rejected"
+            );
+        }
+    }
+
     #[test]
     fn test_shell_code_contains_wtm() {
-        assert!(SHELL_CODE.contains("alias wtm='wt main'"));
+        // wtm goes through --main so that it finds master in a repository
+        // that has no main branch.
+        assert!(SHELL_CODE.contains("alias wtm='wt --main'"));
     }
 }
