@@ -6,6 +6,13 @@
 //! contributes nothing to list. It must not be able to answer for another
 //! repository, and it must not be able to crash `cwt`.
 
+// These mirror the crate-root attributes in src/main.rs. A crate-root attribute
+// reaches only its own target, so the binary raising them does nothing for this
+// test target; repeating them here is what keeps the whole crate under one lint
+// set now that they no longer live in a manifest `[lints]` table.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

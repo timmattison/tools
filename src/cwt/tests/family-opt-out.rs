@@ -4,6 +4,13 @@
 //! which is what `cwt` did before families existed. `CWT_NO_FAMILY` makes that
 //! choice permanent without wrapping the command.
 
+// These mirror the crate-root attributes in src/main.rs. A crate-root attribute
+// reaches only its own target, so the binary raising them does nothing for this
+// test target; repeating them here is what keeps the whole crate under one lint
+// set now that they no longer live in a manifest `[lints]` table.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use support::{code, combined, cwt, cwt_with_env, stdout, target_path, Family};

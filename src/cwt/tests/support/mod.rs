@@ -4,7 +4,10 @@
 //! directory, so two copies of the suite can run at the same time without
 //! sharing a path, a branch name, or a git index.
 
-#![allow(dead_code)] // Each test file uses a different part of this module.
+#![allow(
+    dead_code,
+    reason = "cargo compiles this module into each test binary separately, so a helper only one target calls looks unused to the others"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

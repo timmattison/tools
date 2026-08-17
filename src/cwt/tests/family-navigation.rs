@@ -4,6 +4,13 @@
 //! parent repository, then the rest. `wtm` has to keep meaning "my repository's
 //! main branch" wherever the user is standing.
 
+// These mirror the crate-root attributes in src/main.rs. A crate-root attribute
+// reaches only its own target, so the binary raising them does nothing for this
+// test target; repeating them here is what keeps the whole crate under one lint
+// set now that they no longer live in a manifest `[lints]` table.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use support::{code, cwt, target_path, Family};
