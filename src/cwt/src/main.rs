@@ -352,8 +352,12 @@ fn find_main_worktree(worktrees: &[Worktree]) -> Option<usize> {
 /// The missing-main-worktree error is built from [`MAIN_BRANCH_NAMES`] through
 /// this function, so a name added to the constant cannot leave the message
 /// naming a shorter list than the search actually tried.
-fn quoted_branch_alternatives(_names: &[&str]) -> String {
-    String::new()
+fn quoted_branch_alternatives(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 /// Prints every worktree to stderr as `directory [branch]`.
