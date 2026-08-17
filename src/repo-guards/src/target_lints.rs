@@ -1,7 +1,7 @@
 //! Guard: every *target* of a crate must declare a position on the lints that
 //! crate raises.
 //!
-//! [`workspace_lints`](crate::workspace_lints) proves each member crate opts
+//! [`workspace_lints`] proves each member crate opts
 //! into the repo-wide lint set. This module is the same disease one level down,
 //! at the target instead of the crate.
 //!
