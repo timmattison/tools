@@ -12,5 +12,9 @@
 //! rather than run it, where the inspection deserves a narrow, reusable
 //! interface and a remediation message written once instead of per call site.
 
+/// Proves every target of a crate declares a position on the lints that crate
+/// raises, so a lint cannot apply to the library and silently skip the tests.
+pub mod target_lints;
+
 /// Proves every workspace member inherits the repo-wide lint set.
 pub mod workspace_lints;

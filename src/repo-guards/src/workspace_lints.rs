@@ -51,7 +51,7 @@ use thiserror::Error;
 use toml::Value;
 
 /// Manifest filename, used for both the workspace root and every member.
-const CARGO_TOML: &str = "Cargo.toml";
+pub(crate) const CARGO_TOML: &str = "Cargo.toml";
 
 /// The exact stanza a member manifest needs. Rendered verbatim (indented) into
 /// [`Report`]'s failure message so a reader can paste it without retyping.
@@ -275,17 +275,61 @@ impl fmt::Display for Report {
 /// - `repo_root` is not valid UTF-8
 ///   ([`NonUtf8RepoRoot`](WorkspaceLintsError::NonUtf8RepoRoot)).
 pub fn audit(repo_root: &Path) -> Result<Report, WorkspaceLintsError> {
+    let member_dirs = members(repo_root)?;
+
+    let mut offenders = Vec::new();
+    for dir in &member_dirs {
+        let manifest_path = dir.join(CARGO_TOML);
+        if !inherits_workspace_lints(&parse_manifest(&manifest_path)?) {
+            offenders.push(
+                manifest_path
+                    .strip_prefix(repo_root)
+                    .unwrap_or(&manifest_path)
+                    .to_path_buf(),
+            );
+        }
+    }
+    offenders.sort();
+
+    Ok(Report {
+        members_examined: member_dirs.len(),
+        offenders,
+    })
+}
+
+/// Enumerate the member crate directories of the workspace rooted at
+/// `repo_root`, sorted and deduplicated.
+///
+/// This is the workspace-enumeration half of [`audit`], lifted out so every
+/// repo guard that must walk "each member crate" walks the *same* set. A second
+/// guard with its own copy of this logic would drift from this one, and a guard
+/// that audits a smaller set than it believes reports clean for the wrong
+/// reason — the exact failure this module exists to prevent, reintroduced by
+/// duplication.
+///
+/// Every returned directory is guaranteed to hold a `Cargo.toml`, so a caller
+/// may join and parse it without re-checking.
+///
+/// # Errors
+///
+/// Returns [`WorkspaceLintsError`] — never a short list — when the workspace
+/// cannot be enumerated with confidence: an unreadable or unparsable root
+/// manifest, a missing/empty/ill-typed `workspace.members`, an invalid or
+/// empty-matching pattern, an exclude list that removes every member, or a
+/// member directory with no manifest. See [`audit`] for the variant-by-variant
+/// breakdown.
+pub fn members(repo_root: &Path) -> Result<Vec<PathBuf>, WorkspaceLintsError> {
     let root_manifest = repo_root.join(CARGO_TOML);
     let root = parse_manifest(&root_manifest)?;
     let workspace = root.get("workspace");
 
-    let members = workspace
+    let patterns = workspace
         .and_then(|table| table.get("members"))
         .and_then(Value::as_array)
         .ok_or_else(|| WorkspaceLintsError::NoMembersKey {
             path: root_manifest.clone(),
         })?;
-    if members.is_empty() {
+    if patterns.is_empty() {
         return Err(WorkspaceLintsError::EmptyMembers {
             path: root_manifest,
         });
@@ -294,7 +338,7 @@ pub fn audit(repo_root: &Path) -> Result<Report, WorkspaceLintsError> {
     let excluded = excluded_paths(repo_root, workspace, &root_manifest)?;
 
     let mut member_dirs = Vec::new();
-    for (index, entry) in members.iter().enumerate() {
+    for (index, entry) in patterns.iter().enumerate() {
         let pattern = string_entry(entry, &root_manifest, "members", index)?;
         let matched = expand_pattern(repo_root, pattern)?;
         if matched.is_empty() {
@@ -314,27 +358,13 @@ pub fn audit(repo_root: &Path) -> Result<Report, WorkspaceLintsError> {
         return Err(WorkspaceLintsError::NoMembersRemain);
     }
 
-    let mut offenders = Vec::new();
     for dir in &member_dirs {
-        let manifest_path = dir.join(CARGO_TOML);
-        if !manifest_path.is_file() {
+        if !dir.join(CARGO_TOML).is_file() {
             return Err(WorkspaceLintsError::MissingMemberManifest { dir: dir.clone() });
         }
-        if !inherits_workspace_lints(&parse_manifest(&manifest_path)?) {
-            offenders.push(
-                manifest_path
-                    .strip_prefix(repo_root)
-                    .unwrap_or(&manifest_path)
-                    .to_path_buf(),
-            );
-        }
     }
-    offenders.sort();
 
-    Ok(Report {
-        members_examined: member_dirs.len(),
-        offenders,
-    })
+    Ok(member_dirs)
 }
 
 /// True when `manifest` opts into the workspace lint set.
@@ -353,7 +383,10 @@ fn inherits_workspace_lints(manifest: &Value) -> bool {
 }
 
 /// Read and parse a manifest, attributing both failure modes to its path.
-fn parse_manifest(path: &Path) -> Result<Value, WorkspaceLintsError> {
+///
+/// Shared with the sibling guards so "unreadable" and "unparsable" are refusals
+/// everywhere, spelled the same way, rather than each guard inventing its own.
+pub(crate) fn parse_manifest(path: &Path) -> Result<Value, WorkspaceLintsError> {
     let text = fs::read_to_string(path).map_err(|source| WorkspaceLintsError::ReadManifest {
         path: path.to_path_buf(),
         source,

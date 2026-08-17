@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 glob.workspace = true
+syn.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 

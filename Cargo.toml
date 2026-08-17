@@ -106,6 +106,7 @@ log = "0.4"
 env_logger = "0.11"
 
 # Misc
+syn = { version = "2", default-features = false, features = ["full", "parsing"] }
 tiktoken-rs = "0.5"
 num-format = "0.4"
 human_bytes = "0.4"
