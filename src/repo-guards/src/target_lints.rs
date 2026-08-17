@@ -287,8 +287,9 @@ impl Offender {
 pub struct Report {
     /// Number of member crates whose targets were resolved.
     crates_examined: usize,
-    /// Number of target roots actually opened and parsed.
-    roots_examined: usize,
+    /// Every target root actually opened and parsed, relative to the repo
+    /// root and sorted by path.
+    roots: Vec<PathBuf>,
     /// Silent roots, sorted by path.
     offenders: Vec<Offender>,
 }
@@ -313,13 +314,30 @@ impl Report {
         self.crates_examined
     }
 
+    /// Every target root the audit opened and parsed, relative to the repo
+    /// root and sorted by path.
+    ///
+    /// [`roots_examined`](Self::roots_examined) is the size of this set;
+    /// this is the set itself. The difference matters because this guard
+    /// *models* cargo's target discovery rather than asking cargo, and a model
+    /// only ever disagrees with cargo about *which* roots exist. A count can
+    /// match while the contents do not, so a caller that wants to prove the
+    /// model right compares these paths against another enumeration of the
+    /// same workspace — `cargo metadata`, which needs no model because it is
+    /// the build — and reads off exactly which roots each side has that the
+    /// other lacks.
+    #[must_use]
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     /// How many target roots the audit opened and parsed.
     ///
     /// A caller should assert this is non-zero: a guard that scans nothing
     /// reports clean for the wrong reason.
     #[must_use]
     pub fn roots_examined(&self) -> usize {
-        self.roots_examined
+        self.roots.len()
     }
 }
 
@@ -329,7 +347,7 @@ impl fmt::Display for Report {
             return write!(
                 f,
                 "Checked {} target roots across {} workspace members; every one declares a position on its crate's lints.",
-                self.roots_examined, self.crates_examined
+                self.roots.len(), self.crates_examined
             );
         }
 
@@ -337,7 +355,7 @@ impl fmt::Display for Report {
             f,
             "{} of {} target roots are silent about a lint their crate raises.",
             self.offenders.len(),
-            self.roots_examined
+            self.roots.len()
         )?;
         writeln!(
             f,
@@ -464,7 +482,7 @@ struct RootLints {
 pub fn audit(repo_root: &Path) -> Result<Report, TargetLintsError> {
     let member_dirs = workspace_lints::members(repo_root)?;
 
-    let mut roots_examined = 0;
+    let mut examined = Vec::new();
     let mut offenders = Vec::new();
 
     for dir in &member_dirs {
@@ -477,7 +495,11 @@ pub fn audit(repo_root: &Path) -> Result<Report, TargetLintsError> {
             let lints = root_lints(&root.path)?;
             scanned.push((root, lints));
         }
-        roots_examined += scanned.len();
+        examined.extend(
+            scanned
+                .iter()
+                .map(|(root, _)| relative_to(repo_root, &root.path)),
+        );
 
         let baseline: BTreeSet<&String> = scanned
             .iter()
@@ -498,24 +520,30 @@ pub fn audit(repo_root: &Path) -> Result<Report, TargetLintsError> {
                 continue;
             }
             offenders.push(Offender {
-                path: root
-                    .path
-                    .strip_prefix(repo_root)
-                    .unwrap_or(&root.path)
-                    .to_path_buf(),
+                path: relative_to(repo_root, &root.path),
                 kind: root.kind.label(),
                 missing,
             });
         }
     }
 
+    examined.sort();
     offenders.sort_by(|a, b| a.path.cmp(&b.path));
 
     Ok(Report {
         crates_examined: member_dirs.len(),
-        roots_examined,
+        roots: examined,
         offenders,
     })
+}
+
+/// Render one absolute path the way a [`Report`] carries it: relative to
+/// `repo_root` when it lies inside, and verbatim when it does not.
+///
+/// Both the offender list and the examined-root set go through here, so a
+/// caller can join either back onto the same repo root and get the file back.
+fn relative_to(repo_root: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(repo_root).unwrap_or(path).to_path_buf()
 }
 
 /// Resolve every target root of one member crate.

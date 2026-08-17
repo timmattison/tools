@@ -1,15 +1,21 @@
 //! Guard tests for `repo_guards::target_lints::audit`.
 //!
-//! The headline test — [`every_target_root_declares_a_position_on_its_crate_lints`]
-//! — runs the audit against this repository and **fails today by design**. Four
-//! target roots are silent about lints their own crate raises: `cwt`'s two
-//! integration tests never mention `unsafe_code` or `clippy::pedantic`, and
-//! `bm`'s two integration tests never mention `clippy::unwrap_used` or
-//! `clippy::expect_used`. Both crates acquired the gap honestly — they moved
-//! a manifest `[lints]` table into a crate-root attribute to satisfy the
-//! workspace-inheritance guard, and a crate-root attribute reaches one target
-//! where the manifest table reached all of them. That red is the point of this
-//! commit; the following commits clear it.
+//! Two tests point at this repository, and they check the guard's two halves.
+//!
+//! [`every_target_root_declares_a_position_on_its_crate_lints`] checks the
+//! verdict: no target root here is silent about a lint its own crate raises.
+//! It was red when this file was written — `cwt`'s and `bm`'s integration tests
+//! had each lost lints to the manifest-to-crate-root migration that satisfying
+//! the workspace-inheritance guard requires — and the commits that followed
+//! cleared it.
+//!
+//! [`the_guard_resolves_exactly_the_roots_cargo_builds`] checks the prior
+//! question, which a verdict cannot: whether the guard found every root there
+//! is. It asks `cargo metadata` rather than trusting the guard's hand-written
+//! model of cargo's discovery rules, and it **fails today by design** —
+//! `src/buildinfo/build.rs` is a target cargo builds and lints that the guard
+//! has never enumerated. That red is a real gap the guardrail caught; the
+//! commit after this one closes it.
 //!
 //! Every other test is a mutation test. A guard that cannot fail is worse than
 //! no guard, because "clean" and "I never looked" print identically. So each
@@ -24,8 +30,10 @@
 //! OS makes unique; nothing is keyed on a fixed path under the temp dir, the
 //! repo, or the home dir.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use repo_guards::target_lints::{self, Report, TargetLintsError};
 use tempfile::TempDir;
@@ -37,9 +45,18 @@ const RAISES_PEDANTIC: &str = "#![warn(clippy::pedantic)]\n\nfn main() {}\n";
 /// being compiled rather than the working directory (which `cargo test` does
 /// not pin).
 fn repo_root() -> PathBuf {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    fs::canonicalize(&root)
-        .unwrap_or_else(|e| panic!("cannot canonicalize repo root {}: {e}", root.display()))
+    canonical(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+/// Resolve a path to its one true spelling, failing loudly when it cannot be.
+///
+/// Both sides of the cargo-parity comparison go through this. This repository
+/// is reachable as both `/Users/...` and `/Volumes/...`, and `repo_root()`
+/// arrives with a `../..` in it, so two names for one file would otherwise read
+/// as two files and colour the comparison in whichever direction the spellings
+/// happened to fall.
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", path.display()))
 }
 
 /// Create a throwaway workspace root whose members are `crates/*`.
@@ -146,6 +163,164 @@ fn every_target_root_declares_a_position_on_its_crate_lints() {
          reports clean for the wrong reason"
     );
     assert!(report.is_compliant(), "{report}");
+}
+
+/// The set of target roots the guard resolves must equal the set cargo builds.
+///
+/// Every other test here asks what the guard *concludes* about a root. This one
+/// asks the prior question — which roots there are — and answers it by asking
+/// the toolchain instead of modelling the toolchain. `cargo metadata` needs no
+/// model of cargo's discovery rules because it *is* cargo; the guard's
+/// `target_roots` re-derives those rules by hand, from `src/lib.rs` and
+/// `tests/*.rs` down to the `<dir>/<name>/main.rs` form. A hand-written copy of
+/// someone else's rules drifts, and it drifts silently: a root the guard never
+/// opens cannot be reported as silent about its crate's lints, so the crate
+/// comes back clean *because* it was never fully read. That is the same false
+/// green this whole file exists to prevent, one level further up.
+///
+/// Two review findings are why this test exists, and they are one defect twice:
+///
+/// - **Build scripts are never enumerated.** `build.rs` is a target cargo
+///   compiles and lints. Verified on cargo 1.97.1: a manifest
+///   `[lints.rust] unsafe_code = "deny"` makes an unsafe block in `build.rs` a
+///   compile error, while the same lint written `#![deny(unsafe_code)]` in
+///   `src/lib.rs` lets it through. So a build script loses its lints in exactly
+///   the manifest-to-crate-root migration this guard was written to police, and
+///   the guard calls the crate clean. `src/buildinfo/build.rs` is this
+///   workspace's only build script, and it is why this test is **red the day it
+///   lands** — a real occurrence, flagged by the guardrail rather than by a
+///   reviewer.
+/// - **`AUTO_DISCOVERY_KEYS` lists four of cargo's five keys**, omitting
+///   `autolib`. No manifest here sets it today, so this test is silent on that
+///   half for now; the moment one does, the guard enumerates a library root
+///   cargo does not build and it lands in the `invented` direction below.
+///
+/// Both were caught by a human reading the model against cargo's documentation,
+/// which does not scale and did not have to. Whatever cargo adds next — another
+/// target kind, another discovery key — arrives here as a set difference on the
+/// first run after it lands, with no one needing to notice.
+#[test]
+fn the_guard_resolves_exactly_the_roots_cargo_builds() {
+    let repo_root = repo_root();
+    let report = target_lints::audit(&repo_root).expect("audit the workspace");
+
+    let guard: BTreeSet<PathBuf> = report
+        .roots()
+        .iter()
+        .map(|root| canonical(&repo_root.join(root)))
+        .collect();
+    let cargo = cargo_target_roots(&repo_root);
+
+    assert!(
+        !cargo.is_empty(),
+        "`cargo metadata` reported no targets at all for {}; every root the guard \
+         resolved would then look invented and every real gap would vanish, so an \
+         empty cargo side is a broken test rather than a verdict",
+        repo_root.display()
+    );
+
+    let missed: BTreeSet<PathBuf> = cargo.difference(&guard).cloned().collect();
+    assert!(
+        missed.is_empty(),
+        "cargo builds {} target root(s) the guard never resolved:\n{}\n\
+         This is the false-green direction. A root the guard does not open cannot be \
+         reported as silent about a lint its crate raises, so that root keeps the \
+         workspace default lints unnoticed and its crate is reported clean on the \
+         strength of the roots that were read.",
+        missed.len(),
+        render_roots(&missed, &repo_root)
+    );
+
+    let invented: BTreeSet<PathBuf> = guard.difference(&cargo).cloned().collect();
+    assert!(
+        invented.is_empty(),
+        "the guard resolved {} root(s) cargo does not build:\n{}\n\
+         This direction is loud rather than silent, but it is the same drift: the \
+         guard would demand a lint attribute in a file cargo never lints, and a model \
+         wrong about which files exist is not to be trusted about which files are \
+         missing.",
+        invented.len(),
+        render_roots(&invented, &repo_root)
+    );
+}
+
+/// Every `src_path` cargo reports, across every target of every workspace
+/// package, canonicalized.
+///
+/// `--no-deps` keeps the answer to this workspace's own packages, and is
+/// deliberately not paired with `--offline`: resolution is skipped either way,
+/// and `--offline` only adds a way for a cold cache to fail.
+///
+/// Every step here fails loudly. A parity test that skipped when cargo could
+/// not be spawned, or compared against a set it quietly failed to parse, would
+/// be an instance of the very defect it exists to catch: a check that reports
+/// clean because it never looked.
+fn cargo_target_roots(repo_root: &Path) -> BTreeSet<PathBuf> {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(repo_root)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "cannot run `cargo metadata` in {}: {e}",
+                repo_root.display()
+            )
+        });
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "`cargo metadata` in {} exited with {}:\n{stderr}",
+        repo_root.display(),
+        output.status
+    );
+
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!("cannot parse the output of `cargo metadata` as JSON: {e}\nstderr:\n{stderr}")
+    });
+
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| {
+            panic!("`cargo metadata` returned no `packages` array\nstderr:\n{stderr}")
+        });
+
+    packages
+        .iter()
+        .flat_map(|package| {
+            package
+                .get("targets")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| {
+                    panic!("a package in `cargo metadata` has no `targets` array: {package}")
+                })
+        })
+        .map(|target| {
+            let src_path = target
+                .get("src_path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_else(|| {
+                    panic!("a target in `cargo metadata` has no `src_path`: {target}")
+                });
+            canonical(Path::new(src_path))
+        })
+        .collect()
+}
+
+/// Render a set of absolute roots as one indented repo-relative path per line,
+/// so a failure reads as a list of files rather than as two sets to diff by eye.
+fn render_roots(roots: &BTreeSet<PathBuf>, repo_root: &Path) -> String {
+    roots
+        .iter()
+        .map(|root| {
+            format!(
+                "    {}",
+                root.strip_prefix(repo_root).unwrap_or(root).display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ---------------------------------------------------------------------------
