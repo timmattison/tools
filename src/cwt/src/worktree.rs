@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Length of short commit hash for display (git uses 7 by default).
+/// Number of characters of a commit hash to show (git uses 7 by default).
 const SHORT_COMMIT_HASH_LENGTH: usize = 7;
 
 /// Represents a single git worktree.
@@ -25,16 +25,17 @@ impl Worktree {
     }
 
     /// Get the branch name for display, or short commit hash for detached HEAD.
+    ///
+    /// A detached HEAD shows the first `SHORT_COMMIT_HASH_LENGTH` characters of
+    /// the hash, or the whole hash when it is shorter than that. Counting
+    /// characters rather than bytes keeps a head that carries multi-byte UTF-8
+    /// from panicking or from losing a character to a truncated byte sequence.
     pub fn display_branch(&self) -> String {
         if let Some(branch) = &self.branch {
             branch.clone()
         } else {
             // Show short commit hash for detached HEAD
-            let short_hash = if self.head.len() >= SHORT_COMMIT_HASH_LENGTH {
-                &self.head[..SHORT_COMMIT_HASH_LENGTH]
-            } else {
-                &self.head
-            };
+            let short_hash: String = self.head.chars().take(SHORT_COMMIT_HASH_LENGTH).collect();
             format!("HEAD@{short_hash}")
         }
     }
