@@ -75,11 +75,36 @@
 //! and a missed spelling reports *clean* — indistinguishable from a guard doing
 //! real work.
 //!
-//! One consequence worth stating: `#![cfg_attr(not(test), warn(lint))]` is an
-//! attribute whose path is `cfg_attr`, not a lint level, so it neither raises
-//! nor mentions anything. That is correct rather than incidental — a
-//! conditionally-applied lint is not a position the crate holds in every
-//! configuration.
+//! # `cfg_attr` mentions without raising
+//!
+//! `#![cfg_attr(not(test), warn(lint))]` is an attribute whose path is
+//! `cfg_attr` rather than a lint level, and the two halves of the rule answer
+//! it differently. That split is the point, not an oversight.
+//!
+//! It does **not raise**. A lint that applies only under `not(test)` is not a
+//! position the crate holds in every configuration, so it must not impose a
+//! requirement on sibling targets — least of all on the test targets the
+//! predicate deliberately excludes.
+//!
+//! It **does mention**. The mention bar asks for exactly one thing: that the
+//! root name the lint, so the decision is visible in the file it governs and a
+//! reviewer can see it. A conditional raise names the lint *and* the exact
+//! configuration it holds in, which is strictly more precise than the bare
+//! `#![warn(lint)]` that would satisfy the guard. Reading it as silence would
+//! demand a redundant unconditional mention bolted on top of a more careful
+//! declaration — the guard would punish the crate that stated its position
+//! best. `src/bm/src/lib.rs` is that crate, and it is why this half of the rule
+//! reads the way it does.
+//!
+//! So mention-detection looks *inside* `cfg_attr`, recursively: the form takes
+//! several attributes after its predicate (`#![cfg_attr(unix, warn(a),
+//! allow(b))]`) and it nests (`#![cfg_attr(unix, cfg_attr(test, warn(a)))]`).
+//! Only lint-level attributes found in there count, and the predicate itself is
+//! never read as a lint name — `not`, `test`, and `cfg_attr` are cfg syntax, not
+//! lints. Recursion is bounded so a pathological file cannot exhaust the stack;
+//! past the bound the guard refuses rather than return a verdict it only partly
+//! computed — see
+//! [`CfgAttrTooDeep`](crate::target_lints::TargetLintsError::CfgAttrTooDeep).
 //!
 //! Everything that could shrink the audited set is a hard error rather than a
 //! clean verdict; see [`TargetLintsError`].
@@ -103,6 +128,18 @@ const RAISING_LEVELS: [&str; 3] = ["deny", "forbid", "warn"];
 /// Attribute paths that *mention* a lint. A superset of [`RAISING_LEVELS`]:
 /// `allow` and `expect` are positions too, just not raised ones.
 const MENTIONING_LEVELS: [&str; 5] = ["allow", "deny", "expect", "forbid", "warn"];
+
+/// The attribute that applies other attributes conditionally. Its contents
+/// mention but never raise; see the module docs.
+const CFG_ATTR: &str = "cfg_attr";
+
+/// How many `cfg_attr` wrappers the guard will descend through before refusing.
+///
+/// `cfg_attr` nests without limit in the grammar, so the walk over it is
+/// recursive and a hand-written or generated file could otherwise drive it into
+/// the stack. Real code nests once; the bound is set far above anything a human
+/// writes so that hitting it means the file is pathological, not merely careful.
+const MAX_CFG_ATTR_DEPTH: usize = 16;
 
 /// `[package]` keys that turn cargo's target auto-discovery on or off.
 ///
@@ -146,6 +183,17 @@ pub enum TargetLintsError {
         path: PathBuf,
         /// The underlying parse failure.
         source: syn::Error,
+    },
+
+    /// A target root nests `cfg_attr` deeper than the guard will follow.
+    #[error(
+        "{} nests `cfg_attr` more than {MAX_CFG_ATTR_DEPTH} deep; the guard stops rather than \
+         risk the stack, and a root it only partly read is a root it cannot vouch for",
+        path.display()
+    )]
+    CfgAttrTooDeep {
+        /// The root file whose nesting exceeded the bound.
+        path: PathBuf,
     },
 
     /// A directory that should hold target roots could not be listed.
@@ -410,7 +458,9 @@ struct RootLints {
 /// - a member resolves to no target roots
 ///   ([`NoTargetRoots`](TargetLintsError::NoTargetRoots));
 /// - a root file is unreadable ([`ReadRoot`](TargetLintsError::ReadRoot)) or
-///   does not parse as Rust ([`ParseRoot`](TargetLintsError::ParseRoot)).
+///   does not parse as Rust ([`ParseRoot`](TargetLintsError::ParseRoot));
+/// - a root nests `cfg_attr` past the guard's bound
+///   ([`CfgAttrTooDeep`](TargetLintsError::CfgAttrTooDeep)).
 pub fn audit(repo_root: &Path) -> Result<Report, TargetLintsError> {
     let member_dirs = workspace_lints::members(repo_root)?;
 
@@ -635,6 +685,9 @@ fn discover(
 ///
 /// `reason = "..."` is a [`Meta::NameValue`], not a [`Meta::Path`], so it is
 /// skipped rather than collected as a lint named `reason`.
+///
+/// Each inner attribute is handed to [`collect_positions`], which is also what
+/// descends through `cfg_attr`.
 fn root_lints(path: &Path) -> Result<RootLints, TargetLintsError> {
     let text = fs::read_to_string(path).map_err(|source| TargetLintsError::ReadRoot {
         path: path.to_path_buf(),
@@ -650,40 +703,88 @@ fn root_lints(path: &Path) -> Result<RootLints, TargetLintsError> {
         if !matches!(attr.style, AttrStyle::Inner(_)) {
             continue;
         }
-        let Meta::List(list) = &attr.meta else {
-            continue;
-        };
-        let Some(level) = sole_segment(&list.path) else {
-            continue;
-        };
-        if !MENTIONING_LEVELS.contains(&level.as_str()) {
-            continue;
-        }
-
-        let args = list
-            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            .map_err(|source| TargetLintsError::ParseRoot {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        for arg in args {
-            let Meta::Path(lint) = arg else {
-                continue;
-            };
-            let name = render_path(&lint);
-            if RAISING_LEVELS.contains(&level.as_str()) {
-                lints.raised.insert(name.clone());
-            }
-            lints.mentioned.insert(name);
-        }
+        collect_positions(&attr.meta, 0, path, &mut lints)?;
     }
     Ok(lints)
 }
 
+/// Record the lint positions one attribute takes, descending through any
+/// `cfg_attr` wrapping it.
+///
+/// `depth` counts the `cfg_attr` wrappers this attribute sits inside. Depth zero
+/// is unconditional and is the only depth that can *raise*; anything deeper
+/// applies in some configurations and not others, so it mentions without
+/// raising. See the module docs for why those two answers differ.
+///
+/// The first argument of a `cfg_attr` is its cfg predicate — `not(test)`,
+/// `unix`, `feature = "x"` — and is skipped outright, so no part of a predicate
+/// can be mistaken for a lint name. Every argument after it is an attribute the
+/// predicate guards, and each is walked the same way, which is what makes both
+/// the multi-attribute form and the nested form fall out of one rule rather than
+/// a case apiece.
+fn collect_positions(
+    meta: &Meta,
+    depth: usize,
+    path: &Path,
+    lints: &mut RootLints,
+) -> Result<(), TargetLintsError> {
+    let Meta::List(list) = meta else {
+        return Ok(());
+    };
+    let Some(name) = sole_segment(&list.path) else {
+        return Ok(());
+    };
+
+    if name == CFG_ATTR {
+        if depth >= MAX_CFG_ATTR_DEPTH {
+            return Err(TargetLintsError::CfgAttrTooDeep {
+                path: path.to_path_buf(),
+            });
+        }
+        for guarded in meta_args(list, path)?.iter().skip(1) {
+            collect_positions(guarded, depth + 1, path, lints)?;
+        }
+        return Ok(());
+    }
+
+    if !MENTIONING_LEVELS.contains(&name.as_str()) {
+        return Ok(());
+    }
+    let raises = depth == 0 && RAISING_LEVELS.contains(&name.as_str());
+
+    for arg in &meta_args(list, path)? {
+        let Meta::Path(lint) = arg else {
+            continue;
+        };
+        let rendered = render_path(lint);
+        if raises {
+            lints.raised.insert(rendered.clone());
+        }
+        lints.mentioned.insert(rendered);
+    }
+    Ok(())
+}
+
+/// Parse the comma-separated arguments of an attribute list.
+///
+/// A failure here is a refusal, not an empty list: arguments the guard cannot
+/// read are lint positions it cannot see, and "this attribute holds nothing" is
+/// the one conclusion it has no evidence for.
+fn meta_args(
+    list: &syn::MetaList,
+    path: &Path,
+) -> Result<Punctuated<Meta, Token![,]>, TargetLintsError> {
+    list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        .map_err(|source| TargetLintsError::ParseRoot {
+            path: path.to_path_buf(),
+            source,
+        })
+}
+
 /// The identifier of a single-segment path, or `None` for anything longer.
 ///
-/// Lint *levels* are always one segment (`warn`), which is what distinguishes
-/// them from wrappers like `cfg_attr` only by name — and from lint *paths* like
+/// Lint *levels* and `cfg_attr` alike are always one segment, which is what
+/// distinguishes them from each other only by name — and from lint *paths* like
 /// `clippy::pedantic` by shape.
 fn sole_segment(path: &syn::Path) -> Option<String> {
     match path.segments.len() {

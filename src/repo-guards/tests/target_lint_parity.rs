@@ -1,11 +1,11 @@
 //! Guard tests for `repo_guards::target_lints::audit`.
 //!
 //! The headline test — [`every_target_root_declares_a_position_on_its_crate_lints`]
-//! — runs the audit against this repository and **fails today by design**. Five
+//! — runs the audit against this repository and **fails today by design**. Four
 //! target roots are silent about lints their own crate raises: `cwt`'s two
 //! integration tests never mention `unsafe_code` or `clippy::pedantic`, and
-//! `bm`'s library and two integration tests never mention `clippy::unwrap_used`
-//! or `clippy::expect_used`. Both crates acquired the gap honestly — they moved
+//! `bm`'s two integration tests never mention `clippy::unwrap_used` or
+//! `clippy::expect_used`. Both crates acquired the gap honestly — they moved
 //! a manifest `[lints]` table into a crate-root attribute to satisfy the
 //! workspace-inheritance guard, and a crate-root attribute reaches one target
 //! where the manifest table reached all of them. That red is the point of this
@@ -411,12 +411,43 @@ fn a_reason_is_not_a_lint_name() {
     );
 }
 
-/// `#![cfg_attr(not(test), warn(lint))]` has attribute path `cfg_attr`, so it is
-/// neither a raise nor a mention. This is `bm`'s `src/lib.rs` exactly: a lint
-/// that applies in some configurations is not a position the crate holds in all
-/// of them, and the guard must not read it as one.
+/// A `cfg_attr`-wrapped lint does **not** raise. A lint that applies only under
+/// `not(test)` is not a position the crate holds in every configuration, so it
+/// cannot bind sibling targets — least of all the test targets its own predicate
+/// excludes. Were it to raise, the silent `tests/cli.rs` here would be an
+/// offender.
 #[test]
-fn cfg_attr_wrapped_lints_neither_raise_nor_mention() {
+fn cfg_attr_wrapped_lints_do_not_raise() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(
+        &member,
+        "src/lib.rs",
+        "#![cfg_attr(not(test), warn(clippy::unwrap_used))]\n",
+    );
+    write_source(&member, "tests/cli.rs", "#[test]\nfn works() {}\n");
+
+    let report = audit_fixture(&ws);
+
+    assert!(
+        report.is_compliant(),
+        "a conditionally-applied lint must not impose a baseline on siblings; got:\n{report}"
+    );
+    assert_eq!(
+        report.roots_examined(),
+        2,
+        "both roots should still have been examined"
+    );
+}
+
+/// A `cfg_attr`-wrapped lint **does** mention. This is `bm`'s real shape: the
+/// library states its position on `clippy::unwrap_used` more precisely than a
+/// bare `#![warn(...)]` would — it names the lint *and* the configuration it
+/// holds in — and the mention bar asks for nothing more than that the file name
+/// the lint. Reading it as silence would demand a redundant unconditional
+/// mention be bolted on top of the more careful declaration.
+#[test]
+fn cfg_attr_wrapped_lints_are_a_mention() {
     let ws = synthetic_workspace();
     let member = write_member(ws.path(), "tool", "");
     write_source(
@@ -432,13 +463,151 @@ fn cfg_attr_wrapped_lints_neither_raise_nor_mention() {
 
     let report = audit_fixture(&ws);
 
+    assert!(
+        report.is_compliant(),
+        "naming a lint inside cfg_attr is a stated position, not silence; got:\n{report}"
+    );
+}
+
+/// `cfg_attr` takes *several* attributes after its predicate. A walk that read
+/// only the first would report the rest silent forever — the false-green shape
+/// this whole file exists to prevent. The unanswered third lint proves the guard
+/// is still able to flag while both wrapped mentions land.
+#[test]
+fn every_attribute_after_a_cfg_predicate_mentions() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(
+        &member,
+        "src/lib.rs",
+        "#![cfg_attr(unix, warn(clippy::unwrap_used), allow(clippy::expect_used))]\n",
+    );
+    write_source(
+        &member,
+        "src/main.rs",
+        "#![warn(clippy::unwrap_used, clippy::expect_used)]\n#![deny(unsafe_code)]\n\nfn main() {}\n",
+    );
+
+    let report = audit_fixture(&ws);
+
     assert_eq!(
         offenders(&report),
         vec![(
             PathBuf::from("crates/tool/src/lib.rs"),
-            vec!["clippy::unwrap_used".to_owned()]
+            vec!["unsafe_code".to_owned()]
         )],
-        "a cfg_attr-wrapped lint is not a mention, so the library is still silent"
+        "both attributes after the predicate must be read, leaving only the lint neither names"
+    );
+}
+
+/// `cfg_attr` nests. The walk recurses instead of special-casing one level, so
+/// an inner mention counts however many wrappers sit above it.
+#[test]
+fn nested_cfg_attr_mentions_are_found() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(
+        &member,
+        "src/lib.rs",
+        "#![cfg_attr(unix, cfg_attr(test, warn(clippy::unwrap_used)))]\n",
+    );
+    write_source(
+        &member,
+        "src/main.rs",
+        "#![warn(clippy::unwrap_used)]\n#![deny(unsafe_code)]\n\nfn main() {}\n",
+    );
+
+    let report = audit_fixture(&ws);
+
+    assert_eq!(
+        offenders(&report),
+        vec![(
+            PathBuf::from("crates/tool/src/lib.rs"),
+            vec!["unsafe_code".to_owned()]
+        )],
+        "a mention nested two cfg_attrs deep still counts"
+    );
+}
+
+/// Only *lint-level* attributes inside a `cfg_attr` count. `doc = "..."` and
+/// `feature(...)` are conditionally applied too, and neither says anything about
+/// a lint, so the library here is still silent.
+#[test]
+fn non_lint_attributes_inside_cfg_attr_mention_nothing() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(
+        &member,
+        "src/lib.rs",
+        "#![cfg_attr(unix, doc = \"unix only\")]\n#![cfg_attr(docsrs, feature(doc_cfg))]\n",
+    );
+    write_source(&member, "src/main.rs", RAISES_PEDANTIC);
+
+    let report = audit_fixture(&ws);
+
+    assert_eq!(
+        offenders(&report),
+        vec![(
+            PathBuf::from("crates/tool/src/lib.rs"),
+            vec!["clippy::pedantic".to_owned()]
+        )],
+        "a non-lint attribute inside cfg_attr is not a position on any lint"
+    );
+}
+
+/// The cfg predicate is cfg syntax, never a lint name. `not`, `test`, and
+/// `cfg_attr` are spelled here as lints the binary raises, so a walk that
+/// harvested the predicate would report the library compliant on all three.
+#[test]
+fn a_cfg_predicate_is_never_a_lint_name() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(
+        &member,
+        "src/lib.rs",
+        "#![cfg_attr(not(test), warn(clippy::unwrap_used))]\n",
+    );
+    write_source(
+        &member,
+        "src/main.rs",
+        "#![warn(clippy::unwrap_used)]\n#![deny(cfg_attr, not, test)]\n\nfn main() {}\n",
+    );
+
+    let report = audit_fixture(&ws);
+
+    assert_eq!(
+        offenders(&report),
+        vec![(
+            PathBuf::from("crates/tool/src/lib.rs"),
+            vec!["cfg_attr".to_owned(), "not".to_owned(), "test".to_owned()]
+        )],
+        "only the wrapped lint may be mentioned; the predicate contributes nothing"
+    );
+}
+
+/// `cfg_attr` nests without limit in the grammar, so the walk over it is
+/// recursive and a generated or hostile file could drive it into the stack. Past
+/// the bound the guard refuses, because a root it only partly read is a root it
+/// cannot vouch for.
+#[test]
+fn pathologically_nested_cfg_attr_refuses() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    let mut attribute = "warn(clippy::unwrap_used)".to_owned();
+    for _ in 0..64 {
+        attribute = format!("cfg_attr(unix, {attribute})");
+    }
+    write_source(
+        &member,
+        "src/main.rs",
+        &format!("#![{attribute}]\n\nfn main() {{}}\n"),
+    );
+
+    let error = audit_must_refuse(&ws);
+
+    assert!(
+        matches!(&error, TargetLintsError::CfgAttrTooDeep { path } if path.ends_with("src/main.rs")),
+        "nesting past the bound must be an error naming the file, got: {error}"
     );
 }
 
