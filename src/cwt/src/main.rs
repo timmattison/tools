@@ -117,9 +117,9 @@ struct Cli {
     /// Matches in order: exact directory name, exact branch name, then case-insensitive
     /// substring on branch names. If multiple branches match, lists them and exits.
     ///
-    /// Prefix a repository name to select inside one repository of the family,
-    /// for example `child-b:shared`. A bare `child-b:` selects that
-    /// repository's main worktree.
+    /// Prefix a repository name to search one repository of the family, for
+    /// example `REPO:feature-x`. Part of the name is enough, and a bare `REPO:`
+    /// selects that repository's main worktree.
     #[arg(conflicts_with_all = ["forward", "prev", "main", "shell_setup"], verbatim_doc_comment)]
     target: Option<String>,
 
