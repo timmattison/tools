@@ -209,8 +209,13 @@ fn generate_and_encode_video(
     theme: TerminalTheme,
     optimize_web: bool,
 ) -> Result<usize> {
-    let frame_duration = 1.0 / fps as f64;
-    let total_frames = (recording.duration * fps as f64).ceil() as usize;
+    let frame_duration = 1.0 / f64::from(fps);
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the saturating float cast is the clamp we want: a negative or NaN duration yields no frames, and a recording long enough to exceed usize would exhaust the disk long before the cast mattered"
+    )]
+    let total_frames = (recording.duration * f64::from(fps)).ceil() as usize;
 
     // Start FFmpeg process first
     let mut ffmpeg_process = spawn_ffmpeg(output_path, width, height, fps, optimize_web)?;
@@ -226,11 +231,8 @@ fn generate_and_encode_video(
         font_manager.fonts.len()
     );
 
-    let mut terminal_state = TerminalState::new(
-        recording.width as usize,
-        recording.height as usize,
-        theme.clone(),
-    );
+    let mut terminal_state =
+        TerminalState::new(recording.width as usize, recording.height as usize, theme);
 
     let mut event_index = 0;
 
@@ -302,6 +304,46 @@ fn calculate_font_baseline(font: &impl Font, font_size: f32) -> f32 {
     ascent.min(48.0).round()
 }
 
+/// Pixel offset of the leading edge of the cell at grid coordinate `index`.
+///
+/// Grid coordinates are bounded by the recording's `u16` terminal dimensions and
+/// `cell_size` is a small compile-time constant, so `index * cell_size + padding`
+/// always fits in a `u32`.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "grid indices come from the recording's u16 terminal dimensions, so they always fit in u32"
+)]
+fn cell_offset(index: usize, cell_size: u32, padding: u32) -> u32 {
+    padding + (index as u32 * cell_size)
+}
+
+/// Converts a pixel offset into the signed coordinate the `imageproc` drawing
+/// calls take.
+///
+/// Every offset is produced by [`cell_offset`], i.e. a grid index bounded by the
+/// recording's `u16` terminal size times a small cell constant, so it stays far
+/// below `i32::MAX` and cannot wrap.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "pixel offsets are bounded by the recording's u16 terminal size times a small cell constant, so they never reach i32::MAX"
+)]
+const fn pixel_coord(offset: u32) -> i32 {
+    offset as i32
+}
+
+/// Baseline row for a glyph drawn in the cell whose top edge is at `cell_top`.
+///
+/// `cell_top` is a bounded pixel offset (see [`pixel_coord`]) and
+/// [`calculate_font_baseline`] caps the offset at 48 pixels, so the rounded sum
+/// always fits in an `i32`.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a bounded cell offset plus a baseline capped at 48 pixels stays far inside i32's range"
+)]
+fn baseline_y(cell_top: u32, baseline_offset: f32) -> i32 {
+    (cell_top as f32 + baseline_offset).round() as i32
+}
+
 fn render_terminal_to_image(
     terminal_state: &TerminalState,
     width: u32,
@@ -319,8 +361,8 @@ fn render_terminal_to_image(
 
     // Use fixed character cell dimensions to match terminal expectations
     const SCALE: u32 = 4; // 4x resolution for fine control
-    let char_width = 6u32 * SCALE - 1; // 23px - 0.25px tighter
-    let char_height = 13u32 * SCALE + 1; // 53px - 0.25px looser
+    let char_width = 6_u32 * SCALE - 1; // 23px - 0.25px tighter
+    let char_height = 13_u32 * SCALE + 1; // 53px - 0.25px looser
     let font_size = 12.0 * SCALE as f32; // 48pt at 4x
     let scale = PxScale::from(font_size);
 
@@ -338,13 +380,15 @@ fn render_terminal_to_image(
 
     // Pass 1: Render all cell backgrounds first (including status bar)
     for (y, row) in grid.iter().enumerate() {
+        // Use integer positioning to avoid gaps
+        let pixel_y = cell_offset(y, char_height, padding_y);
+
         for (x, cell) in row.iter().enumerate() {
-            // Use integer positioning to avoid gaps
-            let pixel_x = padding_x + (x as u32 * char_width);
-            let pixel_y = padding_y + (y as u32 * char_height);
+            let pixel_x = cell_offset(x, char_width, padding_x);
 
             // Draw background color for this cell - ensure it fills the entire cell
-            let bg_rect = Rect::at(pixel_x as i32, pixel_y as i32).of_size(char_width, char_height);
+            let bg_rect = Rect::at(pixel_coord(pixel_x), pixel_coord(pixel_y))
+                .of_size(char_width, char_height);
 
             // Get resolved colors from terminal state (handles dynamic palette, overrides, etc.)
             let (_, bg_color) = terminal_state.resolve_cell_colors(cell);
@@ -359,10 +403,11 @@ fn render_terminal_to_image(
 
     // Pass 2: Render all text on top of backgrounds (including status bar)
     for (y, row) in grid.iter().enumerate() {
+        // Use integer positioning to avoid gaps
+        let pixel_y = cell_offset(y, char_height, padding_y);
+
         for (x, cell) in row.iter().enumerate() {
-            // Use integer positioning to avoid gaps
-            let pixel_x = padding_x + (x as u32 * char_width);
-            let pixel_y = padding_y + (y as u32 * char_height);
+            let pixel_x = cell_offset(x, char_width, padding_x);
 
             // Draw the character if it's not empty
             if cell.ch != ' ' && cell.ch != '\x00' {
@@ -393,8 +438,8 @@ fn render_terminal_to_image(
 
                 // Position text properly within the character cell
                 // Ensure integer positioning for crisp rendering
-                let text_x = pixel_x as i32;
-                let text_y = (pixel_y as f32 + baseline_offset).round() as i32;
+                let text_x = pixel_coord(pixel_x);
+                let text_y = baseline_y(pixel_y, baseline_offset);
 
                 draw_text_mut(
                     &mut image,
@@ -408,9 +453,11 @@ fn render_terminal_to_image(
 
                 // Add underline if needed
                 if cell.underline {
-                    let underline_rect =
-                        Rect::at(pixel_x as i32, (pixel_y + char_height - (2 * SCALE)) as i32)
-                            .of_size(char_width, SCALE); // Scale underline thickness
+                    let underline_rect = Rect::at(
+                        pixel_coord(pixel_x),
+                        pixel_coord(pixel_y + char_height - (2 * SCALE)),
+                    )
+                    .of_size(char_width, SCALE); // Scale underline thickness
 
                     draw_filled_rect_mut(
                         &mut image,
@@ -436,16 +483,21 @@ fn render_terminal_to_image(
             );
 
             // Calculate cursor pixel position - align with text rendering
-            let cursor_pixel_x = padding_x + (adj_cursor_x as u32 * char_width);
-            let cell_top_y = padding_y + (adj_cursor_y as u32 * char_height);
+            let cursor_pixel_x = cell_offset(adj_cursor_x, char_width, padding_x);
+            let cell_top_y = cell_offset(adj_cursor_y, char_height, padding_y);
 
             // Position cursor to align with text baseline - start from baseline and extend down
             // This matches how terminals typically render cursors
-            let cursor_pixel_y = cell_top_y + baseline_offset as u32;
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "calculate_font_baseline already rounds its result and caps it at 48.0, and a font ascent is never negative, so this converts a whole number of pixels in 0..=48"
+            )]
             let cursor_height = baseline_offset as u32;
+            let cursor_pixel_y = cell_top_y + cursor_height;
 
             // Draw cursor as inverted block aligned with text
-            let cursor_rect = Rect::at(cursor_pixel_x as i32, cursor_pixel_y as i32)
+            let cursor_rect = Rect::at(pixel_coord(cursor_pixel_x), pixel_coord(cursor_pixel_y))
                 .of_size(char_width, cursor_height);
 
             // Get the cell at cursor position to determine colors
@@ -467,8 +519,8 @@ fn render_terminal_to_image(
                 if cell.ch != ' ' && cell.ch != '\x00' {
                     let text = cell.ch.to_string();
                     let font = font_manager.get_best_font_for_char(cell.ch);
-                    let text_x = cursor_pixel_x as i32;
-                    let text_y = (cell_top_y as f32 + baseline_offset).round() as i32;
+                    let text_x = pixel_coord(cursor_pixel_x);
+                    let text_y = baseline_y(cell_top_y, baseline_offset);
 
                     draw_text_mut(
                         &mut image,
