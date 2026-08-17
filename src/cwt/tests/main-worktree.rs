@@ -151,3 +151,16 @@ fn repository_without_main_or_master_reports_not_found() {
         "cwt must print no path when it finds no main worktree"
     );
 }
+
+#[test]
+fn not_found_message_names_every_branch_that_was_searched() {
+    let (temp, repo) = init_repo("trunk");
+    let feature = add_worktree(&temp, &repo, "feature");
+
+    let output = cwt_main(&feature);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("'main' or 'master'"),
+        "the not-found message must name every branch cwt searched for, got: {stderr}"
+    );
+}

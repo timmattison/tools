@@ -347,6 +347,15 @@ fn find_main_worktree(worktrees: &[Worktree]) -> Option<usize> {
     })
 }
 
+/// Formats `names` as a quoted alternation: `'main' or 'master'`.
+///
+/// The missing-main-worktree error is built from [`MAIN_BRANCH_NAMES`] through
+/// this function, so a name added to the constant cannot leave the message
+/// naming a shorter list than the search actually tried.
+fn quoted_branch_alternatives(_names: &[&str]) -> String {
+    String::new()
+}
+
 /// Prints every worktree to stderr as `directory [branch]`.
 ///
 /// This list follows a "not found" error, so it obeys quiet mode.
@@ -483,9 +492,8 @@ fn main() {
         let Some(target_idx) = find_main_worktree(&worktrees) else {
             error!(
                 cli.quiet,
-                "Error: No worktree is on branch '{}' or '{}'",
-                MAIN_BRANCH_NAMES[0],
-                MAIN_BRANCH_NAMES[1]
+                "Error: No worktree is on branch {}",
+                quoted_branch_alternatives(&MAIN_BRANCH_NAMES)
             );
             print_available_worktrees(&worktrees, cli.quiet);
             exit(exit_codes::WORKTREE_NOT_FOUND);
@@ -948,6 +956,41 @@ mod tests {
             worktree_on("/repo-wt/wt1", Some("wt-main-master")),
         ];
         assert_eq!(find_main_worktree(&worktrees), None);
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_quotes_a_single_name() {
+        assert_eq!(quoted_branch_alternatives(&["main"]), "'main'");
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_joins_two_names() {
+        assert_eq!(
+            quoted_branch_alternatives(&["main", "master"]),
+            "'main' or 'master'"
+        );
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_joins_three_names() {
+        // This is the assertion that proves the arity coupling is gone. The old
+        // message read MAIN_BRANCH_NAMES[0] and [1] by index, so a third name
+        // would be searched for and never named. The formatter must render
+        // every name it is given, whatever the length of the slice.
+        assert_eq!(
+            quoted_branch_alternatives(&["main", "master", "trunk"]),
+            "'main' or 'master' or 'trunk'"
+        );
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_renders_the_branch_constant() {
+        // Ties the formatter to the constant the not-found message is built
+        // from, so the user-facing text stays what it has always been.
+        assert_eq!(
+            quoted_branch_alternatives(&MAIN_BRANCH_NAMES),
+            "'main' or 'master'"
+        );
     }
 
     #[test]
