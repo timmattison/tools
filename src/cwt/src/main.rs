@@ -92,6 +92,9 @@ macro_rules! error {
 #[command(name = "cwt")]
 #[command(about = "Change to a different git worktree")]
 #[command(version = version_string!())]
+// Without this, clap folds the long help into one paragraph and the code blocks
+// below come out as a single run-on line.
+#[command(verbatim_doc_comment)]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are naturally bool-heavy
 struct Cli {
     /// Go to the next worktree (wraps around).
