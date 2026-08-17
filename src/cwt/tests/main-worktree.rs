@@ -5,93 +5,16 @@
 //! repository: a repository that never renamed `master` still gets a main
 //! worktree, `main` wins wherever both branches exist, and a branch that merely
 //! contains the text "main" never captures the shortcut.
+//!
+//! The repository fixtures and the binary runner are shared with the other
+//! end-to-end targets and live in [`common`]. Only the `--main` assertions are
+//! here.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+mod common;
 
-use tempfile::TempDir;
+use std::path::Path;
 
-/// Exit code that `cwt` returns when it finds no matching worktree.
-const WORKTREE_NOT_FOUND: i32 = 3;
-
-/// Runs a git command in `dir` and returns whether it succeeded.
-///
-/// Output is nulled so that concurrent test runs do not interleave noise. The
-/// git environment of the parent is scrubbed because a run started from a git
-/// hook inherits `GIT_DIR` and friends, which would point every command here at
-/// the wrong repository.
-fn run_git(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .args(args)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_PREFIX")
-        .status()
-        .is_ok_and(|s| s.success())
-}
-
-/// Creates a throwaway repository whose first branch is `branch`, with one commit.
-///
-/// The repository is a subdirectory of the [`TempDir`] (keep it alive) so that
-/// the worktrees added beside it are removed with it. gpg signing is disabled
-/// so that a globally configured signer cannot break the commit.
-fn init_repo(branch: &str) -> (TempDir, PathBuf) {
-    let temp = TempDir::new().expect("failed to create temp dir");
-    let repo = temp.path().join("repo");
-    std::fs::create_dir(&repo).expect("failed to create repo subdir");
-
-    assert!(run_git(&repo, &["init", "-b", branch]), "git init failed");
-    assert!(
-        run_git(&repo, &["config", "user.email", "test@example.com"]),
-        "git config user.email failed"
-    );
-    assert!(
-        run_git(&repo, &["config", "user.name", "Test User"]),
-        "git config user.name failed"
-    );
-
-    std::fs::write(repo.join("README.md"), "baseline\n").expect("failed to write baseline file");
-    assert!(run_git(&repo, &["add", "README.md"]), "git add failed");
-    assert!(
-        run_git(
-            &repo,
-            &["-c", "commit.gpgsign=false", "commit", "-m", "baseline"]
-        ),
-        "git commit failed"
-    );
-
-    (temp, repo)
-}
-
-/// Adds a worktree beside `repo` on a new branch, and returns its path.
-fn add_worktree(temp: &TempDir, repo: &Path, branch: &str) -> PathBuf {
-    let worktree = temp.path().join(branch);
-    let path = worktree.to_str().expect("worktree path is not UTF-8");
-    assert!(
-        run_git(repo, &["worktree", "add", "-b", branch, path]),
-        "git worktree add failed"
-    );
-    worktree
-}
-
-/// Runs `cwt --main` in `dir`.
-fn cwt_main(dir: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_cwt"))
-        .arg("--main")
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_PREFIX")
-        .output()
-        .expect("failed to run cwt")
-}
+use common::{add_worktree, cwt_main, init_repo, WORKTREE_NOT_FOUND};
 
 /// Asserts that `cwt --main`, run in `from`, printed the path of `expected`.
 ///

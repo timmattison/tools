@@ -360,15 +360,23 @@ fn quoted_branch_alternatives(names: &[&str]) -> String {
         .join(" or ")
 }
 
-/// Prints every worktree to stderr as `directory [branch]`.
+/// Prints one worktree to stderr as `  directory [branch]`.
+///
+/// Both the "not found" and the "multiple matches" errors list worktrees in
+/// this format, so the format lives here and not at either call site. Those
+/// two list different sets of worktrees, which is why the set is the caller's
+/// business and the line is not.
+///
+/// The list follows an error, so it obeys quiet mode.
+fn print_worktree_line(_wt: &Worktree, _quiet: bool) {}
+
+/// Prints every worktree to stderr, one [`print_worktree_line`] each.
 ///
 /// This list follows a "not found" error, so it obeys quiet mode.
 fn print_available_worktrees(worktrees: &[Worktree], quiet: bool) {
     error!(quiet, "Available worktrees:");
     for wt in worktrees {
-        let dir = wt.dir_name().unwrap_or("<unknown>");
-        let branch = wt.display_branch();
-        error!(quiet, "  {} [{}]", dir, branch);
+        print_worktree_line(wt, quiet);
     }
 }
 
@@ -515,10 +523,7 @@ fn main() {
                     "Error: Multiple worktrees match '{}'. Be more specific:", name
                 );
                 for idx in indices {
-                    let wt = &worktrees[idx];
-                    let dir = wt.dir_name().unwrap_or("<unknown>");
-                    let branch = wt.display_branch();
-                    error!(cli.quiet, "  {} [{}]", dir, branch);
+                    print_worktree_line(&worktrees[idx], cli.quiet);
                 }
                 exit(exit_codes::MULTIPLE_MATCHES);
             }
