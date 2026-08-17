@@ -97,9 +97,11 @@ pub fn code(output: &Output) -> i32 {
 ///
 /// ```text
 /// root/
+///   aaa-worktree                       worktree of child-b, branch aaa
 ///   family/                            repository, branch main
 ///   family-worktrees/feature           worktree of family, branch feature
 ///   family/docs/                       plain directory, not a repository
+///   family/inside-wt                   worktree of family, branch inside
 ///   family/child-a/                    repository, branch main
 ///   family/child-a-worktrees/shared    worktree of child-a, branch shared
 ///   family/child-b/                    repository, branch trunk
@@ -110,6 +112,14 @@ pub fn code(output: &Output) -> i32 {
 /// The duplicated names are deliberate. `main` exists in both `family` and
 /// `child-a`, and `shared` exists in both `child-a` and `child-b`, so the tests
 /// can prove which repository wins a tie and when `cwt` refuses to guess.
+///
+/// Two of the worktrees are placed where they are on purpose:
+///
+/// - `aaa-worktree` sorts before every other worktree of child-b, so a listing
+///   that assumed a repository's main worktree comes first would be wrong.
+/// - `inside-wt` is a worktree of the parent that sits one level below it,
+///   where the scan for child repositories will find it. It must join the
+///   parent's group rather than start a group of its own.
 pub struct Family {
     /// Kept alive so the temp directory outlives the test.
     _tmp: TempDir,
@@ -134,6 +144,8 @@ impl Family {
             "../family-worktrees/feature",
             "feature",
         );
+        // A worktree of the parent, sitting where the scan for children looks.
+        add_worktree(&root.join("family"), "inside-wt", "inside");
 
         std::fs::create_dir_all(root.join("family/docs")).expect("failed to create docs dir");
         std::fs::write(root.join("family/docs/README.md"), "not a repository\n")
@@ -157,6 +169,8 @@ impl Family {
             "../child-b-worktrees/shared",
             "shared",
         );
+        // Outside the family, and sorting before every other worktree child-b has.
+        add_worktree(&root.join("family/child-b"), "../../aaa-worktree", "aaa");
 
         Self { _tmp: tmp, root }
     }

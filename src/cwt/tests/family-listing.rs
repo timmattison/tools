@@ -81,8 +81,10 @@ fn list_includes_the_worktrees_of_every_child_repository() {
     let paths: Vec<&str> = listed.iter().map(|l| l.path.as_str()).collect();
 
     for expected in [
+        "aaa-worktree",
         "family",
         "family-worktrees/feature",
+        "family/inside-wt",
         "family/child-a",
         "family/child-a-worktrees/shared",
         "family/child-b",
@@ -95,7 +97,52 @@ fn list_includes_the_worktrees_of_every_child_repository() {
             "cwt must list {wanted}, but listed {paths:#?}"
         );
     }
-    assert_eq!(paths.len(), 7, "cwt listed unexpected extras: {paths:#?}");
+    assert_eq!(paths.len(), 9, "cwt listed unexpected extras: {paths:#?}");
+}
+
+#[test]
+fn a_worktree_of_the_parent_inside_the_parent_does_not_become_a_repository() {
+    // `inside-wt` is a worktree of the parent, sitting exactly where the scan
+    // for child repositories looks. It belongs to the parent's group, once.
+    let family = Family::build();
+    let output = cwt(&family.at("family"), &[]);
+
+    let listed = parse_listing(&stdout(&output));
+    let wanted = family.path_of("family/inside-wt");
+    let holding: Vec<&str> = listed
+        .iter()
+        .filter(|l| l.path == wanted)
+        .map(|l| l.repo.as_str())
+        .collect();
+
+    assert_eq!(
+        holding,
+        vec!["family"],
+        "the parent's own worktree is listed once, under the parent"
+    );
+    assert_eq!(
+        headings(&listed),
+        vec!["family", "child-a", "child-b"],
+        "it must not open a repository group of its own"
+    );
+}
+
+#[test]
+fn a_repository_owns_its_worktrees_wherever_they_sit() {
+    // `aaa-worktree` is a worktree of child-b that lives outside the family
+    // directory altogether. It is still child-b's.
+    let family = Family::build();
+    let output = cwt(&family.at("family"), &[]);
+
+    let listed = parse_listing(&stdout(&output));
+    let wanted = family.path_of("aaa-worktree");
+    let holding: Vec<&str> = listed
+        .iter()
+        .filter(|l| l.path == wanted)
+        .map(|l| l.repo.as_str())
+        .collect();
+
+    assert_eq!(holding, vec!["child-b"]);
 }
 
 #[test]
@@ -118,11 +165,12 @@ fn list_groups_each_worktree_under_its_own_repository() {
     assert_eq!(
         child_b,
         vec![
+            family.path_of("aaa-worktree"),
             family.path_of("family/child-b"),
             family.path_of("family/child-b-worktrees/beta"),
             family.path_of("family/child-b-worktrees/shared"),
         ],
-        "every worktree of child-b belongs under the child-b heading"
+        "every worktree of child-b belongs under the child-b heading, in path order"
     );
 }
 

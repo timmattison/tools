@@ -17,8 +17,9 @@ fn no_family_lists_only_the_repository_the_user_is_in() {
     assert_eq!(
         stdout(&output),
         format!(
-            "> {} [main]\n  {} [feature]\n",
+            "> {} [main]\n  {} [inside]\n  {} [feature]\n",
             family.path_of("family"),
+            family.path_of("family/inside-wt"),
             family.path_of("family-worktrees/feature")
         ),
         "one repository prints as a plain list, with no headings and no children"
@@ -68,8 +69,9 @@ fn the_environment_variable_opts_out_of_the_family() {
     assert_eq!(
         stdout(&output),
         format!(
-            "> {} [main]\n  {} [feature]\n",
+            "> {} [main]\n  {} [inside]\n  {} [feature]\n",
             family.path_of("family"),
+            family.path_of("family/inside-wt"),
             family.path_of("family-worktrees/feature")
         ),
         "CWT_NO_FAMILY=1 has the same effect as --no-family"
