@@ -1,3 +1,18 @@
+// These lints are stricter than the inherited `[workspace.lints]` set. They live
+// here rather than in Cargo.toml because cargo refuses to merge a local `[lints]`
+// table with `lints.workspace = true`, and inheritance is mandatory (see the guard
+// in src/repo-guards). Crate-root attributes only ADD to the inherited set.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "SessionIdError keeps the SessionId prefix so a reader of Result<SessionId, SessionIdError> sees at a glance which type failed to build"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "random, from_hex and as_hex are called for their result at every site; #[must_use] on each would restate the signature without catching a bug"
+)]
+
 //! Session ID type for tsm.
 //!
 //! A [`SessionId`] is a 128-bit identifier represented as exactly 32 lowercase

@@ -1,3 +1,18 @@
+// These lints are stricter than the inherited `[workspace.lints]` set. They live
+// here rather than in Cargo.toml because cargo refuses to merge a local `[lints]`
+// table with `lints.workspace = true`, and inheritance is mandatory (see the guard
+// in src/repo-guards). Crate-root attributes only ADD to the inherited set.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "WorktreeMatch keeps the Worktree prefix so a signature says which of the match outcomes it carries; the shorter name would save characters and cost clarity"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "cwt is a binary with no external callers, so a dropped return value cannot surprise anyone outside this file; blanket #[must_use] would be attribute noise rather than a guard"
+)]
+
 use std::process::exit;
 
 use buildinfo::version_string;

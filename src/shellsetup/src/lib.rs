@@ -1,3 +1,18 @@
+// These lints are stricter than the inherited `[workspace.lints]` set. They live
+// here rather than in Cargo.toml because cargo refuses to merge a local `[lints]`
+// table with `lints.workspace = true`, and inheritance is mandatory (see the guard
+// in src/repo-guards). Crate-root attributes only ADD to the inherited set.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "the public surface deliberately repeats the crate name (ShellIntegration, ShellCommand, ShellSetupError) so callers read `shellsetup::ShellIntegration` and plain `ShellIntegration` the same way"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "the builder methods are consumed by chaining at every call site; marking each one #[must_use] would document nothing a reader does not already see"
+)]
+
 //! Shell integration library for adding tool functions to shell config files.
 //!
 //! This library provides a standardized way to add shell functions and aliases

@@ -1,3 +1,18 @@
+// These lints are stricter than the inherited `[workspace.lints]` set. They live
+// here rather than in Cargo.toml because cargo refuses to merge a local `[lints]`
+// table with `lints.workspace = true`, and inheritance is mandatory (see the guard
+// in src/repo-guards). Crate-root attributes only ADD to the inherited set.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "HeaderKind and PrecmdKind keep the prefix of the record they discriminate, which is what makes each pairing readable at a glance"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "the public functions return Result, which is already #[must_use]; the record types expose plain fields rather than getters, so the lint has nothing left to mark"
+)]
+
 //! Header-first JSONL append and read for tsm session log files.
 //!
 //! A tsm session log file `<session-id>.jsonl` has this structure:
