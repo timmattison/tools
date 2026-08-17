@@ -1,0 +1,190 @@
+//! `cwt` treats a parent repository and the repositories checked out one level
+//! below it as one family: the listing shows all of them, grouped by
+//! repository, and the cycling flags walk the whole family.
+
+mod support;
+
+use support::{code, cwt, stdout, Family};
+
+/// One line of a `cwt` listing that names a worktree.
+#[derive(Debug, PartialEq, Eq)]
+struct Listed {
+    /// The repository heading this worktree appeared under.
+    repo: String,
+    /// True when the line carried the current-worktree marker.
+    current: bool,
+    /// The path the line named.
+    path: String,
+}
+
+/// Parse a grouped `cwt` listing.
+///
+/// A heading starts at column zero. A worktree line starts with the marker
+/// column: `>` for the current worktree, a space for every other.
+fn parse_listing(output: &str) -> Vec<Listed> {
+    let mut listed = Vec::new();
+    let mut repo = String::new();
+
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('>') {
+            listed.push(Listed {
+                repo: repo.clone(),
+                current: true,
+                path: path_of(rest),
+            });
+        } else if line.starts_with(' ') {
+            listed.push(Listed {
+                repo: repo.clone(),
+                current: false,
+                path: path_of(line),
+            });
+        } else {
+            repo = line.trim().to_string();
+        }
+    }
+
+    listed
+}
+
+/// Take the path out of a worktree line, dropping the marker and the trailing
+/// `[branch]`.
+fn path_of(line: &str) -> String {
+    let without_branch = line
+        .rsplit_once(" [")
+        .map_or(line, |(path, _)| path)
+        .trim()
+        .to_string();
+    without_branch
+}
+
+/// The repository headings, in the order they appeared.
+fn headings(listing: &[Listed]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for entry in listing {
+        if seen.last() != Some(&entry.repo) {
+            seen.push(entry.repo.clone());
+        }
+    }
+    seen
+}
+
+#[test]
+fn list_includes_the_worktrees_of_every_child_repository() {
+    let family = Family::build();
+    let output = cwt(&family.at("family"), &[]);
+    assert_eq!(code(&output), 0, "cwt failed: {}", stdout(&output));
+
+    let listed = parse_listing(&stdout(&output));
+    let paths: Vec<&str> = listed.iter().map(|l| l.path.as_str()).collect();
+
+    for expected in [
+        "family",
+        "family-worktrees/feature",
+        "family/child-a",
+        "family/child-a-worktrees/shared",
+        "family/child-b",
+        "family/child-b-worktrees/beta",
+        "family/child-b-worktrees/shared",
+    ] {
+        let wanted = family.path_of(expected);
+        assert!(
+            paths.contains(&wanted.as_str()),
+            "cwt must list {wanted}, but listed {paths:#?}"
+        );
+    }
+    assert_eq!(paths.len(), 7, "cwt listed unexpected extras: {paths:#?}");
+}
+
+#[test]
+fn list_groups_each_worktree_under_its_own_repository() {
+    let family = Family::build();
+    let output = cwt(&family.at("family"), &[]);
+
+    let listed = parse_listing(&stdout(&output));
+    assert_eq!(
+        headings(&listed),
+        vec!["family", "child-a", "child-b"],
+        "the parent repository comes first, then the child repositories by name"
+    );
+
+    let child_b: Vec<&str> = listed
+        .iter()
+        .filter(|l| l.repo == "child-b")
+        .map(|l| l.path.as_str())
+        .collect();
+    assert_eq!(
+        child_b,
+        vec![
+            family.path_of("family/child-b"),
+            family.path_of("family/child-b-worktrees/beta"),
+            family.path_of("family/child-b-worktrees/shared"),
+        ],
+        "every worktree of child-b belongs under the child-b heading"
+    );
+}
+
+#[test]
+fn list_ignores_a_directory_that_is_not_a_repository() {
+    let family = Family::build();
+    let output = cwt(&family.at("family"), &[]);
+
+    assert!(
+        !stdout(&output).contains("docs"),
+        "the plain docs directory is not a repository and must not be listed: {}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn list_from_a_child_repository_shows_the_whole_family() {
+    let family = Family::build();
+    let output = cwt(&family.at("family/child-a"), &[]);
+    assert_eq!(code(&output), 0, "cwt failed: {}", stdout(&output));
+
+    let listed = parse_listing(&stdout(&output));
+    assert_eq!(
+        headings(&listed),
+        vec!["family", "child-a", "child-b"],
+        "standing in a child repository shows the same family as standing in the parent"
+    );
+
+    let current: Vec<&str> = listed
+        .iter()
+        .filter(|l| l.current)
+        .map(|l| l.path.as_str())
+        .collect();
+    assert_eq!(
+        current,
+        vec![family.path_of("family/child-a")],
+        "the marker names the worktree the user stands in"
+    );
+}
+
+#[test]
+fn forward_leaves_one_repository_and_enters_the_next() {
+    let family = Family::build();
+    let output = cwt(&family.at("family-worktrees/feature"), &["-f"]);
+
+    assert_eq!(code(&output), 0, "cwt -f failed: {}", stdout(&output));
+    assert_eq!(
+        stdout(&output).trim_end(),
+        family.path_of("family/child-a"),
+        "the last worktree of the parent is followed by the first child repository"
+    );
+}
+
+#[test]
+fn previous_leaves_one_repository_and_enters_the_one_before() {
+    let family = Family::build();
+    let output = cwt(&family.at("family/child-a"), &["-p"]);
+
+    assert_eq!(code(&output), 0, "cwt -p failed: {}", stdout(&output));
+    assert_eq!(
+        stdout(&output).trim_end(),
+        family.path_of("family-worktrees/feature"),
+        "the first worktree of a child repository is preceded by the parent's last"
+    );
+}
