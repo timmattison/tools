@@ -6,4 +6,11 @@
 //! deliberately omits the `--version`/git-hash handling the repo otherwise
 //! mandates for tools, because there is nothing for a user to run.
 //!
-//! All meaningful behavior lives in `tests/`; this library is empty by design.
+//! Most guards need no library code at all — running the real artifact and
+//! asserting on its exit status is enough, and that logic lives in `tests/`.
+//! The modules here exist for the guards that must *inspect* the repository
+//! rather than run it, where the inspection deserves a narrow, reusable
+//! interface and a remediation message written once instead of per call site.
+
+/// Proves every workspace member inherits the repo-wide lint set.
+pub mod workspace_lints;
