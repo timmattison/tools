@@ -13,7 +13,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `claude-usage` | Parses an Anthropic API usage CSV and computes per-model costs. |
 | `clipboard-random` | Generates random binary or Zalgo text data and copies it to the clipboard. |
 | `crap` | Claude, Resume Anywhere Please — resume a Claude Code session from its original directory (refuses if it's already running, or if that directory is gone or unenterable — pointing you at `--here` to fork where you stand); if the id belongs to another account it's found automatically (self-first), or target one with `--user` (which errors and lists the real accounts if you name one that never ran Claude); owner-only project dirs are skipped, then named in the miss with copy-paste recovery commands — it never runs `sudo` itself; `--status <id>` reports where a session left off without resuming, with the same `--user`/self-first cross-user discovery but read-only (no copy, no fork). |
-| `cwt` | Change Worktree — navigate, cycle, or jump between git worktrees. |
+| `cwt` | Change Worktree — navigate, cycle, or jump between the git worktrees of a repository and of the repositories inside it. |
 | `dirc` | Copies the current directory to the clipboard, or emits a `cd` from a clipboard path. |
 | `dirhash` | SHA256 hash of a directory tree's contents to compare directories for equality. |
 | `diskhog` | Live terminal UI of per-process disk I/O on macOS (IOPS with sudo). |

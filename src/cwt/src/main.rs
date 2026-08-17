@@ -1,11 +1,14 @@
-use std::path::{Path, PathBuf};
-use std::process::{exit, Command};
+use std::process::exit;
 
 use buildinfo::version_string;
 use clap::Parser;
-use colored::Colorize;
 use repowalker::find_git_repo;
 use shellsetup::ShellIntegration;
+
+mod family;
+mod worktree;
+
+use family::{Family, WorktreeMatch, MAIN_BRANCH_NAMES};
 
 /// Exit codes for different error conditions.
 mod exit_codes {
@@ -23,9 +26,6 @@ mod exit_codes {
     pub const MULTIPLE_MATCHES: i32 = 6;
 }
 
-/// Length of short commit hash for display (git uses 7 by default).
-const SHORT_COMMIT_HASH_LENGTH: usize = 7;
-
 /// Macro for printing error messages that respects quiet mode.
 macro_rules! error {
     ($quiet:expr, $($arg:tt)*) => {
@@ -37,7 +37,16 @@ macro_rules! error {
 
 /// Change to a different git worktree.
 ///
-/// Lists all worktrees in the current repository or navigates to a specific one.
+/// Lists every worktree of the repository and of the repositories inside it,
+/// or navigates to a specific one. `--no-family` lists only the repository you
+/// are standing in.
+///
+/// # Families of repositories
+///
+/// A repository that holds other repositories one level below it — a workspace
+/// that tracks the map, with the real repositories checked out inside it — is a
+/// family. `cwt` lists every worktree of every repository in the family, and
+/// navigates to any of them by name.
 ///
 /// # Usage
 ///
@@ -48,6 +57,7 @@ macro_rules! error {
 /// cwt -m        # Go to the main worktree (branch main, or master)
 /// cwt NAME      # Go to worktree by directory name or branch name
 /// cwt TEXT      # Go to worktree by case-insensitive substring match on branch
+/// cwt REPO:NAME # Go to a worktree of one repository in the family
 /// ```
 ///
 /// # Shell Integration
@@ -84,6 +94,9 @@ macro_rules! error {
 #[command(name = "cwt")]
 #[command(about = "Change to a different git worktree")]
 #[command(version = version_string!())]
+// Without this, clap folds the long help into one paragraph and the code blocks
+// below come out as a single run-on line.
+#[command(verbatim_doc_comment)]
 #[allow(clippy::struct_excessive_bools)] // CLI flags are naturally bool-heavy
 struct Cli {
     /// Go to the next worktree (wraps around).
@@ -105,6 +118,15 @@ struct Cli {
     ///
     /// Matches in order: exact directory name, exact branch name, then case-insensitive
     /// substring on branch names. If multiple branches match, lists them and exits.
+    ///
+    /// Prefix a repository name to search one repository of the family, for
+    /// example `REPO:feature-x`. Part of the name is enough, and a bare `REPO:`
+    /// selects that repository's main worktree.
+    ///
+    /// A repository whose directory name belongs to another repository of the
+    /// family — a parent that holds a child named after itself — is named by
+    /// the path that leads to it instead, the way the listing heads it:
+    /// `PARENT/REPO:feature-x`.
     #[arg(conflicts_with_all = ["forward", "prev", "main", "shell_setup"], verbatim_doc_comment)]
     target: Option<String>,
 
@@ -117,234 +139,28 @@ struct Cli {
     #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "main", "target"])]
     shell_setup: bool,
 
+    /// List only the repository you are standing in, not the whole family.
+    ///
+    /// Set `CWT_NO_FAMILY` to any value other than 0 to make this the default.
+    #[arg(long, verbatim_doc_comment, conflicts_with = "shell_setup")]
+    no_family: bool,
+
     /// Suppress error messages.
     #[arg(short, long)]
     quiet: bool,
 }
 
-/// Represents a single git worktree.
-#[derive(Debug, Clone)]
-struct Worktree {
-    /// The filesystem path to this worktree.
-    path: PathBuf,
-    /// The HEAD commit hash.
-    head: String,
-    /// The branch name (without refs/heads/ prefix), or None for detached HEAD.
-    branch: Option<String>,
-}
-
-impl Worktree {
-    /// Get the final directory name (e.g., "absurd-rock" from full path).
-    fn dir_name(&self) -> Option<&str> {
-        self.path.file_name()?.to_str()
-    }
-
-    /// Get the branch name for display, or short commit hash for detached HEAD.
-    fn display_branch(&self) -> String {
-        if let Some(branch) = &self.branch {
-            branch.clone()
-        } else {
-            // Show short commit hash for detached HEAD
-            let short_hash = if self.head.len() >= SHORT_COMMIT_HASH_LENGTH {
-                &self.head[..SHORT_COMMIT_HASH_LENGTH]
-            } else {
-                &self.head
-            };
-            format!("HEAD@{short_hash}")
-        }
-    }
-}
-
-/// Parses the output of `git worktree list --porcelain`.
+/// Lists every worktree of the family to stderr, one `  name [branch]` a line.
 ///
-/// The porcelain format looks like:
-/// ```text
-/// worktree /path/to/repo
-/// HEAD abc123...
-/// branch refs/heads/main
+/// Both the "not found" and the "no main worktree" errors end with this list,
+/// so the format lives here and not at either call site.
 ///
-/// worktree /path/to/worktree
-/// HEAD def456...
-/// branch refs/heads/feature
-/// ```
-///
-/// For detached HEAD, the branch line is absent.
-fn parse_worktree_list(output: &str) -> Vec<Worktree> {
-    let mut worktrees = Vec::new();
-    let mut current_path: Option<PathBuf> = None;
-    let mut current_head: Option<String> = None;
-    let mut current_branch: Option<String> = None;
-
-    for line in output.lines() {
-        if line.is_empty() {
-            // End of a worktree block, save if we have the required fields.
-            // Note: .take() already leaves the Option as None, so no need to reassign.
-            if let (Some(path), Some(head)) = (current_path.take(), current_head.take()) {
-                worktrees.push(Worktree {
-                    path,
-                    head,
-                    branch: current_branch.take(),
-                });
-            }
-        } else if let Some(path) = line.strip_prefix("worktree ") {
-            current_path = Some(PathBuf::from(path));
-        } else if let Some(head) = line.strip_prefix("HEAD ") {
-            current_head = Some(head.to_string());
-        } else if let Some(branch) = line.strip_prefix("branch ") {
-            // Strip the refs/heads/ prefix
-            let branch_name = branch.strip_prefix("refs/heads/").unwrap_or(branch);
-            current_branch = Some(branch_name.to_string());
-        }
-        // Ignore other lines (like "bare" or "detached")
+/// The list follows an error, so it obeys quiet mode.
+fn print_available(family: &Family, quiet: bool) {
+    error!(quiet, "Available worktrees:");
+    for label in family.labels() {
+        error!(quiet, "  {}", label);
     }
-
-    // Handle last block if output doesn't end with blank line
-    if let (Some(path), Some(head)) = (current_path, current_head) {
-        worktrees.push(Worktree {
-            path,
-            head,
-            branch: current_branch,
-        });
-    }
-
-    // Sort by path for consistent ordering
-    worktrees.sort_by(|a, b| a.path.cmp(&b.path));
-
-    worktrees
-}
-
-/// Gets all worktrees for the repository at the given root.
-fn get_worktrees(repo_root: &Path) -> Result<Vec<Worktree>, String> {
-    let output = Command::new("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| format!("Failed to execute git: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git worktree list failed: {stderr}"));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_worktree_list(&stdout))
-}
-
-/// Finds the index of the current worktree in the sorted list.
-///
-/// # Arguments
-///
-/// * `worktrees` - The list of worktrees to search
-/// * `repo_root` - The root of the current repository (avoids redundant `find_git_repo()` call)
-fn find_current_worktree(worktrees: &[Worktree], repo_root: &Path) -> Option<usize> {
-    let canonical = std::fs::canonicalize(repo_root).ok()?;
-
-    worktrees
-        .iter()
-        .position(|wt| std::fs::canonicalize(&wt.path).is_ok_and(|p| paths_equal(&p, &canonical)))
-}
-
-/// Compares two paths, handling case-insensitivity on macOS.
-fn paths_equal(a: &Path, b: &Path) -> bool {
-    // On macOS, the default filesystem is case-insensitive
-    #[cfg(target_os = "macos")]
-    {
-        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        a == b
-    }
-}
-
-/// Result of searching for a worktree by name.
-#[derive(Debug)]
-enum WorktreeMatch {
-    /// Found exactly one matching worktree.
-    Single(usize),
-    /// Found multiple matching worktrees (indices into the worktree list).
-    Multiple(Vec<usize>),
-    /// No matching worktree found.
-    None,
-}
-
-/// Finds a worktree by name (directory name, branch name, or branch substring).
-///
-/// Search priority:
-/// 1. Exact directory name match
-/// 2. Exact branch name match (supports branch names with `/` like `feature/login`)
-/// 3. Case-insensitive substring match on branch names
-///
-/// Rejects names containing `..` or `\` to prevent path traversal. Forward slashes
-/// are allowed since they're common in branch names (e.g., `feature/login`) and
-/// directory names cannot contain `/` on Unix filesystems.
-fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
-    // Reject empty search terms (would match all branches via substring)
-    // and path traversal attempts.
-    // Note: `/` is intentionally allowed because:
-    // - Branch names commonly contain `/` (e.g., `feature/login`, `bugfix/issue-42`)
-    // - Directory names cannot contain `/` on Unix, so no security risk for dir matching
-    // - Worktree paths come from `git worktree list`, not user input
-    if name.is_empty() || name.contains('\\') || name.contains("..") {
-        return WorktreeMatch::None;
-    }
-
-    // First: try exact directory name match
-    if let Some(idx) = worktrees.iter().position(|wt| wt.dir_name() == Some(name)) {
-        return WorktreeMatch::Single(idx);
-    }
-
-    // Second: try exact branch name match
-    if let Some(idx) = worktrees
-        .iter()
-        .position(|wt| wt.branch.as_deref() == Some(name))
-    {
-        return WorktreeMatch::Single(idx);
-    }
-
-    // Third: try case-insensitive substring match on branch names
-    // Note: We collect all matches because we need to display them in the Multiple case
-    let name_lower = name.to_lowercase();
-    let matches: Vec<usize> = worktrees
-        .iter()
-        .enumerate()
-        .filter(|(_, wt)| {
-            wt.branch
-                .as_ref()
-                .is_some_and(|b| b.to_lowercase().contains(&name_lower))
-        })
-        .map(|(idx, _)| idx)
-        .collect();
-
-    match matches.len() {
-        0 => WorktreeMatch::None,
-        1 => WorktreeMatch::Single(matches[0]),
-        _ => WorktreeMatch::Multiple(matches),
-    }
-}
-
-/// The branch names that identify the main worktree, in order of priority.
-///
-/// `main` comes first. `master` is the fallback for a repository that never
-/// renamed its first branch.
-const MAIN_BRANCH_NAMES: [&str; 2] = ["main", "master"];
-
-/// Finds the main worktree: the one on branch `main`, or the one on branch
-/// `master` when no worktree is on `main`.
-///
-/// The branch name must match exactly. The substring match that
-/// [`find_worktree_by_name`] does is wrong here: in a repository that has no
-/// `main` branch, a branch such as `wt-main-master` would capture the shortcut
-/// and send the user somewhere that is not the main worktree.
-///
-/// A detached worktree has no branch, so it is never the main worktree.
-fn find_main_worktree(worktrees: &[Worktree]) -> Option<usize> {
-    MAIN_BRANCH_NAMES.iter().find_map(|name| {
-        worktrees
-            .iter()
-            .position(|wt| wt.branch.as_deref() == Some(*name))
-    })
 }
 
 /// Formats `names` as a quoted alternation: `'main' or 'master'`.
@@ -360,48 +176,16 @@ fn quoted_branch_alternatives(names: &[&str]) -> String {
         .join(" or ")
 }
 
-/// Prints one worktree to stderr as `  directory [branch]`.
-///
-/// Both the "not found" and the "multiple matches" errors list worktrees in
-/// this format, so the format lives here and not at either call site. Those
-/// two list different sets of worktrees, which is why the set is the caller's
-/// business and the line is not.
-///
-/// The list follows an error, so it obeys quiet mode.
-fn print_worktree_line(wt: &Worktree, quiet: bool) {
-    let dir = wt.dir_name().unwrap_or("<unknown>");
-    let branch = wt.display_branch();
-    error!(quiet, "  {} [{}]", dir, branch);
-}
+/// The environment variable that makes `--no-family` the default.
+const NO_FAMILY_ENV: &str = "CWT_NO_FAMILY";
 
-/// Prints every worktree to stderr, one [`print_worktree_line`] each.
+/// True when the environment asks `cwt` to stay inside one repository.
 ///
-/// This list follows a "not found" error, so it obeys quiet mode.
-fn print_available_worktrees(worktrees: &[Worktree], quiet: bool) {
-    error!(quiet, "Available worktrees:");
-    for wt in worktrees {
-        print_worktree_line(wt, quiet);
-    }
-}
-
-/// Displays the list of worktrees with the current one highlighted.
-fn display_worktree_list(worktrees: &[Worktree], current_idx: Option<usize>) {
-    for (idx, wt) in worktrees.iter().enumerate() {
-        let is_current = current_idx == Some(idx);
-        let marker = if is_current { ">" } else { " " };
-        let path = wt.path.display().to_string();
-        let branch = wt.display_branch();
-
-        if is_current {
-            println!(
-                "{} {} [{}]",
-                marker.green().bold(),
-                path.green().bold(),
-                branch.green()
-            );
-        } else {
-            println!("{} {} [{}]", marker, path, branch.dimmed());
-        }
+/// An unset or empty variable is not a choice, and `0` is the choice not to.
+fn no_family_in_env() -> bool {
+    match std::env::var(NO_FAMILY_ENV) {
+        Ok(value) => !value.is_empty() && value != "0",
+        Err(_) => false,
     }
 }
 
@@ -463,83 +247,74 @@ fn main() {
         exit(exit_codes::NOT_IN_REPO);
     };
 
-    // Get all worktrees
-    let worktrees = match get_worktrees(&repo_root) {
-        Ok(wts) => wts,
+    // Collect the family: this repository, and any repository beside it
+    let scan_children = !cli.no_family && !no_family_in_env();
+    let family = match Family::discover(&repo_root, scan_children) {
+        Ok(family) => family,
         Err(e) => {
             error!(cli.quiet, "Error getting worktrees: {}", e);
             exit(exit_codes::GIT_COMMAND_ERROR);
         }
     };
 
-    if worktrees.is_empty() {
+    for warning in family.warnings() {
+        error!(cli.quiet, "Warning: skipped {}", warning);
+    }
+
+    if family.is_empty() {
         error!(cli.quiet, "No worktrees found");
         exit(exit_codes::GIT_COMMAND_ERROR);
     }
 
-    // Find current worktree (pass repo_root to avoid redundant find_git_repo() call)
-    let current_idx = find_current_worktree(&worktrees, &repo_root);
-
     // Handle different modes
     if cli.forward {
-        // Next worktree (wrap around)
-        let target_idx = if let Some(i) = current_idx {
-            (i + 1) % worktrees.len()
-        } else {
+        let Some(index) = family.next() else {
             error!(cli.quiet, "Error: Could not determine current worktree");
             exit(exit_codes::CURRENT_UNKNOWN);
         };
-        println!("{}", worktrees[target_idx].path.display());
+        println!("{}", family.path(index).display());
     } else if cli.prev {
-        // Previous worktree (wrap around)
-        let target_idx = if let Some(i) = current_idx {
-            if i == 0 {
-                worktrees.len() - 1
-            } else {
-                i - 1
-            }
-        } else {
+        let Some(index) = family.previous() else {
             error!(cli.quiet, "Error: Could not determine current worktree");
             exit(exit_codes::CURRENT_UNKNOWN);
         };
-        println!("{}", worktrees[target_idx].path.display());
+        println!("{}", family.path(index).display());
     } else if cli.main {
         // Main worktree: branch main, or branch master when there is no main.
-        let Some(target_idx) = find_main_worktree(&worktrees) else {
+        let Some(index) = family.main_worktree() else {
             error!(
                 cli.quiet,
                 "Error: No worktree is on branch {}",
                 quoted_branch_alternatives(&MAIN_BRANCH_NAMES)
             );
-            print_available_worktrees(&worktrees, cli.quiet);
+            print_available(&family, cli.quiet);
             exit(exit_codes::WORKTREE_NOT_FOUND);
         };
-        println!("{}", worktrees[target_idx].path.display());
+        println!("{}", family.path(index).display());
     } else if let Some(name) = &cli.target {
-        // Find by name
-        match find_worktree_by_name(&worktrees, name) {
-            WorktreeMatch::Single(idx) => {
-                println!("{}", worktrees[idx].path.display());
+        match family.find(name) {
+            WorktreeMatch::Single(index) => {
+                println!("{}", family.path(index).display());
             }
             WorktreeMatch::Multiple(indices) => {
                 error!(
                     cli.quiet,
                     "Error: Multiple worktrees match '{}'. Be more specific:", name
                 );
-                for idx in indices {
-                    print_worktree_line(&worktrees[idx], cli.quiet);
+                for index in indices {
+                    error!(cli.quiet, "  {}", family.label(index));
                 }
                 exit(exit_codes::MULTIPLE_MATCHES);
             }
             WorktreeMatch::None => {
                 error!(cli.quiet, "Error: Worktree '{}' not found", name);
-                print_available_worktrees(&worktrees, cli.quiet);
+                print_available(&family, cli.quiet);
                 exit(exit_codes::WORKTREE_NOT_FOUND);
             }
         }
     } else {
         // No args: display list
-        display_worktree_list(&worktrees, current_idx);
+        print!("{}", family.render());
     }
 }
 
@@ -547,429 +322,8 @@ fn main() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_worktree_list_single() {
-        let output = "worktree /path/to/repo\nHEAD abc123\nbranch refs/heads/main\n";
-        let worktrees = parse_worktree_list(output);
-        assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].path, PathBuf::from("/path/to/repo"));
-        assert_eq!(worktrees[0].head, "abc123");
-        assert_eq!(worktrees[0].branch, Some("main".to_string()));
-    }
-
-    #[test]
-    fn test_parse_worktree_list_multiple() {
-        let output = "worktree /path/to/repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /path/to/wt\nHEAD def456\nbranch refs/heads/feature\n";
-        let worktrees = parse_worktree_list(output);
-        assert_eq!(worktrees.len(), 2);
-        assert_eq!(worktrees[0].path, PathBuf::from("/path/to/repo"));
-        assert_eq!(worktrees[1].path, PathBuf::from("/path/to/wt"));
-    }
-
-    #[test]
-    fn test_parse_worktree_list_detached_head() {
-        let output = "worktree /path/to/repo\nHEAD abc123\ndetached\n";
-        let worktrees = parse_worktree_list(output);
-        assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].branch, None);
-    }
-
-    #[test]
-    fn test_parse_worktree_list_sorted() {
-        let output = "worktree /z/repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /a/repo\nHEAD def\nbranch refs/heads/feature\n";
-        let worktrees = parse_worktree_list(output);
-        assert_eq!(worktrees.len(), 2);
-        // Should be sorted by path
-        assert_eq!(worktrees[0].path, PathBuf::from("/a/repo"));
-        assert_eq!(worktrees[1].path, PathBuf::from("/z/repo"));
-    }
-
-    #[test]
-    fn test_find_worktree_by_dir_name() {
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("main".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/absurd-rock"),
-                head: "def".to_string(),
-                branch: Some("feature".to_string()),
-            },
-        ];
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "absurd-rock"),
-            WorktreeMatch::Single(1)
-        ));
-    }
-
-    #[test]
-    fn test_find_worktree_by_branch() {
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("main".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/absurd-rock"),
-                head: "def".to_string(),
-                branch: Some("feature".to_string()),
-            },
-        ];
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "feature"),
-            WorktreeMatch::Single(1)
-        ));
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "main"),
-            WorktreeMatch::Single(0)
-        ));
-    }
-
-    #[test]
-    fn test_find_worktree_not_found() {
-        let worktrees = vec![Worktree {
-            path: PathBuf::from("/repo"),
-            head: "abc".to_string(),
-            branch: Some("main".to_string()),
-        }];
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "nonexistent"),
-            WorktreeMatch::None
-        ));
-    }
-
-    #[test]
-    fn test_find_worktree_rejects_empty_string() {
-        // Empty string would match all branches via substring, which is unexpected
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("main".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt1"),
-                head: "def".to_string(),
-                branch: Some("feature".to_string()),
-            },
-        ];
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, ""),
-            WorktreeMatch::None
-        ));
-    }
-
-    #[test]
-    fn test_find_worktree_rejects_path_traversal() {
-        let worktrees = vec![Worktree {
-            path: PathBuf::from("/repo"),
-            head: "abc".to_string(),
-            branch: Some("main".to_string()),
-        }];
-        // Should reject path traversal attempts (backslash and ..)
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "../etc/passwd"),
-            WorktreeMatch::None
-        ));
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "foo\\bar"),
-            WorktreeMatch::None
-        ));
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, ".."),
-            WorktreeMatch::None
-        ));
-        // Note: Forward slash `/` is intentionally allowed - see test below
-    }
-
-    #[test]
-    fn test_find_worktree_allows_forward_slash_in_branch_names() {
-        // Forward slashes are common in branch names (feature/*, bugfix/*, etc.)
-        // and should work for both exact and substring matching
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("main".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt1"),
-                head: "def".to_string(),
-                branch: Some("feature/user-auth".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt2"),
-                head: "ghi".to_string(),
-                branch: Some("feature/login-page".to_string()),
-            },
-        ];
-
-        // Exact branch match with forward slash
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "feature/user-auth"),
-            WorktreeMatch::Single(1)
-        ));
-
-        // Substring match with forward slash (matches both feature/* branches)
-        match find_worktree_by_name(&worktrees, "feature/") {
-            WorktreeMatch::Multiple(indices) => {
-                assert_eq!(indices.len(), 2);
-                assert!(indices.contains(&1));
-                assert!(indices.contains(&2));
-            }
-            other => panic!("Expected Multiple, got {other:?}"),
-        }
-
-        // Partial path within branch name
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "ure/user"),
-            WorktreeMatch::Single(1)
-        ));
-    }
-
-    #[test]
-    fn test_find_worktree_substring_match_single() {
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("main".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt1"),
-                head: "def".to_string(),
-                branch: Some("feature/login-page".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt2"),
-                head: "ghi".to_string(),
-                branch: Some("bugfix/header".to_string()),
-            },
-        ];
-        // "login" matches only "feature/login-page"
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "login"),
-            WorktreeMatch::Single(1)
-        ));
-        // Case-insensitive: "LOGIN" should also match
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "LOGIN"),
-            WorktreeMatch::Single(1)
-        ));
-        // "header" matches only "bugfix/header"
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "header"),
-            WorktreeMatch::Single(2)
-        ));
-    }
-
-    #[test]
-    fn test_find_worktree_substring_match_multiple() {
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("main".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt1"),
-                head: "def".to_string(),
-                branch: Some("feature/login-page".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt2"),
-                head: "ghi".to_string(),
-                branch: Some("feature/logout-page".to_string()),
-            },
-        ];
-        // "feature" matches both feature branches
-        match find_worktree_by_name(&worktrees, "feature") {
-            WorktreeMatch::Multiple(indices) => {
-                assert_eq!(indices.len(), 2);
-                assert!(indices.contains(&1));
-                assert!(indices.contains(&2));
-            }
-            other => panic!("Expected Multiple, got {other:?}"),
-        }
-        // "page" also matches both
-        match find_worktree_by_name(&worktrees, "page") {
-            WorktreeMatch::Multiple(indices) => {
-                assert_eq!(indices.len(), 2);
-            }
-            other => panic!("Expected Multiple, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_find_worktree_exact_match_takes_priority() {
-        let worktrees = vec![
-            Worktree {
-                path: PathBuf::from("/repo"),
-                head: "abc".to_string(),
-                branch: Some("main".to_string()),
-            },
-            Worktree {
-                path: PathBuf::from("/repo-wt/wt1"),
-                head: "def".to_string(),
-                branch: Some("main-feature".to_string()),
-            },
-        ];
-        // "main" should exact-match the first worktree, not substring-match both
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "main"),
-            WorktreeMatch::Single(0)
-        ));
-    }
-
-    #[test]
-    fn test_find_worktree_substring_case_insensitive() {
-        let worktrees = vec![Worktree {
-            path: PathBuf::from("/repo"),
-            head: "abc".to_string(),
-            branch: Some("Feature/UserAuth".to_string()),
-        }];
-        // Various case combinations should all match
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "userauth"),
-            WorktreeMatch::Single(0)
-        ));
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "USERAUTH"),
-            WorktreeMatch::Single(0)
-        ));
-        assert!(matches!(
-            find_worktree_by_name(&worktrees, "UserAuth"),
-            WorktreeMatch::Single(0)
-        ));
-    }
-
-    #[test]
-    fn test_cycle_forward() {
-        let current = 0;
-        let count = 3;
-        assert_eq!((current + 1) % count, 1);
-
-        let current = 2;
-        assert_eq!((current + 1) % count, 0); // Wraps
-    }
-
-    #[test]
-    fn test_cycle_backward() {
-        let count = 3;
-
-        let current = 1;
-        assert_eq!(if current == 0 { count - 1 } else { current - 1 }, 0);
-
-        let current = 0;
-        assert_eq!(if current == 0 { count - 1 } else { current - 1 }, 2); // Wraps
-    }
-
-    #[test]
-    fn test_worktree_dir_name() {
-        let wt = Worktree {
-            path: PathBuf::from("/repo-worktrees/absurd-rock"),
-            head: "abc".to_string(),
-            branch: Some("feature".to_string()),
-        };
-        assert_eq!(wt.dir_name(), Some("absurd-rock"));
-    }
-
-    #[test]
-    fn test_worktree_display_branch() {
-        let with_branch = Worktree {
-            path: PathBuf::from("/repo"),
-            head: "abc".to_string(),
-            branch: Some("main".to_string()),
-        };
-        assert_eq!(with_branch.display_branch(), "main");
-
-        let detached = Worktree {
-            path: PathBuf::from("/repo"),
-            head: "abc1234567890".to_string(),
-            branch: None,
-        };
-        assert_eq!(detached.display_branch(), "HEAD@abc1234");
-    }
-
-    #[test]
-    fn test_parse_worktree_no_trailing_newline() {
-        let output = "worktree /path/to/repo\nHEAD abc123\nbranch refs/heads/main";
-        let worktrees = parse_worktree_list(output);
-        assert_eq!(worktrees.len(), 1);
-        assert_eq!(worktrees[0].branch, Some("main".to_string()));
-    }
-
-    /// Builds a worktree fixture at `path` checked out on `branch`.
-    ///
-    /// Pass `None` as the branch for a detached HEAD.
-    fn worktree_on(path: &str, branch: Option<&str>) -> Worktree {
-        Worktree {
-            path: PathBuf::from(path),
-            head: "abc1234567890".to_string(),
-            branch: branch.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn test_find_main_worktree_picks_main() {
-        let worktrees = vec![
-            worktree_on("/repo", Some("main")),
-            worktree_on("/repo-wt/wt1", Some("feature")),
-        ];
-        assert_eq!(find_main_worktree(&worktrees), Some(0));
-    }
-
-    #[test]
-    fn test_find_main_worktree_falls_back_to_master() {
-        // A repository that never renamed master still has a main worktree.
-        let worktrees = vec![
-            worktree_on("/repo-wt/wt1", Some("feature")),
-            worktree_on("/repo", Some("master")),
-        ];
-        assert_eq!(find_main_worktree(&worktrees), Some(1));
-    }
-
-    #[test]
-    fn test_find_main_worktree_prefers_main_over_master() {
-        // Both branches exist. main wins, whatever the order of the list.
-        let worktrees = vec![
-            worktree_on("/repo-wt/old", Some("master")),
-            worktree_on("/repo", Some("main")),
-        ];
-        assert_eq!(find_main_worktree(&worktrees), Some(1));
-    }
-
-    #[test]
-    fn test_find_main_worktree_ignores_substring_branches() {
-        // The branch name must match exactly. A branch that merely contains
-        // "main" must not capture the main worktree of a master repository.
-        let worktrees = vec![
-            worktree_on("/repo-wt/wt1", Some("wt-main-master")),
-            worktree_on("/repo", Some("master")),
-        ];
-        assert_eq!(find_main_worktree(&worktrees), Some(1));
-    }
-
-    #[test]
-    fn test_find_main_worktree_ignores_detached_head() {
-        let worktrees = vec![
-            worktree_on("/repo-wt/wt1", None),
-            worktree_on("/repo", Some("master")),
-        ];
-        assert_eq!(find_main_worktree(&worktrees), Some(1));
-    }
-
-    #[test]
-    fn test_find_main_worktree_none_without_main_or_master() {
-        let worktrees = vec![
-            worktree_on("/repo", Some("trunk")),
-            worktree_on("/repo-wt/wt1", Some("wt-main-master")),
-        ];
-        assert_eq!(find_main_worktree(&worktrees), None);
-    }
+    // The tests of the main-worktree search live beside the search itself, in
+    // the family module.
 
     #[test]
     fn test_quoted_branch_alternatives_quotes_a_single_name() {

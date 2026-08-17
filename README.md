@@ -350,10 +350,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the repository.
   - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
-  - Change Worktree - Navigate between git worktrees in a repository. Shows a list of all
-    worktrees with the current one highlighted, or cycle through them with `-f` (forward) and
-    `-p` (previous). Can also jump directly to a worktree by directory name or branch name.
-    Use `--shell-setup` to automatically add shell integration to your config.
+  - Change Worktree - Navigate between the git worktrees of a repository and of the
+    repositories inside it. Shows a list of all worktrees with the current one highlighted,
+    or cycle through them with `-f` (forward) and `-p` (previous). Can also jump directly to
+    a worktree by directory name or branch name. Use `--no-family` to stay inside one
+    repository, and `--shell-setup` to automatically add shell integration to your config.
   - To install: `cargo install --git https://github.com/timmattison/tools cwt`
 - gitnuke
   - Removes a git worktree and deletes the branch it had checked out, resolved as one
@@ -1332,7 +1333,7 @@ nwt --tmux --run "code ."
 
 ## cwt (change worktree)
 
-Navigate between git worktrees in a repository. Lists all worktrees, cycles through them, or jumps to a specific one by name.
+Navigate between the git worktrees of a repository and of the repositories inside it. Lists them all, cycles through them, or jumps to a specific one by name.
 
 ### Basic Usage
 
@@ -1343,6 +1344,7 @@ cwt -p                        # Go to previous worktree (wraps around)
 cwt -m                        # Go to the main worktree
 cwt main                      # Go to worktree by branch name
 cwt absurd-rock               # Go to worktree by directory name
+cwt vial-qmk:vial             # Go to one repository's worktree by name
 ```
 
 ### Options
@@ -1350,7 +1352,8 @@ cwt absurd-rock               # Go to worktree by directory name
 - `-f, --forward`: Go to the next worktree in the sorted list (wraps around)
 - `-p, --prev`: Go to the previous worktree (wraps around)
 - `-m, --main`: Go to the main worktree (see [The main worktree](#the-main-worktree))
-- `[TARGET]`: Worktree to switch to (directory name or branch name)
+- `[TARGET]`: Worktree to switch to (directory name, branch name, or `REPO:NAME`)
+- `--no-family`: List only the repository you are standing in
 - `--shell-setup`: Automatically add shell integration to your ~/.zshrc or ~/.bashrc
 - `-q, --quiet`: Suppress error messages
 
@@ -1360,13 +1363,117 @@ cwt absurd-rock               # Go to worktree by directory name
 `main`, it goes to the worktree on branch `master`, so a repository that never renamed its
 first branch gets the same shortcut.
 
+In a family, `cwt -m` stays in the repository you are standing in. Every repository of a
+family has a main worktree of its own, and the shortcut takes you to yours.
+
 The branch name must match exactly. This is what separates `cwt -m` from `cwt main`, which
 also substring-matches: in a `master` repository, `cwt main` lands on a branch such as
 `wt-main-master`, and `cwt -m` does not. A detached worktree has no branch, so it is never
 the main worktree.
 
-If neither branch is checked out anywhere, `cwt -m` lists the worktrees and exits with code
-3.
+If your repository has neither branch checked out, `cwt -m` lists the worktrees and exits
+with code 3.
+
+### Families of Repositories
+
+Some repositories are containers. They track the map of a workspace, and the real
+repositories sit one level below them, kept out of the parent's history by
+`.gitignore`:
+
+```text
+keyboards/                    # the parent repository
+  qmk_firmware/               # a repository of its own
+  vial/                       # a repository of its own
+  vial-qmk/                   # a repository of its own
+  zmk-config-corne/           # a repository of its own
+```
+
+`cwt` treats the parent and its children as one **family**. One listing shows every
+worktree of every repository, grouped by repository, and one name reaches any of them:
+
+```bash
+cd keyboards && cwt
+# keyboards
+# >   /code/keyboards                                          [main]
+#     /code/keyboards-worktrees/keymap-parity-tool             [keymap-parity-tool]
+#
+# qmk_firmware
+#     /code/keyboards/qmk_firmware                             [master]
+#
+# vial-qmk
+#     /code/keyboards/vial-qmk                                 [vial]
+#     /code/keyboards/vial-qmk-worktrees/split-handedness-build [split-handedness-build]
+```
+
+The family is the same from anywhere inside it, so `cwt` gets you out of a child
+repository as easily as it gets you in. Only one level is scanned: a child of a child
+is that child's business.
+
+A directory that looks like a repository but has no worktree to offer — a bare
+repository, which git lists without a HEAD — cannot join the family, because there is
+nothing there to change into. `cwt` leaves it out of the listing and says so on
+standard error, so a directory you can see is never missing without a reason:
+
+```text
+Warning: skipped /code/keyboards/archive: no worktrees to list
+```
+
+#### Which repository answers a name
+
+A name is offered to each repository in turn, nearest first:
+
+1. The repository you are standing in
+2. The parent repository the family is anchored at
+3. Every other repository in the family
+
+So `wtm` still means "my repository's main branch" wherever you are standing. Within
+each repository the order is the same as before: exact directory name, then exact
+branch name, then a case-insensitive substring of a branch name. An exact name
+anywhere in the family beats a substring anywhere.
+
+#### When two repositories share a name
+
+`cwt` refuses to guess, and names the candidates the way you have to type them:
+
+```bash
+cwt master
+# Error: Multiple worktrees match 'master'. Be more specific:
+#   qmk_firmware:qmk_firmware [master]
+#   zmk-config-corne:zmk-config-corne [master]
+```
+
+A `REPO:NAME` target searches one repository of the family. The repository can be
+named in full or by any part of its name, and `REPO:` on its own selects that
+repository's main worktree:
+
+```bash
+cwt zmk-config-corne:master    # that repository's master
+cwt zmk:                       # that repository's main worktree
+```
+
+Every name `cwt` prints can be typed straight back, so two repositories of one family
+cannot be left sharing a name — not even the parent and a child named after it. The
+child is listed, and typed, as the path that leads to it:
+
+```bash
+cd keyboards && cwt
+# keyboards
+# >   /code/keyboards                              [main]
+#
+# keyboards/keyboards
+#     /code/keyboards/keyboards                    [main]
+#     /code/keyboards/keyboards-worktrees/inner    [inner]
+
+cwt keyboards:                 # the parent
+cwt keyboards/keyboards:       # the child checked out inside it
+cwt keyboards/keyboards:inner  # a worktree of that child
+```
+
+#### Staying in one repository
+
+`--no-family` confines the listing, the cycling, and the name search to the repository
+you are standing in. Set `CWT_NO_FAMILY` to any value other than `0` to make that the
+default.
 
 ### Shell Integration
 
@@ -1431,9 +1538,9 @@ alias wtm 'wt --main'  # Main worktree (branch main, or master)
 Show all worktrees with current highlighted:
 ```bash
 cwt
-#   /path/to/repo                    [main]
-# > /path/to/repo-worktrees/absurd   [feature-branch]
-#   /path/to/repo-worktrees/zen      [fix-bug]
+#   /path/to/repo                        [main]
+# > /path/to/repo-worktrees/absurd-rock  [feature-branch]
+#   /path/to/repo-worktrees/zen          [fix-bug]
 ```
 
 Cycle through worktrees:
@@ -1446,6 +1553,7 @@ Jump to specific worktree:
 ```bash
 wt main           # By branch name
 wt absurd-rock    # By directory name
+wt vial-qmk:vial  # By repository and branch name
 wtm               # Quick alias for the main worktree (branch main, or master)
 ```
 
@@ -1457,7 +1565,7 @@ wtm               # Quick alias for the main worktree (branch main, or master)
 - `3`: Worktree not found
 - `4`: Could not determine current worktree (for -f/-p)
 - `5`: Shell setup failed
-- `6`: Multiple worktrees matched (be more specific)
+- `6`: Multiple worktrees matched the name (be more specific)
 
 ## gitnuke (nuke a worktree)
 
