@@ -65,7 +65,12 @@ fn a_bare_repository_prefix_selects_its_main_worktree() {
     let family = Family::build();
     let output = cwt(&family.at("family"), &["child-b:"]);
 
-    assert_eq!(code(&output), 0, "cwt child-b: failed: {}", combined(&output));
+    assert_eq!(
+        code(&output),
+        0,
+        "cwt child-b: failed: {}",
+        combined(&output)
+    );
     assert_eq!(
         target_path(&output),
         family.path_of("family/child-b"),
@@ -102,7 +107,11 @@ fn an_unknown_repository_prefix_is_not_found() {
         "no repository is named nope: {}",
         combined(&output)
     );
-    assert_eq!(stdout(&output), "", "a name that is not found prints no path");
+    assert_eq!(
+        stdout(&output),
+        "",
+        "a name that is not found prints no path"
+    );
 }
 
 #[test]

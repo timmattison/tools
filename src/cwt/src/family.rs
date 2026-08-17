@@ -55,6 +55,8 @@ struct Group {
     name: String,
     /// How near this repository is to the user. See [`rank`].
     rank: u8,
+    /// Index into the family's entries of this repository's main worktree.
+    main: usize,
 }
 
 /// One worktree, and the repository it belongs to.
@@ -252,27 +254,87 @@ impl Family {
             return WorktreeMatch::None;
         }
 
+        // A repository prefix narrows the search to one repository of the
+        // family. Git forbids `:` in a branch name, so the separator can never
+        // be part of the name the user means.
+        if let Some((repo, rest)) = name.split_once(':') {
+            return self.find_in_repo(repo, rest);
+        }
+
         let pool: Vec<usize> = (0..self.entries.len()).collect();
         self.search(&pool, name)
+    }
+
+    /// Finds `name` inside the repository the prefix names.
+    ///
+    /// An empty `name` selects that repository's main worktree, so `child-b:`
+    /// reaches child-b even when another repository holds the better match for
+    /// every name child-b has.
+    fn find_in_repo(&self, repo: &str, name: &str) -> WorktreeMatch {
+        if repo.is_empty() {
+            return WorktreeMatch::None;
+        }
+
+        let groups = self.groups_named(repo);
+        if groups.is_empty() {
+            return WorktreeMatch::None;
+        }
+
+        if name.is_empty() {
+            return decide(
+                groups
+                    .iter()
+                    .map(|&group| self.groups[group].main)
+                    .collect(),
+            );
+        }
+
+        let pool: Vec<usize> = (0..self.entries.len())
+            .filter(|&index| groups.contains(&self.entries[index].group))
+            .collect();
+        self.search(&pool, name)
+    }
+
+    /// The repositories a prefix names: the one whose name matches exactly, or
+    /// every one whose name contains the prefix.
+    fn groups_named(&self, prefix: &str) -> Vec<usize> {
+        if let Some(index) = self.groups.iter().position(|group| group.name == prefix) {
+            return vec![index];
+        }
+
+        let wanted = prefix.to_lowercase();
+        self.groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.name.to_lowercase().contains(&wanted))
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// Searches `pool` for `name`, nearest repository first.
     fn search(&self, pool: &[usize], name: &str) -> WorktreeMatch {
         for tier in rank::HOME..=rank::OTHER {
             let near = self.tier(pool, tier);
-            if let Some(index) = near
+
+            // Every match is collected, not just the first: two repositories of
+            // the same rank can each hold a worktree of this name, and picking
+            // one of them silently is how a user lands somewhere they did not ask for.
+            let by_directory: Vec<usize> = near
                 .iter()
                 .copied()
-                .find(|&i| self.entries[i].worktree.dir_name() == Some(name))
-            {
-                return WorktreeMatch::Single(index);
+                .filter(|&i| self.entries[i].worktree.dir_name() == Some(name))
+                .collect();
+            if !by_directory.is_empty() {
+                return decide(by_directory);
             }
-            if let Some(index) = near
+
+            let by_branch: Vec<usize> = near
                 .iter()
                 .copied()
-                .find(|&i| self.entries[i].worktree.branch.as_deref() == Some(name))
-            {
-                return WorktreeMatch::Single(index);
+                .filter(|&i| self.entries[i].worktree.branch.as_deref() == Some(name))
+                .collect();
+            if !by_branch.is_empty() {
+                return decide(by_branch);
             }
         }
 
@@ -293,10 +355,8 @@ impl Family {
                 })
                 .collect();
 
-            match matches.len() {
-                0 => {}
-                1 => return WorktreeMatch::Single(matches[0]),
-                _ => return WorktreeMatch::Multiple(matches),
+            if !matches.is_empty() {
+                return decide(matches);
             }
         }
 
@@ -381,6 +441,16 @@ fn child_repo_dirs(dir: &Path) -> Vec<PathBuf> {
     children
 }
 
+/// Turns the matches found in one tier into an answer. More than one match is
+/// reported rather than resolved: only the user knows which one they meant.
+fn decide(matches: Vec<usize>) -> WorktreeMatch {
+    match matches.len() {
+        0 => WorktreeMatch::None,
+        1 => WorktreeMatch::Single(matches[0]),
+        _ => WorktreeMatch::Multiple(matches),
+    }
+}
+
 /// The family under construction.
 #[derive(Default)]
 struct Roll {
@@ -407,6 +477,7 @@ impl Roll {
         self.claimed.push(key);
 
         let group = self.groups.len();
+        let first = self.entries.len();
         self.groups.push(Group {
             name: repo
                 .main
@@ -415,6 +486,9 @@ impl Roll {
                 .unwrap_or("<unknown>")
                 .to_string(),
             rank: rank::OTHER,
+            // Corrected below once the entries are in place. A repository always
+            // has a main worktree, so the fallback only survives an empty list.
+            main: first,
         });
 
         for worktree in &repo.all {
@@ -422,6 +496,13 @@ impl Roll {
                 group,
                 worktree: worktree.clone(),
             });
+        }
+
+        if let Some(index) = self.entries[first..]
+            .iter()
+            .position(|entry| paths_equal(&entry.worktree.path, &repo.main))
+        {
+            self.groups[group].main = first + index;
         }
     }
 }
@@ -468,7 +549,8 @@ mod tests {
         let mut groups: Vec<Group> = Vec::new();
         let entries: Vec<Entry> = entries
             .into_iter()
-            .map(|(repo, path, branch)| {
+            .enumerate()
+            .map(|(next, (repo, path, branch))| {
                 let group = groups
                     .iter()
                     .position(|g| g.name == repo)
@@ -476,6 +558,9 @@ mod tests {
                         groups.push(Group {
                             name: repo.to_string(),
                             rank: rank::OTHER,
+                            // The first worktree named for a repository stands
+                            // in for its main worktree.
+                            main: next,
                         });
                         groups.len() - 1
                     });
@@ -858,6 +943,75 @@ mod tests {
             Some(0),
         );
         assert!(matches!(two.find("feature"), WorktreeMatch::Single(0)));
+    }
+
+    #[test]
+    fn find_refuses_a_name_two_repositories_of_the_same_rank_share() {
+        let three = family(
+            vec![
+                ("parent", "/p", "main"),
+                ("one", "/p/one-wt/shared", "shared"),
+                ("two", "/p/two-wt/shared", "shared"),
+            ],
+            true,
+            Some(0),
+        );
+        match three.find("shared") {
+            WorktreeMatch::Multiple(indices) => assert_eq!(indices, vec![1, 2]),
+            other => panic!("Expected Multiple, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_prefix_narrows_the_search_to_one_repository() {
+        let three = family(
+            vec![
+                ("parent", "/p", "main"),
+                ("one", "/p/one-wt/shared", "shared"),
+                ("two", "/p/two-wt/shared", "shared"),
+            ],
+            true,
+            Some(0),
+        );
+        assert!(matches!(three.find("two:shared"), WorktreeMatch::Single(2)));
+    }
+
+    #[test]
+    fn a_prefix_may_name_a_repository_by_part_of_its_name() {
+        let two = family(
+            vec![("parent", "/p", "main"), ("child-b", "/p/child-b", "trunk")],
+            true,
+            Some(0),
+        );
+        assert!(matches!(two.find("ild-b:trunk"), WorktreeMatch::Single(1)));
+    }
+
+    #[test]
+    fn a_prefix_naming_no_repository_finds_nothing() {
+        let two = family(
+            vec![("parent", "/p", "main"), ("child", "/p/child", "trunk")],
+            true,
+            Some(0),
+        );
+        assert!(matches!(two.find("nope:trunk"), WorktreeMatch::None));
+        // A separator with nothing before it names no repository at all.
+        assert!(matches!(two.find(":trunk"), WorktreeMatch::None));
+    }
+
+    #[test]
+    fn a_bare_prefix_selects_the_main_worktree_not_the_first_listed() {
+        let mut two = family(
+            vec![
+                ("parent", "/p", "main"),
+                ("child", "/aaa-wt", "feature"),
+                ("child", "/p/child", "trunk"),
+            ],
+            true,
+            Some(0),
+        );
+        // The child's main worktree sorts after one of its linked worktrees.
+        two.groups[1].main = 2;
+        assert!(matches!(two.find("child:"), WorktreeMatch::Single(2)));
     }
 
     #[test]
