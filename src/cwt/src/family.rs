@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 
-use crate::worktree::{list_worktrees, paths_equal, Worktree};
+use crate::worktree::{list_worktrees, paths_equal, RepoWorktrees, Worktree};
 
 /// The indent that puts a worktree under its repository heading.
 const GROUP_INDENT: &str = "  ";
@@ -38,11 +38,30 @@ pub enum WorktreeMatch {
     None,
 }
 
+/// How near a repository is to the user, which is the order a name is answered in.
+mod rank {
+    /// The repository the user is standing in.
+    pub const HOME: u8 = 0;
+    /// The parent repository the family is anchored at.
+    pub const ANCHOR: u8 = 1;
+    /// Every other repository in the family.
+    pub const OTHER: u8 = 2;
+}
+
+/// One repository of the family.
+#[derive(Debug, Clone)]
+struct Group {
+    /// The directory name of the repository's main worktree.
+    name: String,
+    /// How near this repository is to the user. See [`rank`].
+    rank: u8,
+}
+
 /// One worktree, and the repository it belongs to.
 #[derive(Debug, Clone)]
 struct Entry {
-    /// The name of the owning repository: the directory name of its main worktree.
-    repo: String,
+    /// Index into the family's groups.
+    group: usize,
     /// The worktree itself.
     worktree: Worktree,
 }
@@ -51,6 +70,8 @@ struct Entry {
 pub struct Family {
     /// The parent repository's worktrees first, then each child repository's.
     entries: Vec<Entry>,
+    /// The repositories that contributed, in the same order.
+    groups: Vec<Group>,
     /// True when more than one repository contributed, which turns on the
     /// grouped display and the `repo:target` names in messages.
     grouped: bool,
@@ -68,10 +89,8 @@ impl Family {
     pub fn discover(repo_root: &Path, scan_children: bool) -> Result<Self, String> {
         let own = list_worktrees(repo_root)?;
 
-        let mut entries = Vec::new();
+        let mut roll = Roll::default();
         let mut warnings = Vec::new();
-        let mut repos = 0_usize;
-        let mut claimed: Vec<PathBuf> = Vec::new();
 
         if scan_children {
             let anchor_dir = anchor_of(&own.main);
@@ -85,13 +104,13 @@ impl Family {
                 list_worktrees(&anchor_dir)
             };
             match anchor {
-                Ok(repo) => repos += usize::from(claim(&mut entries, &mut claimed, &repo)),
+                Ok(repo) => roll.claim(&repo),
                 Err(e) => warnings.push(format!("{}: {e}", anchor_dir.display())),
             }
 
             for child in child_repo_dirs(&anchor_dir) {
                 match list_worktrees(&child) {
-                    Ok(repo) => repos += usize::from(claim(&mut entries, &mut claimed, &repo)),
+                    Ok(repo) => roll.claim(&repo),
                     Err(e) => warnings.push(format!("{}: {e}", child.display())),
                 }
             }
@@ -99,15 +118,32 @@ impl Family {
 
         // Without children, and as a backstop if the anchor could not be read,
         // the user's own repository is the family.
-        if entries.is_empty() {
-            repos += usize::from(claim(&mut entries, &mut claimed, &own));
+        if roll.entries.is_empty() {
+            roll.claim(&own);
         }
 
+        let Roll {
+            entries,
+            mut groups,
+            ..
+        } = roll;
         let current = find_current(&entries, repo_root);
+
+        // Nearest first: the repository the user stands in, then the anchor —
+        // which is the first repository claimed — then everything else.
+        if let Some(anchor) = groups.first_mut() {
+            anchor.rank = rank::ANCHOR;
+        }
+        if let Some(index) = current {
+            groups[entries[index].group].rank = rank::HOME;
+        }
+
+        let grouped = groups.len() > 1;
 
         Ok(Self {
             entries,
-            grouped: repos > 1,
+            groups,
+            grouped,
             current,
             warnings,
         })
@@ -162,12 +198,12 @@ impl Family {
     ///
     /// [`find`]: Family::find
     pub fn main_worktree(&self) -> Option<usize> {
-        let repo = self.entries.get(self.current?)?.repo.as_str();
+        let group = self.entries.get(self.current?)?.group;
 
         MAIN_BRANCH_NAMES.iter().find_map(|name| {
             self.entries
                 .iter()
-                .position(|e| e.repo == repo && e.worktree.branch.as_deref() == Some(*name))
+                .position(|e| e.group == group && e.worktree.branch.as_deref() == Some(*name))
         })
     }
 
@@ -178,7 +214,7 @@ impl Family {
         let dir = entry.worktree.dir_name().unwrap_or("<unknown>");
         let branch = entry.worktree.display_branch();
         if self.grouped {
-            format!("{}:{dir} [{branch}]", entry.repo)
+            format!("{}:{dir} [{branch}]", self.groups[entry.group].name)
         } else {
             format!("{dir} [{branch}]")
         }
@@ -191,10 +227,15 @@ impl Family {
 
     /// Finds a worktree by name (directory name, branch name, or branch substring).
     ///
-    /// Search priority:
+    /// The family is searched a repository at a time, nearest first: the
+    /// repository the user stands in, then the parent, then the rest. Within a
+    /// repository the priority is:
     /// 1. Exact directory name match
     /// 2. Exact branch name match (supports branch names with `/` like `feature/login`)
-    /// 3. Case-insensitive substring match on branch names
+    ///
+    /// An exact match anywhere in the family beats a substring anywhere, so the
+    /// substrings are only tried after every repository has been asked for an
+    /// exact name. Substrings are then tried nearest first in the same way.
     ///
     /// Rejects names containing `..` or `\` to prevent path traversal. Forward
     /// slashes are allowed since they are common in branch names (for example
@@ -211,45 +252,63 @@ impl Family {
             return WorktreeMatch::None;
         }
 
-        // First: exact directory name.
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|e| e.worktree.dir_name() == Some(name))
-        {
-            return WorktreeMatch::Single(index);
+        let pool: Vec<usize> = (0..self.entries.len()).collect();
+        self.search(&pool, name)
+    }
+
+    /// Searches `pool` for `name`, nearest repository first.
+    fn search(&self, pool: &[usize], name: &str) -> WorktreeMatch {
+        for tier in rank::HOME..=rank::OTHER {
+            let near = self.tier(pool, tier);
+            if let Some(index) = near
+                .iter()
+                .copied()
+                .find(|&i| self.entries[i].worktree.dir_name() == Some(name))
+            {
+                return WorktreeMatch::Single(index);
+            }
+            if let Some(index) = near
+                .iter()
+                .copied()
+                .find(|&i| self.entries[i].worktree.branch.as_deref() == Some(name))
+            {
+                return WorktreeMatch::Single(index);
+            }
         }
 
-        // Second: exact branch name.
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|e| e.worktree.branch.as_deref() == Some(name))
-        {
-            return WorktreeMatch::Single(index);
-        }
-
-        // Third: case-insensitive substring on branch names. Every match is
-        // collected because they all have to be shown when there is more than one.
+        // No exact name anywhere in the family. Every substring match in the
+        // nearest repository that has one is collected, because they all have to
+        // be shown when there is more than one.
         let wanted = name.to_lowercase();
-        let matches: Vec<usize> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| {
-                e.worktree
-                    .branch
-                    .as_ref()
-                    .is_some_and(|b| b.to_lowercase().contains(&wanted))
-            })
-            .map(|(index, _)| index)
-            .collect();
+        for tier in rank::HOME..=rank::OTHER {
+            let matches: Vec<usize> = self
+                .tier(pool, tier)
+                .into_iter()
+                .filter(|&i| {
+                    self.entries[i]
+                        .worktree
+                        .branch
+                        .as_ref()
+                        .is_some_and(|branch| branch.to_lowercase().contains(&wanted))
+                })
+                .collect();
 
-        match matches.len() {
-            0 => WorktreeMatch::None,
-            1 => WorktreeMatch::Single(matches[0]),
-            _ => WorktreeMatch::Multiple(matches),
+            match matches.len() {
+                0 => {}
+                1 => return WorktreeMatch::Single(matches[0]),
+                _ => return WorktreeMatch::Multiple(matches),
+            }
         }
+
+        WorktreeMatch::None
+    }
+
+    /// The entries of `pool` that belong to a repository of the given rank.
+    fn tier(&self, pool: &[usize], rank: u8) -> Vec<usize> {
+        pool.iter()
+            .copied()
+            .filter(|&index| self.groups[self.entries[index].group].rank == rank)
+            .collect()
     }
 
     /// Renders the listing, with the current worktree highlighted.
@@ -261,12 +320,13 @@ impl Family {
         let mut heading: Option<&str> = None;
 
         for (index, entry) in self.entries.iter().enumerate() {
-            if self.grouped && heading != Some(entry.repo.as_str()) {
+            let repo = self.groups[entry.group].name.as_str();
+            if self.grouped && heading != Some(repo) {
                 if heading.is_some() {
                     out.push('\n');
                 }
-                let _ = writeln!(out, "{}", entry.repo.bold());
-                heading = Some(entry.repo.as_str());
+                let _ = writeln!(out, "{}", repo.bold());
+                heading = Some(repo);
             }
 
             let is_current = self.current == Some(index);
@@ -321,37 +381,49 @@ fn child_repo_dirs(dir: &Path) -> Vec<PathBuf> {
     children
 }
 
-/// Adds a repository's worktrees to the family, unless another repository
-/// already claimed them. Returns true when the repository was added.
-///
-/// A repository is claimed by its main worktree, so a directory that is really a
-/// linked worktree of a repository already in the family adds nothing new.
-fn claim(
-    entries: &mut Vec<Entry>,
-    claimed: &mut Vec<PathBuf>,
-    repo: &crate::worktree::RepoWorktrees,
-) -> bool {
-    let key = canonical(&repo.main);
-    if claimed.iter().any(|seen| paths_equal(seen, &key)) {
-        return false;
-    }
-    claimed.push(key);
+/// The family under construction.
+#[derive(Default)]
+struct Roll {
+    /// The worktrees claimed so far, in display order.
+    entries: Vec<Entry>,
+    /// The repositories that claimed them, in the same order.
+    groups: Vec<Group>,
+    /// The main worktree of every repository already claimed.
+    claimed: Vec<PathBuf>,
+}
 
-    let name = repo
-        .main
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("<unknown>")
-        .to_string();
+impl Roll {
+    /// Adds a repository's worktrees to the family, unless another repository
+    /// already claimed them.
+    ///
+    /// A repository is claimed by its main worktree, so a directory that is
+    /// really a linked worktree of a repository already in the family adds
+    /// nothing new.
+    fn claim(&mut self, repo: &RepoWorktrees) {
+        let key = canonical(&repo.main);
+        if self.claimed.iter().any(|seen| paths_equal(seen, &key)) {
+            return;
+        }
+        self.claimed.push(key);
 
-    for worktree in &repo.all {
-        entries.push(Entry {
-            repo: name.clone(),
-            worktree: worktree.clone(),
+        let group = self.groups.len();
+        self.groups.push(Group {
+            name: repo
+                .main
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<unknown>")
+                .to_string(),
+            rank: rank::OTHER,
         });
-    }
 
-    true
+        for worktree in &repo.all {
+            self.entries.push(Entry {
+                group,
+                worktree: worktree.clone(),
+            });
+        }
+    }
 }
 
 /// Finds the entry for the worktree the user is standing in.
@@ -373,6 +445,10 @@ mod tests {
     use super::*;
 
     /// Build a family by hand, without touching the filesystem.
+    ///
+    /// Each entry is `(repository, path, branch)`. Repositories are ranked the
+    /// way `discover` ranks them: the first repository named is the anchor, and
+    /// the one holding the current worktree is home.
     fn family(entries: Vec<(&str, &str, &str)>, grouped: bool, current: Option<usize>) -> Family {
         let entries = entries
             .into_iter()
@@ -389,18 +465,41 @@ mod tests {
         grouped: bool,
         current: Option<usize>,
     ) -> Family {
-        Family {
-            entries: entries
-                .into_iter()
-                .map(|(repo, path, branch)| Entry {
-                    repo: repo.to_string(),
+        let mut groups: Vec<Group> = Vec::new();
+        let entries: Vec<Entry> = entries
+            .into_iter()
+            .map(|(repo, path, branch)| {
+                let group = groups
+                    .iter()
+                    .position(|g| g.name == repo)
+                    .unwrap_or_else(|| {
+                        groups.push(Group {
+                            name: repo.to_string(),
+                            rank: rank::OTHER,
+                        });
+                        groups.len() - 1
+                    });
+                Entry {
+                    group,
                     worktree: Worktree {
                         path: PathBuf::from(path),
                         head: "abc1234567890".to_string(),
                         branch: branch.map(str::to_string),
                     },
-                })
-                .collect(),
+                }
+            })
+            .collect();
+
+        if let Some(anchor) = groups.first_mut() {
+            anchor.rank = rank::ANCHOR;
+        }
+        if let Some(index) = current {
+            groups[entries[index].group].rank = rank::HOME;
+        }
+
+        Family {
+            entries,
+            groups,
             grouped,
             current,
             warnings: Vec::new(),
@@ -703,6 +802,62 @@ mod tests {
         assert!(matches!(one.find("userauth"), WorktreeMatch::Single(0)));
         assert!(matches!(one.find("USERAUTH"), WorktreeMatch::Single(0)));
         assert!(matches!(one.find("UserAuth"), WorktreeMatch::Single(0)));
+    }
+
+    #[test]
+    fn find_prefers_the_home_repository_to_the_parent() {
+        // Both repositories have a `main` branch. The user stands in the child.
+        let two = family(
+            vec![("parent", "/p", "main"), ("child", "/p/c", "main")],
+            true,
+            Some(1),
+        );
+        assert!(matches!(two.find("main"), WorktreeMatch::Single(1)));
+
+        // Standing in the parent, the same name answers from the parent.
+        let two = family(
+            vec![("parent", "/p", "main"), ("child", "/p/c", "main")],
+            true,
+            Some(0),
+        );
+        assert!(matches!(two.find("main"), WorktreeMatch::Single(0)));
+    }
+
+    #[test]
+    fn find_prefers_the_parent_to_an_unrelated_repository() {
+        // Neither the parent nor the sibling is home, and both have `shared`.
+        let three = family(
+            vec![
+                ("parent", "/p", "shared"),
+                ("home", "/p/home", "work"),
+                ("other", "/p/other", "shared"),
+            ],
+            true,
+            Some(1),
+        );
+        assert!(matches!(three.find("shared"), WorktreeMatch::Single(0)));
+    }
+
+    #[test]
+    fn find_prefers_an_exact_name_elsewhere_to_a_substring_at_home() {
+        // Home has `beta-old`, which contains "beta". Another repository has the
+        // branch `beta` itself. The exact name wins even though it is further away.
+        let two = family(
+            vec![("home", "/h", "beta-old"), ("other", "/h/o", "beta")],
+            true,
+            Some(0),
+        );
+        assert!(matches!(two.find("beta"), WorktreeMatch::Single(1)));
+    }
+
+    #[test]
+    fn find_prefers_a_substring_at_home_to_a_substring_elsewhere() {
+        let two = family(
+            vec![("home", "/h", "feature-x"), ("other", "/h/o", "feature-y")],
+            true,
+            Some(0),
+        );
+        assert!(matches!(two.find("feature"), WorktreeMatch::Single(0)));
     }
 
     #[test]
