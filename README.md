@@ -350,10 +350,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     the repository.
   - To install: `cargo install --git https://github.com/timmattison/tools nwt`
 - cwt
-  - Change Worktree - Navigate between git worktrees in a repository. Shows a list of all
-    worktrees with the current one highlighted, or cycle through them with `-f` (forward) and
-    `-p` (previous). Can also jump directly to a worktree by directory name or branch name.
-    Use `--shell-setup` to automatically add shell integration to your config.
+  - Change Worktree - Navigate between the git worktrees of a repository and of the
+    repositories inside it. Shows a list of all worktrees with the current one highlighted,
+    or cycle through them with `-f` (forward) and `-p` (previous). Can also jump directly to
+    a worktree by directory name or branch name. Use `--no-family` to stay inside one
+    repository, and `--shell-setup` to automatically add shell integration to your config.
   - To install: `cargo install --git https://github.com/timmattison/tools cwt`
 - gitnuke
   - Removes a git worktree and deletes the branch it had checked out, resolved as one
@@ -1332,7 +1333,7 @@ nwt --tmux --run "code ."
 
 ## cwt (change worktree)
 
-Navigate between git worktrees in a repository. Lists all worktrees, cycles through them, or jumps to a specific one by name.
+Navigate between the git worktrees of a repository and of the repositories inside it. Lists them all, cycles through them, or jumps to a specific one by name.
 
 ### Basic Usage
 
@@ -1343,7 +1344,7 @@ cwt -p                        # Go to previous worktree (wraps around)
 cwt -m                        # Go to the main worktree
 cwt main                      # Go to worktree by branch name
 cwt absurd-rock               # Go to worktree by directory name
-cwt vial-qmk:main             # Go to one repository's worktree by name
+cwt vial-qmk:vial             # Go to one repository's worktree by name
 ```
 
 ### Options
@@ -1537,9 +1538,9 @@ alias wtm 'wt --main'  # Main worktree (branch main, or master)
 Show all worktrees with current highlighted:
 ```bash
 cwt
-#   /path/to/repo                    [main]
-# > /path/to/repo-worktrees/absurd   [feature-branch]
-#   /path/to/repo-worktrees/zen      [fix-bug]
+#   /path/to/repo                        [main]
+# > /path/to/repo-worktrees/absurd-rock  [feature-branch]
+#   /path/to/repo-worktrees/zen          [fix-bug]
 ```
 
 Cycle through worktrees:

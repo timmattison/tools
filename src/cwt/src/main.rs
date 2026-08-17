@@ -37,7 +37,9 @@ macro_rules! error {
 
 /// Change to a different git worktree.
 ///
-/// Lists all worktrees in the current repository or navigates to a specific one.
+/// Lists every worktree of the repository and of the repositories inside it,
+/// or navigates to a specific one. `--no-family` lists only the repository you
+/// are standing in.
 ///
 /// # Families of repositories
 ///
