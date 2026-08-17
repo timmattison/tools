@@ -368,7 +368,11 @@ fn quoted_branch_alternatives(names: &[&str]) -> String {
 /// business and the line is not.
 ///
 /// The list follows an error, so it obeys quiet mode.
-fn print_worktree_line(_wt: &Worktree, _quiet: bool) {}
+fn print_worktree_line(wt: &Worktree, quiet: bool) {
+    let dir = wt.dir_name().unwrap_or("<unknown>");
+    let branch = wt.display_branch();
+    error!(quiet, "  {} [{}]", dir, branch);
+}
 
 /// Prints every worktree to stderr, one [`print_worktree_line`] each.
 ///
