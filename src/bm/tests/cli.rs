@@ -3,6 +3,12 @@
 //! Each test builds its own temporary tree, so concurrent test runs stay
 //! isolated (see the parallel-safety note in the project guidelines).
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "every unwrap in this file is an assertion, not an unhandled error: on the tempdirs and fixture files the test just created, on `.output()` spawning the freshly built binary (a spawn failure is a broken harness, not behavior under test), and on reading back a file the test itself wrote so it can be compared. The CLI's own error paths are never unwrapped — they are asserted through the exit status, `assert!(!ok, ...)` — which is why src/lib.rs raises both lints only under cfg(not(test)). No `.expect` appears here yet; the allow covers it so the first one does not silently change the file's position"
+)]
+
 use std::path::Path;
 use std::process::{Command, Output};
 
