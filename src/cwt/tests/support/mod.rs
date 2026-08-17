@@ -121,7 +121,11 @@ impl Family {
             .expect("failed to canonicalize temp dir");
 
         make_repo(&root.join("family"), "main");
-        add_worktree(&root.join("family"), "../family-worktrees/feature", "feature");
+        add_worktree(
+            &root.join("family"),
+            "../family-worktrees/feature",
+            "feature",
+        );
 
         std::fs::create_dir_all(root.join("family/docs")).expect("failed to create docs dir");
         std::fs::write(root.join("family/docs/README.md"), "not a repository\n")

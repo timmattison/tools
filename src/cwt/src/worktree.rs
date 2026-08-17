@@ -98,8 +98,28 @@ pub fn parse_worktree_list(output: &str) -> Vec<Worktree> {
     worktrees
 }
 
+/// Finds the main worktree in the output of `git worktree list --porcelain`.
+///
+/// Git lists the main worktree first and the linked worktrees after it, so the
+/// first `worktree` line names the main one. `parse_worktree_list` sorts by
+/// path and loses that order, which is why this reads the raw output.
+pub fn parse_main_worktree(output: &str) -> Option<PathBuf> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix("worktree ").map(PathBuf::from))
+}
+
+/// Every worktree of one repository.
+#[derive(Debug, Clone)]
+pub struct RepoWorktrees {
+    /// The main worktree — the checkout that owns the `.git` directory.
+    pub main: PathBuf,
+    /// All worktrees of the repository, sorted by path.
+    pub all: Vec<Worktree>,
+}
+
 /// Gets all worktrees for the repository at the given root.
-pub fn get_worktrees(repo_root: &Path) -> Result<Vec<Worktree>, String> {
+pub fn list_worktrees(repo_root: &Path) -> Result<RepoWorktrees, String> {
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
@@ -112,7 +132,17 @@ pub fn get_worktrees(repo_root: &Path) -> Result<Vec<Worktree>, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_worktree_list(&stdout))
+    let main = parse_main_worktree(&stdout).ok_or_else(|| {
+        format!(
+            "git worktree list named no worktree in {}",
+            repo_root.display()
+        )
+    })?;
+
+    Ok(RepoWorktrees {
+        main,
+        all: parse_worktree_list(&stdout),
+    })
 }
 
 /// Compares two paths, handling case-insensitivity on macOS.
@@ -195,6 +225,22 @@ mod tests {
             branch: None,
         };
         assert_eq!(detached.display_branch(), "HEAD@abc1234");
+    }
+
+    #[test]
+    fn test_parse_main_worktree_is_the_first_block() {
+        // Git lists the main worktree first, whatever the paths sort like.
+        let output = "worktree /z/repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /a/repo-wt\nHEAD def\nbranch refs/heads/feature\n";
+        assert_eq!(
+            parse_main_worktree(output),
+            Some(PathBuf::from("/z/repo")),
+            "the sorted list starts with /a/repo-wt, but the main worktree is /z/repo"
+        );
+    }
+
+    #[test]
+    fn test_parse_main_worktree_of_empty_output() {
+        assert_eq!(parse_main_worktree(""), None);
     }
 
     #[test]
