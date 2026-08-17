@@ -89,3 +89,15 @@ fn an_empty_environment_variable_keeps_the_family() {
         stdout(&output)
     );
 }
+
+#[test]
+fn a_zero_environment_variable_keeps_the_family() {
+    let family = Family::build();
+    let output = cwt_with_env(&family.at("family"), &[], &[("CWT_NO_FAMILY", "0")]);
+
+    assert!(
+        stdout(&output).contains(&family.path_of("family/child-a")),
+        "0 is the choice not to opt out, so the family stays: {}",
+        stdout(&output)
+    );
+}
