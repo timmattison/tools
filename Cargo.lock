@@ -1676,6 +1676,7 @@ dependencies = [
  "colored",
  "repowalker",
  "shellsetup",
+ "tempfile",
 ]
 
 [[package]]

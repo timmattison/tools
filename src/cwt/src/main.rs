@@ -45,6 +45,7 @@ macro_rules! error {
 /// cwt           # Show list of worktrees with current highlighted
 /// cwt -f        # Go to next worktree (wraps around)
 /// cwt -p        # Go to previous worktree (wraps around)
+/// cwt -m        # Go to the main worktree (branch main, or master)
 /// cwt NAME      # Go to worktree by directory name or branch name
 /// cwt TEXT      # Go to worktree by case-insensitive substring match on branch
 /// ```
@@ -67,6 +68,7 @@ macro_rules! error {
 ///
 /// alias wtf='wt -f'  # Next worktree
 /// alias wtb='wt -p'  # Previous worktree (back)
+/// alias wtm='wt --main'  # Main worktree (branch main, or master)
 /// ```
 ///
 /// # Exit Codes
@@ -85,18 +87,25 @@ macro_rules! error {
 #[allow(clippy::struct_excessive_bools)] // CLI flags are naturally bool-heavy
 struct Cli {
     /// Go to the next worktree (wraps around).
-    #[arg(short = 'f', long, conflicts_with_all = ["prev", "target", "shell_setup"])]
+    #[arg(short = 'f', long, conflicts_with_all = ["prev", "main", "target", "shell_setup"])]
     forward: bool,
 
     /// Go to the previous worktree (wraps around).
-    #[arg(short = 'p', long, conflicts_with_all = ["forward", "target", "shell_setup"])]
+    #[arg(short = 'p', long, conflicts_with_all = ["forward", "main", "target", "shell_setup"])]
     prev: bool,
+
+    /// Go to the main worktree.
+    ///
+    /// The main worktree is the one on branch `main`, or the one on branch `master` when
+    /// no worktree is on `main`. The branch name must match exactly.
+    #[arg(short = 'm', long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target", "shell_setup"])]
+    main: bool,
 
     /// Worktree to switch to (directory name, branch name, or branch substring).
     ///
     /// Matches in order: exact directory name, exact branch name, then case-insensitive
     /// substring on branch names. If multiple branches match, lists them and exits.
-    #[arg(conflicts_with_all = ["forward", "prev", "shell_setup"], verbatim_doc_comment)]
+    #[arg(conflicts_with_all = ["forward", "prev", "main", "shell_setup"], verbatim_doc_comment)]
     target: Option<String>,
 
     /// Add shell integration to your shell config. Adds these commands:
@@ -104,8 +113,8 @@ struct Cli {
     ///   wt [target]  - List worktrees or change to one
     ///   wtf          - Next worktree (forward)
     ///   wtb          - Previous worktree (back)
-    ///   wtm          - Main worktree
-    #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target"])]
+    ///   wtm          - Main worktree (branch main, or master)
+    #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "main", "target"])]
     shell_setup: bool,
 
     /// Suppress error messages.
@@ -315,6 +324,66 @@ fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
     }
 }
 
+/// The branch names that identify the main worktree, in order of priority.
+///
+/// `main` comes first. `master` is the fallback for a repository that never
+/// renamed its first branch.
+const MAIN_BRANCH_NAMES: [&str; 2] = ["main", "master"];
+
+/// Finds the main worktree: the one on branch `main`, or the one on branch
+/// `master` when no worktree is on `main`.
+///
+/// The branch name must match exactly. The substring match that
+/// [`find_worktree_by_name`] does is wrong here: in a repository that has no
+/// `main` branch, a branch such as `wt-main-master` would capture the shortcut
+/// and send the user somewhere that is not the main worktree.
+///
+/// A detached worktree has no branch, so it is never the main worktree.
+fn find_main_worktree(worktrees: &[Worktree]) -> Option<usize> {
+    MAIN_BRANCH_NAMES.iter().find_map(|name| {
+        worktrees
+            .iter()
+            .position(|wt| wt.branch.as_deref() == Some(*name))
+    })
+}
+
+/// Formats `names` as a quoted alternation: `'main' or 'master'`.
+///
+/// The missing-main-worktree error is built from [`MAIN_BRANCH_NAMES`] through
+/// this function, so a name added to the constant cannot leave the message
+/// naming a shorter list than the search actually tried.
+fn quoted_branch_alternatives(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+
+/// Prints one worktree to stderr as `  directory [branch]`.
+///
+/// Both the "not found" and the "multiple matches" errors list worktrees in
+/// this format, so the format lives here and not at either call site. Those
+/// two list different sets of worktrees, which is why the set is the caller's
+/// business and the line is not.
+///
+/// The list follows an error, so it obeys quiet mode.
+fn print_worktree_line(wt: &Worktree, quiet: bool) {
+    let dir = wt.dir_name().unwrap_or("<unknown>");
+    let branch = wt.display_branch();
+    error!(quiet, "  {} [{}]", dir, branch);
+}
+
+/// Prints every worktree to stderr, one [`print_worktree_line`] each.
+///
+/// This list follows a "not found" error, so it obeys quiet mode.
+fn print_available_worktrees(worktrees: &[Worktree], quiet: bool) {
+    error!(quiet, "Available worktrees:");
+    for wt in worktrees {
+        print_worktree_line(wt, quiet);
+    }
+}
+
 /// Displays the list of worktrees with the current one highlighted.
 fn display_worktree_list(worktrees: &[Worktree], current_idx: Option<usize>) {
     for (idx, wt) in worktrees.iter().enumerate() {
@@ -358,7 +427,7 @@ function wt() {
 # Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
-alias wtm='wt main'  # Main worktree
+alias wtm='wt --main'  # Main worktree (branch main, or master)
 "#;
 
 /// Sets up shell integration by adding the wt function to the user's shell config.
@@ -367,7 +436,7 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
         .with_command("wt", "List worktrees or change to one")
         .with_command("wtf", "Next worktree")
         .with_command("wtb", "Previous worktree (back)")
-        .with_command("wtm", "Main worktree")
+        .with_command("wtm", "Main worktree (branch main, or master)")
         // Old installations ended with this alias (before end marker was added)
         .with_old_end_marker("alias wtb='wt -p'");
 
@@ -434,6 +503,18 @@ fn main() {
             exit(exit_codes::CURRENT_UNKNOWN);
         };
         println!("{}", worktrees[target_idx].path.display());
+    } else if cli.main {
+        // Main worktree: branch main, or branch master when there is no main.
+        let Some(target_idx) = find_main_worktree(&worktrees) else {
+            error!(
+                cli.quiet,
+                "Error: No worktree is on branch {}",
+                quoted_branch_alternatives(&MAIN_BRANCH_NAMES)
+            );
+            print_available_worktrees(&worktrees, cli.quiet);
+            exit(exit_codes::WORKTREE_NOT_FOUND);
+        };
+        println!("{}", worktrees[target_idx].path.display());
     } else if let Some(name) = &cli.target {
         // Find by name
         match find_worktree_by_name(&worktrees, name) {
@@ -446,21 +527,13 @@ fn main() {
                     "Error: Multiple worktrees match '{}'. Be more specific:", name
                 );
                 for idx in indices {
-                    let wt = &worktrees[idx];
-                    let dir = wt.dir_name().unwrap_or("<unknown>");
-                    let branch = wt.display_branch();
-                    error!(cli.quiet, "  {} [{}]", dir, branch);
+                    print_worktree_line(&worktrees[idx], cli.quiet);
                 }
                 exit(exit_codes::MULTIPLE_MATCHES);
             }
             WorktreeMatch::None => {
                 error!(cli.quiet, "Error: Worktree '{}' not found", name);
-                error!(cli.quiet, "Available worktrees:");
-                for wt in &worktrees {
-                    let dir = wt.dir_name().unwrap_or("<unknown>");
-                    let branch = wt.display_branch();
-                    error!(cli.quiet, "  {} [{}]", dir, branch);
-                }
+                print_available_worktrees(&worktrees, cli.quiet);
                 exit(exit_codes::WORKTREE_NOT_FOUND);
             }
         }
@@ -829,8 +902,142 @@ mod tests {
         assert_eq!(worktrees[0].branch, Some("main".to_string()));
     }
 
+    /// Builds a worktree fixture at `path` checked out on `branch`.
+    ///
+    /// Pass `None` as the branch for a detached HEAD.
+    fn worktree_on(path: &str, branch: Option<&str>) -> Worktree {
+        Worktree {
+            path: PathBuf::from(path),
+            head: "abc1234567890".to_string(),
+            branch: branch.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn test_find_main_worktree_picks_main() {
+        let worktrees = vec![
+            worktree_on("/repo", Some("main")),
+            worktree_on("/repo-wt/wt1", Some("feature")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(0));
+    }
+
+    #[test]
+    fn test_find_main_worktree_falls_back_to_master() {
+        // A repository that never renamed master still has a main worktree.
+        let worktrees = vec![
+            worktree_on("/repo-wt/wt1", Some("feature")),
+            worktree_on("/repo", Some("master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_prefers_main_over_master() {
+        // Both branches exist. main wins, whatever the order of the list.
+        let worktrees = vec![
+            worktree_on("/repo-wt/old", Some("master")),
+            worktree_on("/repo", Some("main")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_ignores_substring_branches() {
+        // The branch name must match exactly. A branch that merely contains
+        // "main" must not capture the main worktree of a master repository.
+        let worktrees = vec![
+            worktree_on("/repo-wt/wt1", Some("wt-main-master")),
+            worktree_on("/repo", Some("master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_ignores_detached_head() {
+        let worktrees = vec![
+            worktree_on("/repo-wt/wt1", None),
+            worktree_on("/repo", Some("master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), Some(1));
+    }
+
+    #[test]
+    fn test_find_main_worktree_none_without_main_or_master() {
+        let worktrees = vec![
+            worktree_on("/repo", Some("trunk")),
+            worktree_on("/repo-wt/wt1", Some("wt-main-master")),
+        ];
+        assert_eq!(find_main_worktree(&worktrees), None);
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_quotes_a_single_name() {
+        assert_eq!(quoted_branch_alternatives(&["main"]), "'main'");
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_joins_two_names() {
+        assert_eq!(
+            quoted_branch_alternatives(&["main", "master"]),
+            "'main' or 'master'"
+        );
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_joins_three_names() {
+        // This is the assertion that proves the arity coupling is gone. The old
+        // message read MAIN_BRANCH_NAMES[0] and [1] by index, so a third name
+        // would be searched for and never named. The formatter must render
+        // every name it is given, whatever the length of the slice.
+        assert_eq!(
+            quoted_branch_alternatives(&["main", "master", "trunk"]),
+            "'main' or 'master' or 'trunk'"
+        );
+    }
+
+    #[test]
+    fn test_quoted_branch_alternatives_renders_the_branch_constant() {
+        // Ties the formatter to the constant the not-found message is built
+        // from, so the user-facing text stays what it has always been.
+        assert_eq!(
+            quoted_branch_alternatives(&MAIN_BRANCH_NAMES),
+            "'main' or 'master'"
+        );
+    }
+
+    #[test]
+    fn test_main_flag_parses() {
+        let long = Cli::try_parse_from(["cwt", "--main"]).expect("--main must parse");
+        assert!(long.main);
+
+        let short = Cli::try_parse_from(["cwt", "-m"]).expect("-m must parse");
+        assert!(short.main);
+
+        let absent = Cli::try_parse_from(["cwt"]).expect("no arguments must parse");
+        assert!(!absent.main);
+    }
+
+    #[test]
+    fn test_main_flag_conflicts_with_other_modes() {
+        // --main selects a worktree, so it cannot combine with the other selectors.
+        for args in [
+            vec!["cwt", "--main", "feature"],
+            vec!["cwt", "--main", "-f"],
+            vec!["cwt", "--main", "-p"],
+            vec!["cwt", "--main", "--shell-setup"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&args).is_err(),
+                "{args:?} must be rejected"
+            );
+        }
+    }
+
     #[test]
     fn test_shell_code_contains_wtm() {
-        assert!(SHELL_CODE.contains("alias wtm='wt main'"));
+        // wtm goes through --main so that it finds master in a repository
+        // that has no main branch.
+        assert!(SHELL_CODE.contains("alias wtm='wt --main'"));
     }
 }

@@ -1340,6 +1340,7 @@ Navigate between git worktrees in a repository. Lists all worktrees, cycles thro
 cwt                           # Show list of worktrees with current highlighted
 cwt -f                        # Go to next worktree (wraps around)
 cwt -p                        # Go to previous worktree (wraps around)
+cwt -m                        # Go to the main worktree
 cwt main                      # Go to worktree by branch name
 cwt absurd-rock               # Go to worktree by directory name
 ```
@@ -1348,9 +1349,24 @@ cwt absurd-rock               # Go to worktree by directory name
 
 - `-f, --forward`: Go to the next worktree in the sorted list (wraps around)
 - `-p, --prev`: Go to the previous worktree (wraps around)
+- `-m, --main`: Go to the main worktree (see [The main worktree](#the-main-worktree))
 - `[TARGET]`: Worktree to switch to (directory name or branch name)
 - `--shell-setup`: Automatically add shell integration to your ~/.zshrc or ~/.bashrc
 - `-q, --quiet`: Suppress error messages
+
+### The main worktree
+
+`cwt -m` (and the `wtm` alias) goes to the worktree on branch `main`. If no worktree is on
+`main`, it goes to the worktree on branch `master`, so a repository that never renamed its
+first branch gets the same shortcut.
+
+The branch name must match exactly. This is what separates `cwt -m` from `cwt main`, which
+also substring-matches: in a `master` repository, `cwt main` lands on a branch such as
+`wt-main-master`, and `cwt -m` does not. A detached worktree has no branch, so it is never
+the main worktree.
+
+If neither branch is checked out anywhere, `cwt -m` lists the worktrees and exits with code
+3.
 
 ### Shell Integration
 
@@ -1387,7 +1403,7 @@ function wt() {
 # Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
-alias wtm='wt main'  # Main worktree
+alias wtm='wt --main'  # Main worktree (branch main, or master)
 ```
 
 #### Fish (~/.config/fish/config.fish)
@@ -1407,7 +1423,7 @@ end
 # Quick navigation aliases
 alias wtf 'wt -f'  # Next worktree
 alias wtb 'wt -p'  # Previous worktree (back)
-alias wtm 'wt main'  # Main worktree
+alias wtm 'wt --main'  # Main worktree (branch main, or master)
 ```
 
 ### Examples
@@ -1430,7 +1446,7 @@ Jump to specific worktree:
 ```bash
 wt main           # By branch name
 wt absurd-rock    # By directory name
-wtm               # Quick alias for main worktree
+wtm               # Quick alias for the main worktree (branch main, or master)
 ```
 
 ### Exit Codes
@@ -1441,6 +1457,7 @@ wtm               # Quick alias for main worktree
 - `3`: Worktree not found
 - `4`: Could not determine current worktree (for -f/-p)
 - `5`: Shell setup failed
+- `6`: Multiple worktrees matched (be more specific)
 
 ## gitnuke (nuke a worktree)
 
