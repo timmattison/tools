@@ -54,8 +54,16 @@ pub fn git(dir: &Path, args: &[&str]) -> Output {
 ///
 /// `NO_COLOR` keeps the output plain so assertions can match on text.
 pub fn cwt(dir: &Path, args: &[&str]) -> Output {
+    cwt_with_env(dir, args, &[])
+}
+
+/// Run the real `cwt` binary in `dir` with extra environment variables.
+pub fn cwt_with_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cwt"));
     cmd.args(args).current_dir(dir).env("NO_COLOR", "1");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
     scrub_git_env(&mut cmd).output().expect("failed to run cwt")
 }
 
