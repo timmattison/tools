@@ -247,6 +247,65 @@ All Go tools use internal/version:
 - `subito` - AWS IoT Subscriber
 - `symfix` - Symlink Fix
 
+## Lint Configuration
+
+Every crate in this workspace **must** inherit the repo-wide lint set, and a crate that wants to be stricter **must** declare the extra lints as crate-root attributes in **every one of its target roots**.
+
+### Why
+
+The root `Cargo.toml` declares `[workspace.lints.rust]` and `[workspace.lints.clippy]`, but cargo hands those lints only to members that opt in. A member that omits the stanza is silently exempt: nothing warns and nothing fails, because the exemption is spelled as an *absence*. That is also why it spreads — a new crate that never types the stanza is born exempt. All 73 members opt in today, and `repo_guards::workspace_lints` keeps it that way: a new crate that omits the stanza fails `cargo test`.
+
+### Usage
+
+Every member manifest carries:
+
+```toml
+[lints]
+workspace = true
+```
+
+Extra strictness cannot go in the manifest. Cargo refuses to merge a local `[lints]` table with `lints.workspace = true`:
+
+```text
+error: cannot override workspace.lints in lints, either remove the overrides or lints.workspace = true and manually specify the lints
+```
+
+So a crate that wants lints stricter than the workspace set declares them as crate-root inner attributes in its source (`src/cwt/src/main.rs`):
+
+```rust
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+```
+
+### The Trap: A Crate-Root Attribute Reaches One Target
+
+**A manifest `[lints]` table applies to every target of the package. A crate-root attribute applies only to the target whose root file carries it.**
+
+So `#![deny(unsafe_code)]` in `src/main.rs` does nothing for `tests/`, `benches/`, or `examples/` — and nothing for `src/lib.rs` either, in a crate that has both. **The attributes must be repeated in every target root.**
+
+This is not hypothetical. `cwt`'s integration tests silently lost `unsafe_code` and `clippy::pedantic` when its manifest `[lints]` table was converted to a crate-root attribute. Nothing warned; the lints simply stopped applying there. `src/cwt/tests/main-worktree.rs` now repeats them:
+
+```rust
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+```
+
+A target that legitimately needs a lint relaxed says so at the site, with a reason (`src/bm/tests/cli.rs`):
+
+```rust
+#![allow(
+    clippy::unwrap_used,
+    reason = "every unwrap in this file is an assertion, not an unhandled error"
+)]
+```
+
+`deny`, `forbid`, `warn`, `allow`, and `expect` all count as declaring a position — **silence is the only violation**. The bar is "mention", not "match the level", so a relaxation stays a visible, reviewable decision in the file it applies to instead of an entry in a central allowlist. A `cfg_attr`-wrapped lint (`#![cfg_attr(not(test), warn(clippy::unwrap_used))]`, as in `src/bm/src/lib.rs`) counts as a mention but does not raise. Because `clippy::allow_attributes_without_reason` is `warn` in the workspace set, every `allow` needs a `reason = "..."`.
+
+### Guards Enforcing This
+
+- `repo_guards::workspace_lints` (`src/repo-guards/src/workspace_lints.rs`) - every workspace member manifest declares `[lints]` / `workspace = true`
+- `repo_guards::target_lints` (`src/repo-guards/src/target_lints.rs`) - every target root declares a position on each lint its crate's lib/bin roots raise
+
 ## UTF-8 String Safety
 
 All tools in this repository **must** handle UTF-8 strings safely. Never use byte-level indexing that could panic on multi-byte characters.

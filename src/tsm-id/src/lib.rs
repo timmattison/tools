@@ -1,7 +1,4 @@
-// These lints are stricter than the inherited `[workspace.lints]` set. They live
-// here rather than in Cargo.toml because cargo refuses to merge a local `[lints]`
-// table with `lints.workspace = true`, and inheritance is mandatory (see the guard
-// in src/repo-guards). Crate-root attributes only ADD to the inherited set.
+// Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 #![allow(
