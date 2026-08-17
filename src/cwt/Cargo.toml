@@ -29,3 +29,5 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+# Byte-level string indexing (&s[..n]) panics when n lands inside a multi-byte UTF-8 character
+string_slice = "warn"
