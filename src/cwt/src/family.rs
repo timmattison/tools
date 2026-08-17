@@ -1018,6 +1018,22 @@ mod tests {
     }
 
     #[test]
+    fn a_prefix_two_repositories_answer_to_is_refused() {
+        // `discover` gives every repository a name of its own, so this shape
+        // should never reach `find`. If one ever does, the answer is to report
+        // both repositories, never to hand back whichever was found first.
+        let two = family(
+            vec![("dup", "/one", "first"), ("dup", "/two", "second")],
+            true,
+            None,
+        );
+        match two.find("dup:") {
+            WorktreeMatch::Multiple(indices) => assert_eq!(indices, vec![0, 1]),
+            other => panic!("Expected Multiple, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_prefix_naming_no_repository_finds_nothing() {
         let two = family(
             vec![("parent", "/p", "main"), ("child", "/p/child", "trunk")],

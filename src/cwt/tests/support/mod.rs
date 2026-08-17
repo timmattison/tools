@@ -91,6 +91,69 @@ pub fn code(output: &Output) -> i32 {
     output.status.code().expect("cwt was killed by a signal")
 }
 
+/// One line of a `cwt` listing that names a worktree.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Listed {
+    /// The repository heading this worktree appeared under.
+    pub repo: String,
+    /// True when the line carried the current-worktree marker.
+    pub current: bool,
+    /// The path the line named.
+    pub path: String,
+}
+
+/// Parse a grouped `cwt` listing.
+///
+/// A heading starts at column zero. A worktree line starts with the marker
+/// column: `>` for the current worktree, a space for every other.
+pub fn parse_listing(output: &str) -> Vec<Listed> {
+    let mut listed = Vec::new();
+    let mut repo = String::new();
+
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('>') {
+            listed.push(Listed {
+                repo: repo.clone(),
+                current: true,
+                path: listed_path(rest),
+            });
+        } else if line.starts_with(' ') {
+            listed.push(Listed {
+                repo: repo.clone(),
+                current: false,
+                path: listed_path(line),
+            });
+        } else {
+            repo = line.trim().to_string();
+        }
+    }
+
+    listed
+}
+
+/// Take the path out of a worktree line, dropping the marker and the trailing
+/// `[branch]`.
+fn listed_path(line: &str) -> String {
+    line.rsplit_once(" [")
+        .map_or(line, |(path, _)| path)
+        .trim()
+        .to_string()
+}
+
+/// The repository headings, in the order they appeared.
+pub fn headings(listing: &[Listed]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for entry in listing {
+        if seen.last() != Some(&entry.repo) {
+            seen.push(entry.repo.clone());
+        }
+    }
+    seen
+}
+
 /// A family of repositories: one parent repository with child repositories
 /// checked out one level below it, in the layout that `.gitignore` keeps out of
 /// the parent's history.
@@ -188,7 +251,7 @@ impl Family {
 
 /// Create a repository at `path` whose first branch is `branch`, with one
 /// commit so `git worktree list` reports a real HEAD.
-fn make_repo(path: &Path, branch: &str) {
+pub fn make_repo(path: &Path, branch: &str) {
     std::fs::create_dir_all(path).expect("failed to create repo dir");
     git(path, &["init", "--initial-branch", branch]);
     std::fs::write(path.join("README.md"), "fixture\n").expect("failed to write README");
@@ -198,6 +261,6 @@ fn make_repo(path: &Path, branch: &str) {
 
 /// Add a worktree of the repository at `repo`, at `relative` to that repository,
 /// on a new branch named `branch`.
-fn add_worktree(repo: &Path, relative: &str, branch: &str) {
+pub fn add_worktree(repo: &Path, relative: &str, branch: &str) {
     git(repo, &["worktree", "add", "-b", branch, relative]);
 }

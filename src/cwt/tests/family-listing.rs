@@ -4,72 +4,7 @@
 
 mod support;
 
-use support::{code, cwt, stdout, Family};
-
-/// One line of a `cwt` listing that names a worktree.
-#[derive(Debug, PartialEq, Eq)]
-struct Listed {
-    /// The repository heading this worktree appeared under.
-    repo: String,
-    /// True when the line carried the current-worktree marker.
-    current: bool,
-    /// The path the line named.
-    path: String,
-}
-
-/// Parse a grouped `cwt` listing.
-///
-/// A heading starts at column zero. A worktree line starts with the marker
-/// column: `>` for the current worktree, a space for every other.
-fn parse_listing(output: &str) -> Vec<Listed> {
-    let mut listed = Vec::new();
-    let mut repo = String::new();
-
-    for line in output.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('>') {
-            listed.push(Listed {
-                repo: repo.clone(),
-                current: true,
-                path: path_of(rest),
-            });
-        } else if line.starts_with(' ') {
-            listed.push(Listed {
-                repo: repo.clone(),
-                current: false,
-                path: path_of(line),
-            });
-        } else {
-            repo = line.trim().to_string();
-        }
-    }
-
-    listed
-}
-
-/// Take the path out of a worktree line, dropping the marker and the trailing
-/// `[branch]`.
-fn path_of(line: &str) -> String {
-    let without_branch = line
-        .rsplit_once(" [")
-        .map_or(line, |(path, _)| path)
-        .trim()
-        .to_string();
-    without_branch
-}
-
-/// The repository headings, in the order they appeared.
-fn headings(listing: &[Listed]) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    for entry in listing {
-        if seen.last() != Some(&entry.repo) {
-            seen.push(entry.repo.clone());
-        }
-    }
-    seen
-}
+use support::{code, cwt, headings, parse_listing, stdout, Family};
 
 #[test]
 fn list_includes_the_worktrees_of_every_child_repository() {
