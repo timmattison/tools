@@ -41,6 +41,12 @@
 //! that contributes no members at all is an error here, because a typo'd
 //! pattern silently shrinking the audited set is the false-green disease this
 //! guard exists to avoid.
+//!
+//! `workspace.exclude` mirrors cargo too, and cargo treats it *differently*
+//! from `members`: exclude entries are literal paths, prefix-matched against
+//! each member, never globs. Reading them as globs would be stricter-looking
+//! and strictly worse — it would drop members that cargo still builds, which
+//! shrinks the audited set in silence.
 
 use std::fmt;
 use std::fs;
@@ -249,8 +255,9 @@ impl fmt::Display for Report {
 /// Audit every member of the workspace rooted at `repo_root`.
 ///
 /// Members are enumerated from `workspace.members` in the root manifest and
-/// glob-expanded on disk, minus anything `workspace.exclude` removes. Each
-/// member manifest is parsed and checked for `lints.workspace = true`.
+/// glob-expanded on disk, minus anything `workspace.exclude` removes — where
+/// exclude entries are literal paths, exactly as cargo reads them. Each member
+/// manifest is parsed and checked for `lints.workspace = true`.
 ///
 /// # Errors
 ///
@@ -414,11 +421,22 @@ fn string_entry<'a>(
         })
 }
 
-/// Expand `workspace.exclude` into absolute directory paths.
+/// Resolve `workspace.exclude` into absolute paths, **literally**.
 ///
-/// An exclude pattern that matches nothing is *not* an error, unlike a member
-/// pattern: excluding a path that is not there removes nothing from the audited
-/// set, so it cannot hide a crate. A member pattern that matches nothing can.
+/// Unlike `workspace.members`, cargo does not glob-expand `exclude`: each entry
+/// is a path relative to the workspace root, and a member is excluded when that
+/// path is one of its ancestors. So `exclude = ["crates/b*"]` removes nothing
+/// unless a directory is genuinely named `b*`, and `crates/bad` stays a member
+/// that cargo builds. Globbing here instead would audit strictly *fewer* crates
+/// than the build compiles, and the crate that slipped out could omit the lint
+/// stanza forever while this guard kept reporting clean — the false-green
+/// direction the module header refuses when it makes an empty-matching *member*
+/// pattern a hard error.
+///
+/// An exclude entry that is not on disk at all is still *not* an error, unlike
+/// a member pattern: a path that is not there prefixes no member, so it removes
+/// nothing from the audited set and cannot hide a crate. A member pattern that
+/// matches nothing can.
 fn excluded_paths(
     repo_root: &Path,
     workspace: Option<&Value>,
@@ -433,14 +451,16 @@ fn excluded_paths(
 
     let mut excluded = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
-        let pattern = string_entry(entry, root_manifest, "exclude", index)?;
-        excluded.extend(expand_pattern(repo_root, pattern)?);
+        let path = string_entry(entry, root_manifest, "exclude", index)?;
+        excluded.push(repo_root.join(path));
     }
     Ok(excluded)
 }
 
-/// Glob-expand one manifest pattern, relative to `repo_root`, keeping only the
-/// directories — which is what cargo counts as a member candidate.
+/// Glob-expand one `workspace.members` pattern, relative to `repo_root`,
+/// keeping only the directories — which is what cargo counts as a member
+/// candidate. `workspace.exclude` deliberately does *not* come through here;
+/// cargo reads those entries literally.
 ///
 /// `repo_root` is glob-escaped before it is joined, so a repository checked out
 /// under a path containing `*`, `?`, or `[` is matched literally instead of
