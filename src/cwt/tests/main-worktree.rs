@@ -32,8 +32,7 @@ fn run_git(dir: &Path, args: &[&str]) -> bool {
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_PREFIX")
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|s| s.success())
 }
 
 /// Creates a throwaway repository whose first branch is `branch`, with one commit.

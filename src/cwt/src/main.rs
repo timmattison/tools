@@ -45,6 +45,7 @@ macro_rules! error {
 /// cwt           # Show list of worktrees with current highlighted
 /// cwt -f        # Go to next worktree (wraps around)
 /// cwt -p        # Go to previous worktree (wraps around)
+/// cwt -m        # Go to the main worktree (branch main, or master)
 /// cwt NAME      # Go to worktree by directory name or branch name
 /// cwt TEXT      # Go to worktree by case-insensitive substring match on branch
 /// ```
@@ -67,6 +68,7 @@ macro_rules! error {
 ///
 /// alias wtf='wt -f'  # Next worktree
 /// alias wtb='wt -p'  # Previous worktree (back)
+/// alias wtm='wt --main'  # Main worktree (branch main, or master)
 /// ```
 ///
 /// # Exit Codes
@@ -111,7 +113,7 @@ struct Cli {
     ///   wt [target]  - List worktrees or change to one
     ///   wtf          - Next worktree (forward)
     ///   wtb          - Previous worktree (back)
-    ///   wtm          - Main worktree
+    ///   wtm          - Main worktree (branch main, or master)
     #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "main", "target"])]
     shell_setup: bool,
 
@@ -322,11 +324,39 @@ fn find_worktree_by_name(worktrees: &[Worktree], name: &str) -> WorktreeMatch {
     }
 }
 
-/// Finds the main worktree.
+/// The branch names that identify the main worktree, in order of priority.
 ///
-/// Not implemented yet.
-fn find_main_worktree(_worktrees: &[Worktree]) -> Option<usize> {
-    None
+/// `main` comes first. `master` is the fallback for a repository that never
+/// renamed its first branch.
+const MAIN_BRANCH_NAMES: [&str; 2] = ["main", "master"];
+
+/// Finds the main worktree: the one on branch `main`, or the one on branch
+/// `master` when no worktree is on `main`.
+///
+/// The branch name must match exactly. The substring match that
+/// [`find_worktree_by_name`] does is wrong here: in a repository that has no
+/// `main` branch, a branch such as `wt-main-master` would capture the shortcut
+/// and send the user somewhere that is not the main worktree.
+///
+/// A detached worktree has no branch, so it is never the main worktree.
+fn find_main_worktree(worktrees: &[Worktree]) -> Option<usize> {
+    MAIN_BRANCH_NAMES.iter().find_map(|name| {
+        worktrees
+            .iter()
+            .position(|wt| wt.branch.as_deref() == Some(*name))
+    })
+}
+
+/// Prints every worktree to stderr as `directory [branch]`.
+///
+/// This list follows a "not found" error, so it obeys quiet mode.
+fn print_available_worktrees(worktrees: &[Worktree], quiet: bool) {
+    error!(quiet, "Available worktrees:");
+    for wt in worktrees {
+        let dir = wt.dir_name().unwrap_or("<unknown>");
+        let branch = wt.display_branch();
+        error!(quiet, "  {} [{}]", dir, branch);
+    }
 }
 
 /// Displays the list of worktrees with the current one highlighted.
@@ -372,7 +402,7 @@ function wt() {
 # Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
-alias wtm='wt main'  # Main worktree
+alias wtm='wt --main'  # Main worktree (branch main, or master)
 "#;
 
 /// Sets up shell integration by adding the wt function to the user's shell config.
@@ -381,7 +411,7 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
         .with_command("wt", "List worktrees or change to one")
         .with_command("wtf", "Next worktree")
         .with_command("wtb", "Previous worktree (back)")
-        .with_command("wtm", "Main worktree")
+        .with_command("wtm", "Main worktree (branch main, or master)")
         // Old installations ended with this alias (before end marker was added)
         .with_old_end_marker("alias wtb='wt -p'");
 
@@ -448,6 +478,19 @@ fn main() {
             exit(exit_codes::CURRENT_UNKNOWN);
         };
         println!("{}", worktrees[target_idx].path.display());
+    } else if cli.main {
+        // Main worktree: branch main, or branch master when there is no main.
+        let Some(target_idx) = find_main_worktree(&worktrees) else {
+            error!(
+                cli.quiet,
+                "Error: No worktree is on branch '{}' or '{}'",
+                MAIN_BRANCH_NAMES[0],
+                MAIN_BRANCH_NAMES[1]
+            );
+            print_available_worktrees(&worktrees, cli.quiet);
+            exit(exit_codes::WORKTREE_NOT_FOUND);
+        };
+        println!("{}", worktrees[target_idx].path.display());
     } else if let Some(name) = &cli.target {
         // Find by name
         match find_worktree_by_name(&worktrees, name) {
@@ -469,12 +512,7 @@ fn main() {
             }
             WorktreeMatch::None => {
                 error!(cli.quiet, "Error: Worktree '{}' not found", name);
-                error!(cli.quiet, "Available worktrees:");
-                for wt in &worktrees {
-                    let dir = wt.dir_name().unwrap_or("<unknown>");
-                    let branch = wt.display_branch();
-                    error!(cli.quiet, "  {} [{}]", dir, branch);
-                }
+                print_available_worktrees(&worktrees, cli.quiet);
                 exit(exit_codes::WORKTREE_NOT_FOUND);
             }
         }
