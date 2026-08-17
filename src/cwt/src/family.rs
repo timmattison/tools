@@ -51,8 +51,14 @@ mod rank {
 /// One repository of the family.
 #[derive(Debug, Clone)]
 struct Group {
-    /// The directory name of the repository's main worktree.
+    /// The name that selects this repository and heads its worktrees in the
+    /// listing: the directory name of its main worktree, or — when another
+    /// repository of the family has that same directory name — the path that
+    /// leads to it. See [`qualify_shared_names`].
     name: String,
+    /// The directory of the repository's main worktree, which is what tells two
+    /// repositories of the same directory name apart.
+    dir: PathBuf,
     /// How near this repository is to the user. See [`rank`].
     rank: u8,
     /// Index into the family's entries of this repository's main worktree, or
@@ -97,11 +103,11 @@ impl Family {
     /// family and named in [`warnings`](Self::warnings) instead.
     pub fn discover(repo_root: &Path, scan_children: bool) -> Result<Self, String> {
         let own = list_worktrees(repo_root)?;
+        let anchor_dir = anchor_of(&own.main);
 
         let mut roll = Roll::default();
 
         if scan_children {
-            let anchor_dir = anchor_of(&own.main);
             // The anchor repository leads, then its children by directory name.
             // Standing in a child means the anchor is a different repository, so
             // it has to be read separately. Standing in the anchor itself, the
@@ -136,6 +142,13 @@ impl Family {
             warnings,
             ..
         } = roll;
+
+        // Before anything is printed or looked up, every repository needs a name
+        // that reaches it and nothing else. The anchor's own name is measured
+        // from the directory above it, so a child that shares it becomes
+        // `anchor/child`.
+        qualify_shared_names(&mut groups, anchor_dir.parent().unwrap_or(&anchor_dir));
+
         let current = find_current(&entries, repo_root);
 
         // Nearest first: the repository the user stands in, then the anchor —
@@ -218,6 +231,10 @@ impl Family {
 
     /// How to name the worktree at `index` in a message, so that the name can
     /// be handed straight back to `cwt`.
+    ///
+    /// In a family the name is prefixed with the repository's own name, which
+    /// answers for that repository alone — see [`qualify_shared_names`] — so
+    /// every name a message prints selects the worktree it was printed for.
     pub fn label(&self, index: usize) -> String {
         let entry = &self.entries[index];
         let dir = entry.worktree.dir_name().unwrap_or("<unknown>");
@@ -274,6 +291,10 @@ impl Family {
 
     /// Finds `name` inside the repository the prefix names.
     ///
+    /// The prefix names a repository the way the listing heads it — see
+    /// [`groups_named`](Self::groups_named) — and a prefix that names more than
+    /// one repository searches all of them.
+    ///
     /// An empty `name` selects that repository's main worktree, so `child-b:`
     /// reaches child-b even when another repository holds the better match for
     /// every name child-b has. A repository whose main worktree is not among the
@@ -303,11 +324,23 @@ impl Family {
         self.search(&pool, name)
     }
 
-    /// The repositories a prefix names: the one whose name matches exactly, or
-    /// every one whose name contains the prefix.
+    /// The repositories a prefix names: every one whose name it matches exactly,
+    /// or, failing that, every one whose name contains it.
+    ///
+    /// [`qualify_shared_names`] makes the names unique, so an exact match is one
+    /// repository. Every exact match is collected all the same: two
+    /// repositories that answered to one name would have to be reported to the
+    /// user, never quietly reduced to whichever was found first.
     fn groups_named(&self, prefix: &str) -> Vec<usize> {
-        if let Some(index) = self.groups.iter().position(|group| group.name == prefix) {
-            return vec![index];
+        let exact: Vec<usize> = self
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, group)| group.name == prefix)
+            .map(|(index, _)| index)
+            .collect();
+        if !exact.is_empty() {
+            return exact;
         }
 
         let wanted = prefix.to_lowercase();
@@ -385,16 +418,18 @@ impl Family {
     /// each repository's name above its worktrees.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        let mut heading: Option<&str> = None;
+        // The heading is remembered by which repository it was: two
+        // repositories of one family can have the same directory name, and a
+        // heading compared by name would swallow the second one's worktrees.
+        let mut heading: Option<usize> = None;
 
         for (index, entry) in self.entries.iter().enumerate() {
-            let repo = self.groups[entry.group].name.as_str();
-            if self.grouped && heading != Some(repo) {
+            if self.grouped && heading != Some(entry.group) {
                 if heading.is_some() {
                     out.push('\n');
                 }
-                let _ = writeln!(out, "{}", repo.bold());
-                heading = Some(repo);
+                let _ = writeln!(out, "{}", self.groups[entry.group].name.as_str().bold());
+                heading = Some(entry.group);
             }
 
             let is_current = self.current == Some(index);
@@ -447,6 +482,47 @@ fn child_repo_dirs(dir: &Path) -> Vec<PathBuf> {
         .collect();
     children.sort();
     children
+}
+
+/// Gives every repository of the family a name that reaches it alone.
+///
+/// A repository is normally known by the directory name of its main worktree:
+/// short, and what the user already sees on disk. A parent that holds a child
+/// named after itself breaks that — one name would stand for two repositories,
+/// the listing would head both under it, and a `REPO:NAME` prefix would answer
+/// from whichever repository came first while the other stayed out of reach.
+///
+/// So each repository that shares its directory name is renamed to the path
+/// from `base` down to it — `keyboards/keyboards` rather than `keyboards` —
+/// which no other repository of the family can have, because no two of them
+/// stand in the same directory. `base` is the directory above the family's
+/// anchor, so the anchor keeps its own directory name and the child inside it
+/// is named after the way there.
+///
+/// The parts are always joined with `/`, whatever the platform writes paths
+/// with, because that is what a `REPO:NAME` target accepts.
+fn qualify_shared_names(groups: &mut [Group], base: &Path) {
+    let shared: Vec<bool> = groups
+        .iter()
+        .map(|group| {
+            groups
+                .iter()
+                .filter(|other| other.name == group.name)
+                .count()
+                > 1
+        })
+        .collect();
+
+    for (group, shared) in groups.iter_mut().zip(shared) {
+        if shared {
+            let path = group.dir.strip_prefix(base).unwrap_or(&group.dir);
+            group.name = path
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+        }
+    }
 }
 
 /// Turns the matches found in one tier into an answer. More than one match is
@@ -510,6 +586,7 @@ impl Roll {
                 .and_then(|name| name.to_str())
                 .unwrap_or("<unknown>")
                 .to_string(),
+            dir: repo.main.clone(),
             rank: rank::OTHER,
             // Filled in below if the main worktree is among the entries. A bare
             // repository with linked worktrees is listed without a HEAD, so it
@@ -561,6 +638,25 @@ mod tests {
     /// Each entry is `(repository, path, branch)`. Repositories are ranked the
     /// way `discover` ranks them: the first repository named is the anchor, and
     /// the one holding the current worktree is home.
+    ///
+    /// Repositories are keyed by name here, so a family whose repositories
+    /// share one has to be built without this helper.
+    /// One worktree at `path`, with `branch` checked out.
+    fn worktree(path: &str, branch: &str) -> Worktree {
+        detachable_worktree(path, Some(branch))
+    }
+
+    /// The same, for a worktree that has to be detached.
+    ///
+    /// Pass `None` as the branch for a detached HEAD.
+    fn detachable_worktree(path: &str, branch: Option<&str>) -> Worktree {
+        Worktree {
+            path: PathBuf::from(path),
+            head: "abc1234567890".to_string(),
+            branch: branch.map(str::to_string),
+        }
+    }
+
     fn family(entries: Vec<(&str, &str, &str)>, grouped: bool, current: Option<usize>) -> Family {
         let entries = entries
             .into_iter()
@@ -588,6 +684,7 @@ mod tests {
                     .unwrap_or_else(|| {
                         groups.push(Group {
                             name: repo.to_string(),
+                            dir: PathBuf::from(path),
                             rank: rank::OTHER,
                             // The first worktree named for a repository stands
                             // in for its main worktree.
@@ -597,11 +694,7 @@ mod tests {
                     });
                 Entry {
                     group,
-                    worktree: Worktree {
-                        path: PathBuf::from(path),
-                        head: "abc1234567890".to_string(),
-                        branch: branch.map(str::to_string),
-                    },
+                    worktree: detachable_worktree(path, branch),
                 }
             })
             .collect();
@@ -1019,14 +1112,39 @@ mod tests {
 
     #[test]
     fn a_prefix_two_repositories_answer_to_is_refused() {
-        // `discover` gives every repository a name of its own, so this shape
-        // should never reach `find`. If one ever does, the answer is to report
-        // both repositories, never to hand back whichever was found first.
-        let two = family(
-            vec![("dup", "/one", "first"), ("dup", "/two", "second")],
-            true,
-            None,
-        );
+        // `qualify_shared_names` gives every repository a name of its own, so a
+        // family this shape should never reach `find`. If one ever does, the
+        // answer is to report both repositories, never to hand back whichever
+        // was found first.
+        let two = Family {
+            entries: vec![
+                Entry {
+                    group: 0,
+                    worktree: worktree("/one", "first"),
+                },
+                Entry {
+                    group: 1,
+                    worktree: worktree("/two", "second"),
+                },
+            ],
+            groups: vec![
+                Group {
+                    name: "dup".to_string(),
+                    dir: PathBuf::from("/one"),
+                    rank: rank::ANCHOR,
+                    main: Some(0),
+                },
+                Group {
+                    name: "dup".to_string(),
+                    dir: PathBuf::from("/two"),
+                    rank: rank::OTHER,
+                    main: Some(1),
+                },
+            ],
+            grouped: true,
+            current: None,
+            warnings: Vec::new(),
+        };
         match two.find("dup:") {
             WorktreeMatch::Multiple(indices) => assert_eq!(indices, vec![0, 1]),
             other => panic!("Expected Multiple, got {other:?}"),

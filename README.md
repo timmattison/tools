@@ -1450,6 +1450,24 @@ cwt zmk-config-corne:master    # that repository's master
 cwt zmk:                       # that repository's main worktree
 ```
 
+Every name `cwt` prints can be typed straight back, so two repositories of one family
+cannot be left sharing a name — not even the parent and a child named after it. The
+child is listed, and typed, as the path that leads to it:
+
+```bash
+cd keyboards && cwt
+# keyboards
+# >   /code/keyboards                              [main]
+#
+# keyboards/keyboards
+#     /code/keyboards/keyboards                    [main]
+#     /code/keyboards/keyboards-worktrees/inner    [inner]
+
+cwt keyboards:                 # the parent
+cwt keyboards/keyboards:       # the child checked out inside it
+cwt keyboards/keyboards:inner  # a worktree of that child
+```
+
 #### Staying in one repository
 
 `--no-family` confines the listing, the cycling, and the name search to the repository

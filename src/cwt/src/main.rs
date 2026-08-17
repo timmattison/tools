@@ -120,6 +120,11 @@ struct Cli {
     /// Prefix a repository name to search one repository of the family, for
     /// example `REPO:feature-x`. Part of the name is enough, and a bare `REPO:`
     /// selects that repository's main worktree.
+    ///
+    /// A repository whose directory name belongs to another repository of the
+    /// family — a parent that holds a child named after itself — is named by
+    /// the path that leads to it instead, the way the listing heads it:
+    /// `PARENT/REPO:feature-x`.
     #[arg(conflicts_with_all = ["forward", "prev", "main", "shell_setup"], verbatim_doc_comment)]
     target: Option<String>,
 
