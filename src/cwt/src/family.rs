@@ -8,8 +8,8 @@
 //!
 //! The family is anchored at a directory: the parent repository if there is
 //! one, otherwise the repository the user stands in. Every repository directly
-//! below the anchor joins the family. The search stops there — a child of a
-//! child is that child's business.
+//! below the anchor that has a worktree joins the family. The search stops
+//! there — a child of a child is that child's business.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -55,8 +55,11 @@ struct Group {
     name: String,
     /// How near this repository is to the user. See [`rank`].
     rank: u8,
-    /// Index into the family's entries of this repository's main worktree.
-    main: usize,
+    /// Index into the family's entries of this repository's main worktree, or
+    /// `None` when the repository lists worktrees but not that one — a bare
+    /// repository with linked worktrees is reported without a HEAD, so it never
+    /// appears among the entries it owns.
+    main: Option<usize>,
 }
 
 /// One worktree, and the repository it belongs to.
@@ -79,7 +82,7 @@ pub struct Family {
     grouped: bool,
     /// The entry the user is standing in.
     current: Option<usize>,
-    /// Repositories that could not be read, for the caller to report.
+    /// Repositories left out of the family, for the caller to report.
     warnings: Vec<String>,
 }
 
@@ -88,11 +91,14 @@ impl Family {
     ///
     /// With `scan_children` off, the family is just that repository — the
     /// behavior of `cwt` before families existed.
+    ///
+    /// A repository the scan reaches but cannot use — one that will not be
+    /// read, or one that lists no worktree of its own — is left out of the
+    /// family and named in [`warnings`](Self::warnings) instead.
     pub fn discover(repo_root: &Path, scan_children: bool) -> Result<Self, String> {
         let own = list_worktrees(repo_root)?;
 
         let mut roll = Roll::default();
-        let mut warnings = Vec::new();
 
         if scan_children {
             let anchor_dir = anchor_of(&own.main);
@@ -107,13 +113,13 @@ impl Family {
             };
             match anchor {
                 Ok(repo) => roll.claim(&repo),
-                Err(e) => warnings.push(format!("{}: {e}", anchor_dir.display())),
+                Err(e) => roll.skip(&anchor_dir, &e),
             }
 
             for child in child_repo_dirs(&anchor_dir) {
                 match list_worktrees(&child) {
                     Ok(repo) => roll.claim(&repo),
-                    Err(e) => warnings.push(format!("{}: {e}", child.display())),
+                    Err(e) => roll.skip(&child, &e),
                 }
             }
         }
@@ -127,6 +133,7 @@ impl Family {
         let Roll {
             entries,
             mut groups,
+            warnings,
             ..
         } = roll;
         let current = find_current(&entries, repo_root);
@@ -156,7 +163,7 @@ impl Family {
         self.entries.is_empty()
     }
 
-    /// Repositories that could not be read.
+    /// Repositories the scan reached but left out of the family, and why.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -269,7 +276,8 @@ impl Family {
     ///
     /// An empty `name` selects that repository's main worktree, so `child-b:`
     /// reaches child-b even when another repository holds the better match for
-    /// every name child-b has.
+    /// every name child-b has. A repository whose main worktree is not among the
+    /// entries has nothing to offer a bare prefix and is passed over.
     fn find_in_repo(&self, repo: &str, name: &str) -> WorktreeMatch {
         if repo.is_empty() {
             return WorktreeMatch::None;
@@ -284,7 +292,7 @@ impl Family {
             return decide(
                 groups
                     .iter()
-                    .map(|&group| self.groups[group].main)
+                    .filter_map(|&group| self.groups[group].main)
                     .collect(),
             );
         }
@@ -460,7 +468,12 @@ struct Roll {
     groups: Vec<Group>,
     /// The main worktree of every repository already claimed.
     claimed: Vec<PathBuf>,
+    /// The repositories left out, and why.
+    warnings: Vec<String>,
 }
+
+/// What a repository that lists no worktree is told to the user as.
+const NO_WORKTREES: &str = "no worktrees to list";
 
 impl Roll {
     /// Adds a repository's worktrees to the family, unless another repository
@@ -469,12 +482,24 @@ impl Roll {
     /// A repository is claimed by its main worktree, so a directory that is
     /// really a linked worktree of a repository already in the family adds
     /// nothing new.
+    ///
+    /// A repository that lists no worktree at all does not become a group. A
+    /// bare repository is the case that reaches here: `git worktree list`
+    /// reports it without a HEAD, so it owns no entry a group could point at,
+    /// and a group with nothing behind it can only answer for its neighbors.
+    /// It goes to the warnings instead, so the user is told why a directory
+    /// they can see is missing from the listing.
     fn claim(&mut self, repo: &RepoWorktrees) {
         let key = canonical(&repo.main);
         if self.claimed.iter().any(|seen| paths_equal(seen, &key)) {
             return;
         }
         self.claimed.push(key);
+
+        if repo.all.is_empty() {
+            self.skip(&repo.main, NO_WORKTREES);
+            return;
+        }
 
         let group = self.groups.len();
         let first = self.entries.len();
@@ -486,9 +511,10 @@ impl Roll {
                 .unwrap_or("<unknown>")
                 .to_string(),
             rank: rank::OTHER,
-            // Corrected below once the entries are in place. A repository always
-            // has a main worktree, so the fallback only survives an empty list.
-            main: first,
+            // Filled in below if the main worktree is among the entries. A bare
+            // repository with linked worktrees is listed without a HEAD, so it
+            // contributes worktrees without contributing its own.
+            main: None,
         });
 
         for worktree in &repo.all {
@@ -502,8 +528,13 @@ impl Roll {
             .iter()
             .position(|entry| paths_equal(&entry.worktree.path, &repo.main))
         {
-            self.groups[group].main = first + index;
+            self.groups[group].main = Some(first + index);
         }
+    }
+
+    /// Records a repository that the scan reached but the family left out.
+    fn skip(&mut self, dir: &Path, reason: &str) {
+        self.warnings.push(format!("{}: {reason}", dir.display()));
     }
 }
 
@@ -560,7 +591,7 @@ mod tests {
                             rank: rank::OTHER,
                             // The first worktree named for a repository stands
                             // in for its main worktree.
-                            main: next,
+                            main: Some(next),
                         });
                         groups.len() - 1
                     });
@@ -1010,7 +1041,7 @@ mod tests {
             Some(0),
         );
         // The child's main worktree sorts after one of its linked worktrees.
-        two.groups[1].main = 2;
+        two.groups[1].main = Some(2);
         assert!(matches!(two.find("child:"), WorktreeMatch::Single(2)));
     }
 

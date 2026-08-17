@@ -1408,6 +1408,15 @@ The family is the same from anywhere inside it, so `cwt` gets you out of a child
 repository as easily as it gets you in. Only one level is scanned: a child of a child
 is that child's business.
 
+A directory that looks like a repository but has no worktree to offer — a bare
+repository, which git lists without a HEAD — cannot join the family, because there is
+nothing there to change into. `cwt` leaves it out of the listing and says so on
+standard error, so a directory you can see is never missing without a reason:
+
+```text
+Warning: skipped /code/keyboards/archive: no worktrees to list
+```
+
 #### Which repository answers a name
 
 A name is offered to each repository in turn, nearest first:
