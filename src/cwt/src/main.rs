@@ -129,6 +129,12 @@ struct Cli {
     #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "main", "target"])]
     shell_setup: bool,
 
+    /// List only the repository you are standing in, not the whole family.
+    ///
+    /// Set `CWT_NO_FAMILY` to any value other than 0 to make this the default.
+    #[arg(long, verbatim_doc_comment, conflicts_with = "shell_setup")]
+    no_family: bool,
+
     /// Suppress error messages.
     #[arg(short, long)]
     quiet: bool,
@@ -158,6 +164,19 @@ fn quoted_branch_alternatives(names: &[&str]) -> String {
         .map(|name| format!("'{name}'"))
         .collect::<Vec<_>>()
         .join(" or ")
+}
+
+/// The environment variable that makes `--no-family` the default.
+const NO_FAMILY_ENV: &str = "CWT_NO_FAMILY";
+
+/// True when the environment asks `cwt` to stay inside one repository.
+///
+/// An unset or empty variable is not a choice, and `0` is the choice not to.
+fn no_family_in_env() -> bool {
+    match std::env::var(NO_FAMILY_ENV) {
+        Ok(value) => !value.is_empty() && value != "0",
+        Err(_) => false,
+    }
 }
 
 /// The shell code to add to shell config files.
@@ -219,7 +238,8 @@ fn main() {
     };
 
     // Collect the family: this repository, and any repository beside it
-    let family = match Family::discover(&repo_root, true) {
+    let scan_children = !cli.no_family && !no_family_in_env();
+    let family = match Family::discover(&repo_root, scan_children) {
         Ok(family) => family,
         Err(e) => {
             error!(cli.quiet, "Error getting worktrees: {}", e);

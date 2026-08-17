@@ -28,7 +28,10 @@ fn no_family_lists_only_the_repository_the_user_is_in() {
 #[test]
 fn no_family_confines_cycling_to_one_repository() {
     let family = Family::build();
-    let output = cwt(&family.at("family-worktrees/feature"), &["-f", "--no-family"]);
+    let output = cwt(
+        &family.at("family-worktrees/feature"),
+        &["-f", "--no-family"],
+    );
 
     assert_eq!(code(&output), 0, "cwt -f --no-family failed");
     assert_eq!(
@@ -49,7 +52,11 @@ fn no_family_cannot_reach_a_child_repository() {
         "beta belongs to a child repository, which is out of scope: {}",
         combined(&output)
     );
-    assert_eq!(stdout(&output), "", "a name that is not found prints no path");
+    assert_eq!(
+        stdout(&output),
+        "",
+        "a name that is not found prints no path"
+    );
 }
 
 #[test]
