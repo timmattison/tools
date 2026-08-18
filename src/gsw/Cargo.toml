@@ -25,6 +25,7 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+testcolor.workspace = true
 
 [lints]
 workspace = true

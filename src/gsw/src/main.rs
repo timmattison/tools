@@ -25,7 +25,6 @@ mod snapshot;
 /// module that needs real ANSI bytes. Test-only: the shipped binary never
 /// forces the override.
 #[cfg(test)]
-mod testcolor;
 /// Shared git fixtures for the unit tests. Test-only: it shells out to `git` to
 /// build throwaway repositories, which the shipped binary never does.
 #[cfg(test)]

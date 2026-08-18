@@ -1194,69 +1194,11 @@ pub fn plan_section_caps(
     (file_share, log_share)
 }
 
-/// Drop ANSI escape sequences so tests can match on the visible glyphs.
-///
-/// Handles the two common forms:
-///   - CSI sequences: `ESC [ <params…> <final>` where `<final>` is 0x40–0x7E.
-///   - Fe sequences:  `ESC <byte>` (single byte after ESC that isn't `[`).
-///
-/// This is intentionally conservative — it only skips escape sequences,
-/// never ordinary text.
-///
-/// Shared crate-wide rather than kept private to this module's tests: whether a
-/// frame carries color at all is decided by `colored`'s *process-global*
-/// override, which the parallel test runner leaves in whichever state some other
-/// test last put it. Any test that asserts on rendered text — here, or in
-/// [`crate::watch`] where a walk's snapshot is rendered into a header line — has
-/// to compare visible glyphs rather than bytes, so they compare them through one
-/// stripper instead of each shipping its own subtly different one.
-#[cfg(test)]
-pub(crate) fn strip_ansi(s: &str) -> String {
-    #[derive(PartialEq)]
-    enum State {
-        Normal,
-        AfterEsc,
-        InCsi,
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut state = State::Normal;
-    for c in s.chars() {
-        match state {
-            State::Normal => {
-                if c == '\x1b' {
-                    state = State::AfterEsc;
-                } else {
-                    out.push(c);
-                }
-            }
-            State::AfterEsc => {
-                if c == '[' {
-                    // CSI introducer — consume parameters until the final byte.
-                    state = State::InCsi;
-                } else {
-                    // Fe-style single-byte escape (e.g. ESC M, ESC =).
-                    // The byte itself is the final byte; swallow it and resume.
-                    state = State::Normal;
-                }
-            }
-            State::InCsi => {
-                // Parameter bytes: 0x30–0x3F. Intermediate bytes: 0x20–0x2F.
-                // Final byte: 0x40–0x7E — terminates the sequence.
-                if (0x40..=0x7E).contains(&(c as u32)) {
-                    state = State::Normal;
-                }
-                // In all cases, keep consuming (don't push to output).
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use crate::testcolor::{self, max_red_channel, TRUECOLOR_FG};
+    use testcolor::{max_red_channel, strip_ansi, TRUECOLOR_FG};
 
     fn opts() -> RenderOptions {
         RenderOptions {
