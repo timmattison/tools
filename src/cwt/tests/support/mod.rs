@@ -336,6 +336,17 @@ impl Nest {
         self.root.join(relative)
     }
 
+    /// Create a plain directory inside the nest, and every directory above it.
+    ///
+    /// A user stands anywhere inside a worktree, not only at its root, and
+    /// `--main` has to answer for both places. This is where a test puts a
+    /// directory below one, so that it can run `cwt` from there.
+    pub fn deepen(&self, relative: &str) -> PathBuf {
+        let path = self.at(relative);
+        std::fs::create_dir_all(&path).expect("failed to create a directory inside the nest");
+        path
+    }
+
     /// The path of a worktree as a string, for comparison with `cwt` output.
     pub fn path_of(&self, relative: &str) -> String {
         self.at(relative).display().to_string()

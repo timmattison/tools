@@ -54,6 +54,43 @@ fn a_feature_worktree_still_reaches_its_own_main_worktree() {
 }
 
 #[test]
+fn a_subdirectory_of_the_main_worktree_still_reaches_the_top_of_it() {
+    // The first press of wtm, from where a developer normally stands: inside
+    // the main worktree, below its root. That is a request to go to the top of
+    // the worktree, not out of the repository. Only the root itself climbs.
+    let nest = Nest::build();
+    let inside = "top/middle/leaf/src/deep";
+    nest.deepen(inside);
+
+    assert_goes_to(&nest, inside, &["--main"], "top/middle/leaf");
+}
+
+#[test]
+fn a_subdirectory_of_the_topmost_repository_still_reaches_the_top_of_it() {
+    // The same press in the repository the climb has nothing above. Standing
+    // below its root must take the user to it, never report that no repository
+    // holds it: the user asked to go to the top of their worktree and there is
+    // one to go to.
+    let nest = Nest::build();
+    let inside = "top/src/deep";
+    nest.deepen(inside);
+
+    assert_goes_to(&nest, inside, &["--main"], "top");
+}
+
+#[test]
+fn a_subdirectory_of_a_feature_worktree_still_reaches_its_own_main_worktree() {
+    // The case the fix must leave alone. A linked worktree already answered
+    // with its repository's main worktree from its root, and standing below
+    // that root changes nothing.
+    let nest = Nest::build();
+    let inside = "top/middle/leaf-worktrees/feature/src/deep";
+    nest.deepen(inside);
+
+    assert_goes_to(&nest, inside, &["--main"], "top/middle/leaf");
+}
+
+#[test]
 fn the_main_worktree_climbs_to_the_repository_that_holds_it() {
     // The second press. leaf is a repository inside middle, so middle answers.
     // middle is on master, which proves the climb ranks branches the way the
