@@ -20,10 +20,10 @@
 //! **every target of the package**. A crate-root attribute applies to **one
 //! target** — the single file that is that target's root. Moving lints out of
 //! the manifest to satisfy the inheritance guard therefore hands the library
-//! and binary a stricter lint set while the integration tests, benches, and
-//! examples of the same crate quietly keep the workspace default. Nothing warns.
-//! The exemption is spelled as an *absence*, which is why it is invisible and
-//! why it spreads.
+//! and binary a stricter lint set while the integration tests, benches,
+//! examples, and build script of the same crate quietly keep the workspace
+//! default. Nothing warns. The exemption is spelled as an *absence*, which is
+//! why it is invisible and why it spreads.
 //!
 //! # The rule
 //!
@@ -33,10 +33,25 @@
 //!    `forbid`, or `warn` — by inner attributes at the roots of its **library
 //!    and binary** targets. Those are the targets that define what the crate
 //!    holds itself to.
-//! 2. Every target root of that crate — library, binary, test, bench, example —
-//!    must **mention** every baseline lint in some inner lint attribute:
-//!    `deny`, `forbid`, `warn`, `allow`, or `expect`.
+//! 2. Every target root of that crate — library, binary, test, bench, example,
+//!    build script — must **mention** every baseline lint in some inner lint
+//!    attribute: `deny`, `forbid`, `warn`, `allow`, or `expect`.
 //! 3. **Silence is the only violation.**
+//!
+//! # Why a build script mentions but never raises
+//!
+//! `build.rs` is a target cargo compiles and lints like any other, and it is
+//! the target the manifest-to-crate-root migration strands most quietly:
+//! verified on cargo 1.97.1, `[lints.rust] unsafe_code = "deny"` in the
+//! manifest makes an unsafe block in `build.rs` a compile error, while the same
+//! lint written `#![deny(unsafe_code)]` in `src/lib.rs` lets it through. So it
+//! owes the baseline an answer, by rule 2, like every other root.
+//!
+//! It does not *raise*, by rule 1, because nothing links it. A build script is
+//! compiled for the build machine, run once, and never becomes part of the
+//! crate — so a lint it alone raises is a position that one target holds, not
+//! one the crate holds. Were it to raise, a strict build script would go red
+//! across a library and test suite that never asked for the lint.
 //!
 //! # Why "mention", not "match the level"
 //!
@@ -148,12 +163,19 @@ const MAX_CFG_ATTR_DEPTH: usize = 16;
 /// [`AutoDiscoveryOverride`](TargetLintsError::AutoDiscoveryOverride).
 const AUTO_DISCOVERY_KEYS: [&str; 4] = ["autobenches", "autobins", "autoexamples", "autotests"];
 
+/// The manifest table those keys — and `build` — live in.
+const PACKAGE: &str = "package";
+
 /// Rust source extension, used when auto-discovering target roots.
 const RS: &str = "rs";
 
 /// The conventional entry point of a directory-shaped target
 /// (`tests/foo/main.rs`).
 const MAIN_RS: &str = "main.rs";
+
+/// The conventional build script, relative to the member directory. Also what
+/// `build = true` names.
+const BUILD_RS: &str = "build.rs";
 
 /// Everything that can stop the audit from reaching a verdict.
 ///
@@ -205,7 +227,8 @@ pub enum TargetLintsError {
         source: io::Error,
     },
 
-    /// A manifest declares a target `path` that is not on disk.
+    /// A manifest declares a target that is not on disk: a `path` under
+    /// `[lib]`/`[[bin]]`/`[[test]]`/…, or the `build` key naming a build script.
     #[error(
         "{} declares a {kind} target at `{declared}`, which does not exist; \
          a target this guard cannot open is a target it cannot vouch for",
@@ -214,9 +237,11 @@ pub enum TargetLintsError {
     MissingDeclaredTarget {
         /// The manifest carrying the declaration.
         manifest: PathBuf,
-        /// Which kind of target declared it: `lib`, `bin`, `test`, …
+        /// Which kind of target declared it: `lib`, `bin`, `test`, `build`, …
         kind: &'static str,
-        /// The `path` value, exactly as written in the manifest.
+        /// The declared path. Written verbatim as it appears in the manifest,
+        /// except for `build = true`, which is rendered as the `build.rs` it
+        /// names.
         declared: String,
     },
 
@@ -279,7 +304,7 @@ impl Offender {
     }
 
     /// Which kind of target this root is: `library`, `binary`, `test`, `bench`,
-    /// or `example`.
+    /// `example`, or `build script`.
     #[must_use]
     pub fn kind(&self) -> &'static str {
         self.kind
@@ -409,7 +434,7 @@ impl fmt::Display for Report {
 ///
 /// The distinction that matters is [`raises_baseline`](TargetKind::raises_baseline):
 /// libraries and binaries *define* what a crate holds itself to; tests, benches,
-/// and examples only have to answer.
+/// examples, and build scripts only have to answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetKind {
     Lib,
@@ -417,6 +442,7 @@ enum TargetKind {
     Test,
     Bench,
     Example,
+    Build,
 }
 
 impl TargetKind {
@@ -428,6 +454,7 @@ impl TargetKind {
             Self::Test => "test",
             Self::Bench => "bench",
             Self::Example => "example",
+            Self::Build => "build",
         }
     }
 
@@ -439,10 +466,17 @@ impl TargetKind {
             Self::Test => "test",
             Self::Bench => "bench",
             Self::Example => "example",
+            Self::Build => "build script",
         }
     }
 
     /// True for the targets whose raised lints form the crate's baseline.
+    ///
+    /// A build script is deliberately not one of them, even though it is
+    /// compiled from the crate's own source. Nothing links it: it is built for
+    /// the build machine, run once, and never becomes part of the crate. A lint
+    /// it alone raises is a position that one target holds, not one the crate
+    /// holds — so it must answer for the baseline without adding to it.
     const fn raises_baseline(self) -> bool {
         matches!(self, Self::Lib | Self::Bin)
     }
@@ -481,8 +515,11 @@ struct RootLints {
 /// - a member manifest is unreadable or not valid TOML (also
 ///   [`Members`](TargetLintsError::Members), carrying the underlying
 ///   [`WorkspaceLintsError`]);
-/// - a manifest declares a target `path` that is not on disk
+/// - a manifest declares a target — a target `path`, or a `build` script — that
+///   is not on disk
 ///   ([`MissingDeclaredTarget`](TargetLintsError::MissingDeclaredTarget));
+/// - a manifest's `build` key is neither a path nor a bool
+///   ([`MalformedBuildKey`](TargetLintsError::MalformedBuildKey));
 /// - a manifest sets `autotests`, `autobins`, `autobenches`, or `autoexamples`
 ///   ([`AutoDiscoveryOverride`](TargetLintsError::AutoDiscoveryOverride));
 /// - a directory holding target roots cannot be listed
@@ -568,6 +605,13 @@ fn relative_to(repo_root: &Path, path: &Path) -> PathBuf {
 /// directory form `<dir>/<name>/main.rs`). Discovery is deliberately depth-1:
 /// `tests/common/mod.rs` is a module a test root *includes*, not a target root,
 /// and treating it as one would invent a target cargo never builds.
+///
+/// The build script is the exception to every sentence above, because it is
+/// declared by a scalar `build` key inside `[package]` rather than by a table
+/// with a `path`: absent, it is `build.rs` if that file exists; `false`, there
+/// is none even when `build.rs` does exist; `true`, it *is* `build.rs` and the
+/// file must be there; a string, it is that path and the conventional
+/// `build.rs` is not a target at all.
 fn target_roots(
     dir: &Path,
     manifest: &Value,
@@ -575,7 +619,7 @@ fn target_roots(
 ) -> Result<Vec<TargetRoot>, TargetLintsError> {
     for key in AUTO_DISCOVERY_KEYS {
         if manifest
-            .get("package")
+            .get(PACKAGE)
             .and_then(|package| package.get(key))
             .is_some()
         {
@@ -587,6 +631,49 @@ fn target_roots(
     }
 
     let mut roots = Vec::new();
+
+    // Build script: the one target declared by a *scalar* — `build` inside
+    // `[package]`, holding a path or a bool — rather than by a table with a
+    // `path` field, so it is resolved here instead of through `declared_path`.
+    match manifest
+        .get(PACKAGE)
+        .and_then(|package| package.get(TargetKind::Build.manifest_key()))
+    {
+        // No key: the conventional root if it is there, and nothing if it is
+        // not. This is the only form where absence is not a declaration.
+        None => push_if_file(&mut roots, dir.join(BUILD_RS), TargetKind::Build),
+        // `build = false` turns the build script off. Cargo then builds no
+        // build script *even with a `build.rs` on disk*, so discovering one
+        // would invent a target and demand lints in a file cargo never reads.
+        Some(Value::Boolean(false)) => {}
+        // `build = true` names the conventional path, and cargo means it
+        // literally: with no `build.rs` it still reports the target, then fails
+        // to compile it. A declaration, not a search — so a missing file is the
+        // same refusal a typo'd `path` earns.
+        Some(Value::Boolean(true)) => roots.push(declared_root(
+            dir,
+            BUILD_RS,
+            TargetKind::Build,
+            manifest_path,
+        )?),
+        // An explicit path *replaces* the convention: cargo reports exactly one
+        // build script, at this path, and a stray `build.rs` beside it is not a
+        // target at all.
+        Some(Value::String(declared)) => roots.push(declared_root(
+            dir,
+            declared,
+            TargetKind::Build,
+            manifest_path,
+        )?),
+        // Anything else is a manifest cargo itself rejects. Falling through
+        // silently would read it as "no build script" and shrink the audit.
+        Some(other) => {
+            return Err(TargetLintsError::MalformedBuildKey {
+                manifest: manifest_path.to_path_buf(),
+                value: other.to_string(),
+            });
+        }
+    }
 
     // Library: an explicit `[lib] path` wins, otherwise the conventional root.
     match declared_path(manifest.get(TargetKind::Lib.manifest_key())) {

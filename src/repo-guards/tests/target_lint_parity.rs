@@ -12,10 +12,10 @@
 //! [`the_guard_resolves_exactly_the_roots_cargo_builds`] checks the prior
 //! question, which a verdict cannot: whether the guard found every root there
 //! is. It asks `cargo metadata` rather than trusting the guard's hand-written
-//! model of cargo's discovery rules, and it **fails today by design** —
+//! model of cargo's discovery rules. It was red the day it landed —
 //! `src/buildinfo/build.rs` is a target cargo builds and lints that the guard
-//! has never enumerated. That red is a real gap the guardrail caught; the
-//! commit after this one closes it.
+//! had never enumerated — and the commit that followed taught the guard about
+//! build scripts and cleared it.
 //!
 //! Every other test is a mutation test. A guard that cannot fail is worse than
 //! no guard, because "clean" and "I never looked" print identically. So each
@@ -180,16 +180,18 @@ fn every_target_root_declares_a_position_on_its_crate_lints() {
 ///
 /// Two review findings are why this test exists, and they are one defect twice:
 ///
-/// - **Build scripts are never enumerated.** `build.rs` is a target cargo
+/// - **Build scripts were never enumerated.** `build.rs` is a target cargo
 ///   compiles and lints. Verified on cargo 1.97.1: a manifest
 ///   `[lints.rust] unsafe_code = "deny"` makes an unsafe block in `build.rs` a
 ///   compile error, while the same lint written `#![deny(unsafe_code)]` in
 ///   `src/lib.rs` lets it through. So a build script loses its lints in exactly
 ///   the manifest-to-crate-root migration this guard was written to police, and
-///   the guard calls the crate clean. `src/buildinfo/build.rs` is this
-///   workspace's only build script, and it is why this test is **red the day it
-///   lands** — a real occurrence, flagged by the guardrail rather than by a
-///   reviewer.
+///   the guard called the crate clean. `src/buildinfo/build.rs` is this
+///   workspace's only build script, and it is why this test was **red the day
+///   it landed** — a real occurrence, flagged by the guardrail rather than by a
+///   reviewer. The next commit added `TargetKind::Build`; the build-script
+///   fixtures further down pin the behavior, and this test pins that the fix
+///   matches what cargo actually reports.
 /// - **`AUTO_DISCOVERY_KEYS` lists four of cargo's five keys**, omitting
 ///   `autolib`. No manifest here sets it today, so this test is silent on that
 ///   half for now; the moment one does, the guard enumerates a library root

@@ -281,7 +281,9 @@ So a crate that wants lints stricter than the workspace set declares them as cra
 
 **A manifest `[lints]` table applies to every target of the package. A crate-root attribute applies only to the target whose root file carries it.**
 
-So `#![deny(unsafe_code)]` in `src/main.rs` does nothing for `tests/`, `benches/`, or `examples/` — and nothing for `src/lib.rs` either, in a crate that has both. **The attributes must be repeated in every target root.**
+So `#![deny(unsafe_code)]` in `src/main.rs` does nothing for `tests/`, `benches/`, `examples/`, or `build.rs` — and nothing for `src/lib.rs` either, in a crate that has both. **The attributes must be repeated in every target root.**
+
+A build script is the easiest one to forget, because nothing about it looks like a target. It is one: with `[lints.rust] unsafe_code = "deny"` in the manifest, an unsafe block in `build.rs` fails the build; move that lint to `#![deny(unsafe_code)]` in `src/lib.rs` and the same `build.rs` compiles clean. So `build.rs` must state a position like every other root — but a lint *it* raises never binds its siblings, since nothing links a build script into the crate.
 
 This is not hypothetical. `cwt`'s integration tests silently lost `unsafe_code` and `clippy::pedantic` when its manifest `[lints]` table was converted to a crate-root attribute. Nothing warned; the lints simply stopped applying there. `src/cwt/tests/main-worktree.rs` now repeats them:
 
@@ -304,7 +306,7 @@ A target that legitimately needs a lint relaxed says so at the site, with a reas
 ### Guards Enforcing This
 
 - `repo_guards::workspace_lints` (`src/repo-guards/src/workspace_lints.rs`) - every workspace member manifest declares `[lints]` / `workspace = true`
-- `repo_guards::target_lints` (`src/repo-guards/src/target_lints.rs`) - every target root declares a position on each lint its crate's lib/bin roots raise
+- `repo_guards::target_lints` (`src/repo-guards/src/target_lints.rs`) - every target root — library, binary, test, bench, example, build script - declares a position on each lint its crate's lib/bin roots raise. Its companion test asks `cargo metadata` whether that set of roots is the set cargo actually builds, so a target kind the guard never learned about shows up as a set difference instead of a clean report
 
 ## UTF-8 String Safety
 
