@@ -3,10 +3,7 @@
 //! own, and every name `cwt` prints has to select the worktree it was printed
 //! for.
 
-// These mirror the crate-root attributes in src/main.rs. A crate-root attribute
-// reaches only its own target, so the binary raising them does nothing for this
-// test target; repeating them here is what keeps the whole crate under one lint
-// set now that they no longer live in a manifest `[lints]` table.
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
