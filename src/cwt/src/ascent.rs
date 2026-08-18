@@ -1,9 +1,9 @@
 //! The main worktree, and the ladder of them above the one the user stands in.
 //!
-//! `wtm` means "take me to my main worktree". A user who already stands in it
-//! has asked for the next thing up: the repository that holds theirs. This
-//! module owns both halves of that question — which branch names a main
-//! worktree, and how to climb out of one.
+//! `wtm` means "take me to my main worktree". A user whose directory already
+//! is that worktree has asked for the next thing up: the repository that holds
+//! theirs. This module owns both halves of that question — which branch names a
+//! main worktree, and how to climb out of one.
 
 use std::path::{Path, PathBuf};
 

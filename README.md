@@ -1376,15 +1376,26 @@ with code 3.
 
 #### Pressing it again climbs out
 
-When you already stand in the main worktree, you have asked to go up. So the next `wtm`
-takes you to the main worktree of the repository that **holds** yours, and the one after
-that goes up again, for as deep as the repositories are nested:
+When the directory you are in **is** the main worktree, you have asked to go up. So the
+next `wtm` takes you to the main worktree of the repository that **holds** yours, and the
+one after that goes up again, for as deep as the repositories are nested:
 
 ```bash
 cd keyboards/zmk-config-corne-worktrees/guard-the-commit-hashes-in-prose
 wtm   # -> keyboards/zmk-config-corne        the repository's own main worktree
 wtm   # -> keyboards                         the repository that holds it
 wtm   # Error: No repository above /code/keyboards has a main worktree
+```
+
+It is the directory you stand in that decides, not the worktree that holds you. From a
+subdirectory of the main worktree — `zmk-config-corne/config`, say — `wtm` takes you to the
+top of it, exactly as it does from a subdirectory of any other worktree. Only the top of
+the main worktree has anywhere left to go, so that is the only place the climb starts:
+
+```bash
+cd keyboards/zmk-config-corne/config
+wtm   # -> keyboards/zmk-config-corne        the top of the worktree you are in
+wtm   # -> keyboards                         now the climb starts
 ```
 
 The climb is measured from where your repository **sits on disk** — its own main worktree —
@@ -1534,7 +1545,7 @@ function wt() {
 # Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
-alias wtm='wt --main'  # Main worktree, or a level up when you are in it
+alias wtm='wt --main'  # Main worktree, or a level up when you are at its root
 ```
 
 #### Fish (~/.config/fish/config.fish)
@@ -1554,7 +1565,7 @@ end
 # Quick navigation aliases
 alias wtf 'wt -f'  # Next worktree
 alias wtb 'wt -p'  # Previous worktree (back)
-alias wtm 'wt --main'  # Main worktree, or a level up when you are in it
+alias wtm 'wt --main'  # Main worktree, or a level up when you are at its root
 ```
 
 ### Examples
@@ -1578,7 +1589,7 @@ Jump to specific worktree:
 wt main           # By branch name
 wt absurd-rock    # By directory name
 wt vial-qmk:vial  # By repository and branch name
-wtm               # The main worktree, or a level up when you are in it
+wtm               # The main worktree, or a level up when you are at its root
 ```
 
 ### Exit Codes

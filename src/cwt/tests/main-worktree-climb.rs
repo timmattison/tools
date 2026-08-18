@@ -1,10 +1,15 @@
-//! What `--main` does when the user already stands in the main worktree.
+//! What `--main` does when the user's directory is the main worktree itself.
 //!
 //! `family-main-worktree.rs` proves which repository answers the first press of
 //! `wtm`: the one the user stands in. These tests prove what the next press
-//! does. A user who is already in their main worktree has asked to go up, so
-//! `--main` climbs to the repository that holds theirs and takes its main
+//! does. A user standing at the top of their main worktree has asked to go up,
+//! so `--main` climbs to the repository that holds theirs and takes its main
 //! worktree, and repeats that for as deep as the nest goes.
+//!
+//! Standing *inside* the main worktree is not standing at it. From a
+//! subdirectory the answer is still the top of that worktree, which is why the
+//! directory the user is in — not the worktree that holds them — is what fires
+//! the climb.
 //!
 //! The climb starts at the main worktree of the user's repository, never at the
 //! worktree they stand in. That is what keeps the first press of `wtm` in a

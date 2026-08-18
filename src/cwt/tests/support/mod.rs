@@ -269,8 +269,8 @@ pub fn add_worktree(repo: &Path, relative: &str, branch: &str) {
 }
 
 /// A nest of repositories: repositories checked out inside repositories, three
-/// levels deep, for the climb `--main` makes when the user already stands in a
-/// main worktree.
+/// levels deep, for the climb `--main` makes when the user's directory is a
+/// main worktree itself.
 ///
 /// ```text
 /// root/

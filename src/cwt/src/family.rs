@@ -32,9 +32,9 @@ pub enum MainTarget {
     /// The repository the user stands in has no worktree on a main branch, so
     /// it has no main worktree to offer.
     NoMainBranch,
-    /// The user already stands in the main worktree, and no repository above
-    /// the one named here has a main worktree either. The path is where that
-    /// repository sits on disk, which is what the climb started from.
+    /// The user's directory is the main worktree itself, and no repository
+    /// above the one named here has a main worktree either. The path is where
+    /// that repository sits on disk, which is what the climb started from.
     AtTheTop(PathBuf),
 }
 
@@ -217,13 +217,23 @@ impl Family {
         })
     }
 
-    /// Where `--main` sends the user.
+    /// Where `--main` sends the user, standing in `cwd`.
     ///
     /// The first answer is the main worktree of the repository the user stands
-    /// in, which [`own_main_worktree`] finds. When the user already stands in
-    /// that worktree, they have asked to go up instead, so the answer becomes
-    /// the main worktree of the repository that holds theirs — see [`climb`],
-    /// which repeats for as deep as the repositories are nested.
+    /// in, which [`own_main_worktree`] finds. That answer holds from anywhere
+    /// inside the repository, a subdirectory of the main worktree included: a
+    /// user below a worktree root asked to be taken to the top of it.
+    ///
+    /// Only a user whose directory *is* the main worktree has asked to go up,
+    /// so the answer becomes the main worktree of the repository that holds
+    /// theirs — see [`climb`], which repeats for as deep as the repositories
+    /// are nested.
+    ///
+    /// That is why `cwd` is asked for rather than the worktree the user is in:
+    /// the whole subtree of the main worktree is "in" it, and the climb belongs
+    /// to one directory of that subtree. A `cwd` that is no worktree — the
+    /// empty path the caller passes when the current directory cannot be read —
+    /// therefore never climbs, and `--main` keeps the meaning it has always had.
     ///
     /// The climb starts at the main worktree of the user's repository, never at
     /// the worktree they stand in. A repository sits on disk where its main
@@ -231,13 +241,14 @@ impl Family {
     /// measured from.
     ///
     /// [`own_main_worktree`]: Family::own_main_worktree
-    pub fn main_worktree(&self) -> MainTarget {
+    pub fn main_worktree(&self, cwd: &Path) -> MainTarget {
         let Some(index) = self.own_main_worktree() else {
             return MainTarget::NoMainBranch;
         };
 
-        if Some(index) != self.current {
-            return MainTarget::Worktree(self.entries[index].worktree.path.clone());
+        let main = self.entries[index].worktree.path.clone();
+        if Some(index) != self.current || !paths_equal(&canonical(cwd), &canonical(&main)) {
+            return MainTarget::Worktree(main);
         }
 
         let home = self.groups[self.entries[index].group].dir.clone();
@@ -903,6 +914,31 @@ mod tests {
             Some(3),
         );
         assert_eq!(whole.own_main_worktree(), Some(2));
+    }
+
+    #[test]
+    fn main_worktree_answers_with_the_main_worktree_from_below_its_root() {
+        // The user is inside the main worktree, not at it. `--main` means "take
+        // me to the top of this worktree" from there, and never a climb out of
+        // the repository.
+        let one = family(vec![("solo", "/repo", "main")], false, Some(0));
+        match one.main_worktree(Path::new("/repo/src/deep")) {
+            MainTarget::Worktree(path) => assert_eq!(path, PathBuf::from("/repo")),
+            other => panic!("Expected the main worktree, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn main_worktree_does_not_climb_when_the_current_directory_is_unknown() {
+        // The caller passes the empty path when the current directory cannot be
+        // read. It is at no worktree, so the answer stays the one `--main` gave
+        // before the climb existed: a directory that cannot be identified must
+        // never be taken for the root of the main worktree.
+        let one = family(vec![("solo", "/repo", "main")], false, Some(0));
+        match one.main_worktree(Path::new("")) {
+            MainTarget::Worktree(path) => assert_eq!(path, PathBuf::from("/repo")),
+            other => panic!("Expected the main worktree, got {other:?}"),
+        }
     }
 
     #[test]
