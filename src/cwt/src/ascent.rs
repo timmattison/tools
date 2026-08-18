@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::worktree::{canonical, is_checkout, list_worktrees, paths_equal, Worktree};
+use crate::worktree::{
+    canonical, is_checkout, list_worktrees, paths_equal, RepoWorktrees, Worktree,
+};
 
 /// The branch names that identify the main worktree, in order of priority.
 ///
@@ -59,6 +61,27 @@ fn main_worktree_of(worktrees: &[Worktree]) -> Option<&Worktree> {
 ///
 /// Returns `None` when no repository above `from` has a main worktree.
 pub fn climb(from: &Path) -> Option<PathBuf> {
+    climb_with(from, |dir| {
+        is_checkout(dir).then(|| list_worktrees(dir).ok()).flatten()
+    })
+}
+
+/// The climb itself, over whatever ladder `list` describes.
+///
+/// `list` answers "the repository checked out at this directory", and `None` is
+/// its answer for every directory the climb cannot go on from. That folds two
+/// cases the climb has always treated alike: a directory that is not a checkout
+/// at all, and a checkout whose worktrees will not list. Neither can name a
+/// destination, and the message the caller prints — that no repository above had
+/// a main worktree — is true of both, so one `Option`-returning reader says
+/// exactly what the climb needs to know. The family scan reports an unreadable
+/// repository as a warning because it is missing from a listing the user can
+/// see; here there is no listing.
+///
+/// Taking the reader as an argument is also the only seam a test has: the guard
+/// below ends a climb that revisits a repository, and git will not build the
+/// on-disk tangle that would exercise it.
+fn climb_with(from: &Path, list: impl Fn(&Path) -> Option<RepoWorktrees>) -> Option<PathBuf> {
     // A repository above can be a linked worktree whose own repository sits
     // somewhere else, so the climb is not guaranteed to walk toward the root.
     // Remembering the repositories already asked is what keeps a tangle of
@@ -68,16 +91,7 @@ pub fn climb(from: &Path) -> Option<PathBuf> {
 
     loop {
         let parent = dir.parent()?;
-        if !is_checkout(parent) {
-            return None;
-        }
-
-        // A repository that will not be read ends the climb. The family scan
-        // reports such a repository as a warning because it is missing from a
-        // listing the user can see; here there is no listing, and the message
-        // the caller prints already says no repository above had a main
-        // worktree.
-        let repo = list_worktrees(parent).ok()?;
+        let repo = list(parent)?;
         let key = canonical(&repo.main);
         if asked.iter().any(|seen| paths_equal(seen, &key)) {
             return None;
