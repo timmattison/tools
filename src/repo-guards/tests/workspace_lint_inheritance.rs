@@ -1,10 +1,12 @@
 //! Guard tests for `repo_guards::workspace_lints::audit`.
 //!
 //! The headline test — [`every_workspace_member_inherits_the_workspace_lints`]
-//! — runs the audit against this repository and **fails today by design**. Six
-//! member crates never opted into the workspace lint set, so they are silently
-//! exempt from `[workspace.lints.*]`. That red is the point of this commit; the
-//! following commits clear it.
+//! — runs the audit against this repository and checks the verdict: every
+//! member manifest here declares `[lints] workspace = true`, so cargo hands
+//! each of them the workspace lint set. It was red when this file was written
+//! — six crates had never typed the stanza, and the exemption was spelled as
+//! an absence, so nothing warned and nothing failed — and the commits that
+//! followed cleared it, five of the six in one and `beta` in the next.
 //!
 //! Every other test is a mutation test. A guard that cannot fail is worse than
 //! no guard, because "clean" and "I never looked" print identically. So each
@@ -31,10 +33,10 @@ const COMPLIANT: &str = "[lints]\nworkspace = true\n";
 /// Opting *out* explicitly. Reads like a lint declaration, inherits nothing.
 const OPTED_OUT: &str = "[lints]\nworkspace = false\n";
 
-/// A `[lints.clippy]` table with no `workspace` key. This is the exact shape of
-/// the six real offenders in this repo: the manifest mentions lints, so a
-/// grep for "lints" calls it clean, while cargo hands it none of the workspace
-/// set.
+/// A `[lints.clippy]` table with no `workspace` key. This was the exact shape
+/// of the six offenders this guard found in this repo: the manifest mentions
+/// lints, so a grep for "lints" calls it clean, while cargo hands it none of
+/// the workspace set.
 const CLIPPY_ONLY: &str = "[lints.clippy]\npedantic = { level = \"warn\", priority = -1 }\n";
 
 /// Absolute, canonical path to this repository's root, derived from the crate
@@ -105,7 +107,8 @@ fn offenders(report: &Report) -> Vec<PathBuf> {
 // The real repository
 // ---------------------------------------------------------------------------
 
-/// The guard, pointed at this repo. Red until the offending crates opt in.
+/// The guard, pointed at this repo: every member inherits the workspace lint
+/// set.
 ///
 /// The member-count assertion runs first on purpose: a guard that examined zero
 /// crates would report "compliant" for entirely the wrong reason, and that
@@ -168,9 +171,9 @@ fn member_that_opts_out_explicitly_is_flagged() {
     );
 }
 
-/// A `[lints.clippy]` table with no `workspace = true` key is flagged. This is
-/// the shape of every real offender in this repo, and the shape a naive "does
-/// the manifest mention lints?" check would wave through.
+/// A `[lints.clippy]` table with no `workspace = true` key is flagged. This was
+/// the shape of every offender this guard found here, and it is the shape a
+/// naive "does the manifest mention lints?" check would wave through.
 #[test]
 fn member_with_only_a_clippy_lints_table_is_flagged() {
     let ws = synthetic_workspace("[\"crates/*\"]");
