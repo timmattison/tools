@@ -166,7 +166,13 @@ const MAX_CFG_ATTR_DEPTH: usize = 16;
 /// documented set by a test, rather than restated there. A key this list omits
 /// is a key the guard silently guesses at, and a fixture list copied from this
 /// one could never notice.
-pub const AUTO_DISCOVERY_KEYS: [&str; 4] = ["autobenches", "autobins", "autoexamples", "autotests"];
+pub const AUTO_DISCOVERY_KEYS: [&str; 5] = [
+    "autobenches",
+    "autobins",
+    "autoexamples",
+    "autolib",
+    "autotests",
+];
 
 /// The manifest table those keys — and `build` — live in.
 const PACKAGE: &str = "package";
@@ -273,7 +279,7 @@ pub enum TargetLintsError {
     AutoDiscoveryOverride {
         /// The manifest carrying the override.
         manifest: PathBuf,
-        /// The offending key: `autotests`, `autobins`, …
+        /// The offending key, one of [`AUTO_DISCOVERY_KEYS`].
         key: &'static str,
     },
 
@@ -525,7 +531,7 @@ struct RootLints {
 ///   ([`MissingDeclaredTarget`](TargetLintsError::MissingDeclaredTarget));
 /// - a manifest's `build` key is neither a path nor a bool
 ///   ([`MalformedBuildKey`](TargetLintsError::MalformedBuildKey));
-/// - a manifest sets `autotests`, `autobins`, `autobenches`, or `autoexamples`
+/// - a manifest sets one of [`AUTO_DISCOVERY_KEYS`]
 ///   ([`AutoDiscoveryOverride`](TargetLintsError::AutoDiscoveryOverride));
 /// - a directory holding target roots cannot be listed
 ///   ([`ReadTargetDir`](TargetLintsError::ReadTargetDir));

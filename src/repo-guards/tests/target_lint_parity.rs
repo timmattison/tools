@@ -213,10 +213,15 @@ fn every_target_root_declares_a_position_on_its_crate_lints() {
 ///   reviewer. The next commit added `TargetKind::Build`; the build-script
 ///   fixtures further down pin the behavior, and this test pins that the fix
 ///   matches what cargo actually reports.
-/// - **`AUTO_DISCOVERY_KEYS` lists four of cargo's five keys**, omitting
-///   `autolib`. No manifest here sets it today, so this test is silent on that
-///   half for now; the moment one does, the guard enumerates a library root
-///   cargo does not build and it lands in the `invented` direction below.
+/// - **`AUTO_DISCOVERY_KEYS` listed four of cargo's five keys**, omitting
+///   `autolib`. Verified on cargo 1.97.1: `autolib = false` with a `src/lib.rs`
+///   on disk and an explicit `[[bin]]` beside it makes cargo report the bin and
+///   no lib at all, while the guard walked past the key and resolved
+///   `src/lib.rs` as a library root — a kind that *raises* the crate baseline,
+///   so lints from a file cargo never compiles would be imposed on every target
+///   that is real. No manifest here sets it, so this test could not have seen
+///   it; [`the_guard_models_every_auto_discovery_key_cargo_has`] is what closes
+///   that half, by comparing the guard's modeled set against cargo's own.
 ///
 /// Both were caught by a human reading the model against cargo's documentation,
 /// which does not scale and did not have to. Whatever cargo adds next — another
