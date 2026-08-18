@@ -325,6 +325,13 @@ fn columns_env_ignored_when_no_color_env_is_set() {
     let output = gsw_command(dir.path())
         .env("COLUMNS", "50")
         .env("NO_COLOR", "1")
+        // Pin the rest of the color environment, the same as the test above.
+        // `CLICOLOR_FORCE` outranks `NO_COLOR` inside the `colored` crate, so a
+        // run started from a shell that exports it — the test gate does — paints
+        // the output and the assertion below reads the host's setup rather than
+        // the answer of `gsw`.
+        .env_remove("CLICOLOR")
+        .env_remove("CLICOLOR_FORCE")
         .output()
         .expect("failed to invoke gsw");
     assert!(output.status.success(), "gsw exited non-zero");
