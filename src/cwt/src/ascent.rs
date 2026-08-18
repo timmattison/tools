@@ -110,6 +110,8 @@ fn climb_with(from: &Path, list: impl Fn(&Path) -> Option<RepoWorktrees>) -> Opt
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     /// One worktree at `path`, with `branch` checked out.
@@ -118,6 +120,49 @@ mod tests {
             path: PathBuf::from(path),
             head: "abc1234567890".to_string(),
             branch: branch.map(str::to_string),
+        }
+    }
+
+    /// One rung of a synthetic ladder: the repository whose main worktree sits
+    /// at `main`, holding one worktree per entry of `worktrees`.
+    fn rung(main: &str, worktrees: &[(&str, Option<&str>)]) -> RepoWorktrees {
+        RepoWorktrees {
+            main: PathBuf::from(main),
+            all: worktrees
+                .iter()
+                .map(|(path, branch)| worktree(path, *branch))
+                .collect(),
+        }
+    }
+
+    /// How many listings a climb over a synthetic ladder may ask for before the
+    /// test calls it a runaway. Every ladder here is a few rungs long, so this
+    /// sits far above a healthy climb and far below a hang.
+    const LOOKUP_LIMIT: usize = 32;
+
+    /// A reader over the synthetic ladder `rungs`, which pairs a directory with
+    /// the repository checked out there. A directory no rung names is off the
+    /// ladder, and the climb ends there.
+    ///
+    /// It counts its calls and panics past [`LOOKUP_LIMIT`]. That bound is what
+    /// turns a broken cycle guard into a loud, fast test failure instead of a
+    /// hang that takes the whole suite with it.
+    fn ladder<'a>(
+        rungs: &'a [(&'a str, RepoWorktrees)],
+        lookups: &'a Cell<usize>,
+    ) -> impl Fn(&Path) -> Option<RepoWorktrees> + 'a {
+        move |dir| {
+            lookups.set(lookups.get() + 1);
+            assert!(
+                lookups.get() <= LOOKUP_LIMIT,
+                "the climb asked for {} listings over a ladder of {} rungs, so it is not terminating",
+                lookups.get(),
+                rungs.len()
+            );
+            rungs
+                .iter()
+                .find(|(at, _)| Path::new(at) == dir)
+                .map(|(_, repo)| repo.clone())
         }
     }
 
@@ -198,8 +243,143 @@ mod tests {
 
     #[test]
     fn the_climb_stops_at_a_directory_that_is_not_a_checkout() {
-        let root = std::env::temp_dir();
-        let repo = root.join("no-parent-checkout-should-exist-here");
+        // The directory above the one the climb starts from is one this test
+        // just made and owns, so the answer says something about the climb
+        // rather than about wherever the temporary directory happens to live.
+        let root = tempfile::TempDir::new().expect("a temporary directory to climb out of");
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo).expect("a directory for the climb to start from");
         assert_eq!(climb(&repo), None);
+    }
+
+    #[test]
+    fn the_climb_answers_with_the_first_repository_above_that_has_a_main_worktree() {
+        let lookups = Cell::new(0);
+        let rungs = [(
+            "/nest",
+            rung(
+                "/nest/holder",
+                &[
+                    ("/nest/holder", Some("main")),
+                    ("/nest/holder-wt/feature", Some("feature")),
+                ],
+            ),
+        )];
+
+        assert_eq!(
+            climb_with(Path::new("/nest/held"), ladder(&rungs, &lookups)),
+            Some(PathBuf::from("/nest/holder")),
+            "the repository above is on main, so the climb ends at its main worktree"
+        );
+        assert_eq!(
+            lookups.get(),
+            1,
+            "one rung answered, so one listing was read"
+        );
+    }
+
+    #[test]
+    fn the_climb_steps_over_a_repository_with_no_main_branch() {
+        let lookups = Cell::new(0);
+        let rungs = [
+            ("/one/two", rung("/one/two", &[("/one/two", Some("trunk"))])),
+            ("/one", rung("/one", &[("/one", Some("main"))])),
+        ];
+
+        assert_eq!(
+            climb_with(Path::new("/one/two/repo"), ladder(&rungs, &lookups)),
+            Some(PathBuf::from("/one")),
+            "the rung in between is on trunk, so the climb passes through it"
+        );
+    }
+
+    #[test]
+    fn the_climb_stops_when_the_ladder_leads_back_to_where_it_started() {
+        // Two repositories that hold each other. Neither is on a main branch, so
+        // nothing but the record of what has been asked ends this.
+        let lookups = Cell::new(0);
+        let rungs = [
+            (
+                "/tangle/first",
+                rung(
+                    "/tangle/second/repo",
+                    &[("/tangle/second/repo", Some("trunk"))],
+                ),
+            ),
+            (
+                "/tangle/second",
+                rung(
+                    "/tangle/first/repo",
+                    &[("/tangle/first/repo", Some("trunk"))],
+                ),
+            ),
+        ];
+
+        assert_eq!(
+            climb_with(Path::new("/tangle/first/repo"), ladder(&rungs, &lookups)),
+            None,
+            "the second rung names the repository the climb started from"
+        );
+        assert_eq!(
+            lookups.get(),
+            2,
+            "the climb stopped at the rung that repeated, not one rung later"
+        );
+    }
+
+    #[test]
+    fn the_climb_stops_when_the_ladder_revisits_a_repository_it_already_asked() {
+        // The revisited repository is one the climb reached on the way, not the
+        // one it started from, so this is the record the loop itself keeps.
+        let lookups = Cell::new(0);
+        let rungs = [
+            (
+                "/tangle/start",
+                rung(
+                    "/tangle/first/repo",
+                    &[("/tangle/first/repo", Some("trunk"))],
+                ),
+            ),
+            (
+                "/tangle/first",
+                rung(
+                    "/tangle/second/repo",
+                    &[("/tangle/second/repo", Some("trunk"))],
+                ),
+            ),
+            (
+                "/tangle/second",
+                rung(
+                    "/tangle/first/repo",
+                    &[("/tangle/first/repo", Some("trunk"))],
+                ),
+            ),
+        ];
+
+        assert_eq!(
+            climb_with(Path::new("/tangle/start/repo"), ladder(&rungs, &lookups)),
+            None,
+            "the third rung names a repository the climb has already asked"
+        );
+        assert_eq!(
+            lookups.get(),
+            3,
+            "the climb stopped at the rung that repeated, not one rung later"
+        );
+    }
+
+    #[test]
+    fn the_climb_stops_where_the_ladder_ends() {
+        // A directory the reader will not answer for — one that is not a
+        // checkout, or a checkout whose worktrees will not list — ends the
+        // climb rather than being stepped over.
+        let lookups = Cell::new(0);
+        let rungs: [(&str, RepoWorktrees); 0] = [];
+
+        assert_eq!(
+            climb_with(Path::new("/off/the/ladder"), ladder(&rungs, &lookups)),
+            None
+        );
+        assert_eq!(lookups.get(), 1, "the climb asked once and took the answer");
     }
 }
