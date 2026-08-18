@@ -146,6 +146,24 @@ pub fn list_worktrees(repo_root: &Path) -> Result<RepoWorktrees, String> {
     })
 }
 
+/// The name git gives the marker it puts at the root of a checkout.
+const GIT_MARKER: &str = ".git";
+
+/// True when `dir` is a checkout: a repository, or one of its linked worktrees.
+///
+/// Git marks the main worktree with a `.git` directory and a linked worktree
+/// with a `.git` file, so the presence of the name — not what it is — is what
+/// tells a checkout from a plain directory.
+pub fn is_checkout(dir: &Path) -> bool {
+    dir.join(GIT_MARKER).exists()
+}
+
+/// The resolved form of a path, falling back to the path itself when it cannot
+/// be resolved (a worktree whose directory was deleted, for example).
+pub fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Compares two paths, handling case-insensitivity on macOS.
 pub fn paths_equal(a: &Path, b: &Path) -> bool {
     // On macOS, the default filesystem is case-insensitive

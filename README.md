@@ -1374,6 +1374,29 @@ the main worktree.
 If your repository has neither branch checked out, `cwt -m` lists the worktrees and exits
 with code 3.
 
+#### Pressing it again climbs out
+
+When you already stand in the main worktree, you have asked to go up. So the next `wtm`
+takes you to the main worktree of the repository that **holds** yours, and the one after
+that goes up again, for as deep as the repositories are nested:
+
+```bash
+cd keyboards/zmk-config-corne-worktrees/guard-the-commit-hashes-in-prose
+wtm   # -> keyboards/zmk-config-corne        the repository's own main worktree
+wtm   # -> keyboards                         the repository that holds it
+wtm   # Error: No repository above /code/keyboards has a main worktree
+```
+
+The climb is measured from where your repository **sits on disk** — its own main worktree —
+never from the worktree you happen to stand in. That is what keeps the first `wtm` above
+from skipping `zmk-config-corne` and landing on `keyboards`.
+
+Only the directory directly above counts, the same one level the family scan looks down. A
+repository on the way with neither `main` nor `master` cannot be a destination, so the
+climb steps over it and asks the repository above it. When nothing above has a main
+worktree, `cwt -m` says so and exits with code 3. `--no-family` does not change any of
+this: it says which repositories the **listing** shows, and the climb is not a listing.
+
 ### Families of Repositories
 
 Some repositories are containers. They track the map of a workspace, and the real
@@ -1426,7 +1449,8 @@ A name is offered to each repository in turn, nearest first:
 2. The parent repository the family is anchored at
 3. Every other repository in the family
 
-So `wtm` still means "my repository's main branch" wherever you are standing. Within
+So `wtm` still means "my repository's main branch" wherever you are standing — and,
+once you are standing in it, the repository above that. Within
 each repository the order is the same as before: exact directory name, then exact
 branch name, then a case-insensitive substring of a branch name. An exact name
 anywhere in the family beats a substring anywhere.
@@ -1510,7 +1534,7 @@ function wt() {
 # Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
-alias wtm='wt --main'  # Main worktree (branch main, or master)
+alias wtm='wt --main'  # Main worktree, or a level up when you are in it
 ```
 
 #### Fish (~/.config/fish/config.fish)
@@ -1530,7 +1554,7 @@ end
 # Quick navigation aliases
 alias wtf 'wt -f'  # Next worktree
 alias wtb 'wt -p'  # Previous worktree (back)
-alias wtm 'wt --main'  # Main worktree (branch main, or master)
+alias wtm 'wt --main'  # Main worktree, or a level up when you are in it
 ```
 
 ### Examples
@@ -1554,7 +1578,7 @@ Jump to specific worktree:
 wt main           # By branch name
 wt absurd-rock    # By directory name
 wt vial-qmk:vial  # By repository and branch name
-wtm               # Quick alias for the main worktree (branch main, or master)
+wtm               # The main worktree, or a level up when you are in it
 ```
 
 ### Exit Codes

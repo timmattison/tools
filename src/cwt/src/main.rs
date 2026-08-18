@@ -17,10 +17,12 @@ use clap::Parser;
 use repowalker::find_git_repo;
 use shellsetup::ShellIntegration;
 
+mod ascent;
 mod family;
 mod worktree;
 
-use family::{Family, WorktreeMatch, MAIN_BRANCH_NAMES};
+use ascent::MAIN_BRANCH_NAMES;
+use family::{Family, MainTarget, WorktreeMatch};
 
 /// Exit codes for different error conditions.
 mod exit_codes {
@@ -66,7 +68,7 @@ macro_rules! error {
 /// cwt           # Show list of worktrees with current highlighted
 /// cwt -f        # Go to next worktree (wraps around)
 /// cwt -p        # Go to previous worktree (wraps around)
-/// cwt -m        # Go to the main worktree (branch main, or master)
+/// cwt -m        # Go to the main worktree, or up a level when you are in it
 /// cwt NAME      # Go to worktree by directory name or branch name
 /// cwt TEXT      # Go to worktree by case-insensitive substring match on branch
 /// cwt REPO:NAME # Go to a worktree of one repository in the family
@@ -90,7 +92,7 @@ macro_rules! error {
 ///
 /// alias wtf='wt -f'  # Next worktree
 /// alias wtb='wt -p'  # Previous worktree (back)
-/// alias wtm='wt --main'  # Main worktree (branch main, or master)
+/// alias wtm='wt --main'  # Main worktree, or a level up when you are in it
 /// ```
 ///
 /// # Exit Codes
@@ -126,6 +128,11 @@ struct Cli {
     ///
     /// The main worktree is the one on branch `main`, or the one on branch `master` when
     /// no worktree is on `main`. The branch name must match exactly.
+    ///
+    /// When you already stand in the main worktree, this goes up a level instead. It
+    /// goes to the main worktree of the repository that holds yours, and it repeats
+    /// that climb for each level above. A repository on the way with no main worktree
+    /// is stepped over.
     #[arg(short = 'm', long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "target", "shell_setup"])]
     main: bool,
 
@@ -150,7 +157,7 @@ struct Cli {
     ///   wt [target]  - List worktrees or change to one
     ///   wtf          - Next worktree (forward)
     ///   wtb          - Previous worktree (back)
-    ///   wtm          - Main worktree (branch main, or master)
+    ///   wtm          - Main worktree, or a level up when you are in it
     #[arg(long, verbatim_doc_comment, conflicts_with_all = ["forward", "prev", "main", "target"])]
     shell_setup: bool,
 
@@ -226,7 +233,7 @@ function wt() {
 # Quick navigation aliases
 alias wtf='wt -f'  # Next worktree
 alias wtb='wt -p'  # Previous worktree (back)
-alias wtm='wt --main'  # Main worktree (branch main, or master)
+alias wtm='wt --main'  # Main worktree, or a level up when you are in it
 "#;
 
 /// Sets up shell integration by adding the wt function to the user's shell config.
@@ -235,7 +242,7 @@ fn setup_shell_integration() -> Result<(), shellsetup::ShellSetupError> {
         .with_command("wt", "List worktrees or change to one")
         .with_command("wtf", "Next worktree")
         .with_command("wtb", "Previous worktree (back)")
-        .with_command("wtm", "Main worktree (branch main, or master)")
+        .with_command("wtm", "Main worktree, or a level up when you are in it")
         // Old installations ended with this alias (before end marker was added)
         .with_old_end_marker("alias wtb='wt -p'");
 
@@ -296,16 +303,30 @@ fn main() {
         println!("{}", family.path(index).display());
     } else if cli.main {
         // Main worktree: branch main, or branch master when there is no main.
-        let Some(index) = family.main_worktree() else {
-            error!(
-                cli.quiet,
-                "Error: No worktree is on branch {}",
-                quoted_branch_alternatives(&MAIN_BRANCH_NAMES)
-            );
-            print_available(&family, cli.quiet);
-            exit(exit_codes::WORKTREE_NOT_FOUND);
-        };
-        println!("{}", family.path(index).display());
+        // Standing in it already is a request to go up a level instead.
+        match family.main_worktree() {
+            MainTarget::Worktree(path) => println!("{}", path.display()),
+            MainTarget::NoMainBranch => {
+                error!(
+                    cli.quiet,
+                    "Error: No worktree is on branch {}",
+                    quoted_branch_alternatives(&MAIN_BRANCH_NAMES)
+                );
+                print_available(&family, cli.quiet);
+                exit(exit_codes::WORKTREE_NOT_FOUND);
+            }
+            MainTarget::AtTheTop(home) => {
+                // No worktree listing follows this one. The worktrees of this
+                // repository are not candidates: the user is standing in the
+                // main one, and asked for what is above it.
+                error!(
+                    cli.quiet,
+                    "Error: No repository above {} has a main worktree",
+                    home.display()
+                );
+                exit(exit_codes::WORKTREE_NOT_FOUND);
+            }
+        }
     } else if let Some(name) = &cli.target {
         match family.find(name) {
             WorktreeMatch::Single(index) => {
