@@ -169,7 +169,6 @@ pub fn max_red_channel(text: &str) -> u8 {
 /// takes the rest of `text` with it, which is what a truncated frame deserves.
 #[must_use]
 pub fn strip_ansi(s: &str) -> String {
-    #[derive(PartialEq)]
     enum State {
         Normal,
         AfterEsc,
