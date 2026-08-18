@@ -160,11 +160,13 @@ pub fn max_red_channel(text: &str) -> u8 {
 /// The scan walks characters, not bytes, so a multi-byte glyph next to an
 /// escape survives whole.
 ///
-/// Two shapes of escape are recognized. A CSI sequence starts with `ESC [`, and
-/// runs through its parameter and intermediate bytes to a final byte in the
-/// range `0x40..=0x7E`. Every other `ESC x` pair is an Fe-style escape, whose
-/// second character ends it. An escape that runs off the end of `text` takes
-/// the rest of `text` with it, which is what a truncated frame deserves.
+/// Three shapes of escape are recognized. A CSI sequence starts with `ESC [`,
+/// and runs through its parameter and intermediate bytes to a final byte in the
+/// range `0x40..=0x7E`. An OSC sequence starts with `ESC ]` and runs to a BEL
+/// (`0x07`) or to the `ESC \` string terminator, which is the shape `ic` writes
+/// to draw an inline image. Every other `ESC x` pair is an Fe-style escape,
+/// whose second character ends it. An escape that runs off the end of `text`
+/// takes the rest of `text` with it, which is what a truncated frame deserves.
 #[must_use]
 pub fn strip_ansi(s: &str) -> String {
     #[derive(PartialEq)]
@@ -172,6 +174,7 @@ pub fn strip_ansi(s: &str) -> String {
         Normal,
         AfterEsc,
         InCsi,
+        InOsc,
     }
     let mut out = String::with_capacity(s.len());
     let mut state = State::Normal;
@@ -188,9 +191,14 @@ pub fn strip_ansi(s: &str) -> String {
                 if c == '[' {
                     // CSI introducer — consume parameters until the final byte.
                     state = State::InCsi;
+                } else if c == ']' {
+                    // OSC introducer — consume the payload until it ends.
+                    state = State::InOsc;
                 } else {
                     // Fe-style single-byte escape (e.g. ESC M, ESC =).
                     // The byte itself is the final byte; swallow it and resume.
+                    // This arm is also the second half of the ESC \ string
+                    // terminator that ends an OSC sequence.
                     state = State::Normal;
                 }
             }
@@ -199,6 +207,19 @@ pub fn strip_ansi(s: &str) -> String {
                 // Final byte: 0x40–0x7E — terminates the sequence.
                 if (0x40..=0x7E).contains(&(c as u32)) {
                     state = State::Normal;
+                }
+                // In all cases, keep consuming (don't push to output).
+            }
+            State::InOsc => {
+                // A BEL ends the payload outright. An ESC starts the ESC \
+                // string terminator, and handing it to AfterEsc swallows the
+                // backslash through the Fe arm — which also recovers sanely
+                // from a stray ESC inside a malformed payload, rather than
+                // eating the rest of the text.
+                if c == '\u{7}' {
+                    state = State::Normal;
+                } else if c == '\x1b' {
+                    state = State::AfterEsc;
                 }
                 // In all cases, keep consuming (don't push to output).
             }
