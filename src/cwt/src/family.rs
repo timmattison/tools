@@ -735,6 +735,22 @@ fn find_current(entries: &[Entry], repo_root: &Path) -> Option<usize> {
 mod tests {
     use super::*;
 
+    /// The visible glyphs of a render, with the escape codes of the `colored`
+    /// crate forced on and then taken back out.
+    ///
+    /// `render` paints its output, and `colored` writes escape codes only when
+    /// it believes the output goes to a terminal. A test that reads `render`
+    /// raw thus asserts on something the test does not control: it passes in a
+    /// redirected run and fails under a hand-typed `git commit`, where the hook
+    /// hands the test binary a terminal.
+    ///
+    /// Forcing the codes on and then stripping them makes the terminal
+    /// irrelevant. It also makes the assertion stronger than a plain `render`
+    /// call, because the painted output is the one a user reads.
+    fn glyphs_of(whole: &Family) -> String {
+        testcolor::strip_ansi(&testcolor::with_forced_ansi(|| whole.render()))
+    }
+
     /// Build a family by hand, without touching the filesystem.
     ///
     /// Each entry is `(repository, path, branch)`. Repositories are ranked the
@@ -968,7 +984,7 @@ mod tests {
             false,
             Some(0),
         );
-        let rendered = testcolor::with_forced_ansi(|| one.render());
+        let rendered = glyphs_of(&one);
         assert_eq!(
             rendered, "> /repo [main]\n  /repo-wt/x [feature]\n",
             "a lone repository prints exactly as it always has"
@@ -983,7 +999,7 @@ mod tests {
             Some(1),
         );
         assert_eq!(
-            testcolor::with_forced_ansi(|| two.render()),
+            glyphs_of(&two),
             "parent\n    /p [main]\n\nchild\n>   /p/c [trunk]\n",
             "each repository heads its own group, and the marker keeps its column"
         );
