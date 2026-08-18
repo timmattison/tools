@@ -41,6 +41,27 @@ use tempfile::TempDir;
 /// A crate root that raises one lint, in the plainest form there is.
 const RAISES_PEDANTIC: &str = "#![warn(clippy::pedantic)]\n\nfn main() {}\n";
 
+/// Every `[package]` key cargo uses to turn target auto-discovery on or off,
+/// as cargo documents them and as verified against cargo 1.97.1.
+///
+/// This is the *ground truth* the guard is measured against, not a mirror of
+/// [`target_lints::AUTO_DISCOVERY_KEYS`]. The distinction is the whole point:
+/// the list here started as a copy of the guard's own constant, inherited its
+/// omission of `autolib`, and so was structurally incapable of noticing it —
+/// a fixture set derived from an implementation cannot catch what that
+/// implementation forgot. Written independently, it catches a key the guard
+/// does not model (every key below is exercised end-to-end by
+/// [`auto_discovery_override_refuses`]) and, paired with
+/// [`the_guard_models_every_auto_discovery_key_cargo_has`], a key the guard
+/// models that cargo does not have.
+const CARGO_AUTO_DISCOVERY_KEYS: [&str; 5] = [
+    "autobenches",
+    "autobins",
+    "autoexamples",
+    "autolib",
+    "autotests",
+];
+
 /// Absolute, canonical path to this repository's root, derived from the crate
 /// being compiled rather than the working directory (which `cargo test` does
 /// not pin).
@@ -1376,20 +1397,24 @@ fn build_key_that_is_neither_path_nor_bool_refuses() {
 /// `autotests = false` (and its siblings) change which roots cargo builds. This
 /// guard models the default rules only, so it refuses rather than enumerate a
 /// set that disagrees with the build.
+///
+/// One fixture per key cargo actually has — [`CARGO_AUTO_DISCOVERY_KEYS`] —
+/// because a key the guard does not model is not a refusal but a silent guess,
+/// and it guesses wrong. `autolib = false` is the sharpest of the five: cargo
+/// then reports no library target at all, verified on cargo 1.97.1 with a
+/// `src/lib.rs` on disk and an explicit `[[bin]]` beside it, so a guard that
+/// walks past the key resolves `src/lib.rs` as a library root. A library root
+/// is one of the two kinds that *raise* the crate baseline, so lints from a
+/// file cargo never compiles would be imposed on every target that is real.
+/// Each fixture therefore carries both a library and a binary root, so every
+/// key has something its setting could change.
 #[test]
 fn auto_discovery_override_refuses() {
-    for key in ["autotests", "autobins", "autobenches", "autoexamples"] {
+    for key in CARGO_AUTO_DISCOVERY_KEYS {
         let ws = synthetic_workspace();
-        let dir = ws.path().join("crates").join("tool");
-        fs::create_dir_all(&dir).expect("create fixture member dir");
-        fs::write(
-            dir.join("Cargo.toml"),
-            format!(
-                "[package]\nname = \"tool\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{key} = false\n"
-            ),
-        )
-        .expect("write fixture member manifest");
-        write_source(&dir, "src/main.rs", RAISES_PEDANTIC);
+        let member = write_member(ws.path(), "tool", &format!("{key} = false\n"));
+        write_source(&member, "src/lib.rs", RAISES_PEDANTIC);
+        write_source(&member, "src/main.rs", RAISES_PEDANTIC);
 
         let error = audit_must_refuse(&ws);
 
@@ -1398,6 +1423,28 @@ fn auto_discovery_override_refuses() {
             "`{key}` must be an error, got: {error}"
         );
     }
+}
+
+/// The other direction of the same fact: the guard must not refuse a key cargo
+/// does not have, and must not skip one it does.
+///
+/// [`auto_discovery_override_refuses`] proves each of cargo's keys is refused,
+/// which catches an omission. It cannot catch the reverse — an invented key
+/// would refuse manifests cargo reads happily — and neither can any fixture,
+/// because there is no manifest to write for a key that does not exist. So the
+/// two lists are compared directly, and this is what keeps them from drifting
+/// apart again in either direction.
+#[test]
+fn the_guard_models_every_auto_discovery_key_cargo_has() {
+    let modeled: BTreeSet<&str> = target_lints::AUTO_DISCOVERY_KEYS.into_iter().collect();
+    let cargo: BTreeSet<&str> = CARGO_AUTO_DISCOVERY_KEYS.into_iter().collect();
+
+    assert_eq!(
+        modeled, cargo,
+        "the guard models a different set of auto-discovery keys than cargo has; \
+         a key cargo has and the guard omits is guessed at rather than refused, and \
+         a key the guard invents refuses a manifest cargo would accept"
+    );
 }
 
 /// A member crate with a manifest but no target roots at all. Reporting it

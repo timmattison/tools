@@ -161,7 +161,12 @@ const MAX_CFG_ATTR_DEPTH: usize = 16;
 /// This guard models the default discovery rules only. A manifest that changes
 /// them is refused rather than guessed at; see
 /// [`AutoDiscoveryOverride`](TargetLintsError::AutoDiscoveryOverride).
-const AUTO_DISCOVERY_KEYS: [&str; 4] = ["autobenches", "autobins", "autoexamples", "autotests"];
+///
+/// Public so the guard's model of cargo can be *compared* against cargo's own
+/// documented set by a test, rather than restated there. A key this list omits
+/// is a key the guard silently guesses at, and a fixture list copied from this
+/// one could never notice.
+pub const AUTO_DISCOVERY_KEYS: [&str; 4] = ["autobenches", "autobins", "autoexamples", "autotests"];
 
 /// The manifest table those keys — and `build` — live in.
 const PACKAGE: &str = "package";
