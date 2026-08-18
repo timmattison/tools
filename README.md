@@ -1341,7 +1341,7 @@ Navigate between the git worktrees of a repository and of the repositories insid
 cwt                           # Show list of worktrees with current highlighted
 cwt -f                        # Go to next worktree (wraps around)
 cwt -p                        # Go to previous worktree (wraps around)
-cwt -m                        # Go to the main worktree
+cwt -m                        # Go to the main worktree, or up a level when you are at its root
 cwt main                      # Go to worktree by branch name
 cwt absurd-rock               # Go to worktree by directory name
 cwt vial-qmk:vial             # Go to one repository's worktree by name
@@ -1363,8 +1363,9 @@ cwt vial-qmk:vial             # Go to one repository's worktree by name
 `main`, it goes to the worktree on branch `master`, so a repository that never renamed its
 first branch gets the same shortcut.
 
-In a family, `cwt -m` stays in the repository you are standing in. Every repository of a
-family has a main worktree of its own, and the shortcut takes you to yours.
+In a family, `cwt -m` stays in the repository you are standing in until you are already at
+the top of its main worktree. Every repository of a family has a main worktree of its own,
+and the shortcut takes you to yours.
 
 The branch name must match exactly. This is what separates `cwt -m` from `cwt main`, which
 also substring-matches: in a `master` repository, `cwt main` lands on a branch such as

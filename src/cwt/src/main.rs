@@ -370,8 +370,10 @@ fn main() {
 mod tests {
     use super::*;
 
-    // The tests of the main-worktree search live beside the search itself, in
-    // the family module.
+    // The tests of the main-worktree search live beside the search itself: the
+    // branch-name ranking, the pick of a main worktree out of a list, and the
+    // climb out of one are tested in the ascent module; the choice of which
+    // worktree of a family answers `--main` is tested in the family module.
 
     #[test]
     fn test_quoted_branch_alternatives_quotes_a_single_name() {
