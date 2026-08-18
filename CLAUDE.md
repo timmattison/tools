@@ -145,6 +145,69 @@ Benefits of the channel-based shutdown:
 - `prhash` - Progress Hash (custom template with dynamic width)
 - `org-borg` - Organization Backup (custom template with dynamic width)
 
+## Colored Output in Tests
+
+Every test that asserts on text a tool painted with the `colored` crate **must**
+compare visible glyphs, through the `testcolor` library crate at
+`src/testcolor/`.
+
+### Why
+
+`colored` decides at format time whether to write ANSI escape codes. One input
+to that decision is whether file descriptor 1 is a terminal. A test that
+compares painted output against plain text thus passes when the run writes to a
+file and fails when the run writes to a terminal.
+
+`cargo test` hands the test binary the terminal of whoever started it. A
+redirected run hides such a test, and a hand-typed `git commit` fails it,
+because the pre-commit hook passes its terminal straight through.
+
+This is not a flake. The result is deterministic on a condition the test does
+not control, and it stays hidden until somebody commits from a terminal. `cwt`
+shipped two such tests in #361. They blocked the first commit that touched
+`Cargo.lock`, because a lockfile change is what makes the hook run the Rust
+gate at all, so an unrelated dependency bump wore the blame.
+
+### Usage
+
+Take the crate as a dev-dependency with `testcolor.workspace = true`, then
+force the codes on and take them back out:
+
+```rust
+let glyphs = testcolor::strip_ansi(&testcolor::with_forced_ansi(|| render(&snap)));
+assert_eq!(glyphs, "> /repo [main]\n");
+```
+
+- `strip_ansi` - the one stripper. Two hand-written strippers agree on the
+  common sequences and part company on the rare ones.
+- `with_forced_ansi` - turns the codes on for one body, under the one lock, and
+  puts the override back even when the body panics.
+- `max_red_channel` and `TRUECOLOR_FG` - read a 24-bit foreground color back out
+  of painted text.
+
+Forcing the codes on and stripping them beats reading `render` raw. The
+assertion then covers the painted output, which is the output a user reads.
+
+### The ban
+
+The override of the `colored` crate is process-global, and `cargo test` runs the
+tests of one binary on many threads. A test that sets the override directly
+changes what an unrelated test sees. The `clippy.toml` beside the workspace
+manifest bans all four spellings of that call, and `disallowed_methods` is
+`deny` in the workspace lint set, so a bypass fails the build.
+
+A tool that decides its own color output at startup is the one legitimate
+caller. It says so at the call site with
+`#[allow(clippy::disallowed_methods, reason = "...")]` - see `gsw` and `seescc`.
+The exemption stays visible in the file it applies to, rather than in a central
+allowlist.
+
+### Crates Currently Using testcolor
+
+- `gsw` - render, watch, and push tests
+- `cwt` - family render tests, and the end-to-end helpers that read the output
+  of the binary
+
 ## Version Information
 
 All tools in this repository **must** display version information including git hash and dirty status when `--version` or `-V` is used.

@@ -8,7 +8,7 @@
 
 mod support;
 
-use support::{code, cwt, headings, parse_listing, stdout, Family};
+use support::{code, cwt, cwt_with_env, headings, parse_listing, stdout, Family};
 
 #[test]
 fn list_includes_the_worktrees_of_every_child_repository() {
@@ -173,5 +173,34 @@ fn previous_leaves_one_repository_and_enters_the_one_before() {
         stdout(&output).trim_end(),
         family.path_of("family-worktrees/feature"),
         "the first worktree of a child repository is preceded by the parent's last"
+    );
+}
+
+#[test]
+fn a_painted_listing_parses_the_same_as_a_plain_one() {
+    // `NO_COLOR` alone does not keep the listing plain. The `colored` crate
+    // gives `CLICOLOR_FORCE` a higher priority than `NO_COLOR`, so a run
+    // started from a shell that exports it paints the listing, and every
+    // assertion in this file then reads escape codes instead of glyphs. A
+    // painted heading no longer starts at column zero and a painted worktree
+    // line no longer starts with its marker column, so `parse_listing` reads
+    // every line as a heading.
+    //
+    // The helpers must compare visible glyphs, which is what CLAUDE.md asks of
+    // every test that asserts on text a tool painted.
+    let family = Family::build();
+    let painted = cwt_with_env(&family.at("family"), &[], &[("CLICOLOR_FORCE", "1")]);
+    assert_eq!(code(&painted), 0, "cwt failed: {}", stdout(&painted));
+
+    let plain = cwt(&family.at("family"), &[]);
+    assert_eq!(
+        parse_listing(&stdout(&painted)),
+        parse_listing(&stdout(&plain)),
+        "where the run sends its output must not change what the listing parses to"
+    );
+    assert_eq!(
+        headings(&parse_listing(&stdout(&painted))),
+        vec!["family", "child-a", "child-b"],
+        "a painted listing groups under the same headings as a plain one"
     );
 }

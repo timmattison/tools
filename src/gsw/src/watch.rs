@@ -1805,7 +1805,7 @@ mod tests {
             height: 40,
         };
         let frame = render_frame(snapshot, cfg, dims, FrameTiming::at_walk(None));
-        crate::render::strip_ansi(frame.output.lines().next().unwrap_or_default())
+        testcolor::strip_ansi(frame.output.lines().next().unwrap_or_default())
     }
 
     #[test]
@@ -4083,9 +4083,9 @@ mod push_loop_tests {
     use super::tests::{frame, timer_off, TEST_DEBOUNCE, TEST_DIMS};
     use super::*;
     use crate::push::PushOutcome;
-    use crate::render::strip_ansi;
     use crossterm::event::{KeyCode, KeyModifiers};
     use std::cell::RefCell;
+    use testcolor::strip_ansi;
 
     /// A snapshot on an untracked `gsw-push` with `origin` available, so the
     /// push feature has something real to plan.

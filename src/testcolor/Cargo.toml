@@ -1,0 +1,12 @@
+[package]
+name = "testcolor"
+version = "0.1.0"
+edition.workspace = true
+description = "Test-only support for the ANSI escape codes the colored crate writes"
+license = "MIT"
+
+[dependencies]
+colored.workspace = true
+
+[lints]
+workspace = true

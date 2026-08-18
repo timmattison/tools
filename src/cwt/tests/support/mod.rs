@@ -55,7 +55,10 @@ pub fn git(dir: &Path, args: &[&str]) -> Output {
 
 /// Run the real `cwt` binary in `dir` and capture its result.
 ///
-/// `NO_COLOR` keeps the output plain so assertions can match on text.
+/// `NO_COLOR` asks the binary for plain output, and [`stdout`] takes the escape
+/// codes back out of whatever arrives. Both halves are needed: the `colored`
+/// crate gives `CLICOLOR_FORCE` a higher priority than `NO_COLOR`, so a run
+/// started from a shell that exports it paints the output regardless.
 pub fn cwt(dir: &Path, args: &[&str]) -> Output {
     cwt_with_env(dir, args, &[])
 }
@@ -70,9 +73,14 @@ pub fn cwt_with_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     scrub_git_env(&mut cmd).output().expect("failed to run cwt")
 }
 
-/// Standard output of a `cwt` run.
+/// Standard output of a `cwt` run, as visible glyphs.
+///
+/// The escape codes come out here rather than at each call site, so every
+/// assertion in every end-to-end target reads what a user reads and none of
+/// them depends on the color decision of the run. See "Colored Output in Tests"
+/// in CLAUDE.md.
 pub fn stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).to_string()
+    testcolor::strip_ansi(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// The single path a navigating `cwt` run prints, with the newline removed.
@@ -80,13 +88,17 @@ pub fn target_path(output: &Output) -> String {
     stdout(output).trim_end().to_string()
 }
 
-/// Combined stdout and stderr of a `cwt` run, for message assertions.
+/// Combined stdout and stderr of a `cwt` run, for message assertions, as
+/// visible glyphs.
+///
+/// `cwt` paints its messages too, and the override of the `colored` crate is
+/// not per stream, so this side needs the same treatment as [`stdout`].
 pub fn combined(output: &Output) -> String {
-    format!(
+    testcolor::strip_ansi(&format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    )
+    ))
 }
 
 /// The exit code of a `cwt` run.

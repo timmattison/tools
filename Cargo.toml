@@ -137,6 +137,7 @@ portplz-core = { path = "src/portplz-core" }
 repowalker = { path = "src/repowalker" }
 shellsetup = { path = "src/shellsetup" }
 termbar = { path = "src/termbar" }
+testcolor = { path = "src/testcolor" }
 
 [workspace.lints.rust]
 # Require explicit handling of must-use values
@@ -168,8 +169,8 @@ allow_attributes_without_reason = "warn"
 redundant_clone = "warn"
 # Warn on byte-level string indexing (&s[..n]) which can panic on multi-byte UTF-8
 string_slice = "warn"
-# A banned method is a hard error, not a warning. The ban is how a crate makes
-# its own helper mandatory, and a warning is something a plain `cargo clippy`
-# run prints and a reader skips. Each crate lists the methods it bans in its own
-# clippy.toml, so a crate with no such file has nothing to trip on.
+# A banned method is a hard error, not a warning. The ban is how the workspace
+# makes a helper mandatory, and a warning is something a plain `cargo clippy`
+# run prints and a reader skips. The banned methods are listed in the
+# clippy.toml beside this manifest, which covers every member.
 disallowed_methods = "deny"

@@ -132,8 +132,16 @@ fn main() -> Result<()> {
     let columns_env: Option<usize> = std::env::var("COLUMNS").ok().and_then(|s| s.parse().ok());
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
     if no_color_env {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
         colored::control::set_override(false);
     } else if watch::should_force_colors(stdout_is_tty, columns_env.is_some(), no_color_env) {
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "this process decides its own color output at startup; the ban covers the tests, which must go through testcolor::with_forced_ansi"
+        )]
         colored::control::set_override(true);
     }
 

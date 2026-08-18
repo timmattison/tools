@@ -1412,7 +1412,7 @@ mod tests {
 mod ui_tests {
     use super::*;
     use crate::render::Snapshot;
-    use crate::testcolor::{self, max_red_channel, TRUECOLOR_FG};
+    use testcolor::{max_red_channel, TRUECOLOR_FG};
 
     /// A snapshot on `gsw-push` with `origin` available and the given tracking
     /// status. Only the four fields the push feature reads matter here.

@@ -1,10 +1,10 @@
-# The `colored` crate's override is process-global, and `cargo test` runs the
-# tests of one binary on many threads. A test that sets the override directly
-# changes what an unrelated test sees, which makes failures that appear and
-# disappear between runs. `testcolor::with_forced_ansi` holds the one lock on
-# that global state and puts the override back, so it is the only entrance.
-# These entries make the bypass fail the build instead of failing a test
-# once a week.
+# The override of the `colored` crate is process-global, and `cargo test` runs
+# the tests of one binary on many threads. A test that sets the override
+# directly changes what an unrelated test sees, which makes failures that appear
+# and disappear between runs. `testcolor::with_forced_ansi` holds the one lock
+# on that global state and puts the override back, so it is the only entrance.
+# These entries make the bypass fail the build instead of failing a test once a
+# week.
 #
 # The override arrives in two spellings. The two free functions in
 # `colored::control` are the usual one, but each of them only forwards to a
@@ -13,9 +13,13 @@
 # call through it changes the same global state. All four spellings are banned
 # for that reason.
 #
-# This file sits beside gsw's Cargo.toml, so the ban covers the gsw crate only.
-# Other crates in the workspace, such as seescc, call the same API in
-# production and must keep it.
+# This file sits beside the workspace manifest, so the ban covers every member.
+# It used to sit beside gsw's manifest and cover gsw alone, which left the same
+# trap open for every other crate. cwt fell into it: two tests compared colored
+# output against plain text, passed in a redirected run, and failed under a
+# hand-typed `git commit`. Clippy reads the nearest clippy.toml and no other, so
+# a member that must keep the raw call cannot narrow this file — it says so at
+# the call site with an `#[allow]` and a reason, where a reader sees it.
 disallowed-methods = [
     { path = "colored::control::set_override", reason = "call testcolor::with_forced_ansi instead; it holds the one lock on this process-global override" },
     { path = "colored::control::unset_override", reason = "testcolor::with_forced_ansi puts the override back on its own, on the panic path as well" },
