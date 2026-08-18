@@ -302,7 +302,8 @@ mod tests {
     fn stripping_keeps_multi_byte_glyphs_whole() {
         // The scan walks characters, so a 3-byte or 4-byte glyph beside an
         // escape survives. Byte-level scanning is what breaks these.
-        let painted = with_forced_ansi(|| format!("{} {} {}", "日本語".green(), "🎉".red(), "café".blue()));
+        let painted =
+            with_forced_ansi(|| format!("{} {} {}", "日本語".green(), "🎉".red(), "café".blue()));
         assert_eq!(strip_ansi(&painted), "日本語 🎉 café");
     }
 
