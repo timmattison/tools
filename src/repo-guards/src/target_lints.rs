@@ -220,6 +220,20 @@ pub enum TargetLintsError {
         declared: String,
     },
 
+    /// A manifest's `build` key is neither a path nor a bool.
+    #[error(
+        "{} sets `build = {value}`, which is neither a path nor a bool; cargo rejects that \
+         manifest outright, and reading it as `this crate has no build script` would drop a \
+         target from the audit on the strength of a value the guard did not understand",
+        manifest.display()
+    )]
+    MalformedBuildKey {
+        /// The manifest carrying the key.
+        manifest: PathBuf,
+        /// The value, rendered as TOML.
+        value: String,
+    },
+
     /// A manifest overrides cargo's target auto-discovery.
     #[error(
         "{} sets `{key}`; this guard models cargo's default target discovery only, \

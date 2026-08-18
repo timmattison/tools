@@ -1009,6 +1009,162 @@ fn baselines_do_not_leak_between_crates() {
 }
 
 // ---------------------------------------------------------------------------
+// Build scripts: a target cargo lints, declared in a shape no other target has
+// ---------------------------------------------------------------------------
+//
+// Every fixture below was checked against cargo 1.97.1 with a throwaway crate
+// and `cargo metadata --no-deps --format-version 1`, reading the `custom-build`
+// target it reports. The `build` key is a *scalar* inside `[package]` — a path
+// or a bool — not an array-of-tables with a `path` field like `[[bin]]`, so its
+// forms are enumerated here one fixture apiece rather than inherited from the
+// declared-path machinery the other kinds share.
+
+/// A conventional `build.rs` is a target root, and silence there is the same
+/// violation it is anywhere else.
+///
+/// This is the defect in its live form. Verified on cargo 1.97.1: with
+/// `[lints.rust] unsafe_code = "deny"` in the manifest, an unsafe block in
+/// `build.rs` fails the build; with the identical lint moved to
+/// `#![deny(unsafe_code)]` at the top of `src/lib.rs`, the same `build.rs`
+/// compiles clean. So a build script loses its lints in exactly the
+/// manifest-to-crate-root migration this guard was written to police.
+#[test]
+fn build_script_silent_about_a_baseline_lint_is_flagged() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(&member, "src/lib.rs", "#![deny(unsafe_code)]\n");
+    write_source(&member, "build.rs", "fn main() {}\n");
+
+    let report = audit_fixture(&ws);
+
+    assert_offenders(&report, &["crates/tool/build.rs"]);
+    assert_eq!(
+        report.offenders()[0].kind(),
+        "build script",
+        "the report should say what kind of target is silent"
+    );
+}
+
+/// A build script that states a position is compliant, by the same rule every
+/// other target answers to: mention the lint, at any level, in writing.
+#[test]
+fn build_script_that_states_a_position_is_clean() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(&member, "src/lib.rs", "#![warn(clippy::pedantic)]\n");
+    write_source(
+        &member,
+        "build.rs",
+        "#![allow(clippy::pedantic, reason = \"a build script prints to stdout by protocol\")]\n\nfn main() {}\n",
+    );
+
+    let report = audit_fixture(&ws);
+
+    assert!(
+        report.is_compliant(),
+        "an explicit allow in a build script is a stated position, not silence; got:\n{report}"
+    );
+    assert_eq!(
+        report.roots_examined(),
+        2,
+        "both the library and the build script should have been examined"
+    );
+}
+
+/// A build script **mentions but never raises**. Nothing depends on a build
+/// script — it is compiled for the build machine, run once, and never linked
+/// into the crate — so a lint it alone raises is a position that target holds,
+/// not one the crate holds. Were it to raise, the silent library and test here
+/// would both be offenders, and adding one strict build script would go red
+/// across a crate that never asked for the lint.
+#[test]
+fn a_build_script_does_not_raise_its_crates_baseline() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "");
+    write_source(&member, "src/lib.rs", "pub fn f() {}\n");
+    write_source(
+        &member,
+        "build.rs",
+        "#![deny(unsafe_code)]\n\nfn main() {}\n",
+    );
+    write_source(&member, "tests/cli.rs", "#[test]\nfn works() {}\n");
+
+    let report = audit_fixture(&ws);
+
+    assert!(
+        report.is_compliant(),
+        "a build script's own lints must not bind its siblings; got:\n{report}"
+    );
+    assert_eq!(
+        report.roots_examined(),
+        3,
+        "all three roots should still have been examined"
+    );
+}
+
+/// `build = "custom-build.rs"` names the build script explicitly, and the
+/// declaration *replaces* the convention rather than adding to it: cargo reports
+/// exactly one `custom-build` target, at the declared path, and the stray
+/// `build.rs` beside it is not a target at all. A guard that discovered the
+/// convention regardless would demand a lint attribute in a file cargo never
+/// compiles.
+#[test]
+fn explicitly_declared_build_script_paths_are_audited() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "build = \"custom-build.rs\"\n");
+    write_source(&member, "src/lib.rs", "#![warn(clippy::pedantic)]\n");
+    write_source(&member, "custom-build.rs", "fn main() {}\n");
+    write_source(&member, "build.rs", "fn main() {}\n");
+
+    let report = audit_fixture(&ws);
+
+    assert_offenders(&report, &["crates/tool/custom-build.rs"]);
+    assert_eq!(
+        report.roots_examined(),
+        2,
+        "the declared path replaces the conventional one; build.rs is not a target here"
+    );
+}
+
+/// `build = true` is the conventional path spelled out loud, and cargo means it
+/// literally: it reports a `custom-build` target at `build.rs` and compiles it.
+#[test]
+fn build_true_resolves_the_conventional_build_script() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "build = true\n");
+    write_source(&member, "src/lib.rs", "#![warn(clippy::pedantic)]\n");
+    write_source(&member, "build.rs", "fn main() {}\n");
+
+    let report = audit_fixture(&ws);
+
+    assert_offenders(&report, &["crates/tool/build.rs"]);
+}
+
+/// `build = false` turns the build script off. Cargo reports no `custom-build`
+/// target even with a `build.rs` sitting on disk, and does not compile it — so
+/// demanding a lint attribute in that file would be a violation invented against
+/// a file the build never reads.
+#[test]
+fn build_false_resolves_no_build_script() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "build = false\n");
+    write_source(&member, "src/lib.rs", "#![warn(clippy::pedantic)]\n");
+    write_source(&member, "build.rs", "fn main() {}\n");
+
+    let report = audit_fixture(&ws);
+
+    assert!(
+        report.is_compliant(),
+        "a disabled build script is not a target to audit; got:\n{report}"
+    );
+    assert_eq!(
+        report.roots_examined(),
+        1,
+        "only the library is a target when `build = false`"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Display: the message has to be usable without opening the source
 // ---------------------------------------------------------------------------
 
@@ -1148,6 +1304,70 @@ fn declared_target_path_that_does_not_exist_refuses() {
                 if declared == "checks/typo.rs"
         ),
         "a declared target that is not on disk must be an error naming it, got: {error}"
+    );
+}
+
+/// `build = "missing.rs"` names a build script that is not on disk. Cargo
+/// reports the target and then fails to compile it (`error: couldn't read
+/// `missing.rs``), so a guard that quietly skipped it would be reporting on a
+/// smaller set than the build has — the same defect a typo'd `[[test]] path`
+/// already refuses over.
+#[test]
+fn declared_build_script_that_does_not_exist_refuses() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "build = \"missing.rs\"\n");
+    write_source(&member, "src/lib.rs", "#![warn(clippy::pedantic)]\n");
+
+    let error = audit_must_refuse(&ws);
+
+    assert!(
+        matches!(
+            &error,
+            TargetLintsError::MissingDeclaredTarget { kind: "build", declared, .. }
+                if declared == "missing.rs"
+        ),
+        "a declared build script that is not on disk must be an error naming it, got: {error}"
+    );
+}
+
+/// `build = true` without a `build.rs` is the same refusal, and cargo agrees:
+/// it reports the target at `build.rs` and then fails with `couldn't read
+/// `build.rs``. So `true` is a *declaration* of the conventional path, not a
+/// best-effort look for one — treating it as "discover if present" would let the
+/// guard's root set silently disagree with cargo's.
+#[test]
+fn build_true_without_a_build_script_refuses() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "build = true\n");
+    write_source(&member, "src/lib.rs", "#![warn(clippy::pedantic)]\n");
+
+    let error = audit_must_refuse(&ws);
+
+    assert!(
+        matches!(
+            &error,
+            TargetLintsError::MissingDeclaredTarget { kind: "build", declared, .. }
+                if declared == "build.rs"
+        ),
+        "`build = true` with no build.rs must be an error naming the file cargo would compile, got: {error}"
+    );
+}
+
+/// A `build` key that is neither a path nor a bool. Cargo rejects such a
+/// manifest outright; reading it here as "this crate has no build script" would
+/// drop a target from the audit on the strength of a value the guard did not
+/// understand.
+#[test]
+fn build_key_that_is_neither_path_nor_bool_refuses() {
+    let ws = synthetic_workspace();
+    let member = write_member(ws.path(), "tool", "build = 3\n");
+    write_source(&member, "src/lib.rs", "#![warn(clippy::pedantic)]\n");
+
+    let error = audit_must_refuse(&ws);
+
+    assert!(
+        matches!(&error, TargetLintsError::MalformedBuildKey { value, .. } if value == "3"),
+        "an ill-typed `build` key must be an error quoting the value, got: {error}"
     );
 }
 
