@@ -267,3 +267,88 @@ pub fn make_repo(path: &Path, branch: &str) {
 pub fn add_worktree(repo: &Path, relative: &str, branch: &str) {
     git(repo, &["worktree", "add", "-b", branch, relative]);
 }
+
+/// A nest of repositories: repositories checked out inside repositories, three
+/// levels deep, for the climb `--main` makes when the user's directory is a
+/// main worktree itself.
+///
+/// ```text
+/// root/
+///   top/                                repository, branch main
+///   top/middle/                         repository, branch master
+///   top/middle/leaf/                    repository, branch main
+///   top/middle/leaf-worktrees/feature   worktree of leaf, branch feature
+///   top/hub/                            repository, branch trunk
+///   top/hub/twig/                       repository, branch main
+///   top/away/                           repository, branch trunk
+///   top/away-worktrees/main             worktree of away, branch main
+///   top/away/sprig/                     repository, branch main
+/// ```
+///
+/// Each of the three branches of the nest proves one thing about the climb:
+///
+/// - `middle` is the plain ladder. `leaf` climbs to `middle`, which is on
+///   `master`, and `middle` climbs to `top`. Above `top` there is nothing.
+/// - `hub` has neither `main` nor `master`, so it can never be a destination.
+///   `twig` must step over it and reach `top`.
+/// - `away` is on `trunk` and keeps its `main` branch in a worktree beside
+///   itself. `sprig` must reach that worktree, not the directory that holds
+///   the repository.
+pub struct Nest {
+    /// Kept alive so the temp directory outlives the test.
+    _tmp: TempDir,
+    /// The canonical path of the temp directory, for the reason [`Family`]
+    /// canonicalizes its own.
+    root: PathBuf,
+}
+
+impl Nest {
+    /// Build the nest described in the type documentation.
+    pub fn build() -> Self {
+        let tmp = TempDir::new().expect("failed to create temp dir");
+        let root = tmp
+            .path()
+            .canonicalize()
+            .expect("failed to canonicalize temp dir");
+
+        make_repo(&root.join("top"), "main");
+
+        make_repo(&root.join("top/middle"), "master");
+        make_repo(&root.join("top/middle/leaf"), "main");
+        add_worktree(
+            &root.join("top/middle/leaf"),
+            "../leaf-worktrees/feature",
+            "feature",
+        );
+
+        make_repo(&root.join("top/hub"), "trunk");
+        make_repo(&root.join("top/hub/twig"), "main");
+
+        make_repo(&root.join("top/away"), "trunk");
+        add_worktree(&root.join("top/away"), "../away-worktrees/main", "main");
+        make_repo(&root.join("top/away/sprig"), "main");
+
+        Self { _tmp: tmp, root }
+    }
+
+    /// Resolve a path inside the nest, for example `top/middle/leaf`.
+    pub fn at(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
+    }
+
+    /// Create a plain directory inside the nest, and every directory above it.
+    ///
+    /// A user stands anywhere inside a worktree, not only at its root, and
+    /// `--main` has to answer for both places. This is where a test puts a
+    /// directory below one, so that it can run `cwt` from there.
+    pub fn deepen(&self, relative: &str) -> PathBuf {
+        let path = self.at(relative);
+        std::fs::create_dir_all(&path).expect("failed to create a directory inside the nest");
+        path
+    }
+
+    /// The path of a worktree as a string, for comparison with `cwt` output.
+    pub fn path_of(&self, relative: &str) -> String {
+        self.at(relative).display().to_string()
+    }
+}

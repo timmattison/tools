@@ -16,16 +16,27 @@ use std::path::{Path, PathBuf};
 
 use colored::Colorize;
 
-use crate::worktree::{list_worktrees, paths_equal, RepoWorktrees, Worktree};
+use crate::ascent::{climb, main_branch_rank};
+use crate::worktree::{
+    canonical, is_checkout, list_worktrees, paths_equal, RepoWorktrees, Worktree,
+};
 
 /// The indent that puts a worktree under its repository heading.
 const GROUP_INDENT: &str = "  ";
 
-/// The branch names that identify the main worktree, in order of priority.
-///
-/// `main` comes first. `master` is the fallback for a repository that never
-/// renamed its first branch.
-pub const MAIN_BRANCH_NAMES: [&str; 2] = ["main", "master"];
+/// Where `--main` sends the user.
+#[derive(Debug)]
+pub enum MainTarget {
+    /// The main worktree to change to.
+    Worktree(PathBuf),
+    /// The repository the user stands in has no worktree on a main branch, so
+    /// it has no main worktree to offer.
+    NoMainBranch,
+    /// The user's directory is the main worktree itself, and no repository
+    /// above the one named here has a main worktree either. The path is where
+    /// that repository sits on disk, which is what the climb started from.
+    AtTheTop(PathBuf),
+}
 
 /// Result of searching for a worktree by name.
 #[derive(Debug)]
@@ -206,6 +217,44 @@ impl Family {
         })
     }
 
+    /// Where `--main` sends the user, standing in `cwd`.
+    ///
+    /// The first answer is the main worktree of the repository the user stands
+    /// in, which [`own_main_worktree`] finds. That answer holds from anywhere
+    /// inside the repository, a subdirectory of the main worktree included: a
+    /// user below a worktree root asked to be taken to the top of it.
+    ///
+    /// Only a user whose directory *is* the main worktree has asked to go up,
+    /// so the answer becomes the main worktree of the repository that holds
+    /// theirs — see [`climb`], which repeats for as deep as the repositories
+    /// are nested.
+    ///
+    /// That is why `cwd` is asked for rather than the worktree the user is in:
+    /// the whole subtree of the main worktree is "in" it, and the climb belongs
+    /// to one directory of that subtree. A `cwd` that is no worktree — the
+    /// empty path the caller passes when the current directory cannot be read —
+    /// therefore never climbs, and `--main` keeps the meaning it has always had.
+    ///
+    /// The climb starts at the main worktree of the user's repository, never at
+    /// the worktree they stand in. A repository sits on disk where its main
+    /// worktree is, so that is the only place the repository above it can be
+    /// measured from.
+    ///
+    /// [`own_main_worktree`]: Family::own_main_worktree
+    pub fn main_worktree(&self, cwd: &Path) -> MainTarget {
+        let Some(index) = self.own_main_worktree() else {
+            return MainTarget::NoMainBranch;
+        };
+
+        let main = self.entries[index].worktree.path.clone();
+        if Some(index) != self.current || !paths_equal(&canonical(cwd), &canonical(&main)) {
+            return MainTarget::Worktree(main);
+        }
+
+        let home = self.groups[self.entries[index].group].dir.clone();
+        climb(&home).map_or(MainTarget::AtTheTop(home), MainTarget::Worktree)
+    }
+
     /// The main worktree of the repository the user stands in: the one on
     /// branch `main`, or the one on branch `master` when no worktree of that
     /// repository is on `main`.
@@ -215,22 +264,30 @@ impl Family {
     /// the current worktree, which keeps the user inside the repository they
     /// work in instead of sending them to the anchor of the family.
     ///
-    /// The branch name must match exactly. The substring match that [`find`]
-    /// does is wrong here: in a repository that has no `main` branch, a branch
-    /// such as `wt-main-master` would capture the shortcut and send the user
-    /// somewhere that is not the main worktree.
+    /// [`main_branch_rank`] ranks the branches, so the name must match exactly.
+    /// The substring match that [`find`] does is wrong here: in a repository
+    /// that has no `main` branch, a branch such as `wt-main-master` would
+    /// capture the shortcut and send the user somewhere that is not the main
+    /// worktree. A detached worktree has no branch, so it is never the main
+    /// worktree.
     ///
-    /// A detached worktree has no branch, so it is never the main worktree.
+    /// Two worktrees of one repository cannot share a branch, so the lowest
+    /// rank belongs to one entry and the tie-break on the index never decides
+    /// anything a user can see.
     ///
     /// [`find`]: Family::find
-    pub fn main_worktree(&self) -> Option<usize> {
+    fn own_main_worktree(&self) -> Option<usize> {
         let group = self.entries.get(self.current?)?.group;
 
-        MAIN_BRANCH_NAMES.iter().find_map(|name| {
-            self.entries
-                .iter()
-                .position(|e| e.group == group && e.worktree.branch.as_deref() == Some(*name))
-        })
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.group == group)
+            .filter_map(|(index, entry)| {
+                main_branch_rank(entry.worktree.branch.as_deref()).map(|rank| (rank, index))
+            })
+            .min()
+            .map(|(_, index)| index)
     }
 
     /// How to name the worktree at `index` in a message, so that the name can
@@ -467,7 +524,7 @@ impl Family {
 fn anchor_of(main_worktree: &Path) -> PathBuf {
     let parent = main_worktree.parent();
     match parent {
-        Some(parent) if parent.join(".git").exists() => parent.to_path_buf(),
+        Some(parent) if is_checkout(parent) => parent.to_path_buf(),
         _ => main_worktree.to_path_buf(),
     }
 }
@@ -482,7 +539,7 @@ fn child_repo_dirs(dir: &Path) -> Vec<PathBuf> {
     let mut children: Vec<PathBuf> = read
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join(".git").exists())
+        .filter(|path| path.is_dir() && is_checkout(path))
         .collect();
     children.sort();
     children
@@ -674,12 +731,6 @@ fn find_current(entries: &[Entry], repo_root: &Path) -> Option<usize> {
     })
 }
 
-/// The resolved form of a path, falling back to the path itself when it cannot
-/// be resolved (a worktree whose directory was deleted, for example).
-fn canonical(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,7 +827,7 @@ mod tests {
             false,
             Some(1),
         );
-        assert_eq!(one.main_worktree(), Some(0));
+        assert_eq!(one.own_main_worktree(), Some(0));
     }
 
     #[test]
@@ -790,7 +841,7 @@ mod tests {
             false,
             Some(0),
         );
-        assert_eq!(one.main_worktree(), Some(1));
+        assert_eq!(one.own_main_worktree(), Some(1));
     }
 
     #[test]
@@ -804,7 +855,7 @@ mod tests {
             false,
             Some(0),
         );
-        assert_eq!(one.main_worktree(), Some(1));
+        assert_eq!(one.own_main_worktree(), Some(1));
     }
 
     #[test]
@@ -819,7 +870,7 @@ mod tests {
             false,
             Some(0),
         );
-        assert_eq!(one.main_worktree(), Some(1));
+        assert_eq!(one.own_main_worktree(), Some(1));
     }
 
     #[test]
@@ -832,7 +883,7 @@ mod tests {
             false,
             Some(0),
         );
-        assert_eq!(one.main_worktree(), Some(1));
+        assert_eq!(one.own_main_worktree(), Some(1));
     }
 
     #[test]
@@ -845,7 +896,7 @@ mod tests {
             false,
             Some(0),
         );
-        assert_eq!(one.main_worktree(), None);
+        assert_eq!(one.own_main_worktree(), None);
     }
 
     #[test]
@@ -862,7 +913,32 @@ mod tests {
             true,
             Some(3),
         );
-        assert_eq!(whole.main_worktree(), Some(2));
+        assert_eq!(whole.own_main_worktree(), Some(2));
+    }
+
+    #[test]
+    fn main_worktree_answers_with_the_main_worktree_from_below_its_root() {
+        // The user is inside the main worktree, not at it. `--main` means "take
+        // me to the top of this worktree" from there, and never a climb out of
+        // the repository.
+        let one = family(vec![("solo", "/repo", "main")], false, Some(0));
+        match one.main_worktree(Path::new("/repo/src/deep")) {
+            MainTarget::Worktree(path) => assert_eq!(path, PathBuf::from("/repo")),
+            other => panic!("Expected the main worktree, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn main_worktree_does_not_climb_when_the_current_directory_is_unknown() {
+        // The caller passes the empty path when the current directory cannot be
+        // read. It is at no worktree, so the answer stays the one `--main` gave
+        // before the climb existed: a directory that cannot be identified must
+        // never be taken for the root of the main worktree.
+        let one = family(vec![("solo", "/repo", "main")], false, Some(0));
+        match one.main_worktree(Path::new("")) {
+            MainTarget::Worktree(path) => assert_eq!(path, PathBuf::from("/repo")),
+            other => panic!("Expected the main worktree, got {other:?}"),
+        }
     }
 
     #[test]
@@ -873,7 +949,7 @@ mod tests {
             true,
             None,
         );
-        assert_eq!(whole.main_worktree(), None);
+        assert_eq!(whole.own_main_worktree(), None);
     }
 
     #[test]
