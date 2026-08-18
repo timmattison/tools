@@ -23,7 +23,7 @@ mod tests {
             version: 2,
             width: 80,
             height: 24,
-            timestamp: 1234567890.0,
+            timestamp: 1_234_567_890.0,
             duration: 10.5,
             command: "bash".to_string(),
             title: "Test recording".to_string(),

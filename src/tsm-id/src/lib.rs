@@ -1,3 +1,15 @@
+// Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "SessionIdError keeps the SessionId prefix so a reader of Result<SessionId, SessionIdError> sees at a glance which type failed to build"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "random, from_hex and as_hex are called for their result at every site; #[must_use] on each would restate the signature without catching a bug"
+)]
+
 //! Session ID type for tsm.
 //!
 //! A [`SessionId`] is a 128-bit identifier represented as exactly 32 lowercase
@@ -51,6 +63,15 @@ impl SessionId {
     /// The input must be exactly 32 characters long and consist solely of
     /// lowercase hex characters (`0-9`, `a-f`). Uppercase hex is rejected
     /// to keep the canonical representation unambiguous.
+    ///
+    /// # Errors
+    ///
+    /// - [`SessionIdError::WrongLength`] when `s` is not exactly 32 characters,
+    ///   reporting both the expected and the actual count.
+    /// - [`SessionIdError::UppercaseHex`] when `s` is the right length but holds an
+    ///   `A`-`F`, naming the offending character.
+    /// - [`SessionIdError::NonHexCharacter`] when `s` holds any other character
+    ///   outside `[0-9a-f]`, naming the offending character.
     pub fn from_hex(s: &str) -> Result<Self, SessionIdError> {
         let actual = s.chars().count();
         if actual != SESSION_ID_HEX_LEN {

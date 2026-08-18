@@ -5,6 +5,10 @@
 //! matched. The sets differ, the rendering does not, so these tests pin the
 //! rendered line at both sites and would catch the two drifting apart.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod common;
 
 use common::{

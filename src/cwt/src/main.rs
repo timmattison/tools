@@ -1,3 +1,15 @@
+// Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::module_name_repetitions,
+    reason = "WorktreeMatch keeps the Worktree prefix so a signature says which of the match outcomes it carries; the shorter name would save characters and cost clarity"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "cwt is a binary with no external callers, so a dropped return value cannot surprise anyone outside this file; blanket #[must_use] would be attribute noise rather than a guard"
+)]
+
 use std::process::exit;
 
 use buildinfo::version_string;
@@ -97,7 +109,10 @@ macro_rules! error {
 // Without this, clap folds the long help into one paragraph and the code blocks
 // below come out as a single run-on line.
 #[command(verbatim_doc_comment)]
-#[allow(clippy::struct_excessive_bools)] // CLI flags are naturally bool-heavy
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each bool is a distinct CLI flag clap fills in; grouping them into an enum would hide the flags from the derive"
+)]
 struct Cli {
     /// Go to the next worktree (wraps around).
     #[arg(short = 'f', long, conflicts_with_all = ["prev", "main", "target", "shell_setup"])]

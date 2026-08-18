@@ -9,6 +9,10 @@
 //! no `main` and no `master` has no main worktree, and sending the user to a
 //! sibling's main worktree is not the shortcut they asked for.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use support::{code, combined, cwt, target_path, Family};

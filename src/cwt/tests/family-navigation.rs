@@ -4,6 +4,10 @@
 //! parent repository, then the rest. `wtm` has to keep meaning "my repository's
 //! main branch" wherever the user is standing.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use support::{code, cwt, target_path, Family};

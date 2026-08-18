@@ -1,6 +1,33 @@
 use anyhow::Result;
 use vte::{Parser, Perform};
 
+/// Narrows an SGR colour offset to the palette index it names.
+///
+/// Callers reach this only from a match arm that has already pinned the SGR
+/// parameter to one of the eight-value ranges 30-37, 40-47, 90-97 or 100-107, so
+/// the offset handed in is always 0..=15 and the narrowing is exact.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the caller's match arm pins the offset to 0..=15, so this narrowing is exact"
+)]
+const fn sgr_palette_index(offset: u16) -> u8 {
+    offset as u8
+}
+
+/// Narrows a raw VT parameter to the byte an SGR colour operand needs.
+///
+/// VT parameters are unbounded 16-bit values, so a malformed sequence such as
+/// `ESC[38;2;300;0;0m` can carry an operand wider than a byte. Wrapping it is
+/// deliberate and long-standing: the renderer keeps painting with the wrapped
+/// value rather than discarding the whole sequence.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "an out-of-range VT colour operand is deliberately wrapped into a byte, preserving the renderer's existing handling of malformed input"
+)]
+const fn sgr_color_byte(param: u16) -> u8 {
+    param as u8
+}
+
 #[derive(Debug, Clone)]
 pub struct TerminalTheme {
     pub background: (u8, u8, u8),
@@ -230,7 +257,10 @@ pub struct Cell {
     pub fg_color: (u8, u8, u8),
     pub bg_color: (u8, u8, u8),
     pub bold: bool,
-    #[allow(dead_code)] // Tracked by SGR processing; rendering support planned
+    #[allow(
+        dead_code,
+        reason = "tracked by SGR processing; rendering support planned"
+    )]
     pub italic: bool,
     pub underline: bool,
 }
@@ -375,8 +405,8 @@ impl TerminalState {
         let mut bg = cell.bg_color;
 
         // Only check palette entries that have been modified (not all 256)
-        for (i, &dynamic_color) in self.dynamic_palette.iter().enumerate() {
-            let standard_color = TerminalTheme::get_256_color(i as u8);
+        for (index, &dynamic_color) in (0..=u8::MAX).zip(self.dynamic_palette.iter()) {
+            let standard_color = TerminalTheme::get_256_color(index);
             if dynamic_color == standard_color {
                 continue; // Skip unmodified entries
             }
@@ -720,7 +750,7 @@ impl TerminalState {
                 24 => self.underline = false,
                 30..=37 => {
                     // Foreground colors
-                    let color_index = (param - 30) as u8;
+                    let color_index = sgr_palette_index(param - 30);
                     self.current_fg = self.theme.get_color(color_index);
                 }
                 38
@@ -730,7 +760,7 @@ impl TerminalState {
                             5
                                 // 256-color mode: ESC[38;5;n
                                 if i + 2 < param_vec.len() => {
-                                    let color_index = param_vec[i + 2] as u8;
+                                    let color_index = sgr_color_byte(param_vec[i + 2]);
                                     if (color_index as usize) < self.dynamic_palette.len() {
                                         self.current_fg =
                                             self.dynamic_palette[color_index as usize];
@@ -742,9 +772,9 @@ impl TerminalState {
                             2
                                 // 24-bit RGB mode: ESC[38;2;r;g;b
                                 if i + 4 < param_vec.len() => {
-                                    let r = param_vec[i + 2] as u8;
-                                    let g = param_vec[i + 3] as u8;
-                                    let b = param_vec[i + 4] as u8;
+                                    let r = sgr_color_byte(param_vec[i + 2]);
+                                    let g = sgr_color_byte(param_vec[i + 3]);
+                                    let b = sgr_color_byte(param_vec[i + 4]);
                                     self.current_fg = (r, g, b);
                                     i += 4; // Skip the 2, r, g, b
                                 }
@@ -753,7 +783,7 @@ impl TerminalState {
                     }
                 40..=47 => {
                     // Background colors
-                    let color_index = (param - 40) as u8;
+                    let color_index = sgr_palette_index(param - 40);
                     self.current_bg = self.theme.get_color(color_index);
                 }
                 48
@@ -763,7 +793,7 @@ impl TerminalState {
                             5
                                 // 256-color mode: ESC[48;5;n
                                 if i + 2 < param_vec.len() => {
-                                    let color_index = param_vec[i + 2] as u8;
+                                    let color_index = sgr_color_byte(param_vec[i + 2]);
                                     if (color_index as usize) < self.dynamic_palette.len() {
                                         self.current_bg =
                                             self.dynamic_palette[color_index as usize];
@@ -775,9 +805,9 @@ impl TerminalState {
                             2
                                 // 24-bit RGB mode: ESC[48;2;r;g;b
                                 if i + 4 < param_vec.len() => {
-                                    let r = param_vec[i + 2] as u8;
-                                    let g = param_vec[i + 3] as u8;
-                                    let b = param_vec[i + 4] as u8;
+                                    let r = sgr_color_byte(param_vec[i + 2]);
+                                    let g = sgr_color_byte(param_vec[i + 3]);
+                                    let b = sgr_color_byte(param_vec[i + 4]);
                                     self.current_bg = (r, g, b);
                                     i += 4; // Skip the 2, r, g, b
                                 }
@@ -786,12 +816,12 @@ impl TerminalState {
                     }
                 90..=97 => {
                     // Bright foreground colors
-                    let color_index = (param - 90 + 8) as u8;
+                    let color_index = sgr_palette_index(param - 90 + 8);
                     self.current_fg = self.theme.get_color(color_index);
                 }
                 100..=107 => {
                     // Bright background colors
-                    let color_index = (param - 100 + 8) as u8;
+                    let color_index = sgr_palette_index(param - 100 + 8);
                     self.current_bg = self.theme.get_color(color_index);
                 }
                 _ => {}
@@ -807,9 +837,10 @@ impl TerminalState {
         self.parse_color_spec(color_spec)
     }
 
-    // All byte-level indexing below is safe because we reject non-ASCII input
-    // via `is_ascii()` checks before any indexing occurs.
-    #[allow(clippy::string_slice)]
+    #[allow(
+        clippy::string_slice,
+        reason = "every byte-level index below is guarded by an `is_ascii()` check on the whole spec, so no index can land inside a multi-byte character"
+    )]
     fn parse_color_spec(&self, color_spec: &str) -> Option<(u8, u8, u8)> {
         let spec = color_spec.trim();
         if spec.starts_with('#') && spec.len() == 7 && spec.is_ascii() {
@@ -969,8 +1000,9 @@ impl Perform for TerminalState {
                     let indices = std::str::from_utf8(params[1]).unwrap_or("");
                     if indices.is_empty() {
                         // Reset all colors
-                        for i in 0..=255 {
-                            self.dynamic_palette[i] = TerminalTheme::get_256_color(i as u8);
+                        for index in 0..=u8::MAX {
+                            self.dynamic_palette[usize::from(index)] =
+                                TerminalTheme::get_256_color(index);
                         }
                     } else {
                         // Reset specific indices
@@ -1195,7 +1227,7 @@ impl Perform for TerminalState {
                     .iter()
                     .nth(1)
                     .and_then(|p| p.first().copied())
-                    .unwrap_or(self.height as u16) as usize;
+                    .map_or(self.height, usize::from);
 
                 // Validate and set scrolling region
                 if top > 0 && bottom <= self.height && top < bottom {

@@ -4,6 +4,10 @@
 //! which is what `cwt` did before families existed. `CWT_NO_FAMILY` makes that
 //! choice permanent without wrapping the command.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use support::{code, combined, cwt, cwt_with_env, stdout, target_path, Family};

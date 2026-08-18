@@ -390,8 +390,14 @@ pub async fn export_web(
     };
 
     // Format duration
-    let duration_minutes = recording.duration as u64 / 60;
-    let duration_seconds = recording.duration as u64 % 60;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the duration is a count of seconds; the saturating float cast clamps a negative or NaN duration from a corrupt recording to 0:00"
+    )]
+    let duration_total_seconds = recording.duration as u64;
+    let duration_minutes = duration_total_seconds / 60;
+    let duration_seconds = duration_total_seconds % 60;
     let duration_formatted = format!("{}:{:02}", duration_minutes, duration_seconds);
 
     // Create template environment

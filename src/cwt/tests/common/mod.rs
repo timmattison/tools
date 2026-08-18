@@ -7,7 +7,10 @@
 //! Cargo compiles this module separately into each test binary, so a helper
 //! that only one target calls looks unused to the other. That is what the
 //! blanket `dead_code` allow is for; it is not hiding a helper nobody calls.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "cargo compiles this module into each test binary separately, so a helper only one target calls looks unused to the others"
+)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

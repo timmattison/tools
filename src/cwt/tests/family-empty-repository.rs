@@ -6,6 +6,10 @@
 //! contributes nothing to list. It must not be able to answer for another
 //! repository, and it must not be able to crash `cwt`.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

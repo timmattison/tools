@@ -10,6 +10,10 @@
 //! end-to-end targets and live in [`common`]. Only the `--main` assertions are
 //! here.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod common;
 
 use std::path::Path;

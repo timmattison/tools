@@ -1,3 +1,7 @@
+// Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
+#![warn(clippy::arithmetic_side_effects)]
+#![warn(clippy::indexing_slicing)]
+
 use anyhow::{Context, Result};
 use buildinfo::version_string;
 use clap::{Parser, ValueEnum};
@@ -175,7 +179,7 @@ async fn main() -> Result<()> {
     }
 
     // Calculate total size
-    let mut total_size = 0u64;
+    let mut total_size = 0_u64;
     for file in &args.files {
         let metadata = fs::metadata(file)
             .context(format!("Failed to read metadata for '{}'", file.display()))?;
@@ -234,9 +238,10 @@ async fn main() -> Result<()> {
 
     // Process each file
     for (idx, file) in args.files.iter().enumerate() {
-        // SAFETY: idx comes from enumerate() over args.files which is bounded by memory,
-        // so idx < usize::MAX and idx + 1 cannot overflow.
-        #[allow(clippy::arithmetic_side_effects)]
+        #[allow(
+            clippy::arithmetic_side_effects,
+            reason = "idx comes from enumerate() over args.files, which is bounded by memory, so idx < usize::MAX and idx + 1 cannot overflow"
+        )]
         let file_num = idx + 1;
         pb.set_message(format!(
             "Hashing {} ({}/{})",
@@ -358,9 +363,10 @@ async fn hash_file_with_progress(
         };
 
         // Update hash
-        // SAFETY: bytes_read is the return value from read(), which guarantees
-        // bytes_read <= buffer.len(), so this slice is always valid.
-        #[allow(clippy::indexing_slicing)]
+        #[allow(
+            clippy::indexing_slicing,
+            reason = "bytes_read is the return value of read(), which guarantees bytes_read <= buffer.len(), so this slice is always in bounds"
+        )]
         hasher.update(&buffer[..bytes_read]);
 
         pb.inc(bytes_read as u64);

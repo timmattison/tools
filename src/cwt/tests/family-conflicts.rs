@@ -3,6 +3,10 @@
 //! It refuses to guess, and it names the candidates the way the user has to
 //! type them: `repository:worktree`.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use support::{code, combined, cwt, stdout, target_path, Family};

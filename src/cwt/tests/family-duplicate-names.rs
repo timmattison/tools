@@ -3,6 +3,10 @@
 //! own, and every name `cwt` prints has to select the worktree it was printed
 //! for.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

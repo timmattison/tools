@@ -2,6 +2,10 @@
 //! below it as one family: the listing shows all of them, grouped by
 //! repository, and the cycling flags walk the whole family.
 
+// Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
+#![deny(unsafe_code)]
+#![warn(clippy::pedantic)]
+
 mod support;
 
 use support::{code, cwt, headings, parse_listing, stdout, Family};
