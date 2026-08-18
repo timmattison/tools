@@ -205,7 +205,8 @@ allowlist.
 ### Crates Currently Using testcolor
 
 - `gsw` - render, watch, and push tests
-- `cwt` - family render tests
+- `cwt` - family render tests, and the end-to-end helpers that read the output
+  of the binary
 
 ## Version Information
 
