@@ -968,7 +968,7 @@ mod tests {
             false,
             Some(0),
         );
-        let rendered = one.render();
+        let rendered = testcolor::with_forced_ansi(|| one.render());
         assert_eq!(
             rendered, "> /repo [main]\n  /repo-wt/x [feature]\n",
             "a lone repository prints exactly as it always has"
@@ -983,7 +983,7 @@ mod tests {
             Some(1),
         );
         assert_eq!(
-            two.render(),
+            testcolor::with_forced_ansi(|| two.render()),
             "parent\n    /p [main]\n\nchild\n>   /p/c [trunk]\n",
             "each repository heads its own group, and the marker keeps its column"
         );
