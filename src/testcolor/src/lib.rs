@@ -292,6 +292,28 @@ mod tests {
     }
 
     #[test]
+    fn stripping_removes_an_osc_sequence_ended_by_a_bel() {
+        // `ic` writes an iTerm2 OSC sequence to draw an inline image:
+        // `ESC ] 1337 ; … BEL`. Reading the `ESC ]` as an Fe escape swallows
+        // two characters and leaves the whole payload behind as glyphs.
+        assert_eq!(strip_ansi("a\x1b]1337;ClearScrollback\x07b"), "ab");
+    }
+
+    #[test]
+    fn stripping_removes_an_osc_sequence_ended_by_a_string_terminator() {
+        // `ESC \` is the other legal end of an OSC sequence. A terminal title
+        // arrives in this form.
+        assert_eq!(strip_ansi("a\x1b]0;title\x1b\\b"), "ab");
+    }
+
+    #[test]
+    fn stripping_swallows_an_osc_that_runs_off_the_end() {
+        // A frame cut inside an OSC payload has no visible glyphs left to
+        // report, the same as one cut inside a CSI sequence.
+        assert_eq!(strip_ansi("done\x1b]1337;File=inline=1"), "done");
+    }
+
+    #[test]
     fn stripping_swallows_an_escape_that_runs_off_the_end() {
         // A frame cut mid-sequence has no visible glyphs left to report.
         assert_eq!(strip_ansi("done\x1b[38;2;1"), "done");
