@@ -168,8 +168,8 @@ fn assert_offenders(report: &Report, expected: &[&str]) {
 // The real repository
 // ---------------------------------------------------------------------------
 
-/// The guard, pointed at this repo. Red until the silent test roots take a
-/// position.
+/// The guard, pointed at this repo: every target root declares a position on
+/// every lint its own crate raises.
 ///
 /// The root-count assertion runs first on purpose: a guard that examined zero
 /// target roots would report "compliant" for entirely the wrong reason, and
@@ -470,8 +470,9 @@ fn crate_that_raises_nothing_imposes_nothing() {
 }
 
 /// The baseline is the *union* over library and binary roots, and both of them
-/// have to answer for it. This is `bm`'s real shape: `src/main.rs` raises lints
-/// that `src/lib.rs` never mentions.
+/// have to answer for it. Without the union each half would be measured only
+/// against what it raises itself, and a lint one root states would never reach
+/// the other.
 #[test]
 fn baseline_unions_library_and_binary_and_binds_both() {
     let ws = synthetic_workspace();
@@ -845,8 +846,9 @@ fn outer_attributes_are_not_target_wide_positions() {
 // ---------------------------------------------------------------------------
 
 /// `tests/common/mod.rs` is a module a test root `include!`s or `mod`s, not a
-/// target cargo builds. Three crates in this repo have one; treating them as
-/// roots would invent violations against files that are never compiled alone.
+/// target cargo builds. Three crates in this repo keep one, under
+/// `tests/common/` or `tests/support/`; treating them as roots would invent
+/// violations against files that are never compiled alone.
 #[test]
 fn test_helper_modules_are_not_target_roots() {
     let ws = synthetic_workspace();
@@ -968,9 +970,10 @@ fn src_bin_binaries_contribute_to_the_baseline() {
     );
 }
 
-/// `[[bin]] path = "src/main.rs"` — the spelling nearly every crate in this repo
-/// uses — names the same file auto-discovery finds. Counting it twice would
-/// inflate the root count and print the same offender twice.
+/// `[[bin]] path = "src/main.rs"` names the same file auto-discovery would have
+/// found on its own, and the crates here are split between the two spellings.
+/// Counting it twice would inflate the root count and print the same offender
+/// twice.
 #[test]
 fn a_declared_path_and_its_conventional_twin_are_one_root() {
     let ws = synthetic_workspace();
@@ -1224,7 +1227,7 @@ fn failure_message_names_the_root_the_lint_and_both_remedies() {
 }
 
 /// A clean audit says how much it looked at — so a passing CI log distinguishes
-/// "checked 90 roots" from "checked nothing".
+/// "checked 125 roots" from "checked nothing".
 #[test]
 fn clean_message_reports_the_counts() {
     let ws = synthetic_workspace();
