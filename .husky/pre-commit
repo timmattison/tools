@@ -47,7 +47,7 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     cargo machete
     echo "pre-commit: running cargo clippy --all-targets --workspace -- -D warnings"
     cargo clippy --all-targets --workspace -- -D warnings
-    echo "pre-commit: running cargo test --workspace"
+    echo "pre-commit: running cargo test --workspace (CLICOLOR_FORCE=1)"
     # Git exports GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/GIT_PREFIX into the hook's
     # environment, and `cargo test` inherits them. The suite spawns helpers that
     # run `git init`/`add`/`commit` inside throwaway temp repos; if those vars
@@ -56,7 +56,24 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     # `a.txt` fixture plus the developer's staged changes straight onto the
     # branch, and parallel runs flooded the real .git/config with lock errors.)
     # Scrub them for the test run so every test's git stays sandboxed.
-    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX cargo test --workspace
+    #
+    # CLICOLOR_FORCE=1 makes the `colored` crate paint whatever the run writes
+    # to. Without it, `colored` paints only when file descriptor 1 is a
+    # terminal, so a test that compares painted output against plain text
+    # passes in a redirected run and fails under a hand-typed commit, where the
+    # hook passes its terminal straight through. That is a deterministic result
+    # on a condition the test does not control, and it stays hidden until
+    # somebody commits from a terminal. Forcing the codes on makes the gate
+    # strictly stricter: such a test now fails on every commit. A test that
+    # asserts on rendered text must compare visible glyphs, through the
+    # `testcolor` crate — see "Colored Output in Tests" in CLAUDE.md.
+    #
+    # This does not defeat a tool that decides its own color output. A manual
+    # `colored::control::set_override` beats CLICOLOR_FORCE, so `gsw --no-color`
+    # and `seescc` under NO_COLOR still print plain text, and
+    # `testcolor::with_forced_ansi` still forces the codes on.
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
+        CLICOLOR_FORCE=1 cargo test --workspace
 fi
 
 # The Go module gets the same treatment, again cheapest-first:
