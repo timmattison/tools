@@ -203,3 +203,14 @@ fn a_command_line_without_a_destination_fails() {
     let stderr = failure(&[]);
     assert!(!stderr.is_empty(), "the failure carries a message");
 }
+
+#[test]
+fn a_destination_beside_a_replay_fails_and_names_both() {
+    let stderr = failure(&["example.com", "--replay", "old.jsonl"]);
+    for part in ["DESTINATION", "--replay"] {
+        assert!(
+            stderr.contains(part),
+            "the message names `{part}`: {stderr}"
+        );
+    }
+}

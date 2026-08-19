@@ -885,6 +885,21 @@ resolved configuration:
     }
 
     #[test]
+    fn rejects_a_destination_beside_a_replay() {
+        let error = rejection(&["krt", "example.com", "--replay", "path.jsonl"]);
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        let message = error.to_string();
+        assert!(
+            message.contains("DESTINATION"),
+            "the message names the destination: {message}"
+        );
+        assert!(
+            message.contains("--replay"),
+            "the message names the replay: {message}"
+        );
+    }
+
+    #[test]
     fn rejects_a_run_without_a_replay() {
         let error = rejection(&["krt", "example.com", "--run", "2026-08-19T12:00:00Z"]);
         assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
