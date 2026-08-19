@@ -125,6 +125,33 @@ fn run_hook(dir: &Path) -> bool {
         .success()
 }
 
+/// Run the real hook as [`run_hook`] does, and give back what it printed.
+///
+/// The status alone cannot tell which block ran. A fixture repo is not this
+/// workspace, so a block naming a package of this workspace fails there for a
+/// reason that has nothing to do with the trigger under test. Each block
+/// announces itself before it runs, so the announcement is what proves the
+/// trigger fired.
+fn run_hook_output(dir: &Path) -> String {
+    let output = Command::new("bash")
+        .arg(hook_path())
+        .current_dir(dir)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .expect("failed to spawn pre-commit hook");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// The line the hook prints before it runs the tool-index guard.
+const INDEX_GUARD_ANNOUNCEMENT: &str =
+    "pre-commit: running cargo test -p repo-guards --test tool_index_coverage";
+
 /// Best-effort cleanup; the per-process+nanos path is the real isolation, so a
 /// failed removal cannot collide with another run.
 fn cleanup(dir: &Path) {
@@ -182,25 +209,68 @@ fn staged_toolchain_config_alone_triggers_the_gate() {
     }
 }
 
-/// When only a non-Rust file is staged, the trigger condition is false and the
-/// gate is skipped — so the hook exits zero even though a misformatted
-/// `src/main.rs` sits on disk (unstaged). This proves the trigger, not the
-/// formatter, is what runs: if the gate fired anyway it would catch the file
-/// and fail.
+/// When only a file that no trigger names is staged, every gate is skipped — so
+/// the hook exits zero even though a misformatted `src/main.rs` sits on disk
+/// (unstaged). This proves the trigger, not the formatter, is what runs: if the
+/// gate fired anyway it would catch the file and fail.
+///
+/// The staged file is `NOTES.md` and not `README.md`. `README.md` is one of the
+/// two tool indexes, and a third block names those directly, so a fixture
+/// staging one of them no longer skips everything. See
+/// [`staged_tool_index_alone_triggers_the_index_guard`].
 #[test]
-fn staged_non_rust_file_skips_the_gate() {
+fn staged_unnamed_file_skips_every_gate() {
     let dir = unique_fixture_dir();
     write_fixture_package(&dir);
-    fs::write(dir.join("README.md"), "# fixture\n").expect("write README.md");
+    fs::write(dir.join("NOTES.md"), "# fixture\n").expect("write NOTES.md");
 
-    // Only the README is staged; the misformatted main.rs stays unstaged.
-    git_init_and_stage(&dir, &["README.md"]);
+    // Only the notes are staged; the misformatted main.rs stays unstaged.
+    git_init_and_stage(&dir, &["NOTES.md"]);
 
+    let output = run_hook_output(&dir);
     let passed = run_hook(&dir);
     cleanup(&dir);
 
     assert!(
         passed,
-        "hook should skip the gate when no Rust/Cargo files are staged, but it exited non-zero"
+        "hook should skip every gate when no named file is staged, but it exited non-zero: {output}"
     );
+    assert!(
+        !output.contains(INDEX_GUARD_ANNOUNCEMENT),
+        "an unrelated Markdown file must not run the tool-index guard: {output}"
+    );
+}
+
+/// Staging either tool index alone must run the tool-index guard.
+///
+/// This is the one direction the guard cannot otherwise reach. Adding a crate
+/// touches a `Cargo.toml`, which fires the Rust gate and runs the whole suite;
+/// REMOVING a tool's entry from an index touches Markdown alone, and before the
+/// third block existed such a commit ran no gate at all.
+///
+/// The assertion reads the announcement rather than the exit status. A fixture
+/// repo holds no `repo-guards` package, so `cargo test -p repo-guards` fails
+/// there whatever the trigger did, and a status assertion would pass for that
+/// reason instead of for the trigger. Proven able to fail by mutation: against
+/// the hook as it stood before the third block, both index files produce no
+/// announcement and this test fails.
+#[test]
+fn staged_tool_index_alone_triggers_the_index_guard() {
+    for index in ["README.md", "TLDR.md"] {
+        let dir = unique_fixture_dir();
+        write_fixture_package(&dir);
+        fs::write(dir.join(index), "# fixture\n").expect("write the index");
+
+        // Only the index is staged; the misformatted main.rs stays unstaged, so
+        // the Rust gate cannot be what fires.
+        git_init_and_stage(&dir, &[index]);
+
+        let output = run_hook_output(&dir);
+        cleanup(&dir);
+
+        assert!(
+            output.contains(INDEX_GUARD_ANNOUNCEMENT),
+            "staging {index} must run the tool-index guard: {output}"
+        );
+    }
 }
