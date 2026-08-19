@@ -551,7 +551,7 @@ resolved configuration:
 ";
 
     /// Every text that the parser rejects, for the message tests.
-    const BAD_TEXTS: [&str; 10] = [
+    const BAD_TEXTS: [&str; 16] = [
         "",
         "1",
         "1sec",
@@ -562,7 +562,25 @@ resolved configuration:
         "0s",
         "0ms",
         "99999999999999999999m",
+        "1秒",
+        "1🎉",
+        "1é",
+        "秒",
+        "café",
+        "½s",
     ];
+
+    /// Every text where a digit runs into a multi-byte character that is no unit.
+    ///
+    /// The characters are 3 bytes, 4 bytes, and 2 bytes long, in that order. The
+    /// parser makes the message for an unknown unit.
+    const MULTI_BYTE_UNKNOWN_UNITS: [&str; 3] = ["1秒", "1🎉", "1é"];
+
+    /// Every text that starts with a multi-byte character in the place of a digit.
+    ///
+    /// `½` is a numeric character to Unicode, but it is no ASCII digit, so the
+    /// parser makes the message for a text without a number.
+    const MULTI_BYTE_TEXTS_WITHOUT_A_NUMBER: [&str; 3] = ["秒", "café", "½s"];
 
     fn error_of(text: &str) -> String {
         parse_duration(text).expect_err("the parser must reject this text")
@@ -625,7 +643,7 @@ resolved configuration:
 
     #[test]
     fn rejects_an_unknown_unit() {
-        for text in ["1sec", "5x"] {
+        for text in ["1sec", "5x"].into_iter().chain(MULTI_BYTE_UNKNOWN_UNITS) {
             let message = error_of(text);
             assert!(
                 message.contains(text),
@@ -640,11 +658,37 @@ resolved configuration:
 
     #[test]
     fn rejects_text_without_a_number() {
-        for text in ["ms", "abc"] {
+        for text in ["ms", "abc"]
+            .into_iter()
+            .chain(MULTI_BYTE_TEXTS_WITHOUT_A_NUMBER)
+        {
             let message = error_of(text);
             assert!(
                 message.contains("no number"),
                 "the message names the fault: {message}"
+            );
+        }
+    }
+
+    /// The parser splits a text on a character boundary.
+    ///
+    /// The parser reads the split point from `char_indices`, so the point is
+    /// always on a character boundary. A split point that mixes a count of
+    /// characters with a count of bytes cuts a multi-byte character in half,
+    /// and `split_at` panics. A measurement of the unit from the end of the
+    /// text, such as `text.len() - text.chars().rev().take_while(|c|
+    /// !c.is_ascii_digit()).count()`, is one such point: it panics on `½s`,
+    /// `秒`, `1秒`, `1🎉`, and `1é`. This test holds the boundary in place.
+    #[test]
+    fn a_duration_that_holds_a_multi_byte_character_never_panics() {
+        for text in MULTI_BYTE_UNKNOWN_UNITS
+            .into_iter()
+            .chain(MULTI_BYTE_TEXTS_WITHOUT_A_NUMBER)
+        {
+            let message = error_of(text);
+            assert!(
+                message.contains(text),
+                "the message names the text: {message}"
             );
         }
     }
