@@ -8,8 +8,9 @@
 //!
 //! Nothing enforced this before. The omission is spelled as an *absence*, which
 //! is why it spread: a crate that nobody remembers to document is born
-//! undocumented, and no build step ever says so. Two of the workspace's
-//! binaries had drifted out of an index by the time this guard was written.
+//! undocumented, and no build step ever says so. One binary, `seescc`, had
+//! drifted out of an index by the time this guard was written: it carried a
+//! `README.md` entry and no `TLDR.md` row.
 //!
 //! [`audit`] closes that hole. Three design rules make it a real guard rather
 //! than a comfortable one:

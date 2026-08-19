@@ -386,8 +386,9 @@ tool nobody finds.
 
 Nothing enforced this before. The omission is spelled as an *absence*, which is
 why it spread: a crate that nobody remembers to document is born undocumented,
-and no build step ever said so. Two binaries had drifted out of an index by the
-time the guard was written.
+and no build step ever said so. One binary, `seescc`, had drifted out of an
+index by the time the guard was written: it carried a `README.md` entry and no
+`TLDR.md` row.
 
 ### Usage
 
