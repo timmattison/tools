@@ -43,6 +43,12 @@ const FIRST_TTL_DEFAULT: u8 = 1;
 /// The last TTL of a run, when the user names none.
 const MAX_TTL_DEFAULT: u8 = 30;
 
+/// The lowest number of rounds that stops a run. A run of zero rounds records
+/// nothing.
+///
+/// The type is the type that `clap` takes for the bound of a range.
+const ROUNDS_LOWEST: u64 = 1;
+
 /// The width of the key field of the resolved configuration block.
 ///
 /// The longest key is `address family:`, and one space follows it.
@@ -201,7 +207,11 @@ struct Cli {
     duration: Option<Duration>,
 
     /// Stop after this many rounds.
-    #[arg(long, value_name = "N")]
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(ROUNDS_LOWEST..),
+    )]
     rounds: Option<u64>,
 
     /// Fold a recorded file and print the table. Then exit.
