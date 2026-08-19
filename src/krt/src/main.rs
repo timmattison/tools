@@ -1,16 +1,15 @@
 //! `krt` (Knights of the Round Trip) records the network path to a
 //! destination, hop by hop.
 //!
-//! This slice adds the flags of the command line and their defaults. Later
-//! slices print the resolved configuration, then add the tracer, the file
-//! writer, and the table.
+//! This slice resolves the command line and prints the configuration of the
+//! run. Later slices add the tracer, the file writer, and the table.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
 use buildinfo::version_string;
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -43,6 +42,23 @@ const FIRST_TTL_DEFAULT: u8 = 1;
 
 /// The last TTL of a run, when the user names none.
 const MAX_TTL_DEFAULT: u8 = 30;
+
+/// The width of the key field of the resolved configuration block.
+///
+/// The longest key is `address family:`, and one space follows it.
+const CONFIG_KEY_WIDTH: usize = 16;
+
+/// The value of a flag that holds no limit and no file.
+const ABSENT: &str = "none";
+
+/// The value of the output, when the user names no file.
+const OUTPUT_DERIVED: &str = "derived at run time";
+
+/// The value of the source, when the user names no address.
+const SOURCE_DISCOVERED: &str = "discovered at run time";
+
+/// The value of the run, when the user names no run of a replay.
+const RUN_LATEST: &str = "the last run";
 
 /// The protocol of a probe.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,20 +93,40 @@ enum AddressFamily {
     Version6,
 }
 
-/// The command line of `krt`.
+impl fmt::Display for AddressFamily {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Auto => "auto",
+            Self::Version4 => "ipv4",
+            Self::Version6 => "ipv6",
+        })
+    }
+}
+
+/// Reads the text that the parser accepts for one value of a value enum.
 ///
-/// `--version` and `-V` print the build string that `buildinfo` made at compile
-/// time.
+/// The printer and the parser then read the same table, so the text of the
+/// output and the text of the command line can never part company.
+///
+/// # Panics
+///
+/// Panics when the variant carries no name. Every variant of a value enum of
+/// `krt` carries one, because no variant is hidden from the parser.
+fn value_name<T: ValueEnum>(value: &T) -> String {
+    value
+        .to_possible_value()
+        .expect("every variant of a value enum of `krt` carries a name")
+        .get_name()
+        .to_owned()
+}
+
+/// Knights of the Round Trip: record the network path to a destination.
+///
+/// `krt` probes every hop to the destination once per round, and it records
+/// each round in a file. This build parses the command line and prints the
+/// configuration it resolved.
 #[derive(Parser, Debug)]
-#[command(
-    name = "krt",
-    version = version_string!(),
-    about = "Knights of the Round Trip: record the network path to a destination"
-)]
-#[allow(
-    dead_code,
-    reason = "slice 4 reads every field when it prints the resolved configuration, and slice 4 removes this attribute"
-)]
+#[command(name = "krt", version = version_string!())]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each flag of the design is one switch of the command line"
@@ -227,13 +263,109 @@ impl Cli {
     /// TTL above the max TTL leaves no hop to probe. A multipath mode other
     /// than `classic` needs UDP or TCP, because ICMP carries no flow to vary.
     fn resolve(self) -> Result<ResolvedConfig, String> {
-        unimplemented!("slice 4 resolves the command line")
+        if self.first_ttl > self.max_ttl {
+            return Err(format!(
+                "`--first-ttl {}` is above `--max-ttl {}`: the first TTL starts the probe and the max TTL ends it",
+                self.first_ttl, self.max_ttl
+            ));
+        }
+
+        let carries_a_flow = matches!(self.protocol, Protocol::Udp | Protocol::Tcp);
+        if self.multipath != Multipath::Classic && !carries_a_flow {
+            return Err(format!(
+                "`--multipath {}` needs `--protocol udp` or `--protocol tcp`, but the protocol is `{}`",
+                value_name(&self.multipath),
+                value_name(&self.protocol)
+            ));
+        }
+
+        // The parser rejects the two flags of the address family together, so
+        // one flag at most is true here.
+        let address_family = if self.ipv4 {
+            AddressFamily::Version4
+        } else if self.ipv6 {
+            AddressFamily::Version6
+        } else {
+            AddressFamily::Auto
+        };
+
+        Ok(ResolvedConfig {
+            destination: self.destination,
+            output: self.output,
+            interval: self.interval,
+            first_ttl: self.first_ttl,
+            max_ttl: self.max_ttl,
+            protocol: self.protocol,
+            multipath: self.multipath,
+            address_family,
+            reverse_dns: !self.no_dns,
+            source: self.source,
+            headless: self.headless,
+            duration: self.duration,
+            rounds: self.rounds,
+            replay: self.replay,
+            run: self.run,
+        })
     }
 }
 
 impl fmt::Display for ResolvedConfig {
-    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("slice 4 prints the resolved configuration")
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let path_or = |path: Option<&PathBuf>, absent: &str| {
+            path.map_or_else(|| absent.to_owned(), |path| path.display().to_string())
+        };
+        let rows = [
+            (
+                "destination",
+                self.destination
+                    .clone()
+                    .unwrap_or_else(|| ABSENT.to_owned()),
+            ),
+            ("output", path_or(self.output.as_ref(), OUTPUT_DERIVED)),
+            ("interval", render_duration(self.interval)),
+            ("first ttl", self.first_ttl.to_string()),
+            ("max ttl", self.max_ttl.to_string()),
+            ("protocol", value_name(&self.protocol)),
+            ("multipath", value_name(&self.multipath)),
+            ("address family", self.address_family.to_string()),
+            (
+                "reverse dns",
+                if self.reverse_dns { "on" } else { "off" }.to_owned(),
+            ),
+            (
+                "source",
+                self.source.map_or_else(
+                    || SOURCE_DISCOVERED.to_owned(),
+                    |address| address.to_string(),
+                ),
+            ),
+            (
+                "display",
+                if self.headless { "headless" } else { "table" }.to_owned(),
+            ),
+            (
+                "duration limit",
+                self.duration
+                    .map_or_else(|| ABSENT.to_owned(), render_duration),
+            ),
+            (
+                "round limit",
+                self.rounds
+                    .map_or_else(|| ABSENT.to_owned(), |rounds| rounds.to_string()),
+            ),
+            ("replay", path_or(self.replay.as_ref(), ABSENT)),
+            (
+                "run",
+                self.run.clone().unwrap_or_else(|| RUN_LATEST.to_owned()),
+            ),
+        ];
+
+        writeln!(formatter, "resolved configuration:")?;
+        for (key, value) in rows {
+            let key = format!("{key}:");
+            writeln!(formatter, "  {key:<CONFIG_KEY_WIDTH$}{value}")?;
+        }
+        Ok(())
     }
 }
 
@@ -314,10 +446,6 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
 /// hours becomes hours. A whole number of minutes becomes minutes. Every other
 /// duration becomes seconds. The text reads like the text a user types, so
 /// `Duration::from_secs(3600)` becomes `1h`.
-#[allow(
-    dead_code,
-    reason = "slice 4 prints the resolved configuration with this renderer"
-)]
 fn render_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
     if duration.subsec_millis() != 0 || seconds == 0 {
@@ -333,9 +461,16 @@ fn render_duration(duration: Duration) -> String {
 }
 
 fn main() {
-    // The parse handles `--version`, `-V`, and `--help` on its own. A later
-    // slice prints the resolved configuration.
-    Cli::parse();
+    // The parse handles `--version`, `-V`, and `--help` on its own. A
+    // contradiction between two flags leaves the parser, so `clap` writes it to
+    // standard error in the style of every other error of a command line.
+    let cli = Cli::parse();
+    match cli.resolve() {
+        Ok(config) => print!("{config}"),
+        Err(message) => Cli::command()
+            .error(clap::error::ErrorKind::ValueValidation, message)
+            .exit(),
+    }
 }
 
 #[cfg(test)]
