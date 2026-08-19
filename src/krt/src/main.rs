@@ -456,12 +456,15 @@ fn parse_duration(text: &str) -> Result<Duration, String> {
     Ok(duration)
 }
 
-/// Writes the shortest exact text of a duration.
+/// Writes the shortest text of a duration, to the millisecond.
 ///
 /// A duration that carries milliseconds becomes milliseconds. A whole number of
 /// hours becomes hours. A whole number of minutes becomes minutes. Every other
 /// duration becomes seconds. The text reads like the text a user types, so
-/// `Duration::from_secs(3600)` becomes `1h`.
+/// `Duration::from_secs(3600)` becomes `1h`. A duration that carries less than
+/// one millisecond loses that remainder. No caller gives such a duration today,
+/// because every duration comes from `parse_duration`, which stops at
+/// milliseconds.
 fn render_duration(duration: Duration) -> String {
     let seconds = duration.as_secs();
     if duration.subsec_millis() != 0 || seconds == 0 {
