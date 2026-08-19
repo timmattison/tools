@@ -990,6 +990,101 @@ resolved configuration:
         assert_eq!(cli.run.as_deref(), Some("2026-08-19T12:00:00Z"));
     }
 
+    /// The verdict the parser must reach for one row of the argument matrix.
+    #[derive(Debug)]
+    enum Verdict {
+        /// The command line is accepted.
+        Parses,
+        /// The command line is rejected, with this reason.
+        Rejects(ErrorKind),
+    }
+
+    /// One row of the matrix of the three arguments that constrain each other.
+    struct ArgumentRow {
+        /// The command line, program name included.
+        arguments: &'static [&'static str],
+        /// The verdict the parser must reach.
+        verdict: Verdict,
+    }
+
+    /// A destination, for a row that carries one.
+    const A_DESTINATION: &str = "example.com";
+
+    /// A replay file, for a row that carries one.
+    const A_REPLAY: [&str; 2] = ["--replay", "path.jsonl"];
+
+    /// A run id, for a row that carries one.
+    const A_RUN: [&str; 2] = ["--run", "2026-08-19T12:00:00Z"];
+
+    /// Every combination of the destination, the replay, and the run.
+    ///
+    /// The three arguments constrain each other, and clap resolves such
+    /// relationships together rather than one at a time. A change to one of them
+    /// moves the verdict of rows that name the other two, so the whole matrix is
+    /// stated here and not one row per test. Two defects of this branch were of
+    /// that kind: `conflicts_with_all` on the destination stopped the `requires`
+    /// of `--run` from firing, and it later made the message of a missing
+    /// argument name a destination that no longer fits beside `--run`.
+    const ARGUMENT_MATRIX: [ArgumentRow; 8] = [
+        ArgumentRow {
+            arguments: &["krt"],
+            verdict: Verdict::Rejects(ErrorKind::MissingRequiredArgument),
+        },
+        ArgumentRow {
+            arguments: &["krt", A_DESTINATION],
+            verdict: Verdict::Parses,
+        },
+        ArgumentRow {
+            arguments: &["krt", A_REPLAY[0], A_REPLAY[1]],
+            verdict: Verdict::Parses,
+        },
+        ArgumentRow {
+            arguments: &["krt", A_DESTINATION, A_REPLAY[0], A_REPLAY[1]],
+            verdict: Verdict::Rejects(ErrorKind::ArgumentConflict),
+        },
+        ArgumentRow {
+            arguments: &["krt", A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Rejects(ErrorKind::MissingRequiredArgument),
+        },
+        ArgumentRow {
+            arguments: &["krt", A_DESTINATION, A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Rejects(ErrorKind::ArgumentConflict),
+        },
+        ArgumentRow {
+            arguments: &["krt", A_REPLAY[0], A_REPLAY[1], A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Parses,
+        },
+        ArgumentRow {
+            arguments: &[
+                "krt",
+                A_DESTINATION,
+                A_REPLAY[0],
+                A_REPLAY[1],
+                A_RUN[0],
+                A_RUN[1],
+            ],
+            verdict: Verdict::Rejects(ErrorKind::ArgumentConflict),
+        },
+    ];
+
+    #[test]
+    fn the_argument_matrix_holds() {
+        for row in &ARGUMENT_MATRIX {
+            let line = row.arguments.join(" ");
+            match row.verdict {
+                Verdict::Parses => {
+                    assert!(
+                        Cli::try_parse_from(row.arguments.iter().copied()).is_ok(),
+                        "`{line}` must parse"
+                    );
+                }
+                Verdict::Rejects(kind) => {
+                    assert_eq!(rejection(row.arguments).kind(), kind, "`{line}`");
+                }
+            }
+        }
+    }
+
     #[test]
     fn rejects_a_first_ttl_of_zero() {
         let error = rejection(&["krt", "example.com", "--first-ttl", "0"]);
