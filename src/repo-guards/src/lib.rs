@@ -17,4 +17,5 @@
 // move module-doc link resolution to the crate root, silently breaking every
 // intra-doc link inside those headers.
 pub mod target_lints;
+pub mod tool_index;
 pub mod workspace_lints;
