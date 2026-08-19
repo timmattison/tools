@@ -11,6 +11,7 @@
 
 use buildinfo::version_string;
 use clap::{Parser, ValueEnum};
+use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -63,6 +64,17 @@ enum Multipath {
     Paris,
     /// Walk the flows to find every path, as Dublin traceroute does.
     Dublin,
+}
+
+/// The IP version of a probe, after the two flags of the command line resolve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddressFamily {
+    /// Let the resolver pick the version.
+    Auto,
+    /// Force IP version 4.
+    Version4,
+    /// Force IP version 6.
+    Version6,
 }
 
 /// The command line of `krt`.
@@ -163,6 +175,66 @@ struct Cli {
     /// With `--replay`, pick which run in the file to fold.
     #[arg(long, value_name = "ID", requires = "replay")]
     run: Option<String>,
+}
+
+/// The configuration of one run, after the command line resolves.
+///
+/// Every field holds a resolved value and not a flag, so a later slice reads
+/// the behavior of the run and never reads the switch that made it.
+#[derive(Debug)]
+struct ResolvedConfig {
+    /// The host or the address to trace. A replay traces nothing.
+    destination: Option<String>,
+    /// The JSONL path the user named. An absent path is derived at run time.
+    output: Option<PathBuf>,
+    /// The period of one round.
+    interval: Duration,
+    /// The first TTL to probe.
+    first_ttl: u8,
+    /// The last TTL to probe.
+    max_ttl: u8,
+    /// The protocol of a probe.
+    protocol: Protocol,
+    /// The way a probe keeps or varies the flow of a packet.
+    multipath: Multipath,
+    /// The IP version of a probe.
+    address_family: AddressFamily,
+    /// True when the tool reads the name of each hop.
+    reverse_dns: bool,
+    /// The source address the user named for the derived filename.
+    source: Option<IpAddr>,
+    /// True when the tool prints status lines and no table.
+    headless: bool,
+    /// The time that stops the run. An absent time runs until the user stops it.
+    duration: Option<Duration>,
+    /// The number of rounds that stops the run.
+    rounds: Option<u64>,
+    /// The recorded file to fold and print.
+    replay: Option<PathBuf>,
+    /// The run in the replay file to fold.
+    run: Option<String>,
+}
+
+impl Cli {
+    /// Resolves the command line into the configuration of one run.
+    ///
+    /// The two flags of the address family collapse into one value, and the
+    /// `--no-dns` switch becomes the behavior it controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason as text when two flags contradict each other. A first
+    /// TTL above the max TTL leaves no hop to probe. A multipath mode other
+    /// than `classic` needs UDP or TCP, because ICMP carries no flow to vary.
+    fn resolve(self) -> Result<ResolvedConfig, String> {
+        unimplemented!("slice 4 resolves the command line")
+    }
+}
+
+impl fmt::Display for ResolvedConfig {
+    fn fmt(&self, _formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unimplemented!("slice 4 prints the resolved configuration")
+    }
 }
 
 /// Reads a duration from the text of a command line flag.
@@ -268,7 +340,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_duration, render_duration, Cli, Multipath, Protocol};
+    use super::{
+        parse_duration, render_duration, AddressFamily, Cli, Multipath, Protocol, ResolvedConfig,
+    };
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -290,6 +364,40 @@ mod tests {
     fn rejection(arguments: &[&str]) -> clap::Error {
         Cli::try_parse_from(arguments.iter().copied()).expect_err("the command line must fail")
     }
+
+    /// Resolves a command line that holds no contradiction.
+    fn resolve(arguments: &[&str]) -> ResolvedConfig {
+        parse(arguments)
+            .resolve()
+            .expect("the command line must resolve")
+    }
+
+    /// Reads the message of a command line that contradicts itself.
+    fn contradiction(arguments: &[&str]) -> String {
+        parse(arguments)
+            .resolve()
+            .expect_err("the command line must contradict itself")
+    }
+
+    /// The block that `krt example.com` prints, with every default.
+    const DEFAULT_BLOCK: &str = "\
+resolved configuration:
+  destination:    example.com
+  output:         derived at run time
+  interval:       1s
+  first ttl:      1
+  max ttl:        30
+  protocol:       icmp
+  multipath:      classic
+  address family: auto
+  reverse dns:    on
+  source:         discovered at run time
+  display:        table
+  duration limit: none
+  round limit:    none
+  replay:         none
+  run:            the last run
+";
 
     /// Every text that the parser rejects, for the message tests.
     const BAD_TEXTS: [&str; 10] = [
@@ -716,5 +824,188 @@ mod tests {
         let cli = parse(&["krt", "example.com", "--no-dns", "--headless"]);
         assert!(cli.no_dns);
         assert!(cli.headless);
+    }
+
+    #[test]
+    fn a_resolved_configuration_holds_every_documented_default() {
+        let config = resolve(&["krt", "example.com"]);
+        assert_eq!(config.destination.as_deref(), Some("example.com"));
+        assert_eq!(config.output, None);
+        assert_eq!(config.interval, Duration::from_secs(1));
+        assert_eq!(config.first_ttl, 1);
+        assert_eq!(config.max_ttl, 30);
+        assert_eq!(config.protocol, Protocol::Icmp);
+        assert_eq!(config.multipath, Multipath::Classic);
+        assert_eq!(config.address_family, AddressFamily::Auto);
+        assert!(config.reverse_dns, "reverse DNS is on by default");
+        assert_eq!(config.source, None);
+        assert!(!config.headless, "the table is on by default");
+        assert_eq!(config.duration, None);
+        assert_eq!(config.rounds, None);
+        assert_eq!(config.replay, None);
+        assert_eq!(config.run, None);
+    }
+
+    #[test]
+    fn the_flag_of_ip_version_4_resolves_to_version_4() {
+        let config = resolve(&["krt", "example.com", "-4"]);
+        assert_eq!(config.address_family, AddressFamily::Version4);
+    }
+
+    #[test]
+    fn the_flag_of_ip_version_6_resolves_to_version_6() {
+        let config = resolve(&["krt", "example.com", "-6"]);
+        assert_eq!(config.address_family, AddressFamily::Version6);
+    }
+
+    #[test]
+    fn the_no_dns_flag_turns_reverse_dns_off() {
+        let config = resolve(&["krt", "example.com", "--no-dns"]);
+        assert!(!config.reverse_dns);
+    }
+
+    #[test]
+    fn rejects_a_first_ttl_above_the_max_ttl() {
+        let message = contradiction(&["krt", "example.com", "--first-ttl", "5", "--max-ttl", "3"]);
+        for part in ["--first-ttl", "5", "--max-ttl", "3"] {
+            assert!(
+                message.contains(part),
+                "the message names `{part}`: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_first_ttl_equal_to_the_max_ttl_resolves() {
+        let config = resolve(&["krt", "example.com", "--first-ttl", "4", "--max-ttl", "4"]);
+        assert_eq!(config.first_ttl, 4);
+        assert_eq!(config.max_ttl, 4);
+    }
+
+    #[test]
+    fn rejects_a_multipath_mode_that_the_protocol_cannot_carry() {
+        let message = contradiction(&["krt", "example.com", "--multipath", "paris"]);
+        for part in ["--multipath", "paris", "--protocol", "icmp"] {
+            assert!(
+                message.contains(part),
+                "the message names `{part}`: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_multipath_mode_resolves_with_udp_and_with_tcp() {
+        for (mode, protocol) in [("paris", "udp"), ("dublin", "tcp")] {
+            let config = resolve(&[
+                "krt",
+                "example.com",
+                "--multipath",
+                mode,
+                "--protocol",
+                protocol,
+            ]);
+            assert_eq!(
+                config.multipath,
+                match mode {
+                    "paris" => Multipath::Paris,
+                    _ => Multipath::Dublin,
+                },
+                "`--multipath {mode} --protocol {protocol}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_classic_multipath_mode_resolves_with_every_protocol() {
+        let config = resolve(&["krt", "example.com", "--multipath", "classic"]);
+        assert_eq!(config.multipath, Multipath::Classic);
+        assert_eq!(config.protocol, Protocol::Icmp);
+    }
+
+    #[test]
+    fn prints_every_default_of_a_resolved_configuration() {
+        assert_eq!(resolve(&["krt", "example.com"]).to_string(), DEFAULT_BLOCK);
+    }
+
+    #[test]
+    fn prints_every_value_that_a_flag_changed() {
+        let config = resolve(&[
+            "krt",
+            "example.com",
+            "--output",
+            "/tmp/x.jsonl",
+            "--interval",
+            "500ms",
+            "--first-ttl",
+            "2",
+            "--max-ttl",
+            "20",
+            "--protocol",
+            "udp",
+            "--multipath",
+            "paris",
+            "-6",
+            "--no-dns",
+            "--source",
+            "1.2.3.4",
+            "--headless",
+            "--duration",
+            "2m",
+            "--rounds",
+            "10",
+        ]);
+        assert_eq!(
+            config.to_string(),
+            "\
+resolved configuration:
+  destination:    example.com
+  output:         /tmp/x.jsonl
+  interval:       500ms
+  first ttl:      2
+  max ttl:        20
+  protocol:       udp
+  multipath:      paris
+  address family: ipv6
+  reverse dns:    off
+  source:         1.2.3.4
+  display:        headless
+  duration limit: 2m
+  round limit:    10
+  replay:         none
+  run:            the last run
+"
+        );
+    }
+
+    #[test]
+    fn prints_the_file_and_the_run_of_a_replay() {
+        let config = resolve(&[
+            "krt",
+            "--replay",
+            "/tmp/r.jsonl",
+            "--run",
+            "2026-08-19T12:00:00Z",
+        ]);
+        assert_eq!(
+            config.to_string(),
+            "\
+resolved configuration:
+  destination:    none
+  output:         derived at run time
+  interval:       1s
+  first ttl:      1
+  max ttl:        30
+  protocol:       icmp
+  multipath:      classic
+  address family: auto
+  reverse dns:    on
+  source:         discovered at run time
+  display:        table
+  duration limit: none
+  round limit:    none
+  replay:         /tmp/r.jsonl
+  run:            2026-08-19T12:00:00Z
+"
+        );
     }
 }

@@ -7,6 +7,10 @@
 //!
 //! The commit hash and the status change with every build, so the test asserts
 //! the shape of the line and not its exact text.
+//!
+//! The rest of the file covers the resolved configuration. A good command line
+//! prints the block and exits with success. A command line that contradicts
+//! itself prints the reason on standard error and exits with a failure.
 
 // Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -90,4 +94,103 @@ fn assert_flag_prints_the_build_string(flag: &str) {
 fn version_flags_report_the_build_string() {
     assert_flag_prints_the_build_string("--version");
     assert_flag_prints_the_build_string("-V");
+}
+
+/// The block that `krt example.com` prints, with every default.
+const DEFAULT_BLOCK: &str = "\
+resolved configuration:
+  destination:    example.com
+  output:         derived at run time
+  interval:       1s
+  first ttl:      1
+  max ttl:        30
+  protocol:       icmp
+  multipath:      classic
+  address family: auto
+  reverse dns:    on
+  source:         discovered at run time
+  display:        table
+  duration limit: none
+  round limit:    none
+  replay:         none
+  run:            the last run
+";
+
+/// What one run of the binary wrote, and whether it succeeded.
+struct Run {
+    /// True when the binary exited with success.
+    success: bool,
+    /// The text the binary wrote to standard output.
+    stdout: String,
+    /// The text the binary wrote to standard error.
+    stderr: String,
+}
+
+/// Runs `krt` with the arguments and reads what it wrote.
+fn run(arguments: &[&str]) -> Run {
+    let output = krt().args(arguments).output().unwrap();
+    Run {
+        success: output.status.success(),
+        stdout: String::from_utf8(output.stdout).unwrap(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// Asserts that the arguments make `krt` fail, and reads the message.
+fn failure(arguments: &[&str]) -> String {
+    let result = run(arguments);
+    assert!(
+        !result.success,
+        "`krt {}` must fail, but it succeeded; stdout: {}",
+        arguments.join(" "),
+        result.stdout
+    );
+    result.stderr
+}
+
+#[test]
+fn a_destination_prints_the_resolved_configuration() {
+    let result = run(&["example.com"]);
+    assert!(
+        result.success,
+        "`krt example.com` must exit with success; stderr: {}",
+        result.stderr
+    );
+    assert_eq!(result.stdout, DEFAULT_BLOCK);
+    assert_eq!(
+        result.stderr, "",
+        "a good command line writes nothing to standard error"
+    );
+}
+
+#[test]
+fn an_interval_that_is_not_a_duration_fails_and_names_the_accepted_forms() {
+    let stderr = failure(&["--interval", "bogus", "example.com"]);
+    assert!(
+        stderr.contains("as in `500ms`, `1s`, or `2m`"),
+        "the message names the accepted forms: {stderr}"
+    );
+}
+
+#[test]
+fn a_first_ttl_above_the_max_ttl_fails_and_names_both_flags() {
+    let stderr = failure(&["--first-ttl", "5", "--max-ttl", "3", "example.com"]);
+    for flag in ["--first-ttl", "--max-ttl"] {
+        assert!(
+            stderr.contains(flag),
+            "the message names `{flag}`: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn both_address_family_flags_fail() {
+    let stderr = failure(&["-4", "-6", "example.com"]);
+    assert!(!stderr.is_empty(), "the failure carries a message");
+}
+
+#[test]
+fn a_command_line_without_a_destination_fails() {
+    let stderr = failure(&[]);
+    assert!(!stderr.is_empty(), "the failure carries a message");
 }
