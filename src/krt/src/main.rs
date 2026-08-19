@@ -52,8 +52,63 @@ struct Cli {}
     dead_code,
     reason = "slice 3 attaches this parser to `--interval` and `--duration`"
 )]
-fn parse_duration(_text: &str) -> Result<Duration, String> {
-    unimplemented!("slice 2 reads a duration from the text of a flag")
+fn parse_duration(text: &str) -> Result<Duration, String> {
+    if text.is_empty() {
+        return Err(format!(
+            "a duration is empty: write a whole number and a unit, {DURATION_FORMS}"
+        ));
+    }
+    if text.starts_with('-') {
+        return Err(format!(
+            "`{text}` is negative: a duration is never negative, {DURATION_FORMS}"
+        ));
+    }
+
+    // The number is the run of digits at the front. The unit is the rest. The
+    // split point comes from `char_indices`, so it is on a character boundary.
+    let unit_start = text
+        .char_indices()
+        .find(|(_, character)| !character.is_ascii_digit())
+        .map_or(text.len(), |(index, _)| index);
+    let (number, unit) = text.split_at(unit_start);
+
+    if number.is_empty() {
+        return Err(format!(
+            "`{text}` has no number: write a whole number before the unit, {DURATION_FORMS}"
+        ));
+    }
+    if unit.is_empty() {
+        return Err(format!(
+            "`{text}` has no unit: {DURATION_UNITS}, {DURATION_FORMS}"
+        ));
+    }
+
+    let too_large = || format!("`{text}` is too large: use a smaller number, {DURATION_FORMS}");
+    let count: u64 = number.parse().map_err(|_| too_large())?;
+    let seconds = |per_unit: u64| {
+        count
+            .checked_mul(per_unit)
+            .map(Duration::from_secs)
+            .ok_or_else(too_large)
+    };
+    let duration = match unit {
+        "ms" => Duration::from_millis(count),
+        "s" => Duration::from_secs(count),
+        "m" => seconds(SECONDS_PER_MINUTE)?,
+        "h" => seconds(SECONDS_PER_HOUR)?,
+        _ => {
+            return Err(format!(
+                "`{text}` is not a duration: {DURATION_UNITS}, {DURATION_FORMS}"
+            ));
+        }
+    };
+
+    if duration.is_zero() {
+        return Err(format!(
+            "`{text}` is zero: a duration is more than zero, {DURATION_FORMS}"
+        ));
+    }
+    Ok(duration)
 }
 
 /// Writes the shortest exact text of a duration.
@@ -66,8 +121,18 @@ fn parse_duration(_text: &str) -> Result<Duration, String> {
     dead_code,
     reason = "slice 4 prints the resolved configuration with this renderer"
 )]
-fn render_duration(_duration: Duration) -> String {
-    unimplemented!("slice 2 writes the shortest exact text of a duration")
+fn render_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if duration.subsec_millis() != 0 || seconds == 0 {
+        return format!("{}ms", duration.as_millis());
+    }
+    if seconds.is_multiple_of(SECONDS_PER_HOUR) {
+        return format!("{}h", seconds / SECONDS_PER_HOUR);
+    }
+    if seconds.is_multiple_of(SECONDS_PER_MINUTE) {
+        return format!("{}m", seconds / SECONDS_PER_MINUTE);
+    }
+    format!("{seconds}s")
 }
 
 fn main() {
@@ -83,7 +148,16 @@ mod tests {
 
     /// Every text that the parser rejects, for the message tests.
     const BAD_TEXTS: [&str; 10] = [
-        "", "1", "1sec", "5x", "ms", "abc", "-1s", "0s", "0ms", "99999999999999999999m",
+        "",
+        "1",
+        "1sec",
+        "5x",
+        "ms",
+        "abc",
+        "-1s",
+        "0s",
+        "0ms",
+        "99999999999999999999m",
     ];
 
     fn error_of(text: &str) -> String {
@@ -115,12 +189,12 @@ mod tests {
 
     #[test]
     fn parses_minutes() {
-        assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
+        assert_eq!(parse_duration("2m").unwrap(), Duration::from_mins(2));
     }
 
     #[test]
     fn parses_hours() {
-        assert_eq!(parse_duration("3h").unwrap(), Duration::from_secs(10800));
+        assert_eq!(parse_duration("3h").unwrap(), Duration::from_hours(3));
     }
 
     #[test]
@@ -131,8 +205,14 @@ mod tests {
     #[test]
     fn rejects_text_without_a_unit() {
         let message = error_of("1");
-        assert!(message.contains("`1`"), "the message names the text: {message}");
-        assert!(message.contains("no unit"), "the message names the fault: {message}");
+        assert!(
+            message.contains("`1`"),
+            "the message names the text: {message}"
+        );
+        assert!(
+            message.contains("no unit"),
+            "the message names the fault: {message}"
+        );
         assert!(
             message.contains("the unit must be `ms`, `s`, `m`, or `h`"),
             "the message names the accepted units: {message}"
@@ -222,17 +302,26 @@ mod tests {
 
     #[test]
     fn renders_minutes() {
-        assert_eq!(render_duration(Duration::from_secs(120)), "2m");
+        assert_eq!(render_duration(Duration::from_mins(2)), "2m");
     }
 
     #[test]
     fn renders_one_hour() {
+        assert_eq!(render_duration(Duration::from_hours(1)), "1h");
+    }
+
+    #[test]
+    #[allow(
+        clippy::duration_suboptimal_units,
+        reason = "the seconds are the behavior: a duration of 3600 seconds renders as hours"
+    )]
+    fn renders_seconds_that_make_a_whole_hour_as_hours() {
         assert_eq!(render_duration(Duration::from_secs(3600)), "1h");
     }
 
     #[test]
     fn renders_whole_hours_as_hours() {
-        assert_eq!(render_duration(Duration::from_secs(7200)), "2h");
+        assert_eq!(render_duration(Duration::from_hours(2)), "2h");
     }
 
     #[test]
