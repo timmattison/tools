@@ -138,10 +138,11 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
     reason = "each flag of the design is one switch of the command line"
 )]
 struct Cli {
-    /// The host or the address to trace. A replay takes no destination.
+    /// The host or the address to trace. A replay takes no destination, and
+    /// neither does a run of a replay.
     #[arg(
         value_name = "DESTINATION",
-        required_unless_present = "replay",
+        required_unless_present_any = ["replay", "run"],
         conflicts_with_all = ["replay", "run"],
     )]
     destination: Option<String>,
