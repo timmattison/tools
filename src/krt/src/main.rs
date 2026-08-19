@@ -497,7 +497,7 @@ mod tests {
     use super::{
         parse_duration, render_duration, AddressFamily, Cli, Multipath, Protocol, ResolvedConfig,
     };
-    use clap::error::ErrorKind;
+    use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::path::PathBuf;
@@ -1082,6 +1082,57 @@ resolved configuration:
                     assert_eq!(rejection(row.arguments).kind(), kind, "`{line}`");
                 }
             }
+        }
+    }
+
+    /// The argv that supplies the argument clap names in a rejection.
+    ///
+    /// The names come from the error, so an argument the test does not know is
+    /// a new argument that belongs in the matrix.
+    fn supply(name: &str) -> Vec<&'static str> {
+        match name {
+            "<DESTINATION>" => vec![A_DESTINATION],
+            "--replay <FILE>" => A_REPLAY.to_vec(),
+            "--run <ID>" => A_RUN.to_vec(),
+            other => panic!("the test cannot supply `{other}`; add it to the matrix"),
+        }
+    }
+
+    /// The arguments a missing-argument rejection names.
+    fn missing_arguments(error: &clap::Error) -> Vec<String> {
+        match error.get(ContextKind::InvalidArg) {
+            Some(ContextValue::Strings(names)) => names.clone(),
+            other => panic!("the rejection names no missing argument: {other:?}"),
+        }
+    }
+
+    /// A message that asks for an argument must ask for one the parser accepts.
+    ///
+    /// A rejection that names a missing argument tells the user to supply it. The
+    /// user obeys, and the parser must then accept the line. It does not, when
+    /// the named argument conflicts with an argument the line already carries,
+    /// and the user reads two messages that each send them back to the other.
+    #[test]
+    fn obeying_a_missing_argument_message_gives_a_command_line_that_parses() {
+        for row in &ARGUMENT_MATRIX {
+            if !matches!(
+                row.verdict,
+                Verdict::Rejects(ErrorKind::MissingRequiredArgument)
+            ) {
+                continue;
+            }
+            let error = rejection(row.arguments);
+            let mut obeyed: Vec<&str> = row.arguments.to_vec();
+            for name in missing_arguments(&error) {
+                obeyed.extend(supply(&name));
+            }
+            let line = obeyed.join(" ");
+            assert!(
+                Cli::try_parse_from(obeyed.iter().copied()).is_ok(),
+                "`{}` names {:?}, and obeying it gives `{line}`, which the parser rejects",
+                row.arguments.join(" "),
+                missing_arguments(&error)
+            );
         }
     }
 
