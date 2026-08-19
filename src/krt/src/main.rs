@@ -138,8 +138,12 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
     reason = "each flag of the design is one switch of the command line"
 )]
 struct Cli {
-    /// The host or the address to trace.
-    #[arg(value_name = "DESTINATION", required_unless_present = "replay")]
+    /// The host or the address to trace. A replay takes no destination.
+    #[arg(
+        value_name = "DESTINATION",
+        required_unless_present = "replay",
+        conflicts_with_all = ["replay", "run"],
+    )]
     destination: Option<String>,
 
     /// The JSONL path. Overrides the derived name.
@@ -214,7 +218,8 @@ struct Cli {
     )]
     rounds: Option<u64>,
 
-    /// Fold a recorded file and print the table. Then exit.
+    /// Fold a recorded file and print the table. Then exit. A replay takes no
+    /// destination.
     #[arg(long, value_name = "FILE")]
     replay: Option<PathBuf>,
 
@@ -229,7 +234,8 @@ struct Cli {
 /// the behavior of the run and never reads the switch that made it.
 #[derive(Debug)]
 struct ResolvedConfig {
-    /// The host or the address to trace. A replay traces nothing.
+    /// The host or the address to trace. A replay traces nothing, so a replay
+    /// takes no destination and this field holds none.
     destination: Option<String>,
     /// The JSONL path the user named. An absent path is derived at run time.
     output: Option<PathBuf>,
