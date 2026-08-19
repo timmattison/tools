@@ -4401,6 +4401,10 @@ dependencies = [
 [[package]]
 name = "krt"
 version = "0.1.0"
+dependencies = [
+ "buildinfo",
+ "clap",
+]
 
 [[package]]
 name = "kstring"

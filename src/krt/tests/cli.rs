@@ -67,7 +67,9 @@ fn assert_flag_prints_the_build_string(flag: &str) {
 
     let parts: Vec<&str> = fields.split(FIELD_SEPARATOR).collect();
     let [hash, status] = parts.as_slice() else {
-        panic!("`krt {flag}` must print one hash and one status, but the parentheses hold {fields:?}");
+        panic!(
+            "`krt {flag}` must print one hash and one status, but the parentheses hold {fields:?}"
+        );
     };
 
     let hash_is_valid = *hash == UNKNOWN
