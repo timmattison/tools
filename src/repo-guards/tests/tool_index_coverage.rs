@@ -11,7 +11,7 @@
 //! repo, or the home dir.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use repo_guards::tool_index;
 use tempfile::TempDir;
@@ -89,4 +89,25 @@ fn a_binary_with_no_tldr_row_is_reported() {
     );
     assert!(!report.is_compliant(), "a missing row is not compliant");
     assert_eq!(report.binaries_examined(), 2);
+}
+
+/// Absolute, canonical path to this repository's root, derived from the crate
+/// being compiled rather than the working directory (which `cargo test` does
+/// not pin).
+fn repo_root() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    fs::canonicalize(&root)
+        .unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", root.display()))
+}
+
+#[test]
+fn every_binary_of_this_repository_appears_in_both_indexes() {
+    let report = tool_index::audit(&repo_root()).expect("the audit reaches a verdict");
+
+    assert!(
+        report.binaries_examined() > 50,
+        "this workspace builds dozens of binaries, so a smaller count means the guard \
+         enumerated the wrong thing and would report clean for the wrong reason: {report:?}"
+    );
+    assert!(report.is_compliant(), "{report}");
 }
