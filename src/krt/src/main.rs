@@ -1,8 +1,9 @@
 //! `krt` (Knights of the Round Trip) records the network path to a
 //! destination, hop by hop.
 //!
-//! This slice builds the crate and the build string. Later slices add the
-//! command line flags, the tracer, the file writer, and the table.
+//! This slice adds the flags of the command line and their defaults. Later
+//! slices print the resolved configuration, then add the tracer, the file
+//! writer, and the table.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -25,6 +26,22 @@ const SECONDS_PER_MINUTE: u64 = 60;
 
 /// The number of seconds in one hour.
 const SECONDS_PER_HOUR: u64 = 60 * SECONDS_PER_MINUTE;
+
+/// The lowest TTL that a probe carries. A TTL of zero leaves no hop to reach.
+///
+/// The type is the type that `clap` takes for the bound of a range.
+const TTL_LOWEST: i64 = 1;
+
+/// The highest TTL that a probe carries. The field of the packet holds one byte.
+///
+/// The type is the type that `clap` takes for the bound of a range.
+const TTL_HIGHEST: i64 = 255;
+
+/// The first TTL of a run, when the user names none.
+const FIRST_TTL_DEFAULT: u8 = 1;
+
+/// The last TTL of a run, when the user names none.
+const MAX_TTL_DEFAULT: u8 = 30;
 
 /// The protocol of a probe.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,40 +75,65 @@ enum Multipath {
     version = version_string!(),
     about = "Knights of the Round Trip: record the network path to a destination"
 )]
+#[allow(
+    dead_code,
+    reason = "slice 4 reads every field when it prints the resolved configuration, and slice 4 removes this attribute"
+)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each flag of the design is one switch of the command line"
+)]
 struct Cli {
     /// The host or the address to trace.
+    #[arg(value_name = "DESTINATION", required_unless_present = "replay")]
     destination: Option<String>,
 
     /// The JSONL path. Overrides the derived name.
-    #[arg(long)]
+    #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
     /// The round period. Accepts `500ms`, `1s`, `2m`.
-    #[arg(long, value_parser = parse_duration)]
+    #[arg(
+        short,
+        long,
+        value_name = "DUR",
+        default_value = "1s",
+        value_parser = parse_duration,
+    )]
     interval: Duration,
 
     /// The first TTL to probe.
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = FIRST_TTL_DEFAULT,
+        value_parser = clap::value_parser!(u8).range(TTL_LOWEST..=TTL_HIGHEST),
+    )]
     first_ttl: u8,
 
     /// The last TTL to probe.
-    #[arg(long)]
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = MAX_TTL_DEFAULT,
+        value_parser = clap::value_parser!(u8).range(TTL_LOWEST..=TTL_HIGHEST),
+    )]
     max_ttl: u8,
 
     /// The protocol of a probe.
-    #[arg(long)]
+    #[arg(long, value_name = "P", value_enum, default_value_t = Protocol::Icmp)]
     protocol: Protocol,
 
     /// The multipath mode. UDP and TCP only.
-    #[arg(long)]
+    #[arg(long, value_name = "M", value_enum, default_value_t = Multipath::Classic)]
     multipath: Multipath,
 
     /// Force IP version 4.
-    #[arg(long)]
+    #[arg(short = '4', conflicts_with = "ipv6")]
     ipv4: bool,
 
     /// Force IP version 6.
-    #[arg(long)]
+    #[arg(short = '6')]
     ipv6: bool,
 
     /// Skip reverse DNS. Show addresses only.
@@ -99,7 +141,7 @@ struct Cli {
     no_dns: bool,
 
     /// Override the source label in the derived filename.
-    #[arg(long)]
+    #[arg(long, value_name = "IP")]
     source: Option<IpAddr>,
 
     /// No table. Print one status line per minute.
@@ -107,19 +149,19 @@ struct Cli {
     headless: bool,
 
     /// Stop after this much time.
-    #[arg(long, value_parser = parse_duration)]
+    #[arg(long, value_name = "DUR", value_parser = parse_duration)]
     duration: Option<Duration>,
 
     /// Stop after this many rounds.
-    #[arg(long)]
+    #[arg(long, value_name = "N")]
     rounds: Option<u64>,
 
     /// Fold a recorded file and print the table. Then exit.
-    #[arg(long)]
+    #[arg(long, value_name = "FILE")]
     replay: Option<PathBuf>,
 
     /// With `--replay`, pick which run in the file to fold.
-    #[arg(long)]
+    #[arg(long, value_name = "ID", requires = "replay")]
     run: Option<String>,
 }
 
@@ -135,10 +177,6 @@ struct Cli {
 /// unknown, the text carries a sign, the duration is zero, or the number is too
 /// large. Each message names the fault and the accepted forms, so the user
 /// reads one line and corrects the flag.
-#[allow(
-    dead_code,
-    reason = "slice 3 attaches this parser to `--interval` and `--duration`"
-)]
 fn parse_duration(text: &str) -> Result<Duration, String> {
     if text.is_empty() {
         return Err(format!(
@@ -230,7 +268,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Multipath, Protocol, parse_duration, render_duration};
+    use super::{parse_duration, render_duration, Cli, Multipath, Protocol};
     use clap::error::ErrorKind;
     use clap::{CommandFactory, Parser};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
