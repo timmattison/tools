@@ -184,6 +184,15 @@ fn a_first_ttl_above_the_max_ttl_fails_and_names_both_flags() {
 }
 
 #[test]
+fn a_round_limit_of_zero_fails_and_names_the_flag() {
+    let stderr = failure(&["--rounds", "0", "example.com"]);
+    assert!(
+        stderr.contains("--rounds"),
+        "the message names `--rounds`: {stderr}"
+    );
+}
+
+#[test]
 fn both_address_family_flags_fail() {
     let stderr = failure(&["-4", "-6", "example.com"]);
     assert!(!stderr.is_empty(), "the failure carries a message");

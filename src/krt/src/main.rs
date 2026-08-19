@@ -955,6 +955,18 @@ resolved configuration:
     }
 
     #[test]
+    fn parses_a_round_limit_of_one() {
+        let cli = parse(&["krt", "example.com", "--rounds", "1"]);
+        assert_eq!(cli.rounds, Some(1));
+    }
+
+    #[test]
+    fn rejects_a_round_limit_of_zero() {
+        let error = rejection(&["krt", "example.com", "--rounds", "0"]);
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
     fn parses_the_flags_that_hold_no_value() {
         let cli = parse(&["krt", "example.com", "--no-dns", "--headless"]);
         assert!(cli.no_dns);
