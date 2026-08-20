@@ -3,6 +3,10 @@
 # languages in this repo: Rust first, then Go. Each language's gates only run
 # when a staged change touches that language's files (see the trigger regexes
 # below), so a Go-only commit never pays for the Rust toolchain and vice versa.
+# The tool-index block below is the one deliberate exception: a commit that
+# stages README.md or TLDR.md and no Rust file runs one Rust test target,
+# because the guard that protects the two Markdown indexes lives in the Rust
+# suite.
 #
 # The four Rust gates run cheapest-first so a commit fails fast on the
 # quickest check:
