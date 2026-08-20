@@ -38,6 +38,15 @@ const UNKNOWN: &str = "unknown";
 /// The words `buildinfo` writes for the state of the working tree.
 const STATUS_WORDS: [&str; 3] = ["clean", "dirty", UNKNOWN];
 
+/// The name of the command that folds a recorded file.
+const REPLAY: &str = "replay";
+
+/// The recorded file that the tests of the replay name.
+///
+/// The command line resolves before anything reads the file, so this build
+/// never opens it.
+const A_RECORDED_FILE: &str = "old.jsonl";
+
 /// Invoke the freshly built `krt` binary.
 fn krt() -> Command {
     Command::new(env!("CARGO_BIN_EXE_krt"))
@@ -206,11 +215,32 @@ fn a_command_line_without_a_destination_fails() {
 
 #[test]
 fn a_destination_beside_a_replay_fails_and_names_both() {
-    let stderr = failure(&["example.com", "--replay", "old.jsonl"]);
-    for part in ["DESTINATION", "--replay"] {
+    let stderr = failure(&["example.com", REPLAY, A_RECORDED_FILE]);
+    for part in ["DESTINATION", REPLAY] {
         assert!(
             stderr.contains(part),
             "the message names `{part}`: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_replay_needs_no_destination_and_prints_the_resolved_configuration() {
+    let result = run(&[REPLAY, A_RECORDED_FILE]);
+    assert!(
+        result.success,
+        "`krt {REPLAY} {A_RECORDED_FILE}` must exit with success; stderr: {}",
+        result.stderr
+    );
+    for row in [
+        "  destination:    none",
+        "  replay:         old.jsonl",
+        "  run:            the last run",
+    ] {
+        assert!(
+            result.stdout.contains(row),
+            "the block holds `{row}`: {}",
+            result.stdout
         );
     }
 }

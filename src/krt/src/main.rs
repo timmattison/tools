@@ -9,7 +9,7 @@
 #![warn(clippy::pedantic)]
 
 use buildinfo::version_string;
-use clap::{CommandFactory, Parser, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -129,22 +129,29 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 /// Knights of the Round Trip: record the network path to a destination.
 ///
 /// `krt` probes every hop to the destination once per round, and it records
-/// each round in a file. This build parses the command line and prints the
-/// configuration it resolved.
+/// each round in a file. The `replay` command reads a file that an earlier run
+/// wrote, so it takes no destination and no flag of a probe. This build parses
+/// the command line and prints the configuration it resolved.
 #[derive(Parser, Debug)]
-#[command(name = "krt", version = version_string!())]
+// `args_conflicts_with_subcommands` rejects a flag of a probe beside a command,
+// because a replay probes nothing. `subcommand_negates_reqs` lifts the demand
+// for a destination when the line names a command, so the destination stays
+// plainly required and a replay still needs none. The two rules then live in
+// the shape of the command line, and no message can ask for an argument that
+// another rule forbids.
+#[command(
+    name = "krt",
+    version = version_string!(),
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "each flag of the design is one switch of the command line"
 )]
 struct Cli {
-    /// The host or the address to trace. A replay takes no destination, and
-    /// neither does a run of a replay.
-    #[arg(
-        value_name = "DESTINATION",
-        required_unless_present_any = ["replay", "run"],
-        conflicts_with_all = ["replay", "run"],
-    )]
+    /// The host or the address to trace.
+    #[arg(value_name = "DESTINATION", required = true)]
     destination: Option<String>,
 
     /// The JSONL path. Overrides the derived name.
@@ -219,14 +226,24 @@ struct Cli {
     )]
     rounds: Option<u64>,
 
-    /// Fold a recorded file and print the table. Then exit. A replay takes no
-    /// destination.
-    #[arg(long, value_name = "FILE")]
-    replay: Option<PathBuf>,
+    /// The command that reads recorded work in the place of a trace.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
 
-    /// With `--replay`, pick which run in the file to fold.
-    #[arg(long, value_name = "ID", requires = "replay")]
-    run: Option<String>,
+/// A command that reads recorded work in the place of a new trace.
+#[derive(Subcommand, Debug, PartialEq, Eq)]
+enum Command {
+    /// Fold a recorded file and print the table. Then exit.
+    Replay {
+        /// The recorded file to fold.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+
+        /// Pick which run in the file to fold. The last run is the default.
+        #[arg(long, value_name = "ID")]
+        run: Option<String>,
+    },
 }
 
 /// The configuration of one run, after the command line resolves.
@@ -235,8 +252,8 @@ struct Cli {
 /// the behavior of the run and never reads the switch that made it.
 #[derive(Debug)]
 struct ResolvedConfig {
-    /// The host or the address to trace. A replay traces nothing, so a replay
-    /// takes no destination and this field holds none.
+    /// The host or the address to trace. A replay traces nothing, so the
+    /// `replay` command takes no destination and this field holds none.
     destination: Option<String>,
     /// The JSONL path the user named. An absent path is derived at run time.
     output: Option<PathBuf>,
@@ -262,9 +279,9 @@ struct ResolvedConfig {
     duration: Option<Duration>,
     /// The number of rounds that stops the run.
     rounds: Option<u64>,
-    /// The recorded file to fold and print.
+    /// The recorded file to fold and print. The `replay` command names it.
     replay: Option<PathBuf>,
-    /// The run in the replay file to fold.
+    /// The run in the recorded file to fold.
     run: Option<String>,
 }
 
@@ -272,7 +289,10 @@ impl Cli {
     /// Resolves the command line into the configuration of one run.
     ///
     /// The two flags of the address family collapse into one value, and the
-    /// `--no-dns` switch becomes the behavior it controls.
+    /// `--no-dns` switch becomes the behavior it controls. The `replay` command
+    /// becomes the recorded file and the run to fold, so every later slice
+    /// reads one flat configuration and never reads the shape of the command
+    /// line.
     ///
     /// # Errors
     ///
@@ -306,6 +326,11 @@ impl Cli {
             AddressFamily::Auto
         };
 
+        let (replay, run) = match self.command {
+            Some(Command::Replay { file, run }) => (Some(file), run),
+            None => (None, None),
+        };
+
         Ok(ResolvedConfig {
             destination: self.destination,
             output: self.output,
@@ -320,8 +345,8 @@ impl Cli {
             headless: self.headless,
             duration: self.duration,
             rounds: self.rounds,
-            replay: self.replay,
-            run: self.run,
+            replay,
+            run,
         })
     }
 }
@@ -496,7 +521,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_duration, render_duration, AddressFamily, Cli, Multipath, Protocol, ResolvedConfig,
+        parse_duration, render_duration, AddressFamily, Cli, Command, Multipath, Protocol,
+        ResolvedConfig,
     };
     use clap::error::{ContextKind, ContextValue, ErrorKind};
     use clap::{CommandFactory, Parser};
@@ -810,8 +836,7 @@ resolved configuration:
         assert!(!cli.headless, "the table is on by default");
         assert_eq!(cli.duration, None);
         assert_eq!(cli.rounds, None);
-        assert_eq!(cli.replay, None);
-        assert_eq!(cli.run, None);
+        assert_eq!(cli.command, None, "a trace runs no command");
     }
 
     #[test]
@@ -933,14 +958,20 @@ resolved configuration:
 
     #[test]
     fn a_replay_needs_no_destination() {
-        let cli = parse(&["krt", "--replay", "path.jsonl"]);
+        let cli = parse(&["krt", "replay", "path.jsonl"]);
         assert_eq!(cli.destination, None);
-        assert_eq!(cli.replay, Some(PathBuf::from("path.jsonl")));
+        assert_eq!(
+            cli.command,
+            Some(Command::Replay {
+                file: PathBuf::from("path.jsonl"),
+                run: None,
+            })
+        );
     }
 
     #[test]
     fn rejects_a_destination_beside_a_replay() {
-        let error = rejection(&["krt", "example.com", "--replay", "path.jsonl"]);
+        let error = rejection(&["krt", "example.com", "replay", "path.jsonl"]);
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
         let message = error.to_string();
         assert!(
@@ -948,31 +979,27 @@ resolved configuration:
             "the message names the destination: {message}"
         );
         assert!(
-            message.contains("--replay"),
+            message.contains("replay"),
             "the message names the replay: {message}"
         );
     }
 
     #[test]
-    fn rejects_a_run_without_a_replay() {
+    fn rejects_a_run_outside_the_replay_command() {
         let error = rejection(&["krt", "--run", "2026-08-19T12:00:00Z"]);
-        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
         let message = error.to_string();
         assert!(
-            message.contains("--replay"),
-            "the message names the replay: {message}"
+            message.contains("--run"),
+            "the message names the run: {message}"
         );
     }
 
     #[test]
     fn rejects_a_run_beside_a_destination() {
         let error = rejection(&["krt", "example.com", "--run", "2026-08-19T12:00:00Z"]);
-        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
         let message = error.to_string();
-        assert!(
-            message.contains("DESTINATION"),
-            "the message names the destination: {message}"
-        );
         assert!(
             message.contains("--run"),
             "the message names the run: {message}"
@@ -983,12 +1010,18 @@ resolved configuration:
     fn parses_a_run_of_a_replay() {
         let cli = parse(&[
             "krt",
-            "--replay",
+            "replay",
             "path.jsonl",
             "--run",
             "2026-08-19T12:00:00Z",
         ]);
-        assert_eq!(cli.run.as_deref(), Some("2026-08-19T12:00:00Z"));
+        assert_eq!(
+            cli.command,
+            Some(Command::Replay {
+                file: PathBuf::from("path.jsonl"),
+                run: Some("2026-08-19T12:00:00Z".to_owned()),
+            })
+        );
     }
 
     /// The verdict the parser must reach for one row of the argument matrix.
@@ -1000,7 +1033,7 @@ resolved configuration:
         Rejects(ErrorKind),
     }
 
-    /// One row of the matrix of the three arguments that constrain each other.
+    /// One row of the matrix of the arguments that constrain each other.
     struct ArgumentRow {
         /// The command line, program name included.
         arguments: &'static [&'static str],
@@ -1011,16 +1044,19 @@ resolved configuration:
     /// A destination, for a row that carries one.
     const A_DESTINATION: &str = "example.com";
 
+    /// The name of the command that folds a recorded file.
+    const REPLAY: &str = "replay";
+
     /// The path of a recorded file, for a row that carries one.
     const A_REPLAY_FILE: &str = "path.jsonl";
 
     /// The id of one run of a recorded file, for a row that carries one.
     const A_RUN_ID: &str = "2026-08-19T12:00:00Z";
 
-    /// A replay file, for a row that carries one.
-    const A_REPLAY: [&str; 2] = ["--replay", A_REPLAY_FILE];
+    /// A whole replay, for a row that carries one.
+    const A_REPLAY: [&str; 2] = [REPLAY, A_REPLAY_FILE];
 
-    /// A run id, for a row that carries one.
+    /// A run of a replay, for a row that carries one.
     const A_RUN: [&str; 2] = ["--run", A_RUN_ID];
 
     /// Every combination of the destination, the replay, and the run.
@@ -1029,37 +1065,61 @@ resolved configuration:
     /// relationships together rather than one at a time. A change to one of them
     /// moves the verdict of rows that name the other two, so the whole matrix is
     /// stated here and not one row per test. Two defects of this branch were of
-    /// that kind: `conflicts_with_all` on the destination stopped the `requires`
-    /// of `--run` from firing, and it later made the message of a missing
-    /// argument name a destination that no longer fits beside `--run`.
-    const ARGUMENT_MATRIX: [ArgumentRow; 8] = [
+    /// that kind, while `--replay` and `--run` were flags of a trace:
+    /// `conflicts_with_all` on the destination stopped the `requires` of
+    /// `--run` from firing, and it later made the usage line of a missing
+    /// argument offer a destination that no longer fit beside `--run`. The
+    /// `replay` command now holds both rules in the grammar, so the matrix
+    /// records what the grammar gives.
+    ///
+    /// The replay holds three states, because the command carries the file it
+    /// folds: no command, the command alone, and the command with a file. The
+    /// run holds two, and the destination holds two, so the matrix has twelve
+    /// rows.
+    const ARGUMENT_MATRIX: [ArgumentRow; 12] = [
         ArgumentRow {
             arguments: &["krt"],
             verdict: Verdict::Rejects(ErrorKind::MissingRequiredArgument),
         },
         ArgumentRow {
-            arguments: &["krt", A_DESTINATION],
-            verdict: Verdict::Parses,
+            arguments: &["krt", A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Rejects(ErrorKind::UnknownArgument),
+        },
+        ArgumentRow {
+            arguments: &["krt", REPLAY],
+            verdict: Verdict::Rejects(ErrorKind::MissingRequiredArgument),
+        },
+        ArgumentRow {
+            arguments: &["krt", REPLAY, A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Rejects(ErrorKind::MissingRequiredArgument),
         },
         ArgumentRow {
             arguments: &["krt", A_REPLAY[0], A_REPLAY[1]],
             verdict: Verdict::Parses,
         },
         ArgumentRow {
-            arguments: &["krt", A_DESTINATION, A_REPLAY[0], A_REPLAY[1]],
-            verdict: Verdict::Rejects(ErrorKind::ArgumentConflict),
+            arguments: &["krt", A_REPLAY[0], A_REPLAY[1], A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Parses,
         },
         ArgumentRow {
-            arguments: &["krt", A_RUN[0], A_RUN[1]],
-            verdict: Verdict::Rejects(ErrorKind::MissingRequiredArgument),
+            arguments: &["krt", A_DESTINATION],
+            verdict: Verdict::Parses,
         },
         ArgumentRow {
             arguments: &["krt", A_DESTINATION, A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Rejects(ErrorKind::UnknownArgument),
+        },
+        ArgumentRow {
+            arguments: &["krt", A_DESTINATION, REPLAY],
             verdict: Verdict::Rejects(ErrorKind::ArgumentConflict),
         },
         ArgumentRow {
-            arguments: &["krt", A_REPLAY[0], A_REPLAY[1], A_RUN[0], A_RUN[1]],
-            verdict: Verdict::Parses,
+            arguments: &["krt", A_DESTINATION, REPLAY, A_RUN[0], A_RUN[1]],
+            verdict: Verdict::Rejects(ErrorKind::ArgumentConflict),
+        },
+        ArgumentRow {
+            arguments: &["krt", A_DESTINATION, A_REPLAY[0], A_REPLAY[1]],
+            verdict: Verdict::Rejects(ErrorKind::ArgumentConflict),
         },
         ArgumentRow {
             arguments: &[
@@ -1123,10 +1183,10 @@ resolved configuration:
     /// Writes the arguments that one fragment of a message asks for.
     ///
     /// The fragment is one name of the list of the missing arguments, such as
-    /// `--replay <FILE>`, or one whole usage line. A word in brackets is a
-    /// placeholder, and it becomes a value. Every other word is literal text of
-    /// a command line, such as a flag, the name of a command, or the name of the
-    /// program, and it stays as it is.
+    /// `<FILE>` or `--run <ID>`, or one whole usage line. A word in brackets is
+    /// a placeholder, and it becomes a value. Every other word is literal text
+    /// of a command line, such as a flag, the name of a command, or the name of
+    /// the program, and it stays as it is.
     fn arguments_of(fragment: &str) -> Vec<String> {
         fragment
             .split_whitespace()
@@ -1162,17 +1222,15 @@ resolved configuration:
     fn usage_forms(error: &clap::Error) -> Vec<String> {
         let rendered = error.render().to_string();
         let mut forms = Vec::new();
-        let mut lines = rendered
-            .lines()
-            .skip_while(|line| !line.starts_with(USAGE_PREFIX));
-        if let Some(first) = lines.next() {
-            forms.push(first[USAGE_PREFIX.len()..].to_owned());
-        }
-        for line in lines {
-            if line.trim().is_empty() {
-                break;
+        let mut lines = rendered.lines();
+        if let Some(first) = lines.find_map(|line| line.strip_prefix(USAGE_PREFIX)) {
+            forms.push(first.trim().to_owned());
+            for line in lines {
+                if line.trim().is_empty() {
+                    break;
+                }
+                forms.push(line.trim().to_owned());
             }
-            forms.push(line.trim().to_owned());
         }
         assert!(
             !forms.is_empty(),
@@ -1474,7 +1532,7 @@ resolved configuration:
     fn prints_the_file_and_the_run_of_a_replay() {
         let config = resolve(&[
             "krt",
-            "--replay",
+            "replay",
             "/tmp/r.jsonl",
             "--run",
             "2026-08-19T12:00:00Z",
