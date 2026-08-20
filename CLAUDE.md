@@ -371,6 +371,65 @@ A target that legitimately needs a lint relaxed says so at the site, with a reas
 - `repo_guards::workspace_lints` (`src/repo-guards/src/workspace_lints.rs`) - every workspace member manifest declares `[lints]` / `workspace = true`
 - `repo_guards::target_lints` (`src/repo-guards/src/target_lints.rs`) - every target root — library, binary, test, bench, example, build script - declares a position on each lint its crate's lib/bin roots raise. Its companion test asks `cargo metadata` whether that set of roots is the set cargo actually builds, so a target kind the guard never learned about shows up as a set difference instead of a clean report
 
+## Tool Indexes
+
+Every binary this workspace builds **must** appear in both `README.md` and
+`TLDR.md`.
+
+### Why
+
+The repository documents its tools twice, and on purpose. `README.md` carries
+the long entry — what the tool is for, how to run it, how to install it.
+`TLDR.md` carries one line per tool, alphabetized, for a reader who only needs
+to know which tool to reach for. A tool that is missing from either one is a
+tool nobody finds.
+
+Nothing enforced this before. The omission is spelled as an *absence*, which is
+why it spread: a crate that nobody remembers to document is born undocumented,
+and no build step ever said so. Two binaries had drifted out of an index by the
+time the guard was written.
+
+### Usage
+
+`TLDR.md` is one table, alphabetized. Add a row whose **first cell** is the tool
+name:
+
+```markdown
+| `krt` | Knights of the Round Trip — records the network path to a destination. |
+```
+
+`README.md` accepts either of the two forms in service today. Add a **top-level
+list item** under `## The tools`, whose first word is the tool name:
+
+```markdown
+- krt (Knights of the Round Trip)
+  - Records the network path to a destination, hop by hop.
+  - To install: `cargo install --git https://github.com/timmattison/tools krt`
+```
+
+Or add a **level-2 section heading** whose first word is the tool name
+(`## occ (old Claude Code)`), for a tool that needs more room than a list item.
+
+### The Trap: A Mention Is Not An Entry
+
+Both indexes are full of mentions. The row of `sirn` names `portplz`, and the
+row of `prgz` names `prcp`. So the guard **parses** the Markdown rather than
+searching it for the tool name — it reads the first cell of a table body row,
+and the first word of a top-level item or a level-2 heading. A text search
+would pass on a tool whose own entry is gone, and a search that reports clean
+for the wrong reason is indistinguishable from a guard doing real work.
+
+A nested list item is not an entry either. The `- To install: …` line under a
+tool's own entry would otherwise document a tool named `To`.
+
+### Guards Enforcing This
+
+- `repo_guards::tool_index` (`src/repo-guards/src/tool_index.rs`) — every binary
+  cargo builds has an entry in `README.md` and a row in `TLDR.md`. Its companion
+  test asks `cargo metadata` whether the guard's set of binaries is the set
+  cargo actually builds, so a binary the guard never learned to discover shows
+  up as a set difference instead of a clean report
+
 ## UTF-8 String Safety
 
 All tools in this repository **must** handle UTF-8 strings safely. Never use byte-level indexing that could panic on multi-byte characters.

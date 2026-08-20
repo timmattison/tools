@@ -34,6 +34,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `inscribe` | Generates git commit messages from staged changes using Claude AI. |
 | `jsonboard` | Pretty-prints JSON on the clipboard and puts it back. |
 | `kitchen-sync` | Installs every Rust binary from a git repo with one command. |
+| `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop. This build parses the command line only. |
 | `localnext` | Serves statically exported Next.js apps locally. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |
@@ -56,6 +57,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `rr` | Rust Remover — runs `cargo clean` across all Rust projects to free disk space. |
 | `runat` | TUI to run a command at a specified time with a live countdown. |
 | `safeboard` | Monitors the clipboard for dangerous/invisible Unicode used in copy-paste attacks. |
+| `seescc` | Self-refreshing terminal viewer for sccache statistics, with sparklines and a one-shot JSON mode. |
 | `sf` | Size of Files — total size of files in directories, with optional suffix/prefix/substring filters. |
 | `sirn` | Serve It Right Now — a zero-config HTTP file server; serves files or the current directory on a git-derived port. |
 | `spv` | Smart Process Viewer — find and view processes by PID/name/regex, with optional cwd and open files. |

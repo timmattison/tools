@@ -107,6 +107,7 @@ env_logger = "0.11"
 
 # Misc
 syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+pulldown-cmark = { version = "0.13", default-features = false }
 tiktoken-rs = "0.5"
 num-format = "0.4"
 human_bytes = "0.4"

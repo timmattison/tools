@@ -1,0 +1,12 @@
+[package]
+name = "krt"
+version = "0.1.0"
+edition.workspace = true
+description = "Knights of the Round Trip: a Rust tool that records the network path to a destination, hop by hop"
+
+[dependencies]
+buildinfo.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

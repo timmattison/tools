@@ -563,6 +563,14 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     volume; defaults to the machine's core count).
   - To install: `cargo install --git https://github.com/timmattison/tools zth`
 
+- krt (Knights of the Round Trip)
+  - Records the network path to a destination, hop by hop. `krt` accepts one destination and the
+    flags of the probe. The flags set the round period, the range of the TTL, the protocol, the
+    multipath mode, and the address family. This build parses the command line and prints the
+    configuration it resolved. It does not probe yet, and it writes no file.
+  - Usage: `krt example.com`, `krt example.com --interval 500ms --protocol udp --multipath paris`
+  - To install: `cargo install --git https://github.com/timmattison/tools krt`
+
 ## dirhash
 
 Calculate a SHA256 hash of a directory tree that's deterministic based on file contents. Respects .gitignore and other ignore files by default.
