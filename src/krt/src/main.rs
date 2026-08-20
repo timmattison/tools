@@ -1011,11 +1011,17 @@ resolved configuration:
     /// A destination, for a row that carries one.
     const A_DESTINATION: &str = "example.com";
 
+    /// The path of a recorded file, for a row that carries one.
+    const A_REPLAY_FILE: &str = "path.jsonl";
+
+    /// The id of one run of a recorded file, for a row that carries one.
+    const A_RUN_ID: &str = "2026-08-19T12:00:00Z";
+
     /// A replay file, for a row that carries one.
-    const A_REPLAY: [&str; 2] = ["--replay", "path.jsonl"];
+    const A_REPLAY: [&str; 2] = ["--replay", A_REPLAY_FILE];
 
     /// A run id, for a row that carries one.
-    const A_RUN: [&str; 2] = ["--run", "2026-08-19T12:00:00Z"];
+    const A_RUN: [&str; 2] = ["--run", A_RUN_ID];
 
     /// Every combination of the destination, the replay, and the run.
     ///
@@ -1086,17 +1092,53 @@ resolved configuration:
         }
     }
 
-    /// The argv that supplies the argument clap names in a rejection.
+    /// The text that starts the first usage line of a message.
+    const USAGE_PREFIX: &str = "Usage: ";
+
+    /// The word of a usage line that stands for every optional flag.
     ///
-    /// The names come from the error, so an argument the test does not know is
-    /// a new argument that belongs in the matrix.
-    fn supply(name: &str) -> Vec<&'static str> {
+    /// It names no one argument, so a filled command line leaves it out.
+    const OPTIONS_PLACEHOLDER: &str = "[OPTIONS]";
+
+    /// Reads the value that one placeholder of a message stands for.
+    ///
+    /// clap writes a placeholder in angle brackets, and it writes an optional
+    /// element of a usage line in square brackets. Both spellings name the same
+    /// argument, so this function reads either one.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a placeholder the test does not know. Such a placeholder is a
+    /// new argument, and it belongs in the matrix.
+    fn value_of(placeholder: &str) -> &'static str {
+        let name = placeholder.trim_matches(|character| matches!(character, '<' | '>' | '[' | ']'));
         match name {
-            "<DESTINATION>" => vec![A_DESTINATION],
-            "--replay <FILE>" => A_REPLAY.to_vec(),
-            "--run <ID>" => A_RUN.to_vec(),
+            "DESTINATION" => A_DESTINATION,
+            "FILE" => A_REPLAY_FILE,
+            "ID" => A_RUN_ID,
             other => panic!("the test cannot supply `{other}`; add it to the matrix"),
         }
+    }
+
+    /// Writes the arguments that one fragment of a message asks for.
+    ///
+    /// The fragment is one name of the list of the missing arguments, such as
+    /// `--replay <FILE>`, or one whole usage line. A word in brackets is a
+    /// placeholder, and it becomes a value. Every other word is literal text of
+    /// a command line, such as a flag, the name of a command, or the name of the
+    /// program, and it stays as it is.
+    fn arguments_of(fragment: &str) -> Vec<String> {
+        fragment
+            .split_whitespace()
+            .filter(|word| *word != OPTIONS_PLACEHOLDER)
+            .map(|word| {
+                if word.starts_with('<') || word.starts_with('[') {
+                    value_of(word).to_owned()
+                } else {
+                    word.to_owned()
+                }
+            })
+            .collect()
     }
 
     /// The arguments a missing-argument rejection names.
@@ -1107,12 +1149,60 @@ resolved configuration:
         }
     }
 
+    /// The usage lines of a rejection, as the user reads them.
+    ///
+    /// The first line starts with `Usage: `, and clap indents every line after
+    /// it to the same column. The block ends at the first empty line.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the message carries no usage line. Every rejection carries
+    /// one, so an empty result means clap now writes the block another way, and
+    /// a test that read it would then hold nothing.
+    fn usage_forms(error: &clap::Error) -> Vec<String> {
+        let rendered = error.render().to_string();
+        let mut forms = Vec::new();
+        let mut lines = rendered
+            .lines()
+            .skip_while(|line| !line.starts_with(USAGE_PREFIX));
+        if let Some(first) = lines.next() {
+            forms.push(first[USAGE_PREFIX.len()..].to_owned());
+        }
+        for line in lines {
+            if line.trim().is_empty() {
+                break;
+            }
+            forms.push(line.trim().to_owned());
+        }
+        assert!(
+            !forms.is_empty(),
+            "the message carries no usage line: {rendered}"
+        );
+        forms
+    }
+
+    /// Asserts that the parser accepts the command line the message asked for.
+    fn assert_the_parser_accepts(line: &[String], what_asked: &str) {
+        assert!(
+            Cli::try_parse_from(line.iter()).is_ok(),
+            "{what_asked} `{}`, which the parser rejects",
+            line.join(" ")
+        );
+    }
+
     /// A message that asks for an argument must ask for one the parser accepts.
     ///
     /// A rejection that names a missing argument tells the user to supply it. The
     /// user obeys, and the parser must then accept the line. It does not, when
     /// the named argument conflicts with an argument the line already carries,
     /// and the user reads two messages that each send them back to the other.
+    ///
+    /// The user obeys two parts of such a message. The list of the missing
+    /// arguments holds what to add to the line they typed. Each usage line under
+    /// that list holds a whole command line of its own, so the test fills the
+    /// line in and parses it as it stands. A test of the list alone reads the
+    /// machine-readable half and passes on a usage line that offers an argument
+    /// the parser then rejects, because the list never names that argument.
     #[test]
     fn obeying_a_missing_argument_message_gives_a_command_line_that_parses() {
         for row in &ARGUMENT_MATRIX {
@@ -1123,17 +1213,28 @@ resolved configuration:
                 continue;
             }
             let error = rejection(row.arguments);
-            let mut obeyed: Vec<&str> = row.arguments.to_vec();
-            for name in missing_arguments(&error) {
-                obeyed.extend(supply(&name));
+            let typed = row.arguments.join(" ");
+            let named = missing_arguments(&error);
+
+            let mut obeyed: Vec<String> = row
+                .arguments
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect();
+            for name in &named {
+                obeyed.extend(arguments_of(name));
             }
-            let line = obeyed.join(" ");
-            assert!(
-                Cli::try_parse_from(obeyed.iter().copied()).is_ok(),
-                "`{}` names {:?}, and obeying it gives `{line}`, which the parser rejects",
-                row.arguments.join(" "),
-                missing_arguments(&error)
+            assert_the_parser_accepts(
+                &obeyed,
+                &format!("`{typed}` names {named:?}, and obeying that list gives"),
             );
+
+            for form in usage_forms(&error) {
+                assert_the_parser_accepts(
+                    &arguments_of(&form),
+                    &format!("`{typed}` offers the usage line `{form}`, and obeying it gives"),
+                );
+            }
         }
     }
 
