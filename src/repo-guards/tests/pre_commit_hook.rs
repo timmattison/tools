@@ -110,30 +110,26 @@ fn run_git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Run the real hook with `dir` as CWD, scrubbing inherited git env vars so the
-/// hook operates on the fixture repo rather than this test's repo. Returns true
-/// if the hook exited zero.
-fn run_hook(dir: &Path) -> bool {
-    Command::new("bash")
-        .arg(hook_path())
-        .current_dir(dir)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .status()
-        .expect("failed to spawn pre-commit hook")
-        .success()
+/// Both halves of one run of the hook. A test reads the half it needs, or both
+/// halves, from the single run that produced them.
+struct HookRun {
+    /// True when the hook exited zero.
+    passed: bool,
+    /// What the hook printed: its standard output, and then its standard error.
+    ///
+    /// The status alone cannot tell which block ran. A fixture repo is not this
+    /// workspace, so a block naming a package of this workspace fails there for
+    /// a reason that has nothing to do with the trigger under test. Each block
+    /// announces itself before it runs, so the announcement is what proves the
+    /// trigger fired.
+    output: String,
 }
 
-/// Run the real hook as [`run_hook`] does, and give back what it printed.
-///
-/// The status alone cannot tell which block ran. A fixture repo is not this
-/// workspace, so a block naming a package of this workspace fails there for a
-/// reason that has nothing to do with the trigger under test. Each block
-/// announces itself before it runs, so the announcement is what proves the
-/// trigger fired.
-fn run_hook_output(dir: &Path) -> String {
-    let output = Command::new("bash")
+/// Run the real hook once with `dir` as CWD, scrubbing inherited git env vars so
+/// the hook operates on the fixture repo rather than this test's repo. Gives
+/// back the exit status and the printed output of that one run.
+fn run_hook(dir: &Path) -> HookRun {
+    let completed = Command::new("bash")
         .arg(hook_path())
         .current_dir(dir)
         .env_remove("GIT_DIR")
@@ -141,11 +137,14 @@ fn run_hook_output(dir: &Path) -> String {
         .env_remove("GIT_INDEX_FILE")
         .output()
         .expect("failed to spawn pre-commit hook");
-    format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    )
+    HookRun {
+        passed: completed.status.success(),
+        output: format!(
+            "{}{}",
+            String::from_utf8_lossy(&completed.stdout),
+            String::from_utf8_lossy(&completed.stderr)
+        ),
+    }
 }
 
 /// The line the hook prints before it runs the tool-index guard.
@@ -167,7 +166,7 @@ fn staged_misformatted_rust_file_fails_the_gate() {
     write_fixture_package(&dir);
     git_init_and_stage(&dir, &["src/main.rs", "Cargo.toml", "rust-toolchain.toml"]);
 
-    let passed = run_hook(&dir);
+    let HookRun { passed, .. } = run_hook(&dir);
     cleanup(&dir);
 
     assert!(
@@ -199,7 +198,7 @@ fn staged_toolchain_config_alone_triggers_the_gate() {
         // so the gate must fire on the config file alone to catch it.
         git_init_and_stage(&dir, &[config_file]);
 
-        let passed = run_hook(&dir);
+        let HookRun { passed, .. } = run_hook(&dir);
         cleanup(&dir);
 
         assert!(
@@ -227,8 +226,7 @@ fn staged_unnamed_file_skips_every_gate() {
     // Only the notes are staged; the misformatted main.rs stays unstaged.
     git_init_and_stage(&dir, &["NOTES.md"]);
 
-    let output = run_hook_output(&dir);
-    let passed = run_hook(&dir);
+    let HookRun { passed, output } = run_hook(&dir);
     cleanup(&dir);
 
     assert!(
@@ -265,7 +263,7 @@ fn staged_tool_index_alone_triggers_the_index_guard() {
         // the Rust gate cannot be what fires.
         git_init_and_stage(&dir, &[index]);
 
-        let output = run_hook_output(&dir);
+        let HookRun { output, .. } = run_hook(&dir);
         cleanup(&dir);
 
         assert!(
