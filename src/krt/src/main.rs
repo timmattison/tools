@@ -1140,10 +1140,9 @@ resolved configuration:
             let line = row.arguments.join(" ");
             match row.verdict {
                 Verdict::Parses => {
-                    assert!(
-                        Cli::try_parse_from(row.arguments.iter().copied()).is_ok(),
-                        "`{line}` must parse"
-                    );
+                    if let Err(error) = Cli::try_parse_from(row.arguments.iter().copied()) {
+                        panic!("`{line}` must parse, but the parser rejected it: {error}");
+                    }
                 }
                 Verdict::Rejects(kind) => {
                     assert_eq!(rejection(row.arguments).kind(), kind, "`{line}`");
