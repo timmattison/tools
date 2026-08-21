@@ -602,6 +602,27 @@ fn summarize(run: &Run<'_>) -> String {
     .join(SUMMARY_SEPARATOR)
 }
 
+/// Writes the reason of a file that holds no run to fold.
+///
+/// A `--run` that names a run the file does not hold adds that identifier and
+/// every run that the file does hold, so the user reads one line and corrects
+/// the flag. A file that holds no run at all has nothing to name, and a message
+/// that promises a list and then holds none reads as a defect of the tool. Such
+/// a message stops at the reason.
+fn no_run_message(path: &Path, wanted: Option<&str>, held: &[RunId]) -> String {
+    let reason = format!("{}: {NO_RUN}", path.display());
+    match wanted {
+        Some(wanted) if !held.is_empty() => {
+            let names: Vec<String> = held.iter().map(|id| format!("`{id}`")).collect();
+            format!(
+                "{reason} `{wanted}`. {THE_RUNS_OF_THE_FILE} {}",
+                names.join(RUN_LIST_SEPARATOR)
+            )
+        }
+        _ => reason,
+    }
+}
+
 /// Reads a recorded file and folds one run of it.
 ///
 /// The run that `--run` names is the run to fold, and the last run of the file
@@ -610,28 +631,14 @@ fn summarize(run: &Run<'_>) -> String {
 /// # Errors
 ///
 /// Returns the reason when the file does not read, when the file holds no run,
-/// and when the file does not hold the run that `--run` names. The message of a
-/// run that the file does not hold names every run that the file does hold, so
-/// the user reads one line and corrects the flag.
+/// and when the file does not hold the run that `--run` names.
 fn replay(path: &Path, wanted: Option<&str>) -> Result<Replay, String> {
     let recording = Recording::read(path).map_err(|error| error.to_string())?;
-    let run = match wanted {
-        Some(wanted) => recording.run(&RunId::from(wanted)).ok_or_else(|| {
-            let held: Vec<String> = recording
-                .run_ids()
-                .iter()
-                .map(|id| format!("`{id}`"))
-                .collect();
-            format!(
-                "{}: {NO_RUN} `{wanted}`. {THE_RUNS_OF_THE_FILE} {}",
-                path.display(),
-                held.join(RUN_LIST_SEPARATOR)
-            )
-        })?,
-        None => recording
-            .last_run()
-            .ok_or_else(|| format!("{}: {NO_RUN}", path.display()))?,
+    let found = match wanted {
+        Some(wanted) => recording.run(&RunId::from(wanted)),
+        None => recording.last_run(),
     };
+    let run = found.ok_or_else(|| no_run_message(path, wanted, &recording.run_ids()))?;
     Ok(Replay {
         summary: summarize(&run),
         // A `kill -9` leaves a file whose final line is cut short. Every round
