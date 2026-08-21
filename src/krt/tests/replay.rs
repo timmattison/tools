@@ -23,6 +23,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// The name that starts every message that `krt` writes to standard error.
+const PROGRAM: &str = "krt";
+
 /// The name of the command that folds a recorded file.
 const REPLAY: &str = "replay";
 
@@ -89,8 +92,8 @@ const NOT_JSON_LINE: &str = "this is not json";
 /// The line that a message names for the corrupt line of a built file.
 const CORRUPT_LINE: &str = "line 2";
 
-/// The words that a message carries when the file holds no run.
-const NO_RUN: &str = "no run";
+/// The reason that a message carries when the file holds no run to fold.
+const NO_RUN: &str = "the file holds no run";
 
 /// Invoke the freshly built `krt` binary.
 fn krt() -> Command {
@@ -262,6 +265,20 @@ fn a_file_that_holds_no_run_fails_and_names_the_path() {
         stderr.contains(NO_RUN),
         "the message says the file holds no run: {stderr}"
     );
+}
+
+/// A file that holds no run lists no run, even when `--run` named one.
+///
+/// The message of an absent run names every run that the file holds, so the
+/// user reads one line and corrects the flag. A file that holds no run has
+/// nothing to name, and a message that promises a list and then holds none
+/// reads as a defect of the tool. The message stops at the reason.
+#[test]
+fn a_file_that_holds_no_run_lists_no_run_for_the_run_flag() {
+    let file = TempFile::new("empty-with-a-run", "");
+    let path = file.arg();
+    let stderr = failure(&[REPLAY, path.as_str(), RUN_FLAG, ABSENT_RUN]);
+    assert_eq!(stderr, format!("{PROGRAM}: {path}: {NO_RUN}\n"));
 }
 
 #[test]
