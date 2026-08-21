@@ -71,6 +71,15 @@ const BUILT_SUMMARY: &str =
 const BUILT_SUMMARY_WITHOUT_A_TARGET: &str =
     "2026-08-20T00:00:00.000Z  unknown  1 round  2 hops  reached\n";
 
+/// The `round` line of a run that did not reach the target.
+///
+/// One TTL answered, so the summary of this round holds the singular `1 hop`.
+const BUILT_MISSED_ROUND_LINE: &str = r#"{"type":"round","run":"2026-08-20T00:00:00.000Z","seq":1,"ts":"2026-08-20T00:00:01.000Z","dur_ms":1000,"ttl_range":[1,2],"reached":false,"hops":[{"ttl":1,"addr":"10.0.0.1","rtt_ms":0.5,"icmp":"time_exceeded"}]}"#;
+
+/// The summary of a built file whose run did not reach the target.
+const BUILT_SUMMARY_NEVER_REACHED: &str =
+    "2026-08-20T00:00:00.000Z  example.net (198.51.100.7)  1 round  1 hop  never reached\n";
+
 /// The start of a `round` line that a `kill -9` cut short.
 const CUT_CHUNK: &str = r#"{"type":"round""#;
 
@@ -282,6 +291,20 @@ fn a_file_without_a_run_record_prints_no_target() {
     let path = file.arg();
     let result = success(&[REPLAY, path.as_str()]);
     assert_eq!(result.stdout, BUILT_SUMMARY_WITHOUT_A_TARGET);
+    assert_eq!(
+        result.stderr, "",
+        "a whole file writes nothing to standard error"
+    );
+}
+
+/// A run that no round reached says so, and one TTL takes the singular word.
+#[test]
+fn a_run_that_did_not_reach_the_target_says_so() {
+    let text = file_of(&[BUILT_RUN_LINE, BUILT_MISSED_ROUND_LINE]);
+    let file = TempFile::new("missed", &text);
+    let path = file.arg();
+    let result = success(&[REPLAY, path.as_str()]);
+    assert_eq!(result.stdout, BUILT_SUMMARY_NEVER_REACHED);
     assert_eq!(
         result.stderr, "",
         "a whole file writes nothing to standard error"
