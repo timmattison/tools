@@ -566,9 +566,12 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
 - krt (Knights of the Round Trip)
   - Records the network path to a destination, hop by hop. `krt` accepts one destination and the
     flags of the probe. The flags set the round period, the range of the TTL, the protocol, the
-    multipath mode, and the address family. This build parses the command line and prints the
-    configuration it resolved. It does not probe yet, and it writes no file.
-  - Usage: `krt example.com`, `krt example.com --interval 500ms --protocol udp --multipath paris`
+    multipath mode, and the address family. The `replay` command folds a file that an earlier run
+    wrote, so it takes no destination and no flag of a probe, and `--run` picks which run in that
+    file to fold. This build parses the command line and prints the configuration it resolved. It
+    does not probe yet, and it writes no file.
+  - Usage: `krt example.com`, `krt example.com --interval 500ms --protocol udp --multipath paris`,
+    `krt replay trace.jsonl`, `krt replay trace.jsonl --run 2026-08-19T12:00:00Z`
   - To install: `cargo install --git https://github.com/timmattison/tools krt`
 
 ## dirhash

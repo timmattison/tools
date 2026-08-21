@@ -3,6 +3,10 @@
 # languages in this repo: Rust first, then Go. Each language's gates only run
 # when a staged change touches that language's files (see the trigger regexes
 # below), so a Go-only commit never pays for the Rust toolchain and vice versa.
+# The tool-index block below is the one deliberate exception: a commit that
+# stages README.md or TLDR.md and no Rust file runs one Rust test target,
+# because the guard that protects the two Markdown indexes lives in the Rust
+# suite.
 #
 # The four Rust gates run cheapest-first so a commit fails fast on the
 # quickest check:
@@ -74,6 +78,33 @@ if git diff --cached --name-only --diff-filter=ACMR | grep -qE '\.rs$|(^|/)Cargo
     # `testcolor::with_forced_ansi` still forces the codes on.
     env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
         CLICOLOR_FORCE=1 cargo test --workspace
+    rust_gate_ran=yes
+fi
+
+# Both tool indexes are Markdown, and the Rust gate above triggers on Rust files
+# only, so a commit that edits README.md or TLDR.md and nothing else would run
+# no gate at all. The guard that holds every binary in both indexes
+# (repo_guards::tool_index) lives in the Rust suite, so such a commit has to
+# name it directly.
+#
+# This is what closes the direction the guard cannot otherwise reach. Adding a
+# crate touches a Cargo.toml and so pays the Rust gate above, which runs the
+# guard; REMOVING a tool's entry from an index touches Markdown alone. Issue
+# #311, which clears the ~563-violation markdownlint backlog, is a bulk rewrite
+# of exactly that shape.
+#
+# It runs the one test target rather than the workspace suite, so it costs a
+# fraction of the Rust block. The rust_gate_ran guard keeps a commit that
+# touches both languages from running the same test twice.
+#
+# --diff-filter carries D on top of ACMR: deleting an index outright is the
+# fault this catches, not only editing one. The same git-env scrub as the gates
+# above keeps the three symmetric.
+if [ "${rust_gate_ran:-}" != yes ] &&
+    git diff --cached --name-only --diff-filter=ACMRD | grep -qE '^(README|TLDR)\.md$'; then
+    echo "pre-commit: running cargo test -p repo-guards --test tool_index_coverage"
+    env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_PREFIX \
+        cargo test -p repo-guards --test tool_index_coverage
 fi
 
 # The Go module gets the same treatment, again cheapest-first:
