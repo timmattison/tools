@@ -2,15 +2,10 @@
 //!
 //! A recorded file holds one JSON object per line. The `type` field names the
 //! record, and every record carries the identifier of the run it belongs to.
-//! This slice builds the records, the two functions that turn a record into one
-//! line and back, and the reader that loads a whole file. The writer and the
-//! `replay` command arrive in the next slices.
-
-// Nothing in `main.rs` reads these items yet.
-#![allow(
-    dead_code,
-    reason = "the reader, the writer, and the replay command arrive in the next slices of issue #366"
-)]
+//! This module builds the records, the two functions that turn a record into
+//! one line and back, the reader that loads a whole file, and the writer that
+//! appends to one. The `replay` command reads through this module. The writer
+//! waits for the tracer, which arrives in a later slice.
 
 use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -83,11 +78,19 @@ pub(crate) struct RunId(String);
 
 impl RunId {
     /// Builds the identifier of the run that starts at this moment.
+    #[allow(
+        dead_code,
+        reason = "the tracer opens a new run and builds its identifier, and the tracer arrives in a later slice of issue #366"
+    )]
     pub(crate) fn at(start: DateTime<Utc>) -> Self {
         Self(format_millis(start))
     }
 
     /// Reads the identifier as text.
+    #[allow(
+        dead_code,
+        reason = "the replay writes the identifier through `Display`, so the tests of this module are the one reader of the text today"
+    )]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -131,6 +134,10 @@ impl Record {
     /// # Errors
     ///
     /// Returns the reason when the record does not become JSON.
+    #[allow(
+        dead_code,
+        reason = "the writer is the one caller, and the tracer that runs the writer arrives in a later slice of issue #366"
+    )]
     pub(crate) fn to_line(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
@@ -329,16 +336,28 @@ impl TtlRange {
     }
 
     /// The first TTL of the round.
+    #[allow(
+        dead_code,
+        reason = "the aggregate table shows a row for every TTL that the round probed, and the table arrives in a later slice of issue #366"
+    )]
     pub(crate) fn first(self) -> u8 {
         self.first
     }
 
     /// The last TTL of the round.
+    #[allow(
+        dead_code,
+        reason = "the aggregate table shows a row for every TTL that the round probed, and the table arrives in a later slice of issue #366"
+    )]
     pub(crate) fn last(self) -> u8 {
         self.last
     }
 
     /// True when the round probed this TTL.
+    #[allow(
+        dead_code,
+        reason = "the aggregate table asks whether a round probed a TTL, to part a hop that did not answer from a hop the round never probed, and the table arrives in a later slice of issue #366"
+    )]
     pub(crate) fn contains(self, ttl: u8) -> bool {
         (self.first..=self.last).contains(&ttl)
     }
@@ -484,6 +503,10 @@ impl Recording {
     }
 
     /// Every record that the file holds.
+    #[allow(
+        dead_code,
+        reason = "the replay reads one run, so the tests of this module are the one reader of the whole file today"
+    )]
     pub(crate) fn records(&self) -> &[Record] {
         &self.records
     }
@@ -551,11 +574,19 @@ pub(crate) struct Truncated {
 
 impl Truncated {
     /// The number of the line that was cut short.
+    #[allow(
+        dead_code,
+        reason = "the replay writes the whole warning through `Display`, so the tests of this module are the one reader of the two numbers today"
+    )]
     pub(crate) fn line(self) -> usize {
         self.line
     }
 
     /// The number of bytes that the cut line holds.
+    #[allow(
+        dead_code,
+        reason = "the replay writes the whole warning through `Display`, so the tests of this module are the one reader of the two numbers today"
+    )]
     pub(crate) fn bytes(self) -> usize {
         self.bytes
     }
@@ -599,6 +630,10 @@ impl<'a> Run<'a> {
     }
 
     /// The names that the run read.
+    #[allow(
+        dead_code,
+        reason = "the aggregate table shows the name of each hop, and the table arrives in a later slice of issue #366"
+    )]
     pub(crate) fn names(&self) -> &[&'a NameRecord] {
         &self.names
     }
@@ -609,6 +644,10 @@ impl<'a> Run<'a> {
     }
 
     /// The record that closed the run. A run that still goes holds none.
+    #[allow(
+        dead_code,
+        reason = "the aggregate table shows why the run stopped, and the table arrives in a later slice of issue #366"
+    )]
     pub(crate) fn end(&self) -> Option<&'a EndRecord> {
         self.end
     }
@@ -655,11 +694,19 @@ pub(crate) enum ReadError {
 /// process, and the operating system keeps the bytes that the process already
 /// gave it. An `fsync` guards against a power loss, which is a different fault,
 /// and not the fault that this guarantee names.
+#[allow(
+    dead_code,
+    reason = "the tracer records each round through this writer, and the tracer arrives in a later slice of issue #366"
+)]
 pub(crate) struct Writer {
     /// The open file, in append mode.
     file: BufWriter<File>,
 }
 
+#[allow(
+    dead_code,
+    reason = "the tracer records each round through this writer, and the tracer arrives in a later slice of issue #366"
+)]
 impl Writer {
     /// Opens the file for appending, and makes the file when it is absent.
     ///
