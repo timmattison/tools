@@ -16,8 +16,8 @@ use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Write as _};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -666,8 +666,11 @@ impl Writer {
     /// # Errors
     ///
     /// Returns the reason when the file does not open.
-    pub(crate) fn append(_path: &Path) -> std::io::Result<Self> {
-        todo!()
+    pub(crate) fn append(path: &Path) -> std::io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: BufWriter::new(file),
+        })
     }
 
     /// Appends one record and one newline, then flushes.
@@ -676,8 +679,11 @@ impl Writer {
     ///
     /// Returns the reason when the record does not become JSON, when the write
     /// fails, and when the flush fails.
-    pub(crate) fn write(&mut self, _record: &Record) -> std::io::Result<()> {
-        todo!()
+    pub(crate) fn write(&mut self, record: &Record) -> std::io::Result<()> {
+        let line = record.to_line().map_err(std::io::Error::other)?;
+        self.file.write_all(line.as_bytes())?;
+        self.file.write_all(&[NEWLINE])?;
+        self.file.flush()
     }
 }
 
