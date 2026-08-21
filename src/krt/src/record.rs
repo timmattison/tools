@@ -13,10 +13,58 @@
 )]
 
 use crate::{Multipath, Protocol};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::IpAddr;
+
+/// Writes a moment as RFC 3339, to the millisecond, in UTC.
+///
+/// `2026-08-18T13:00:00.000Z` keeps its three digits, so every line of a file
+/// carries the same width, and a reader who opens the file by hand reads one
+/// shape.
+fn format_millis(ts: DateTime<Utc>) -> String {
+    ts.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// Reads and writes the timestamp of a record.
+///
+/// The writer holds to `format_millis`. The reader takes any RFC 3339 text and
+/// converts it to UTC, so a file that another tool wrote still loads.
+mod rfc3339_millis {
+    use super::format_millis;
+    use chrono::{DateTime, Utc};
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    /// Writes the moment as RFC 3339, to the millisecond, in UTC.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the serializer refuses the text.
+    pub(super) fn serialize<S>(ts: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&format_millis(*ts))
+    }
+
+    /// Reads a moment from RFC 3339 text, and converts it to UTC.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the value is not text, and when the text is not
+    /// RFC 3339.
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        DateTime::parse_from_rfc3339(&text)
+            .map(|moment| moment.with_timezone(&Utc))
+            .map_err(D::Error::custom)
+    }
+}
 
 /// The identifier of one run: the RFC 3339 start time, to the millisecond, in
 /// UTC.
@@ -24,13 +72,13 @@ use std::net::IpAddr;
 /// The identifier is text, and every comparison is an exact text comparison, so
 /// a run keeps the identifier that the file holds.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub(crate) struct RunId(String);
 
 impl RunId {
     /// Builds the identifier of the run that starts at this moment.
     pub(crate) fn at(start: DateTime<Utc>) -> Self {
-        let _ = start;
-        todo!("the run identifier comes from the start time, to the millisecond, in UTC")
+        Self(format_millis(start))
     }
 
     /// Reads the identifier as text.
@@ -53,6 +101,7 @@ impl From<&str> for RunId {
 
 /// One line of a recorded file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum Record {
     /// The record that opens a run.
     Run(RunRecord),
@@ -63,6 +112,9 @@ pub(crate) enum Record {
     /// The record that closes a run.
     End(EndRecord),
     /// A `type` value that this build does not know.
+    ///
+    /// A reader skips such a line, so `from_line` reports it as `None`.
+    #[serde(other)]
     Unknown,
 }
 
@@ -74,7 +126,7 @@ impl Record {
     ///
     /// Returns the reason when the record does not become JSON.
     pub(crate) fn to_line(&self) -> Result<String, serde_json::Error> {
-        todo!("a record becomes one line of JSON")
+        serde_json::to_string(self)
     }
 
     /// Reads one line of a recorded file.
@@ -87,14 +139,22 @@ impl Record {
     /// Returns the reason when the line is not JSON, when the line names no
     /// `type`, and when a known record does not parse.
     pub(crate) fn from_line(line: &str) -> Result<Option<Record>, serde_json::Error> {
-        let _ = line;
-        todo!("one line of JSON becomes a record")
+        match serde_json::from_str(line)? {
+            Record::Unknown => Ok(None),
+            known => Ok(Some(known)),
+        }
     }
 
     /// The identifier of the run that this record belongs to. An unknown record
     /// has none.
     pub(crate) fn run_id(&self) -> Option<&RunId> {
-        todo!("every known record names the run it belongs to")
+        match self {
+            Self::Run(record) => Some(&record.run),
+            Self::Name(record) => Some(&record.run),
+            Self::Round(record) => Some(&record.run),
+            Self::End(record) => Some(&record.run),
+            Self::Unknown => None,
+        }
     }
 }
 
@@ -126,6 +186,7 @@ pub(crate) struct SourceLabel {
 
 /// How `krt` found the source address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum SourceKind {
     /// The user named the address on the command line.
     Override,
@@ -151,6 +212,7 @@ pub(crate) struct Target {
 /// `AddressFamily` in `main.rs` is the version that the user asked for, and it
 /// admits `auto`. This one is the answer, so it admits no `auto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Family {
     /// IP version 4.
     Ipv4,
@@ -179,6 +241,7 @@ pub(crate) struct RunConfig {
 
 /// The privilege mode of a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum Privilege {
     /// The run sends its probes through a datagram socket.
     Unprivileged,
@@ -192,6 +255,7 @@ pub(crate) struct NameRecord {
     /// The identifier of the run.
     pub(crate) run: RunId,
     /// The moment that the name arrived.
+    #[serde(with = "rfc3339_millis")]
     pub(crate) ts: DateTime<Utc>,
     /// The address that the name belongs to.
     pub(crate) addr: IpAddr,
@@ -207,6 +271,7 @@ pub(crate) struct RoundRecord {
     /// The number of the round. The first round of a run is round one.
     pub(crate) seq: u64,
     /// The moment that the round started.
+    #[serde(with = "rfc3339_millis")]
     pub(crate) ts: DateTime<Utc>,
     /// The time that the round took, in milliseconds.
     pub(crate) dur_ms: u64,
@@ -236,6 +301,7 @@ pub(crate) struct Hop {
 
 /// The TTLs that one round probed, as the two numbers of a JSON array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "[u8; 2]", into = "[u8; 2]")]
 pub(crate) struct TtlRange {
     /// The first TTL of the round.
     first: u8,
@@ -250,8 +316,10 @@ impl TtlRange {
     ///
     /// Returns the reason when the first TTL is above the last one.
     pub(crate) fn new(first: u8, last: u8) -> Result<Self, TtlRangeError> {
-        let _ = (first, last);
-        todo!("a range that runs backward is a fault")
+        if first > last {
+            return Err(TtlRangeError { first, last });
+        }
+        Ok(Self { first, last })
     }
 
     /// The first TTL of the round.
@@ -266,8 +334,22 @@ impl TtlRange {
 
     /// True when the round probed this TTL.
     pub(crate) fn contains(self, ttl: u8) -> bool {
-        let _ = ttl;
-        todo!("the range holds every TTL from the first one to the last one")
+        (self.first..=self.last).contains(&ttl)
+    }
+}
+
+impl TryFrom<[u8; 2]> for TtlRange {
+    type Error = TtlRangeError;
+
+    fn try_from(pair: [u8; 2]) -> Result<Self, Self::Error> {
+        let [first, last] = pair;
+        Self::new(first, last)
+    }
+}
+
+impl From<TtlRange> for [u8; 2] {
+    fn from(range: TtlRange) -> Self {
+        [range.first, range.last]
     }
 }
 
@@ -287,6 +369,7 @@ pub(crate) struct EndRecord {
     /// The identifier of the run.
     pub(crate) run: RunId,
     /// The moment that the run stopped.
+    #[serde(with = "rfc3339_millis")]
     pub(crate) ts: DateTime<Utc>,
     /// The number of rounds that the run made.
     pub(crate) rounds: u64,
@@ -296,6 +379,7 @@ pub(crate) struct EndRecord {
 
 /// Why a run stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum EndReason {
     /// The user stopped the run.
     Quit,

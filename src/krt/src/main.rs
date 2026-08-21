@@ -71,6 +71,7 @@ const RUN_LATEST: &str = "the last run";
 
 /// The protocol of a probe.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Protocol {
     /// Send ICMP echo requests.
     Icmp,
@@ -82,6 +83,7 @@ enum Protocol {
 
 /// The way a probe keeps or varies the flow of a packet.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Multipath {
     /// Let each probe take its own flow, as traceroute always did.
     Classic,
