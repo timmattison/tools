@@ -1606,4 +1606,354 @@ mod tests {
             path.display()
         );
     }
+
+    // The golden fixture. The repository holds one recorded file of two runs,
+    // and the tests below read it. A schema change that nobody wanted moves
+    // the records away from the fixture, and the comparison fails. The three
+    // mutation tests prove that the comparison can fail, because a guard that
+    // matches anything is worse than no guard.
+
+    /// The golden fixture, as the repository holds it.
+    const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/two-runs.jsonl");
+
+    /// The number of lines that the golden fixture holds.
+    ///
+    /// One of the lines names a `type` that this build does not know, so the
+    /// reader gives one record less than this.
+    const FIXTURE_LINES: usize = 9;
+
+    /// The identifier of the second run of the golden fixture.
+    const SECOND_RUN: &str = "2026-08-19T09:30:00.000Z";
+
+    /// The build string of the second run of the golden fixture.
+    const KRT_DIRTY: &str = "0.1.0 (abc1234, dirty)";
+
+    /// The source address of the second run of the golden fixture.
+    const SECOND_SOURCE: &str = "2001:db8::1";
+
+    /// The destination of the second run, as the user typed it.
+    const SECOND_TARGET: &str = "example.org";
+
+    /// The address of the destination of the second run.
+    const SECOND_TARGET_ADDRESS: &str = "93.184.216.35";
+
+    /// The address of the first hop of the second run.
+    const SECOND_FIRST_HOP: &str = "10.0.0.1";
+
+    /// The name of the machine that made both runs of the golden fixture.
+    const MACHINE: &str = "tims-mac";
+
+    /// The ICMP message that a hop below the target answers with.
+    const TIME_EXCEEDED: &str = "time_exceeded";
+
+    /// The ICMP message that the target answers with.
+    const ECHO_REPLY: &str = "echo_reply";
+
+    /// The `type` field of the one line that this build does not know.
+    const WEATHER_TYPE: &str = r#""type":"weather""#;
+
+    /// The name of the round trip time field, as the fixture writes it.
+    const RTT_FIELD: &str = r#""rtt_ms""#;
+
+    /// The name of the round trip time field, renamed.
+    const RENAMED_RTT_FIELD: &str = r#""rtt_millis""#;
+
+    /// The duration of the first round of the first run, as the fixture holds
+    /// it.
+    const ROUND_DURATION: &str = r#""dur_ms":1004"#;
+
+    /// The duration of the first round of the first run, changed.
+    const CHANGED_ROUND_DURATION: &str = r#""dur_ms":9999"#;
+
+    /// The range of TTLs that both rounds of the first run probed.
+    const FIXTURE_TTL_RANGE: &str = r#""ttl_range":[1,3]"#;
+
+    /// The same range of TTLs, turned around, so that it runs backward.
+    const BACKWARD_TTL_RANGE: &str = r#""ttl_range":[3,1]"#;
+
+    /// One hop that answered a probe of the golden fixture.
+    fn hop_at(ttl: u8, addr: &str, rtt_ms: f64, icmp: &str) -> Hop {
+        Hop {
+            ttl,
+            addr: address(addr),
+            rtt_ms,
+            icmp: icmp.to_owned(),
+        }
+    }
+
+    /// The first round of the first run of the golden fixture.
+    ///
+    /// Every TTL that the round probed answered, and the last one is the
+    /// target.
+    fn a_first_fixture_round() -> Record {
+        Record::Round(RoundRecord {
+            run: RunId::from(RUN),
+            seq: 1,
+            ts: moment("2026-08-18T12:00:01.127Z"),
+            dur_ms: 1004,
+            ttl_range: TtlRange::new(1, 3).expect("the fixture range must hold"),
+            reached: true,
+            hops: vec![
+                hop_at(1, FIRST_HOP, 1.23, TIME_EXCEEDED),
+                hop_at(3, TARGET_ADDRESS, 24.10, ECHO_REPLY),
+            ],
+        })
+    }
+
+    /// The second round of the first run of the golden fixture.
+    ///
+    /// The hop at TTL 3 did not answer, so the round holds one hop, and the
+    /// range of TTLs still names the three TTLs that the round probed.
+    fn a_second_fixture_round() -> Record {
+        Record::Round(RoundRecord {
+            run: RunId::from(RUN),
+            seq: 2,
+            ts: moment("2026-08-18T12:00:02.131Z"),
+            dur_ms: 1002,
+            ttl_range: TtlRange::new(1, 3).expect("the fixture range must hold"),
+            reached: false,
+            hops: vec![hop_at(1, FIRST_HOP, 1.41, TIME_EXCEEDED)],
+        })
+    }
+
+    /// The record that closes the first run of the golden fixture.
+    fn a_first_fixture_end() -> Record {
+        Record::End(EndRecord {
+            run: RunId::from(RUN),
+            ts: moment("2026-08-18T12:00:03.000Z"),
+            rounds: 2,
+            reason: EndReason::Quit,
+        })
+    }
+
+    /// The record that opens the second run of the golden fixture.
+    fn a_second_fixture_run() -> Record {
+        Record::Run(RunRecord {
+            run: RunId::from(SECOND_RUN),
+            krt: KRT_DIRTY.to_owned(),
+            source: SourceLabel {
+                addr: address(SECOND_SOURCE),
+                kind: SourceKind::Local,
+            },
+            target: Target {
+                arg: SECOND_TARGET.to_owned(),
+                addr: address(SECOND_TARGET_ADDRESS),
+                family: Family::Ipv4,
+            },
+            config: RunConfig {
+                interval_ms: 500,
+                protocol: Protocol::Udp,
+                first_ttl: 1,
+                max_ttl: 20,
+                multipath: Multipath::Paris,
+                privilege: Privilege::Privileged,
+                dns: false,
+            },
+            host: MACHINE.to_owned(),
+        })
+    }
+
+    /// The one round of the second run of the golden fixture.
+    fn a_second_fixture_run_round() -> Record {
+        Record::Round(RoundRecord {
+            run: RunId::from(SECOND_RUN),
+            seq: 1,
+            ts: moment("2026-08-19T09:30:00.503Z"),
+            dur_ms: 503,
+            ttl_range: TtlRange::new(1, 2).expect("the fixture range must hold"),
+            reached: true,
+            hops: vec![
+                hop_at(1, SECOND_FIRST_HOP, 0.87, TIME_EXCEEDED),
+                hop_at(2, SECOND_TARGET_ADDRESS, 12.5, ECHO_REPLY),
+            ],
+        })
+    }
+
+    /// The record that closes the second run of the golden fixture.
+    fn a_second_fixture_end() -> Record {
+        Record::End(EndRecord {
+            run: RunId::from(SECOND_RUN),
+            ts: moment("2026-08-19T09:30:00.510Z"),
+            rounds: 1,
+            reason: EndReason::Rounds,
+        })
+    }
+
+    /// The records that the golden fixture holds, in file order.
+    ///
+    /// The fixture holds nine lines, and the reader skips the one line whose
+    /// `type` this build does not know, so eight records remain.
+    ///
+    /// The first two records are the two lines that the design writes, and the
+    /// tests above already compare them against `RUN_LINE` and `NAME_LINE`.
+    fn expected_records() -> Vec<Record> {
+        vec![
+            a_run_record(),
+            a_name_record(),
+            a_first_fixture_round(),
+            a_second_fixture_round(),
+            a_first_fixture_end(),
+            a_second_fixture_run(),
+            a_second_fixture_run_round(),
+            a_second_fixture_end(),
+        ]
+    }
+
+    /// The text of the golden fixture.
+    fn fixture_text() -> String {
+        fs::read_to_string(FIXTURE).expect("the golden fixture must read")
+    }
+
+    /// The records of the golden fixture.
+    fn fixture_recording() -> Recording {
+        Recording::read(Path::new(FIXTURE)).expect("the golden fixture must read")
+    }
+
+    /// Writes a copy of the golden fixture, with one text replaced.
+    ///
+    /// The path of the copy keys on the process and on the nanosecond, so two
+    /// runs of one test stay apart. The copy goes away with the value.
+    fn mutated_fixture(label: &str, from: &str, to: &str) -> TempFile {
+        let text = fixture_text();
+        assert!(text.contains(from), "the golden fixture holds `{from}`");
+        TempFile::new(label, text.replace(from, to).as_bytes())
+    }
+
+    #[test]
+    fn the_golden_fixture_parses_to_the_records_it_names() {
+        let recording = fixture_recording();
+        assert_eq!(recording.records(), expected_records());
+        assert_eq!(recording.truncated(), None);
+    }
+
+    /// The committed fixture is text that the writer of this build produces.
+    /// The fixture therefore cannot drift into a shape that the tool does not
+    /// write.
+    #[test]
+    fn the_golden_fixture_holds_the_lines_that_this_build_writes() {
+        let text = fixture_text();
+        assert!(
+            text.ends_with(NEWLINE_CHAR),
+            "a newline ends the golden fixture"
+        );
+        assert_eq!(text.lines().count(), FIXTURE_LINES);
+
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.contains(WEATHER_TYPE))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            FIXTURE_LINES - 1,
+            "the reader skips the one line whose type this build does not know"
+        );
+
+        let recording = fixture_recording();
+        assert_eq!(recording.records().len(), lines.len());
+        for (record, line) in recording.records().iter().zip(&lines) {
+            assert_eq!(line_of(record), *line);
+        }
+    }
+
+    #[test]
+    fn the_golden_fixture_holds_two_runs_and_each_one_holds_its_own_records() {
+        let recording = fixture_recording();
+        assert_eq!(
+            recording.run_ids(),
+            [RunId::from(RUN), RunId::from(SECOND_RUN)]
+        );
+
+        let first = recording
+            .run(&RunId::from(RUN))
+            .expect("the golden fixture holds the first run");
+        assert_eq!(seqs_of(&first), [1, 2]);
+        assert_eq!(hosts_of(&first), [FIRST_HOST]);
+        assert_eq!(
+            first.end().expect("the first run ends").reason,
+            EndReason::Quit
+        );
+
+        let second = recording
+            .run(&RunId::from(SECOND_RUN))
+            .expect("the golden fixture holds the second run");
+        assert_eq!(seqs_of(&second), [1]);
+        assert!(hosts_of(&second).is_empty(), "the second run reads no name");
+        assert_eq!(
+            second.end().expect("the second run ends").reason,
+            EndReason::Rounds
+        );
+
+        let last = recording
+            .last_run()
+            .expect("the golden fixture holds two runs");
+        assert_eq!(last, second);
+    }
+
+    /// A TTL that the round probed and that did not answer is absent from the
+    /// hops, and the range of TTLs still holds it.
+    #[test]
+    fn a_hop_that_did_not_answer_is_absent_from_the_round_of_the_golden_fixture() {
+        let recording = fixture_recording();
+        let run = recording
+            .run(&RunId::from(RUN))
+            .expect("the golden fixture holds the first run");
+        let round = *run
+            .rounds()
+            .get(1)
+            .expect("the first run of the golden fixture makes two rounds");
+        assert_eq!(round.seq, 2);
+        assert_eq!(round.hops.len(), 1, "one hop of the round answered");
+        assert_eq!(round.ttl_range.first(), 1);
+        assert_eq!(round.ttl_range.last(), 3);
+        assert!(round.ttl_range.contains(3), "the round probed ttl 3");
+        assert!(
+            !round.hops.iter().any(|answer| answer.ttl == 3),
+            "the hop at ttl 3 did not answer, so the round holds no hop at ttl 3"
+        );
+    }
+
+    /// A copy of the fixture with one field renamed must not read. A guard that
+    /// accepts a renamed field is a guard that matches anything.
+    #[test]
+    fn a_copy_of_the_golden_fixture_with_a_renamed_field_does_not_read() {
+        let copy = mutated_fixture("renamed-field", RTT_FIELD, RENAMED_RTT_FIELD);
+        assert!(
+            Recording::read(copy.path()).is_err(),
+            "a reader that takes {RENAMED_RTT_FIELD} in place of {RTT_FIELD} matches anything"
+        );
+    }
+
+    /// A copy of the fixture with one value changed must read, and must give
+    /// records that differ from the ones the fixture names.
+    ///
+    /// This half proves that the comparison itself fires. The renamed field
+    /// alone proves less, because the parser refuses the rename before any
+    /// comparison runs.
+    #[test]
+    fn a_copy_of_the_golden_fixture_with_a_changed_value_reads_back_as_other_records() {
+        let copy = mutated_fixture("changed-value", ROUND_DURATION, CHANGED_ROUND_DURATION);
+        let recording = Recording::read(copy.path()).expect("a changed number is still one record");
+        assert_eq!(
+            recording.records().len(),
+            expected_records().len(),
+            "the copy still holds every record of the golden fixture"
+        );
+        assert_ne!(
+            recording.records(),
+            expected_records(),
+            "a comparison that takes {CHANGED_ROUND_DURATION} in place of {ROUND_DURATION} compares nothing"
+        );
+    }
+
+    /// A copy of the fixture with a range that runs backward must not read. The
+    /// guard of the range fires through the parse of a file, and not only
+    /// through the constructor.
+    #[test]
+    fn a_copy_of_the_golden_fixture_with_a_backward_range_does_not_read() {
+        let copy = mutated_fixture("backward-range", FIXTURE_TTL_RANGE, BACKWARD_TTL_RANGE);
+        assert!(
+            Recording::read(copy.path()).is_err(),
+            "a reader that takes the range {BACKWARD_TTL_RANGE} matches anything"
+        );
+    }
 }
