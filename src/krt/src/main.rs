@@ -8,8 +8,11 @@
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod record;
+
 use buildinfo::version_string;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -67,7 +70,7 @@ const SOURCE_DISCOVERED: &str = "discovered at run time";
 const RUN_LATEST: &str = "the last run";
 
 /// The protocol of a probe.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Protocol {
     /// Send ICMP echo requests.
     Icmp,
@@ -78,7 +81,7 @@ enum Protocol {
 }
 
 /// The way a probe keeps or varies the flow of a packet.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Multipath {
     /// Let each probe take its own flow, as traceroute always did.
     Classic,

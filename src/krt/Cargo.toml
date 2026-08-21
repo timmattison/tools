@@ -6,7 +6,11 @@ description = "Knights of the Round Trip: a Rust tool that records the network p
 
 [dependencies]
 buildinfo.workspace = true
+chrono.workspace = true
 clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true
