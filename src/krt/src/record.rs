@@ -17,6 +17,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
 
 /// Writes a moment as RFC 3339, to the millisecond, in UTC.
 ///
@@ -391,15 +392,174 @@ pub(crate) enum EndReason {
     Error,
 }
 
+/// Every record that one file holds, in the order that the file holds them.
+///
+/// The whole file lives in memory. A replay folds every round of a run, so a
+/// reader that streamed would gain nothing here.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Recording {
+    /// The records of the file, in the order that the file holds them.
+    records: Vec<Record>,
+    /// The final line that was cut short, when the file holds one.
+    truncated: Option<Truncated>,
+}
+
+impl Recording {
+    /// Reads a recorded file.
+    ///
+    /// A line whose `type` this build does not know is skipped. A final line
+    /// that no newline ended and that no parse read is reported through
+    /// `truncated`, and every record before it still loads.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not open, when the read of the
+    /// file fails, when a complete line is not UTF-8 text, and when a complete
+    /// line does not parse.
+    pub(crate) fn read(path: &Path) -> Result<Self, ReadError> {
+        todo!()
+    }
+
+    /// Every record that the file holds.
+    pub(crate) fn records(&self) -> &[Record] {
+        todo!()
+    }
+
+    /// The final line that was cut short, when the file holds one.
+    pub(crate) fn truncated(&self) -> Option<Truncated> {
+        todo!()
+    }
+
+    /// The identifier of every run that the file holds, in the order that the
+    /// runs start.
+    pub(crate) fn run_ids(&self) -> Vec<RunId> {
+        todo!()
+    }
+
+    /// The records of one run. A run that the file does not hold gives `None`.
+    pub(crate) fn run(&self, id: &RunId) -> Option<Run<'_>> {
+        todo!()
+    }
+
+    /// The last run that the file holds.
+    pub(crate) fn last_run(&self) -> Option<Run<'_>> {
+        todo!()
+    }
+}
+
+/// A final line that no newline ended and that no parse read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Truncated {
+    /// The number of the line. The first line of a file is line one.
+    line: usize,
+    /// The number of bytes that the line holds.
+    bytes: usize,
+}
+
+impl Truncated {
+    /// The number of the line that was cut short.
+    pub(crate) fn line(self) -> usize {
+        todo!()
+    }
+
+    /// The number of bytes that the cut line holds.
+    pub(crate) fn bytes(self) -> usize {
+        todo!()
+    }
+}
+
+impl fmt::Display for Truncated {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+/// The records of one run inside a recording.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Run<'a> {
+    /// The identifier of the run.
+    id: RunId,
+    /// The record that opened the run.
+    start: Option<&'a RunRecord>,
+    /// The names that the run read.
+    names: Vec<&'a NameRecord>,
+    /// The rounds that the run made.
+    rounds: Vec<&'a RoundRecord>,
+    /// The record that closed the run.
+    end: Option<&'a EndRecord>,
+}
+
+impl<'a> Run<'a> {
+    /// The identifier of the run.
+    pub(crate) fn id(&self) -> &RunId {
+        todo!()
+    }
+
+    /// The record that opened the run. A file that starts in the middle of a
+    /// run holds none.
+    pub(crate) fn start(&self) -> Option<&'a RunRecord> {
+        todo!()
+    }
+
+    /// The names that the run read.
+    pub(crate) fn names(&self) -> &[&'a NameRecord] {
+        todo!()
+    }
+
+    /// The rounds that the run made.
+    pub(crate) fn rounds(&self) -> &[&'a RoundRecord] {
+        todo!()
+    }
+
+    /// The record that closed the run. A run that still goes holds none.
+    pub(crate) fn end(&self) -> Option<&'a EndRecord> {
+        todo!()
+    }
+}
+
+/// Why a recorded file does not read.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadError {
+    /// The file does not open, or the read of the file fails.
+    #[error("{}: {source}", path.display())]
+    Open {
+        /// The path of the file.
+        path: PathBuf,
+        /// The fault that the operating system reported.
+        source: std::io::Error,
+    },
+    /// A complete line does not parse.
+    #[error("{}: line {line} is not one record: {source}", path.display())]
+    Corrupt {
+        /// The path of the file.
+        path: PathBuf,
+        /// The number of the line. The first line of a file is line one.
+        line: usize,
+        /// The fault that the parser reported.
+        source: serde_json::Error,
+    },
+    /// A complete line is not UTF-8 text.
+    #[error("{}: line {line} is not utf-8 text", path.display())]
+    NotText {
+        /// The path of the file.
+        path: PathBuf,
+        /// The number of the line. The first line of a file is line one.
+        line: usize,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        EndReason, EndRecord, Family, Hop, NameRecord, Privilege, Record, RoundRecord, RunConfig,
-        RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange,
+        EndReason, EndRecord, Family, Hop, NameRecord, Privilege, ReadError, Record, Recording,
+        RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange,
     };
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
+    use std::fs;
     use std::net::IpAddr;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     /// The identifier of the run that every test record belongs to.
     const RUN: &str = "2026-08-18T12:00:00.123Z";
@@ -424,6 +584,46 @@ mod tests {
 
     /// The `end` line, as the design writes it.
     const END_LINE: &str = r#"{"type":"end","run":"2026-08-18T12:00:00.123Z","ts":"2026-08-18T13:00:00.000Z","rounds":1420,"reason":"quit"}"#;
+
+    /// The identifier of the second run of a file that holds two runs.
+    const OTHER_RUN: &str = "2026-08-18T14:00:00.000Z";
+
+    /// The identifier of a run that no test file holds.
+    const ABSENT_RUN: &str = "2020-01-01T00:00:00.000Z";
+
+    /// The sequence number that `ROUND_LINE` carries.
+    const ROUND_SEQ: u64 = 142;
+
+    /// The name of the first hop that `NAME_LINE` carries.
+    const FIRST_HOST: &str = "router.lan";
+
+    /// The name of the first hop of the second run of a file of two runs.
+    const OTHER_HOST: &str = "core.example.net";
+
+    /// A name that holds Japanese characters.
+    ///
+    /// A cut inside such a name falls inside one character, and a reader that
+    /// indexes bytes panics on it.
+    const JAPANESE_HOST: &str = "ルーター.lan";
+
+    /// The reason that `END_LINE` carries.
+    const END_REASON: &str = "quit";
+
+    /// The reason that the second run of a file of two runs carries.
+    const OTHER_REASON: &str = "duration";
+
+    /// A line whose `type` value this build does not know.
+    const WEATHER_LINE: &str = r#"{"type":"weather","sky":"clear"}"#;
+
+    /// The start of an `end` line, as a cut final line writes it. The text
+    /// holds 13 bytes.
+    const CUT_CHUNK: &str = r#"{"type":"end""#;
+
+    /// A line that is not JSON.
+    const NOT_JSON_LINE: &str = "this is not json";
+
+    /// Two bytes that no UTF-8 text holds.
+    const NOT_TEXT: [u8; 2] = [0xff, 0xfe];
 
     /// Reads an address that a test names.
     fn address(text: &str) -> IpAddr {
@@ -708,5 +908,402 @@ mod tests {
     #[test]
     fn an_unknown_record_names_no_run() {
         assert_eq!(Record::Unknown.run_id(), None);
+    }
+
+    /// Builds a path under the temporary directory that no other run reaches.
+    ///
+    /// Two runs of one test can overlap, because `cargo test` runs on many
+    /// threads and more than one `cargo test` can run at once. The process
+    /// identifier and the nanosecond keep the two runs apart.
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("the clock must stand after the epoch")
+            .as_nanos();
+        let process = std::process::id();
+        std::env::temp_dir().join(format!("krt-{label}-{process}-{nanos}.jsonl"))
+    }
+
+    /// A file that one test makes. The file goes away when the test ends, and
+    /// also when the test panics.
+    struct TempFile {
+        /// The path of the file.
+        path: PathBuf,
+    }
+
+    impl TempFile {
+        /// Writes the bytes to a new file that no other run reaches.
+        fn new(label: &str, contents: &[u8]) -> Self {
+            let path = temp_path(label);
+            fs::write(&path, contents).expect("the test file must be written");
+            Self { path }
+        }
+
+        /// The path of the file.
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    /// The `type` value that one record writes.
+    fn kind_of(record: &Record) -> &'static str {
+        match record {
+            Record::Run(_) => "run",
+            Record::Name(_) => "name",
+            Record::Round(_) => "round",
+            Record::End(_) => "end",
+            Record::Unknown => "unknown",
+        }
+    }
+
+    /// The `host` field that a `name` line writes.
+    fn host_field(host: &str) -> String {
+        format!(r#""host":"{host}""#)
+    }
+
+    /// The `seq` field that a `round` line writes.
+    fn seq_field(seq: u64) -> String {
+        format!(r#""seq":{seq}"#)
+    }
+
+    /// The `reason` field that an `end` line writes.
+    fn reason_field(reason: &str) -> String {
+        format!(r#""reason":"{reason}""#)
+    }
+
+    /// The `run` line of the run that the test names.
+    fn run_line(id: &str) -> String {
+        RUN_LINE.replace(RUN, id)
+    }
+
+    /// One `name` line of the run that the test names, with the name that the
+    /// test names.
+    fn name_line(id: &str, host: &str) -> String {
+        NAME_LINE
+            .replace(RUN, id)
+            .replace(&host_field(FIRST_HOST), &host_field(host))
+    }
+
+    /// One `round` line of the run that the test names, with the sequence
+    /// number that the test names.
+    fn round_line(id: &str, seq: u64) -> String {
+        ROUND_LINE
+            .replace(RUN, id)
+            .replace(&seq_field(ROUND_SEQ), &seq_field(seq))
+    }
+
+    /// The `end` line of the run that the test names, with the reason that the
+    /// test names.
+    fn end_line(id: &str, reason: &str) -> String {
+        END_LINE
+            .replace(RUN, id)
+            .replace(&reason_field(END_REASON), &reason_field(reason))
+    }
+
+    /// Joins the lines of a file. Every line ends with a newline.
+    fn file_of(lines: &[String]) -> String {
+        let mut text = String::new();
+        for line in lines {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
+    }
+
+    /// A file that holds two runs. The first run makes two rounds, and the
+    /// second run makes one.
+    fn two_runs() -> String {
+        file_of(&[
+            run_line(RUN),
+            name_line(RUN, FIRST_HOST),
+            round_line(RUN, 1),
+            round_line(RUN, 2),
+            end_line(RUN, END_REASON),
+            run_line(OTHER_RUN),
+            name_line(OTHER_RUN, OTHER_HOST),
+            round_line(OTHER_RUN, 7),
+            end_line(OTHER_RUN, OTHER_REASON),
+        ])
+    }
+
+    /// Reads the recording of a file that a test made.
+    fn recording_of(file: &TempFile) -> Recording {
+        Recording::read(file.path()).expect("the test file must read")
+    }
+
+    /// The `type` value of every record of a recording, in file order.
+    fn kinds_of(recording: &Recording) -> Vec<&'static str> {
+        recording.records().iter().map(kind_of).collect()
+    }
+
+    /// The sequence number of every round of a run.
+    fn seqs_of(run: &Run<'_>) -> Vec<u64> {
+        run.rounds().iter().map(|round| round.seq).collect()
+    }
+
+    /// The name that every `name` record of a run carries.
+    fn hosts_of<'a>(run: &Run<'a>) -> Vec<&'a str> {
+        run.names()
+            .iter()
+            .copied()
+            .map(|name| name.host.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_file_of_two_runs_holds_every_record_in_file_order() {
+        let file = TempFile::new("two-runs", two_runs().as_bytes());
+        let recording = recording_of(&file);
+        assert_eq!(
+            kinds_of(&recording),
+            ["run", "name", "round", "round", "end", "run", "name", "round", "end"]
+        );
+        let first = RunId::from(RUN);
+        let other = RunId::from(OTHER_RUN);
+        let ids: Vec<&RunId> = recording
+            .records()
+            .iter()
+            .filter_map(Record::run_id)
+            .collect();
+        assert_eq!(
+            ids,
+            [&first, &first, &first, &first, &first, &other, &other, &other, &other]
+        );
+        assert_eq!(recording.records()[0], a_run_record());
+        assert_eq!(recording.records()[1], a_name_record());
+        assert_eq!(recording.records()[4], an_end_record());
+        assert_eq!(recording.truncated(), None);
+    }
+
+    #[test]
+    fn a_file_of_two_runs_names_both_runs_in_the_order_they_start() {
+        let file = TempFile::new("run-ids", two_runs().as_bytes());
+        assert_eq!(
+            recording_of(&file).run_ids(),
+            [RunId::from(RUN), RunId::from(OTHER_RUN)]
+        );
+    }
+
+    #[test]
+    fn the_last_run_is_the_second_run_of_a_file_of_two_runs() {
+        let file = TempFile::new("last-run", two_runs().as_bytes());
+        let recording = recording_of(&file);
+        let run = recording.last_run().expect("the file holds two runs");
+        assert_eq!(run.id(), &RunId::from(OTHER_RUN));
+        assert_eq!(seqs_of(&run), [7]);
+    }
+
+    #[test]
+    fn a_named_run_is_the_first_run_of_a_file_of_two_runs() {
+        let file = TempFile::new("named-run", two_runs().as_bytes());
+        let recording = recording_of(&file);
+        let run = recording
+            .run(&RunId::from(RUN))
+            .expect("the file holds the first run");
+        assert_eq!(run.id(), &RunId::from(RUN));
+        assert_eq!(seqs_of(&run), [1, 2]);
+    }
+
+    #[test]
+    fn a_run_that_the_file_does_not_hold_is_no_run() {
+        let file = TempFile::new("absent-run", two_runs().as_bytes());
+        assert!(recording_of(&file).run(&RunId::from(ABSENT_RUN)).is_none());
+    }
+
+    #[test]
+    fn a_run_holds_the_names_the_rounds_and_the_end_of_that_run_only() {
+        let file = TempFile::new("one-run-only", two_runs().as_bytes());
+        let recording = recording_of(&file);
+
+        let first = recording
+            .run(&RunId::from(RUN))
+            .expect("the file holds the first run");
+        assert_eq!(hosts_of(&first), [FIRST_HOST]);
+        assert_eq!(seqs_of(&first), [1, 2]);
+        assert_eq!(
+            first.start().expect("the first run starts").run,
+            RunId::from(RUN)
+        );
+        assert_eq!(
+            first.end().expect("the first run ends").reason,
+            EndReason::Quit
+        );
+
+        let other = recording
+            .run(&RunId::from(OTHER_RUN))
+            .expect("the file holds the second run");
+        assert_eq!(hosts_of(&other), [OTHER_HOST]);
+        assert_eq!(seqs_of(&other), [7]);
+        assert_eq!(
+            other.start().expect("the second run starts").run,
+            RunId::from(OTHER_RUN)
+        );
+        assert_eq!(
+            other.end().expect("the second run ends").reason,
+            EndReason::Duration
+        );
+    }
+
+    #[test]
+    fn a_type_that_this_build_does_not_know_is_skipped_by_the_reader() {
+        let text = file_of(&[
+            run_line(RUN),
+            WEATHER_LINE.to_owned(),
+            end_line(RUN, END_REASON),
+        ]);
+        let file = TempFile::new("weather", text.as_bytes());
+        let recording = recording_of(&file);
+        assert_eq!(kinds_of(&recording), ["run", "end"]);
+        assert_eq!(recording.truncated(), None);
+    }
+
+    #[test]
+    fn a_final_line_that_is_cut_short_names_the_line_and_the_byte_count() {
+        let cut = round_line(RUN, 2);
+        let head = cut.len() / 2;
+        let mut bytes = file_of(&[run_line(RUN), round_line(RUN, 1)]).into_bytes();
+        bytes.extend_from_slice(&cut.as_bytes()[..head]);
+        let file = TempFile::new("cut-record", &bytes);
+        let recording = recording_of(&file);
+        let truncated = recording.truncated().expect("the file holds a cut line");
+        assert_eq!(truncated.line(), 3);
+        assert_eq!(truncated.bytes(), head);
+        assert_eq!(kinds_of(&recording), ["run", "round"]);
+    }
+
+    #[test]
+    fn a_final_line_that_is_cut_inside_a_character_names_the_line_and_the_byte_count() {
+        let cut = name_line(RUN, JAPANESE_HOST);
+        let head = cut.find(JAPANESE_HOST).expect("the line holds the name") + 1;
+        let mut bytes = file_of(&[run_line(RUN)]).into_bytes();
+        bytes.extend_from_slice(&cut.as_bytes()[..head]);
+        let file = TempFile::new("cut-character", &bytes);
+        let recording = recording_of(&file);
+        let truncated = recording.truncated().expect("the file holds a cut line");
+        assert_eq!(truncated.line(), 2);
+        assert_eq!(truncated.bytes(), head);
+        assert_eq!(kinds_of(&recording), ["run"]);
+    }
+
+    #[test]
+    fn a_file_that_ends_with_a_newline_holds_no_cut_line() {
+        let file = TempFile::new("whole-file", two_runs().as_bytes());
+        assert_eq!(recording_of(&file).truncated(), None);
+    }
+
+    #[test]
+    fn a_final_line_that_no_newline_ended_and_that_parses_is_one_record() {
+        let mut text = file_of(&[run_line(RUN)]);
+        text.push_str(&end_line(RUN, END_REASON));
+        let file = TempFile::new("no-final-newline", text.as_bytes());
+        let recording = recording_of(&file);
+        assert_eq!(kinds_of(&recording), ["run", "end"]);
+        assert_eq!(recording.truncated(), None);
+    }
+
+    #[test]
+    fn a_complete_line_that_is_not_json_names_the_line() {
+        let text = file_of(&[
+            run_line(RUN),
+            NOT_JSON_LINE.to_owned(),
+            end_line(RUN, END_REASON),
+        ]);
+        let file = TempFile::new("corrupt", text.as_bytes());
+        let error = Recording::read(file.path()).expect_err("a corrupt line must fail");
+        match &error {
+            ReadError::Corrupt { path, line, .. } => {
+                assert_eq!(*line, 2);
+                assert_eq!(path, file.path());
+            }
+            other => panic!("a corrupt line must report a corrupt line: {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("line 2"),
+            "the message names the line: {error}"
+        );
+    }
+
+    #[test]
+    fn a_complete_line_that_is_not_text_names_the_line() {
+        let mut bytes = file_of(&[run_line(RUN)]).into_bytes();
+        bytes.extend_from_slice(&NOT_TEXT);
+        bytes.push(b'\n');
+        bytes.extend_from_slice(end_line(RUN, END_REASON).as_bytes());
+        bytes.push(b'\n');
+        let file = TempFile::new("not-text", &bytes);
+        let error = Recording::read(file.path()).expect_err("a line that is not text must fail");
+        match &error {
+            ReadError::NotText { path, line } => {
+                assert_eq!(*line, 2);
+                assert_eq!(path, file.path());
+            }
+            other => panic!("a line that is not text must report that fault: {other:?}"),
+        }
+        assert!(
+            error.to_string().contains("line 2"),
+            "the message names the line: {error}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_absent_names_the_path() {
+        let path = temp_path("absent");
+        let error = Recording::read(&path).expect_err("an absent file must fail");
+        assert!(
+            matches!(error, ReadError::Open { .. }),
+            "an absent file reports the open fault: {error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&path.display().to_string()),
+            "the message names the path: {message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_file_holds_no_record_and_no_run() {
+        let file = TempFile::new("empty", b"");
+        let recording = recording_of(&file);
+        assert!(recording.records().is_empty(), "the file holds no record");
+        assert!(recording.run_ids().is_empty(), "the file holds no run");
+        assert!(recording.last_run().is_none(), "the file holds no last run");
+        assert_eq!(recording.truncated(), None);
+    }
+
+    #[test]
+    fn a_file_that_holds_no_run_record_still_names_the_run() {
+        let text = file_of(&[round_line(RUN, 1), round_line(RUN, 2)]);
+        let file = TempFile::new("no-run-record", text.as_bytes());
+        let recording = recording_of(&file);
+        assert_eq!(recording.run_ids(), [RunId::from(RUN)]);
+        let run = recording.last_run().expect("the file holds one run");
+        assert!(run.start().is_none(), "the file holds no run record");
+        assert!(run.end().is_none(), "the file holds no end record");
+        assert_eq!(seqs_of(&run), [1, 2]);
+    }
+
+    #[test]
+    fn a_blank_line_between_two_records_is_no_fault() {
+        let text = file_of(&[run_line(RUN), String::new(), end_line(RUN, END_REASON)]);
+        let file = TempFile::new("blank-line", text.as_bytes());
+        let recording = recording_of(&file);
+        assert_eq!(kinds_of(&recording), ["run", "end"]);
+        assert_eq!(recording.truncated(), None);
+    }
+
+    #[test]
+    fn the_message_of_a_cut_line_names_the_line_and_the_byte_count() {
+        let mut text = file_of(&[run_line(RUN)]);
+        text.push_str(CUT_CHUNK);
+        let file = TempFile::new("cut-message", text.as_bytes());
+        let recording = recording_of(&file);
+        let truncated = recording.truncated().expect("the file holds a cut line");
+        assert_eq!(truncated.to_string(), "line 2 is cut short at 13 bytes");
     }
 }
