@@ -2,9 +2,9 @@
 //!
 //! A recorded file holds one JSON object per line. The `type` field names the
 //! record, and every record carries the identifier of the run it belongs to.
-//! This slice builds the records and the two functions that turn a record into
-//! one line and back. The reader, the writer, and the `replay` command arrive
-//! in the next slices.
+//! This slice builds the records, the two functions that turn a record into one
+//! line and back, and the reader that loads a whole file. The writer and the
+//! `replay` command arrive in the next slices.
 
 // Nothing in `main.rs` reads these items yet.
 #![allow(
@@ -16,8 +16,13 @@ use crate::{Multipath, Protocol};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+
+/// The byte that ends one line of a recorded file.
+const NEWLINE: u8 = b'\n';
 
 /// Writes a moment as RFC 3339, to the millisecond, in UTC.
 ///
@@ -417,33 +422,121 @@ impl Recording {
     /// file fails, when a complete line is not UTF-8 text, and when a complete
     /// line does not parse.
     pub(crate) fn read(path: &Path) -> Result<Self, ReadError> {
-        todo!()
+        let file = File::open(path).map_err(|source| ReadError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut reader = BufReader::new(file);
+        let mut records = Vec::new();
+        let mut truncated = None;
+        let mut line = 0_usize;
+        loop {
+            let mut chunk = Vec::new();
+            let read =
+                reader
+                    .read_until(NEWLINE, &mut chunk)
+                    .map_err(|source| ReadError::Open {
+                        path: path.to_path_buf(),
+                        source,
+                    })?;
+            if read == 0 {
+                break;
+            }
+            line += 1;
+            // A chunk that carries no newline is the final chunk of the file.
+            // The writer ends every record with a newline, so such a chunk is
+            // as much of a record as the file holds.
+            let complete = chunk.last() == Some(&NEWLINE);
+            let bytes = chunk.len();
+            let Ok(text) = String::from_utf8(chunk) else {
+                if complete {
+                    return Err(ReadError::NotText {
+                        path: path.to_path_buf(),
+                        line,
+                    });
+                }
+                truncated = Some(Truncated { line, bytes });
+                break;
+            };
+            let body = text.trim();
+            if body.is_empty() {
+                continue;
+            }
+            match Record::from_line(body) {
+                Ok(Some(record)) => records.push(record),
+                // A `type` value that this build does not know. Section 6.1 of
+                // the design asks a reader to skip such a line.
+                Ok(None) => {}
+                Err(source) => {
+                    if complete {
+                        return Err(ReadError::Corrupt {
+                            path: path.to_path_buf(),
+                            line,
+                            source,
+                        });
+                    }
+                    truncated = Some(Truncated { line, bytes });
+                    break;
+                }
+            }
+        }
+        Ok(Self { records, truncated })
     }
 
     /// Every record that the file holds.
     pub(crate) fn records(&self) -> &[Record] {
-        todo!()
+        &self.records
     }
 
     /// The final line that was cut short, when the file holds one.
     pub(crate) fn truncated(&self) -> Option<Truncated> {
-        todo!()
+        self.truncated
     }
 
     /// The identifier of every run that the file holds, in the order that the
     /// runs start.
     pub(crate) fn run_ids(&self) -> Vec<RunId> {
-        todo!()
+        let mut ids: Vec<RunId> = Vec::new();
+        for id in self.records.iter().filter_map(Record::run_id) {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids
     }
 
     /// The records of one run. A run that the file does not hold gives `None`.
     pub(crate) fn run(&self, id: &RunId) -> Option<Run<'_>> {
-        todo!()
+        let mut run = Run {
+            id: id.clone(),
+            start: None,
+            names: Vec::new(),
+            rounds: Vec::new(),
+            end: None,
+        };
+        let mut held = false;
+        for record in self
+            .records
+            .iter()
+            .filter(|candidate| candidate.run_id() == Some(id))
+        {
+            held = true;
+            match record {
+                Record::Run(start) => run.start = Some(start),
+                Record::Name(name) => run.names.push(name),
+                Record::Round(round) => run.rounds.push(round),
+                Record::End(end) => run.end = Some(end),
+                // An unknown record names no run, so the filter drops it.
+                Record::Unknown => {}
+            }
+        }
+        held.then_some(run)
     }
 
     /// The last run that the file holds.
     pub(crate) fn last_run(&self) -> Option<Run<'_>> {
-        todo!()
+        let id = self.run_ids().pop()?;
+        self.run(&id)
     }
 }
 
@@ -459,18 +552,22 @@ pub(crate) struct Truncated {
 impl Truncated {
     /// The number of the line that was cut short.
     pub(crate) fn line(self) -> usize {
-        todo!()
+        self.line
     }
 
     /// The number of bytes that the cut line holds.
     pub(crate) fn bytes(self) -> usize {
-        todo!()
+        self.bytes
     }
 }
 
 impl fmt::Display for Truncated {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        write!(
+            formatter,
+            "line {} is cut short at {} bytes",
+            self.line, self.bytes
+        )
     }
 }
 
@@ -492,28 +589,28 @@ pub(crate) struct Run<'a> {
 impl<'a> Run<'a> {
     /// The identifier of the run.
     pub(crate) fn id(&self) -> &RunId {
-        todo!()
+        &self.id
     }
 
     /// The record that opened the run. A file that starts in the middle of a
     /// run holds none.
     pub(crate) fn start(&self) -> Option<&'a RunRecord> {
-        todo!()
+        self.start
     }
 
     /// The names that the run read.
     pub(crate) fn names(&self) -> &[&'a NameRecord] {
-        todo!()
+        &self.names
     }
 
     /// The rounds that the run made.
     pub(crate) fn rounds(&self) -> &[&'a RoundRecord] {
-        todo!()
+        &self.rounds
     }
 
     /// The record that closed the run. A run that still goes holds none.
     pub(crate) fn end(&self) -> Option<&'a EndRecord> {
-        todo!()
+        self.end
     }
 }
 
