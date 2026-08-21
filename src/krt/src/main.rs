@@ -13,9 +13,10 @@ mod record;
 use buildinfo::version_string;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
+use record::Run;
 use std::fmt;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The accepted units of a duration.
@@ -510,16 +511,58 @@ fn render_duration(duration: Duration) -> String {
     format!("{seconds}s")
 }
 
+/// Writes the one line that a replay prints for one run.
+fn summarize(run: &Run<'_>) -> String {
+    let _ = run;
+    todo!("slice 5 of issue #366 writes the summary line")
+}
+
+/// Reads a recorded file and writes the summary of one run.
+///
+/// # Errors
+///
+/// Returns the reason when the file does not read, when the file holds no run,
+/// and when the file does not hold the run that `--run` names.
+fn replay(path: &Path, wanted: Option<&str>) -> Result<Replay, String> {
+    let _ = (path, wanted);
+    todo!("slice 5 of issue #366 reads the recorded file")
+}
+
+/// The summary of one run, and the warning that its file raised.
+struct Replay {
+    /// The one line that names the run.
+    summary: String,
+    /// The warning about the file, when the file holds a cut final line.
+    warning: Option<String>,
+}
+
 fn main() {
     // The parse handles `--version`, `-V`, and `--help` on its own. A
     // contradiction between two flags leaves the parser, so `clap` writes it to
     // standard error in the style of every other error of a command line.
     let cli = Cli::parse();
-    match cli.resolve() {
-        Ok(config) => print!("{config}"),
+    let config = match cli.resolve() {
+        Ok(config) => config,
         Err(message) => Cli::command()
             .error(clap::error::ErrorKind::ValueValidation, message)
             .exit(),
+    };
+    let Some(path) = config.replay.as_deref() else {
+        // No tracer exists yet, so a trace prints what it resolved.
+        print!("{config}");
+        return;
+    };
+    match replay(path, config.run.as_deref()) {
+        Ok(result) => {
+            if let Some(warning) = result.warning {
+                eprintln!("{warning}");
+            }
+            println!("{}", result.summary);
+        }
+        Err(reason) => {
+            eprintln!("{reason}");
+            std::process::exit(1);
+        }
     }
 }
 

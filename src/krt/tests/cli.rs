@@ -8,9 +8,11 @@
 //! The commit hash and the status change with every build, so the test asserts
 //! the shape of the line and not its exact text.
 //!
-//! The rest of the file covers the resolved configuration. A good command line
-//! prints the block and exits with success. A command line that contradicts
-//! itself prints the reason on standard error and exits with a failure.
+//! The rest of the file covers the resolved configuration. A command line that
+//! names a destination prints the block and exits with success. A command line
+//! that contradicts itself prints the reason on standard error and exits with a
+//! failure. The `replay` command prints one summary line in the place of the
+//! block, and `tests/replay.rs` covers that line.
 
 // Mirrors the crate-root attributes in src/main.rs; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
@@ -41,11 +43,14 @@ const STATUS_WORDS: [&str; 3] = ["clean", "dirty", UNKNOWN];
 /// The name of the command that folds a recorded file.
 const REPLAY: &str = "replay";
 
-/// The recorded file that the tests of the replay name.
+/// A recorded file that no test makes.
 ///
-/// The command line resolves before anything reads the file, so this build
-/// never opens it.
+/// The parser rejects the command line that names it, and it does so before
+/// anything opens a file, so no test needs the file to exist.
 const A_RECORDED_FILE: &str = "old.jsonl";
+
+/// The recorded file the repository holds, which carries two runs.
+const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/two-runs.jsonl");
 
 /// Invoke the freshly built `krt` binary.
 fn krt() -> Command {
@@ -224,23 +229,16 @@ fn a_destination_beside_a_replay_fails_and_names_both() {
     }
 }
 
+/// A replay takes no destination, and the parser asks for none.
+///
+/// The summary line that the replay prints belongs to `tests/replay.rs`, so
+/// this test reads the exit status only.
 #[test]
-fn a_replay_needs_no_destination_and_prints_the_resolved_configuration() {
-    let result = run(&[REPLAY, A_RECORDED_FILE]);
+fn a_replay_needs_no_destination() {
+    let result = run(&[REPLAY, FIXTURE]);
     assert!(
         result.success,
-        "`krt {REPLAY} {A_RECORDED_FILE}` must exit with success; stderr: {}",
+        "`krt {REPLAY} {FIXTURE}` must exit with success; stderr: {}",
         result.stderr
     );
-    for row in [
-        "  destination:    none",
-        "  replay:         old.jsonl",
-        "  run:            the last run",
-    ] {
-        assert!(
-            result.stdout.contains(row),
-            "the block holds `{row}`: {}",
-            result.stdout
-        );
-    }
 }
