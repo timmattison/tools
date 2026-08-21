@@ -17,7 +17,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, BufWriter};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -645,11 +645,48 @@ pub(crate) enum ReadError {
     },
 }
 
+/// Appends records to a recorded file.
+///
+/// The file opens in append mode, so one source and one destination keep one
+/// file across many runs.
+///
+/// Every record reaches the operating system before the call returns, so a
+/// `kill -9` loses at most one round. The flush is enough. A `kill -9` ends the
+/// process, and the operating system keeps the bytes that the process already
+/// gave it. An `fsync` guards against a power loss, which is a different fault,
+/// and not the fault that this guarantee names.
+pub(crate) struct Writer {
+    /// The open file, in append mode.
+    file: BufWriter<File>,
+}
+
+impl Writer {
+    /// Opens the file for appending, and makes the file when it is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the file does not open.
+    pub(crate) fn append(_path: &Path) -> std::io::Result<Self> {
+        todo!()
+    }
+
+    /// Appends one record and one newline, then flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the record does not become JSON, when the write
+    /// fails, and when the flush fails.
+    pub(crate) fn write(&mut self, _record: &Record) -> std::io::Result<()> {
+        todo!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         EndReason, EndRecord, Family, Hop, NameRecord, Privilege, ReadError, Record, Recording,
         RoundRecord, Run, RunConfig, RunId, RunRecord, SourceKind, SourceLabel, Target, TtlRange,
+        Writer,
     };
     use crate::{Multipath, Protocol};
     use chrono::{DateTime, Utc};
@@ -1036,6 +1073,16 @@ mod tests {
             Self { path }
         }
 
+        /// Holds a path that no file uses yet, and that no other run reaches.
+        ///
+        /// The file that a test makes at the path goes away with this value,
+        /// and a path that stays empty is no fault.
+        fn absent(label: &str) -> Self {
+            Self {
+                path: temp_path(label),
+            }
+        }
+
         /// The path of the file.
         fn path(&self) -> &Path {
             &self.path
@@ -1402,5 +1449,155 @@ mod tests {
         let recording = recording_of(&file);
         let truncated = recording.truncated().expect("the file holds a cut line");
         assert_eq!(truncated.to_string(), "line 2 is cut short at 13 bytes");
+    }
+
+    /// The character that ends one line of a recorded file.
+    const NEWLINE_CHAR: char = super::NEWLINE as char;
+
+    /// One round of the run of the design, with the sequence number that the
+    /// test names.
+    fn a_round_record_of(seq: u64) -> Record {
+        match a_round_record() {
+            Record::Round(mut round) => {
+                round.seq = seq;
+                Record::Round(round)
+            }
+            other => panic!("the round record must be a round record: {other:?}"),
+        }
+    }
+
+    /// One record of every type that this build knows, in schema order.
+    fn every_record() -> Vec<Record> {
+        vec![
+            a_run_record(),
+            a_name_record(),
+            a_round_record(),
+            an_end_record(),
+        ]
+    }
+
+    /// Opens a writer on the path that a test names.
+    fn writer_on(path: &Path) -> Writer {
+        Writer::append(path).expect("the test file must open for appending")
+    }
+
+    /// Appends one record through a writer.
+    fn write_record(writer: &mut Writer, record: &Record) {
+        writer.write(record).expect("the record must be written");
+    }
+
+    /// Appends every record through one writer, and closes the writer.
+    fn write_all(path: &Path, records: &[Record]) {
+        let mut writer = writer_on(path);
+        for record in records {
+            write_record(&mut writer, record);
+        }
+    }
+
+    /// The text that a test file holds.
+    fn text_of(file: &TempFile) -> String {
+        fs::read_to_string(file.path()).expect("the test file must read")
+    }
+
+    #[test]
+    fn a_second_writer_appends_to_the_file_and_keeps_what_the_first_one_wrote() {
+        let file = TempFile::absent("append");
+        write_all(file.path(), &[a_run_record()]);
+        write_all(file.path(), &[an_end_record()]);
+        let recording = recording_of(&file);
+        assert_eq!(kinds_of(&recording), ["run", "end"]);
+        assert_eq!(
+            recording.records(),
+            [a_run_record(), an_end_record()].as_slice()
+        );
+    }
+
+    #[test]
+    fn a_writer_makes_the_file_when_the_file_is_absent() {
+        let file = TempFile::absent("make-file");
+        assert!(
+            !file.path().exists(),
+            "the test starts with no file: {}",
+            file.path().display()
+        );
+        let writer = writer_on(file.path());
+        assert!(
+            file.path().exists(),
+            "the writer makes the file: {}",
+            file.path().display()
+        );
+        drop(writer);
+    }
+
+    /// The writer flushes after every record, so a `kill -9` loses at most one
+    /// round. A writer that only emptied its buffer on drop would leave the
+    /// file empty here, and would still pass every other test of the writer.
+    #[test]
+    fn a_record_reaches_the_file_before_the_writer_drops() {
+        let file = TempFile::absent("flush");
+        let mut writer = writer_on(file.path());
+        write_record(&mut writer, &a_run_record());
+        let recording = recording_of(&file);
+        assert_eq!(recording.records(), [a_run_record()].as_slice());
+        assert_eq!(recording.truncated(), None);
+        drop(writer);
+    }
+
+    #[test]
+    fn every_record_writes_one_line_that_a_newline_ends() {
+        let file = TempFile::absent("one-line-each");
+        let records = every_record();
+        write_all(file.path(), &records);
+        let text = text_of(&file);
+        let lines: Vec<&str> = text.split_inclusive(NEWLINE_CHAR).collect();
+        assert_eq!(lines.len(), records.len(), "the file holds one line each");
+        for (line, record) in lines.iter().zip(&records) {
+            assert!(
+                line.ends_with(NEWLINE_CHAR),
+                "a newline ends the line: {line}"
+            );
+            let mut expected = line_of(record);
+            expected.push(NEWLINE_CHAR);
+            assert_eq!(*line, expected);
+        }
+    }
+
+    #[test]
+    fn the_reader_reads_back_every_record_the_writer_wrote() {
+        let file = TempFile::absent("round-trip");
+        let records = every_record();
+        write_all(file.path(), &records);
+        let recording = recording_of(&file);
+        assert_eq!(kinds_of(&recording), ["run", "name", "round", "end"]);
+        assert_eq!(recording.records(), records.as_slice());
+        assert_eq!(recording.truncated(), None);
+    }
+
+    #[test]
+    fn a_run_of_many_records_keeps_the_order_the_writer_wrote() {
+        let file = TempFile::absent("order");
+        let mut records = vec![a_run_record()];
+        records.extend((1..=3_u64).map(a_round_record_of));
+        records.push(an_end_record());
+        write_all(file.path(), &records);
+        let recording = recording_of(&file);
+        assert_eq!(
+            kinds_of(&recording),
+            ["run", "round", "round", "round", "end"]
+        );
+        assert_eq!(recording.records(), records.as_slice());
+        let run = recording.last_run().expect("the file holds one run");
+        assert_eq!(seqs_of(&run), [1, 2, 3]);
+    }
+
+    #[test]
+    fn a_path_whose_directory_is_absent_is_a_fault() {
+        let directory = TempFile::absent("absent-directory");
+        let path = directory.path().join("record.jsonl");
+        assert!(
+            Writer::append(&path).is_err(),
+            "a path under an absent directory must fail: {}",
+            path.display()
+        );
     }
 }
