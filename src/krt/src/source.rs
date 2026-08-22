@@ -56,7 +56,15 @@ const FORBIDDEN: [char; 3] = [':', '/', '\\'];
     reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
 )]
 fn sanitize(text: &str) -> String {
-    text.to_owned()
+    text.chars()
+        .map(|character| {
+            if FORBIDDEN.contains(&character) || character.is_whitespace() {
+                HYPHEN
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 /// Builds the name of the recorded file from the source and the destination.
