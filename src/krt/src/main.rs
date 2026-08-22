@@ -11,6 +11,7 @@
 #![warn(clippy::pedantic)]
 
 mod record;
+mod source;
 mod trace;
 
 use buildinfo::version_string;
