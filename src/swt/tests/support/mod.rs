@@ -390,6 +390,33 @@ pub fn run_swt(cwd: &Path, args: &[&str]) -> Output {
         .expect("failed to run swt")
 }
 
+/// Standard output of a run, as the visible glyphs a user reads.
+///
+/// clap paints its help and its usage errors when it believes the run writes to
+/// a terminal, and `CLICOLOR_FORCE=1` makes it paint whatever the run writes
+/// to. The escape codes wrap whole words, so a match on one word survives them
+/// and a match on a phrase does not: `Usage: swt create` carries codes between
+/// `Usage:` and `swt create`, because clap gives the two spans different
+/// styles.
+///
+/// A test that compares such a phrase against plain text thus passes in a
+/// redirected run and fails under a hand-typed `git commit`, where the
+/// pre-commit hook passes its terminal straight through. The codes come out
+/// here rather than at each call site, so every assertion reads what a user
+/// reads and none of them depends on the color decision of the run. See
+/// "Colored Output in Tests" in CLAUDE.md.
+pub fn stdout(output: &Output) -> String {
+    testcolor::strip_ansi(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Standard error of a run, as the visible glyphs a user reads.
+///
+/// clap writes its usage errors here, so this side needs the same treatment as
+/// [`stdout`].
+pub fn stderr(output: &Output) -> String {
+    testcolor::strip_ansi(&String::from_utf8_lossy(&output.stderr))
+}
+
 /// Runs the real `swt` binary in an empty directory of its own, outside any
 /// repository, and captures its status, stdout and stderr.
 ///
