@@ -28,7 +28,9 @@
 //! [`UniqueToken`] and [`reap_corpse`] confirms that token is still there
 //! immediately before the unlink: a corpse cleared and replaced by a live
 //! successor in the meantime is left alone rather than deleted out from under
-//! its holder. Two adjacent syscalls still separate that confirmation from the
+//! its holder, and a corpse cleared and *not* replaced is reported as the free
+//! path it is, since what the acquisition retries is the path rather than the
+//! unlink. Two adjacent syscalls still separate that confirmation from the
 //! unlink, which no portable filesystem call closes; what the token removes is
 //! the far wider window that used to run from the staleness verdict all the way
 //! to the delete.
@@ -260,11 +262,15 @@ fn interpose_before_reap() {
     });
 }
 
-/// Reads the token whoever created a lock file wrote into it.
+/// Reads the token whoever created a lock file wrote into it, for the
+/// identification that happens *before* the staleness verdict.
 ///
-/// `None` means no owner could be established at all: the file has gone, or it
-/// cannot be read. A `None` never matches anything, not even another `None`, so
-/// a lock this process cannot identify is waited out rather than removed.
+/// `None` means no owner could be established: the file has gone, or it cannot
+/// be read. Either way this run cannot say which file the coming verdict is
+/// about, so a `None` refuses the reap outright and the lock is waited out
+/// rather than removed. The two are told apart only at the confirmation read in
+/// [`reap_corpse`], where a file that has gone is a freed path rather than an
+/// unidentifiable one.
 ///
 /// An *empty* answer is a real identity rather than a missing one. It is what
 /// every lock an older `swt` created carries, and it matches itself, so an
@@ -279,26 +285,39 @@ fn lock_owner(lock_path: &Path) -> Option<Vec<u8>> {
 ///
 /// `owner` is the token read *before* the staleness verdict; the file's token is
 /// read once more here and the unlink happens only if the two agree. Returns
-/// whether the path was freed, so a refused reap falls through to the ordinary
-/// backoff rather than spinning on a lock it will keep declining to remove.
+/// whether the path is now free — freed by this unlink, or already free because
+/// a competing waiter cleared the same corpse first, since the caller retries on
+/// the path rather than on who emptied it. A refused reap answers `false` and
+/// falls through to the ordinary backoff rather than spinning on a lock it will
+/// keep declining to remove.
 fn reap_corpse(lock_path: &Path, owner: Option<&[u8]>) -> bool {
     interpose_before_reap();
-    // A lock whose owner could not be read is never removed. An mtime says
-    // nothing about *which* file it belongs to, and this is the one place `swt`
-    // deletes a file it did not create, so an unidentifiable one is left for the
-    // wait to time out on and report.
+    // A lock whose owner could not be established is never removed. An mtime
+    // says nothing about *which* file it belongs to, and this is the one place
+    // `swt` deletes a file it did not create, so an unidentifiable one is left
+    // for the wait to time out on and report.
     let Some(owner) = owner else {
         return false;
     };
-    if lock_owner(lock_path).as_deref() != Some(owner) {
+    match fs::read(lock_path) {
+        // Still the file that was judged. Fall through to the unlink.
+        Ok(current) if current == owner => {}
         // Somebody stood a different lock up in the corpse's place between the
         // staleness verdict and here. It is not a corpse; go back to waiting.
-        return false;
+        Ok(_) => return false,
+        // Gone rather than changed: a competing waiter reaped the same corpse.
+        // The path is free, which is the whole of what this answer is asked, so
+        // saying so sends the caller straight back to `O_EXCL` instead of
+        // waiting out a backoff on a lock that is no longer there.
+        Err(err) if err.kind() == ErrorKind::NotFound => return true,
+        // There but unreadable. Nothing about this file can be confirmed, so
+        // nothing about it is removed — the same refusal a `None` owner gets.
+        Err(_) => return false,
     }
     match fs::remove_file(lock_path) {
         Ok(()) => true,
-        // Already gone: another waiter reaped the same corpse. The path is free
-        // either way, which is all this answer is asked about.
+        // Already gone: the same competing reap, one syscall later. The path is
+        // free either way.
         Err(err) => err.kind() == ErrorKind::NotFound,
     }
 }
@@ -373,8 +392,9 @@ fn locked<T>(
         }
 
         // Reap a lock old enough to be a corpse rather than a merge in
-        // progress. A lock that vanishes under the stat is simply retried:
-        // whoever held it has just let go.
+        // progress. A lock that vanishes under the stat is left to the next
+        // pass: whoever held it has just let go, and nothing here is a corpse
+        // to clear.
         //
         // The owner is read *first*, ahead of the staleness verdict, and
         // confirmed again inside the reap. Reading it afterwards would defeat
@@ -390,9 +410,10 @@ fn locked<T>(
                 // reaping a live lock hands two merges the same repository.
                 .and_then(|mtime| SystemTime::now().duration_since(mtime).ok())
                 .is_some_and(|age| age > timings.stale_after);
-            // Only a freed path skips the backoff: a reap that was refused
-            // because the lock changed underneath it has something live to wait
-            // on, not a corpse to clear.
+            // Only a free path skips the backoff, whoever emptied it. A reap
+            // that was refused has something live to wait on — a successor's
+            // lock, or one this run cannot identify at all — rather than a
+            // corpse to clear.
             if abandoned && reap_corpse(lock_path, owner.as_deref()) {
                 continue;
             }
@@ -761,6 +782,61 @@ mod tests {
         assert!(
             lock.exists(),
             "an unidentifiable lock at {} was removed",
+            lock.display()
+        );
+    }
+
+    // "Gone" and "unreadable" are one answer to the read before the staleness
+    // verdict and two answers to the confirmation read inside the reap, so the
+    // narrower case has to be pinned where it actually arises: a corpse that was
+    // readable when it was identified and is not readable by the time the reap
+    // confirms it. The test above cannot reach here — an already-unreadable lock
+    // is refused before the confirmation read is ever made — and without this
+    // one, treating an unreadable file as a freed path would pass every test in
+    // this module.
+    #[cfg(unix)]
+    #[test]
+    fn a_corpse_that_stops_being_readable_before_the_confirmation_is_not_reaped() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        aged_lock(&lock, CORPSE_OWNER, ABANDONED_FOR);
+        // Whether hiding the file hides anything is settled up front, since the
+        // interposer below has no way to abandon the test from inside the reap.
+        // Root reads a mode 0 file regardless, which would leave this pinning an
+        // ordinary readable corpse. Mode changes leave the backdated mtime
+        // alone, so the fixture is still a corpse afterwards.
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000))
+            .expect("make the lock fixture unreadable");
+        let readable_anyway = fs::read(&lock).is_ok();
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o600))
+            .expect("restore the lock fixture");
+        if readable_anyway {
+            return;
+        }
+
+        let hidden_lock = lock.clone();
+        let mut already_hidden = false;
+        let result = with_reap_interposer(
+            move || {
+                if already_hidden {
+                    return;
+                }
+                already_hidden = true;
+                fs::set_permissions(&hidden_lock, fs::Permissions::from_mode(0o000))
+                    .expect("hide the corpse from the confirmation read");
+            },
+            || locked(&lock, REAPING, || "the region ran"),
+        );
+
+        assert!(
+            matches!(result, Err(LockFailure::TimedOut)),
+            "a lock that could not be confirmed was reaped anyway, got {result:?}"
+        );
+        assert!(
+            lock.exists(),
+            "an unconfirmable lock at {} was removed",
             lock.display()
         );
     }
