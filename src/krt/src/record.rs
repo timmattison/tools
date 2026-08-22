@@ -441,7 +441,7 @@ impl Recording {
     /// file fails, when a complete line is not UTF-8 text, and when a complete
     /// line does not parse.
     pub(crate) fn read(path: &Path) -> Result<Self, ReadError> {
-        let file = File::open(path).map_err(|source| ReadError::Open {
+        let file = File::open(path).map_err(|source| ReadError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -451,13 +451,12 @@ impl Recording {
         let mut line = 0_usize;
         loop {
             let mut chunk = Vec::new();
-            let read =
-                reader
-                    .read_until(NEWLINE, &mut chunk)
-                    .map_err(|source| ReadError::Open {
-                        path: path.to_path_buf(),
-                        source,
-                    })?;
+            let read = reader
+                .read_until(NEWLINE, &mut chunk)
+                .map_err(|source| ReadError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
             if read == 0 {
                 break;
             }
@@ -656,9 +655,14 @@ impl<'a> Run<'a> {
 /// Why a recorded file does not read.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReadError {
-    /// The file does not open, or the read of the file fails.
+    /// The file does not open, or a read of the file fails.
+    ///
+    /// The two faults share one variant, because the operating system reports
+    /// both of them the same way and neither one names a record. A read that
+    /// fails in the middle of a file therefore names no line, unlike every
+    /// other fault of this reader, which names the line it read.
     #[error("{}: {source}", path.display())]
-    Open {
+    Io {
         /// The path of the file.
         path: PathBuf,
         /// The fault that the operating system reported.
@@ -1453,8 +1457,8 @@ mod tests {
         let path = temp_path("absent");
         let error = Recording::read(&path).expect_err("an absent file must fail");
         assert!(
-            matches!(error, ReadError::Open { .. }),
-            "an absent file reports the open fault: {error:?}"
+            matches!(error, ReadError::Io { .. }),
+            "an absent file reports the fault of the operating system: {error:?}"
         );
         let message = error.to_string();
         assert!(
