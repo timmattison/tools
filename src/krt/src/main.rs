@@ -11,6 +11,7 @@
 #![warn(clippy::pedantic)]
 
 mod record;
+mod trace;
 
 use buildinfo::version_string;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -27,6 +28,14 @@ const PROGRAM: &str = "krt";
 
 /// The exit code of a failure.
 const EXIT_FAILURE: i32 = 1;
+
+/// The exit code of a platform that needs raw socket privileges and does not
+/// hold them.
+#[allow(
+    dead_code,
+    reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+const EXIT_NO_PRIVILEGES: i32 = 2;
 
 /// The accepted units of a duration.
 const DURATION_UNITS: &str = "the unit must be `ms`, `s`, `m`, or `h`";
