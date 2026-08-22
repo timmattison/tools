@@ -76,9 +76,6 @@ const OUTPUT_DERIVED: &str = "derived at run time";
 /// The value of the source, when the user names no address.
 const SOURCE_DISCOVERED: &str = "discovered at run time";
 
-/// The value of the run, when the user names no run of a replay.
-const RUN_LATEST: &str = "the last run";
-
 /// The text between two fields of a summary line.
 const SUMMARY_SEPARATOR: &str = "  ";
 
@@ -400,6 +397,12 @@ impl Cli {
     }
 }
 
+/// Writes the block that a trace prints before it probes.
+///
+/// The block names no `replay` and no `run`. `main` prints the block only when
+/// the command line names no `replay`, and `resolve` fills the run only inside
+/// a `replay`, so neither field can reach the block with a value. A replay
+/// prints its own summary line in the place of the block.
 impl fmt::Display for ResolvedConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let path_or = |path: Option<&PathBuf>, absent: &str| {
@@ -443,11 +446,6 @@ impl fmt::Display for ResolvedConfig {
                 "round limit",
                 self.rounds
                     .map_or_else(|| ABSENT.to_owned(), |rounds| rounds.to_string()),
-            ),
-            ("replay", path_or(self.replay.as_ref(), ABSENT)),
-            (
-                "run",
-                self.run.clone().unwrap_or_else(|| RUN_LATEST.to_owned()),
             ),
         ];
 
