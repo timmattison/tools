@@ -91,6 +91,7 @@ uuid = { version = "1", features = ["v4", "v5"] }
 # System info
 sysinfo = "0.36"
 libc = "0.2"
+signal-hook = "0.3"
 which = "8.0"
 listeners = "0.2"
 get_if_addrs = "0.5"

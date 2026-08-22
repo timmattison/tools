@@ -526,12 +526,18 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     each Claude model. Useful for reconciling spend or estimating burn across date ranges.
   - To install: `cargo install --git https://github.com/timmattison/tools claude-usage`
 - swt (subagent worktree)
-  - Subagent worktree helper for parallel TDD. `swt create <name>` verifies HEAD is green and spins
-    up an isolated worktree on a new branch; `swt merge <path>` verifies the subagent is green,
-    rebases if the parent advanced, fast-forward-merges, and cleans up. Concurrent merges are
-    serialized via `.git/swt.lock`. Drop a `./.swt-check` script to override the default green check.
-  - To install: symlink `swt/swt.ts` from a clone of this repo into your `PATH`
-    (e.g. `ln -s "$PWD/swt/swt.ts" ~/.local/bin/swt`). Requires `npx`/`tsx`.
+  - Subagent worktree helper for parallel TDD. `swt create <name>` spins up an isolated worktree on a
+    new branch and runs the green check *inside* it — a clean checkout of HEAD, so uncommitted parent
+    state can't fake a pass — tearing the worktree and branch back down if it fails; `swt merge <path>`
+    refuses unless both worktrees are clean and green, rebases if the parent advanced,
+    fast-forward-merges, and cleans up. Concurrent merges are serialized via a `swt.lock` in the git
+    directory *shared* by every worktree of the repo (`git rev-parse --git-common-dir`), so two merges
+    launched from two different worktrees of one repo contend for the same lock. Drop an executable
+    `.swt-check` at the parent repo root to override the default green check.
+  - To install: `cargo install --git https://github.com/timmattison/tools swt`
+  - Upgrading from the old TypeScript version: it was installed by symlinking `swt/swt.ts` into your
+    `PATH`. That file is gone, so the symlink now dangles — and depending on `PATH` order it can keep
+    shadowing the installed binary. Remove it (`rm ~/.local/bin/swt`) and run the `cargo install` above.
 - install-bin
   - Installs a locally built binary into `~/.local/bin` (or `--dest <dir>`) without tripping macOS's
     per-vnode code-signature cache: `cp` over an existing binary keeps the destination inode, so the
