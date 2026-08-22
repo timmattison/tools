@@ -489,6 +489,19 @@ mod tests {
         retry_every: TEST_BACKOFF,
     };
 
+    /// Timings for a reap test that has to resolve on its first pass.
+    ///
+    /// A zero wait means the acquisition loop tries exactly once: either the
+    /// reap reports the path free and the immediate retry takes it, or the call
+    /// gives up. That turns "how long did this take" into "which branch did it
+    /// take", so the answer is a decision rather than a race against a clock.
+    /// The staleness window is [`REAPING`]'s, for the reason given there.
+    const ONE_PASS: LockTimings = LockTimings {
+        stale_after: REAPING.stale_after,
+        wait_at_most: Duration::ZERO,
+        retry_every: TEST_BACKOFF,
+    };
+
     /// How far back a fixture corpse's mtime is set — far past [`REAPING`]'s
     /// window, so it is reaped on the first pass and nothing about these tests
     /// depends on how long they take to run.
@@ -666,6 +679,40 @@ mod tests {
             "the successor's lock at {} was deleted out from under it",
             lock.display()
         );
+    }
+
+    // The other way that race can land: a competing waiter clears the same
+    // corpse and stands nothing up in its place, so the reap arrives to find the
+    // path already free. That is the outcome this reap was after, whoever
+    // performed the unlink, so the acquisition has to retry the freed path at
+    // once rather than sit out a backoff on a lock that is no longer there.
+    #[test]
+    fn a_corpse_another_waiter_already_cleared_leaves_the_path_free() {
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        aged_lock(&lock, CORPSE_OWNER, ABANDONED_FOR);
+
+        // The competitor's unlink, placed at exactly the point where this reap
+        // has decided to delete and has not yet done so — and, unlike the
+        // successor case above, leaving no replacement behind.
+        let cleared_lock = lock.clone();
+        let mut already_cleared = false;
+        let result = with_reap_interposer(
+            move || {
+                if already_cleared {
+                    return;
+                }
+                already_cleared = true;
+                fs::remove_file(&cleared_lock).expect("the competing waiter's reap");
+            },
+            || locked(&lock, ONE_PASS, || "the region ran"),
+        );
+
+        assert!(
+            matches!(result, Ok("the region ran")),
+            "a path another waiter had already freed was waited on instead of taken, got {result:?}"
+        );
+        assert!(!lock.exists(), "the lock outlived its region");
     }
 
     // An older `swt` wrote nothing into the lock file it created, and one of
