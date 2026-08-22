@@ -14,11 +14,17 @@
 //! recording is the whole purpose of the tool, and a run that keeps a display
 //! while it silently records nothing is worse than a run that stops.
 
-use crate::record::{EndReason, EndRecord, Record, RoundRecord, RunRecord, Writer};
+use crate::record::{EndReason, EndRecord, Record, RoundRecord, RunId, RunRecord, Writer};
 use chrono::Utc;
 use std::io::Write;
-use std::sync::mpsc::Receiver;
-use std::time::Instant;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+/// The longest wait for one round.
+///
+/// The loop still sees the stop flag and the deadline when no round arrives,
+/// because the wait ends after this time and the loop takes another turn.
+const POLL: Duration = Duration::from_millis(100);
 
 /// The limits that stop a run.
 #[allow(
@@ -72,7 +78,16 @@ pub(crate) enum RunError {
 /// the record that closes it.
 ///
 /// `stop` answers whether the user asked the run to stop. The loop asks it once
-/// at the top of each turn.
+/// at the top of each turn, before it reads a round, so a run that the user
+/// stops records no further round.
+///
+/// The `run` record goes first, and a fault there stops the run before it reads
+/// anything. Each round that arrives becomes one `round` record. The `end`
+/// record names the number of rounds that the run recorded and why it stopped.
+///
+/// A failed write of any record stops the run. The recording is the whole
+/// purpose of the tool, and a run that keeps a display while it silently
+/// records nothing is worse than a run that stops.
 ///
 /// # Errors
 ///
@@ -84,22 +99,97 @@ pub(crate) enum RunError {
 )]
 pub(crate) fn record<W: Write>(
     start: &RunRecord,
-    _rounds: &Receiver<RoundRecord>,
-    _limits: &Limits,
-    _stop: &dyn Fn() -> bool,
+    rounds: &Receiver<RoundRecord>,
+    limits: &Limits,
+    stop: &dyn Fn() -> bool,
     writer: &mut Writer<W>,
 ) -> Result<Outcome, RunError> {
-    drop(writer.write(&Record::Run(start.clone())));
-    drop(writer.write(&Record::End(EndRecord {
-        run: start.run.clone(),
-        ts: Utc::now(),
-        rounds: 0,
-        reason: EndReason::Quit,
-    })));
-    Ok(Outcome {
-        rounds: 0,
-        reason: EndReason::Quit,
+    writer
+        .write(&Record::Run(start.clone()))
+        .map_err(RunError::Write)?;
+    let mut recorded: u64 = 0;
+    loop {
+        if let Some(reason) = stopped(recorded, limits, stop) {
+            close(writer, &start.run, recorded, reason)?;
+            return Ok(Outcome {
+                rounds: recorded,
+                reason,
+            });
+        }
+        match rounds.recv_timeout(wait(limits.deadline)) {
+            Ok(round) => {
+                writer
+                    .write(&Record::Round(round))
+                    .map_err(RunError::Write)?;
+                recorded += 1;
+            }
+            // No round arrived inside the wait. The loop takes another turn, so
+            // it reads the stop flag and the deadline again.
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                // The tracer holds the sender for as long as it lives, so a
+                // closed channel names a tracer thread that died.
+                //
+                // The `?` gives the write fault the last word. A run whose
+                // `end` record will not write reports that fault and not the
+                // dead tracer, because a file that takes no record names the
+                // fault that stops the tool from doing its job at all.
+                close(writer, &start.run, recorded, EndReason::Error)?;
+                return Err(RunError::Tracer { rounds: recorded });
+            }
+        }
+    }
+}
+
+/// Why the run stops at the top of this turn. A run that goes on stops for
+/// nothing.
+///
+/// The user comes first, then the number of rounds, then the moment.
+fn stopped(recorded: u64, limits: &Limits, stop: &dyn Fn() -> bool) -> Option<EndReason> {
+    if stop() {
+        return Some(EndReason::Quit);
+    }
+    if limits.rounds.is_some_and(|limit| recorded >= limit) {
+        return Some(EndReason::Rounds);
+    }
+    if limits
+        .deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        return Some(EndReason::Duration);
+    }
+    None
+}
+
+/// The longest wait for the next round.
+///
+/// The wait ends at the deadline when the deadline stands nearer than [`POLL`],
+/// so a run stops at the moment of its time limit and not one poll after it.
+fn wait(deadline: Option<Instant>) -> Duration {
+    deadline.map_or(POLL, |deadline| {
+        deadline.saturating_duration_since(Instant::now()).min(POLL)
     })
+}
+
+/// Writes the record that closes a run.
+///
+/// # Errors
+///
+/// Returns [`RunError::Write`] when the record does not reach the file.
+fn close<W: Write>(
+    writer: &mut Writer<W>,
+    run: &RunId,
+    rounds: u64,
+    reason: EndReason,
+) -> Result<(), RunError> {
+    writer
+        .write(&Record::End(EndRecord {
+            run: run.clone(),
+            ts: Utc::now(),
+            rounds,
+            reason,
+        }))
+        .map_err(RunError::Write)
 }
 
 #[cfg(test)]
@@ -376,6 +466,10 @@ mod tests {
 
         /// The number of whole records that reached the sink. Every record ends
         /// with one newline.
+        #[allow(
+            clippy::naive_bytecount,
+            reason = "the sink of a test holds a few hundred bytes, which is no reason to take the bytecount crate as a dependency"
+        )]
         fn records(&self) -> usize {
             self.bytes
                 .borrow()
@@ -578,9 +672,12 @@ mod tests {
 
     #[test]
     fn the_rounds_reach_the_file_in_the_order_the_tracer_sent_them() {
-        let ran = ran("round-order", &rounds_of(&[7, 3, 9]), &after_rounds(3), &|| {
-            false
-        });
+        let ran = ran(
+            "round-order",
+            &rounds_of(&[7, 3, 9]),
+            &after_rounds(3),
+            &|| false,
+        );
         assert_eq!(seqs_of(&ran.recording), [7, 3, 9]);
     }
 
