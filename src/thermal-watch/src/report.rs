@@ -24,6 +24,15 @@ pub const EARLY_WINDOW: Duration = Duration::from_secs(20);
 /// Samples inside this window from the end form the late mean.
 pub const LATE_WINDOW: Duration = Duration::from_secs(60);
 
+/// The end of the early window and the start of the late window.
+///
+/// The early window holds every busy sample before the first value. The late
+/// window holds every busy sample from the second value on.
+#[must_use]
+pub fn windows(_first_at: Duration, last_at: Duration) -> (Duration, Duration) {
+    (EARLY_WINDOW, last_at.saturating_sub(LATE_WINDOW))
+}
+
 /// A P-cluster below this active residency is idle, not throttled.
 pub const BUSY_THRESHOLD_PCT: f64 = 50.0;
 

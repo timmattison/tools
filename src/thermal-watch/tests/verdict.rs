@@ -7,7 +7,7 @@ use std::time::Duration;
 use thermal_watch::dvfs::DvfsTable;
 use thermal_watch::mhz::Mhz;
 use thermal_watch::powermetrics::{PressureLevel, Sample};
-use thermal_watch::report::{judge, Outcome};
+use thermal_watch::report::{judge, windows, Outcome};
 
 /// The DVFS table of an M4 Pro, trimmed to its two ends.
 fn m4_pro() -> DvfsTable {
@@ -161,4 +161,79 @@ fn a_short_run_still_reports_a_verdict() {
     assert_eq!(verdict.outcome, Outcome::HeldClock);
     assert_eq!(verdict.early_mean, Mhz::new(4_500));
     assert_eq!(verdict.late_mean, Mhz::new(4_500));
+}
+
+#[test]
+fn a_twenty_second_collapse_is_throttling() {
+    // The clock holds for fifteen seconds and then falls to 2000 MHz. A run
+    // this short must still show the decay.
+    let mut samples = steady(15, 4_500);
+    samples.extend((15..20).map(|second| busy(second, 2_000)));
+
+    let verdict = judge(&samples, &m4_pro());
+    match verdict.outcome {
+        Outcome::Throttled { decay } => {
+            assert!(
+                decay > 0.30_f64,
+                "the clock fell from 4500 MHz to 2000 MHz, got a decay of {decay}"
+            );
+        }
+        other => panic!("expected throttling, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_forty_five_second_run_reports_the_decay_it_measured() {
+    // The true decay is 44.4%. Windows that share samples dilute it to 24.7%.
+    let mut samples = steady(20, 4_500);
+    samples.extend((20..45).map(|second| busy(second, 2_500)));
+
+    let verdict = judge(&samples, &m4_pro());
+    match verdict.outcome {
+        Outcome::Throttled { decay } => {
+            assert!(
+                decay > 0.40_f64,
+                "2500 MHz is 44.4% below 4500 MHz, got a decay of {decay}"
+            );
+        }
+        other => panic!("expected throttling, got {other:?}"),
+    }
+    assert_eq!(verdict.early_mean, Mhz::new(4_500));
+    assert_eq!(verdict.late_mean, Mhz::new(2_500));
+}
+
+#[test]
+fn the_early_window_and_the_late_window_never_share_a_sample() {
+    // Each run starts at second zero and holds one sample each second.
+    for count in [5_u64, 10, 20, 30, 45, 60, 90, 180, 300] {
+        let (early_until, late_from) = windows(Duration::ZERO, Duration::from_secs(count - 1));
+        assert!(
+            early_until <= late_from,
+            "a run of {count} samples ends the early window at {early_until:?} \
+             and starts the late window at {late_from:?}"
+        );
+    }
+}
+
+#[test]
+fn a_load_that_starts_late_takes_its_early_mean_from_the_load() {
+    // The machine is idle for a minute, then the user starts a build. The
+    // early mean must come from the start of the load.
+    let mut samples: Vec<Sample> = (0..60).map(idle).collect();
+    samples.extend((60..=300).map(|second| busy(second, 4_000)));
+    // One spike lifts the peak above the clock of the load.
+    samples[180] = busy(180, 4_500);
+
+    let verdict = judge(&samples, &m4_pro());
+    assert_eq!(verdict.peak, Mhz::new(4_500));
+    assert_eq!(
+        verdict.early_mean,
+        Mhz::new(4_000),
+        "the early mean comes from the start of the load, not from the peak"
+    );
+    assert_eq!(
+        verdict.outcome,
+        Outcome::NeverReachedPeak,
+        "the clock never decayed, so this is not throttling"
+    );
 }
