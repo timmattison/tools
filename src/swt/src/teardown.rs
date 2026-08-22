@@ -60,6 +60,8 @@
 //! alone leaves the check running, and there this module is the only way the run
 //! can end.
 
+#[cfg(all(test, unix))]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -129,6 +131,71 @@ fn anything_at_risk() -> bool {
     unverified_worktree().is_some() || holds_any_lock()
 }
 
+/// Serializes every test that puts something at risk, or that asks what is.
+///
+/// The two registries the predicate above reads are process-global and cargo
+/// runs one binary's tests on many threads, so a lock test and a worktree test
+/// overlap freely. That is harmless while each only disturbs its own registry.
+/// It stops being harmless for a test that asks the *combined* question, which
+/// would otherwise read a concurrent test's responsibility as its own and fail
+/// for a reason it is not about. Crate-wide rather than per module, because the
+/// question is.
+#[cfg(test)]
+static AT_RISK_SERIAL: Mutex<()> = Mutex::new(());
+
+/// Claims the at-risk registries for one test, ignoring poisoning.
+///
+/// A thread that panicked while holding this says nothing about the registries,
+/// which are whole-value stores either way, so the next test carries on.
+#[cfg(test)]
+pub(crate) fn serialize_at_risk() -> MutexGuard<'static, ()> {
+    AT_RISK_SERIAL
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+// Test-only observer of the arming, reading the at-risk predicate at the one
+// instant that distinguishes the two possible orderings.
+//
+// Both call sites arm first and record their responsibility second, and that
+// choice leaves no trace behind it: either order ends with the handler installed
+// and the registry written, so nothing asked afterwards can tell them apart. A
+// test that reverses the two would pass every assertion in this crate. Asking
+// `anything_at_risk` from *inside* the arming is what makes the instant between
+// the two steps observable, and `false` is the answer only the correct order can
+// give.
+//
+// Thread local rather than process global so two tests running concurrently in
+// one binary cannot see each other's observation, and `#[cfg(test)]` so the
+// shipped binary carries neither the slot nor a branch on it.
+#[cfg(all(test, unix))]
+thread_local! {
+    static ARMING_WITNESS: RefCell<Option<bool>> = const { RefCell::new(None) };
+}
+
+/// Records what was at risk at the instant the arming fired.
+///
+/// Compiles to an empty function outside tests, where there is nothing to read
+/// the answer.
+#[cfg(unix)]
+fn witness_arming() {
+    #[cfg(test)]
+    {
+        let at_risk = anything_at_risk();
+        ARMING_WITNESS.with(|slot| *slot.borrow_mut() = Some(at_risk));
+    }
+}
+
+/// Takes what the last arming on this thread saw at risk, clearing the slot so a
+/// later test on the same thread cannot inherit the answer.
+///
+/// `None` means no arming has fired on this thread since the last take, which is
+/// itself a failure for a caller that just took a responsibility.
+#[cfg(all(test, unix))]
+pub(crate) fn take_arming_witness() -> Option<bool> {
+    ARMING_WITNESS.with(|slot| slot.borrow_mut().take())
+}
+
 /// Acts on one termination signal, on the signal thread and never in a handler.
 ///
 /// Both branches are terminal by design: either the process dies by the signal
@@ -179,6 +246,10 @@ pub fn arm_signal_teardown() {
     /// Latches the installation, so every later responsibility finds it done.
     static ARMED: OnceLock<()> = OnceLock::new();
 
+    // Outside the latch, deliberately. What a test asks here is about *this*
+    // call; anything inside would answer only for the first arming in the
+    // process and be silent for every later responsibility.
+    witness_arming();
     ARMED.get_or_init(|| {
         let Ok(mut signals) = Signals::new(TERMINATION_SIGNALS) else {
             return;
@@ -381,22 +452,13 @@ fn remove_held_worktree() -> Option<Outcome> {
 
 #[cfg(test)]
 mod tests {
-    use super::{hold_unverified_worktree, remove_unverified_worktree, UnverifiedWorktree};
+    use super::{
+        hold_unverified_worktree, remove_unverified_worktree, serialize_at_risk, UnverifiedWorktree,
+    };
     #[cfg(unix)]
-    use super::{signal_disposition, Disposition, SIGINT, SIGTERM};
+    use super::{signal_disposition, take_arming_witness, Disposition, SIGINT, SIGTERM};
     use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard, PoisonError};
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    /// Serializes these tests against each other. The holder under test is
-    /// process-global and cargo runs one binary's tests in threads, so two of
-    /// them left to overlap would take each other's worktree.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
-    /// Claims the registry for one test.
-    fn serial() -> MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
-    }
 
     /// A worktree triple no git command can act on and no other run can name.
     ///
@@ -421,7 +483,7 @@ mod tests {
 
     #[test]
     fn nothing_held_means_nothing_to_remove() {
-        let _serial = serial();
+        let _serial = serialize_at_risk();
         assert!(
             remove_unverified_worktree().is_none(),
             "a teardown with no hold must report that there was nothing to do"
@@ -433,7 +495,7 @@ mod tests {
     // over a directory the first one already deleted.
     #[test]
     fn a_held_worktree_is_torn_down_once_and_the_hold_is_latched() {
-        let _serial = serial();
+        let _serial = serialize_at_risk();
         let held = unreachable_worktree();
         // Bound, not dropped on the spot: the hold *is* a guard, so a temporary
         // would tear the worktree down before the assertions could ask.
@@ -455,7 +517,7 @@ mod tests {
     // the worktree still there.
     #[test]
     fn keeping_a_worktree_releases_the_hold() {
-        let _serial = serial();
+        let _serial = serialize_at_risk();
         let held = unreachable_worktree();
         let hold = hold_unverified_worktree(&held.root, &held.path, &held.branch);
 
@@ -464,6 +526,33 @@ mod tests {
         assert!(
             remove_unverified_worktree().is_none(),
             "a kept worktree must no longer be swt's to tear down"
+        );
+    }
+
+    // The arming has to come *before* the registry names the worktree. The other
+    // order leaves an instant in which `swt` owns a worktree and no thread is
+    // reading the signals that would tear it down, and it is invisible after the
+    // fact: both orders end with the handler installed and the registry written.
+    // So the question is asked from inside the arming, where the two orders give
+    // different answers.
+    #[cfg(unix)]
+    #[test]
+    fn the_signal_teardown_is_armed_before_the_worktree_is_registered() {
+        let _serial = serialize_at_risk();
+        // Any answer left by an earlier test on this thread would be read as this
+        // one's.
+        take_arming_witness();
+        let held = unreachable_worktree();
+
+        // Bound rather than dropped on the spot: the hold *is* a guard, and an
+        // unwind out of a failing assertion below still has to release it.
+        let _hold = hold_unverified_worktree(&held.root, &held.path, &held.branch);
+
+        assert_eq!(
+            take_arming_witness(),
+            Some(false),
+            "the signal teardown was armed after the worktree was registered, \
+             leaving an instant in which swt owned a worktree nobody was watching"
         );
     }
 

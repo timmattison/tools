@@ -465,6 +465,9 @@ pub fn with_parent_lock<T>(repo_root: &Path, f: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 mod tests {
     use super::{locked, LockFailure, LockTimings, LOCK_FILE, REAP_INTERPOSER};
+    use crate::teardown::serialize_at_risk;
+    #[cfg(unix)]
+    use crate::teardown::take_arming_witness;
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -573,8 +576,16 @@ mod tests {
         outcome
     }
 
+    // Every test below that actually *takes* a lock claims
+    // `serialize_at_risk` first. A held lock is one of the two things the
+    // signal teardown treats as at risk, the registry holding it is
+    // process-global, and the tests that ask what is at risk — the arming
+    // witness here and its twin in `teardown` — would otherwise read a
+    // concurrent acquisition's lock as their own. Tests that only wait on
+    // somebody else's lock register nothing and need no guard.
     #[test]
     fn a_free_lock_is_taken_for_the_region_and_dropped_after_it() {
+        let _serial = serialize_at_risk();
         let dir = lock_dir();
         let lock = dir.path().join(LOCK_FILE);
 
@@ -592,6 +603,33 @@ mod tests {
             "the region's value must come back"
         );
         assert!(!lock.exists(), "the lock outlived its region");
+    }
+
+    // The arming has to come *before* the lock is registered. The other order
+    // leaves an instant in which the registry names a lock and no thread is
+    // reading the signals that would release it — and a lock left behind blocks
+    // every later merge in that repository for an hour. It is invisible after the
+    // fact: both orders end with the handler installed and the lock registered.
+    // So the question is asked from inside the arming, where the two orders give
+    // different answers.
+    #[cfg(unix)]
+    #[test]
+    fn the_signal_teardown_is_armed_before_the_lock_is_registered() {
+        let _serial = serialize_at_risk();
+        let dir = lock_dir();
+        let lock = dir.path().join(LOCK_FILE);
+        // Any answer left by an earlier test on this thread would be read as this
+        // one's.
+        take_arming_witness();
+
+        locked(&lock, FAST, || ()).expect("an uncontended lock must be acquired");
+
+        assert_eq!(
+            take_arming_witness(),
+            Some(false),
+            "the signal teardown was armed after the lock was registered, \
+             leaving an instant in which swt held a lock nobody was watching"
+        );
     }
 
     // A lock somebody else is still holding is not a corpse. Reaping it early is
@@ -636,6 +674,7 @@ mod tests {
     // block the repository forever.
     #[test]
     fn a_lock_older_than_the_staleness_window_is_reaped() {
+        let _serial = serialize_at_risk();
         let dir = lock_dir();
         let lock = dir.path().join(LOCK_FILE);
         aged_lock(&lock, CORPSE_OWNER, ABANDONED_FOR);
@@ -650,6 +689,7 @@ mod tests {
     // who created it, so every acquisition writes its own token in.
     #[test]
     fn the_lock_file_names_the_run_holding_it() {
+        let _serial = serialize_at_risk();
         let dir = lock_dir();
         let lock = dir.path().join(LOCK_FILE);
 
@@ -709,6 +749,7 @@ mod tests {
     // once rather than sit out a backoff on a lock that is no longer there.
     #[test]
     fn a_corpse_another_waiter_already_cleared_leaves_the_path_free() {
+        let _serial = serialize_at_risk();
         let dir = lock_dir();
         let lock = dir.path().join(LOCK_FILE);
         aged_lock(&lock, CORPSE_OWNER, ABANDONED_FOR);
@@ -743,6 +784,7 @@ mod tests {
     // somebody deleted it by hand.
     #[test]
     fn a_corpse_from_an_older_swt_that_names_no_owner_is_still_reaped() {
+        let _serial = serialize_at_risk();
         let dir = lock_dir();
         let lock = dir.path().join(LOCK_FILE);
         aged_lock(&lock, NO_OWNER, ABANDONED_FOR);
@@ -846,6 +888,7 @@ mod tests {
     // the log would read first-in, second-in, second-out, first-out.
     #[test]
     fn a_second_acquisition_waits_until_the_first_releases() {
+        let _serial = serialize_at_risk();
         let dir = lock_dir();
         let lock = dir.path().join(LOCK_FILE);
         let log: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
