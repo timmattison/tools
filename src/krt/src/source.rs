@@ -9,6 +9,7 @@
 //! the user gives to another person carries that address too. `--output`
 //! avoids this.
 
+use crate::record::{SourceKind, SourceLabel};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -99,11 +100,100 @@ pub(crate) fn output_path(named: Option<&Path>, source: IpAddr, destination: &st
     )
 }
 
+/// The port that the socket records as its peer.
+///
+/// The value does not matter, because the socket sends no packet. It is not
+/// zero, because some systems refuse a connect to port zero. 33434 is the port
+/// that traceroute has always probed, so a reader of a packet capture that
+/// somehow holds one recognizes it.
+#[allow(
+    dead_code,
+    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+const PROBE_PORT: u16 = 33434_u16;
+
+/// The port that the operating system picks for the socket.
+///
+/// A bind to port zero asks the operating system for a free port. The socket
+/// never listens, so the number it picks is of no interest.
+#[allow(
+    dead_code,
+    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+const ANY_PORT: u16 = 0_u16;
+
+/// The address to bind before the socket records its peer: the unspecified
+/// address of the family of the target.
+///
+/// A socket bound to one family refuses a connect to the other one, so the bind
+/// reads the family of the target and never guesses it.
+#[allow(
+    dead_code,
+    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+fn bind_address(target: IpAddr) -> IpAddr {
+    target
+}
+
+/// The address of the interface that reaches the target.
+///
+/// The socket sends no packet. A `connect` on a datagram socket only records
+/// the peer, so the operating system picks the route and fills in the local
+/// address, and nothing leaves the machine.
+///
+/// # Errors
+///
+/// Returns the reason when the socket does not open, when the operating system
+/// finds no route to the target, and when the local address does not read.
+#[allow(
+    dead_code,
+    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
+    Ok(target)
+}
+
+/// Finds the address that the probes leave from, and how krt found it.
+///
+/// The address that the user named wins, and it opens no socket. Every other
+/// run reads the address of the interface that reaches the target.
+///
+/// The design puts one HTTPS request to a public address service between those
+/// two steps. A later slice adds it.
+///
+/// # Errors
+///
+/// Returns the reason when the socket of the egress address does not open, when
+/// the operating system finds no route to the target, and when the local
+/// address does not read. A run that names a source raises none of these,
+/// because it opens no socket.
+#[allow(
+    dead_code,
+    reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result<SourceLabel> {
+    let addr = match named {
+        Some(named) => named,
+        None => egress_address(target)?,
+    };
+    Ok(SourceLabel {
+        addr,
+        kind: SourceKind::Local,
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{derive_name, output_path};
-    use std::net::IpAddr;
+    use super::{bind_address, derive_name, discover, egress_address, output_path};
+    use crate::record::SourceKind;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::path::{Path, PathBuf};
+
+    /// The loopback address of IP version 4.
+    ///
+    /// Every machine holds a route to it, so a test that reads the egress
+    /// address of it reaches no network and never flakes.
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
     /// The source address of every test that names a plain one.
     const SOURCE: &str = "1.2.3.4";
@@ -224,5 +314,60 @@ mod tests {
             "the derived name carries no directory: {}",
             path.display()
         );
+    }
+
+    /// The socket of the egress address sends no packet, so this test touches
+    /// no network. A `connect` on a datagram socket only records the peer: the
+    /// operating system picks the route and fills in the local address, and
+    /// that is a system call and not a packet. The loopback route stands on
+    /// every machine, so the test never flakes. Do not delete it as a network
+    /// test.
+    #[test]
+    fn the_egress_address_of_the_loopback_of_ip_version_4_is_that_loopback() {
+        let local = egress_address(LOOPBACK).expect("every machine holds a loopback route");
+        assert_eq!(local, LOOPBACK);
+    }
+
+    /// The bind reads the family of the target and never guesses it.
+    ///
+    /// This test is pure, so it also holds on a machine that has turned IP
+    /// version 6 off. A socket test of the loopback of IP version 6 would fail
+    /// on such a machine for a reason that this code does not own.
+    #[test]
+    fn the_bind_address_of_a_target_of_ip_version_4_is_the_unspecified_address_of_that_family() {
+        assert_eq!(
+            bind_address(address(SOURCE)),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+    }
+
+    /// The bind reads the family of the target and never guesses it. This test
+    /// is pure, so it holds on a machine that has turned IP version 6 off.
+    #[test]
+    fn the_bind_address_of_a_target_of_ip_version_6_is_the_unspecified_address_of_that_family() {
+        assert_eq!(
+            bind_address(address(SOURCE_VERSION_6)),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        );
+    }
+
+    /// A source that the user named opens no socket, and the record marks it an
+    /// override.
+    #[test]
+    fn a_source_that_the_user_named_is_an_override() {
+        let named = address(SOURCE);
+        let label = discover(Some(named), LOOPBACK).expect("a named source opens no socket");
+        assert_eq!(label.addr, named);
+        assert_eq!(label.kind, SourceKind::Override);
+    }
+
+    /// A run that names no source reads the egress address, and the record
+    /// marks it local. The target is the loopback, so the test touches no
+    /// network.
+    #[test]
+    fn no_named_source_gives_the_local_egress_address() {
+        let label = discover(None, LOOPBACK).expect("every machine holds a loopback route");
+        assert_eq!(label.addr, LOOPBACK);
+        assert_eq!(label.kind, SourceKind::Local);
     }
 }
