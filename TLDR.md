@@ -34,7 +34,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `inscribe` | Generates git commit messages from staged changes using Claude AI. |
 | `jsonboard` | Pretty-prints JSON on the clipboard and puts it back. |
 | `kitchen-sync` | Installs every Rust binary from a git repo with one command. |
-| `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop. This build reads and writes the recorded file, and `krt replay` summarizes one run of it. |
+| `krt` | Knights of the Round Trip — records the network path to a destination, hop by hop. This build writes no file yet, and `krt replay` summarizes one run of a recorded file. |
 | `localnext` | Serves statically exported Next.js apps locally. |
 | `ng` | Navel-Gaze — watches JS/TS files and re-runs `pnpm lint` (or `--typecheck`) on change. |
 | `nodenuke` | Removes `node_modules` directories and lock files throughout a repo. |

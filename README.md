@@ -569,10 +569,11 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
     multipath mode, and the address family.
   - The `replay` command reads a file that an earlier run wrote, and it takes no destination and no
     flag of a probe. `--run` picks which run in that file to read, and the last run of the file is
-    the default. A recorded file holds one JSON record on each line. The file opens in append mode,
-    so one source and one destination keep one file across many runs.
-  - This build reads and writes that file, and it prints one summary line for a recorded run. It
-    does not probe yet. A later build adds the tracer and the aggregate table.
+    the default. A recorded file holds one JSON record on each line.
+  - This build reads that file and prints one summary line for a recorded run. It writes no file,
+    because it does not probe yet. The writer is in place, and it opens the file in append mode.
+    One source and one destination will keep one file across many runs, once the tracer arrives. A
+    later build adds the tracer and the aggregate table.
   - Usage: `krt example.com`, `krt example.com --interval 500ms --protocol udp --multipath paris`,
     `krt replay trace.jsonl`, `krt replay trace.jsonl --run 2026-08-19T12:00:00.000Z`
   - To install: `cargo install --git https://github.com/timmattison/tools krt`
