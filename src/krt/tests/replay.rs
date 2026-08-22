@@ -86,6 +86,9 @@ const BUILT_SUMMARY_NEVER_REACHED: &str =
 /// The start of a `round` line that a `kill -9` cut short.
 const CUT_CHUNK: &str = r#"{"type":"round""#;
 
+/// What the warning of a cut final line says about the cut.
+const CUT_SHORT: &str = "is cut short at";
+
 /// A line that is not JSON.
 const NOT_JSON_LINE: &str = "this is not json";
 
@@ -337,6 +340,30 @@ fn a_line_that_is_not_json_fails_and_names_the_line() {
     assert!(
         stderr.contains(CORRUPT_LINE),
         "the message names the line: {stderr}"
+    );
+    assert!(
+        stderr.contains(path.as_str()),
+        "the message names the path: {stderr}"
+    );
+}
+
+/// A cut that swallowed every record still names the cut.
+///
+/// A `kill -9` during the first record of a file leaves a file that holds no
+/// complete record. Without the warning, such a file reads exactly like an
+/// empty file, and the user cannot tell the one from the other.
+#[test]
+fn a_cut_that_swallowed_every_record_names_the_cut_and_the_missing_run() {
+    let file = TempFile::new("cut-away", CUT_CHUNK);
+    let path = file.arg();
+    let stderr = failure(&[REPLAY, path.as_str()]);
+    assert!(
+        stderr.contains(CUT_SHORT),
+        "the message names the cut: {stderr}"
+    );
+    assert!(
+        stderr.contains(NO_RUN),
+        "the message says the file holds no run: {stderr}"
     );
     assert!(
         stderr.contains(path.as_str()),
