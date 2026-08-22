@@ -25,8 +25,12 @@ const PHYSICAL_CORES: &str = "hw.physicalcpu";
 
 /// How many arithmetic operations run between two checks of the deadline.
 ///
-/// A check on every operation would cost more than the work it guards. A batch
-/// this size keeps the check under a millisecond of delay.
+/// A check on every operation costs more than the work it guards. A batch of
+/// this size delays each check by about 7 milliseconds. One batch took 6.677 ms
+/// in a release build on an Apple Silicon machine. A worker goes past its
+/// deadline, and obeys [`Load::stop`], that much later. This constant is a
+/// count of floating point operations, not a time, so a different machine gives
+/// a different delay.
 pub const BATCH: u32 = 1_000_000;
 
 /// A running full-speed load on the performance cores.
@@ -39,8 +43,10 @@ pub struct Load {
 }
 
 impl Load {
-    /// Start one worker for each performance core, every one of them ending at
-    /// `deadline`.
+    /// Start `threads` workers, every one of them ending at `deadline`.
+    ///
+    /// The caller sets the count. To load all of the performance cores, the
+    /// caller gives [`performance_core_count`].
     #[must_use]
     pub fn start(threads: usize, deadline: Instant) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
