@@ -32,6 +32,9 @@ fn reports_a_share_of_a_maximum() {
 #[test]
 fn a_maximum_of_zero_gives_a_share_of_zero_rather_than_an_infinity() {
     let ratio = Mhz::new(4_510).ratio_of(Mhz::new(0));
-    assert!(ratio.is_finite(), "a zero maximum must not produce infinity");
+    assert!(
+        ratio.is_finite(),
+        "a zero maximum must not produce infinity"
+    );
     assert!((ratio - 0.0).abs() < f64::EPSILON);
 }

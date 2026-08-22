@@ -43,7 +43,10 @@ fn reads_a_credible_dvfs_table_from_this_machine() {
     );
 
     let e_max = table.e_max();
-    assert!(e_max.megahertz() > 0, "the E-cluster table must not be empty");
+    assert!(
+        e_max.megahertz() > 0,
+        "the E-cluster table must not be empty"
+    );
     assert!(
         e_max < p_max,
         "the efficiency cores ({e_max}) must be slower than the performance cores ({p_max})"

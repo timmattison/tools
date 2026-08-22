@@ -76,14 +76,102 @@ pub struct Verdict {
 
 /// Judge a run of samples against the DVFS table of the chip.
 #[must_use]
-pub fn judge(_samples: &[Sample], _table: &DvfsTable) -> Verdict {
-    Verdict {
-        outcome: Outcome::NotEnoughData { busy_samples: 0 },
+pub fn judge(samples: &[Sample], table: &DvfsTable) -> Verdict {
+    // An unknown level is the absence of a reading, not a level above
+    // `Critical`, so it never wins the comparison for the worst one.
+    let worst_pressure = samples
+        .iter()
+        .map(|sample| sample.pressure)
+        .filter(|level| *level != PressureLevel::Unknown)
+        .max()
+        .unwrap_or(PressureLevel::Unknown);
+    let peak_power_mw = samples
+        .iter()
+        .filter_map(|sample| sample.cpu_power_mw)
+        .max()
+        .unwrap_or(0);
+
+    // An idle P-cluster reports a low clock. Counting it would report every
+    // machine that spent a moment idle as a machine that throttled.
+    let busy: Vec<&Sample> = samples
+        .iter()
+        .filter(|sample| sample.p_cluster_is_busy(BUSY_THRESHOLD_PCT))
+        .collect();
+
+    let empty = Verdict {
+        outcome: Outcome::NotEnoughData {
+            busy_samples: busy.len(),
+        },
         peak: Mhz::new(0),
         early_mean: Mhz::new(0),
         late_mean: Mhz::new(0),
         late_ratio_of_max: 0.0,
-        peak_power_mw: 0,
-        worst_pressure: PressureLevel::Unknown,
+        peak_power_mw,
+        worst_pressure,
+    };
+
+    if busy.len() < MINIMUM_BUSY_SAMPLES {
+        return empty;
     }
+
+    let clock = |sample: &&Sample| sample.p_freq.map(Mhz::megahertz);
+    let Some(peak) = busy.iter().filter_map(clock).max().map(Mhz::new) else {
+        return empty;
+    };
+    let Some(last_at) = busy.last().map(|sample| sample.at) else {
+        return empty;
+    };
+    let late_from = last_at.saturating_sub(LATE_WINDOW);
+
+    let early_mean = mean_clock(
+        busy.iter()
+            .filter(|sample| sample.at < EARLY_WINDOW)
+            .copied(),
+    )
+    .unwrap_or(peak);
+    let Some(late_mean) = mean_clock(busy.iter().filter(|sample| sample.at >= late_from).copied())
+    else {
+        return empty;
+    };
+
+    let late_ratio_of_max = late_mean.ratio_of(table.p_max());
+    let decay = 1.0 - late_mean.ratio_of(early_mean);
+
+    let outcome = if decay >= DECAY_TOLERANCE {
+        Outcome::Throttled { decay }
+    } else if late_ratio_of_max >= HOLD_RATIO {
+        Outcome::HeldClock
+    } else {
+        Outcome::NeverReachedPeak
+    };
+
+    Verdict {
+        outcome,
+        peak,
+        early_mean,
+        late_mean,
+        late_ratio_of_max,
+        peak_power_mw,
+        worst_pressure,
+    }
+}
+
+/// The mean clock of the samples that carry one.
+fn mean_clock<'a>(samples: impl Iterator<Item = &'a Sample>) -> Option<Mhz> {
+    let clocks: Vec<u32> = samples
+        .filter_map(|sample| sample.p_freq.map(Mhz::megahertz))
+        .collect();
+    if clocks.is_empty() {
+        return None;
+    }
+    let total: u64 = clocks.iter().map(|&mhz| u64::from(mhz)).sum();
+    let count = clocks.len() as u64;
+    // Round to the nearest megahertz rather than toward zero, so a run at a
+    // steady clock reports exactly that clock.
+    let rounded = (total + count / 2) / count;
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the mean of a list of u32 clocks cannot exceed u32::MAX"
+    )]
+    Some(Mhz::new(rounded as u32))
 }

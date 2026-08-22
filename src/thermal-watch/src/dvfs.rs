@@ -14,6 +14,15 @@
 //! registry node hold" — names a structure, not a piece of text, so this module
 //! asks the IO Registry itself through IOKit. Nothing is text-matched.
 
+use core_foundation::base::{CFType, TCFType};
+use core_foundation::data::CFData;
+use core_foundation::string::CFString;
+use core_foundation_sys::base::kCFAllocatorDefault;
+use io_kit_sys::keys::kIOServicePlane;
+use io_kit_sys::{
+    kIOMasterPortDefault, kIORegistryIterateRecursively, IOObjectRelease,
+    IORegistryEntrySearchCFProperty, IORegistryGetRootEntry,
+};
 use thiserror::Error;
 
 use crate::mhz::Mhz;
@@ -75,7 +84,16 @@ impl DvfsTable {
     /// Returns [`DvfsError`] when the IO Registry carries no DVFS property,
     /// when the property is not raw data, or when it decodes to no usable step.
     pub fn read() -> Result<Self, DvfsError> {
-        Err(DvfsError::PropertyMissing { key: P_CLUSTER_KEY })
+        let p_steps = decode_voltage_states(&read_property(P_CLUSTER_KEY)?);
+        if p_steps.is_empty() {
+            return Err(DvfsError::TableEmpty { key: P_CLUSTER_KEY });
+        }
+        // A chip whose E-cluster property is absent still answers the question
+        // this tool asks, so the E-cluster is read but never required.
+        let e_steps = read_property(E_CLUSTER_KEY)
+            .map(|raw| decode_voltage_states(&raw))
+            .unwrap_or_default();
+        Ok(Self { p_steps, e_steps })
     }
 
     /// Build a table from already-decoded steps. Used by tests, and by
@@ -116,12 +134,55 @@ impl DvfsTable {
 /// kilohertz, then a voltage. A trailing partial entry is ignored, and a step
 /// whose frequency is zero is padding rather than a real step.
 #[must_use]
-pub fn decode_voltage_states(_raw: &[u8]) -> Vec<Mhz> {
-    Vec::new()
+pub fn decode_voltage_states(raw: &[u8]) -> Vec<Mhz> {
+    raw.chunks_exact(ENTRY_BYTES)
+        .filter_map(|entry| {
+            let (frequency, _voltage) = entry.split_at(ENTRY_BYTES / 2);
+            let kilohertz = u32::from_le_bytes(frequency.try_into().ok()?);
+            (kilohertz > 0).then(|| Mhz::from_khz(kilohertz))
+        })
+        .collect()
 }
 
 /// Read one IO Registry property as raw bytes, searching the whole service
 /// plane from the root.
-fn read_property(_key: &'static str) -> Result<Vec<u8>, DvfsError> {
-    Err(DvfsError::PropertyMissing { key: P_CLUSTER_KEY })
+fn read_property(key: &'static str) -> Result<Vec<u8>, DvfsError> {
+    let name = CFString::new(key);
+
+    // SAFETY: `IORegistryGetRootEntry` takes a mach port and returns an entry
+    // this thread owns. `kIOMasterPortDefault` is the port IOKit publishes for
+    // this purpose. A returned zero means no entry, which is checked below
+    // before the handle is used.
+    let root = unsafe { IORegistryGetRootEntry(kIOMasterPortDefault) };
+    if root == 0 {
+        return Err(DvfsError::PropertyMissing { key });
+    }
+
+    // SAFETY: `root` is a live registry entry from the call above.
+    // `kIOServicePlane` is a static C string from IOKit, and `name` outlives
+    // the call. The create rule applies to the result, so the wrapper below
+    // takes ownership of it. The entry is released whatever the result is.
+    let raw = unsafe {
+        let property = IORegistryEntrySearchCFProperty(
+            root,
+            kIOServicePlane,
+            name.as_concrete_TypeRef(),
+            kCFAllocatorDefault,
+            kIORegistryIterateRecursively,
+        );
+        IOObjectRelease(root);
+        property
+    };
+
+    if raw.is_null() {
+        return Err(DvfsError::PropertyMissing { key });
+    }
+
+    // SAFETY: `raw` is a non-null Core Foundation value returned under the
+    // create rule, so this wrapper owns it and releases it on drop.
+    let value = unsafe { CFType::wrap_under_create_rule(raw) };
+    let data = value
+        .downcast::<CFData>()
+        .ok_or(DvfsError::PropertyNotData { key })?;
+    Ok(data.bytes().to_vec())
 }

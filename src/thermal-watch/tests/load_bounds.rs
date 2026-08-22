@@ -67,7 +67,10 @@ fn asking_for_no_workers_starts_none() {
 #[test]
 fn the_machine_reports_at_least_one_performance_core() {
     let count = performance_core_count();
-    assert!(count >= 1, "every machine has at least one core, got {count}");
+    assert!(
+        count >= 1,
+        "every machine has at least one core, got {count}"
+    );
     assert!(count < 1_024, "a count of {count} cores is not credible");
 }
 

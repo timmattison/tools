@@ -24,8 +24,8 @@ impl Mhz {
     /// Build a frequency from a count of kilohertz, as the DVFS table reports
     /// it. The result is rounded to the nearest megahertz.
     #[must_use]
-    pub const fn from_khz(_kilohertz: u32) -> Self {
-        Self(0)
+    pub const fn from_khz(kilohertz: u32) -> Self {
+        Self(kilohertz.saturating_add(500) / 1_000)
     }
 
     /// The frequency as a count of megahertz.
@@ -45,8 +45,11 @@ impl Mhz {
     /// A `maximum` of zero gives `0.0` rather than an infinity, so a caller
     /// that reads an empty DVFS table still renders.
     #[must_use]
-    pub fn ratio_of(self, _maximum: Self) -> f64 {
-        0.0
+    pub fn ratio_of(self, maximum: Self) -> f64 {
+        if maximum.0 == 0 {
+            return 0.0;
+        }
+        f64::from(self.0) / f64::from(maximum.0)
     }
 }
 
