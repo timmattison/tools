@@ -131,6 +131,60 @@ fn a_run_with_too_few_busy_samples_carries_the_count_beside_the_outcome() {
     assert!(verdict["decay"].is_null());
 }
 
+/// The four clock numbers of an unjudged run are placeholders, not readings.
+/// A consumer cannot tell a placeholder zero from a measured zero, so the line
+/// must leave the four keys out.
+#[test]
+fn a_verdict_that_judged_nothing_carries_no_clock_measurement() {
+    let line = verdict_json(&steady(3, 4_500));
+    let verdict = &line["verdict"];
+    for key in ["peak", "early_mean", "late_mean", "late_ratio_of_max"] {
+        assert!(
+            verdict[key].is_null(),
+            "an unjudged verdict leaves {key} out, got {line}"
+        );
+    }
+}
+
+/// The power and the pressure are real readings of an unjudged run, and the
+/// outcome and its count describe the run. All four stay on the line.
+#[test]
+fn a_verdict_that_judged_nothing_keeps_the_measurements_it_made() {
+    let line = verdict_json(&steady(3, 4_500));
+    let verdict = &line["verdict"];
+    assert_eq!(verdict["outcome"], "not_enough_data");
+    assert_eq!(verdict["busy_samples"], 3);
+    assert_eq!(
+        verdict["peak_power_mw"], 48_500,
+        "the power is a reading of the run, got {line}"
+    );
+    assert_eq!(
+        verdict["worst_pressure"], "nominal",
+        "the pressure is a reading of the run, got {line}"
+    );
+}
+
+/// A judged outcome keeps every clock number. This holds the line against a
+/// fix that leaves the four keys out of each outcome.
+#[test]
+fn a_verdict_that_judged_the_run_carries_every_clock_measurement() {
+    let throttled = verdict_json(&decaying_run());
+    let verdict = &throttled["verdict"];
+    assert_eq!(verdict["outcome"], "throttled");
+    assert_eq!(verdict["peak"], 4_500, "got {throttled}");
+    assert_eq!(verdict["early_mean"], 4_500, "got {throttled}");
+    assert_eq!(verdict["late_mean"], 3_400, "got {throttled}");
+    assert!(verdict["late_ratio_of_max"].is_f64(), "got {throttled}");
+
+    let held = verdict_json(&steady(180, 4_500));
+    let verdict = &held["verdict"];
+    assert_eq!(verdict["outcome"], "held_clock");
+    assert_eq!(verdict["peak"], 4_500, "got {held}");
+    assert_eq!(verdict["early_mean"], 4_500, "got {held}");
+    assert_eq!(verdict["late_mean"], 4_500, "got {held}");
+    assert!(verdict["late_ratio_of_max"].is_f64(), "got {held}");
+}
+
 #[test]
 fn a_sample_line_and_a_verdict_line_stay_apart_in_the_stream() {
     let sample_line = serde_json::to_string(&busy(7, 4_500)).expect("the sample serializes");
