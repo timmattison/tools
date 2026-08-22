@@ -569,7 +569,9 @@ fn counted(count: usize, name: &str) -> String {
 /// target, and the field then holds one word.
 ///
 /// A TTL counts once, however many rounds answered at it, so the count is the
-/// length of the path and not the number of answers.
+/// number of TTLs that answered and not the number of answers. A TTL that the
+/// run probed and that never answered counts for nothing, so the count is at or
+/// below the length of the path.
 ///
 /// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
 /// slice builds neither module, so the summary lives here. A later slice
