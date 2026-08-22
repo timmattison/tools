@@ -146,7 +146,7 @@ const FIRST_ROUND: u64 = 1;
 ///
 /// No field holds a type of a trippy crate, so a caller states a whole run
 /// from outside the wall of this module.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(
     dead_code,
     reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
@@ -194,6 +194,10 @@ pub(crate) enum TraceError {
 
 /// Builds the tracer of one run from the configuration of `krt`.
 ///
+/// The round period of the tracer is the window between its shortest round and
+/// its longest one. `krt` names one period, so both ends of that window take
+/// it.
+///
 /// # Errors
 ///
 /// Returns [`TraceError::Build`] when the tracer refuses the configuration.
@@ -203,6 +207,42 @@ pub(crate) enum TraceError {
 )]
 fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
     trippy_core::Builder::new(config.target)
+        .min_round_duration(config.interval)
+        .max_round_duration(config.interval)
+        .first_ttl(config.first_ttl)
+        .max_ttl(config.max_ttl)
+        .protocol(match config.protocol {
+            crate::Protocol::Icmp => trippy_core::Protocol::Icmp,
+            crate::Protocol::Udp => trippy_core::Protocol::Udp,
+            crate::Protocol::Tcp => trippy_core::Protocol::Tcp,
+        })
+        .multipath_strategy(match config.multipath {
+            crate::Multipath::Classic => trippy_core::MultipathStrategy::Classic,
+            crate::Multipath::Paris => trippy_core::MultipathStrategy::Paris,
+            crate::Multipath::Dublin => trippy_core::MultipathStrategy::Dublin,
+        })
+        .privilege_mode(match config.privilege {
+            record::Privilege::Unprivileged => trippy_core::PrivilegeMode::Unprivileged,
+            record::Privilege::Privileged => trippy_core::PrivilegeMode::Privileged,
+        })
+        // The protocol decides the direction of the ports. ICMP carries no
+        // port. The build refuses a UDP trace and a TCP trace whose direction
+        // is `None`, and `None` is the direction that the builder holds by
+        // default, so the two arms under the first one are what makes such a
+        // run start.
+        .port_direction(match config.protocol {
+            crate::Protocol::Icmp => trippy_core::PortDirection::None,
+            crate::Protocol::Udp => {
+                trippy_core::PortDirection::FixedSrc(trippy_core::Port(UDP_SOURCE_PORT))
+            }
+            crate::Protocol::Tcp => {
+                trippy_core::PortDirection::FixedDest(trippy_core::Port(TCP_DESTINATION_PORT))
+            }
+        })
+        // `krt` owns the round limit and the time limit, and the run loop
+        // enforces both of them. A tracer that stopped itself would close the
+        // channel, and the run loop reads a closed channel as a dead tracer.
+        .max_rounds(None)
         .build()
         .map_err(|error| TraceError::Build {
             reason: error.to_string(),
@@ -218,7 +258,7 @@ fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
     reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
 )]
 fn next_seq(counter: &AtomicU64) -> u64 {
-    counter.fetch_add(1, Ordering::Relaxed)
+    counter.fetch_add(1, Ordering::Relaxed) + FIRST_ROUND
 }
 
 /// Starts the tracer on its own thread and gives back a receiver of completed
