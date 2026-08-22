@@ -335,6 +335,28 @@ impl TtlRange {
         Ok(Self { first, last })
     }
 
+    /// The TTLs that a round probed, from the first TTL upward.
+    ///
+    /// A last TTL below the first names no TTL that the round probed, so the
+    /// range closes at the first TTL.
+    ///
+    /// This constructor never fails, and [`TtlRange::new`] does. A round that
+    /// answered nothing reports a last TTL of zero, and the conversion of a
+    /// round has already clamped that case away, so a `Result` there would
+    /// carry an arm that no input reaches. A reader of a recorded file still
+    /// needs the refusal, because a file states the two numbers on its own.
+    #[allow(
+        dead_code,
+        reason = "the tracer converts each round through this constructor, and the tracer arrives in a later slice of issue #367"
+    )]
+    #[allow(
+        unused_variables,
+        reason = "the stub of the red step reads no last TTL; the green step reads it"
+    )]
+    pub(crate) fn from_first(first: u8, last: u8) -> Self {
+        Self { first, last: first }
+    }
+
     /// The first TTL of the round.
     #[allow(
         dead_code,
@@ -1033,6 +1055,23 @@ mod tests {
         }
         assert_eq!(range.first(), 1);
         assert_eq!(range.last(), 30);
+    }
+
+    #[test]
+    fn a_range_from_the_first_ttl_spans_to_the_last_one() {
+        let range = TtlRange::from_first(1, 14);
+        assert_eq!(range.first(), 1);
+        assert_eq!(range.last(), 14);
+    }
+
+    /// A round that answered nothing reports a last TTL of zero, which runs
+    /// below every first TTL. Such a range names no TTL that the round probed,
+    /// so it closes at the first TTL.
+    #[test]
+    fn a_range_whose_last_ttl_runs_below_the_first_one_closes_at_the_first_one() {
+        let range = TtlRange::from_first(3, 1);
+        assert_eq!(range.first(), 3);
+        assert_eq!(range.last(), 3);
     }
 
     #[test]

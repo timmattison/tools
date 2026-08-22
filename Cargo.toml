@@ -69,6 +69,11 @@ url = "2.5"
 percent-encoding = "2.3"
 
 # Network tracing
+# The documentation of `trippy-core` says that its public API is not stable and
+# is highly likely to change, so the version is pinned exactly. `src/krt` holds
+# every mention of a trippy type in one module, and `repo_guards::trippy_wall`
+# keeps it there, so an upgrade breaks one file.
+trippy-core = "=0.13.0"
 trippy-privilege = "0.13.0"
 
 # Date/time
