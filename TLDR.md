@@ -65,6 +65,7 @@ A one-line description of every program documented in the [README](./README.md),
 | `swt` | Subagent Worktree — isolated-worktree helper for parallel TDD (create/merge with green checks). |
 | `symfix` | Recursively finds and optionally fixes broken symlinks. |
 | `tc` | Token Count — counts estimated LLM tokens in files (multiple OpenAI tokenizers, stdin support). |
+| `thermal-watch` | Shows whether an Apple Silicon Mac decreases its clock under sustained load, measuring the P-cluster frequency against the DVFS table of the chip rather than trusting the thermal pressure level. |
 | `tsm` | Terminal Session Manager — records every shell command to JSONL logs you can search and replay. |
 | `tubeboard` | Extracts the video ID from a YouTube URL on the clipboard. |
 | `unescapeboard` | Unescapes one level of `\"`-style escaping in clipboard text. |

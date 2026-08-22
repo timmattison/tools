@@ -91,6 +91,15 @@ See [src/gitscratch/README.md](src/gitscratch/README.md) for the full list of gu
       (GPT-3.5-turbo, GPT-4, GPT-4o) and can read from stdin or multiple files. Shows counts with
       thousands separators for easy reading.
     - To install: `cargo install --git https://github.com/timmattison/tools tc`
+- thermal-watch
+    - Shows whether this Apple Silicon Mac decreases its clock under sustained load. macOS reports two different
+      signals and only one of them answers the question: the thermal pressure level (`Nominal`, `Fair`, `Serious`,
+      `Critical`) tells applications to do less work and stays `Nominal` through most real throttling, while the
+      measured P-cluster frequency against the DVFS table of the chip is the ground truth. This tool samples both
+      once a second, optionally makes its own full P-core load, and reports how far the clock decayed from its
+      early peak. `--load` makes the load, `--duration` sets how long, and `--json` prints one object per sample.
+      Needs `sudo`, because `powermetrics` does.
+    - To install: `cargo install --git https://github.com/timmattison/tools thermal-watch`
 - htmlboard
     - Waits for HTML to be put on the clipboard and then pretty prints it and puts it back in the clipboard.
     - To install: `cargo install --git https://github.com/timmattison/tools htmlboard`
