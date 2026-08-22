@@ -25,9 +25,10 @@ verdict is built on.
    residency, the CPU power, and the thermal pressure level from each sample.
 3. Optionally makes its own full P-core load, so no separate build is necessary.
 4. Compares the mean clock at the start of the load against the mean clock at
-   the end of it. That decay is the throttling. The two windows are 20 seconds
-   and 60 seconds on a run of 80 seconds or more. On a shorter run each window
-   becomes one third of the run, so the two windows never share a sample.
+   the end of it. That decay is the throttling. Each window is one third of the
+   run or less, so the two windows never share a sample. The early window is
+   the full 20 seconds on a run of 60 seconds or more. The late window is the
+   full 60 seconds on a run of 180 seconds or more.
 
 ## Usage
 

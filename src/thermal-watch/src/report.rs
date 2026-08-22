@@ -24,7 +24,7 @@ use crate::powermetrics::{PressureLevel, Sample};
 
 /// The longest early window. It starts at the first busy sample.
 ///
-/// A run shorter than 80 seconds gets a smaller window. See [`windows`].
+/// A run shorter than 60 seconds gets a smaller window. See [`windows`].
 pub const EARLY_WINDOW: Duration = Duration::from_secs(20);
 
 /// The longest late window. It ends at the last busy sample.
@@ -39,9 +39,13 @@ pub const LATE_WINDOW: Duration = Duration::from_secs(60);
 /// the first busy sample and the time of the last busy sample.
 ///
 /// Each window is not longer than one third of the span between the two
-/// samples. Thus the two windows never share a sample. On a span of 80 seconds
-/// or more, one third is 20 seconds or more, and the windows are the full
-/// [`EARLY_WINDOW`] and [`LATE_WINDOW`].
+/// samples. Thus the two windows never share a sample. The two windows reach
+/// their full length at different spans. One third of the span becomes 20
+/// seconds at a span of 60 seconds, thus the early window is the full
+/// [`EARLY_WINDOW`] on a span of 60 seconds or more. One third of the span
+/// becomes 60 seconds at a span of 180 seconds, thus the late window is the
+/// full [`LATE_WINDOW`] on a span of 180 seconds or more. Only a span of 180
+/// seconds or more gives both windows their full length.
 #[must_use]
 pub fn windows(first_at: Duration, last_at: Duration) -> (Duration, Duration) {
     let third = last_at.saturating_sub(first_at) / 3;

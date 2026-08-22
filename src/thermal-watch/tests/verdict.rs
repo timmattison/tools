@@ -7,7 +7,7 @@ use std::time::Duration;
 use thermal_watch::dvfs::DvfsTable;
 use thermal_watch::mhz::Mhz;
 use thermal_watch::powermetrics::{PressureLevel, Sample};
-use thermal_watch::report::{judge, windows, Outcome};
+use thermal_watch::report::{judge, windows, Outcome, EARLY_WINDOW, LATE_WINDOW};
 
 /// The DVFS table of an M4 Pro, trimmed to its two ends.
 fn m4_pro() -> DvfsTable {
@@ -214,6 +214,74 @@ fn the_early_window_and_the_late_window_never_share_a_sample() {
              and starts the late window at {late_from:?}"
         );
     }
+}
+
+#[test]
+fn the_early_window_is_full_at_a_span_of_sixty_seconds() {
+    // One third of 60 seconds is 20 seconds. That is the full early window.
+    let (early_until, _) = windows(Duration::ZERO, Duration::from_secs(60));
+    assert_eq!(
+        early_until, EARLY_WINDOW,
+        "a span of 60 seconds gives the early window its full length"
+    );
+}
+
+#[test]
+fn the_early_window_is_shorter_below_a_span_of_sixty_seconds() {
+    // One third of 59 seconds is less than 20 seconds. The window shrinks.
+    let (early_until, _) = windows(Duration::ZERO, Duration::from_secs(59));
+    assert!(
+        early_until < EARLY_WINDOW,
+        "a span of 59 seconds gives a shorter early window, got {early_until:?}"
+    );
+}
+
+#[test]
+fn the_late_window_is_full_at_a_span_of_one_hundred_eighty_seconds() {
+    // One third of 180 seconds is 60 seconds. That is the full late window.
+    let last_at = Duration::from_secs(180);
+    let (_, late_from) = windows(Duration::ZERO, last_at);
+    assert_eq!(
+        late_from,
+        Duration::from_secs(120),
+        "a span of 180 seconds starts the late window at 120 seconds"
+    );
+    assert_eq!(
+        last_at - late_from,
+        LATE_WINDOW,
+        "a span of 180 seconds gives the late window its full length"
+    );
+}
+
+#[test]
+fn the_late_window_is_shorter_below_a_span_of_one_hundred_eighty_seconds() {
+    // One third of 179 seconds is less than 60 seconds. The window shrinks.
+    let last_at = Duration::from_secs(179);
+    let (_, late_from) = windows(Duration::ZERO, last_at);
+    assert!(
+        last_at - late_from < LATE_WINDOW,
+        "a span of 179 seconds gives a shorter late window, got {:?}",
+        last_at - late_from
+    );
+}
+
+#[test]
+fn the_late_window_is_not_full_at_a_span_of_sixty_seconds() {
+    // The two windows reach their full length at different spans. A span of
+    // 60 seconds fills the early window. It leaves the late window at one
+    // third of the span, which is 20 seconds.
+    let last_at = Duration::from_secs(60);
+    let (early_until, late_from) = windows(Duration::ZERO, last_at);
+    assert_eq!(early_until, EARLY_WINDOW);
+    assert_eq!(
+        last_at - late_from,
+        Duration::from_secs(20),
+        "a span of 60 seconds holds the late window to one third of the span"
+    );
+    assert!(
+        last_at - late_from < LATE_WINDOW,
+        "a span of 60 seconds does not fill the late window"
+    );
 }
 
 #[test]
