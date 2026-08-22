@@ -10,7 +10,7 @@
 //! avoids this.
 
 use crate::record::{SourceKind, SourceLabel};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 
 /// The extension of a recorded file.
@@ -30,12 +30,15 @@ const EXTENSION: &str = "jsonl";
 )]
 const HYPHEN: char = '-';
 
-/// Every character that a file name must not hold.
+/// The characters that a file name must not hold, as a list.
 ///
 /// A colon names a drive on Windows and parts a host from a port everywhere. A
 /// forward slash parts two names of a path, and a backward slash does the same
-/// on Windows. Whitespace is not forbidden, but a name that holds it needs a
-/// quote at every command line that reads it.
+/// on Windows.
+///
+/// Whitespace becomes a hyphen too, and this list does not hold it.
+/// `char::is_whitespace` reads the whole Unicode table, and no list of a few
+/// characters holds as much.
 #[allow(
     dead_code,
     reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
@@ -104,8 +107,8 @@ pub(crate) fn output_path(named: Option<&Path>, source: IpAddr, destination: &st
 ///
 /// The value does not matter, because the socket sends no packet. It is not
 /// zero, because some systems refuse a connect to port zero. 33434 is the port
-/// that traceroute has always probed, so a reader of a packet capture that
-/// somehow holds one recognizes it.
+/// that traceroute probes, so the number tells a reader what the socket is
+/// for.
 #[allow(
     dead_code,
     reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
@@ -132,7 +135,10 @@ const ANY_PORT: u16 = 0_u16;
     reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
 )]
 fn bind_address(target: IpAddr) -> IpAddr {
-    target
+    match target {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    }
 }
 
 /// The address of the interface that reaches the target.
@@ -150,7 +156,9 @@ fn bind_address(target: IpAddr) -> IpAddr {
     reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
 )]
 fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
-    Ok(target)
+    let socket = UdpSocket::bind((bind_address(target), ANY_PORT))?;
+    socket.connect((target, PROBE_PORT))?;
+    Ok(socket.local_addr()?.ip())
 }
 
 /// Finds the address that the probes leave from, and how krt found it.
@@ -172,14 +180,16 @@ fn egress_address(target: IpAddr) -> std::io::Result<IpAddr> {
     reason = "main derives the file name and the source beside the run loop, and the run loop arrives in a later slice of issue #367"
 )]
 pub(crate) fn discover(named: Option<IpAddr>, target: IpAddr) -> std::io::Result<SourceLabel> {
-    let addr = match named {
-        Some(named) => named,
-        None => egress_address(target)?,
-    };
-    Ok(SourceLabel {
-        addr,
-        kind: SourceKind::Local,
-    })
+    match named {
+        Some(addr) => Ok(SourceLabel {
+            addr,
+            kind: SourceKind::Override,
+        }),
+        None => Ok(SourceLabel {
+            addr: egress_address(target)?,
+            kind: SourceKind::Local,
+        }),
+    }
 }
 
 #[cfg(test)]
