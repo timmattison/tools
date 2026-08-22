@@ -44,7 +44,7 @@ sudo thermal-watch --json                 # one JSON object for each sample
 | Option | What it does |
 | --- | --- |
 | `--load` | Make a full P-core load instead of watching one you started. |
-| `--duration <SECONDS>` | How long to watch. The default is 300. |
+| `--duration <SECONDS>` | How long to watch. The default is 300. The maximum is 86400, which is one day. |
 | `--json` | Print one JSON object for each sample instead of the live display. |
 
 ## Reading the output

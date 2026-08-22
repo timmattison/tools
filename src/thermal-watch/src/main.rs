@@ -23,6 +23,14 @@ const LOAD_MARGIN: Duration = Duration::from_secs(5);
 /// The width of the rule that separates the display from the report.
 const RULE_WIDTH: usize = 72;
 
+/// The longest watch the tool accepts, in seconds.
+///
+/// A day is far past every real test of the thermal behavior of a machine. The
+/// bound also keeps the sample count and the size of the sample list inside the
+/// limits of their types, so a very large value gives a clean error instead of
+/// a panic.
+const MAXIMUM_DURATION_SECONDS: u64 = 86_400;
+
 /// Show whether this Mac decreases its clock under sustained load.
 ///
 /// macOS reports two different signals. The thermal pressure level tells
@@ -36,7 +44,7 @@ struct Args {
     #[clap(long)]
     load: bool,
 
-    /// How long to watch, in seconds
+    /// How long to watch, in seconds. The maximum is 86400, which is one day
     #[clap(long, default_value_t = 300)]
     duration: u64,
 
@@ -50,6 +58,11 @@ fn main() -> Result<()> {
 
     if args.duration == 0 {
         anyhow::bail!("--duration needs a positive number of seconds");
+    }
+    if args.duration > MAXIMUM_DURATION_SECONDS {
+        anyhow::bail!(
+            "--duration accepts no more than {MAXIMUM_DURATION_SECONDS} seconds, which is one day"
+        );
     }
 
     let table = DvfsTable::read().context("cannot read the DVFS table of this machine")?;
