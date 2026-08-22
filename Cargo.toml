@@ -122,6 +122,9 @@ mockito = "1.7"
 
 # Platform-specific
 procfs = "0.17"
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
+io-kit-sys = "0.5"
 windows-sys = { version = "0.60", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_Foundation",
