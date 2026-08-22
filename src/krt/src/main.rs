@@ -758,8 +758,6 @@ resolved configuration:
   display:        table
   duration limit: none
   round limit:    none
-  replay:         none
-  run:            the last run
 ";
 
     /// Every text that the parser rejects, for the message tests.
@@ -1703,14 +1701,18 @@ resolved configuration:
   display:        headless
   duration limit: 2m
   round limit:    10
-  replay:         none
-  run:            the last run
 "
         );
     }
 
+    /// The block names neither the replay nor the run.
+    ///
+    /// `main` prints the block only when the command line names no `replay`,
+    /// and `resolve` fills the run only inside a `replay`, so neither field can
+    /// reach the block with a value. A replay prints its own summary line in
+    /// the place of the block.
     #[test]
-    fn prints_the_file_and_the_run_of_a_replay() {
+    fn the_block_names_neither_the_replay_nor_the_run() {
         let config = resolve(&[
             "krt",
             "replay",
@@ -1718,26 +1720,12 @@ resolved configuration:
             "--run",
             "2026-08-19T12:00:00Z",
         ]);
-        assert_eq!(
-            config.to_string(),
-            "\
-resolved configuration:
-  destination:    none
-  output:         derived at run time
-  interval:       1s
-  first ttl:      1
-  max ttl:        30
-  protocol:       icmp
-  multipath:      classic
-  address family: auto
-  reverse dns:    on
-  source:         discovered at run time
-  display:        table
-  duration limit: none
-  round limit:    none
-  replay:         /tmp/r.jsonl
-  run:            2026-08-19T12:00:00Z
-"
-        );
+        let block = config.to_string();
+        for absent in ["replay:", "run:", "/tmp/r.jsonl", "2026-08-19T12:00:00Z"] {
+            assert!(
+                !block.contains(absent),
+                "the block holds no `{absent}`: {block}"
+            );
+        }
     }
 }

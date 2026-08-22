@@ -126,8 +126,6 @@ resolved configuration:
   display:        table
   duration limit: none
   round limit:    none
-  replay:         none
-  run:            the last run
 ";
 
 /// What one run of the binary wrote, and whether it succeeded.
