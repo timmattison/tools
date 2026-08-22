@@ -55,10 +55,14 @@
 //! "I examined nothing" reads exactly like "everything is clean". See
 //! [`TrippyWallError`].
 
+use std::collections::BTreeSet;
 use std::fmt;
+use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use proc_macro2::{TokenStream, TokenTree};
+use syn::visit::Visit;
 use thiserror::Error;
 
 /// The source directory of the crate that carries the wall, relative to the
@@ -67,6 +71,15 @@ const KRT_SRC: &str = "src/krt/src";
 
 /// The one module of that crate which names a trippy type.
 const TRACE_MODULE: &str = "trace.rs";
+
+/// The first characters of the name of every trippy crate.
+const TRIPPY: &str = "trippy";
+
+/// The extension of a Rust source file.
+const RS: &str = "rs";
+
+/// The separator between the segments of a rendered path.
+const SEPARATOR: &str = "::";
 
 /// Everything that stops the audit from reaching a verdict.
 ///
@@ -268,13 +281,238 @@ pub fn audit(repo_root: &Path) -> Result<Report, TrippyWallError> {
 /// - the directory holds no Rust file at all
 ///   ([`NoSources`](TrippyWallError::NoSources)).
 pub fn audit_sources(src_dir: &Path, allowed_module: &str) -> Result<Report, TrippyWallError> {
-    // The detection is the next commit. Until then every source reports clean,
-    // so the tests fail on the missing behavior rather than on a missing symbol.
-    let _ = src_dir;
+    let files = rust_sources(src_dir)?;
+    if files.is_empty() {
+        return Err(TrippyWallError::NoSources {
+            dir: src_dir.to_path_buf(),
+        });
+    }
+
+    let mut offenders = Vec::new();
+    for path in &files {
+        // Every file is read and parsed, the allowed module included. A file
+        // the guard skips is a file it cannot vouch for, and the count it
+        // reports must be the count of files it truly read.
+        let text = fs::read_to_string(path).map_err(|source| TrippyWallError::ReadSource {
+            path: path.clone(),
+            source,
+        })?;
+        let file = syn::parse_file(&text).map_err(|error| TrippyWallError::Unparsable {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+
+        if is_allowed(src_dir, path, allowed_module) {
+            continue;
+        }
+
+        let mut finder = Finder::default();
+        finder.visit_file(&file);
+        if finder.found.is_empty() {
+            continue;
+        }
+        offenders.push(Offender {
+            path: path.clone(),
+            trippy_paths: finder.found.into_iter().collect(),
+        });
+    }
 
     Ok(Report {
-        files: Vec::new(),
-        offenders: Vec::new(),
+        files,
+        offenders,
         allowed_module: allowed_module.to_owned(),
     })
+}
+
+/// True when `path` belongs to the one module the wall lets through: the file
+/// `allowed_module` directly under `src_dir`, or any file under a directory of
+/// the same name beside it.
+///
+/// The directory half is deliberate. A later split of the tracer into
+/// submodules — `trace/mod.rs` beside `trace/probe.rs` — must not open the wall
+/// without a word.
+fn is_allowed(src_dir: &Path, path: &Path, allowed_module: &str) -> bool {
+    let Ok(relative) = path.strip_prefix(src_dir) else {
+        return false;
+    };
+    if relative == Path::new(allowed_module) {
+        return true;
+    }
+    let Some(directory) = Path::new(allowed_module).file_stem() else {
+        return false;
+    };
+    matches!(
+        relative.components().next(),
+        Some(Component::Normal(first)) if first == directory
+    )
+}
+
+/// Every Rust source under `dir`, at any depth, sorted by path.
+///
+/// A directory that exists and cannot be listed is a refusal. To walk past it
+/// would drop files from the audit and report the wall intact for the wrong
+/// reason.
+fn rust_sources(dir: &Path) -> Result<Vec<PathBuf>, TrippyWallError> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+
+    while let Some(current) = pending.pop() {
+        let entries = fs::read_dir(&current).map_err(|source| TrippyWallError::ReadDir {
+            dir: current.clone(),
+            source,
+        })?;
+        for entry in entries {
+            let path = entry
+                .map_err(|source| TrippyWallError::ReadDir {
+                    dir: current.clone(),
+                    source,
+                })?
+                .path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == RS) {
+                files.push(path);
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
+/// The trippy paths one file names, collected by one walk of its syntax tree.
+///
+/// The four checks are the four shapes the same fact arrives in. See the module
+/// header for why each one needs its own visit.
+#[derive(Debug, Default)]
+struct Finder {
+    /// What the walk found, sorted and deduplicated by the set itself.
+    found: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for Finder {
+    /// Check 1: a path whose first segment names a trippy crate.
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        if let Some(first) = node.segments.first() {
+            if names_trippy(&first.ident) {
+                self.found.insert(render_path(node));
+            }
+        }
+        syn::visit::visit_path(self, node);
+    }
+
+    /// Check 2: a `use` tree rooted at a trippy crate.
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        collect_use_tree(&node.tree, &mut Vec::new(), &mut self.found);
+        syn::visit::visit_item_use(self, node);
+    }
+
+    /// Check 3: `extern crate trippy_...;`, which holds a bare identifier.
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        if names_trippy(&node.ident) {
+            self.found.insert(node.ident.to_string());
+        }
+        syn::visit::visit_item_extern_crate(self, node);
+    }
+
+    /// Check 4: an identifier in the unparsed body of a macro.
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        scan_tokens(&node.tokens, &mut self.found);
+        syn::visit::visit_macro(self, node);
+    }
+
+    /// Check 4 again, for the other place `syn` keeps unparsed tokens: the
+    /// arguments of an attribute, such as `#[derive(trippy_core::Thing)]`.
+    fn visit_meta_list(&mut self, node: &'ast syn::MetaList) {
+        scan_tokens(&node.tokens, &mut self.found);
+        syn::visit::visit_meta_list(self, node);
+    }
+}
+
+/// True when an identifier starts with the name every trippy crate starts with.
+fn names_trippy(ident: &syn::Ident) -> bool {
+    ident.to_string().starts_with(TRIPPY)
+}
+
+/// Render a path the way a person writes it: the segment identifiers joined
+/// with `::`.
+///
+/// A leading `::` is dropped, and so are the generic arguments of a segment.
+/// The result names the item, which is what a reader needs to find it.
+fn render_path(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join(SEPARATOR)
+}
+
+/// Collect the full paths one `use` tree declares, and keep the ones rooted at
+/// a trippy crate.
+///
+/// `prefix` holds the segments above `tree`. A group divides one tree into
+/// several, and each branch of it gets the same prefix.
+fn collect_use_tree(tree: &syn::UseTree, prefix: &mut Vec<String>, found: &mut BTreeSet<String>) {
+    match tree {
+        syn::UseTree::Path(node) => {
+            prefix.push(node.ident.to_string());
+            collect_use_tree(&node.tree, prefix, found);
+            prefix.pop();
+        }
+        syn::UseTree::Name(node) => record_use_path(prefix, &node.ident.to_string(), found),
+        // `use trippy_core as tc;` is the shape the alias hides. The renamed
+        // identifier is the one that names the crate, so the rename is read and
+        // the new name is not.
+        syn::UseTree::Rename(node) => record_use_path(prefix, &node.ident.to_string(), found),
+        syn::UseTree::Glob(_) => record_use_path(prefix, "*", found),
+        syn::UseTree::Group(node) => {
+            for branch in &node.items {
+                collect_use_tree(branch, prefix, found);
+            }
+        }
+    }
+}
+
+/// Record `prefix::leaf` when the first name in it is a trippy crate.
+///
+/// The first name is the root of the tree, which is the only segment that names
+/// a crate. `use crate::trippy_helper::thing;` is rooted at `crate` and names
+/// nothing outside this workspace.
+fn record_use_path(prefix: &[String], leaf: &str, found: &mut BTreeSet<String>) {
+    let root = prefix.first().map_or(leaf, String::as_str);
+    if !root.starts_with(TRIPPY) {
+        return;
+    }
+    let mut segments: Vec<&str> = prefix.iter().map(String::as_str).collect();
+    segments.push(leaf);
+    found.insert(segments.join(SEPARATOR));
+}
+
+/// Record every identifier that names a trippy crate inside a token stream.
+///
+/// `syn` hands a macro body over as tokens that it did not parse, so no visit
+/// of the syntax tree reaches into one. The walk goes into every group and
+/// reads an identifier only. It never reads a literal, so the string
+/// `"trippy"` in a macro body does not fire.
+///
+/// A group holds another stream, so the walk keeps its own stack of streams.
+/// Recursion here would put the depth of a macro body on the call stack, and a
+/// generated file can nest one as deep as it likes.
+fn scan_tokens(tokens: &TokenStream, found: &mut BTreeSet<String>) {
+    let mut pending = vec![tokens.clone()];
+
+    while let Some(stream) = pending.pop() {
+        for token in stream {
+            match token {
+                TokenTree::Ident(ident) => {
+                    let name = ident.to_string();
+                    if name.starts_with(TRIPPY) {
+                        found.insert(name);
+                    }
+                }
+                TokenTree::Group(group) => pending.push(group.stream()),
+                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            }
+        }
+    }
 }

@@ -112,13 +112,13 @@ pub fn show() {
 ";
 
 /// A module whose paths are rooted at `crate`. Only the first segment of a path
-/// names a crate, so a trippy word later in the path names nothing.
+/// names a crate, so a trippy word later in the path names nothing outside this
+/// workspace.
 const CRATE_ROOTED: &str = "\
-use crate::trippy_helper;
+use crate::trippy_helper::Thing;
 
-pub fn helper() {
-    crate::trippy_helper::thing();
-    trippy_helper::thing();
+pub fn helper() -> Thing {
+    crate::trippy_helper::thing()
 }
 ";
 
@@ -396,6 +396,33 @@ fn repo_root() -> PathBuf {
 /// files.
 fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|e| panic!("cannot canonicalize {}: {e}", path.display()))
+}
+
+/// The two constants [`trippy_wall::audit`] holds — the source directory it
+/// reads, and the module it lets through — are pinned here against a repository
+/// built for the purpose.
+///
+/// Every other fixture calls `audit_sources` and passes both of them in, so a
+/// wrong constant inside `audit` would change nothing that those tests see.
+/// `src/krt/src/trace.rs` does not exist yet, so the live repository cannot pin
+/// them either: a guard that let `tracer.rs` through, or that read
+/// `src/krt/source`, would report the same clean verdict it reports today.
+#[test]
+fn the_repository_audit_reads_krt_and_lets_the_tracer_through() {
+    let dir = tree(&[
+        ("src/krt/src/main.rs", PLAIN),
+        ("src/krt/src/trace.rs", &EVERY_FORM.join("\n")),
+        ("src/krt/src/record.rs", USE_DECLARATION),
+    ]);
+
+    let report = trippy_wall::audit(dir.path()).expect("the audit reaches a verdict");
+
+    assert_eq!(
+        offenders(&dir, &report),
+        one_offender("src/krt/src/record.rs", &["trippy_core::Builder"]),
+        "the audit must read the sources of krt, and let trace.rs alone"
+    );
+    assert_eq!(report.files_examined(), 3);
 }
 
 #[test]
