@@ -85,6 +85,8 @@ pub(crate) enum RunError {
 /// anything. Each round that arrives becomes one `round` record. The `end`
 /// record names the number of rounds that the run recorded and why it stopped.
 ///
+/// Each round that the run records also prints one status line to `status`.
+///
 /// A failed write of any record stops the run. The recording is the whole
 /// purpose of the tool, and a run that keeps a display while it silently
 /// records nothing is worse than a run that stops.
@@ -97,12 +99,13 @@ pub(crate) enum RunError {
     dead_code,
     reason = "main starts the run loop when it resolves the destination, and that arrives in a later slice of issue #367"
 )]
-pub(crate) fn record<W: Write>(
+pub(crate) fn record<W: Write, S: Write>(
     start: &RunRecord,
     rounds: &Receiver<RoundRecord>,
     limits: &Limits,
     stop: &dyn Fn() -> bool,
     writer: &mut Writer<W>,
+    _status: &mut S,
 ) -> Result<Outcome, RunError> {
     writer
         .write(&Record::Run(start.clone()))
@@ -263,6 +266,18 @@ mod tests {
     /// The time that a round of the whole path takes, in milliseconds.
     const WHOLE_PATH_MS: u64 = 1000;
 
+    /// The time that a round of one answer takes, in milliseconds.
+    const LOST_ROUND_MS: u64 = 1004;
+
+    /// The status line of the first round of a run that answered the whole path.
+    const A_WHOLE_PATH_LINE: &str = "round 1  2 hops  reached  1s";
+
+    /// The number of the round that answered one hop.
+    const LOST_ROUND_SEQ: u64 = 2;
+
+    /// The status line of a round that answered one hop and reached nothing.
+    const A_LOST_ROUND_LINE: &str = "round 2  1 hop  never reached  1004ms";
+
     /// The limits of a run that stops on nothing.
     const NO_LIMIT: Limits = Limits {
         rounds: None,
@@ -345,6 +360,24 @@ mod tests {
                     icmp: ECHO_REPLY.to_owned(),
                 },
             ],
+        }
+    }
+
+    /// One round that answered one hop and reached nothing.
+    fn a_lost_round(seq: u64) -> RoundRecord {
+        RoundRecord {
+            run: RunId::from(RUN),
+            seq,
+            ts: moment(ROUND_START),
+            dur_ms: LOST_ROUND_MS,
+            ttl_range: TtlRange::new(FIRST_TTL, TARGET_TTL).expect("the test range must hold"),
+            reached: false,
+            hops: vec![Hop {
+                ttl: FIRST_TTL,
+                addr: address(FIRST_HOP),
+                rtt_ms: FIRST_HOP_RTT_MS,
+                icmp: TIME_EXCEEDED.to_owned(),
+            }],
         }
     }
 
@@ -502,19 +535,30 @@ mod tests {
         outcome: Result<Outcome, RunError>,
         /// What the recorded file holds.
         recording: Recording,
+        /// What the run printed.
+        status: String,
     }
 
     /// Records one run to a real file, and reads the file back.
     fn ran(label: &str, rounds: &[RoundRecord], limits: &Limits, stop: &dyn Fn() -> bool) -> Ran {
         let file = TempFile::absent(label);
         let stream = a_stream(rounds);
+        let mut status: Vec<u8> = Vec::new();
         let outcome = {
             let mut writer = Writer::append(file.path()).expect("the test file must open");
-            record(&a_run_record(), &stream, limits, stop, &mut writer)
+            record(
+                &a_run_record(),
+                &stream,
+                limits,
+                stop,
+                &mut writer,
+                &mut status,
+            )
         };
         Ran {
             outcome,
             recording: Recording::read(file.path()).expect("the test file must read"),
+            status: String::from_utf8(status).expect("the status must hold UTF-8 text"),
         }
     }
 
@@ -691,6 +735,7 @@ mod tests {
             &after_rounds(1),
             &|| false,
             &mut writer,
+            &mut Vec::new(),
         );
         assert!(
             matches!(outcome, Err(RunError::Write(_))),
@@ -713,6 +758,7 @@ mod tests {
             &after_rounds(3),
             &|| false,
             &mut writer,
+            &mut Vec::new(),
         );
         assert!(
             matches!(outcome, Err(RunError::Write(_))),
@@ -725,5 +771,66 @@ mod tests {
             .expect("the record must parse")
             .expect("the record must name a type that this build knows");
         assert_eq!(kind_of(&written), "run");
+    }
+
+    // The status line of one round. A later slice replaces this line with the
+    // live table.
+
+    /// The status lines that a run printed, without the newline of each one.
+    fn lines_of(ran: &Ran) -> Vec<&str> {
+        ran.status.lines().collect()
+    }
+
+    #[test]
+    fn a_round_that_answered_two_hops_and_reached_the_target_prints_one_line() {
+        let ran = ran(
+            "status-reached",
+            &rounds_of(&[1]),
+            &after_rounds(1),
+            &|| false,
+        );
+        assert_eq!(ran.status, format!("{A_WHOLE_PATH_LINE}\n"));
+    }
+
+    /// One hop keeps the singular name, and a round that reached nothing says
+    /// so.
+    #[test]
+    fn a_round_that_answered_one_hop_and_reached_nothing_prints_the_singular_name() {
+        let ran = ran(
+            "status-lost",
+            &[a_lost_round(LOST_ROUND_SEQ)],
+            &after_rounds(1),
+            &|| false,
+        );
+        assert_eq!(ran.status, format!("{A_LOST_ROUND_LINE}\n"));
+    }
+
+    #[test]
+    fn a_run_of_three_rounds_prints_one_line_for_each_round() {
+        let ran = ran(
+            "status-three",
+            &rounds_of(&[1, 2, 3]),
+            &after_rounds(3),
+            &|| false,
+        );
+        assert_eq!(
+            lines_of(&ran),
+            [
+                A_WHOLE_PATH_LINE,
+                "round 2  2 hops  reached  1s",
+                "round 3  2 hops  reached  1s",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_that_records_no_round_prints_nothing() {
+        let ran = ran("status-none", &rounds_of(&[1, 2]), &NO_LIMIT, &|| true);
+        assert_eq!(outcome_of(&ran).rounds, 0);
+        assert!(
+            ran.status.is_empty(),
+            "the run printed no line: {:?}",
+            ran.status
+        );
     }
 }
