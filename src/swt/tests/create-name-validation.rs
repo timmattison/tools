@@ -16,17 +16,11 @@
 
 mod support;
 
-use support::run_swt_outside_a_repository;
+use support::{run_swt_outside_a_repository, OPTION_LOOKING_NAMES};
 
 /// A name that must never reach git: it traverses out of the worktree parent
 /// directory and would put the branch and the checkout somewhere unrelated.
 const TRAVERSING_NAME: &str = "../evil";
-
-/// Names that look like options. Each is a name swt refuses, and the refusal is
-/// swt's own — a hyphen-leading argument must not be read as a flag on the way
-/// in, or the user is told the argument was "unexpected" instead of being told
-/// which rule it broke.
-const OPTION_LOOKING_NAMES: [&str; 3] = ["-b", "-rf", "--force"];
 
 /// The rule quoted back to the user, verbatim, when a name is refused.
 const WORKTREE_NAME_RULE: &str =

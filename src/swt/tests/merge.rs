@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 use std::process::Output;
 
 use support::{
-    exiting_check, git, run_swt, unique, write_swt_check, LinkedWorktree, TestRepo, SWT_CHECK,
-    TRACKED_FILE,
+    exiting_check, git, run_swt, unique, write_swt_check, LinkedWorktree, TestRepo,
+    OPTION_LOOKING_NAMES, SWT_CHECK, TRACKED_FILE,
 };
 
 /// Basename of the lock file inside the repository's shared git directory. Built
@@ -187,6 +187,37 @@ fn a_worktree_path_that_does_not_exist_is_named_in_the_refusal() {
         format!("No such worktree: {}\n", ghost.display()),
         "the path the user typed must be named back"
     );
+}
+
+// A path that starts with a hyphen is still a path. `merge` owns the argument,
+// so it is the one to answer for it: the path is resolved against the current
+// directory and reported as missing, the same answer any other path that names
+// nothing gets. Without `allow_hyphen_values` on `merge`'s positional, clap takes
+// the argument for an option `swt` does not have and answers "unexpected
+// argument" with the usage status — a different message about a different
+// question, and the divergence from the original implementation this pins.
+//
+// Resolving before reporting is also why a hyphen-leading path is no injection
+// risk: what reaches git is an absolute path, which cannot be read as a flag.
+#[test]
+fn merge_reports_option_looking_paths_as_missing_worktrees() {
+    let repo = TestRepo::new();
+
+    for name in OPTION_LOOKING_NAMES {
+        let output = run_swt(repo.path(), &["merge", name]);
+        let stderr = stderr_of(&output);
+
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "`swt merge {name}` must be refused by swt, not by the argument parser: {stderr}"
+        );
+        assert_eq!(
+            stderr,
+            format!("No such worktree: {}\n", repo.path().join(name).display()),
+            "`swt merge {name}` must resolve the argument as a path and name it back"
+        );
+    }
 }
 
 // In-progress work in the parent is exactly what a fast-forward would silently

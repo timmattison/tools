@@ -63,6 +63,17 @@ pub const TRACKED_FILE: &str = "tracked.txt";
 /// Basename of the per-developer green-check override script.
 pub const SWT_CHECK: &str = ".swt-check";
 
+/// Arguments that look like options but are values. `swt` has no options of its
+/// own beyond `--help`, so each of these is a worktree name or a worktree path
+/// that happens to start with a hyphen, and the command that owns it — not clap —
+/// must be the one to answer for it.
+///
+/// The list lives here because both commands take such a value and each pins it
+/// separately: `create` refuses the name against its naming rule, `merge`
+/// resolves the path and reports that nothing is there. One list keeps the two
+/// halves from drifting into covering different spellings.
+pub const OPTION_LOOKING_NAMES: [&str; 3] = ["-b", "-rf", "--force"];
+
 /// Suffix every worktree directory `swt create` builds carries.
 pub const WORKTREE_SUFFIX: &str = ".swt";
 
