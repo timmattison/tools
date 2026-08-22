@@ -18,7 +18,8 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
 use crate::dvfs::DvfsTable;
 use crate::mhz::Mhz;
@@ -74,6 +75,11 @@ pub const MINIMUM_BUSY_SAMPLES: usize = 5;
 /// case, and the data of the variant sits beside that key rather than under it.
 /// [`Outcome::Throttled`] adds `decay`, [`Outcome::NotEnoughData`] adds
 /// `busy_samples`, and the other two add nothing.
+///
+/// The outcome also decides which measurements the line carries.
+/// [`Outcome::NotEnoughData`] means the run gave no clock numbers at all, so
+/// its line leaves out `peak`, `early_mean`, `late_mean` and
+/// `late_ratio_of_max`. See [`VerdictLine`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
@@ -94,6 +100,10 @@ pub enum Outcome {
 }
 
 /// The measured summary of one run.
+///
+/// The four clock fields are always present, so an [`Outcome::NotEnoughData`]
+/// run holds zero in each of them. Read them only beside the outcome. The JSON
+/// mode does not print them on such a run. See [`VerdictLine`].
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Verdict {
     /// What the run showed. In JSON it becomes an `outcome` key beside the
@@ -133,10 +143,85 @@ pub struct Verdict {
 /// ```
 ///
 /// The tool prints it on one line. It is broken here to fit the page.
-#[derive(Debug, Serialize)]
+///
+/// A run that gave no clock numbers carries none. [`Verdict`] fills `peak`,
+/// `early_mean`, `late_mean` and `late_ratio_of_max` with zero on an
+/// [`Outcome::NotEnoughData`] run, because the Rust fields are always present.
+/// A zero on the wire reads as a measurement, so the line leaves the four keys
+/// out instead. `peak_power_mw` and `worst_pressure` stay, because the run
+/// measured both of them.
+///
+/// ```text
+/// {"verdict":{"outcome":"not_enough_data","busy_samples":3,
+///  "peak_power_mw":48500,"worst_pressure":"nominal"}}
+/// ```
+#[derive(Debug)]
 pub struct VerdictLine<'a> {
     /// The verdict this line carries.
     verdict: &'a Verdict,
+}
+
+/// The wire shape of a run the judge could judge. See [`VerdictLine`].
+///
+/// The field order and the flattened outcome match [`Verdict`], so a judged
+/// line reads exactly as it did before the unjudged line lost its four keys.
+#[derive(Serialize)]
+struct JudgedWire<'a> {
+    #[serde(flatten)]
+    outcome: &'a Outcome,
+    peak: Mhz,
+    early_mean: Mhz,
+    late_mean: Mhz,
+    late_ratio_of_max: f64,
+    peak_power_mw: u32,
+    worst_pressure: PressureLevel,
+}
+
+/// The wire shape of a run the judge could not judge. See [`VerdictLine`].
+///
+/// It holds the two measurements such a run still made, and no clock number.
+#[derive(Serialize)]
+struct UnjudgedWire<'a> {
+    #[serde(flatten)]
+    outcome: &'a Outcome,
+    peak_power_mw: u32,
+    worst_pressure: PressureLevel,
+}
+
+impl Serialize for VerdictLine<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let verdict = self.verdict;
+        let mut line = serializer.serialize_struct("VerdictLine", 1)?;
+        // The match is exhaustive on purpose. A new outcome must state whether
+        // its line carries the clock numbers.
+        match verdict.outcome {
+            Outcome::NotEnoughData { .. } => line.serialize_field(
+                "verdict",
+                &UnjudgedWire {
+                    outcome: &verdict.outcome,
+                    peak_power_mw: verdict.peak_power_mw,
+                    worst_pressure: verdict.worst_pressure,
+                },
+            )?,
+            Outcome::HeldClock | Outcome::Throttled { .. } | Outcome::NeverReachedPeak => line
+                .serialize_field(
+                    "verdict",
+                    &JudgedWire {
+                        outcome: &verdict.outcome,
+                        peak: verdict.peak,
+                        early_mean: verdict.early_mean,
+                        late_mean: verdict.late_mean,
+                        late_ratio_of_max: verdict.late_ratio_of_max,
+                        peak_power_mw: verdict.peak_power_mw,
+                        worst_pressure: verdict.worst_pressure,
+                    },
+                )?,
+        }
+        line.end()
+    }
 }
 
 /// Wrap a verdict in the shape the JSON mode prints it. See [`VerdictLine`].
@@ -169,6 +254,10 @@ pub fn judge(samples: &[Sample], table: &DvfsTable) -> Verdict {
         .filter(|sample| sample.p_cluster_is_busy(BUSY_THRESHOLD_PCT))
         .collect();
 
+    // The four clock numbers below are placeholders, not readings. The struct
+    // fields are always present, thus they need a value. The outcome is the
+    // guard against a reader that takes them for measurements, and the JSON
+    // mode leaves all four out of such a line. See `VerdictLine`.
     let empty = Verdict {
         outcome: Outcome::NotEnoughData {
             busy_samples: busy.len(),

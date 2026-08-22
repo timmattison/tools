@@ -98,6 +98,31 @@ The data of the outcome sits beside `outcome`, not under it. `throttled` adds
 adds `busy_samples`, which is the count of busy samples the run collected. The
 other two outcomes add nothing.
 
+The outcome also decides which measurements the line carries. A
+`not_enough_data` run measured no clock at all, so its line leaves out `peak`,
+`early_mean`, `late_mean` and `late_ratio_of_max`. A zero in those keys would
+read as a measurement, and an absent key cannot. The line keeps
+`peak_power_mw` and `worst_pressure`, because the run measured both of them
+even though it could not support a verdict.
+
+```text
+{"verdict":{"outcome":"not_enough_data","busy_samples":3,"peak_power_mw":48500,"worst_pressure":"nominal"}}
+```
+
+The other three outcomes carry every key in the table below.
+
+| Key | On which outcomes | What it holds |
+| --- | --- | --- |
+| `outcome` | all four | The name of the verdict, in lower snake case. |
+| `decay` | `throttled` | The share of the early mean that was lost. |
+| `busy_samples` | `not_enough_data` | The count of busy samples the run collected. |
+| `peak` | the three judged ones | The peak clock under load, in megahertz. |
+| `early_mean` | the three judged ones | The mean clock over the early window, in megahertz. |
+| `late_mean` | the three judged ones | The mean clock over the late window, in megahertz. |
+| `late_ratio_of_max` | the three judged ones | The late mean as a share of the peak of the chip. |
+| `peak_power_mw` | all four | The highest CPU package power, in milliwatts. |
+| `worst_pressure` | all four | The worst thermal pressure level of the run. |
+
 ## Why the IO Registry, and not `ioreg`
 
 The command line tool `ioreg` renders the DVFS tables as hexadecimal inside a
