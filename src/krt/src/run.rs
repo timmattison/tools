@@ -15,6 +15,7 @@
 //! while it silently records nothing is worse than a run that stops.
 
 use crate::record::{EndReason, EndRecord, Record, RoundRecord, RunId, RunRecord, Writer};
+use crate::{counted, render_duration, HOP, NEVER_REACHED, REACHED, ROUND, SUMMARY_SEPARATOR};
 use chrono::Utc;
 use std::io::Write;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -105,7 +106,7 @@ pub(crate) fn record<W: Write, S: Write>(
     limits: &Limits,
     stop: &dyn Fn() -> bool,
     writer: &mut Writer<W>,
-    _status: &mut S,
+    status: &mut S,
 ) -> Result<Outcome, RunError> {
     writer
         .write(&Record::Run(start.clone()))
@@ -121,9 +122,15 @@ pub(crate) fn record<W: Write, S: Write>(
         }
         match rounds.recv_timeout(wait(limits.deadline)) {
             Ok(round) => {
+                let line = status_line(&round);
                 writer
                     .write(&Record::Round(round))
                     .map_err(RunError::Write)?;
+                // A line that does not print stops nothing. The recording is
+                // the purpose of the tool, and the line is one view of it, so a
+                // reader who closes the pipe of the display loses the display
+                // and keeps the recording.
+                drop(writeln!(status, "{line}"));
                 recorded += 1;
             }
             // No round arrived inside the wait. The loop takes another turn, so
@@ -142,6 +149,31 @@ pub(crate) fn record<W: Write, S: Write>(
             }
         }
     }
+}
+
+/// Writes the one line that a run prints for one round.
+///
+/// The line holds the number of the round, the number of hops that answered,
+/// whether the round reached the target, and the time that the round took. Two
+/// spaces separate the fields, as they do in the summary line of a replay.
+///
+/// A hop that did not answer is absent from the record, so the count is the
+/// number of hops that answered and not the length of the path.
+///
+/// A later slice replaces this line with the live table.
+fn status_line(round: &RoundRecord) -> String {
+    let reached = if round.reached {
+        REACHED
+    } else {
+        NEVER_REACHED
+    };
+    [
+        format!("{ROUND} {}", round.seq),
+        counted(round.hops.len(), HOP),
+        reached.to_owned(),
+        render_duration(Duration::from_millis(round.dur_ms)),
+    ]
+    .join(SUMMARY_SEPARATOR)
 }
 
 /// Why the run stops at the top of this turn. A run that goes on stops for
