@@ -18,6 +18,8 @@
 
 use std::time::Duration;
 
+use serde::ser::{Serialize, SerializeMap, Serializer};
+
 use crate::dvfs::DvfsTable;
 use crate::mhz::Mhz;
 use crate::powermetrics::{PressureLevel, Sample};
@@ -104,6 +106,36 @@ pub struct Verdict {
     pub peak_power_mw: u32,
     /// The worst thermal pressure level the run reported.
     pub worst_pressure: PressureLevel,
+}
+
+/// One [`Verdict`] in the shape the JSON mode prints it.
+///
+/// The whole verdict sits under a single `verdict` key. A reader of the
+/// line-delimited stream tells a verdict line from a sample line by that key
+/// alone, because a sample line carries `at_seconds` and no `verdict`.
+///
+/// Build one with [`verdict_line`]. The field is private, so the shape has one
+/// entrance and the printed stream cannot drift from what the tests hold.
+#[derive(Debug)]
+pub struct VerdictLine<'a> {
+    /// The verdict this line carries.
+    #[allow(
+        dead_code,
+        reason = "the stub does not read it yet; the real shape comes next"
+    )]
+    verdict: &'a Verdict,
+}
+
+impl Serialize for VerdictLine<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_map(Some(0))?.end()
+    }
+}
+
+/// Wrap a verdict in the shape the JSON mode prints it. See [`VerdictLine`].
+#[must_use]
+pub const fn verdict_line(verdict: &Verdict) -> VerdictLine<'_> {
+    VerdictLine { verdict }
 }
 
 /// Judge a run of samples against the DVFS table of the chip.
