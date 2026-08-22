@@ -349,12 +349,11 @@ impl TtlRange {
         dead_code,
         reason = "the tracer converts each round through this constructor, and the tracer arrives in a later slice of issue #367"
     )]
-    #[allow(
-        unused_variables,
-        reason = "the stub of the red step reads no last TTL; the green step reads it"
-    )]
     pub(crate) fn from_first(first: u8, last: u8) -> Self {
-        Self { first, last: first }
+        Self {
+            first,
+            last: last.max(first),
+        }
     }
 
     /// The first TTL of the round.

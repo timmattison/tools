@@ -19,9 +19,10 @@
 //! this file alone. The run loop that drives the tracer arrives in a later
 //! slice.
 
-use crate::record::{self, RoundRecord, RunId, TtlRange};
+use crate::record::{self, Hop, RoundRecord, RunId, TtlRange};
 use chrono::{DateTime, Utc};
-use trippy_core::{IcmpPacketType, Round};
+use std::time::SystemTime;
+use trippy_core::{CompletionReason, IcmpPacketType, ProbeStatus, Round};
 
 /// The remedy of a platform that needs raw socket privileges and holds none.
 ///
@@ -105,6 +106,13 @@ pub(crate) enum PrivilegeError {
     },
 }
 
+/// The number of milliseconds in one second.
+///
+/// `Duration::as_millis_f64` is not stable in the pinned toolchain, so the
+/// conversion reads a duration as a fraction of a second and scales it by this
+/// number.
+const MILLIS_PER_SECOND: f64 = 1000.0;
+
 /// The name that the schema records when a hop below the target answered that
 /// the TTL of the probe ran out.
 const TIME_EXCEEDED: &str = "time_exceeded";
@@ -142,12 +150,13 @@ enum IcmpKind {
 
 impl IcmpKind {
     /// The name that the schema records for this message.
-    #[allow(
-        unused_variables,
-        reason = "the stub of the red step reads no message; the green step reads it"
-    )]
     fn name(self) -> &'static str {
-        NOT_APPLICABLE
+        match self {
+            Self::TimeExceeded => TIME_EXCEEDED,
+            Self::EchoReply => ECHO_REPLY,
+            Self::Unreachable => UNREACHABLE,
+            Self::NotApplicable => NOT_APPLICABLE,
+        }
     }
 }
 
@@ -194,10 +203,6 @@ fn icmp_kind(packet: IcmpPacketType) -> IcmpKind {
     dead_code,
     reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
 )]
-#[allow(
-    unused_variables,
-    reason = "the stub of the red step reads no round; the green step reads it"
-)]
 fn to_round_record(
     round: &Round<'_>,
     run: &RunId,
@@ -205,15 +210,137 @@ fn to_round_record(
     now: DateTime<Utc>,
     first_ttl: u8,
 ) -> RoundRecord {
+    let mut hops: Vec<Hop> = round.probes.iter().filter_map(to_hop).collect();
+    // The answers of a round arrive in the order the network returns them, and
+    // a record holds its hops in the order of the path.
+    hops.sort_by_key(|hop| hop.ttl);
+
+    let last_ttl = if round.largest_ttl.0 >= first_ttl {
+        round.largest_ttl.0
+    } else {
+        round
+            .probes
+            .iter()
+            .filter_map(sent_probe)
+            .map(|probe| probe.ttl)
+            .max()
+            .unwrap_or(first_ttl)
+    };
+
+    let ts = round
+        .probes
+        .iter()
+        .filter_map(sent_probe)
+        .map(|probe| probe.sent)
+        .min()
+        .map_or(now, DateTime::<Utc>::from);
+    // A difference below zero names a `now` before the first probe left, which
+    // one round of one clock never gives. A record holds no negative duration,
+    // so such a difference records zero.
+    let dur_ms = u64::try_from((now - ts).num_milliseconds()).unwrap_or_default();
+
+    // A `match` and not a `matches!`, so a new reason of the tracer breaks
+    // this one file rather than recording `false` without a word.
+    let reached = match round.reason {
+        CompletionReason::TargetFound => true,
+        CompletionReason::RoundTimeLimitExceeded => false,
+    };
+
     RoundRecord {
         run: run.clone(),
         seq,
-        ts: now,
-        dur_ms: 0,
-        ttl_range: TtlRange::from_first(first_ttl, first_ttl),
-        reached: false,
-        hops: Vec::new(),
+        ts,
+        dur_ms,
+        ttl_range: TtlRange::from_first(first_ttl, last_ttl),
+        reached,
+        hops,
     }
+}
+
+/// The hop that one status of the tracer records. A status that no hop
+/// answered records none.
+///
+/// The schema holds one hop for each answer, so a probe that the round never
+/// sent, that it skipped, that failed, and that still waits each record
+/// nothing. `ttl_range` states which TTLs the round probed, so a reader still
+/// parts a hop that did not answer from a TTL that the round never probed.
+#[allow(
+    dead_code,
+    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
+)]
+fn to_hop(status: &ProbeStatus) -> Option<Hop> {
+    match status {
+        ProbeStatus::Complete(probe) => Some(Hop {
+            ttl: probe.ttl.0,
+            addr: probe.host,
+            rtt_ms: rtt_millis(probe.sent, probe.received),
+            icmp: icmp_kind(probe.icmp_packet_type).name().to_owned(),
+        }),
+        ProbeStatus::NotSent
+        | ProbeStatus::Skipped
+        | ProbeStatus::Failed(_)
+        | ProbeStatus::Awaited(_) => None,
+    }
+}
+
+/// One probe that a round put on the wire.
+///
+/// A round that answered nothing still states which TTLs it probed, and the
+/// probes that left are the answer. This value carries the two facts that such
+/// a round reads from one of them.
+#[derive(Debug, Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
+)]
+struct SentProbe {
+    /// The TTL that the probe carried.
+    ttl: u8,
+    /// The moment that the probe left.
+    sent: SystemTime,
+}
+
+/// The probe that one status of the tracer put on the wire. A status that put
+/// none there gives `None`.
+///
+/// A probe left when the round awaits its answer, and when the answer already
+/// arrived. A probe that the round never sent, that it skipped, and that
+/// failed each left nothing on the wire, so none of them widens the range of
+/// TTLs and none of them invents a hop that was lost.
+#[allow(
+    dead_code,
+    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
+)]
+fn sent_probe(status: &ProbeStatus) -> Option<SentProbe> {
+    match status {
+        ProbeStatus::Awaited(probe) => Some(SentProbe {
+            ttl: probe.ttl.0,
+            sent: probe.sent,
+        }),
+        ProbeStatus::Complete(probe) => Some(SentProbe {
+            ttl: probe.ttl.0,
+            sent: probe.sent,
+        }),
+        ProbeStatus::NotSent | ProbeStatus::Skipped | ProbeStatus::Failed(_) => None,
+    }
+}
+
+/// The round trip time of one answer, in milliseconds.
+///
+/// An answer that the clock stamps before its probe left gives zero. The clock
+/// of the operating system steps when the machine corrects its time, so the
+/// two stamps of one probe can run backward, and a record holds no negative
+/// round trip time.
+#[allow(
+    dead_code,
+    reason = "the tracer thread converts each round, and the tracer arrives in a later slice of issue #367"
+)]
+fn rtt_millis(sent: SystemTime, received: SystemTime) -> f64 {
+    received
+        .duration_since(sent)
+        .unwrap_or_default()
+        .as_secs_f64()
+        * MILLIS_PER_SECOND
 }
 
 #[cfg(test)]
@@ -531,6 +658,10 @@ this platform needs raw socket privileges to send probes.
     /// The round trip time keeps the fraction of a millisecond. A conversion
     /// that read whole milliseconds records `1` here.
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "1500 microseconds is 1.5 milliseconds, and both numbers are exact in binary, so the conversion gives this one and no other"
+    )]
     fn the_round_trip_time_is_the_milliseconds_between_the_two_stamps() {
         let probes = [an_answer(
             FIRST_TTL,
