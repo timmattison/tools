@@ -2,10 +2,14 @@
 //!
 //! The verdict compares three numbers. The **peak** is the highest clock the
 //! P-cluster reached while busy. The **early mean** is the clock over the first
-//! seconds of the run, before the heat sink saturates. The **late mean** is the
-//! clock over the last stretch of the run. A machine that holds its clock has
-//! an early mean and a late mean that agree. A machine that throttles shows a
-//! late mean below both.
+//! seconds of the load, before the heat sink saturates. The **late mean** is
+//! the clock over the last stretch of the load. A machine that holds its clock
+//! has an early mean and a late mean that agree. A machine that throttles
+//! shows a late mean below both.
+//!
+//! Both windows are measured from the busy samples, and [`windows`] keeps each
+//! one to one third of the busy span or less. Thus the two windows never share
+//! a sample, and a short run shows its decay at full size.
 //!
 //! Two failure modes are separated on purpose. A run whose clock **decays** was
 //! fast and then slowed, which is thermal throttling or a power limit. A run
@@ -18,19 +22,32 @@ use crate::dvfs::DvfsTable;
 use crate::mhz::Mhz;
 use crate::powermetrics::{PressureLevel, Sample};
 
-/// Samples inside this window from the start form the early mean.
+/// The longest early window. It starts at the first busy sample.
+///
+/// A run shorter than 80 seconds gets a smaller window. See [`windows`].
 pub const EARLY_WINDOW: Duration = Duration::from_secs(20);
 
-/// Samples inside this window from the end form the late mean.
+/// The longest late window. It ends at the last busy sample.
+///
+/// A run shorter than 180 seconds gets a smaller window. See [`windows`].
 pub const LATE_WINDOW: Duration = Duration::from_secs(60);
 
 /// The end of the early window and the start of the late window.
 ///
 /// The early window holds every busy sample before the first value. The late
-/// window holds every busy sample from the second value on.
+/// window holds every busy sample from the second value on. Give the time of
+/// the first busy sample and the time of the last busy sample.
+///
+/// Each window is not longer than one third of the span between the two
+/// samples. Thus the two windows never share a sample. On a span of 80 seconds
+/// or more, one third is 20 seconds or more, and the windows are the full
+/// [`EARLY_WINDOW`] and [`LATE_WINDOW`].
 #[must_use]
-pub fn windows(_first_at: Duration, last_at: Duration) -> (Duration, Duration) {
-    (EARLY_WINDOW, last_at.saturating_sub(LATE_WINDOW))
+pub fn windows(first_at: Duration, last_at: Duration) -> (Duration, Duration) {
+    let third = last_at.saturating_sub(first_at) / 3;
+    let early_until = first_at.saturating_add(EARLY_WINDOW.min(third));
+    let late_from = last_at.saturating_sub(LATE_WINDOW.min(third));
+    (early_until, late_from)
 }
 
 /// A P-cluster below this active residency is idle, not throttled.
@@ -71,9 +88,11 @@ pub struct Verdict {
     pub outcome: Outcome,
     /// The peak clock the P-cluster reached while busy.
     pub peak: Mhz,
-    /// The mean clock over [`EARLY_WINDOW`] from the start.
+    /// The mean clock over the early window, which starts at the first busy
+    /// sample. See [`windows`].
     pub early_mean: Mhz,
-    /// The mean clock over [`LATE_WINDOW`] to the end.
+    /// The mean clock over the late window, which ends at the last busy
+    /// sample. See [`windows`].
     pub late_mean: Mhz,
     /// The late mean as a share of the peak of the chip.
     pub late_ratio_of_max: f64,
@@ -127,14 +146,20 @@ pub fn judge(samples: &[Sample], table: &DvfsTable) -> Verdict {
     let Some(peak) = busy.iter().filter_map(clock).max().map(Mhz::new) else {
         return empty;
     };
-    let Some(last_at) = busy.last().map(|sample| sample.at) else {
+    // The windows are anchored on the busy samples, not on time zero. A user
+    // who starts a build one minute into the run gets an early mean from the
+    // start of the load.
+    let (Some(first_at), Some(last_at)) = (
+        busy.first().map(|sample| sample.at),
+        busy.last().map(|sample| sample.at),
+    ) else {
         return empty;
     };
-    let late_from = last_at.saturating_sub(LATE_WINDOW);
+    let (early_until, late_from) = windows(first_at, last_at);
 
     let early_mean = mean_clock(
         busy.iter()
-            .filter(|sample| sample.at < EARLY_WINDOW)
+            .filter(|sample| sample.at < early_until)
             .copied(),
     )
     .unwrap_or(peak);

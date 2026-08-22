@@ -155,8 +155,9 @@ fn throttling_is_found_even_when_the_pressure_level_never_leaves_nominal() {
 
 #[test]
 fn a_short_run_still_reports_a_verdict() {
-    // Thirty seconds is shorter than the early window plus the late window, so
-    // the two windows overlap. The verdict must still be produced.
+    // Thirty seconds is shorter than the early window plus the late window.
+    // Each window becomes one third of the run, so the two windows stay
+    // apart. The verdict must still be produced.
     let verdict = judge(&steady(30, 4_500), &m4_pro());
     assert_eq!(verdict.outcome, Outcome::HeldClock);
     assert_eq!(verdict.early_mean, Mhz::new(4_500));
