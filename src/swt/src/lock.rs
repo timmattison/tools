@@ -834,8 +834,8 @@ mod tests {
     // readable when it was identified and is not readable by the time the reap
     // confirms it. The test above cannot reach here — an already-unreadable lock
     // is refused before the confirmation read is ever made — and without this
-    // one, treating an unreadable file as a freed path would pass every test in
-    // this module.
+    // one, treating an unreadable file as a confirmed match would unlink it and
+    // pass every other test in the module.
     #[cfg(unix)]
     #[test]
     fn a_corpse_that_stops_being_readable_before_the_confirmation_is_not_reaped() {
