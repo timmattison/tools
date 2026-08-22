@@ -27,11 +27,11 @@ verdict is built on.
 4. Compares the mean clock at the start of the load against the mean clock at
    the end of it. That decay is the throttling. Each window is one third of the
    busy span or less, so the two windows never share a sample. The busy span is
-   the time from the first busy sample to the last busy sample, which is the
-   full run with `--load` but less for a load that you start part way through.
-   The early window is the full 20 seconds on a busy span of 60 seconds or
-   more. The late window is the full 60 seconds on a busy span of 180 seconds
-   or more.
+   the time from the first busy sample to the last busy sample. With `--load`
+   that span is the full run, but a load that you start part way through gives
+   a shorter span. The early window is the full 20 seconds on a busy span of 60
+   seconds or more. The late window is the full 60 seconds on a busy span of
+   180 seconds or more.
 
 ## Usage
 
