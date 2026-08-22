@@ -68,12 +68,12 @@ fn main() -> Result<()> {
         )
     });
 
-    let stream = SampleStream::spawn(SAMPLE_INTERVAL, sample_count)
+    let mut stream = SampleStream::spawn(SAMPLE_INTERVAL, sample_count)
         .context("cannot start powermetrics; it needs root, so run this tool with sudo")?;
 
     let mut samples = Vec::with_capacity(usize::try_from(args.duration).unwrap_or_default());
     let mut out = io::stdout().lock();
-    for sample in stream {
+    for sample in stream.by_ref() {
         if args.json {
             writeln!(out, "{}", serde_json::to_string(&sample)?)?;
         } else {
@@ -81,6 +81,17 @@ fn main() -> Result<()> {
         }
         out.flush()?;
         samples.push(sample);
+    }
+
+    // A run that refused to start and a run that measured a quiet machine both
+    // give no sample. Reporting the first as the second sends the reader after
+    // a load problem that is really a privilege problem.
+    if let Some(status) = stream.exit_status() {
+        if !status.success() && samples.is_empty() {
+            anyhow::bail!(
+                "powermetrics ended with {status} and measured nothing; it needs root, so run this tool with sudo"
+            );
+        }
     }
 
     if let Some(load) = load {

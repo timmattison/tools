@@ -353,8 +353,10 @@ impl SampleStream {
     ///
     /// The status is kept, so asking more than once gives the same answer.
     pub fn exit_status(&mut self) -> Option<ExitStatus> {
-        let _ = &mut self.status;
-        None
+        if self.status.is_none() {
+            self.status = self.child.wait().ok();
+        }
+        self.status
     }
 
     /// Take the lines collected so far as one sample.
@@ -391,12 +393,20 @@ impl Iterator for SampleStream {
 
             let line = line.trim_end().to_owned();
             if line.starts_with(SAMPLE_HEADER) {
-                if let Some(sample) = self.take_block() {
-                    self.block.push(line);
-                    return Some(sample);
+                let finished = self.take_block();
+                self.block.push(line);
+                if finished.is_some() {
+                    return finished;
                 }
+                continue;
             }
-            self.block.push(line);
+
+            // Anything before the first header is the banner `powermetrics`
+            // prints at the start of a run. It carries no measurement, so it is
+            // dropped rather than turned into a sample.
+            if !self.block.is_empty() {
+                self.block.push(line);
+            }
         }
     }
 }
@@ -404,6 +414,11 @@ impl Iterator for SampleStream {
 impl Drop for SampleStream {
     /// Stop `powermetrics` rather than leave it sampling after this tool ends.
     fn drop(&mut self) {
+        if self.status.is_some() {
+            // Already waited for, so there is no process left to stop and no
+            // zombie left to reap.
+            return;
+        }
         drop(self.child.kill());
         drop(self.child.wait());
     }

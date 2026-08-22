@@ -28,7 +28,9 @@ fn block(mhz: u32) -> String {
 /// A stand-in for `powermetrics` that prints `script` and exits with `code`.
 fn stand_in(script: &str, code: i32) -> Command {
     let mut command = Command::new("/bin/sh");
-    command.arg("-c").arg(format!("printf '%s' \"$0\"; exit {code}"));
+    command
+        .arg("-c")
+        .arg(format!("printf '%s' \"$0\"; exit {code}"));
     command.arg(script);
     command
 }
@@ -79,7 +81,9 @@ fn reports_the_status_of_a_run_that_failed() {
     let mut stream = SampleStream::from_command(stand_in("", 1)).expect("a stream");
     assert_eq!(stream.by_ref().count(), 0);
 
-    let status = stream.exit_status().expect("the run must report its status");
+    let status = stream
+        .exit_status()
+        .expect("the run must report its status");
     assert!(
         !status.success(),
         "a run that failed must be told apart from a run that measured nothing"
@@ -92,7 +96,9 @@ fn reports_the_status_of_a_run_that_finished() {
     let mut stream = SampleStream::from_command(stand_in(&script, 0)).expect("a stream");
     assert_eq!(stream.by_ref().count(), 1);
 
-    let status = stream.exit_status().expect("the run must report its status");
+    let status = stream
+        .exit_status()
+        .expect("the run must report its status");
     assert!(status.success());
 }
 
@@ -104,5 +110,9 @@ fn the_status_is_the_same_however_often_it_is_asked_for() {
     let first = stream.exit_status().expect("a status").code();
     let second = stream.exit_status().expect("a status").code();
     assert_eq!(first, Some(3));
-    assert_eq!(second, Some(3), "the status must be kept, not waited for twice");
+    assert_eq!(
+        second,
+        Some(3),
+        "the status must be kept, not waited for twice"
+    );
 }
