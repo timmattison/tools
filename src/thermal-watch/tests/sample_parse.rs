@@ -1,8 +1,9 @@
 //! Tests for reading one `powermetrics` sample.
 //!
 //! Every fixture is a real shape of `powermetrics` output: the two-P-cluster
-//! form of an M-series Pro or Max chip, the single-P-cluster form of a base
-//! chip, and a block whose P-cluster is offline.
+//! form of an M-series Pro or Max chip, the two-die form of an Ultra, the
+//! single-P-cluster form of a base chip, and a block whose P-cluster is
+//! offline.
 //!
 //! Parallel safety: every test here is pure. Nothing runs `powermetrics`.
 
@@ -41,6 +42,56 @@ Combined Power (CPU + GPU + ANE): 32125 mW
 Current pressure level: Nominal
 ";
 
+/// An M-series Ultra joins two dies, and prints the E-cluster and the
+/// P-cluster of each die. The numbers here make the two means easy to read:
+/// the E-clusters give 1500 MHz, and the P-clusters give 3500 MHz.
+const TWO_E_CLUSTERS: &str = "\
+*** Sampled system activity (Fri Aug 22 09:00:00 2026 -0400) (1001.55ms elapsed) ***
+
+**** Processor usage ****
+
+E0-Cluster Online: 0-3
+E0-Cluster HW active frequency: 1000 MHz
+E0-Cluster HW active residency:  70.00% (1020 MHz:  40%)
+E0-Cluster idle residency:  30.00%
+
+P0-Cluster Online: 4-11
+P0-Cluster HW active frequency: 4000 MHz
+P0-Cluster HW active residency:  99.00% (4510 MHz: 55%)
+P0-Cluster idle residency:   1.00%
+
+E1-Cluster Online: 12-15
+E1-Cluster HW active frequency: 2000 MHz
+E1-Cluster HW active residency:  60.00% (2020 MHz:  30%)
+E1-Cluster idle residency:  40.00%
+
+P1-Cluster Online: 16-23
+P1-Cluster HW active frequency: 3000 MHz
+P1-Cluster HW active residency:  99.00% (4510 MHz: 45%)
+P1-Cluster idle residency:   1.00%
+
+CPU Power: 60000 mW
+GPU Power: 40 mW
+Combined Power (CPU + GPU + ANE): 60040 mW
+
+**** Thermal pressure ****
+
+Current pressure level: Nominal
+";
+
+/// A block whose second E-cluster line carries no number. `powermetrics`
+/// prints a dash in place of a measurement it did not get.
+const UNREADABLE_SECOND_E_CLUSTER: &str = "\
+*** Sampled system activity ***
+
+E0-Cluster HW active frequency: 1000 MHz
+E0-Cluster HW active residency:  70.00%
+E1-Cluster HW active frequency: -- MHz
+P0-Cluster HW active frequency: 3000 MHz
+P0-Cluster HW active residency:  99.00%
+CPU Power: 30000 mW
+";
+
 /// A base M-series chip prints one P-cluster.
 const ONE_P_CLUSTER: &str = "\
 *** Sampled system activity ***
@@ -76,6 +127,33 @@ fn averages_every_p_cluster_that_reports() {
     let residency = sample.p_active_pct.expect("a residency");
     assert!((residency - 99.81).abs() < 1e-9_f64);
     assert_eq!(sample.at, Duration::from_secs(7));
+}
+
+#[test]
+fn averages_every_e_cluster_that_reports() {
+    let sample = Sample::parse_block(TWO_E_CLUSTERS, Duration::from_secs(5));
+    assert_eq!(
+        sample.e_freq,
+        Some(Mhz::new(1_500)),
+        "the mean of 1000 MHz and 2000 MHz, not the last cluster of the block"
+    );
+    assert_eq!(
+        sample.p_freq,
+        Some(Mhz::new(3_500)),
+        "the mean of 4000 MHz and 3000 MHz, which the two branches agree on"
+    );
+    assert_eq!(sample.at, Duration::from_secs(5));
+}
+
+#[test]
+fn an_unreadable_e_cluster_line_keeps_the_frequency_already_read() {
+    let sample = Sample::parse_block(UNREADABLE_SECOND_E_CLUSTER, Duration::ZERO);
+    assert_eq!(
+        sample.e_freq,
+        Some(Mhz::new(1_000)),
+        "a line with no number adds nothing, and erases nothing"
+    );
+    assert_eq!(sample.p_freq, Some(Mhz::new(3_000)));
 }
 
 #[test]
