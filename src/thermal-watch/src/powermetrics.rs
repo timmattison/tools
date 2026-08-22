@@ -10,7 +10,7 @@
 //! this module runs `sudo`. The caller decides.
 
 use std::io::{BufRead, BufReader};
-use std::process::{Child, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Serialize, Serializer};
@@ -290,6 +290,8 @@ pub struct SampleStream {
     block: Vec<String>,
     /// True once the process closed its output.
     ended: bool,
+    /// How the run ended, once it has been waited for.
+    status: Option<ExitStatus>,
 }
 
 impl SampleStream {
@@ -300,13 +302,28 @@ impl SampleStream {
     /// Returns the error of the spawn when `powermetrics` cannot be started,
     /// which is what a caller without root sees.
     pub fn spawn(interval: Duration, count: u32) -> std::io::Result<Self> {
-        let mut child = Command::new("powermetrics")
+        let mut command = Command::new("powermetrics");
+        command
             .arg("--samplers")
             .arg(SAMPLERS)
             .arg("-i")
             .arg(interval.as_millis().to_string())
             .arg("-n")
-            .arg(count.to_string())
+            .arg(count.to_string());
+        Self::from_command(command)
+    }
+
+    /// Start an already-built command and read its output as samples.
+    ///
+    /// [`Self::spawn`] builds the `powermetrics` invocation and hands it here.
+    /// A test hands a stand-in instead, which is how the lifecycle of a run is
+    /// covered without root.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of the spawn when the command cannot be started.
+    pub fn from_command(mut command: Command) -> std::io::Result<Self> {
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -315,7 +332,7 @@ impl SampleStream {
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| std::io::Error::other("powermetrics started with no standard output"))?;
+            .ok_or_else(|| std::io::Error::other("the command started with no standard output"))?;
 
         Ok(Self {
             child,
@@ -323,7 +340,21 @@ impl SampleStream {
             started: Instant::now(),
             block: Vec::new(),
             ended: false,
+            status: None,
         })
+    }
+
+    /// How the run ended.
+    ///
+    /// A run that measured nothing and a run that refused to start are the same
+    /// shape at the iterator — both give no sample — and they need different
+    /// answers. `powermetrics` without root is the second: it writes a refusal
+    /// and exits non-zero. This tells the two apart.
+    ///
+    /// The status is kept, so asking more than once gives the same answer.
+    pub fn exit_status(&mut self) -> Option<ExitStatus> {
+        let _ = &mut self.status;
+        None
     }
 
     /// Take the lines collected so far as one sample.
