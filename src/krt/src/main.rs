@@ -628,33 +628,45 @@ fn no_run_message(path: &Path, wanted: Option<&str>, held: &[RunId]) -> String {
 /// The run that `--run` names is the run to fold, and the last run of the file
 /// is the run to fold when the flag is absent.
 ///
-/// # Errors
-///
-/// Returns the reason when the file does not read, when the file holds no run,
-/// and when the file does not hold the run that `--run` names.
-fn replay(path: &Path, wanted: Option<&str>) -> Result<Replay, String> {
-    let recording = Recording::read(path).map_err(|error| error.to_string())?;
+/// A file that does not read at all, a file that holds no run, and a file that
+/// does not hold the run that `--run` names each give the reason in the
+/// outcome. The warning of a cut final line rides beside the outcome and not
+/// inside it, because a cut is often the reason that the file holds no run to
+/// fold: a `kill -9` during the first record leaves a file that holds no
+/// complete record, and such a file reads as an empty one until the warning
+/// says otherwise.
+fn replay(path: &Path, wanted: Option<&str>) -> Replay {
+    let recording = match Recording::read(path) {
+        Ok(recording) => recording,
+        Err(error) => {
+            return Replay {
+                warning: None,
+                outcome: Err(error.to_string()),
+            };
+        }
+    };
+    // A `kill -9` leaves a file whose final line is cut short. Every round
+    // before the cut still reads, so the replay reports the cut and goes on.
+    let warning = recording
+        .truncated()
+        .map(|truncated| format!("{}: {truncated}. {RECORDS_BEFORE_THE_CUT}", path.display()));
     let found = match wanted {
         Some(wanted) => recording.run(&RunId::from(wanted)),
         None => recording.last_run(),
     };
-    let run = found.ok_or_else(|| no_run_message(path, wanted, &recording.run_ids()))?;
-    Ok(Replay {
-        summary: summarize(&run),
-        // A `kill -9` leaves a file whose final line is cut short. Every round
-        // before the cut still reads, so the replay reports the cut and goes on.
-        warning: recording
-            .truncated()
-            .map(|truncated| format!("{}: {truncated}. {RECORDS_BEFORE_THE_CUT}", path.display())),
-    })
+    let outcome = match found {
+        Some(run) => Ok(summarize(&run)),
+        None => Err(no_run_message(path, wanted, &recording.run_ids())),
+    };
+    Replay { warning, outcome }
 }
 
-/// The summary of one run, and the warning that its file raised.
+/// The warning that a recorded file raised, and what the replay of it found.
 struct Replay {
-    /// The one line that names the run.
-    summary: String,
     /// The warning about the file, when the file holds a cut final line.
     warning: Option<String>,
+    /// The one line that names the run, or the reason that no run folds.
+    outcome: Result<String, String>,
 }
 
 fn main() {
@@ -673,13 +685,14 @@ fn main() {
         print!("{config}");
         return;
     };
-    match replay(path, config.run.as_deref()) {
-        Ok(result) => {
-            if let Some(warning) = result.warning {
-                eprintln!("{PROGRAM}: {warning}");
-            }
-            println!("{}", result.summary);
-        }
+    // The warning comes before the outcome, so a reader of standard error sees
+    // the state of the file before the answer that state produced.
+    let result = replay(path, config.run.as_deref());
+    if let Some(warning) = result.warning {
+        eprintln!("{PROGRAM}: {warning}");
+    }
+    match result.outcome {
+        Ok(summary) => println!("{summary}"),
         Err(reason) => {
             eprintln!("{PROGRAM}: {reason}");
             std::process::exit(EXIT_FAILURE);
