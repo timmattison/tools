@@ -1,19 +1,32 @@
 //! `krt` (Knights of the Round Trip) records the network path to a
 //! destination, hop by hop.
 //!
-//! This slice resolves the command line and prints the configuration of the
-//! run. Later slices add the tracer, the file writer, and the table.
+//! No tracer exists yet, so a command line that names a destination prints the
+//! configuration that it resolved. The `replay` command reads a recorded file
+//! and prints one summary line for one run of it. Later slices add the tracer
+//! and the table.
 
 // Stricter than the inherited `[workspace.lints]` set; see "Lint Configuration" in CLAUDE.md.
 #![deny(unsafe_code)]
 #![warn(clippy::pedantic)]
 
+mod record;
+
 use buildinfo::version_string;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use record::{Recording, Run, RunId};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// The name that starts every message that `krt` writes to standard error.
+const PROGRAM: &str = "krt";
+
+/// The exit code of a failure.
+const EXIT_FAILURE: i32 = 1;
 
 /// The accepted units of a duration.
 const DURATION_UNITS: &str = "the unit must be `ms`, `s`, `m`, or `h`";
@@ -63,11 +76,42 @@ const OUTPUT_DERIVED: &str = "derived at run time";
 /// The value of the source, when the user names no address.
 const SOURCE_DISCOVERED: &str = "discovered at run time";
 
-/// The value of the run, when the user names no run of a replay.
-const RUN_LATEST: &str = "the last run";
+/// The text between two fields of a summary line.
+const SUMMARY_SEPARATOR: &str = "  ";
+
+/// The target field of a run whose `run` record is absent.
+const TARGET_UNKNOWN: &str = "unknown";
+
+/// The name of one round of a run, in a summary line.
+const ROUND: &str = "round";
+
+/// The name of one TTL that answered, in a summary line.
+const HOP: &str = "hop";
+
+/// The last field of a summary line, when one round reached the target.
+const REACHED: &str = "reached";
+
+/// The last field of a summary line, when no round reached the target.
+const NEVER_REACHED: &str = "never reached";
+
+/// The reason of a file that holds no run.
+///
+/// A file that holds no run at all stops the message here. A `--run` that names
+/// a run the file does not hold adds that identifier and the runs of the file.
+const NO_RUN: &str = "the file holds no run";
+
+/// What the message of an absent run says before it lists the runs of the file.
+const THE_RUNS_OF_THE_FILE: &str = "The runs of this file are";
+
+/// The text between two run identifiers of a message.
+const RUN_LIST_SEPARATOR: &str = ", ";
+
+/// What a warning says about the rounds before a cut final line.
+const RECORDS_BEFORE_THE_CUT: &str = "The records before the cut still read.";
 
 /// The protocol of a probe.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Protocol {
     /// Send ICMP echo requests.
     Icmp,
@@ -78,7 +122,8 @@ enum Protocol {
 }
 
 /// The way a probe keeps or varies the flow of a packet.
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum Multipath {
     /// Let each probe take its own flow, as traceroute always did.
     Classic,
@@ -130,8 +175,9 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 ///
 /// `krt` probes every hop to the destination once per round, and it records
 /// each round in a file. The `replay` command reads a file that an earlier run
-/// wrote, so it takes no destination and no flag of a probe. This build parses
-/// the command line and prints the configuration it resolved.
+/// wrote, so it takes no destination and no flag of a probe. This build prints
+/// the configuration that a trace resolved, because no tracer exists yet, and
+/// it prints one summary line for a replay.
 #[derive(Parser, Debug)]
 // `args_conflicts_with_subcommands` rejects a flag of a probe beside a command,
 // because a replay probes nothing. `subcommand_negates_reqs` lifts the demand
@@ -140,7 +186,7 @@ fn value_name<T: ValueEnum>(value: &T) -> String {
 // the shape of the command line, and no message can ask for an argument that
 // another rule forbids.
 #[command(
-    name = "krt",
+    name = PROGRAM,
     version = version_string!(),
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true,
@@ -234,7 +280,7 @@ struct Cli {
 /// A command that reads recorded work in the place of a new trace.
 #[derive(Subcommand, Debug, PartialEq, Eq)]
 enum Command {
-    /// Fold a recorded file and print the table. Then exit.
+    /// Fold a recorded file and print what it holds. Then exit.
     Replay {
         /// The recorded file to fold.
         #[arg(value_name = "FILE")]
@@ -351,6 +397,12 @@ impl Cli {
     }
 }
 
+/// Writes the block that a trace prints before it probes.
+///
+/// The block names no `replay` and no `run`. `main` prints the block only when
+/// the command line names no `replay`, and `resolve` fills the run only inside
+/// a `replay`, so neither field can reach the block with a value. A replay
+/// prints its own summary line in the place of the block.
 impl fmt::Display for ResolvedConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let path_or = |path: Option<&PathBuf>, absent: &str| {
@@ -394,11 +446,6 @@ impl fmt::Display for ResolvedConfig {
                 "round limit",
                 self.rounds
                     .map_or_else(|| ABSENT.to_owned(), |rounds| rounds.to_string()),
-            ),
-            ("replay", path_or(self.replay.as_ref(), ABSENT)),
-            (
-                "run",
-                self.run.clone().unwrap_or_else(|| RUN_LATEST.to_owned()),
             ),
         ];
 
@@ -505,16 +552,151 @@ fn render_duration(duration: Duration) -> String {
     format!("{seconds}s")
 }
 
+/// Writes a count and the name of what it counts.
+///
+/// One of a thing keeps the singular name, and every other count adds one `s`.
+/// The two names of this file, `round` and `hop`, both take that plural.
+fn counted(count: usize, name: &str) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {name}{plural}")
+}
+
+/// Writes the one line that a replay prints for one run.
+///
+/// The line holds the identifier of the run, the target, the number of rounds,
+/// the number of TTLs that answered, and whether the run reached the target.
+/// Two spaces separate the fields. A run whose `run` record is absent names no
+/// target, and the field then holds one word.
+///
+/// A TTL counts once, however many rounds answered at it, so the count is the
+/// number of TTLs that answered and not the number of answers. A TTL that the
+/// run probed and that never answered counts for nothing, so the count is at or
+/// below the length of the path.
+///
+/// The design puts the fold in `stats.rs` and the render in `ui.rs`. This
+/// slice builds neither module, so the summary lives here. A later slice
+/// replaces this line with the aggregate table.
+fn summarize(run: &Run<'_>) -> String {
+    let target = run.start().map_or_else(
+        || TARGET_UNKNOWN.to_owned(),
+        |start| format!("{} ({})", start.target.arg, start.target.addr),
+    );
+    let ttls: BTreeSet<u8> = run
+        .rounds()
+        .iter()
+        .flat_map(|round| &round.hops)
+        .map(|hop| hop.ttl)
+        .collect();
+    let reached = if run.rounds().iter().any(|round| round.reached) {
+        REACHED
+    } else {
+        NEVER_REACHED
+    };
+    [
+        run.id().to_string(),
+        target,
+        counted(run.rounds().len(), ROUND),
+        counted(ttls.len(), HOP),
+        reached.to_owned(),
+    ]
+    .join(SUMMARY_SEPARATOR)
+}
+
+/// Writes the reason of a file that holds no run to fold.
+///
+/// A `--run` that names a run the file does not hold adds that identifier and
+/// every run that the file does hold, so the user reads one line and corrects
+/// the flag. A file that holds no run at all has nothing to name, and a message
+/// that promises a list and then holds none reads as a defect of the tool. Such
+/// a message stops at the reason.
+fn no_run_message(path: &Path, wanted: Option<&str>, held: &[RunId]) -> String {
+    let reason = format!("{}: {NO_RUN}", path.display());
+    match wanted {
+        Some(wanted) if !held.is_empty() => {
+            let names: Vec<String> = held.iter().map(|id| format!("`{id}`")).collect();
+            format!(
+                "{reason} `{wanted}`. {THE_RUNS_OF_THE_FILE} {}",
+                names.join(RUN_LIST_SEPARATOR)
+            )
+        }
+        _ => reason,
+    }
+}
+
+/// Reads a recorded file and folds one run of it.
+///
+/// The run that `--run` names is the run to fold, and the last run of the file
+/// is the run to fold when the flag is absent.
+///
+/// A file that does not read at all, a file that holds no run, and a file that
+/// does not hold the run that `--run` names each give the reason in the
+/// outcome. The warning of a cut final line rides beside the outcome and not
+/// inside it, because a cut is often the reason that the file holds no run to
+/// fold: a `kill -9` during the first record leaves a file that holds no
+/// complete record, and such a file reads as an empty one until the warning
+/// says otherwise.
+fn replay(path: &Path, wanted: Option<&str>) -> Replay {
+    let recording = match Recording::read(path) {
+        Ok(recording) => recording,
+        Err(error) => {
+            return Replay {
+                warning: None,
+                outcome: Err(error.to_string()),
+            };
+        }
+    };
+    // A `kill -9` leaves a file whose final line is cut short. Every round
+    // before the cut still reads, so the replay reports the cut and goes on.
+    let warning = recording
+        .truncated()
+        .map(|truncated| format!("{}: {truncated}. {RECORDS_BEFORE_THE_CUT}", path.display()));
+    let found = match wanted {
+        Some(wanted) => recording.run(&RunId::from(wanted)),
+        None => recording.last_run(),
+    };
+    let outcome = match found {
+        Some(run) => Ok(summarize(&run)),
+        None => Err(no_run_message(path, wanted, &recording.run_ids())),
+    };
+    Replay { warning, outcome }
+}
+
+/// The warning that a recorded file raised, and what the replay of it found.
+struct Replay {
+    /// The warning about the file, when the file holds a cut final line.
+    warning: Option<String>,
+    /// The one line that names the run, or the reason that no run folds.
+    outcome: Result<String, String>,
+}
+
 fn main() {
     // The parse handles `--version`, `-V`, and `--help` on its own. A
     // contradiction between two flags leaves the parser, so `clap` writes it to
     // standard error in the style of every other error of a command line.
     let cli = Cli::parse();
-    match cli.resolve() {
-        Ok(config) => print!("{config}"),
+    let config = match cli.resolve() {
+        Ok(config) => config,
         Err(message) => Cli::command()
             .error(clap::error::ErrorKind::ValueValidation, message)
             .exit(),
+    };
+    let Some(path) = config.replay.as_deref() else {
+        // No tracer exists yet, so a trace prints what it resolved.
+        print!("{config}");
+        return;
+    };
+    // The warning comes before the outcome, so a reader of standard error sees
+    // the state of the file before the answer that state produced.
+    let result = replay(path, config.run.as_deref());
+    if let Some(warning) = result.warning {
+        eprintln!("{PROGRAM}: {warning}");
+    }
+    match result.outcome {
+        Ok(summary) => println!("{summary}"),
+        Err(reason) => {
+            eprintln!("{PROGRAM}: {reason}");
+            std::process::exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -576,8 +758,6 @@ resolved configuration:
   display:        table
   duration limit: none
   round limit:    none
-  replay:         none
-  run:            the last run
 ";
 
     /// Every text that the parser rejects, for the message tests.
@@ -1521,14 +1701,18 @@ resolved configuration:
   display:        headless
   duration limit: 2m
   round limit:    10
-  replay:         none
-  run:            the last run
 "
         );
     }
 
+    /// The block names neither the replay nor the run.
+    ///
+    /// `main` prints the block only when the command line names no `replay`,
+    /// and `resolve` fills the run only inside a `replay`, so neither field can
+    /// reach the block with a value. A replay prints its own summary line in
+    /// the place of the block.
     #[test]
-    fn prints_the_file_and_the_run_of_a_replay() {
+    fn the_block_names_neither_the_replay_nor_the_run() {
         let config = resolve(&[
             "krt",
             "replay",
@@ -1536,26 +1720,12 @@ resolved configuration:
             "--run",
             "2026-08-19T12:00:00Z",
         ]);
-        assert_eq!(
-            config.to_string(),
-            "\
-resolved configuration:
-  destination:    none
-  output:         derived at run time
-  interval:       1s
-  first ttl:      1
-  max ttl:        30
-  protocol:       icmp
-  multipath:      classic
-  address family: auto
-  reverse dns:    on
-  source:         discovered at run time
-  display:        table
-  duration limit: none
-  round limit:    none
-  replay:         /tmp/r.jsonl
-  run:            2026-08-19T12:00:00Z
-"
-        );
+        let block = config.to_string();
+        for absent in ["replay:", "run:", "/tmp/r.jsonl", "2026-08-19T12:00:00Z"] {
+            assert!(
+                !block.contains(absent),
+                "the block holds no `{absent}`: {block}"
+            );
+        }
     }
 }
