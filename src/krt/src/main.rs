@@ -11,6 +11,7 @@
 #![warn(clippy::pedantic)]
 
 mod record;
+mod run;
 mod source;
 mod trace;
 

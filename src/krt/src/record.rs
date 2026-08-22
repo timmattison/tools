@@ -12,7 +12,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write as _};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -719,20 +719,24 @@ pub(crate) enum ReadError {
 /// process, and the operating system keeps the bytes that the process already
 /// gave it. An `fsync` guards against a power loss, which is a different fault,
 /// and not the fault that this guarantee names.
+///
+/// The sink of a run is the open file, and that is the sink a caller takes when
+/// it names none.
 #[allow(
     dead_code,
-    reason = "the tracer records each round through this writer, and the tracer arrives in a later slice of issue #366"
+    reason = "the run loop records each round through this writer, and main starts the run loop in a later slice of issue #367"
 )]
-pub(crate) struct Writer {
-    /// The open file, in append mode.
-    file: BufWriter<File>,
+pub(crate) struct Writer<W: Write = BufWriter<File>> {
+    /// The sink that takes every record. A run writes to the open file, in
+    /// append mode.
+    sink: W,
 }
 
 #[allow(
     dead_code,
-    reason = "the tracer records each round through this writer, and the tracer arrives in a later slice of issue #366"
+    reason = "the run loop records each round through this writer, and main starts the run loop in a later slice of issue #367"
 )]
-impl Writer {
+impl Writer<BufWriter<File>> {
     /// Opens the file for appending, and makes the file when it is absent.
     ///
     /// # Errors
@@ -741,8 +745,23 @@ impl Writer {
     pub(crate) fn append(path: &Path) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
-            file: BufWriter::new(file),
+            sink: BufWriter::new(file),
         })
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the run loop records each round through this writer, and main starts the run loop in a later slice of issue #367"
+)]
+impl<W: Write> Writer<W> {
+    /// Sends every record to this sink.
+    ///
+    /// A run writes to a file, and a file fails a write only when the disk
+    /// fills or the device goes away. A test drives the writer through a sink
+    /// that fails on demand, so it covers the fault that a file rarely gives.
+    pub(crate) fn to_sink(sink: W) -> Self {
+        Self { sink }
     }
 
     /// Appends one record and one newline, then flushes.
@@ -753,9 +772,9 @@ impl Writer {
     /// fails, and when the flush fails.
     pub(crate) fn write(&mut self, record: &Record) -> std::io::Result<()> {
         let line = record.to_line().map_err(std::io::Error::other)?;
-        self.file.write_all(line.as_bytes())?;
-        self.file.write_all(&[NEWLINE])?;
-        self.file.flush()
+        self.sink.write_all(line.as_bytes())?;
+        self.sink.write_all(&[NEWLINE])?;
+        self.sink.flush()
     }
 }
 
