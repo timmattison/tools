@@ -107,7 +107,8 @@ log = "0.4"
 env_logger = "0.11"
 
 # Misc
-syn = { version = "2", default-features = false, features = ["full", "parsing"] }
+syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
+proc-macro2 = "1"
 pulldown-cmark = { version = "0.13", default-features = false }
 tiktoken-rs = "0.5"
 num-format = "0.4"

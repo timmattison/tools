@@ -6352,6 +6352,7 @@ name = "repo-guards"
 version = "0.1.0"
 dependencies = [
  "glob",
+ "proc-macro2",
  "pulldown-cmark",
  "serde_json",
  "syn 2.0.119",
