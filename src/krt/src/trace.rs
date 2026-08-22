@@ -1,5 +1,6 @@
-//! The privilege gate of a run, the wall in front of the tracer, and the
-//! conversion of one round into one record.
+//! The privilege gate of a run, the wall in front of the tracer, the tracer
+//! that one configuration starts, and the conversion of one round into one
+//! record.
 //!
 //! `krt` probes through the trippy crates. No other module of `krt` names a
 //! type of those crates, so an upgrade of them breaks this one file and no
@@ -12,16 +13,24 @@
 //! that needs them and holds none stops, and the message names the remedy of
 //! each platform.
 //!
+//! The interface of the wall is one type and one function. [`TraceConfig`]
+//! states one run in the words that `krt` owns, and [`spawn`] starts the
+//! tracer of that run and gives back a receiver of completed rounds. A caller
+//! outside this module therefore names no type of a trippy crate.
+//!
 //! The conversion is the wall itself. The tracer hands one round over as a
 //! borrowed value that lives for the length of one call, and
 //! [`to_round_record`] copies every value that the record keeps. Nothing
 //! borrowed crosses out of this module, so a later change of engine touches
-//! this file alone. The run loop that drives the tracer arrives in a later
+//! this file alone. The run loop that reads the receiver arrives in a later
 //! slice.
 
 use crate::record::{self, Hop, RoundRecord, RunId, TtlRange};
 use chrono::{DateTime, Utc};
-use std::time::SystemTime;
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, SystemTime};
 use trippy_core::{CompletionReason, IcmpPacketType, ProbeStatus, Round};
 
 /// The remedy of a platform that needs raw socket privileges and holds none.
@@ -104,6 +113,151 @@ pub(crate) enum PrivilegeError {
         /// The reason that the platform gave.
         reason: String,
     },
+}
+
+/// The source port that a UDP trace holds while the destination port varies.
+///
+/// A fixed source port to a varying destination port is the direction of a UDP
+/// trace, and 33434 is the first port of the range that traceroute probes.
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+const UDP_SOURCE_PORT: u16 = 33_434;
+
+/// The destination port that a TCP trace holds while the source port varies.
+///
+/// A varying source port to a fixed destination port is the direction of a TCP
+/// trace, and 80 is the port of HTTP.
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+const TCP_DESTINATION_PORT: u16 = 80;
+
+/// The number of the first round of a run. The schema counts from one.
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+const FIRST_ROUND: u64 = 1;
+
+/// The configuration of one tracing run, in the words that `krt` owns.
+///
+/// No field holds a type of a trippy crate, so a caller states a whole run
+/// from outside the wall of this module.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+pub(crate) struct TraceConfig {
+    /// The address to probe. `main` resolves the destination of the command
+    /// line to this address.
+    pub(crate) target: IpAddr,
+    /// The identifier of the run that every round record carries.
+    pub(crate) run: RunId,
+    /// The period of one round.
+    pub(crate) interval: Duration,
+    /// The first TTL that the run probes.
+    pub(crate) first_ttl: u8,
+    /// The last TTL that the run probes.
+    pub(crate) max_ttl: u8,
+    /// The protocol of a probe.
+    pub(crate) protocol: crate::Protocol,
+    /// The way a probe keeps or varies the flow of a packet.
+    pub(crate) multipath: crate::Multipath,
+    /// The privilege mode of the run.
+    pub(crate) privilege: record::Privilege,
+}
+
+/// Why the tracer of a run does not start.
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub(crate) enum TraceError {
+    /// The tracer refused the configuration of the run.
+    #[error("the tracer refused the configuration: {reason}")]
+    Build {
+        /// The reason that the tracer gave.
+        reason: String,
+    },
+    /// The thread of the tracer did not start.
+    #[error("the thread of the tracer did not start: {reason}")]
+    Spawn {
+        /// The reason that the platform gave.
+        reason: String,
+    },
+}
+
+/// Builds the tracer of one run from the configuration of `krt`.
+///
+/// # Errors
+///
+/// Returns [`TraceError::Build`] when the tracer refuses the configuration.
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+fn tracer_of(config: &TraceConfig) -> Result<trippy_core::Tracer, TraceError> {
+    trippy_core::Builder::new(config.target)
+        .build()
+        .map_err(|error| TraceError::Build {
+            reason: error.to_string(),
+        })
+}
+
+/// The number of the next round. The first round of a run is round one.
+///
+/// The callback of the tracer is `Fn` and not `FnMut`, so the count of the
+/// rounds lives in an atomic and not in a number of the closure.
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+fn next_seq(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Starts the tracer on its own thread and gives back a receiver of completed
+/// rounds.
+///
+/// The callback of the tracer holds a borrowed round. It converts that round
+/// into an owned record before it sends, so nothing borrowed crosses the
+/// channel and a later engine swap touches this file only.
+///
+/// The channel is unbounded, so a slow reader never stalls the tracer thread.
+/// The tracer holds no way to stop, so its thread ends when the process ends.
+///
+/// # Errors
+///
+/// Returns [`TraceError::Build`] when the tracer refuses the configuration, and
+/// [`TraceError::Spawn`] when the thread does not start.
+#[allow(
+    dead_code,
+    reason = "main starts the tracer beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+pub(crate) fn spawn(config: &TraceConfig) -> Result<Receiver<RoundRecord>, TraceError> {
+    let tracer = tracer_of(config)?;
+    let (sender, receiver) = mpsc::channel();
+    let run = config.run.clone();
+    let first_ttl = config.first_ttl;
+    let counter = AtomicU64::new(0);
+    // `spawn_with` gives back the tracer and the handle of its thread. The run
+    // loop reads a closed channel as a dead tracer, so it needs neither.
+    let (_tracer, _thread) = tracer
+        .spawn_with(move |round| {
+            let record = to_round_record(round, &run, next_seq(&counter), Utc::now(), first_ttl);
+            // A failed send means the reader of the channel is gone, and the
+            // run is over. The thread ends when the process ends.
+            drop(sender.send(record));
+        })
+        .map_err(|error| TraceError::Spawn {
+            reason: error.to_string(),
+        })?;
+    Ok(receiver)
 }
 
 /// The number of milliseconds in one second.
@@ -345,11 +499,15 @@ fn rtt_millis(sent: SystemTime, received: SystemTime) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_privilege, icmp_kind, to_round_record, IcmpKind, PrivilegeError};
+    use super::{
+        choose_privilege, icmp_kind, next_seq, to_round_record, tracer_of, IcmpKind,
+        PrivilegeError, TraceConfig, TraceError,
+    };
     use crate::record::{Privilege, Record, RoundRecord, RunId};
-    use crate::PROGRAM;
+    use crate::{Multipath, Protocol, PROGRAM};
     use chrono::{DateTime, Utc};
     use std::net::IpAddr;
+    use std::sync::atomic::AtomicU64;
     use std::time::{Duration, SystemTime};
     use trippy_core::{
         CompletionReason, Flags, IcmpPacketType, Port, Probe, ProbeComplete, ProbeStatus, Round,
@@ -844,5 +1002,222 @@ this platform needs raw socket privileges to send probes.
             record.to_line().expect("the record must become one line"),
             ROUND_LINE
         );
+    }
+
+    // The tracer that one configuration builds. No test below touches the
+    // network, and none of them needs a privilege. `Builder::build` reads the
+    // configuration and builds a `Tracer`, and it opens no socket: the channel
+    // of a trace opens in `run`, which `build` never calls. No test calls
+    // `spawn`, because that call starts a thread that probes.
+    //
+    // Every value of the test configuration differs from the value that the
+    // tracer holds by default, so a mapping that dropped the field fails here
+    // rather than reading as a pass.
+
+    /// The period of one round of a test run.
+    const A_ROUND_PERIOD: Duration = Duration::from_millis(250);
+
+    /// The first TTL that a test run probes.
+    const A_FIRST_TTL: u8 = 2;
+
+    /// The last TTL that a test run probes.
+    const A_MAX_TTL: u8 = 20;
+
+    /// The source port that a UDP trace holds while the destination port
+    /// varies. It is the first port of the range that traceroute probes.
+    const UDP_SOURCE_PORT: u16 = 33_434;
+
+    /// The destination port that a TCP trace holds while the source port
+    /// varies. It is the port of HTTP.
+    const TCP_DESTINATION_PORT: u16 = 80;
+
+    /// A last TTL above the largest one that the tracer takes.
+    ///
+    /// The command line of `krt` accepts a TTL up to 255, and `trippy_core`
+    /// stops at `MAX_TTL`, which is 254. Such a run therefore reaches the
+    /// build and the build refuses it.
+    const A_TTL_THAT_THE_TRACER_REFUSES: u8 = 255;
+
+    /// The configuration of a test run. Each test changes the one field that
+    /// it reads.
+    fn a_config() -> TraceConfig {
+        TraceConfig {
+            target: address(TARGET_ADDRESS),
+            run: RunId::from(RUN),
+            interval: A_ROUND_PERIOD,
+            first_ttl: A_FIRST_TTL,
+            max_ttl: A_MAX_TTL,
+            protocol: Protocol::Icmp,
+            multipath: Multipath::Classic,
+            privilege: Privilege::Unprivileged,
+        }
+    }
+
+    /// The tracer that one configuration builds.
+    fn tracer_from(config: &TraceConfig) -> trippy_core::Tracer {
+        tracer_of(config).expect("the tracer must take the configuration")
+    }
+
+    /// The tracer of a run that probes with this protocol.
+    fn tracer_of_protocol(protocol: Protocol) -> trippy_core::Tracer {
+        tracer_from(&TraceConfig {
+            protocol,
+            ..a_config()
+        })
+    }
+
+    #[test]
+    fn the_target_of_the_configuration_reaches_the_tracer() {
+        assert_eq!(
+            tracer_from(&a_config()).target_addr(),
+            address(TARGET_ADDRESS)
+        );
+    }
+
+    /// The round period of the tracer is the window between its shortest round
+    /// and its longest one. `krt` names one period, so both ends take it.
+    #[test]
+    fn the_interval_becomes_the_shortest_round_and_the_longest_round() {
+        let tracer = tracer_from(&a_config());
+        assert_eq!(tracer.min_round_duration(), A_ROUND_PERIOD);
+        assert_eq!(tracer.max_round_duration(), A_ROUND_PERIOD);
+    }
+
+    #[test]
+    fn the_first_ttl_and_the_last_ttl_reach_the_tracer() {
+        let tracer = tracer_from(&a_config());
+        assert_eq!(tracer.first_ttl().0, A_FIRST_TTL);
+        assert_eq!(tracer.max_ttl().0, A_MAX_TTL);
+    }
+
+    #[test]
+    fn every_protocol_reaches_the_tracer() {
+        for (protocol, expected) in [
+            (Protocol::Icmp, trippy_core::Protocol::Icmp),
+            (Protocol::Udp, trippy_core::Protocol::Udp),
+            (Protocol::Tcp, trippy_core::Protocol::Tcp),
+        ] {
+            assert_eq!(
+                tracer_of_protocol(protocol).protocol(),
+                expected,
+                "{protocol:?}"
+            );
+        }
+    }
+
+    /// The command line refuses a multipath mode other than `classic` beside
+    /// ICMP, because ICMP carries no flow to vary. Each run below therefore
+    /// probes with UDP.
+    #[test]
+    fn every_multipath_mode_reaches_the_tracer() {
+        for (multipath, expected) in [
+            (Multipath::Classic, trippy_core::MultipathStrategy::Classic),
+            (Multipath::Paris, trippy_core::MultipathStrategy::Paris),
+            (Multipath::Dublin, trippy_core::MultipathStrategy::Dublin),
+        ] {
+            let config = TraceConfig {
+                protocol: Protocol::Udp,
+                multipath,
+                ..a_config()
+            };
+            assert_eq!(
+                tracer_from(&config).multipath_strategy(),
+                expected,
+                "{multipath:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_privilege_mode_reaches_the_tracer() {
+        for (privilege, expected) in [
+            (
+                Privilege::Unprivileged,
+                trippy_core::PrivilegeMode::Unprivileged,
+            ),
+            (
+                Privilege::Privileged,
+                trippy_core::PrivilegeMode::Privileged,
+            ),
+        ] {
+            let config = TraceConfig {
+                privilege,
+                ..a_config()
+            };
+            assert_eq!(
+                tracer_from(&config).privilege_mode(),
+                expected,
+                "{privilege:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_icmp_trace_carries_no_port_direction() {
+        assert_eq!(
+            tracer_of_protocol(Protocol::Icmp).port_direction(),
+            trippy_core::PortDirection::None
+        );
+    }
+
+    /// `Builder::build` refuses a UDP trace whose port direction is `None`,
+    /// and `None` is the direction that the builder holds by default, so this
+    /// run reaches a tracer only because the mapping names a direction.
+    #[test]
+    fn a_udp_trace_fixes_the_source_port() {
+        assert_eq!(
+            tracer_of_protocol(Protocol::Udp).port_direction(),
+            trippy_core::PortDirection::FixedSrc(Port(UDP_SOURCE_PORT))
+        );
+    }
+
+    /// `Builder::build` refuses a TCP trace whose port direction is `None`, as
+    /// it refuses such a UDP trace.
+    #[test]
+    fn a_tcp_trace_fixes_the_destination_port() {
+        assert_eq!(
+            tracer_of_protocol(Protocol::Tcp).port_direction(),
+            trippy_core::PortDirection::FixedDest(Port(TCP_DESTINATION_PORT))
+        );
+    }
+
+    /// `krt` owns the round limit and the time limit, and the run loop enforces
+    /// them. A tracer that stopped itself would close the channel, and the run
+    /// loop reads a closed channel as a dead tracer.
+    #[test]
+    fn the_tracer_holds_no_round_limit() {
+        let limit = tracer_from(&a_config()).max_rounds();
+        assert!(limit.is_none(), "the tracer holds a round limit: {limit:?}");
+    }
+
+    #[test]
+    fn a_configuration_that_the_tracer_refuses_names_the_reason() {
+        let config = TraceConfig {
+            max_ttl: A_TTL_THAT_THE_TRACER_REFUSES,
+            ..a_config()
+        };
+        let error = tracer_of(&config).expect_err("the tracer must refuse this last TTL");
+        assert!(
+            matches!(error, TraceError::Build { .. }),
+            "the build of the tracer refused it: {error:?}"
+        );
+        let message = error.to_string();
+        for part in [
+            A_TTL_THAT_THE_TRACER_REFUSES.to_string(),
+            trippy_core::MAX_TTL.to_string(),
+        ] {
+            assert!(
+                message.contains(&part),
+                "the message names `{part}`: {message}"
+            );
+        }
+    }
+
+    /// The schema says that the first round of a run is round one.
+    #[test]
+    fn the_first_round_of_a_run_is_round_one() {
+        let counter = AtomicU64::new(0);
+        assert_eq!(next_seq(&counter), 1);
+        assert_eq!(next_seq(&counter), 2);
     }
 }
