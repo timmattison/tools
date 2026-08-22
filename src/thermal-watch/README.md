@@ -26,9 +26,12 @@ verdict is built on.
 3. Optionally makes its own full P-core load, so no separate build is necessary.
 4. Compares the mean clock at the start of the load against the mean clock at
    the end of it. That decay is the throttling. Each window is one third of the
-   run or less, so the two windows never share a sample. The early window is
-   the full 20 seconds on a run of 60 seconds or more. The late window is the
-   full 60 seconds on a run of 180 seconds or more.
+   busy span or less, so the two windows never share a sample. The busy span is
+   the time from the first busy sample to the last busy sample, which is the
+   full run with `--load` but less for a load that you start part way through.
+   The early window is the full 20 seconds on a busy span of 60 seconds or
+   more. The late window is the full 60 seconds on a busy span of 180 seconds
+   or more.
 
 ## Usage
 
