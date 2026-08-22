@@ -17,8 +17,5 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-[dev-dependencies]
-libc.workspace = true
-
 [lints]
 workspace = true
