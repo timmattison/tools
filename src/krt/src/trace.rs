@@ -13,6 +13,20 @@
 
 use crate::record;
 
+/// The remedy of a platform that needs raw socket privileges and holds none.
+///
+/// `main` writes every message as `krt: {reason}`, so the text carries no
+/// program name. The two lines under the first one carry two spaces each, and
+/// the remedy of each platform starts at the same column.
+#[allow(
+    dead_code,
+    reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
+)]
+const MISSING_PRIVILEGES: &str = "\
+this platform needs raw socket privileges to send probes.
+  Linux:   sudo setcap 'cap_net_raw+p' $(which krt)
+  Windows: run krt from an elevated prompt";
+
 /// Acquires the privileges of the platform and decides the mode of a run.
 ///
 /// # Errors
@@ -48,8 +62,15 @@ pub(crate) fn acquire_privilege() -> Result<record::Privilege, PrivilegeError> {
     reason = "main wires the privilege gate beside the run loop, and the run loop arrives in a later slice of issue #367"
 )]
 fn choose_privilege(has: bool, needs: bool) -> Result<record::Privilege, PrivilegeError> {
-    let _ = (has, needs);
-    Ok(record::Privilege::Unprivileged)
+    match (needs, has) {
+        // macOS sends through an `IPPROTO_ICMP` socket with the `IP_HDRINCL`
+        // socket option, so it needs no privileges. A process that holds them
+        // there still runs unprivileged, because `krt` never changes the way it
+        // probes without a word.
+        (false, _) => Ok(record::Privilege::Unprivileged),
+        (true, true) => Ok(record::Privilege::Privileged),
+        (true, false) => Err(PrivilegeError::Missing),
+    }
 }
 
 /// Why a run does not start.
@@ -60,7 +81,11 @@ fn choose_privilege(has: bool, needs: bool) -> Result<record::Privilege, Privile
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub(crate) enum PrivilegeError {
     /// The platform needs raw socket privileges, and the process holds none.
-    #[error("the privileges are missing")]
+    ///
+    /// Linux supports an `IPPROTO_ICMP` socket and does not support the
+    /// `IP_HDRINCL` socket option, so it needs `CAP_NET_RAW`. Windows needs an
+    /// elevated token. The message names the remedy of each one.
+    #[error("{MISSING_PRIVILEGES}")]
     Missing,
     /// The platform will not report the privileges that it holds.
     #[error("the platform will not report the privileges that it holds: {reason}")]
