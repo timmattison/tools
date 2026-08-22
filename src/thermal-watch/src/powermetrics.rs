@@ -44,7 +44,8 @@ const CLUSTER_SUFFIX: &str = "-Cluster";
 /// Which cluster a `powermetrics` line describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cluster {
-    /// The efficiency cores.
+    /// The efficiency cores. A chip with more than one E-cluster names them
+    /// `E0`, `E1`, and so on, and every one of them is this kind.
     Efficiency,
     /// The performance cores. A chip with more than one P-cluster names them
     /// `P0`, `P1`, and so on, and every one of them is this kind.
@@ -54,9 +55,9 @@ enum Cluster {
 /// Read which cluster a line names from the text before its label.
 ///
 /// The names in service are `E-Cluster`, `P-Cluster`, and the numbered
-/// `P0-Cluster` form of a chip with more than one performance cluster. A name
-/// this function does not recognize gives `None`, so an unfamiliar line is
-/// dropped rather than counted as a P-cluster.
+/// `E0-Cluster` and `P0-Cluster` forms of a chip with more than one cluster of
+/// a kind. A name this function does not recognize gives `None`, so an
+/// unfamiliar line is dropped rather than counted as a P-cluster.
 fn cluster_of(head: &str) -> Option<Cluster> {
     let name = head.trim().strip_suffix(CLUSTER_SUFFIX)?;
     let mut characters = name.chars();
@@ -183,7 +184,7 @@ pub struct Sample {
     /// Mean active residency across every P-cluster that reported, as a
     /// percentage.
     pub p_active_pct: Option<f64>,
-    /// Active frequency of the E-cluster.
+    /// Mean active frequency across every E-cluster that reported.
     pub e_freq: Option<Mhz>,
     /// CPU package power, in milliwatts.
     pub cpu_power_mw: Option<u32>,
@@ -197,13 +198,15 @@ impl Sample {
     /// Read one sample from the block of text between two sample headers.
     ///
     /// A chip with more than one P-cluster, such as an M4 Pro, prints
-    /// `P0-Cluster` and `P1-Cluster`. Both are read, and the frequencies are
-    /// averaged, so the caller sees one number for the P-cores.
+    /// `P0-Cluster` and `P1-Cluster`. An Ultra joins two dies, and prints an
+    /// E-cluster and a P-cluster for each die. Every cluster line is read, and
+    /// the frequencies of each kind are averaged, so the caller sees one number
+    /// for the P-cores and one number for the E-cores.
     #[must_use]
     pub fn parse_block(block: &str, at: Duration) -> Self {
         let mut p_freqs: Vec<f64> = Vec::new();
         let mut p_residencies: Vec<f64> = Vec::new();
-        let mut e_freq = None;
+        let mut e_freqs: Vec<f64> = Vec::new();
         let mut cpu_power_mw = None;
         let mut gpu_power_mw = None;
         let mut pressure = PressureLevel::Unknown;
@@ -219,7 +222,9 @@ impl Sample {
                         }
                     }
                     Some(Cluster::Efficiency) => {
-                        e_freq = leading_number(tail).map(round_to_mhz);
+                        if let Some(mhz) = leading_number(tail) {
+                            e_freqs.push(mhz);
+                        }
                     }
                     None => {}
                 }
@@ -254,7 +259,7 @@ impl Sample {
             at,
             p_freq: mean(&p_freqs).map(round_to_mhz),
             p_active_pct: mean(&p_residencies),
-            e_freq,
+            e_freq: mean(&e_freqs).map(round_to_mhz),
             cpu_power_mw,
             gpu_power_mw,
             pressure,
