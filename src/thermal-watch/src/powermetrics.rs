@@ -356,9 +356,17 @@ impl SampleStream {
     /// answers. `powermetrics` without root is the second: it writes a refusal
     /// and exits non-zero. This tells the two apart.
     ///
+    /// The status is available only after the run ends. A caller that asks
+    /// earlier gets `None`. Read every sample first. A wait before the output
+    /// closes stops forever, because nothing reads the pipe during the wait,
+    /// and the process stops when the pipe is full.
+    ///
     /// The status is kept, so asking more than once gives the same answer.
     pub fn exit_status(&mut self) -> Option<ExitStatus> {
         if self.status.is_none() {
+            if !self.ended {
+                return None;
+            }
             self.status = self.child.wait().ok();
         }
         self.status
